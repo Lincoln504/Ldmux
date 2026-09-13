@@ -226,6 +226,26 @@ Key takeaways:
 
 ---
 
+## 5. Transport deep-dive (v0.3)
+
+Hands-on experiments on tmux **3.5a** + **Bun 1.3.9** (scratch server
+`-L ldmux-probe`) established that **control mode `-C` runs over plain pipes with
+no PTY**; only `-CC` needs a tty (`tcgetattr failed`). A Bun script drove
+`tmux -C attach` over pipes, used `refresh-client -f pause-after=2`, and parsed
+`%extended-output` correctly; a burst streamed ~383 KB in ~255 ms (~1.5 MB/s) at
+~0 tmux CPU idle. `capture-pane -p -e` costs ~3.1 ms/call. This overturned the
+v0.1/v0.2 assumption (inherited from dooboxes' "PTY-based" wording) that control
+mode implies a native PTY dependency.
+
+Source-level finding: dooboxes' `apps/session-bridge/src/tmux/control.rs`
+control-mode client is **dead code** (no consumer); its shipped terminal path is
+`capture-pane` diffs (`bridge/streaming.rs`), and its control parser has UTF-8
+bugs. Copy `compute_diff` + the sanitizer policy; write a new parser.
+
+Decision: ADR-0001 — control mode `-C` over pipes + `capture-pane`
+snapshots/fallback, Bun + TypeScript, no native modules. Details in
+[`TRANSPORT.md`](TRANSPORT.md).
+
 ## 5. Sources
 
 Local: `~/.local/bin/{gmux,gmuxd}`, `~/.config/gmux/`, `~/.local/state/gmux/`,

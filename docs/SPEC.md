@@ -1,6 +1,6 @@
 # ldmux — Software Specification
 
-**Version:** 0.2 (design; incorporates adversarial review)
+**Version:** 0.3 (design; transport decision finalized)
 **Date:** 2026-09-13
 **Author:** Lincoln Deen (with the pi coding agent)
 **Status:** Investigation complete; specification for review. No implementation yet.
@@ -11,6 +11,12 @@
 > transport default, explicit session discovery/adoption scope, a client-owned
 > scroll-anchor model, snapshot-then-stream reconnect, a decisive TLS/pairing story,
 > and Android specifics. Over-specified infrastructure was trimmed. See §17 (ADRs).
+>
+> **Revision note (v0.3):** The transport decision (ADR-0001) was settled by
+> hands-on experiment: **tmux control mode `-C` runs over plain pipes with no PTY**
+> (only `-CC` requires a tty). v1 therefore uses control-mode streaming +
+> capture-pane snapshots/fallback, still under Bun with no native dependency.
+> See [`TRANSPORT.md`](TRANSPORT.md).
 
 ---
 
@@ -294,28 +300,39 @@ set -g allow-passthrough on              # for images/hyperlinks
 set -g remain-on-exit on
 ```
 
-**Transport (ADR-0001).** Control mode (`tmux -C`) is **PTY-based** and would force
-a native PTY dependency into the Bun daemon (`node-pty`/`bun-pty`), complicating
-single-binary packaging. For v1 the default is **PTY-free**:
+**Transport (ADR-0001 — final).** v1 uses **tmux control mode `-C` over pipes**
+(no PTY) for live streaming, with **`capture-pane` snapshots** for
+connect/reconnect/scrollback and as an automatic fallback.
 
-- **Streaming:** `tmux capture-pane -p -e -t %<pane>` polled at an **adaptive
-  rate** (active ≈ 60–120 ms; idle backoff to ≈ 1 s; no viewers → stopped), with a
-  `compute_diff` like dooboxes' to emit only the suffix when the pane appended, or
-  the full screen on scroll/redraw.
-- **Snapshots (reconnect):** the same `capture-pane -e` plus state fields (below).
-- **Topology:** periodic `list-sessions`/`list-panes` + `display-message -p` (and
-  event triggers on `send-keys`/spawn), not control notifications.
-- **Input:** `tmux send-keys -l <text>` / `send-keys <key>`.
+- **Streaming:** one `tmux -L ldmux -C attach -t <session>` child per *viewed*
+  session, spawned with `stdin`/`stdout` **pipes** (proven on tmux 3.5a + Bun
+  1.3.9). Parse `%output` / `%extended-output` notifications. Do **not** use
+  `-CC` — it requires a tty (`tcgetattr failed` over a pipe); `-C` needs no PTY.
+- **Backpressure:** `refresh-client -f pause-after=2` in the control client;
+  handle `%pause`/`%continue` and the
+  `%extended-output <pane> <age_ms> : <data>` form. (Measured: ~1.5 MB/s burst,
+  no stalls, ~0 tmux CPU when idle.)
+- **Input:** `send-keys` over the control connection (no process per keystroke).
+- **Snapshots (reconnect):** `capture-pane -p -e` + `display-message -p` state
+  fields (see §6.2).
+- **Scrollback paging:** `capture-pane -S/-E` on demand.
+- **Fallback:** if the control client dies/stalls (`%exit`, EOF), fall back to
+  adaptive `capture-pane` diff polling until it restarts; tmux owns state, so
+  correctness never depends on the stream.
 
-A `PaneStream` interface abstracts this so **Phase 2** can add `pipe-pane`
-(raw-byte, event-driven) or control mode (lowest latency, flow control) without
-touching the API. Phase 1 includes a **spike** measuring latency/CPU of
-capture-pane polling vs `pipe-pane` on this machine before freezing ADR-0001.
+A `PaneStream` interface abstracts this; `pipe-pane` (raw bytes) and a
+server-side VT emulator (perfect snapshots) slot in behind it later.
 
-Rationale: v1 is single-user with a handful of sessions; capture-pane polling is
-restart-safe (stateless), PTY-free, and needs no pipe/lifecycle management. The
-trade-off (poll latency, repeated full-screen diffs for full-screen apps) is
-acceptable and documented.
+Rationale: `-C` over pipes gives control-mode latency and flow control **without
+the native PTY dependency** the v0.1/v0.2 drafts assumed (dooboxes labelled
+control mode "PTY-based"; that is a convention, not a requirement for `-C`).
+See [`TRANSPORT.md`](TRANSPORT.md) for the experiments and the parser spec.
+
+**Parser requirements (do not repeat dooboxes' bugs):** byte→line framing on
+`\n` (never `readline`; U+2028/9 must not split); octal → **bytes** then a
+**per-pane incremental UTF-8 decoder** (never `byte as char` or per-chunk
+`from_utf8`); correlate `%begin/%end/%error <seq>`; tolerate unknown `%…` lines;
+stateful per-stream sanitizer (OSC 52 / DCS / device-status) on by default.
 
 **Multi-pane scope (v1):** one window, one pane per session. The mobile context
 menu can split/create windows via `send-keys`/tmux commands, but the client tracks
@@ -425,9 +442,10 @@ viewport scale/pan — **not** a tmux resize; see ADR-0002).
 
 ### 6.3 Connection lifecycle (snapshot-then-stream)
 
-**Reconnect = snapshot, then stream.** The v0.1 seq-window replay is **cut**: tmux
-persists, so replaying a bounded frame window adds cache/eviction/desync bugs for
-marginal benefit.
+**Reconnect = snapshot, then stream.** The live stream is tmux control-mode
+`%output`/`%extended-output` (ADR-0001). The v0.1 seq-window replay is **cut**:
+tmux persists, so replaying a bounded frame window adds cache/eviction/desync bugs
+for marginal benefit.
 
 1. Client → `HELLO {clientId?, lastSnapshotEpoch?}`.
 2. Server → `CAPS`; then `SNAPSHOT` (declared geometry + state fields).
@@ -573,10 +591,10 @@ XDG_RUNTIME_DIR`, and the helper exports `DISPLAY=:0`/`XAUTHORITY` as fallback.
 
 **Recommendation: TypeScript on Bun** for v1. Bun ships native `bun:sqlite`,
 WebSocket, and Unix sockets, and `bun build --target bun` yields a single binary.
-**Correction from v0.1:** the "no native modules" rationale holds **only because
-the v1 transport is PTY-free** (ADR-0001). If control mode is later adopted, a
-native PTY dependency is required and this rationale must be revisited — tracked
-as an ADR.
+**Transport note (v0.3):** the Bun recommendation is *reinforced* by ADR-0001 —
+control mode `-C` runs over pipes and needs **no** native PTY dependency, so the
+single-binary/packaging argument holds. (If a PTY were required, e.g. for `-CC`
+or `pipe-pane` helpers, this rationale would be revisited.)
 
 Alternatives: Node.js + `ws` + `better-sqlite3` (ubiquitous, but native-module
 fragility); Rust + tokio (best throughput, slower iteration); Rust core + napi-rs
@@ -646,10 +664,12 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 **Phase 1 — local core.**
 - `packages/protocol`: frame/message types + tests.
 - `ldmuxd`: tmux control plane (`list`/`new`/`send-keys`/`capture-pane`/
-  `display-message`), the `PaneStream` (capture-pane diff polling), registry JSON,
-  Unix-socket API, lifecycle/`remain-on-exit`.
-- **Transport spike (ADR-0001):** measure capture-pane polling vs `pipe-pane` vs
-  control-mode latency/CPU on tmux 3.5a; freeze the decision.
+  `display-message`), the control-mode `PaneStream` (parser + `%output`/
+  `%extended-output` + flow control) with the capture-pane snapshot/fallback path,
+  registry JSON, Unix-socket API, lifecycle/`remain-on-exit`.
+- **Transport (ADR-0001):** DONE — `-C` over pipes proven on tmux 3.5a + Bun 1.3.9.
+  Remaining: implement the robust parser (framing, octal→bytes, per-pane
+  incremental UTF-8, `%begin/%end` correlation) and a burst/`%pause` test.
 - `ldmux` CLI: `list`, `new`, `attach`, `send`, `capture`, `kill`, `adopt`, `doctor`.
 - **Geometry probe (ADR-0002):** confirm `window-size manual` behavior and the
   canonical-size default.
@@ -690,7 +710,7 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 | R9 | Token/identity security. | Loopback bind, `tailscale serve` TLS, token 0600 + hashed at rest, optional allow list. |
 | R10 | Language choice. | TS/Bun v1 with a `PaneStream` seam to Rust. |
 | R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |
-| R12 | Polling latency/CPU (ADR-0001). | Adaptive rate + spike; upgrade path to `pipe-pane`/control mode. |
+| R12 | Control-mode parser robustness (octal, split UTF-8, sequence correlation). | Robust parser + tests; capture-pane fallback; tmux owns state. |
 | R13 | iOS scope creep. | v1 = Android; iOS is a documented target. |
 | Q1 | Wrapper attaches interactively? | Recommend yes (gmux parity). |
 | Q2 | ~~serve vs direct bind~~ | **Resolved (ADR-0005): `tailscale serve`.** |
@@ -734,11 +754,11 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 
 | ADR | Decision |
 |-----|----------|
-| **ADR-0001** | **Transport:** v1 is PTY-free — `capture-pane` adaptive diff polling behind a `PaneStream` interface; `pipe-pane`/control mode deferred to a Phase-1 spike and Phase 2. |
+| **ADR-0001** | **Transport:** tmux control mode `-C` over pipes (no PTY) + `capture-pane` snapshots/fallback, behind a `PaneStream` interface. Proven on tmux 3.5a + Bun 1.3.9. |
 | **ADR-0002** | **Canonical geometry:** pin `window-size manual` + a canonical grid; clients render viewports and never resize the pane. |
 | **ADR-0003** | **Extension lifecycle:** branch on `session_shutdown.reason`; only `quit` ends a session; never tear down the daemon/tmux on shutdown. |
 | **ADR-0004** | **Scroll anchor:** client-owned explicit `following`/`anchored` state machine; server never resolves line ids. |
 | **ADR-0005** | **TLS/remote:** loopback bind + `tailscale serve --bg`; token + QR pairing; no Funnel. |
 
-Individual ADRs live under `docs/adr/` and are added as decisions are frozen
-(Phase 1 freezes ADR-0001/0002 after the spikes).
+Individual ADRs live under `docs/adr/`. ADR-0001 is now **frozen** (proven on this
+machine); ADR-0002 awaits the Phase-1 geometry probe.

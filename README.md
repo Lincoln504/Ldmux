@@ -27,6 +27,7 @@ either. It is deliberately simpler and tmux-native:
 | Doc | Purpose |
 |-----|---------|
 | [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification. |
+| [`docs/TRANSPORT.md`](docs/TRANSPORT.md) | Transport deep-dive + decision (control mode `-C` over pipes, no PTY). |
 | [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md) | Investigation log: what exists on this machine, prior art, and citations. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
 
