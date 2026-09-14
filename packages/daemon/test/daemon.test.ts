@@ -271,3 +271,18 @@ test("a multi-byte character split across socket reads is reassembled, not corru
   expect(res.result.session.title).toBe(title);
   await call(daemon.socketPath, "kill", { id: res.result.session.id });
 });
+
+test("register also refuses an invalid kind (not just new/adopt)", async () => {
+  await expect(
+    call(daemon.socketPath, "register", { piSessionId: "bad-kind-reg", cwd: tmpdir(), kind: "<b>" }),
+  ).rejects.toThrow(/invalid kind/);
+});
+
+test("adopt and register reject a session name that could be read as argv", async () => {
+  await expect(call(daemon.socketPath, "adopt", { tmuxName: "bad name!" })).rejects.toThrow(
+    /invalid tmux session name/,
+  );
+  await expect(call(daemon.socketPath, "register", { piSessionId: "x", cwd: tmpdir(), tmuxName: "bad name!" })).rejects.toThrow(
+    /invalid tmux session name/,
+  );
+});

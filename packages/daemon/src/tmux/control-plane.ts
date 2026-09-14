@@ -207,6 +207,9 @@ export class TmuxControlPlane {
     const args = ["new-session", "-d", "-s", opts.name, "-c", opts.cwd];
     if (opts.cols && opts.rows) args.push("-x", String(opts.cols), "-y", String(opts.rows));
     for (const [key, value] of Object.entries(opts.env ?? {})) args.push("-e", `${key}=${value}`);
+    // `--` before the shell-command: without it a command whose first word
+    // begins with `-` is scanned as a tmux option. (RPC-reachable via `command`.)
+    if (opts.command?.length) args.push("--");
     const { code, err } = await this.run([...args, ...(opts.command ?? [])]);
     if (code !== 0) throw new Error(`tmux new-session failed: ${err.trim() || code}`);
   }

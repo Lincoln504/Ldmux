@@ -230,7 +230,8 @@ export class TmuxControlClient {
     const dec = new TextDecoder();
     try {
       for await (const chunk of this.proc.stderr as AsyncIterable<Uint8Array>) {
-        this.opts.onStderr?.(dec.decode(chunk));
+        // Streaming decode: a multi-byte character can straddle two reads.
+        this.opts.onStderr?.(dec.decode(chunk, { stream: true }));
       }
     } catch {
       /* ignore */

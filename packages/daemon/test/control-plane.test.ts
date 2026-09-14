@@ -2,7 +2,7 @@ import { test, expect, afterAll } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TmuxControlPlane } from "../src/tmux/control-plane.ts";
+import { isValidSessionName, TmuxControlPlane } from "../src/tmux/control-plane.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "ldmux-faketmux-"));
@@ -79,4 +79,14 @@ test("a normal tmux command is unaffected", async () => {
   expect(await cp.hasSession("t")).toBe(true);
   expect(await cp.hasSession("nope")).toBe(false);
   await cp.killSession("t");
+});
+test("isValidSessionName is the argv-safety boundary, tested directly", () => {
+  // These names reach `tmux ... -t <name>` and are stored on a record; the
+  // regex must reject anything that could be read as a flag or a shell token.
+  for (const bad of ["", "a b", "a;b", "a|b", "$(id)", "a/b", "a.b", "a\nb", "a".repeat(129)]) {
+    expect(isValidSessionName(bad)).toBe(false);
+  }
+  for (const ok of ["a", "ok-name_1", "a".repeat(128), "-x", "UPPER"]) {
+    expect(isValidSessionName(ok)).toBe(true);
+  }
 });

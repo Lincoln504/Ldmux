@@ -1,4 +1,7 @@
 import { test, expect, afterAll } from "bun:test";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RemoteServer, type RemoteServerOptions } from "../src/remote.ts";
 import type { PaneStream, StreamSubscriber } from "../src/stream.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
@@ -233,4 +236,41 @@ test("a token in the Authorization header is accepted (not just the query)", asy
   });
   // Bun's fetch cannot complete a WS upgrade, so assert it is not a 401.
   expect(res.status).not.toBe(401);
+});
+test("static serving confines paths lexically, follows no escaping symlink, and 404s", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ldmux-webroot-"));
+  const outside = mkdtempSync(join(tmpdir(), "ldmux-outside-"));
+  writeFileSync(join(root, "index.html"), "<h1>ok</h1>");
+  writeFileSync(join(outside, "secret.txt"), "SECRET");
+  symlinkSync(join(outside, "secret.txt"), join(root, "link.txt"));
+  const { server, info } = start({ webRoot: root });
+  const base = `http://${info.hostname}:${info.port}`;
+
+  expect((await fetch(`${base}/`)).status).toBe(200);
+  expect((await fetch(`${base}/index.html`)).status).toBe(200);
+  // A raw traversal pathname is forbidden lexically (browser/fetch normalises the
+  // URL first, so this branch is exercised directly against serveStatic).
+  const lexical = await (server as unknown as { serveStatic(p: string): Promise<Response> }).serveStatic(
+    "/../../etc/passwd",
+  );
+  expect(lexical.status).toBe(403);
+  expect(await lexical.text()).not.toContain("root:");
+  // A symlink *inside* the root that points outside is re-confined after realpath.
+  const symlinked = await fetch(`${base}/link.txt`);
+  expect(symlinked.status).toBe(403);
+  expect(await symlinked.text()).not.toContain("SECRET");
+  // A genuinely missing file is a 404, not a 403.
+  expect((await fetch(`${base}/nope.js`)).status).toBe(404);
+  rmSync(root, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
+});
+
+test("closing a socket releases the stream for the record it was attached to", async () => {
+  const released: string[] = [];
+  const { info } = start({ releaseStream: (r) => released.push(r.id) });
+  const { ws, text } = await connect(info);
+  ws.send(JSON.stringify({ type: "attach", sessionId: "s1" }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+  ws.close();
+  expect(await waitFor(() => released.includes("s1"))).toBe(true);
 });

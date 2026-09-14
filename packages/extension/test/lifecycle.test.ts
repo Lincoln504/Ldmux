@@ -172,3 +172,35 @@ async function statusOf(piSessionId: string): Promise<string | undefined> {
   const { sessions } = await daemonCallList();
   return sessions.find((s: any) => s.piSessionId === piSessionId)?.status;
 }
+test("the ldmux tool sends into a real terminal session", async () => {
+  const pi = await loadExtension();
+  const tool = pi.tools[0];
+  const ctx = mockCtx("pi-life-tool-send");
+  await pi.handlers.session_start({ reason: "startup" }, ctx);
+
+  // Create a real shell session through the daemon, then drive it via the tool.
+  const { daemonCall } = await import("../../protocol/src/rpc.ts");
+  const sock = join(stateDir, "ldmuxd.sock");
+  const created = await daemonCall(sock, "new", { kind: "shell", cwd: tmpdir() });
+  const session = (created as { session: { id: string } }).session;
+
+  const sent = await tool.execute(
+    "call-send",
+    { action: "send", id: session.id, text: "printf 'TOOL_SEND_OK\\n'", keys: ["Enter"] },
+    undefined,
+    undefined,
+    ctx,
+  );
+  expect(JSON.stringify(sent.content)).toContain(session.id);
+
+  const end = Date.now() + 6000;
+  let screen = "";
+  while (Date.now() < end) {
+    const cap = await daemonCall(sock, "capture", { id: session.id });
+    screen = (cap as { screen: string }).screen;
+    if (screen.includes("TOOL_SEND_OK")) break;
+    await Bun.sleep(60);
+  }
+  expect(screen).toContain("TOOL_SEND_OK");
+  await daemonCall(sock, "kill", { id: session.id });
+});

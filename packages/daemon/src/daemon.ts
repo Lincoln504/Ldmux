@@ -617,7 +617,7 @@ export class LdmuxDaemon {
     const record: SessionRecord = {
       id: shortId(),
       tmuxName,
-      kind: p.kind ?? "pi",
+      kind: parseKind(p.kind ?? "pi"),
       cwd: p.cwd,
       title: String(p.title ?? "pi"),
       createdAt: now,
