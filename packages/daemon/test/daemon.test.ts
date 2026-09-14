@@ -1,5 +1,6 @@
 import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
@@ -208,4 +209,65 @@ test("RPC-only sessions give a clear error instead of an empty tmux target", asy
   // Killing one still works: there is just nothing to kill in tmux.
   const killed = await call<{ session: SessionRecord }>(daemon.socketPath, "kill", { id: session.id });
   expect(killed.session.status).toBe("dead");
+});
+
+test("an invalid kind is refused at the daemon boundary, for new and adopt", async () => {
+  // kind is stored and rendered by clients, and the CLI forwards argv verbatim,
+  // so it must never be trusted from the caller.
+  await expect(
+    call(daemon.socketPath, "new", { kind: "<img src=x onerror=alert(1)>", cwd: tmpdir() }),
+  ).rejects.toThrow(/invalid kind/);
+
+  tm("new-session", "-d", "-s", "bad-kind-adopt");
+  await expect(call(daemon.socketPath, "adopt", { tmuxName: "bad-kind-adopt", kind: "evil" })).rejects.toThrow(
+    /invalid kind/,
+  );
+  tm("kill-session", "-t", "bad-kind-adopt");
+});
+
+test("text beginning with -- is typed literally, not read as a tmux flag", async () => {
+  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+    title: "dash",
+  });
+  // Without the `--` separator tmux rejects this as "invalid flag --".
+  await call(daemon.socketPath, "send", { id: session.id, text: "--dash-marker" });
+  const typed = await waitFor(async () => {
+    const { screen } = await call<{ screen: string }>(daemon.socketPath, "capture", { id: session.id });
+    return screen.includes("--dash-marker");
+  });
+  expect(typed).toBe(true);
+  await call(daemon.socketPath, "kill", { id: session.id });
+});
+
+test("a multi-byte character split across socket reads is reassembled, not corrupted", async () => {
+  const title = "café-\u03a9";
+  const req = JSON.stringify({ id: 99, method: "new", params: { kind: "shell", cwd: tmpdir(), title } }) + "\n";
+  const bytes = new TextEncoder().encode(req);
+  // Cut inside the first multi-byte character (é is two UTF-8 bytes).
+  const prefixBytes = new TextEncoder().encode(req.slice(0, req.indexOf("é"))).length;
+  const cut = prefixBytes + 1;
+
+  const reply = await new Promise<string>((resolve, reject) => {
+    const sock = connect(daemon.socketPath);
+    let buf = "";
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      if (buf.includes("\n")) {
+        sock.end();
+        resolve(buf);
+      }
+    });
+    sock.on("error", reject);
+    sock.on("connect", () => {
+      sock.write(bytes.subarray(0, cut));
+      setTimeout(() => sock.write(bytes.subarray(cut)), 15);
+    });
+  });
+
+  const res = JSON.parse(reply.trim()) as { ok: boolean; result: { session: SessionRecord } };
+  expect(res.ok).toBe(true);
+  expect(res.result.session.title).toBe(title);
+  await call(daemon.socketPath, "kill", { id: res.result.session.id });
 });

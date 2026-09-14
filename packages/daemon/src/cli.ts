@@ -32,13 +32,23 @@ function flag(args: string[], name: string): string | undefined {
 
 function positional(args: string[], skip: string[]): string[] {
   const out: string[] = [];
+  // A bare `--` ends option scanning, so `ldmux send <id> -- --help` types the
+  // literal `--help` instead of silently sending nothing.
+  let endOfOptions = false;
   for (let i = 0; i < args.length; i++) {
-    if (skip.includes(args[i])) {
-      i++;
-      continue;
+    const a = args[i]!;
+    if (!endOfOptions) {
+      if (a === "--") {
+        endOfOptions = true;
+        continue;
+      }
+      if (skip.includes(a)) {
+        i++;
+        continue;
+      }
+      if (a.startsWith("--")) continue;
     }
-    if (args[i].startsWith("--")) continue;
-    out.push(args[i]);
+    out.push(a);
   }
   return out;
 }
@@ -207,8 +217,15 @@ async function main() {
       console.log(`${res.note} in ${res.settingsPath}`);
       if (res.backup) console.log(`backup: ${res.backup}`);
       console.log(`entries: ${res.entries.length ? res.entries.join(", ") : "(none)"}`);
-      if (!res.entries.includes(res.extensionPath) && res.action !== "removed") {
-        console.error(`ldmux: the extension is not enabled; restart pi to load it`);
+      // A settings-declared extension only loads on a pi restart: unlike
+      // auto-discovered extensions, it is not hot-reloaded by /reload. Say so
+      // on the paths that actually changed something.
+      if (rest.includes("--dry-run")) {
+        console.log("dry run: nothing written");
+      } else if (res.action === "added" || (res.action === "unchanged" && res.entries.includes(res.extensionPath))) {
+        console.log("restart pi to load the extension (settings-declared extensions do not hot-reload)");
+      } else if (res.action === "removed") {
+        console.log("restart pi to unload the extension");
       }
       break;
     }

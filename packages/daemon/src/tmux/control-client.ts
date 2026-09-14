@@ -257,19 +257,34 @@ export class TmuxControlClient {
       this.waiters.push({ seq, timer, resolve, reject });
     });
     const sink = this.proc.stdin;
-    await sink.write(line + "\n");
-    await sink.flush();
+    try {
+      await sink.write(line + "\n");
+      await sink.flush();
+    } catch (err) {
+      // The write failed (dead tmux, EPIPE): drop the waiter we just registered
+      // and observe the promise, so its rejection cannot surface unhandled when
+      // the read loop or the command timer later rejects everything.
+      const i = this.waiters.findIndex((w) => w.seq === seq);
+      if (i !== -1) {
+        clearTimeout(this.waiters[i]!.timer);
+        this.waiters.splice(i, 1);
+      }
+      promise.catch(() => {});
+      throw err;
+    }
     return promise;
   }
 
   /** Type literal text into a pane (no key interpretation). */
   async sendText(target: string, text: string): Promise<string[]> {
-    return this.command(["send-keys", "-t", target, "-l", text]);
+    // `--` stops tmux option scanning so a literal string starting with `-` is
+    // typed rather than rejected as a flag.
+    return this.command(["send-keys", "-t", target, "-l", "--", text]);
   }
 
   /** Send named keys (e.g. "Enter", "C-c", "Up") into a pane. */
   async sendKey(target: string, ...keys: string[]): Promise<string[]> {
-    return this.command(["send-keys", "-t", target, ...keys]);
+    return this.command(["send-keys", "-t", target, "--", ...keys]);
   }
 
   private rejectAll(err: Error): void {

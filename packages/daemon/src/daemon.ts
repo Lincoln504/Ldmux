@@ -58,6 +58,12 @@ interface RpcRequest {
 
 interface Conn {
   buf: string;
+  /**
+   * Incremental decoder: one per connection, decoded with `{stream: true}`, so a
+   * multi-byte UTF-8 character split across two reads is reassembled rather than
+   * silently corrupted into U+FFFD (the result would still parse as JSON).
+   */
+  decoder: TextDecoder;
   /** Serializes dispatch: handlers are async, so responses must stay ordered. */
   queue: Promise<void>;
   write(data: string): void;
@@ -65,6 +71,21 @@ interface Conn {
 }
 
 const shortId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 10);
+
+const SESSION_KINDS: readonly SessionKind[] = ["shell", "pi"];
+
+/**
+ * `kind` is stored on the record and rendered by clients, so it is validated at
+ * the boundary rather than trusted from the caller (the CLI forwards argv
+ * straight through, and registry.json is loaded without validation).
+ */
+function parseKind(value: unknown): SessionKind {
+  const kind = value ?? "shell";
+  if (typeof kind !== "string" || !SESSION_KINDS.includes(kind as SessionKind)) {
+    throw new Error(`invalid kind: ${JSON.stringify(value)} (expected shell or pi)`);
+  }
+  return kind as SessionKind;
+}
 
 /** Default titles say nothing; the working directory does. */
 function sessionTitle(record: SessionRecord): string {
@@ -279,6 +300,7 @@ export class LdmuxDaemon {
   private makeConn(ws: any): Conn {
     return {
       buf: "",
+      decoder: new TextDecoder(),
       queue: Promise.resolve(),
       write: (data: string) => this.safeWrite(ws, data),
       close: () => ws.close(),
@@ -297,7 +319,7 @@ export class LdmuxDaemon {
   private onData(ws: any, data: Uint8Array): void {
     const conn = this.conns.get(ws);
     if (!conn) return;
-    conn.buf += new TextDecoder().decode(data);
+    conn.buf += conn.decoder.decode(data, { stream: true });
     let nl: number;
     while ((nl = conn.buf.indexOf("\n")) >= 0) {
       const line = conn.buf.slice(0, nl);
@@ -515,7 +537,7 @@ export class LdmuxDaemon {
   }
 
   private async handleNew(p: NewParams): Promise<{ session: SessionRecord }> {
-    const kind: SessionKind = p.kind ?? "shell";
+    const kind = parseKind(p.kind);
     const cwd = String(p.cwd ?? process.cwd());
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`not a directory: ${cwd}`);
     const id = shortId();
@@ -563,7 +585,7 @@ export class LdmuxDaemon {
     const record: SessionRecord = {
       id: shortId(),
       tmuxName,
-      kind: (params.kind as SessionKind) ?? "shell",
+      kind: parseKind(params.kind),
       cwd: panes[0]?.cwd ?? process.cwd(),
       title: String(params.title ?? tmuxName),
       createdAt: now,

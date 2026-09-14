@@ -204,6 +204,21 @@ test("input and keys are forwarded to the stream, and oversized input is not", a
   ws.close();
 });
 
+test("the input cap counts bytes, so multi-byte text cannot slip through", async () => {
+  const { info, calls } = start();
+  const { ws, text } = await connect(info);
+  ws.send(JSON.stringify({ type: "attach", sessionId: "s1" }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+
+  // 5000 astral characters = 20000 UTF-8 bytes but only 10000 UTF-16 code units,
+  // so a `.length` check would wave it through. It must be refused.
+  const before = calls.length;
+  ws.send(JSON.stringify({ type: "input", data: "\u{1f600}".repeat(5000) }));
+  expect(await waitFor(() => text.some((m) => m.code === "input_too_large"))).toBe(true);
+  expect(calls.length).toBe(before);
+  ws.close();
+});
+
 test("a bad token is rejected before any upgrade", async () => {
   const { info, calls } = start();
   const res = await fetch(`http://${info.hostname}:${info.port}/ws?token=wrong`);

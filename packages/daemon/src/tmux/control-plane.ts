@@ -217,12 +217,14 @@ export class TmuxControlPlane {
   }
 
   async sendText(target: string, text: string): Promise<void> {
-    const { code, err } = await this.run(["send-keys", "-t", target, "-l", text]);
+    // `--` ends tmux's option scanning: without it a literal string beginning
+    // with `-` (e.g. a pasted "--help") is read as a flag and rejected.
+    const { code, err } = await this.run(["send-keys", "-t", target, "-l", "--", text]);
     if (code !== 0) throw new Error(`tmux send-keys failed: ${err.trim() || code}`);
   }
 
   async sendKey(target: string, ...keys: string[]): Promise<void> {
-    const { code, err } = await this.run(["send-keys", "-t", target, ...keys]);
+    const { code, err } = await this.run(["send-keys", "-t", target, "--", ...keys]);
     if (code !== 0) throw new Error(`tmux send-keys failed: ${err.trim() || code}`);
   }
 

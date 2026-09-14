@@ -48,6 +48,8 @@ interface ConnData {
   attachGen: number;
   sessionId?: string;
   stream?: PaneStream;
+  /** The record of the attached session, so the close path can release it. */
+  record?: SessionRecord;
   unsubscribe?: () => void;
   live: boolean;
   pending: string[];
@@ -90,6 +92,10 @@ export class RemoteServer {
           const data = ws.data as ConnData;
           data.disposed = true;
           this.cleanupSubscription(data);
+          // Consistent with the failed/superseded attach paths: a stream with no
+          // remaining subscribers is dropped rather than cached for the daemon's
+          // lifetime. `releaseStreamIfIdle` is a no-op if another client attached.
+          if (data.record) this.opts.releaseStream?.(data.record);
         },
       },
       error: (err: unknown) => {
@@ -169,7 +175,10 @@ export class RemoteServer {
         case "input": {
           if (data.stream) {
             const text = String(msg.data ?? "");
-            if (text.length > MAX_INPUT_BYTES) {
+            // Measured in bytes, not UTF-16 code units: `length` would let a
+            // 16 Ki-code-unit string of 4-byte characters through as ~64 KiB and
+            // be closed at the transport instead of refused gracefully.
+            if (this.encoder.encode(text).length > MAX_INPUT_BYTES) {
               this.sendError(ws, "input_too_large", `input exceeds ${MAX_INPUT_BYTES} bytes`);
               return;
             }
@@ -244,6 +253,7 @@ export class RemoteServer {
     const gen = ++data.attachGen;
     this.cleanupSubscription(data);
     data.sessionId = sessionId;
+    data.record = record;
     data.live = false;
     data.pending = [];
     data.pendingBytes = 0;

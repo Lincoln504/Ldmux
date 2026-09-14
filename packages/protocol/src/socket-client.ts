@@ -29,6 +29,9 @@ export function call<T = unknown>(
     const sock = connect(socketPath);
     let buf = "";
     let done = false;
+    // Incremental decode: a multi-byte character split across TCP chunks would
+    // otherwise be mangled into U+FFFD in the response body.
+    const decoder = new TextDecoder();
     const finish = (fn: () => void) => {
       if (done) return;
       done = true;
@@ -44,7 +47,7 @@ export function call<T = unknown>(
       sock.write(JSON.stringify({ id: 1, method, params }) + "\n");
     });
     sock.on("data", (chunk: Buffer) => {
-      buf += chunk.toString("utf8");
+      buf += decoder.decode(chunk, { stream: true });
       const nl = buf.indexOf("\n");
       if (nl < 0) return;
       const line = buf.slice(0, nl);

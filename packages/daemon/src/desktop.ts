@@ -38,11 +38,20 @@ export function mirrorArgv(tmuxSocket: string, tmuxName: string, opts: MirrorOpt
   return [terminal, "--class", windowClass, "-e", "tmux", ...mirrorTmuxArgs(tmuxSocket, tmuxName, opts)];
 }
 
+/**
+ * Quote an argument for a POSIX shell. Space-containing arguments were already
+ * quoted; this also neutralises space-free metacharacters (`$(…)`, backticks,
+ * `;`, `|`), which matter because `mirrorCommand` is passed to `i3-msg exec`,
+ * which runs its argument through a shell.
+ */
+function shellQuote(a: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a)) return a;
+  return `'${a.replaceAll("'", `'\\''`)}'`;
+}
+
 /** Human/machine readable command line (what the CLI prints). */
 export function mirrorCommand(tmuxSocket: string, tmuxName: string, opts: MirrorOptions = {}): string {
-  return mirrorArgv(tmuxSocket, tmuxName, opts)
-    .map((a) => (a.includes(" ") ? JSON.stringify(a) : a))
-    .join(" ");
+  return mirrorArgv(tmuxSocket, tmuxName, opts).map(shellQuote).join(" ");
 }
 
 export interface MirrorResult {

@@ -106,11 +106,17 @@ test("install-extension edits a settings file without needing a daemon", async (
   const dry = await cli("install-extension", "--dry-run");
   expect(dry.code).toBe(0);
   expect(dry.out).toContain("would add");
+  expect(dry.out).toContain("dry run: nothing written");
+  // A dry run must NOT claim the extension needs enabling or a restart.
+  expect(dry.out).not.toContain("not enabled");
+  expect(dry.out).not.toContain("restart pi");
   expect(existsSync(piSettings)).toBe(false); // dry run touches nothing
 
   const installed = await cli("install-extension");
   expect(installed.code).toBe(0);
   expect(installed.out).toContain("entries:");
+  // A settings-declared extension only loads on restart (it does not hot-reload).
+  expect(installed.out).toContain("restart pi");
   const entries = JSON.parse(readFileSync(piSettings, "utf8")).extensions as string[];
   expect(entries.length).toBe(1);
   expect(entries[0]).toEndWith("/packages/extension");
@@ -135,3 +141,23 @@ test("the daemon still answers after an unusual CLI invocation", async () => {
   expect(empty.code).toBe(1);
   expect((await cli("ping")).code).toBe(0);
 });
+
+test("send -- types a leading-dash string instead of swallowing it as a flag", async () => {
+  const created = await cli("new", "shell", tmpdir());
+  const id = created.out.trim();
+  const sent = await cli("send", id, "--", "--dash-cli-marker");
+  expect(sent.code).toBe(0);
+
+  // The literal text must reach the pane (previously the `--`-prefixed argument
+  // was dropped by option parsing, sending nothing).
+  const { call } = await import("../../protocol/src/socket-client.ts");
+  const end = Date.now() + 6000;
+  let screen = "";
+  while (Date.now() < end) {
+    screen = (await call<{ screen: string }>(daemon.socketPath, "capture", { id })).screen;
+    if (screen.includes("--dash-cli-marker")) break;
+    await Bun.sleep(60);
+  }
+  expect(screen).toContain("--dash-cli-marker");
+  await cli("kill", id);
+}, 20000);

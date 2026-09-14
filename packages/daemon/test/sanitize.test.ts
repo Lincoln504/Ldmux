@@ -53,3 +53,27 @@ test("a malformed stream is bounded and never dumps its tail as text", () => {
   // … and it resyncs at the next ESC rather than staying poisoned.
   expect(s.push("\x1b[32mok")).toBe("\x1b[32mok");
 });
+test("drops device-status queries in ANY parameter form, not just an allowlist", () => {
+  // The policy keys on the final byte: a real terminal answers all of these, and
+  // the answer would be sent back into the pane as input.
+  for (const query of ["\x1b[?6n", "\x1b[1;2c", "\x1b[?62;1;2c", "\x1b[=c", "\x1b[?15n", "\x1b[999n"]) {
+    expect(sanitizeOnce(`a${query}b`)).toBe("ab");
+  }
+});
+
+test("still keeps CSI sequences whose final byte is not a device query", () => {
+  // c/n are queries; p/q/J/m/H and friends are not and must survive intact.
+  for (const keep of ["\x1b[0m", "\x1b[2J", "\x1b[3;7H", "\x1b[?25l", "\x1b[?25h", "\x1b[4h"]) {
+    expect(sanitizeOnce(`a${keep}b`)).toBe(`a${keep}b`);
+  }
+});
+
+test("reset() drops a partial sequence so a mode change cannot splice bytes", () => {
+  // PaneStream resets the sanitizer on the control<->polling transition: a
+  // pending partial sequence left by one source must not be joined to the
+  // generated repaint bytes of the other.
+  const s = createSanitizer();
+  expect(s.push("a\x1b[3")).toBe("a");
+  s.reset();
+  expect(s.push("1m\x1b[2J")).toBe("1m\x1b[2J");
+});

@@ -122,6 +122,13 @@ test("app.js is wired to the shared core (no duplicated decoder)", () => {
   expect(app.includes("decodeFrames")).toBe(true);
   expect(app.includes("function escapeHtml")).toBe(false);
   expect(app.includes("MAX_FRAME_PAYLOAD =")).toBe(false);
+  // Every field interpolated into an innerHTML string must go through
+  // escapeHtml: kind was the one omission (stored from an unvalidated param).
+  expect(app.includes("${escapeHtml(s.kind)}")).toBe(true);
+  expect(app.includes('class="s-kind">${s.kind}')).toBe(false);
+  expect(app.includes("${escapeHtml(s.title || s.id)}")).toBe(true);
+  expect(app.includes("${escapeHtml(s.status)}")).toBe(true);
+  expect(app.includes("${escapeHtml(s.cwd || \"\")}")).toBe(true);
   const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
   const coreAt = html.indexOf("/core.js");
   const appAt = html.indexOf("/app.js");

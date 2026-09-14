@@ -331,7 +331,7 @@ function renderSessions() {
     const dot =
       s.id !== currentId && isUnread(s.lastActivityAt, seen.get(s.id)) ? '<span class="s-dot"></span>' : "";
     li.innerHTML =
-      `<div class="s-title"><span class="s-kind">${s.kind}</span>${escapeHtml(s.title || s.id)}${dot}</div>` +
+      `<div class="s-title"><span class="s-kind">${escapeHtml(s.kind)}</span>${escapeHtml(s.title || s.id)}${dot}</div>` +
       `<div class="s-meta">${escapeHtml(s.cwd || "")} · ${escapeHtml(s.status)}${attachable ? "" : " · rpc"}</div>`;
     li.addEventListener("click", () => {
       if (attachable) attach(s.id);

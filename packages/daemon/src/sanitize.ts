@@ -29,9 +29,15 @@ const MAX_PENDING = 8192;
 
 type State = "ground" | "esc" | "csi" | "osc" | "oscEsc" | "string" | "stringEsc" | "overflow";
 
-/** Device-status requests we never forward (params + final byte). */
+/**
+ * Device queries never reach the client: a real terminal (xterm.js) *answers*
+ * them, and the answer would be sent back through the pane as input.
+ *
+ * Keyed on the final byte alone — `c` (DA) and `n` (DSR) are queries in every
+ * parameter form (`CSI c`, `CSI >c`, `CSI ?6n`, …), so an allowlist of parameter
+ * strings can never be exhaustive.
+ */
 const DROPPED_CSI_FINALS = new Set(["c", "n"]);
-const DROPPED_CSI_PARAMS = new Set(["", ">", ">0", "0", "5", "6", "?0"]);
 
 export function createSanitizer(): Sanitizer {
   let state: State = "ground";
@@ -92,8 +98,7 @@ export function createSanitizer(): Sanitizer {
             const code = c.charCodeAt(0);
             if (code >= 0x40 && code <= 0x7e) {
               const final = c;
-              const params = pending.slice(2, -1);
-              if (!(DROPPED_CSI_FINALS.has(final) && DROPPED_CSI_PARAMS.has(params))) out += pending;
+              if (!DROPPED_CSI_FINALS.has(final)) out += pending;
               reset();
             }
             break;
