@@ -274,3 +274,28 @@ test("closing a socket releases the stream for the record it was attached to", a
   ws.close();
   expect(await waitFor(() => released.includes("s1"))).toBe(true);
 });
+
+test("control messages before attach are silent no-ops; attach still works", async () => {
+  const { info, calls } = start();
+  const { ws, text } = await connect(info);
+  ws.send(JSON.stringify({ type: "input", data: "x" }));
+  ws.send(JSON.stringify({ type: "key", keys: ["Enter"] }));
+  ws.send(JSON.stringify({ type: "follow", mode: "anchored" })); // client-owned: no server effect
+  await Bun.sleep(150);
+  expect(text.filter((m) => m.type === "error")).toEqual([]);
+  expect(calls).toEqual([]); // nothing was forwarded to a stream
+
+  ws.send(JSON.stringify({ type: "attach", sessionId: "s1" }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+  ws.close();
+});
+
+test("an unknown content type is served as application/octet-stream", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ldmux-webroot-ct-"));
+  writeFileSync(join(root, "blob.bin"), new Uint8Array([1, 2, 3]));
+  const { info } = start({ webRoot: root });
+  const res = await fetch(`http://${info.hostname}:${info.port}/blob.bin`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toBe("application/octet-stream");
+  rmSync(root, { recursive: true, force: true });
+});
