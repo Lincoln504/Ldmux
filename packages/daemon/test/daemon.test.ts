@@ -187,3 +187,25 @@ test("forget drops a record without killing or adopting the tmux session", async
   expect(again.removed).toBe(false);
   tm("kill-session", "-t", session.tmuxName);
 });
+
+test("RPC-only sessions give a clear error instead of an empty tmux target", async () => {
+  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "register", {
+    piSessionId: "pi-rpc-only-test",
+    cwd: tmpdir(),
+    kind: "pi",
+  });
+  expect(session.tmuxName).toBe("");
+
+  // The three terminal operations must explain the real problem.
+  for (const [method, params] of [
+    ["capture", { id: session.id }],
+    ["snapshot", { id: session.id }],
+    ["send", { id: session.id, text: "x" }],
+  ] as const) {
+    await expect(call(daemon.socketPath, method, params as never)).rejects.toThrow(/no terminal/);
+  }
+
+  // Killing one still works: there is just nothing to kill in tmux.
+  const killed = await call<{ session: SessionRecord }>(daemon.socketPath, "kill", { id: session.id });
+  expect(killed.session.status).toBe("dead");
+});

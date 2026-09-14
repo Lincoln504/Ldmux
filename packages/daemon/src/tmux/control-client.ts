@@ -18,6 +18,12 @@ export interface TmuxControlClientOptions {
    * with the current one. */
   onExit?: (client: TmuxControlClient) => void;
   onStderr?: (chunk: string) => void;
+  /**
+   * Seconds of client lag before tmux pauses a pane (passed to
+   * `refresh-client -f pause-after=N`). Default 2; 0 makes tmux pause on the
+   * slightest lag, which is how the pause/resume path is tested.
+   */
+  pauseAfter?: number;
 }
 
 interface Waiter {
@@ -150,7 +156,9 @@ export class TmuxControlClient {
     // response FIFO is not desynchronized.
     await client.waitForNotification((l) => l.startsWith("%session-changed"), 1000).catch(() => {});
     // Enable flow control; ignore failure on very old tmux.
-    await client.command(["refresh-client", "-f", "pause-after=2"]).catch(() => {});
+    await client
+      .command(["refresh-client", "-f", `pause-after=${opts.pauseAfter ?? 2}`])
+      .catch(() => {});
     return client;
   }
 

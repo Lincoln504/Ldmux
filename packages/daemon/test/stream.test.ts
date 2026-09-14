@@ -94,7 +94,7 @@ test("polling fallback keeps the pane visible when control mode is gone", async 
   const name = "ldmux-stream-poll";
   await cp.ensureServer();
   await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
-  const stream = new PaneStream(tmuxSocket, name, cp, 40);
+  const stream = new PaneStream(tmuxSocket, name, cp, { pollMs: 40 });
   const chunks: string[] = [];
   const resets: string[] = [];
   await stream.subscribe({ onOutput: (t) => chunks.push(t), onReset: (r) => resets.push(r) });
@@ -179,5 +179,31 @@ test("snapshot state reflects the pane's terminal modes, not hardcoded false", a
   for (const key of ["mouse", "appCursor", "bracketedPaste"] as const) {
     expect(typeof off.state[key]).toBe("boolean");
   }
+  stream.close();
+}, 30000);
+
+test("a real tmux %pause resyncs subscribers and then resumes the pane", async () => {
+  // pause-after=0 makes tmux pause the pane as soon as this client lags at all,
+  // so the whole path can be exercised for real: tmux pauses -> the client
+  // reports it -> the stream tells subscribers to resync -> the pane is resumed.
+  const name = "ldmux-stream-pause";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const stream = new PaneStream(tmuxSocket, name, cp, { pauseAfter: 0 });
+  const chunks: string[] = [];
+  const resets: string[] = [];
+  await stream.subscribe({ onOutput: (t) => chunks.push(t), onReset: (r) => resets.push(r) });
+
+  await stream.inputText("yes PAUSE_TEST | head -c 300000; printf 'PAUSE_DONE\\n'");
+  await stream.sendKey(["Enter"]);
+
+  // With pause-after=0 and a burst this size tmux does pause us; if it ever
+  // stops doing so the assertion below fails loudly rather than passing vacuously.
+  expect(await waitFor(() => resets.length > 0, 15000)).toBe(true);
+  expect(resets[0]).toBe("pane paused");
+  // And the pane must resume: a dropped resume leaves it frozen until tmux's own
+  // timeout, so seeing the tail of the burst is the real assertion.
+  expect(await waitFor(() => chunks.join("").includes("PAUSE_DONE"), 15000)).toBe(true);
+  expect(stream.mode).toBe("control");
   stream.close();
 }, 30000);

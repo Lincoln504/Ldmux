@@ -119,7 +119,11 @@ export default function ldmuxExtension(pi: ExtensionAPI): void {
         const status = await reportStatus(cfg);
         return { content: [{ type: "text" as const, text: status }], details: {} };
       }
-      if (!id) throw new Error("ldmux: `id` is required for snapshot/send");
+      if (action !== "snapshot" && action !== "send") {
+        // An unknown action must not silently degrade into a send.
+        throw new Error(`ldmux: unknown action "${String(action)}" (expected list, snapshot or send)`);
+      }
+      if (!id) throw new Error(`ldmux: \`id\` is required for ${action}`);
       if (action === "snapshot") {
         const { screen } = await daemonCall(cfg.socketPath, "snapshot", { id });
         return { content: [{ type: "text" as const, text: screen }], details: {} };

@@ -412,6 +412,19 @@ export class LdmuxDaemon {
     return record;
   }
 
+  /**
+   * Resolve a session that has a terminal. An RPC-only pi session has no tmux
+   * session, and running tmux with an empty target produces a transport error
+   * that says nothing about the real problem.
+   */
+  private requireTerminal(id: string): SessionRecord {
+    const record = this.require(id);
+    if (!record.tmuxName) {
+      throw new Error(`session ${id} has no terminal (RPC-only pi session)`);
+    }
+    return record;
+  }
+
   // ── RPC methods ──────────────────────────────────────────────────────────
 
   private async handle(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -437,7 +450,7 @@ export class LdmuxDaemon {
 
       case "send": {
         const p = params as unknown as SendParams;
-        const record = this.require(p.id);
+        const record = this.requireTerminal(p.id);
         if (typeof p.text === "string") await this.cp.sendText(record.tmuxName, p.text);
         if (p.keys?.length) await this.cp.sendKey(record.tmuxName, ...p.keys);
         return { ok: true };
@@ -445,13 +458,13 @@ export class LdmuxDaemon {
 
       case "capture":
         return {
-          screen: await this.cp.capturePane(this.require(String(params.id)).tmuxName, {
+          screen: await this.cp.capturePane(this.requireTerminal(String(params.id)).tmuxName, {
             history: Boolean(params.history),
           }),
         };
 
       case "snapshot": {
-        const record = this.require(String(params.id));
+        const record = this.requireTerminal(String(params.id));
         const [screen, state] = await Promise.all([
           this.cp.capturePane(record.tmuxName),
           this.cp.snapshotState(record.tmuxName),
@@ -461,8 +474,12 @@ export class LdmuxDaemon {
 
       case "kill": {
         const record = this.require(String(params.id));
-        await this.cp.killSession(record.tmuxName);
-        this.dropStream(record.tmuxName);
+        // An RPC-only session has nothing in tmux to kill; ending it still has
+        // to mark the record dead so the list does not keep showing it.
+        if (record.tmuxName) {
+          await this.cp.killSession(record.tmuxName);
+          this.dropStream(record.tmuxName);
+        }
         record.status = "dead";
         record.exitedAt = Date.now();
         record.updatedAt = Date.now();

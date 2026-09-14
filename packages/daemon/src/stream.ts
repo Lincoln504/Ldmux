@@ -60,7 +60,7 @@ export class PaneStream {
     private readonly tmuxSocket: string,
     readonly sessionName: string,
     private readonly cp: TmuxControlPlane,
-    private readonly pollMs = DEFAULT_POLL_MS,
+    private readonly opts: { pollMs?: number; pauseAfter?: number } = {},
   ) {}
 
   get subscriberCount(): number {
@@ -199,6 +199,7 @@ export class PaneStream {
   private async connect(): Promise<void> {
     const client = await TmuxControlClient.connect(this.tmuxSocket, this.sessionName, {
       onOutput: (_pane, text) => this.fanout(text),
+      pauseAfter: this.opts.pauseAfter,
       // A paused pane has stopped streaming and its queued output is gone, so
       // subscribers must resync from a snapshot (the client resumes the pane).
       onPaused: () => this.onPaused(),
@@ -262,6 +263,10 @@ export class PaneStream {
   }
 
   // ── polling fallback ───────────────────────────────────────────────────
+
+  private get pollMs(): number {
+    return this.opts.pollMs ?? DEFAULT_POLL_MS;
+  }
 
   private schedulePoll(delay: number): void {
     if (this.closed || !this.polling) return;
