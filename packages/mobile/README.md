@@ -66,22 +66,46 @@ adb reverse tcp:7629 tcp:7629
 # settings -> host: localhost:7629, token: <cat <state-dir>/token>
 ```
 
+## Modes
+
+Two explicit modes, switched by a button — the sensor never rotates the app
+(ADR-0008):
+
+- **Landscape** — side panel (side is a setting), key matrix, `+sh`, settings;
+  the keyboard is never up.
+- **Portrait (typing)** — no panel, terminal fills the width, keyboard always
+  up, and a thin bar rides directly above the keyboard with `⤢` (back to
+  landscape) plus Esc, Tab, arrows, C-c and the microphone.
+
+The terminal is resized to the viewport in both modes: the daemon sizes the tmux
+pane to the grid the surface can actually paint, so the shell is always the
+right size for the screen showing it.
+
 ## Status
 
-- [x] KMP/Compose shell that builds, installs and runs; landscape.
+- [x] KMP/Compose shell that builds, installs and runs.
 - [x] Settings (host + token + panel side) persisted on device.
-- [x] **No top bar**: a slim side panel (left or right, a setting) carries
-      back/forward between open shells, the extra keys, `+shell` and settings.
+- [x] **No top bar**: a slim side panel carries back/forward between open
+      shells, the extra keys, `+shell` and settings.
 - [x] Session list + `new`/`kill` over the daemon's WebSocket; one page per live
-      tmux session in a `HorizontalPager` (swipe, or the side arrows).
+      tmux session in a `HorizontalPager` (swipe, or the panel arrows).
 - [x] **Native terminal rendering**: libghostty-vt via JNI, Compose Canvas
-      renderer, live attach stream. Verified on device.
-- [x] Sidebar keys drive the native terminal directly (verified on device: a
-      tapped `|` reached the pane, and the view updated live).
-- [ ] On-screen keyboard for arbitrary text input (sidebar keys are not enough).
-- [ ] Cursor rendering, touch scrollback, and a fill-the-screen font size.
+      renderer, live attach stream, 1:1 with the pane. Verified on device.
+- [x] **Client-driven pane resize**: the phone's viewport is the authority;
+      the daemon clamps and runs `tmux resize-window`.
+- [x] **Landscape/portrait modes** with a thin bar above the keyboard.
+- [x] Sidebar keys drive the native terminal directly; on-screen keyboard is
+      opt-in through the `⌨` button (a tap on the grid never raises it).
+- [x] **Headless dictation** (Android `SpeechRecognizer`) — no keyboard needed.
+- [ ] Key encoding in the shared core (today keys are sent as tmux key names).
+- [ ] Predictive local echo / adaptive frame rate — designed in
+      `docs/PREDICTIVE-ECHO.md`, not implemented.
+- [ ] Cursor rendering and touch scrollback.
 - [ ] Foreground service so the heartbeat survives Doze (SPEC §6.3).
+- [ ] iOS (needs a macOS host for the xcframework).
 
-Verified on a real Motorola Edge 2024 (2026-09-14): landscape, panel left/right,
-back/forward, `+sh`, and the full native pipeline — attach -> snapshot ->
-libghostty-vt -> Canvas, with ANSI colours, and live output after a sidebar key.
+Verified on a real Motorola Edge 2024 (2026-09-14): landscape with the side
+panel; `⌨` flips to portrait with the keyboard up and the key bar above it;
+typing reaches the pane; `⤢` returns to landscape; the pane resizes per mode
+(76x20 landscape, 46x29 portrait) and the grid draws 1:1 in the terminal's own
+colours.
