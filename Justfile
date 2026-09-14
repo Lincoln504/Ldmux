@@ -56,9 +56,15 @@ clean-tmux:
     done
     echo "reaped stray ldmux tmux servers"
 
-# Build the native Android app (KMP + Compose). Needs the `mobile` devShell.
+# Build the native Android app (KMP + Compose) with the Gradle wrapper.
+# Needs the `mobile` devShell (JDK 25 + Zig + NDK).
 android:
-    nix develop .#mobile --command gradle -p packages/mobile :composeApp:assembleDebug
+    nix develop .#mobile --command bash -c 'cd packages/mobile && ./gradlew :composeApp:assembleDebug'
+
+# Cross-compile libghostty-vt + the JNI shim for Android (arm64-v8a, x86_64).
+# Pinned Ghostty commit; see packages/mobile/scripts/build-libghostty-vt.sh.
+native-android *abis:
+    nix develop .#mobile --command packages/mobile/scripts/build-libghostty-vt.sh {{abis}}
 
 # Build and install the debug APK on the attached phone.
 android-install: android
