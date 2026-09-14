@@ -53,6 +53,7 @@ actual object AppPrefs {
     private const val KEY_HOST = "host"
     private const val KEY_TOKEN = "token"
     private const val KEY_SIDE = "side"
+    private const val KEY_PREDICT = "predict"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -60,6 +61,7 @@ actual object AppPrefs {
             host = sp.getString(KEY_HOST, null) ?: LdmuxConfig.DEFAULT.host,
             token = sp.getString(KEY_TOKEN, null) ?: LdmuxConfig.DEFAULT.token,
             side = sp.getString(KEY_SIDE, null) ?: LdmuxConfig.DEFAULT.side,
+            predict = sp.getBoolean(KEY_PREDICT, LdmuxConfig.DEFAULT.predict),
         )
     }
 
@@ -69,6 +71,7 @@ actual object AppPrefs {
             .putString(KEY_HOST, config.host)
             .putString(KEY_TOKEN, config.token)
             .putString(KEY_SIDE, config.side)
+            .putBoolean(KEY_PREDICT, config.predict)
             .apply()
     }
 }
@@ -190,14 +193,26 @@ actual fun rememberTerminalSurface(
                             val added = next.substring(old.length)
                             val pending = StringBuilder()
                             for (ch in added) {
-                                if (ch == '\n' || ch == '\r') {
-                                    if (pending.isNotEmpty()) {
-                                        controller.sendText(pending.toString())
-                                        pending.clear()
+                                when (ch) {
+                                    '\n', '\r' -> {
+                                        if (pending.isNotEmpty()) {
+                                            controller.sendText(pending.toString())
+                                            pending.clear()
+                                        }
+                                        controller.sendKey("Enter")
                                     }
-                                    controller.sendKey("Enter")
-                                } else {
-                                    pending.append(ch)
+                                    // Tab is a named key, not text: it must reach
+                                    // tmux as Tab so the shell's completion and
+                                    // tmux's own bindings see a real TAB, and so
+                                    // it can never be a prediction candidate.
+                                    '\t' -> {
+                                        if (pending.isNotEmpty()) {
+                                            controller.sendText(pending.toString())
+                                            pending.clear()
+                                        }
+                                        controller.sendKey("Tab")
+                                    }
+                                    else -> pending.append(ch)
                                 }
                             }
                             if (pending.isNotEmpty()) controller.sendText(pending.toString())

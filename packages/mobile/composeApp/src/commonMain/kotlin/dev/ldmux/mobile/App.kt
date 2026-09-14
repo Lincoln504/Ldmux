@@ -57,7 +57,17 @@ val Accent = Color(0xFF4C8DFF)
 val Surface = Color(0xFF141822)
 
 /** Where the daemon is and how to authenticate. Persisted by the platform. */
-data class LdmuxConfig(val host: String, val token: String, val side: String = "left") {
+data class LdmuxConfig(
+    val host: String,
+    val token: String,
+    val side: String = "left",
+    /**
+     * Show typed text before the server echoes it (docs/PREDICTIVE-ECHO.md).
+     * Off by default: it trades a little honesty for a lot of latency, and a
+     * prompt that does not echo is exactly where the trade is most visible.
+     */
+    val predict: Boolean = false,
+) {
     val baseUrl: String get() = if (host.startsWith("http")) host else "http://$host"
 
     val wsUrl: String get() {
@@ -81,7 +91,7 @@ data class LdmuxConfig(val host: String, val token: String, val side: String = "
     }
 
     companion object {
-        val DEFAULT = LdmuxConfig(host = "localhost:7623", token = "", side = "left")
+        val DEFAULT = LdmuxConfig(host = "localhost:7623", token = "", side = "left", predict = false)
     }
 }
 
@@ -352,6 +362,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
     var host by remember { mutableStateOf(current.host) }
     var token by remember { mutableStateOf(current.token) }
     var side by remember { mutableStateOf(current.side) }
+    var predict by remember { mutableStateOf(current.predict) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -380,10 +391,26 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Box(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("predictive echo", color = Dim, fontSize = 12.sp)
+                    TextButton(onClick = { predict = false }) {
+                        Text("off", color = if (!predict) Accent else Dim)
+                    }
+                    TextButton(onClick = { predict = true }) {
+                        Text("on", color = if (predict) Accent else Dim)
+                    }
+                }
+                Text(
+                    "on: typed text appears instantly, before the server echoes it. " +
+                        "A prompt that does not echo (a password) stops prediction until the next line.",
+                    color = Dim,
+                    fontSize = 10.sp,
+                )
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(LdmuxConfig(host.trim(), token.trim(), side)) }) {
+            TextButton(onClick = { onSave(LdmuxConfig(host.trim(), token.trim(), side, predict)) }) {
                 Text("save", color = Accent)
             }
         },

@@ -7,6 +7,7 @@ import dev.ldmux.mobile.term.TerminalEngine
 import dev.ldmux.mobile.term.TerminalFrame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -33,6 +34,9 @@ class TerminalController(
     private var lastRenderAt = 0L
     private var renderScheduled = false
 
+    private val predictor = Predictor()
+    private var staleJob: Job? = null
+
     /** Server-reported terminal modes (affects input encoding later). */
     var modes by mutableStateOf(TerminalModes())
         private set
@@ -47,6 +51,10 @@ class TerminalController(
 
     init {
         attach.onSnapshot = { cols, rows, screen, _, m ->
+            // A snapshot is the truth: any outstanding prediction is settled by
+            // it (this is also the recovery path after a mispredict).
+            predictor.reset()
+            staleJob?.cancel()
             engine.close()
             engine = TerminalEngine(cols, rows)
             if (screen.isNotEmpty()) {
@@ -60,11 +68,39 @@ class TerminalController(
             modes = m
             _frame.value = engine.render()
         }
-        attach.onOutput = { bytes ->
+        attach.onOutput = { bytes -> writeOutput(bytes) }
+        attach.start(scope)
+    }
+
+    /**
+     * Apply one output frame, first reconciling it against any prediction.
+     *
+     * Feeding output before reconciling would paint the echo twice (once from
+     * the prediction, once from the server).
+     */
+    private fun writeOutput(bytes: ByteArray) {
+        if (!config.predict) {
             engine.write(bytes, bytes.size)
             scheduleRender()
+            return
         }
-        attach.start(scope)
+        when (val c = predictor.reconcile(bytes)) {
+            is Predictor.Consumption.Consume -> {
+                staleJob?.cancel()
+                if (c.remaining.isNotEmpty()) engine.write(c.remaining, c.remaining.size)
+                scheduleRender()
+            }
+            Predictor.Consumption.Passthrough -> {
+                engine.write(bytes, bytes.size)
+                scheduleRender()
+            }
+            Predictor.Consumption.Mispredict -> {
+                // The prediction was wrong and a VT cannot un-apply it, so the
+                // screen is rebuilt from the server instead.
+                staleJob?.cancel()
+                attach.snapshotNow()
+            }
+        }
     }
 
     /**
@@ -97,8 +133,42 @@ class TerminalController(
         }
     }
 
-    override fun sendKey(name: String) = attach.keys(listOf(name))
-    override fun sendText(text: String) = attach.input(text)
+    override fun sendKey(name: String) {
+        // Submitting a line re-arms prediction: a fresh line is expected to echo
+        // again, even if the previous one did not (a password prompt).
+        if (name == "Enter") predictor.onLineSubmitted()
+        attach.keys(listOf(name))
+    }
+
+    override fun sendText(text: String) {
+        val bytes = text.encodeToByteArray()
+        val canShowNow = config.predict && !modes.alternateOn && predictor.canPredict(bytes)
+        if (canShowNow) {
+            // Paint it before the server is even asked. If the echo disagrees,
+            // writeOutput() throws this away and repaints from a snapshot.
+            engine.write(bytes, bytes.size)
+            predictor.predict(bytes)
+            armStaleCheck()
+            _frame.value = engine.render()
+        }
+        attach.input(text)
+    }
+
+    /**
+     * A prediction that is never echoed means the pane is not echoing (a
+     * password prompt, most importantly). Show the truth again and stop
+     * predicting until the line is submitted.
+     */
+    private fun armStaleCheck() {
+        staleJob?.cancel()
+        staleJob = scope.launch {
+            delay(STALE_MS)
+            if (predictor.hasPending) {
+                predictor.abandon()
+                attach.snapshotNow()
+            }
+        }
+    }
     override fun loadHistory() = attach.scrollback(MAX_HISTORY_LINES)
     override fun jumpToBottom() = attach.scrollback(0)
 
@@ -116,6 +186,7 @@ class TerminalController(
     }
 
     fun dispose() {
+        staleJob?.cancel()
         attach.stop()
         engine.close()
         scope.cancel()
@@ -125,6 +196,9 @@ class TerminalController(
         const val DEFAULT_COLS = 120
         const val DEFAULT_ROWS = 40
         const val MAX_HISTORY_LINES = 5000
+        /** How long an unconfirmed prediction may stay on screen before we
+         *  conclude the pane is not echoing. Roughly 2-3 mobile round trips. */
+        const val STALE_MS = 900L
         /** ~60 Hz. The ceiling; phase 3 in docs/PREDICTIVE-ECHO.md lowers it to
          *  max(2 Hz, 1/2 RTT) when the link is slow. */
         const val FRAME_MS = 16L

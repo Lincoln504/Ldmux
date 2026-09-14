@@ -242,16 +242,21 @@ export class RemoteServer {
           if (data.stream) {
             const gen = data.attachGen;
             const lines = Number(msg.lines ?? 0);
-            const snap = await data.stream.snapshotWithHistory(
-              Number.isFinite(lines) && lines > 0 ? lines : undefined,
-            );
+            // `lines <= 0` means "re-send the visible screen, no history": this
+            // is how a client returns to the bottom, and it must NOT be read as
+            // "use the default", which would page 5000 lines to show one
+            // screen.
+            const wantsHistory = Number.isFinite(lines) && lines > 0;
+            const snap = wantsHistory
+              ? await data.stream.snapshotWithHistory(lines)
+              : await data.stream.snapshot();
             // Re-check after the await: a newer attach (or a disconnect) may have
             // superseded this request, and repainting another session's screen
             // into the new one is worse than sending nothing.
             if (data.disposed || data.attachGen !== gen) return;
             // The client repaints from scratch, so this is a Snapshot carrying
             // the `history` flag rather than a separate message shape.
-            this.sendState(ws, String(data.sessionId ?? ""), snap, { history: true });
+            this.sendState(ws, String(data.sessionId ?? ""), snap, { history: wantsHistory });
           } else {
             this.sendError(ws, "not_attached", "attach before requesting scrollback");
           }

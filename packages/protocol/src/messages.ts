@@ -77,7 +77,11 @@ export interface KeyMessage { type: "key"; keys: string[] }
 export interface ScrollbackRequest {
   type: "scrollback";
   sessionId: string;
-  /** Lines of history to request (server clamps to its own bound). */
+  /**
+   * Lines of history to request (server clamps to its own bound).
+   * `0` (or omitted) means "re-send just the visible screen" — the return-to-
+   * bottom action — and must not be read as "use the default".
+   */
   lines?: number;
 }
 

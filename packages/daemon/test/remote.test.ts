@@ -394,3 +394,30 @@ test("resize before attach is refused; an absurd size is clamped, not rejected",
   ).toBe(true);
   ws.close();
 });
+
+test("scrollback with lines 0 re-sends the visible screen, not 5000 lines", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id, cols: 40, rows: 10 }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+
+  // Give the shell something that scrolled off the top.
+  ws.send(JSON.stringify({ type: "input", data: "for i in $(seq 1 60); do echo line$i; done" }));
+  ws.send(JSON.stringify({ type: "key", keys: ["Enter"] }));
+  // Let the flood finish and scroll the pane.
+  await new Promise((r) => setTimeout(r, 1500));
+
+  const before = text.filter((m) => m.type === "snapshot").length;
+  ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id, lines: 0 }));
+  expect(await waitFor(() => text.filter((m) => m.type === "snapshot").length > before)).toBe(true);
+  const last = text.filter((m) => m.type === "snapshot").at(-1) as any;
+  // The plain screen is exactly the pane's rows; history paging would be far
+  // taller and would carry the history flag.
+  expect(last.rows).toBe(10);
+  expect(last.history).toBeUndefined();
+  ws.close();
+});

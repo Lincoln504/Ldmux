@@ -23,6 +23,8 @@ data class TerminalModes(
     val mouse: Boolean = false,
     val appCursor: Boolean = false,
     val bracketedPaste: Boolean = false,
+    /** A full-screen application is running; keys rarely echo there. */
+    val alternateOn: Boolean = false,
 )
 
 /**
@@ -99,6 +101,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     mouse = bool(root, "mouse"),
                     appCursor = bool(root, "appCursor"),
                     bracketedPaste = bool(root, "bracketedPaste"),
+                    alternateOn = bool(root, "alternateOn"),
                 )
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }
@@ -166,6 +169,14 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             }.toString(),
         )
     }
+
+    /**
+     * Repaint the visible screen from the server. `lines = 0` is the
+     * return-to-bottom form (no history); it is also the recovery step after a
+     * failed input prediction, because a snapshot is the only way to un-apply
+     * bytes already fed to the emulator.
+     */
+    fun snapshotNow() = scrollback(0)
 
     fun stop() {
         job?.cancel()
