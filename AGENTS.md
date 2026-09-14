@@ -7,8 +7,9 @@ landscape-only mobile app, reachable only over Tailscale. See
 
 ## Status
 
-Design/spec phase. **Do not implement** beyond what is explicitly requested. The
-next planned work is Phase 1 in `docs/SPEC.md` §13.
+Phase 1 (local core) is implemented and tested; Phase 2 (pi extension) is in
+progress. Keep building what is requested; do not expand scope unilaterally.
+`docs/PI-EXTENSIONS.md` is the contract for the extension.
 
 ## Rules
 
@@ -19,7 +20,9 @@ next planned work is Phase 1 in `docs/SPEC.md` §13.
 - **Never split engines per client.** One terminal renderer behind one
   `TerminalSurface` seam.
 - **Defer long-lived resources** in the pi extension to `session_start` and clean
-  up in `session_shutdown` (pi extension contract).
+  up in `session_shutdown` (pi extension contract). **Branch on `event.reason`:**
+  only `quit` means the process is exiting; never stop the daemon or kill tmux on
+  `new`/`resume`/`fork`/`reload`. See `docs/PI-EXTENSIONS.md`.
 - **Pin cross-component contracts with e2e tests in the same commit.**
 - Keep the design honest: update `docs/SPEC.md` (and add ADRs under `docs/adr/`)
   when decisions change.
@@ -28,10 +31,17 @@ next planned work is Phase 1 in `docs/SPEC.md` §13.
 
 - **Nix toolchain:** develop and test inside `nix develop` (bun + tmux + just are
   provided by `flake.nix`). Do not add unpinned system dependencies.
+- **Shared contract:** all shared types + the socket client live in
+  `packages/protocol`. There is no build step — consumers import the protocol
+  module directly (relative import) so the code loads under both Bun (daemon/CLI)
+  and pi's jiti loader (extension). Do not add a bundling step without an ADR.
+- **Daemon is a separate process.** The pi extension must never host long-lived
+  state; it supervises the daemon and talks to it over the Unix socket.
 - Run `bun test` after changes; live tests spawn a scratch tmux server and must
   clean it up (`tmux -L <unique> kill-server`).
 - Conventional commits: `type(scope): summary`.
-- TypeScript: strict; shared wire types live in `packages/protocol`.
+- TypeScript: strict; avoid new runtime deps (the extension uses plain JSON-Schema
+  tool params instead of typebox).
 - Rust (if/when used): match the style of the surrounding crate.
 - Work on branches off `main`; open PRs against `main`.
 

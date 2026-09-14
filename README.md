@@ -46,6 +46,9 @@ and binary cache are reused.
 ```bash
 nix develop            # bun 1.3.x, node 24, tmux 3.7b, just
 bun test               # unit + live tmux tests (run inside nix develop)
+just daemon            # run ldmuxd in the foreground
+just cli run shell     # create a session and attach tmux
+just link-extension    # symlink the pi extension, then /reload in pi
 bun run packages/daemon/src/probe.ts <tmux-socket> <session>   # stream a pane
 ```
 
@@ -55,12 +58,20 @@ devShell).
 
 ## Status
 
-**Phase 1 in progress** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (23 tests, `bun test`):
+**Phase 1 complete; Phase 2 (pi extension) underway** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
+tested (**35 tests**, `bun test`):
 
-- `packages/protocol` — canonical frame codec + control message types.
+- `packages/protocol` — one canonical frame codec, control message types, runtime
+  path resolution, and the typed daemon RPC contract + socket client (shared by
+  every consumer).
 - `packages/daemon` — tmux control-mode parser + live client; control plane;
-  JSON session registry with reconciliation; Unix-socket JSON daemon; CLI
-  (`ping`/`list`/`new`/`send`/`key`/`capture`/`snapshot`/`kill`/`adopt`).
+  JSON session registry with reconciliation + pruning; Unix-socket JSON daemon
+  (pid-lockfile single-instance, owner-only 0600 socket); CLI
+  (`ping`/`list`/`new`/`run`/`send`/`key`/`capture`/`snapshot`/`kill`/`adopt`).
+- `packages/extension` — pi extension: ensures the daemon is running, registers the
+  pi session (reason-branched lifecycle), and exposes a `/ldmux` command + `ldmux`
+  tool. Verified loading under pi's jiti loader and end-to-end from `session_start`.
 
-Not yet: pi extension, tailnet transport/auth, mobile app, desktop mirror.
+See [`docs/PI-EXTENSIONS.md`](docs/PI-EXTENSIONS.md) for the pi extension contract.
+
+Not yet: tailnet transport/auth, mobile app, desktop mirror.

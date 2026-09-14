@@ -1,22 +1,34 @@
 /**
  * Daemon entrypoint:
  *   bun run packages/daemon/src/main.ts
- * Environment:
- *   LDMUX_STATE_DIR  (default $XDG_RUNTIME_DIR/ldmux or /tmp/ldmux)
- *   LDMUX_TMUX_SOCK  (default "ldmux")
+ * Environment: LDMUX_STATE_DIR, LDMUX_TMUX_SOCK, LDMUX_SOCK
+ * (resolved via @ldmux/protocol `paths`).
  */
 
-import { join } from "node:path";
+import { resolveStateDir, resolveTmuxSocket } from "../../protocol/src/paths.ts";
 import { LdmuxDaemon } from "./daemon.ts";
 
-const stateDir = process.env.LDMUX_STATE_DIR ?? join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "ldmux");
-const daemon = new LdmuxDaemon({ stateDir, tmuxSocket: process.env.LDMUX_TMUX_SOCK ?? "ldmux" });
-daemon.start();
-console.log(`ldmuxd listening on ${daemon.socketPath} (tmux -L ${daemon.cp.socket})`);
+const daemon = new LdmuxDaemon({ stateDir: resolveStateDir(), tmuxSocket: resolveTmuxSocket() });
 
-const shutdown = () => {
+try {
+  daemon.start();
+  console.log(`ldmuxd listening on ${daemon.socketPath} (tmux -L ${daemon.cp.socket})`);
+} catch (err) {
+  const message = (err as Error).message;
+  // Another daemon won the startup race — not an error for the spawner.
+  if (message === "ldmuxd already running") {
+    console.log("ldmuxd already running");
+    process.exit(0);
+  }
+  console.error(`ldmuxd: ${message}`);
+  process.exit(1);
+}
+
+process.on("SIGINT", () => {
   daemon.stop();
   process.exit(0);
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+});
+process.on("SIGTERM", () => {
+  daemon.stop();
+  process.exit(0);
+});

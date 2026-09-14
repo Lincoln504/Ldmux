@@ -28,6 +28,8 @@ export interface NewSessionOptions {
   command?: string[];
   cols?: number;
   rows?: number;
+  /** Environment variables injected into the session's command (tmux -e). */
+  env?: Record<string, string>;
 }
 
 export interface CaptureOptions {
@@ -112,6 +114,7 @@ export class TmuxControlPlane {
   newSession(opts: NewSessionOptions): void {
     const args = ["new-session", "-d", "-s", opts.name, "-c", opts.cwd];
     if (opts.cols && opts.rows) args.push("-x", String(opts.cols), "-y", String(opts.rows));
+    for (const [key, value] of Object.entries(opts.env ?? {})) args.push("-e", `${key}=${value}`);
     const { code, err } = this.run([...args, ...(opts.command ?? [])]);
     if (code !== 0) throw new Error(`tmux new-session failed: ${err.trim() || code}`);
   }

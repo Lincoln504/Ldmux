@@ -1,31 +1,18 @@
 /**
  * Session registry. Crash-safe and restart-safe:
- *   - tmux is authoritative; the registry is a cache of metadata tmux cannot hold
- *     (kind, title, created-by, own id);
- *   - reconcile() adopts surviving tmux sessions and marks vanished ones dead.
+ *   - tmux is authoritative for terminal sessions; the registry caches metadata
+ *     tmux cannot hold (kind, title, created-by, pi session id);
+ *   - reconcile() marks vanished tmux-backed sessions dead and reports orphans.
  *
- * JSON (not SQLite) for the single-user v1 — see docs/SPEC.md §5.3.
+ * JSON (not SQLite) for the single-user v1 — see docs/SPEC.md §5.3. Types come
+ * from @ldmux/protocol so the daemon, CLI, and extension share one contract.
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { SessionKind, SessionRecord, SessionStatus } from "../../protocol/src/rpc.ts";
 
-export type SessionKind = "shell" | "pi";
-export type SessionStatus = "starting" | "running" | "dead";
-
-export interface SessionRecord {
-  id: string;
-  tmuxName: string;
-  kind: SessionKind;
-  cwd: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  createdBy: string;
-  status: SessionStatus;
-  exitCode?: number | null;
-  exitedAt?: number | null;
-}
+export type { SessionKind, SessionRecord, SessionStatus };
 
 interface RegistryFile {
   version: 1;
@@ -63,7 +50,14 @@ export class Registry {
   }
 
   byTmuxName(name: string): SessionRecord | undefined {
+    if (!name) return undefined;
     for (const r of this.sessions.values()) if (r.tmuxName === name) return r;
+    return undefined;
+  }
+
+  byPiSessionId(piSessionId: string): SessionRecord | undefined {
+    if (!piSessionId) return undefined;
+    for (const r of this.sessions.values()) if (r.piSessionId === piSessionId) return r;
     return undefined;
   }
 
@@ -80,14 +74,41 @@ export class Registry {
   }
 
   /**
-   * Reconcile against the live tmux session set.
-   * @returns ids marked dead and tmux sessions adopted (unknown to the registry).
+   * Bound registry growth: drop dead records older than `maxDeadAgeMs`, then
+   * trim the oldest records if still over `maxRecords`. Returns removed ids.
+   */
+  prune(opts: { maxDeadAgeMs?: number; maxRecords?: number } = {}, now = Date.now()): string[] {
+    const maxDeadAgeMs = opts.maxDeadAgeMs ?? 24 * 60 * 60 * 1000;
+    const maxRecords = opts.maxRecords ?? 500;
+    const removed: string[] = [];
+    for (const record of this.sessions.values()) {
+      if (record.status === "dead" && record.exitedAt != null && now - record.exitedAt > maxDeadAgeMs) {
+        this.sessions.delete(record.id);
+        removed.push(record.id);
+      }
+    }
+    if (this.sessions.size > maxRecords) {
+      const oldest = [...this.sessions.values()].sort((a, b) => a.updatedAt - b.updatedAt);
+      for (const record of oldest.slice(0, this.sessions.size - maxRecords)) {
+        this.sessions.delete(record.id);
+        removed.push(record.id);
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Reconcile terminal-backed records against the live tmux session set.
+   * Records with no tmuxName (RPC-only pi sessions) are left untouched.
+   *
+   * @returns ids marked dead and live tmux sessions unknown to the registry.
    */
   reconcile(liveTmuxNames: Set<string>, now = Date.now()): { dead: string[]; adopted: string[] } {
     const dead: string[] = [];
     const adopted: string[] = [];
     const known = new Set<string>();
     for (const record of this.sessions.values()) {
+      if (!record.tmuxName) continue; // RPC-only; liveness is the pi process
       known.add(record.tmuxName);
       if (liveTmuxNames.has(record.tmuxName)) {
         if (record.status !== "running") {

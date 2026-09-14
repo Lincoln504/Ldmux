@@ -6,7 +6,5 @@ export { decodeOctalEscapes } from "./tmux/octal.ts";
 export { TmuxControlPlane } from "./tmux/control-plane.ts";
 export type { TmuxSession, TmuxPane, NewSessionOptions, CaptureOptions } from "./tmux/control-plane.ts";
 export { Registry } from "./registry.ts";
-export type { SessionRecord, SessionKind, SessionStatus } from "./registry.ts";
 export { LdmuxDaemon } from "./daemon.ts";
 export type { LdmuxDaemonOptions } from "./daemon.ts";
-export { call } from "./socket-client.ts";

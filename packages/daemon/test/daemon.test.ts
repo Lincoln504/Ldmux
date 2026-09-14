@@ -1,10 +1,11 @@
 import { test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
-import { call } from "../src/socket-client.ts";
-import type { SessionRecord } from "../src/registry.ts";
+import { Registry } from "../src/registry.ts";
+import { call } from "../../protocol/src/socket-client.ts";
+import type { SessionRecord } from "../../protocol/src/rpc.ts";
 
 const tmuxSocket = `ldmux-daemontest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-daemon-"));
@@ -82,4 +83,53 @@ test("adopt registers an existing tmux session", async () => {
 test("unknown method and unknown session are errors", async () => {
   await expect(call(daemon.socketPath, "nope")).rejects.toThrow();
   await expect(call(daemon.socketPath, "capture", { id: "does-not-exist" })).rejects.toThrow();
+});
+
+test("socket is owner-only (0600)", () => {
+  expect(statSync(daemon.socketPath).mode & 0o777).toBe(0o600);
+});
+
+test("a second daemon on the same state dir refuses to start", () => {
+  const second = new LdmuxDaemon({ stateDir, tmuxSocket });
+  expect(() => second.start()).toThrow("already running");
+});
+
+test("new injects the child env contract", async () => {
+  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  await call(daemon.socketPath, "send", { id: session.id, text: "printf 'ENV:%s\n' \"$LDMUX_SESSION_ID\"" });
+  await call(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
+  const ok = await waitFor(async () => {
+    const { screen } = await call<{ screen: string }>(daemon.socketPath, "capture", { id: session.id });
+    return screen.includes(`ENV:${session.id}`);
+  });
+  expect(ok).toBe(true);
+});
+
+test("register binds a pi session and session_end marks it dead", async () => {
+  const piSessionId = "pi-01HMOCKULID00000000000000";
+  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "register", {
+    piSessionId,
+    cwd: tmpdir(),
+    kind: "pi",
+  });
+  expect(session.piSessionId).toBe(piSessionId);
+  expect(session.tmuxName).toBe("");
+
+  // RPC-only sessions have no tmux counterpart and must survive reconcile.
+  const list = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
+  expect(list.sessions.find((s) => s.id === session.id)?.status).toBe("running");
+
+  // Re-registering is idempotent (same record).
+  const again = await call<{ session: SessionRecord }>(daemon.socketPath, "register", {
+    piSessionId,
+    cwd: tmpdir(),
+  });
+  expect(again.session.id).toBe(session.id);
+
+  await call(daemon.socketPath, "session_end", { piSessionId });
+  const after = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
+  expect(after.sessions.find((s) => s.id === session.id)?.status).toBe("dead");
 });
