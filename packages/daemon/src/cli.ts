@@ -10,11 +10,17 @@
  *   ldmux snapshot <id>
  *   ldmux kill <id>
  *   ldmux adopt <tmux-name>
+ *   ldmux mirror <id> [--rw] [--workspace N]
+ *   ldmux remote
+ *   ldmux pair
+ *   ldmux expose [--dry-run]
  */
 
 import { daemonCall, defaultSocketPath } from "../../protocol/src/rpc.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { PingResult, SessionRecord } from "../../protocol/src/rpc.ts";
+import { DEFAULT_MIRROR_WORKSPACE, mirrorCommand, openMirror } from "./desktop.ts";
+import { buildPairInfo, expose, tailnetHost } from "./pairing.ts";
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -124,8 +130,64 @@ async function main() {
       break;
     }
 
+    case "mirror": {
+      const [id] = positional(rest, ["--workspace", "--terminal"]);
+      const { sessions } = await daemonCall(sock, "list", {});
+      const session = sessions.find((s) => s.id === id);
+      if (!session?.tmuxName) {
+        console.error(`ldmux: no terminal-backed session ${id ?? ""}`);
+        process.exit(1);
+      }
+      const ping = await call<PingResult>(sock, "ping");
+      const opts = {
+        readOnly: !rest.includes("--rw"),
+        workspace: Number(flag(rest, "--workspace") ?? DEFAULT_MIRROR_WORKSPACE),
+        terminal: flag(rest, "--terminal"),
+      };
+      const res = openMirror(ping.tmuxSocket, session.tmuxName, opts);
+      if (!res.ok) {
+        console.error(`ldmux: mirror not opened (${res.detail})`);
+        console.error(`run manually: ${mirrorCommand(ping.tmuxSocket, session.tmuxName, opts)}`);
+        process.exit(1);
+      }
+      console.log(`mirror of ${session.tmuxName} on workspace ${res.workspace}`);
+      break;
+    }
+
+    case "pair": {
+      const info = await daemonCall(sock, "remote_info", {});
+      const host = tailnetHost();
+      if (!host) {
+        console.error("ldmux: tailscale unavailable; using localhost");
+      }
+      const pair = buildPairInfo({ host: host ?? "127.0.0.1", port: info.port, token: info.token });
+      console.log(`url:        ${pair.url}`);
+      console.log(`local:      ${pair.localUrl}`);
+      console.log(`deep link:  ${pair.deepLink}`);
+      console.log(`expose:     ${pair.serveCommand}`);
+      break;
+    }
+
+    case "expose": {
+      const info = await daemonCall(sock, "remote_info", {});
+      if (rest.includes("--dry-run")) {
+        console.log(`tailscale serve --bg --https=443 http://127.0.0.1:${info.port}`);
+        break;
+      }
+      const res = expose({ port: info.port });
+      if (!res.ok) {
+        console.error(`ldmux: ${res.detail}`);
+        process.exit(1);
+      }
+      const pair = buildPairInfo({ host: tailnetHost() ?? "127.0.0.1", port: info.port, token: info.token });
+      console.log(`exposed on the tailnet: ${pair.url}`);
+      break;
+    }
+
     default:
-      console.error("usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|adopt|remote> [args]");
+      console.error(
+        "usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|adopt|mirror|remote|pair|expose> [args]",
+      );
       process.exit(2);
   }
 }

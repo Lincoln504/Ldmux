@@ -16,6 +16,8 @@ extension.
 
 ## Rules
 
+- **Tests + types are the gate.** `bun test` and `bun run typecheck` must both
+  pass before committing; the typecheck is strict and has no build step.
 - **tmux is the source of truth.** Never introduce a second session/PTY layer.
 - **Tailnet only.** Never bind a public interface; never disable auth.
 - **Scroll fidelity is sacred.** Any terminal UI change must preserve the

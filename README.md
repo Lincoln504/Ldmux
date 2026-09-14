@@ -54,6 +54,10 @@ bun test               # unit + live tmux tests (run inside nix develop)
 bun run typecheck      # tsc --noEmit (strict, no build step)
 just daemon            # run ldmuxd in the foreground
 just cli run shell     # create a session and attach tmux
+just cli list          # sessions (and their tmux names)
+just cli mirror <id>   # read-only desktop mirror (i3 workspace 10)
+just pair              # phone url + ldmux:// deep link + tailscale serve command
+just expose            # expose the loopback remote over the tailnet
 just link-extension    # symlink the pi extension, then /reload in pi
 bun run packages/daemon/src/probe.ts <tmux-socket> <session>   # stream a pane
 ```
@@ -65,7 +69,7 @@ devShell).
 ## Status
 
 **Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**43 tests**, `bun test`):
+tested (**53 tests**, `bun test`; `bun run typecheck` clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by
@@ -84,6 +88,8 @@ tested (**43 tests**, `bun test`):
 - `packages/web` — buildless xterm.js client served by the daemon at `/`
   (canonical grid scaled to fit, session pager, swipe, mobile key bar,
   reconnect/resync). See [`docs/WEB.md`](docs/WEB.md).
+- pairing/desktop helpers — `ldmux pair` / `ldmux expose` (tailscale URL +
+  `ldmux://` deep link) and `ldmux mirror` (read-only i3 + alacritty view).
 
 See [`docs/PI-EXTENSIONS.md`](docs/PI-EXTENSIONS.md) for the pi extension contract.
 
