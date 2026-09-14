@@ -7,3 +7,6 @@ local.properties
 # the packaged .so lives under src/androidMain/jniLibs and IS committed so the
 # APK builds without a Zig/NDK round-trip).
 native/prebuilt/
+
+# Built by scripts/build-libghostty-vt.sh, not committed (a derived artifact).
+composeApp/src/androidMain/jniLibs/
