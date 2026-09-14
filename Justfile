@@ -17,6 +17,10 @@ cli *args:
 probe socket session:
     bun run packages/daemon/src/probe.ts {{socket}} {{session}}
 
+# Print remote connection info (host/port/token) + the tailscale serve command.
+remote:
+    bun run packages/daemon/src/cli.ts remote
+
 # Symlink the pi extension into pi's auto-discovery dir, then `/reload` in pi.
 link-extension:
     ln -sfn {{justfile_directory()}}/packages/extension ~/.pi/agent/extensions/ldmux

@@ -55,7 +55,25 @@ export interface Pong { type: "pong"; id?: number }
 export interface ErrorMessage { type: "error"; code: string; message: string }
 export interface Close { type: "close"; reason?: string }
 
-export type ControlMessage = Hello | Caps | Snapshot | Follow | Ping | Pong | ErrorMessage | Close;
+/** Remote client → server: subscribe this connection to one session's stream. */
+export interface Attach { type: "attach"; sessionId: string }
+/** Remote client → server: type literal text into the attached pane. */
+export interface Input { type: "input"; data: string }
+/** Remote client → server: send named keys (Enter, C-c, Up, ...). */
+export interface KeyMessage { type: "key"; keys: string[] }
+
+export type ControlMessage =
+  | Hello
+  | Caps
+  | Snapshot
+  | Follow
+  | Ping
+  | Pong
+  | ErrorMessage
+  | Close
+  | Attach
+  | Input
+  | KeyMessage;
 
 export const textFrame = (type: FrameType, msg: ControlMessage) =>
   ({ type, text: JSON.stringify(msg) });

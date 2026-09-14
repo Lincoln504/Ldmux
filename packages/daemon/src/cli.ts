@@ -116,8 +116,16 @@ async function main() {
       break;
     }
 
+    case "remote": {
+      const info = await daemonCall(sock, "remote_info", {});
+      console.log(JSON.stringify(info, null, 2));
+      console.log(`\nlocal:     ws://${info.hostname}:${info.port}${info.path}`);
+      console.log(`expose:    tailscale serve --bg --https=443 http://${info.hostname}:${info.port}`);
+      break;
+    }
+
     default:
-      console.error("usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|adopt> [args]");
+      console.error("usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|adopt|remote> [args]");
       process.exit(2);
   }
 }

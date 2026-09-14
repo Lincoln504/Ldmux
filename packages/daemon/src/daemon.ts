@@ -12,6 +12,9 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rm
 import { join } from "node:path";
 import { TmuxControlPlane } from "./tmux/control-plane.ts";
 import { Registry } from "./registry.ts";
+import { PaneStream } from "./stream.ts";
+import { RemoteServer } from "./remote.ts";
+import { loadOrCreateToken } from "./auth.ts";
 import type {
   NewParams,
   RegisterParams,
@@ -33,6 +36,12 @@ export interface LdmuxDaemonOptions {
   deadRecordTtlMs?: number;
   /** Hard cap on registry size before oldest records are pruned (default 500). */
   maxRecords?: number;
+  /** Remote WebSocket bind host (default 127.0.0.1 — never a public interface). */
+  remoteHost?: string;
+  /** Remote WebSocket port; 0 picks an ephemeral port (tests). */
+  remotePort?: number;
+  /** Set false to run without the remote transport (tests). */
+  enableRemote?: boolean;
 }
 
 interface RpcRequest {
@@ -62,6 +71,10 @@ export class LdmuxDaemon {
   private ownsLock = false;
   private server: { stop(closeActive?: boolean): void } | undefined;
   private readonly conns = new Map<unknown, Conn>();
+  private remote: RemoteServer | undefined;
+  private readonly streams = new Map<string, PaneStream>();
+  private remoteInfo: { hostname: string; port: number } | undefined;
+  private token = "";
 
   constructor(private readonly opts: LdmuxDaemonOptions) {
     this.stateDir = opts.stateDir;
@@ -103,13 +116,78 @@ export class LdmuxDaemon {
       });
       // The socket is a full-control channel: owner-only.
       chmodSync(this.socketPath, 0o600);
+      this.startRemote();
     } catch (err) {
       this.releaseLock();
       throw err;
     }
   }
 
+  private startRemote(): void {
+    if (this.opts.enableRemote === false) return;
+    try {
+      this.token = loadOrCreateToken(this.stateDir);
+      this.remote = new RemoteServer({
+        hostname: this.opts.remoteHost ?? "127.0.0.1",
+        port: this.opts.remotePort ?? 7623,
+        token: this.token,
+        getSession: (id) => this.registry.get(id),
+        acquireStream: (record) => this.streamFor(record),
+        releaseStream: (record) => this.releaseStreamIfIdle(record.tmuxName),
+        log: (msg) => console.error(msg),
+      });
+      this.remoteInfo = this.remote.start();
+    } catch (err) {
+      // Remote is optional: a bind failure must not take down local control.
+      console.error(`ldmuxd: remote disabled: ${(err as Error).message}`);
+      this.remote = undefined;
+      this.remoteInfo = undefined;
+    }
+  }
+
+  /** Get-or-create the live stream for a terminal-backed session. */
+  private streamFor(record: SessionRecord): PaneStream {
+    let stream = this.streams.get(record.tmuxName);
+    if (!stream) {
+      stream = new PaneStream(this.cp.socket, record.tmuxName, this.cp);
+      this.streams.set(record.tmuxName, stream);
+    }
+    return stream;
+  }
+
+  /** Close and forget a stream (its tmux session is gone). */
+  private dropStream(tmuxName: string, reason = "session ended"): void {
+    const stream = this.streams.get(tmuxName);
+    if (!stream) return;
+    this.streams.delete(tmuxName);
+    stream.close(reason);
+  }
+
+  /** Release a stream only if nothing is subscribed to it. */
+  private releaseStreamIfIdle(tmuxName: string): void {
+    const stream = this.streams.get(tmuxName);
+    if (stream && stream.subscriberCount === 0) {
+      this.streams.delete(tmuxName);
+      stream.close();
+    }
+  }
+
+  /** Evict streams whose backing session is gone (bounded memory). */
+  private sweepStreams(): void {
+    for (const [tmuxName, stream] of this.streams) {
+      const record = this.registry.byTmuxName(tmuxName);
+      if (!record || record.status === "dead") this.dropStream(tmuxName);
+    }
+  }
+
   stop(): void {
+    try {
+      this.remote?.stop();
+    } catch {
+      /* ignore */
+    }
+    for (const stream of this.streams.values()) stream.close();
+    this.streams.clear();
     try {
       this.server?.stop(true);
     } catch {
@@ -247,6 +325,7 @@ export class LdmuxDaemon {
     const { dead, adopted } = this.registry.reconcile(live);
     const pruned = this.registry.prune({ maxDeadAgeMs: this.deadRecordTtlMs, maxRecords: this.maxRecords });
     if (dead.length || adopted.length || pruned.length) this.registry.save();
+    this.sweepStreams();
     return { dead, adopted, pruned };
   }
 
@@ -262,6 +341,14 @@ export class LdmuxDaemon {
     switch (method) {
       case "ping":
         return { pong: true, version: DAEMON_PROTOCOL_VERSION, tmuxSocket: this.cp.socket };
+
+      case "remote_info":
+        return {
+          hostname: this.remoteInfo?.hostname ?? "127.0.0.1",
+          port: this.remoteInfo?.port ?? 0,
+          path: "/ws",
+          token: this.token,
+        };
 
       case "list": {
         this.reconcile();
@@ -294,6 +381,7 @@ export class LdmuxDaemon {
       case "kill": {
         const record = this.require(String(params.id));
         this.cp.killSession(record.tmuxName);
+        this.dropStream(record.tmuxName);
         record.status = "dead";
         record.exitedAt = Date.now();
         record.updatedAt = Date.now();
@@ -407,6 +495,7 @@ export class LdmuxDaemon {
   private endSession(p: SessionEndParams): { ok: true; session?: SessionRecord } {
     const record = this.registry.byPiSessionId(p.piSessionId);
     if (!record) return { ok: true };
+    if (record.tmuxName) this.dropStream(record.tmuxName);
     record.status = "dead";
     record.exitedAt = Date.now();
     record.updatedAt = Date.now();

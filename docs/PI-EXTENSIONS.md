@@ -103,6 +103,7 @@ the pi process (e.g. `TMUX`, our `LDMUX_*`) *is* readable from extension code.
 - on `session_shutdown` → `session_end` **only when `reason === "quit"`**;
 - `/ldmux` command + `ldmux` tool (list / snapshot / send) backed by `@ldmux/protocol`'s typed `daemonCall`.
 - The daemon is a **separate detached process** (a pi extension cannot outlive a pi session); the extension only supervises its liveness.
+- **Root sessions only.** `session_start` returns early when `isChildAgentSession()` is true, so fork/subagent children are never registered as ldmux sessions. Detection is `PI_FORK_PROVIDER`/`PI_FORK_ALL_TOOLS` (set by pi-fork on its children); `LDMUX_REGISTER_CHILD=1` forces registration for debugging. This matters because a fork child shares the parent's workspace and is not a session the user opened.
 
 ## 9. Gotchas (from the ecosystem read)
 

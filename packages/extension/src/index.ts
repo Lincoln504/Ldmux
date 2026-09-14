@@ -14,7 +14,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { daemonCall } from "../../protocol/src/rpc.ts";
-import { ensureDaemon, ping, resolveConfig, type LdmuxConfig } from "./config.ts";
+import { ensureDaemon, isChildAgentSession, ping, resolveConfig, type LdmuxConfig } from "./config.ts";
 
 // Plain JSON Schema (TypeBox-compatible) — avoids a typebox dependency.
 const ldmuxToolParams = {
@@ -48,6 +48,8 @@ export default function ldmuxExtension(pi: ExtensionAPI): void {
   const cfg = resolveConfig();
 
   pi.on("session_start", async (_event, ctx) => {
+    // Only root pi sessions are ldmux sessions; fork/subagent children are not.
+    if (isChildAgentSession()) return;
     try {
       if (!(await ensureDaemon(cfg))) {
         if (ctx.hasUI) ctx.ui.notify("ldmux: daemon unavailable (is `bun` on PATH?)", "warning");

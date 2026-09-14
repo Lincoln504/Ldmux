@@ -87,6 +87,10 @@ export interface DaemonMethods {
   adopt: { params: { tmuxName: string; kind?: SessionKind; title?: string }; result: { session: SessionRecord } };
   register: { params: RegisterParams; result: { session: SessionRecord } };
   session_end: { params: SessionEndParams; result: { ok: true; session?: SessionRecord } };
+  remote_info: {
+    params: Record<string, never>;
+    result: { hostname: string; port: number; path: string; token: string };
+  };
 }
 
 export type DaemonMethod = keyof DaemonMethods;

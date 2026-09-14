@@ -7,9 +7,11 @@ landscape-only mobile app, reachable only over Tailscale. See
 
 ## Status
 
-Phase 1 (local core) is implemented and tested; Phase 2 (pi extension) is in
-progress. Keep building what is requested; do not expand scope unilaterally.
-`docs/PI-EXTENSIONS.md` is the contract for the extension.
+Phase 1 (local core) is implemented and tested; Phase 2 (pi extension) is done
+(verified in a real `pi` run); Phase 3 (remote transport) is in progress
+(loopback WebSocket + token auth — see `docs/REMOTE.md`). Keep building what is
+requested; do not expand scope unilaterally. `docs/PI-EXTENSIONS.md` is the
+contract for the extension.
 
 ## Rules
 

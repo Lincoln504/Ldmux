@@ -25,6 +25,19 @@ export function resolveConfig(): LdmuxConfig {
   };
 }
 
+/**
+ * True when this pi process is a child agent (fork/subagent) rather than a
+ * root session the user opened directly. Only root sessions are registered in
+ * ldmux: fork children share the parent's workspace and must not appear as
+ * separate ldmux sessions. pi-fork marks its children with PI_FORK_PROVIDER
+ * (and PI_FORK_ALL_TOOLS for the full-toolset profile); LDMUX_REGISTER_CHILD=1
+ * is the explicit escape hatch.
+ */
+export function isChildAgentSession(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.LDMUX_REGISTER_CHILD === "1") return false;
+  return Boolean(env.PI_FORK_PROVIDER || env.PI_FORK_ALL_TOOLS);
+}
+
 /** Absolute path to the daemon entrypoint (this package lives in the monorepo). */
 const DAEMON_MAIN = fileURLToPath(new URL("../../daemon/src/main.ts", import.meta.url));
 

@@ -9,7 +9,7 @@ import type { SessionRecord } from "../../protocol/src/rpc.ts";
 
 const tmuxSocket = `ldmux-daemontest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-daemon-"));
-const daemon = new LdmuxDaemon({ stateDir, tmuxSocket });
+const daemon = new LdmuxDaemon({ stateDir, tmuxSocket, remotePort: 0 });
 daemon.start();
 
 const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
@@ -90,7 +90,7 @@ test("socket is owner-only (0600)", () => {
 });
 
 test("a second daemon on the same state dir refuses to start", () => {
-  const second = new LdmuxDaemon({ stateDir, tmuxSocket });
+  const second = new LdmuxDaemon({ stateDir, tmuxSocket, enableRemote: false });
   expect(() => second.start()).toThrow("already running");
 });
 
