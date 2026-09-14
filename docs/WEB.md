@@ -47,6 +47,29 @@ meaningful. The token can also be entered in the app (stored in
 `localStorage`); passing it in the URL is a pairing convenience — the client
 strips it from the address bar and persists it.
 
+### Testing on a real phone (USB, no tailnet needed)
+
+When the phone is on the tailnet, use the URL above. When it is plugged in by
+USB instead, forward the daemon's loopback port to the phone with `adb reverse`
+— this exercises the exact same client over the same WebSocket, with no
+`tailscale serve` and no firewall changes:
+
+```bash
+adb reverse tcp:7629 tcp:7629          # phone's localhost:7629 -> this machine's 127.0.0.1:7629
+# ...start a daemon with LDMUX_REMOTE_PORT=7629, create a session...
+adb shell am start -a android.intent.action.VIEW -d "http://localhost:7629/?token=<token>"
+```
+
+Verified against a real device on 2026-09-13 (Motorola Edge 2024, Chrome): the
+PWA loads, the status shows **online** (the WebSocket connected), the drawer
+lists sessions with cwd-derived titles and unread dots, attaching streams live
+pane output, the `⤒` scrollback control is present (caps advertised
+`scrollback: true`), the extra-keys bar's buttons send input (a tapped `|`
+appeared in the pane), and tapping the terminal focuses it and raises the IME
+(`adb shell input text` then reached the pane). Note that `adb shell input
+keyevent`/`input text` only work once the terminal has been tapped — the tap is
+what focuses xterm.js's hidden textarea.
+
 ## Protocol use
 
 The client speaks exactly [`docs/REMOTE.md`](REMOTE.md):
