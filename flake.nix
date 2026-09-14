@@ -39,6 +39,22 @@
             echo "  tmux  $(tmux -V)"
           '';
         };
+
+        # The Android/KMP toolchain (JDK + Gradle). Kept separate from the
+        # default shell because it is only needed to build packages/mobile.
+        # `nix develop .#mobile`
+        mobile = pkgs.mkShell {
+          packages = toolchain pkgs ++ [ pkgs.jdk21 pkgs.gradle ];
+          JAVA_HOME = "${pkgs.jdk21}";
+          shellHook = ''
+            export ANDROID_HOME="$HOME/Android/Sdk"
+            export ANDROID_SDK_ROOT="$ANDROID_HOME"
+            echo "ldmux mobile devshell"
+            echo "  java   $(${pkgs.jdk21}/bin/javac -version 2>&1)"
+            echo "  gradle $(gradle --version 2>/dev/null | awk '/^Gradle/{print $2}')"
+            echo "  sdk    $ANDROID_HOME"
+          '';
+        };
       });
 
       # `nix fmt`

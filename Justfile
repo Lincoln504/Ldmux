@@ -55,3 +55,11 @@ clean-tmux:
       rm -f "$dir/$sock"
     done
     echo "reaped stray ldmux tmux servers"
+
+# Build the native Android app (KMP + Compose). Needs the `mobile` devShell.
+android:
+    nix develop .#mobile --command gradle -p packages/mobile :composeApp:assembleDebug
+
+# Build and install the debug APK on the attached phone.
+android-install: android
+    adb install -r packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
