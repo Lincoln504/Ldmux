@@ -69,28 +69,35 @@ devShell).
 ## Status
 
 **Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**53 tests**, `bun test`; `bun run typecheck` clean):
+tested (**65 tests**, `bun test`; `bun run typecheck` clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by
   every consumer).
-- `packages/daemon` — tmux control-mode parser + live client; control plane; JSON
-  session registry with reconciliation + pruning; Unix-socket JSON daemon
-  (pid-lockfile single-instance, owner-only 0600 socket); **live `PaneStream`
-  fan-out**; **loopback WebSocket remote transport with bearer-token auth**
-  (`docs/REMOTE.md`); CLI
-  (`ping`/`list`/`new`/`run`/`send`/`key`/`capture`/`snapshot`/`kill`/`adopt`/`remote`).
+- `packages/daemon` — tmux control-mode parser + live client; control plane; a
+  stateful **output sanitizer** (drops OSC 52/DCS/device-status before a client
+  sees them); JSON session registry with reconciliation, pruning, and staleness
+  expiry for RPC-only pi sessions; Unix-socket JSON daemon (pid-lockfile
+  single-instance, owner-only 0600 socket); **live `PaneStream` fan-out**;
+  **loopback WebSocket remote transport with bearer-token auth**
+  (`docs/REMOTE.md`); desktop mirror + tailnet pairing; CLI
+  (`ping`/`list`/`new`/`run`/`send`/`key`/`capture`/`snapshot`/`kill`/`adopt`/`mirror`/`remote`/`pair`/`expose`).
 - `packages/extension` — pi extension: ensures the daemon is running, registers the
   pi session (reason-branched lifecycle), and exposes a `/ldmux` command + `ldmux`
   tool. Verified loading under pi's jiti loader and end-to-end from `session_start`
   in a real `pi` run. Only **root** pi sessions register; fork/subagent children
   are skipped.
 - `packages/web` — buildless xterm.js client served by the daemon at `/`
-  (canonical grid scaled to fit, session pager, swipe, mobile key bar,
-  reconnect/resync). See [`docs/WEB.md`](docs/WEB.md).
+  (canonical grid scaled to fit, ADR-0004 scroll state machine + jump-to-bottom,
+  non-destructive snapshot repaint, session drawer + edge-strip swipe, mobile key
+  bar, installable PWA, reconnect/resync). See [`docs/WEB.md`](docs/WEB.md).
 - pairing/desktop helpers — `ldmux pair` / `ldmux expose` (tailscale URL +
   `ldmux://` deep link) and `ldmux mirror` (read-only i3 + alacritty view).
 
 See [`docs/PI-EXTENSIONS.md`](docs/PI-EXTENSIONS.md) for the pi extension contract.
 
-Not yet: Android WebView shell, desktop mirror.
+Not yet: native Android WebView shell, server-side scrollback paging, `%pause`/
+`%continue` handling, `capture-pane` diff-polling fallback.
+
+Design divergences from dooboxes/gmux are recorded in
+[`docs/adr/0006-divergences.md`](docs/adr/0006-divergences.md).

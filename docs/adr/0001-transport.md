@@ -54,9 +54,10 @@ Runtime shape:
   `SNAPSHOT`, then live stream.
 - Robust parser: byte→line on `\n` (never readline); octal→**bytes**; **per-pane
   incremental UTF-8 decoder**; `%begin/%end/%error <seq>` correlation; tolerate
-  unknown `%…` lines; stateful sanitizer on by default.
-- Fallback on `%exit`/stall/EOF: adaptive `capture-pane` diff polling until the
-  control client restarts.
+  unknown `%…` lines; stateful sanitizer on by default (**implemented**: `packages/daemon/src/sanitize.ts`, one instance per pane, drops OSC 52, DCS/SOS/PM/APC, and device-status queries).
+- Fallback on `%exit`/stall/EOF: the control client is **reconnected with bounded
+  backoff** and subscribers resync from a snapshot. Adaptive `capture-pane` diff
+  polling is **not implemented** (documented here as the original intent only).
 - Pinned `window-size manual` + canonical geometry (ADR-0002).
 
 ## Consequences

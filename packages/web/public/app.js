@@ -10,7 +10,7 @@
 const OUTPUT_FRAME = 0x10;
 const HEADER_SIZE = 8;
 const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
-const SCROLLBACK = 5000;
+const SCROLLBACK = 1000; // mobile memory bound (dooboxes MOBILE_TERMINAL_PERFORMANCE §15.1)
 const PING_MS = 20000;
 
 const $ = (id) => document.getElementById(id);
@@ -21,6 +21,7 @@ const els = {
   wrap: $("term-wrap"),
   term: $("term"),
   empty: $("empty"),
+  jump: $("jump"),
   drawer: $("drawer"),
   sessions: $("sessions"),
   keybar: $("keybar"),
@@ -35,6 +36,10 @@ let currentId = null;
 let pingTimer = null;
 let reconnectDelay = 500;
 let ctrlSticky = false;
+// ADR-0004 scroll state: only explicit user intent changes the mode, and
+// streaming output never moves the viewport.
+let mode = "following";
+let attachedOnce = false;
 
 // ── token ────────────────────────────────────────────────────────────────
 function readToken() {
@@ -57,12 +62,37 @@ function ensureTerm() {
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace',
     fontSize: 14,
     scrollback: SCROLLBACK,
-    cursorBlink: true,
+    cursorBlink: false,
     theme: { background: "#000000", foreground: "#c9d1d9" },
   });
   term.open(els.term);
   term.onData((data) => send({ type: "input", data }));
+  // Scroll state machine: an upward move is user intent -> anchored.
+  term.onScroll(() => updateScrollMode());
   return term;
+}
+
+function atBottom() {
+  const buf = term && term.buffer && term.buffer.active;
+  return !buf || buf.viewportY >= buf.baseY;
+}
+
+function updateScrollMode() {
+  const next = atBottom() ? "following" : "anchored";
+  if (next === mode) {
+    els.jump.classList.toggle("hidden", mode === "following");
+    return;
+  }
+  mode = next;
+  els.jump.classList.toggle("hidden", mode === "following");
+  send({ type: "follow", mode });
+}
+
+function jumpToBottom() {
+  mode = "following";
+  els.jump.classList.add("hidden");
+  if (term) term.scrollToBottom();
+  send({ type: "follow", mode });
 }
 
 /** Scale the canonical grid to fit the viewport (never reflow the server). */
@@ -178,9 +208,7 @@ function onControl(msg) {
       els.empty.style.display = "none";
       break;
     case "snapshot":
-      ensureTerm();
-      term.reset();
-      term.write(msg.screen || "");
+      applySnapshot(msg);
       break;
     case "error":
       if (msg.code === "resync" || msg.code === "too_far_behind") {
@@ -197,6 +225,45 @@ function onControl(msg) {
       break;
     default:
       break;
+  }
+}
+
+// ── snapshot application (ADR-0004) ──────────────────────────────────────
+/**
+ * Repaint from a server snapshot without destroying the user's scrollback or
+ * yanking an anchored viewport. `term.reset()` is reserved for the very first
+ * attach of a session.
+ */
+function applySnapshot(msg) {
+  ensureTerm();
+  const buf = term.buffer && term.buffer.active;
+  const anchorFromBottom = mode === "anchored" && buf ? buf.baseY - buf.viewportY : 0;
+
+  if (!attachedOnce) {
+    attachedOnce = true;
+    term.reset();
+  } else {
+    // Clear the visible screen and home the cursor: the previous screen scrolls
+    // into history instead of being erased.
+    term.write("\x1b[2J\x1b[H");
+  }
+  term.write(msg.screen || "");
+  // capture-pane cannot encode cursor position; restore it from the snapshot.
+  const row = Number(msg.cursorY ?? 0) + 1;
+  const col = Number(msg.cursorX ?? 0) + 1;
+  term.write(`\x1b[${row};${col}H`);
+
+  if (mode === "anchored") {
+    const b = term.buffer && term.buffer.active;
+    if (b) {
+      const target = b.baseY - anchorFromBottom;
+      if (target < 0) {
+        // The anchored line is gone: stand down to following (never guess).
+        jumpToBottom();
+      } else {
+        term.scrollToLine(target);
+      }
+    }
   }
 }
 
@@ -225,6 +292,9 @@ function escapeHtml(s) {
 
 function attach(sessionId) {
   currentId = sessionId;
+  attachedOnce = false;
+  mode = "following";
+  els.jump.classList.add("hidden");
   const s = sessions.find((x) => x.id === sessionId);
   els.title.textContent = s ? `${s.kind} · ${s.title}` : "ldmux";
   send({ type: "attach", sessionId });
@@ -282,18 +352,24 @@ addEventListener("keydown", (e) => {
   if (code >= "A" && code <= "Z") send({ type: "key", keys: [`C-${code.toLowerCase()}`] });
 }, true);
 
-// ── swipe between sessions ───────────────────────────────────────────────
-let touch = null;
-els.screen.addEventListener("touchstart", (e) => {
-  if (e.touches.length === 1) touch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-}, { passive: true });
-els.screen.addEventListener("touchend", (e) => {
-  if (!touch) return;
-  const dx = e.changedTouches[0].clientX - touch.x;
-  const dy = e.changedTouches[0].clientY - touch.y;
-  touch = null;
-  if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) cycle(dx < 0 ? 1 : -1);
-}, { passive: true });
+// ── swipe between sessions (edge strips only) ────────────────────────────
+function edgeSwipe(el) {
+  let start = null;
+  el.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) start = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  }, { passive: true });
+  el.addEventListener("touchend", (e) => {
+    if (!start) return;
+    const dx = e.changedTouches[0].clientX - start.x;
+    const dy = e.changedTouches[0].clientY - start.y;
+    start = null;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) cycle(dx < 0 ? 1 : -1);
+  }, { passive: true });
+}
+edgeSwipe($("swipe-left"));
+edgeSwipe($("swipe-right"));
+
+els.jump.addEventListener("click", jumpToBottom);
 
 // ── wiring ───────────────────────────────────────────────────────────────
 $("menu").addEventListener("click", () => {
@@ -313,3 +389,12 @@ buildKeybar();
 ensureTerm();
 els.empty.style.display = "";
 connect();
+
+// Installable app shell (offline cache; /ws is never cached by the worker).
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      /* offline shell is a bonus, never a requirement */
+    });
+  });
+}

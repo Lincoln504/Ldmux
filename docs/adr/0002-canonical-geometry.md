@@ -1,6 +1,7 @@
 # ADR-0002: Canonical tmux geometry; clients never resize the pane
 
-**Status:** Accepted (probe pending, Phase 1)
+**Status:** Accepted (Phase 1 probe done: `daemon.test.ts` asserts a pinned
+`120x40` grid under `window-size manual`)
 
 ## Context
 

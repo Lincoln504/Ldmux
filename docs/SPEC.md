@@ -3,7 +3,7 @@
 **Version:** 0.3 (design; transport decision finalized)
 **Date:** 2026-09-13
 **Author:** Lincoln Deen (with the pi coding agent)
-**Status:** Investigation complete; specification for review. No implementation yet.
+**Status:** Phases 1–3 implemented (see README Status). This document remains the authoritative design; where it describes a *target* API or behaviour that is not built, that is called out inline, and `AGENTS.md` plus the tests are the statement of what exists.
 
 > **Revision note (v0.2):** An adversarial architecture review found three blocker
 > issues and several high issues in v0.1. This revision fixes them: canonical tmux
@@ -288,7 +288,7 @@ mirror) reflows. Therefore:
 **Server option profile** (`ldmux-server.conf`, applied on server start):
 
 ```
-set -g history-limit 50000
+set -g history-limit 10000                # ~40 MB/pane; 50k costs ~200 MB
 set -g default-terminal tmux-256color   # fall back to screen-256color if unsupported
 set -g mouse on
 set -g status off                        # consistent for phone stream and mirror
@@ -296,8 +296,9 @@ set -g aggressive-resize off
 set -g window-size manual
 set -g set-clipboard on
 set -g focus-events on
-set -g allow-passthrough on              # for images/hyperlinks
 set -g remain-on-exit on
+# NOT applied: `allow-passthrough on`. Arbitrary escape pass-through is exactly
+# what the ADR-0001 sanitizer bounds; re-add only with an explicit policy.
 ```
 
 **Transport (ADR-0001 — final).** v1 uses **tmux control mode `-C` over pipes**
@@ -309,16 +310,20 @@ connect/reconnect/scrollback and as an automatic fallback.
   1.3.9). Parse `%output` / `%extended-output` notifications. Do **not** use
   `-CC` — it requires a tty (`tcgetattr failed` over a pipe); `-C` needs no PTY.
 - **Backpressure:** `refresh-client -f pause-after=2` in the control client;
-  handle `%pause`/`%continue` and the
-  `%extended-output <pane> <age_ms> : <data>` form. (Measured: ~1.5 MB/s burst,
-  no stalls, ~0 tmux CPU when idle.)
+  `%extended-output <pane> <age_ms> : <data>` is parsed as the paused form.
+  **Implemented reality:** `%pause`/`%continue` are *not* acted on; the
+  backpressure mechanism that exists is closing a WebSocket client whose
+  `bufferedAmount` exceeds 4 MiB (`too_far_behind` → reconnect → snapshot).
+  Treat explicit pause/resume as future work, not a current guarantee.
+  (Measured: ~1.5 MB/s burst, no stalls, ~0 tmux CPU when idle.)
 - **Input:** `send-keys` over the control connection (no process per keystroke).
-- **Snapshots (reconnect):** `capture-pane -p -e` + `display-message -p` state
-  fields (see §6.2).
-- **Scrollback paging:** `capture-pane -S/-E` on demand.
-- **Fallback:** if the control client dies/stalls (`%exit`, EOF), fall back to
-  adaptive `capture-pane` diff polling until it restarts; tmux owns state, so
-  correctness never depends on the stream.
+- **Snapshots (reconnect):** `capture-pane -p -e` (plus `-a` on the alternate
+  screen) + `display-message -p` state fields (see §6.2).
+- **Scrollback paging:** `capture-pane -S/-E` on demand — **bounded to 5,000
+  lines** and not exposed as a paging protocol in v1.
+- **Fallback:** if the control client dies/stalls (`%exit`, EOF), it is
+  **reconnected with bounded backoff**; adaptive `capture-pane` diff polling is
+  **not implemented** (snapshot-on-attach is the correctness backstop).
 
 A `PaneStream` interface abstracts this; `pipe-pane` (raw bytes) and a
 server-side VT emulator (perfect snapshots) slot in behind it later.
@@ -362,6 +367,15 @@ records for vanished sessions; adopt survivors. Dead-but-retained sessions keep
 metadata + scrollback reference for replay.
 
 ### 5.4 API surface (v1)
+
+> **Aspirational — not implemented.** The shipped surface is deliberately
+> smaller: newline-delimited JSON RPC over a Unix socket
+> (`packages/protocol/src/rpc.ts`: ping/list/new/send/capture/snapshot/kill/
+> adopt/register/session_end/remote_info), one WebSocket per session at `WS /ws`
+> (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`), and the static web
+> client at `/`. No REST layer, no `/api/dirs`, no session creation from a
+> client, and no scrollback paging in v1. The table records original intent, not
+> the contract.
 
 Local: Unix socket `$XDG_RUNTIME_DIR/ldmux/ldmuxd.sock`.
 Remote: `wss://debian.tail496756.ts.net/…` + `https://…/api/…` (via
@@ -523,7 +537,7 @@ server-facing integer line id has no stable meaning across snapshots/reflow/ED3)
   the anchor from the snapshot header; **if the anchored line is gone, stand down
   to `following` — never guess.**
 - Persistent **"↓ jump to bottom"** affordance while anchored (dooboxes requirement).
-- Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research)
+- Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; `packages/web/public/app.js`)
   with a configurable max; server retains up to `history-limit` (50,000) and
   `/scrollback` serves older pages on demand.
 

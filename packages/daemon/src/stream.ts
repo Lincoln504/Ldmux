@@ -10,6 +10,7 @@
  */
 
 import type { PaneState } from "../../protocol/src/rpc.ts";
+import { createSanitizer, sanitizeOnce } from "./sanitize.ts";
 import { TmuxControlClient } from "./tmux/control-client.ts";
 import type { TmuxControlPlane } from "./tmux/control-plane.ts";
 
@@ -31,6 +32,7 @@ export class PaneStream {
   private client: TmuxControlClient | null = null;
   private connecting: Promise<void> | null = null;
   private readonly subs = new Set<StreamSubscriber>();
+  private readonly sanitizer = createSanitizer();
   private lingerTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private epoch = 0;
@@ -70,9 +72,12 @@ export class PaneStream {
 
   /** A fresh full-screen snapshot plus terminal state (client repaints from this). */
   snapshot(): StreamSnapshot {
+    const state = this.cp.snapshotState(this.sessionName);
+    // Full-screen TUIs live on the alternate screen; `-a` captures that one.
+    const raw = this.cp.capturePane(this.sessionName, { escapes: true, alternate: state.alternateOn });
     return {
-      screen: this.cp.capturePane(this.sessionName, { escapes: true }),
-      state: this.cp.snapshotState(this.sessionName),
+      screen: sanitizeOnce(raw),
+      state,
       epoch: ++this.epoch,
     };
   }
@@ -160,7 +165,10 @@ export class PaneStream {
 
   private fanout(text: string): void {
     if (this.closed) return;
-    for (const sub of this.subs) this.safe(() => sub.onOutput(text));
+    // Filter clipboard/DCS/device-status before any client sees it (ADR-0001).
+    const clean = this.sanitizer.push(text);
+    if (!clean) return;
+    for (const sub of this.subs) this.safe(() => sub.onOutput(clean));
   }
 
   private safe(fn: () => void): void {

@@ -7,6 +7,14 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
     />
     <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0b0e14" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ldmux" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
     <title>ldmux</title>
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/app.css" />
@@ -23,6 +31,9 @@
       <main id="screen">
         <div id="term-wrap"><div id="term"></div></div>
         <div id="empty">No session attached — open ☰ and pick one.</div>
+        <button id="jump" class="hidden" aria-label="Jump to bottom">↓</button>
+        <div id="swipe-left" class="edge" aria-hidden="true"></div>
+        <div id="swipe-right" class="edge" aria-hidden="true"></div>
       </main>
 
       <div id="keybar" class="hidden"></div>

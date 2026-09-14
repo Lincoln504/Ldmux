@@ -10,9 +10,10 @@ landscape-only mobile app, reachable only over Tailscale. See
 Phase 1 (local core) is implemented and tested; Phase 2 (pi extension) is done
 (verified in a real `pi` run); Phase 3 (remote transport) is implemented
 (loopback WebSocket + token auth — `docs/REMOTE.md`) along with the buildless web
-client served at `/` (`docs/WEB.md`). Keep building what is requested; do not
-expand scope unilaterally. `docs/PI-EXTENSIONS.md` is the contract for the
-extension.
+client served at `/` (installable PWA — `docs/WEB.md`), the desktop mirror, and
+tailnet pairing. Deliberate divergences from dooboxes/gmux are recorded in
+`docs/adr/0006-divergences.md`. Keep building what is requested; do not expand
+scope unilaterally. `docs/PI-EXTENSIONS.md` is the contract for the extension.
 
 ## Rules
 

@@ -98,6 +98,24 @@ export class Registry {
   }
 
   /**
+   * Expire RPC-only records (no tmuxName) that have not been touched recently.
+   * Their liveness is the pi process; a crash never sends `session_end`.
+   */
+  expireRpcOnly(ttlMs: number, now = Date.now()): string[] {
+    const expired: string[] = [];
+    for (const record of this.sessions.values()) {
+      if (record.tmuxName || record.status !== "running") continue;
+      if (now - record.updatedAt > ttlMs) {
+        record.status = "dead";
+        record.exitedAt = record.exitedAt ?? now;
+        record.updatedAt = now;
+        expired.push(record.id);
+      }
+    }
+    return expired;
+  }
+
+  /**
    * Reconcile terminal-backed records against the live tmux session set.
    * Records with no tmuxName (RPC-only pi sessions) are left untouched.
    *

@@ -35,6 +35,17 @@ export interface NewSessionOptions {
 export interface CaptureOptions {
   escapes?: boolean;
   history?: boolean;
+  /** Capture the alternate screen (`-a`) — required for full-screen TUIs. */
+  alternate?: boolean;
+}
+
+/** Upper bound for a history capture: unbounded `-S -` blocks the event loop. */
+export const HISTORY_CAPTURE_LINES = 5000;
+
+/** tmux session names we accept (adopt/register): conservative and argv-safe. */
+const SESSION_NAME_RE = /^[A-Za-z0-9_-]{1,128}$/;
+export function isValidSessionName(name: string): boolean {
+  return SESSION_NAME_RE.test(name);
 }
 
 export class TmuxControlPlane {
@@ -148,7 +159,10 @@ export class TmuxControlPlane {
   capturePane(target: string, opts: CaptureOptions = {}): string {
     const args = ["capture-pane", "-p", "-t", target];
     if (opts.escapes !== false) args.push("-e");
-    if (opts.history) args.push("-S", "-", "-E", "-");
+    // `-a` captures the alternate screen, which is where full-screen TUIs live.
+    if (opts.alternate) args.push("-a");
+    // History is bounded: capturing 50k lines blocks the event loop (see docs/WEB.md).
+    if (opts.history) args.push("-S", `-${HISTORY_CAPTURE_LINES}`, "-E", "-");
     const { code, out, err } = this.run(args);
     if (code !== 0) throw new Error(`tmux capture-pane failed: ${err.trim() || code}`);
     return out;
@@ -163,13 +177,20 @@ export class TmuxControlPlane {
   snapshotState(target: string) {
     const fmt =
       "#{cursor_x},#{cursor_y},#{alternate_on},#{pane_in_mode},#{history_size}," +
-      "#{pane_width},#{pane_height},#{pane_dead}";
-    const [cursorX, cursorY, alt, mode, history, width, height, dead] = this.displayMessage(target, fmt).split(",");
+      "#{pane_width},#{pane_height},#{pane_dead}," +
+      // mouse_any_flag and keypad_cursor_flag are old; bracket_paste_flag is tmux
+      // 3.8+ and comes back empty on older builds (treated as false).
+      "#{mouse_any_flag},#{keypad_cursor_flag},#{bracket_paste_flag}";
+    const [cursorX, cursorY, alt, mode, history, width, height, dead, mouse, appCursor, bracketedPaste] =
+      this.displayMessage(target, fmt).split(",");
     return {
       cursorX: Number(cursorX),
       cursorY: Number(cursorY),
       alternateOn: alt === "1",
       paneInMode: mode === "1",
+      mouse: mouse === "1",
+      appCursor: appCursor === "1",
+      bracketedPaste: bracketedPaste === "1",
       historySize: Number(history),
       cols: Number(width),
       rows: Number(height),

@@ -44,15 +44,23 @@ export interface RemoteServerOptions {
 interface ConnData {
   authed: boolean;
   disposed: boolean;
+  /** Incremented per attach; a superseded attach must not commit. */
+  attachGen: number;
   sessionId?: string;
   stream?: PaneStream;
   unsubscribe?: () => void;
   live: boolean;
   pending: string[];
+  pendingBytes: number;
   epoch: number;
 }
 
 const DEFAULT_MAX_BUFFERED = 4 * 1024 * 1024;
+/** Per-type caps adapted from dooboxes' codec design (TERMINAL_CODEC_DESIGN.md §5). */
+const MAX_INPUT_BYTES = 16 * 1024;
+const MAX_KEYS = 32;
+/** Output queued between subscribe and snapshot is bounded before we resync. */
+const MAX_PENDING_BYTES = 1024 * 1024;
 
 export class RemoteServer {
   private server: any;
@@ -71,6 +79,8 @@ export class RemoteServer {
       port: opts.port,
       fetch: (req: Request, server: any) => this.handleFetch(req, server),
       websocket: {
+        // Bound a single inbound frame (Bun's default is far larger).
+        maxPayloadLength: MAX_INPUT_BYTES * 4,
         open: () => {
           /* wait for attach */
         },
@@ -109,7 +119,15 @@ export class RemoteServer {
       ? auth.slice("Bearer ".length).trim()
       : (url.searchParams.get("token") ?? "");
     if (!tokenMatches(this.opts.token, provided)) return new Response("unauthorized\n", { status: 401 });
-    const data: ConnData = { authed: true, disposed: false, live: false, pending: [], epoch: 0 };
+    const data: ConnData = {
+      authed: true,
+      disposed: false,
+      attachGen: 0,
+      live: false,
+      pending: [],
+      pendingBytes: 0,
+      epoch: 0,
+    };
     if (server.upgrade(req, { data })) return undefined;
     return new Response("upgrade failed\n", { status: 400 });
   }
@@ -154,12 +172,23 @@ export class RemoteServer {
         case "attach":
           await this.attach(ws, data, String(msg.sessionId ?? ""));
           return;
-        case "input":
-          if (data.stream) await data.stream.inputText(String(msg.data ?? ""));
+        case "input": {
+          if (data.stream) {
+            const text = String(msg.data ?? "");
+            if (text.length > MAX_INPUT_BYTES) {
+              this.sendError(ws, "input_too_large", `input exceeds ${MAX_INPUT_BYTES} bytes`);
+              return;
+            }
+            await data.stream.inputText(text);
+          }
           return;
+        }
         case "key":
           if (data.stream) {
-            const keys = (Array.isArray(msg.keys) ? msg.keys : []).filter((k: unknown): k is string => typeof k === "string");
+            const keys = (Array.isArray(msg.keys) ? msg.keys : [])
+              // strings only, and never a leading dash: tmux would read it as a flag.
+              .filter((k: unknown): k is string => typeof k === "string" && k.length > 0 && !k.startsWith("-"))
+              .slice(0, MAX_KEYS);
             await data.stream.sendKey(keys);
           }
           return;
@@ -183,10 +212,12 @@ export class RemoteServer {
       this.sendError(ws, "session_dead", `session is ${record.status}: ${sessionId}`);
       return;
     }
+    const gen = ++data.attachGen;
     this.cleanupSubscription(data);
     data.sessionId = sessionId;
     data.live = false;
     data.pending = [];
+    data.pendingBytes = 0;
     const stream = this.opts.acquireStream(record);
     data.stream = stream;
 
@@ -195,19 +226,33 @@ export class RemoteServer {
       unsubscribe = await stream.subscribe({
         onOutput: (text) => {
           if (data.live) this.sendOutput(ws, text);
-          else data.pending.push(text);
+          else {
+            data.pendingBytes += text.length;
+            if (data.pendingBytes > MAX_PENDING_BYTES) {
+              // Fell too far behind while snapshotting: resync instead of growing.
+              data.pending = [];
+              data.pendingBytes = 0;
+              this.sendError(ws, "resync", "output backlog exceeded while attaching");
+            } else {
+              data.pending.push(text);
+            }
+          }
         },
-        onReset: (reason) => this.sendError(ws, "resync", reason),
+        onReset: (reason) => {
+          if (data.attachGen === gen) this.sendError(ws, "resync", reason);
+        },
       });
     } catch (err) {
-      data.stream = undefined;
       this.opts.releaseStream?.(record);
-      this.sendError(ws, "attach_failed", (err as Error).message);
+      if (data.attachGen === gen && !data.disposed) {
+        data.stream = undefined;
+        this.sendError(ws, "attach_failed", (err as Error).message);
+      }
       return;
     }
-    // The client may have disconnected while we awaited subscribe(): commit
-    // nothing, or we would resurrect a subscription on a dead socket.
-    if (data.disposed) {
+    // A second attach (or a disconnect) may have superseded us while we awaited:
+    // commit nothing, or we would leak this subscription and mix two panes.
+    if (data.disposed || data.attachGen !== gen) {
       unsubscribe();
       this.opts.releaseStream?.(record);
       return;
@@ -223,7 +268,7 @@ export class RemoteServer {
       cols: snap.state.cols,
       rows: snap.state.rows,
       snapshotEpoch: snap.epoch,
-      capabilities: { controlMode: true, scrollback: true },
+      capabilities: { controlMode: true, scrollback: false },
     };
     const snapshot: Snapshot = {
       type: "snapshot",
@@ -235,9 +280,9 @@ export class RemoteServer {
       cursorY: snap.state.cursorY,
       alternateOn: snap.state.alternateOn,
       paneInMode: snap.state.paneInMode,
-      bracketedPaste: false,
-      mouse: false,
-      appCursor: false,
+      bracketedPaste: snap.state.bracketedPaste,
+      mouse: snap.state.mouse,
+      appCursor: snap.state.appCursor,
       historySize: snap.state.historySize,
       snapshotEpoch: snap.epoch,
     };
@@ -247,6 +292,7 @@ export class RemoteServer {
     data.live = true;
     const pending = data.pending;
     data.pending = [];
+    data.pendingBytes = 0;
     for (const text of pending) this.sendOutput(ws, text);
   }
 
@@ -311,6 +357,7 @@ const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".ico": "image/x-icon",
   ".txt": "text/plain; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
 function contentType(path: string): string {

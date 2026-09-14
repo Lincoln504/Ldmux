@@ -46,22 +46,34 @@ async function reportStatus(cfg: LdmuxConfig): Promise<string> {
 
 export default function ldmuxExtension(pi: ExtensionAPI): void {
   const cfg = resolveConfig();
+  // The daemon expires RPC-only records that go quiet, so the extension
+  // re-registers as a heartbeat; cleared on every transition and on quit.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  const stopHeartbeat = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+  };
 
   pi.on("session_start", async (_event, ctx) => {
     // Only root pi sessions are ldmux sessions; fork/subagent children are not.
     if (isChildAgentSession()) return;
-    try {
-      if (!(await ensureDaemon(cfg))) {
-        if (ctx.hasUI) ctx.ui.notify("ldmux: daemon unavailable (is `bun` on PATH?)", "warning");
-        return;
-      }
-      await daemonCall(cfg.socketPath, "register", {
+    stopHeartbeat();
+    const register = () =>
+      daemonCall(cfg.socketPath, "register", {
         piSessionId: ctx.sessionManager.getSessionId(),
         cwd: ctx.cwd,
         kind: "pi",
         tmuxName: process.env.LDMUX_TMUX_NAME || undefined,
         title: ctx.sessionManager.getName?.() ?? undefined,
       });
+    try {
+      if (!(await ensureDaemon(cfg))) {
+        if (ctx.hasUI) ctx.ui.notify("ldmux: daemon unavailable (is `bun` on PATH?)", "warning");
+        return;
+      }
+      await register();
+      heartbeat = setInterval(() => void register().catch(() => {}), 5 * 60 * 1000);
+      heartbeat.unref?.();
     } catch (err) {
       const message = `ldmux: ${(err as Error).message}`;
       if (ctx.hasUI) ctx.ui.notify(message, "warning");
@@ -72,6 +84,7 @@ export default function ldmuxExtension(pi: ExtensionAPI): void {
   // Only "quit" ends the session; other reasons are session transitions that
   // survive in the same pi process (the next session_start re-registers).
   pi.on("session_shutdown", async (event, ctx) => {
+    stopHeartbeat();
     if (event.reason !== "quit") return;
     try {
       await daemonCall(cfg.socketPath, "session_end", { piSessionId: ctx.sessionManager.getSessionId() });

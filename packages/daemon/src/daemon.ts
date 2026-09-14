@@ -11,7 +11,7 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TmuxControlPlane } from "./tmux/control-plane.ts";
+import { isValidSessionName, TmuxControlPlane } from "./tmux/control-plane.ts";
 import { Registry } from "./registry.ts";
 import { PaneStream } from "./stream.ts";
 import { RemoteServer } from "./remote.ts";
@@ -37,6 +37,8 @@ export interface LdmuxDaemonOptions {
   deadRecordTtlMs?: number;
   /** Hard cap on registry size before oldest records are pruned (default 500). */
   maxRecords?: number;
+  /** Staleness TTL for RPC-only pi sessions whose process vanished (default 15 min). */
+  rpcOnlyTtlMs?: number;
   /** Remote WebSocket bind host (default 127.0.0.1 — never a public interface). */
   remoteHost?: string;
   /** Remote WebSocket port; 0 picks an ephemeral port (tests). */
@@ -80,6 +82,7 @@ export class LdmuxDaemon {
   private readonly historyLimit: number;
   private readonly deadRecordTtlMs: number;
   private readonly maxRecords: number;
+  private readonly rpcOnlyTtlMs: number;
   private ownsLock = false;
   private server: { stop(closeActive?: boolean): void } | undefined;
   private readonly conns = new Map<unknown, Conn>();
@@ -96,9 +99,12 @@ export class LdmuxDaemon {
     this.cp = new TmuxControlPlane(opts.tmuxSocket ?? "ldmux");
     this.registry = new Registry(join(this.stateDir, "registry.json"));
     this.canonical = opts.canonical ?? { cols: 120, rows: 40 };
-    this.historyLimit = opts.historyLimit ?? 50000;
+    // 50k lines costs ~200 MB/pane (dooboxes' measurement); 10k is ~40 MB.
+    this.historyLimit = opts.historyLimit ?? 10000;
     this.deadRecordTtlMs = opts.deadRecordTtlMs ?? 24 * 60 * 60 * 1000;
     this.maxRecords = opts.maxRecords ?? 500;
+    // The extension re-registers every 5 min; 3 missed beats means it is gone.
+    this.rpcOnlyTtlMs = opts.rpcOnlyTtlMs ?? 15 * 60 * 1000;
   }
 
   /**
@@ -348,11 +354,14 @@ export class LdmuxDaemon {
     const liveSessions = this.cp.listSessions();
     const live = liveSessions ? new Set(liveSessions.map((s) => s.name)) : null;
     const { dead, adopted } = this.registry.reconcile(live);
+    // A pi that died without a clean shutdown never sends session_end; expire
+    // its RPC-only record rather than showing a phantom session forever.
+    const stale = this.registry.expireRpcOnly(this.rpcOnlyTtlMs);
     const pruned = this.registry.prune({ maxDeadAgeMs: this.deadRecordTtlMs, maxRecords: this.maxRecords });
-    if (dead.length || adopted.length || pruned.length) this.registry.save();
+    if (dead.length || adopted.length || stale.length || pruned.length) this.registry.save();
     // Only sweep on a *known* live set, and never from a read-only listing.
     if (opts.sweep !== false && live) this.sweepStreams();
-    return { dead, adopted, pruned };
+    return { dead: [...dead, ...stale], adopted, pruned };
   }
 
   private require(id: string): SessionRecord {
@@ -465,6 +474,7 @@ export class LdmuxDaemon {
 
   private adopt(params: Record<string, unknown>): SessionRecord {
     const tmuxName = String(params.tmuxName);
+    if (!isValidSessionName(tmuxName)) throw new Error(`invalid tmux session name: ${tmuxName}`);
     if (!this.cp.hasSession(tmuxName)) throw new Error(`no such tmux session: ${tmuxName}`);
     const existing = this.registry.byTmuxName(tmuxName);
     if (existing) return existing;
@@ -490,6 +500,7 @@ export class LdmuxDaemon {
   private register(p: RegisterParams): SessionRecord {
     const now = Date.now();
     const tmuxName = p.tmuxName ?? "";
+    if (tmuxName && !isValidSessionName(tmuxName)) throw new Error(`invalid tmux session name: ${tmuxName}`);
     const existing = this.registry.byPiSessionId(p.piSessionId) ?? this.registry.byTmuxName(tmuxName);
     if (existing) {
       existing.piSessionId = p.piSessionId;

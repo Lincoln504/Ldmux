@@ -131,6 +131,15 @@ test("serves the bundled web client, its assets, and the session list", async ()
   const missing = await fetch(`${base}/nope.js`);
   expect(missing.status).toBe(404);
 
+  const manifest = await fetch(`${base}/manifest.webmanifest`);
+  expect(manifest.status).toBe(200);
+  expect(manifest.headers.get("content-type")).toContain("manifest+json");
+  expect(((await manifest.json()) as { orientation: string }).orientation).toBe("landscape");
+
+  for (const asset of ["/sw.js", "/icon.svg", "/app.css"]) {
+    expect((await fetch(`${base}${asset}`)).status).toBe(200);
+  }
+
   const { ws, text } = await connect(info, info.token);
   ws.send(JSON.stringify({ type: "list" }));
   expect(await waitFor(() => text.some((m) => m.type === "sessions"))).toBe(true);
@@ -148,5 +157,29 @@ test("attaching to a dead session is rejected with session_dead", async () => {
   const { ws, text } = await connect(info, info.token);
   ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
   expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "session_dead"))).toBe(true);
+  ws.close();
+});
+
+test("a superseded attach does not leak a subscription or mix panes", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const a = (await call<{ session: { id: string } }>(daemon.socketPath, "new", { kind: "shell", cwd: tmpdir() }))
+    .session;
+  const b = (await call<{ session: { id: string } }>(daemon.socketPath, "new", { kind: "shell", cwd: tmpdir() }))
+    .session;
+  const { ws, output, text } = await connect(info, info.token);
+
+  // Attach A then immediately B: A must never commit.
+  ws.send(JSON.stringify({ type: "attach", sessionId: a.id }));
+  ws.send(JSON.stringify({ type: "attach", sessionId: b.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot" && m.sessionId === b.id))).toBe(true);
+
+  // Drive A (the superseded session) and confirm none of its output arrives.
+  await call(daemon.socketPath, "send", { id: a.id, text: "printf 'SUPERSEDED_A\\n'", keys: ["Enter"] });
+  await sleep(600);
+  expect(output.join("").includes("SUPERSEDED_A")).toBe(false);
+
+  // B still streams.
+  await call(daemon.socketPath, "send", { id: b.id, text: "printf 'ACTIVE_B\\n'", keys: ["Enter"] });
+  expect(await waitFor(() => output.join("").includes("ACTIVE_B"))).toBe(true);
   ws.close();
 });

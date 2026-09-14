@@ -74,3 +74,24 @@ test("reconcile(null) treats tmux state as unknown and marks nothing dead", () =
   expect(res).toEqual({ dead: [], adopted: [] });
   expect(reg.get("term")!.status).toBe("running");
 });
+
+test("expireRpcOnly marks a quiet RPC-only pi record dead (a crashed pi)", () => {
+  const reg = new Registry(join(dir, "rpc-only.json"));
+  const quiet = record({
+    id: "pi-quiet",
+    tmuxName: "",
+    kind: "pi",
+    status: "running",
+    updatedAt: Date.now() - 60_000,
+  });
+  const fresh = record({ id: "pi-fresh", tmuxName: "", kind: "pi", status: "running", updatedAt: Date.now() });
+  const terminal = record({ id: "term", tmuxName: "ldmux-t", status: "running", updatedAt: Date.now() - 60_000 });
+  reg.upsert(quiet);
+  reg.upsert(fresh);
+  reg.upsert(terminal);
+  expect(reg.expireRpcOnly(30_000)).toEqual(["pi-quiet"]);
+  expect(reg.get("pi-quiet")!.status).toBe("dead");
+  expect(reg.get("pi-fresh")!.status).toBe("running");
+  // Terminal-backed records are the tmux reconciler's job, not this one.
+  expect(reg.get("term")!.status).toBe("running");
+});

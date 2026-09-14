@@ -47,19 +47,41 @@ The client speaks exactly [`docs/REMOTE.md`](REMOTE.md):
   pane and never calls `refresh-client -C`. It sets the xterm grid to the `caps`
   cols×rows and CSS-scales the wrapper to the viewport, so the phone and the
   desktop mirror show the *same* grid.
-- **Scroll stability (ADR-0004).** Output is written with
-  `Terminal.write()`, which appends; the viewport only moves on explicit user
-  scroll. This is the deliberate fix for the gmux "jumps to the top" defect.
-- **Session pager.** `list` drives a drawer; tapping attaches, horizontal swipe
-  steps to the next/previous attachable session (RPC-only `pi` records with an
-  empty `tmuxName` are shown but not attachable).
+- **Scroll stability (ADR-0004).** The client implements the two-mode state
+  machine: an upward scroll sets `anchored` and sends `follow`, streaming output
+  never moves the viewport, a persistent **↓ jump-to-bottom** affordance appears
+  while anchored, and a snapshot repaint clears only the *visible* screen
+  (`reset()` is reserved for the first attach of a session) so scrollback and
+  the reading position survive a resync. This is the deliberate fix for the gmux
+  "jumps to the top" defect.
+- **Session pager.** `list` drives a drawer; tapping attaches. Session switching
+  is a **drawer action**, with a narrow left/right **edge strip** as the swipe
+  shortcut — a horizontal drag in the terminal body belongs to the running
+  program (dooboxes `MOBILE_TERMINAL_UX` §5).
 - **Mobile keys.** A Termux-style extra-keys bar (Esc, Tab, sticky Ctrl, arrows,
-  C-c, C-d, common punctuation) sits above the soft keyboard; `touch-action:
-  none` on the screen prevents browser scroll/zoom fighting the terminal.
+  C-c, C-d, common punctuation) sits above the soft keyboard. `touch-action:
+  pan-y` on the screen so vertical panning reaches xterm's viewport (native
+  scrollback) while horizontal drags stay available to the edge strips.
+- **Scrollback.** Local xterm scrollback is capped at 1,000 lines (mobile memory
+  bound). Server-side scrollback paging is **not** in v1 (`scrollback: false` in
+  `caps`), so the phone can scroll what arrived since attach; tmux still holds
+  the full history for `ldmux capture --history` (bounded to 5,000 lines).
 - **Reconnect.** On socket close the client reconnects with capped exponential
   backoff, re-`list`s and re-`attach`es. A server `error` with code `resync` or
   `too_far_behind` triggers a fresh `attach` (snapshot), so a client that fell
   behind resynchronizes instead of showing a torn grid.
+
+## Installable app (PWA)
+
+The client ships a `manifest.webmanifest` (`display: standalone`,
+`orientation: landscape`) and a service worker (`sw.js`) that caches the app
+shell. Served over `tailscale serve` the origin is HTTPS, so the phone offers
+"Add to home screen" and the app then launches landscape-locked without browser
+chrome — the interim mobile app until the native WebView shell exists.
+
+The service worker never touches `/ws` or non-GET requests: terminal traffic is
+live and must not be cached. Navigation is network-first (so a redeploy lands)
+with the cached shell as an offline fallback; assets are cache-first.
 
 ## Android (next)
 

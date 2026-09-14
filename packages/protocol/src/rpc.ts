@@ -36,6 +36,9 @@ export interface PaneState {
   cursorY: number;
   alternateOn: boolean;
   paneInMode: boolean;
+  mouse: boolean;
+  appCursor: boolean;
+  bracketedPaste: boolean;
   historySize: number;
   cols: number;
   rows: number;
