@@ -36,12 +36,17 @@ kotlin {
 
 android {
     namespace = "dev.ldmux.mobile"
-    compileSdk = 35
+    // Compile against the latest released platform (37.2), but TARGET 36 and
+    // MIN 26: compileSdk only decides which APIs we may use, targetSdk opts into
+    // new runtime behaviour (kept at the latest broadly-deployed level), and
+    // minSdk 26 (Android 8, 2017) keeps broad device coverage.
+    compileSdk = 37
+    compileSdkMinor = 2
 
     defaultConfig {
         applicationId = "dev.ldmux.mobile"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
     }

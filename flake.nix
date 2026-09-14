@@ -44,8 +44,8 @@
         # default shell because it is only needed to build packages/mobile and
         # the native libghostty-vt core. `nix develop .#mobile`
         mobile = pkgs.mkShell {
-          packages = toolchain pkgs ++ [ pkgs.jdk21 pkgs.gradle pkgs.zig ];
-          JAVA_HOME = "${pkgs.jdk21}";
+          packages = toolchain pkgs ++ [ pkgs.jdk25 pkgs.gradle pkgs.zig ];
+          JAVA_HOME = "${pkgs.jdk25}";
           shellHook = ''
             export ANDROID_HOME="$HOME/Android/Sdk"
             export ANDROID_SDK_ROOT="$ANDROID_HOME"
@@ -53,7 +53,7 @@
             # pick the newest installed one (sort -V), never hard-code a version.
             export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1)"
             echo "ldmux mobile devshell"
-            echo "  java   $(${pkgs.jdk21}/bin/javac -version 2>&1)"
+            echo "  java   $(${pkgs.jdk25}/bin/javac -version 2>&1)"
             echo "  gradle $(gradle --version 2>/dev/null | awk '/^Gradle/{print $2}')"
             echo "  zig    $(zig version)"
             echo "  sdk    $ANDROID_HOME"
