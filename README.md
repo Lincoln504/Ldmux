@@ -36,3 +36,19 @@ either. It is deliberately simpler and tmux-native:
 The user's working name for the old idea was "Doombox"/"Dooboxes"; the existing
 `~/Documents/dooboxes` project is a different (Rust, container-workspace) product.
 `ldmux` is a **new, separate project** — no rename of `dooboxes` is performed.
+
+## Development
+
+The project uses a **Nix flake** for a reproducible toolchain (bun, node, tmux,
+just); the pinned `nixpkgs` rev is shared with the `dooboxes` flake so the store
+and binary cache are reused.
+
+```bash
+nix develop            # bun 1.3.x, node 24, tmux 3.7b, just
+bun test               # unit + live tmux tests (run inside nix develop)
+bun run packages/daemon/src/probe.ts <tmux-socket> <session>   # stream a pane
+```
+
+The live tests spawn a scratch tmux server (`tmux -L <unique>`) and exercise the
+control-mode transport end to end; they require `tmux` on `PATH` (provided by the
+devShell). Phase 1 is in progress — see [`docs/SPEC.md`](docs/SPEC.md) §13.

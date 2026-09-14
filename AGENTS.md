@@ -26,6 +26,10 @@ next planned work is Phase 1 in `docs/SPEC.md` §13.
 
 ## Conventions
 
+- **Nix toolchain:** develop and test inside `nix develop` (bun + tmux + just are
+  provided by `flake.nix`). Do not add unpinned system dependencies.
+- Run `bun test` after changes; live tests spawn a scratch tmux server and must
+  clean it up (`tmux -L <unique> kill-server`).
 - Conventional commits: `type(scope): summary`.
 - TypeScript: strict; shared wire types live in `packages/protocol`.
 - Rust (if/when used): match the style of the surrounding crate.

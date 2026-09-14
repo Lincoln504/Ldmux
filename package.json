@@ -1,0 +1,10 @@
+{
+  "name": "ldmux",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "test": "bun test",
+    "probe": "bun run packages/daemon/src/probe.ts"
+  }
+}

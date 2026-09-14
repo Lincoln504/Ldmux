@@ -128,6 +128,20 @@ Byte stream from control mode (LF-delimited records):
    backoff.
 7. Tolerate unknown `%…` lines (forward compatibility).
 
+**Two gotchas found while implementing this (do not reintroduce):**
+
+- **Attach preamble:** tmux emits an unsolicited, empty `%begin/%end` block
+  immediately on attach, *before* `%session-changed`. If you register a command
+  waiter before it arrives, the response FIFO desyncs (commands resolve with
+  empty output, and a later `%error` is misattributed). **Wait for
+  `%session-changed` before issuing the first command** (or drop the first
+  response block). The client in `packages/daemon` does this.
+- **Byte-level octal:** tmux leaves bytes ≥ 0x80 **raw** (only < 0x20 and `\` are
+  escaped). Octal-decode at the **byte** level. Decoding a JS string and doing
+  `charCodeAt(i) & 0xff` destroys astral characters (😀 → surrogates → `=` + NUL).
+  `packages/daemon/src/tmux/octal.ts` decodes `Uint8Array` → `Uint8Array` for
+  this reason, with a regression test.
+
 ## 6. Snapshot & fallback
 
 - **Snapshot:** `capture-pane -p -e -t %<pane> -S -<n>` plus state fields from
