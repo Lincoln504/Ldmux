@@ -40,19 +40,24 @@
           '';
         };
 
-        # The Android/KMP toolchain (JDK + Gradle). Kept separate from the
-        # default shell because it is only needed to build packages/mobile.
-        # `nix develop .#mobile`
+        # The Android/KMP toolchain (JDK + Gradle + Zig). Kept separate from the
+        # default shell because it is only needed to build packages/mobile and
+        # the native libghostty-vt core. `nix develop .#mobile`
         mobile = pkgs.mkShell {
-          packages = toolchain pkgs ++ [ pkgs.jdk21 pkgs.gradle ];
+          packages = toolchain pkgs ++ [ pkgs.jdk21 pkgs.gradle pkgs.zig ];
           JAVA_HOME = "${pkgs.jdk21}";
           shellHook = ''
             export ANDROID_HOME="$HOME/Android/Sdk"
             export ANDROID_SDK_ROOT="$ANDROID_HOME"
+            # libghostty-vt's build locates the NDK via ANDROID_NDK_HOME;
+            # pick the newest installed one (sort -V), never hard-code a version.
+            export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1)"
             echo "ldmux mobile devshell"
             echo "  java   $(${pkgs.jdk21}/bin/javac -version 2>&1)"
             echo "  gradle $(gradle --version 2>/dev/null | awk '/^Gradle/{print $2}')"
+            echo "  zig    $(zig version)"
             echo "  sdk    $ANDROID_HOME"
+            echo "  ndk    $ANDROID_NDK_HOME"
           '';
         };
       });

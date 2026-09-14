@@ -11,23 +11,66 @@ A terminal **core** (VT parser + screen state: cells, attributes, cursor,
 scrollback, reflow) plus a **renderer** that draws the grid with Compose/Skia,
 drivable from Kotlin Multiplatform on Android (iOS is a target, not v1).
 
-## libghostty / libghostty-vt
+## libghostty / libghostty-vt — CORRECTED (verified 2026-09-14)
 
-The most attractive core on quality grounds, and **not yet usable here**:
+An earlier revision of this note claimed libghostty-vt was unreleased, with no
+mobile build and no Kotlin bindings. **That was wrong.** Verified directly
+against crates.io, npm, and Ghostty's own `build.zig`:
 
-- `libghostty-vt` (Zig) is **parser + state only** — no rendering, by design
-  (embedders draw). Zero dependencies; SIMD parser; robust Unicode, Kitty
-  graphics, tmux control mode.
-- **Its public C API is still alpha and untagged** as of 2026-09 (the internal
-  `ghostty.h` used by the macOS app is explicitly "not a good C API"). Ghostty
-  the app is production-stable; the library is not.
-- **No confirmed Android NDK or iOS build**, no `xcframework`, no Kotlin
-  bindings, no shipped mobile app. Only Linux/macOS/Windows-x64 library builds
-  are demonstrated (e.g. Paneflow links a pinned static lib). MIT licensed.
-- Guidance from the project is to wait for the tagged C API.
+- The Ghostty terminal core is published as **libghostty-vt**, under its **own
+  version** (`lib_version = "0.1.0-dev"` in `build.zig`, a separate release cycle
+  from the app). The C API header is `include/ghostty/vt.h`. It still carries a
+  "incomplete, work-in-progress, not yet stable" warning, and the Zig module says
+  the *API* may change while the *functionality* is production-proven. So the
+  caveat is API stability, not maturity.
+- **Ghostty's own `build.zig` builds all of**: a static lib (`libghostty-vt.a`),
+  a shared lib, a **WASM** module (`ghostty-vt.wasm` — what ghostty-web uses),
+  and an **Apple universal `.xcframework`** (macOS + iOS + iOS-simulator, via
+  `xcodebuild`, macOS host). Minimum **Zig 0.16.0**. Its CI cross-compiles for
+  Android. `zig build -Demit-lib-vt -Demit-xcframework=true` emits the Apple one.
+- **Rust bindings are published**: `libghostty-vt` 0.2.1 and `libghostty-vt-sys`
+  0.2.1 (`uzaaft/libghostty-rs`, MIT, ~113 k downloads; vendored Zig build by
+  default, `link-dynamic`/`pkg-config`/`vendored` features; iOS targets build
+  through the xcframework emit and require a macOS host). A sibling wrapper,
+  `mnml-libghostty-vt` 0.2.3, exists too.
+- **Real Android consumers exist** — this is the important one:
+  `tapthaker/ghostty-android`, `SagerNet/libghostty-android` (published to Maven
+  Central as `io.github.sagernet:libghostty-android:0.1.0-alpha01`, with Compose
+  UI), and `pinhole-io/libghostty-android`. All cross-compile libghostty-vt with
+  Zig for `arm64-v8a` (+ `x86_64`), render with **Compose Canvas** over a JNI
+  bridge, and need NDK r29+. The VT core itself is libc-free; only a PTY wrapper
+  needs Android libc.
+- **A WASM drop-in for our web client exists today**: `coder/ghostty-web` (MIT,
+  npm `ghostty-web` 0.4.0) compiles the Ghostty core to a ~423 KB
+  `ghostty-vt.wasm` behind an **xterm.js-compatible `Terminal` API**, with zero
+  runtime dependencies. Canvas-only (no WebGL, ligatures, or image protocols) and
+  requires `await init()`. Its `buffer.active.viewportY` / `baseY` / `onData` /
+  `onScroll` / `scrollToLine` surface matches exactly what ldmux already uses.
 
-Verdict: **revisit when libghostty-vt ships a tagged C ABI and mobile builds**;
-it is the right long-term core.
+Net: the earlier "revisit trigger" (stable ABI **and** shipped iOS/Android
+builds) is now **substantially met** — an iOS xcframework and Android builds both
+exist, and a web path exists now. The single remaining caveat is the unstable C
+API (pinned as `0.1.0-dev`).
+
+## Verified build (2026-09-14)
+
+`libghostty-vt` **builds for Android on this machine today.** From Ghostty
+`d5eba8d` with Zig `0.16.0` (from the pinned nixpkgs) and
+`ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/android-ndk-r27c`:
+
+```
+nix shell nixpkgs#zig -c zig build -Demit-lib-vt \
+  -Dtarget=aarch64-linux-android -Doptimize=ReleaseSafe
+```
+
+Output: `zig-out/lib/libghostty-vt.a` (21 MB, static),
+`libghostty-vt.so.0.1.0` (12.8 MB, shared), and the full
+`include/ghostty/vt/*.h` header set. The build's own `pkg/android-ndk/build.zig`
+needs the NDK only for bionic libc include/lib paths — the VT core itself is
+libc-free — so a *newer* NDK is not strictly required for the engine, though we
+will take the latest. This proves the native Android path end to end at the
+**engine** level; what remains is the JNI wrapper, the shared Kotlin core, and
+the Compose Canvas renderer.
 
 ## Viable alternatives (checked 2026-09-14)
 
@@ -66,9 +109,10 @@ Findings that transfer directly:
   replies that must go back upstream or full-screen apps hang) → `cells()` /
   `visible_rows()` / `cursor()` out, plus `encode_key`/`encode_mouse`. A renderer
   only needs the styled-grid-out shape.
-- **libghostty was rejected twice, with a testable revisit trigger:** stable ABI
-  **and** shipped iOS/Android targets. Only one of those two conditions is not
-  enough. (The web research above confirms neither has happened as of 2026-09.)
+- **libghostty was rejected twice, with a revisit trigger of stable ABI
+  **and** shipped iOS/Android targets.** (Their rejection predates the 2026-08
+  Android projects and coder/ghostty-web; see the corrected section above — the
+  trigger is now substantially met, leaving only API stability.)
 - **"Never split engines"** — one emulation core for every client. Pairing
   libvterm on mobile with xterm.js on the web would repeat the anti-pattern they
   forbade.
@@ -86,36 +130,42 @@ Findings that transfer directly:
 - Note: their `rendererType: 'canvas'` advice is stale for xterm.js 6 (no such
   option) — same finding ldmux already hit.
 
-## Recommendation
+## Recommendation (revised 2026-09-14)
 
-1. **Now:** keep the WebView renderer. It is the working, tested engine and the
-   smallest risk while the app's chrome/UX is being settled.
-2. **Best native path, revised after reading dooboxes:** **`alacritty_terminal`
-   (Rust, Apache-2.0/MIT) over FFI + a Compose Canvas grid renderer** — preferred
-   over libvterm because it is a *complete* engine (grid, scrollback, reflow,
-   key/mouse encoding) rather than a parser we would have to grow into one. The
-   bridge is Rust→Kotlin: **UniFFI** (+ the UbiqueInnovation KMP plugin, which
-   targets Android JNI and iOS cinterop from one definition) is the 2026 tool of
-   choice; `cargo-ndk` builds the Android `.so`, `xcodebuild -create-xcframework`
-   the iOS artifact. The consume shape is exactly dooboxes' proven one:
-   `advance(bytes)` in, styled cell grid + cursor out. Cost: adds a Rust
-   toolchain to a TypeScript/Bun repo.
+The goal is a **native** terminal on both phones, from **one shared Kotlin
+Multiplatform core** — not a web engine. WASM was considered and **rejected**: it
+would be a second engine, it parses on the browser main thread, it is Canvas-only
+with no WebGL, and it buys nothing over the native library we would already link.
 
-   The older equivalent, if we would rather not add Rust: **libvterm (MIT) via the
-   NDK** + the same Compose Canvas renderer — but we then own the grid/scrollback
-   layer:
-   - compile libvterm as a `.so` per ABI (arm64-v8a, x86_64) with CMake;
-   - JNI bridge: opaque screen handle, a `TerminalFrame` snapshot (cells +
-     attributes + cursor) copied out per frame;
-   - render with `Canvas`/`drawIntoCanvas`, batching glyphs into `SkTextBlob`;
-     only changed rows redraw;
-   - Android IME via a custom `InputConnection` (or the pattern the web client
-     already uses).
-3. **If GPL is acceptable:** Termux `terminal-view` gets a native, proven
-   terminal on screen fastest, via `AndroidView` — but it makes the app GPL.
-4. **Long term:** swap the core to **libghostty-vt** once its C API is tagged and
-   Android/iOS builds exist; the frame-copy seam above is core-agnostic, so the
-   renderer would not change.
+1. **Engine: libghostty-vt, linked natively.** It is the Ghostty emulation core,
+   builds a static/shared lib, and is the reason the Android projects listed
+   above exist. Zig **0.16.0** is the exact minimum and is available in the pinned
+   nixpkgs, so the toolchain is reproducible via Nix. The C API is `0.1.0-dev`
+   (unstable), so we pin the upstream commit and keep all C calls behind one
+   narrow Kotlin seam.
+2. **Shared KMP core ("shared libraries").** One Kotlin Multiplatform module owns
+   the terminal:
+   - an `expect`/`actual` native seam (`TerminalCore`) that loads the Zig-built
+     `libghostty-vt` — Android via **JNI** (`System.loadLibrary`), iOS via a
+     **cinterop**/xcframework — exposing `advance(bytes)`, styled cell grid +
+     cursor, and key/mouse encoding;
+   - the **remote protocol client** (attach/caps/snapshot, binary OUTPUT,
+     input/key/follow/scrollback) in shared Kotlin (a port of the web client's
+     `core.js` protocol half), unit-tested on the JVM;
+   - the **renderer**: a Compose Multiplatform `Canvas` over the cell grid, so the
+     same drawing code runs on Android and iOS.
+3. **Android first, iOS second, independently.** Android: cross-compile
+   libghostty-vt with Zig for `arm64-v8a`/`x86_64` against the NDK, bridge via JNI,
+   render with Compose. iOS: consume the upstream `.xcframework` (built on macOS)
+   and render with the *same* Compose Canvas. The shared module and the protocol
+   code are written once; only the tiny native-loading `actual` and the app shells
+   differ.
+4. **Never split engines** (inherited from dooboxes): the web client keeps its
+   engine, but the native apps share exactly one core. Do not ship libghostty on
+   Android and a different core on iOS.
+5. **Fallback if the Zig/native path stalls:** `alacritty_terminal` (Rust,
+   dependency-light, cross-compiles to both) behind the same seam, or Termux
+   `terminal-view` (fast, but **GPL-3.0** makes the app GPL).
 
 ## What "native" also requires (independent of the core)
 
