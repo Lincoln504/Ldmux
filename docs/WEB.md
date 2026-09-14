@@ -10,6 +10,21 @@ There is **no build step and no runtime dependency**: xterm.js 6.0.0 and
 (licenses included). This is consistent with the repo-wide "buildless" rule; the
 only third-party code is a static asset the daemon serves.
 
+## Layout and testing
+
+| File | Role |
+|------|------|
+| `public/index.html`, `public/app.css` | shell + layout (viewport, drawer, key bar) |
+| `public/core.js` | **DOM-free core**: frame decoder, scroll state machine, snapshot-repaint math, `escapeHtml`, token parsing. Attaches one global, `LdmuxCore`. |
+| `public/app.js` | the client: xterm wiring, WebSocket, drawer, key bar, scaling |
+| `public/sw.js`, `public/manifest.webmanifest`, `public/icon.svg` | installable app shell |
+
+`core.js` exists so the protocol-critical logic is unit-testable without a
+browser: `packages/web/test/core.test.ts` runs it under `bun test` (frame
+reassembly across chunks, the poisoned-length DoS guard, the scroll/anchor
+state machine, 1-based cursor restore, escaping, token precedence) and asserts
+`index.html` loads `core.js` before `app.js`.
+
 ## Serving
 
 `RemoteServer` serves `GET /` (and any non-`/ws` path) from the daemon's

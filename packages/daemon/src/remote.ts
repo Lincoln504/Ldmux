@@ -31,7 +31,7 @@ export interface RemoteServerOptions {
   port: number;
   token: string;
   getSession(id: string): SessionRecord | undefined;
-  listSessions(): SessionInfo[];
+  listSessions(): SessionInfo[] | Promise<SessionInfo[]>;
   acquireStream(record: SessionRecord): PaneStream;
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
@@ -79,7 +79,9 @@ export class RemoteServer {
       port: opts.port,
       fetch: (req: Request, server: any) => this.handleFetch(req, server),
       websocket: {
-        // Bound a single inbound frame (Bun's default is far larger).
+        // Bun closes on a bigger frame (1009) before our handler can answer;
+        // 64 KiB leaves room for the JSON envelope around a 16 KiB payload,
+        // which is where the graceful `input_too_large` check fires.
         maxPayloadLength: MAX_INPUT_BYTES * 4,
         open: () => {
           /* wait for attach */
@@ -167,7 +169,7 @@ export class RemoteServer {
           this.sendJson(ws, { type: "pong", id: msg.id });
           return;
         case "list":
-          this.sendJson(ws, { type: "sessions", sessions: this.opts.listSessions() });
+          this.sendJson(ws, { type: "sessions", sessions: await this.opts.listSessions() });
           return;
         case "attach":
           await this.attach(ws, data, String(msg.sessionId ?? ""));
@@ -259,7 +261,12 @@ export class RemoteServer {
     }
     data.unsubscribe = unsubscribe;
 
-    const snap = stream.snapshot();
+    const snap = await stream.snapshot();
+    // Re-check after the await: the socket may have gone or a newer attach won.
+    if (data.disposed || data.attachGen !== gen) {
+      this.opts.releaseStream?.(record);
+      return;
+    }
     data.epoch = snap.epoch;
     const caps: Caps = {
       type: "caps",

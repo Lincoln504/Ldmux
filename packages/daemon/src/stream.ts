@@ -71,10 +71,10 @@ export class PaneStream {
   }
 
   /** A fresh full-screen snapshot plus terminal state (client repaints from this). */
-  snapshot(): StreamSnapshot {
-    const state = this.cp.snapshotState(this.sessionName);
+  async snapshot(): Promise<StreamSnapshot> {
+    const state = await this.cp.snapshotState(this.sessionName);
     // Full-screen TUIs live on the alternate screen; `-a` captures that one.
-    const raw = this.cp.capturePane(this.sessionName, { escapes: true, alternate: state.alternateOn });
+    const raw = await this.cp.capturePane(this.sessionName, { escapes: true, alternate: state.alternateOn });
     return {
       screen: sanitizeOnce(raw),
       state,

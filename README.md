@@ -69,7 +69,7 @@ devShell).
 ## Status
 
 **Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**65 tests**, `bun test`; `bun run typecheck` clean):
+tested (**82 tests**, `bun test`; `bun run typecheck` clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by
@@ -90,7 +90,9 @@ tested (**65 tests**, `bun test`; `bun run typecheck` clean):
 - `packages/web` — buildless xterm.js client served by the daemon at `/`
   (canonical grid scaled to fit, ADR-0004 scroll state machine + jump-to-bottom,
   non-destructive snapshot repaint, session drawer + edge-strip swipe, mobile key
-  bar, installable PWA, reconnect/resync). See [`docs/WEB.md`](docs/WEB.md).
+  bar, installable PWA, reconnect/resync). Its protocol-critical logic lives in
+  a DOM-free `public/core.js` covered by `packages/web/test/core.test.ts`. See
+  [`docs/WEB.md`](docs/WEB.md).
 - pairing/desktop helpers — `ldmux pair` / `ldmux expose` (tailscale URL +
   `ldmux://` deep link) and `ldmux mirror` (read-only i3 + alacritty view).
 
@@ -98,6 +100,5 @@ See [`docs/PI-EXTENSIONS.md`](docs/PI-EXTENSIONS.md) for the pi extension contra
 
 Not yet: native Android WebView shell, server-side scrollback paging, `%pause`/
 `%continue` handling, `capture-pane` diff-polling fallback.
-
 Design divergences from dooboxes/gmux are recorded in
 [`docs/adr/0006-divergences.md`](docs/adr/0006-divergences.md).

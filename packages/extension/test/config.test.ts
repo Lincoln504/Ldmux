@@ -14,7 +14,7 @@ process.env.LDMUX_STATE_DIR = stateDir;
 process.env.LDMUX_SOCK = join(stateDir, "ldmuxd.sock");
 process.env.LDMUX_TMUX_SOCK = tmuxSocket;
 
-daemon.start();
+await daemon.start();
 
 const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
 

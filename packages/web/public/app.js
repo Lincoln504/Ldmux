@@ -7,9 +7,24 @@
  */
 "use strict";
 
-const OUTPUT_FRAME = 0x10;
-const HEADER_SIZE = 8;
-const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
+// The client's protocol-critical logic lives in core.js (DOM-free, unit-tested
+// under `bun test`). Fail loudly rather than at the first destructure below, so
+// a partial deploy shows a message instead of an inert app.
+if (!globalThis.LdmuxCore) {
+  const overlay = document.getElementById("token-overlay");
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    overlay.insertAdjacentHTML(
+      "afterbegin",
+      '<p style="color:#ff6b6b">ldmux: core.js failed to load — reload. If it persists, the server is serving an incomplete client.</p>',
+    );
+  }
+  throw new Error("ldmux: core.js failed to load (incomplete app shell)");
+}
+
+const { decodeFrames, escapeHtml, scrollMode, anchorFromBottom, anchoredTarget, cursorSequence, tokenFrom } =
+  globalThis.LdmuxCore;
+const OUTPUT_FRAME = globalThis.LdmuxCore.OUTPUT_FRAME;
 const SCROLLBACK = 1000; // mobile memory bound (dooboxes MOBILE_TERMINAL_PERFORMANCE §15.1)
 const PING_MS = 20000;
 
@@ -43,13 +58,10 @@ let attachedOnce = false;
 
 // ── token ────────────────────────────────────────────────────────────────
 function readToken() {
-  const url = new URL(location.href);
-  const fromUrl = url.searchParams.get("token") || (url.hash.startsWith("#token=") ? url.hash.slice(7) : "");
-  const stored = localStorage.getItem("ldmux.token") || "";
-  const token = fromUrl || stored;
+  const { token, fromUrl, path } = tokenFrom(location.href, location.hash, localStorage.getItem("ldmux.token"));
   if (fromUrl) {
     localStorage.setItem("ldmux.token", fromUrl);
-    history.replaceState(null, "", url.pathname);
+    history.replaceState(null, "", path);
   }
   return token;
 }
@@ -72,13 +84,9 @@ function ensureTerm() {
   return term;
 }
 
-function atBottom() {
-  const buf = term && term.buffer && term.buffer.active;
-  return !buf || buf.viewportY >= buf.baseY;
-}
-
 function updateScrollMode() {
-  const next = atBottom() ? "following" : "anchored";
+  const buf = term && term.buffer && term.buffer.active;
+  const next = scrollMode(buf ? buf.viewportY : 0, buf ? buf.baseY : 0);
   if (next === mode) {
     els.jump.classList.toggle("hidden", mode === "following");
     return;
@@ -115,33 +123,15 @@ addEventListener("orientationchange", () => setTimeout(scaleToFit, 150));
 // ── framing ──────────────────────────────────────────────────────────────
 let tail = new Uint8Array(0);
 function onBinary(buf) {
-  const bytes = new Uint8Array(buf);
-  const merged = new Uint8Array(tail.length + bytes.length);
-  merged.set(tail);
-  merged.set(bytes, tail.length);
-  let offset = 0;
-  let poisoned = false;
-  while (merged.length - offset >= HEADER_SIZE) {
-    const view = new DataView(merged.buffer, merged.byteOffset + offset, HEADER_SIZE);
-    const type = view.getUint8(0);
-    const length = view.getUint32(4);
-    // Same DoS guard as the wire codec: never let a bogus length grow the tail.
-    if (length > MAX_FRAME_PAYLOAD) {
-      poisoned = true;
-      break;
-    }
-    if (merged.length - offset - HEADER_SIZE < length) break;
-    const payload = merged.subarray(offset + HEADER_SIZE, offset + HEADER_SIZE + length);
-    if (type === OUTPUT_FRAME && term) term.write(new TextDecoder().decode(payload));
-    offset += HEADER_SIZE + length;
+  const { frames, tail: rest, poisoned } = decodeFrames(tail, new Uint8Array(buf));
+  tail = rest;
+  for (const frame of frames) {
+    if (frame.type === OUTPUT_FRAME && term) term.write(new TextDecoder().decode(frame.payload));
   }
   if (poisoned) {
     setStatus("protocol error", "err");
-    tail = new Uint8Array(0);
     send({ type: "list" });
-    return;
   }
-  tail = merged.subarray(offset);
 }
 
 // ── protocol ─────────────────────────────────────────────────────────────
@@ -237,7 +227,7 @@ function onControl(msg) {
 function applySnapshot(msg) {
   ensureTerm();
   const buf = term.buffer && term.buffer.active;
-  const anchorFromBottom = mode === "anchored" && buf ? buf.baseY - buf.viewportY : 0;
+  const fromBottom = buf ? anchorFromBottom(mode, buf.viewportY, buf.baseY) : 0;
 
   if (!attachedOnce) {
     attachedOnce = true;
@@ -248,21 +238,15 @@ function applySnapshot(msg) {
     term.write("\x1b[2J\x1b[H");
   }
   term.write(msg.screen || "");
-  // capture-pane cannot encode cursor position; restore it from the snapshot.
-  const row = Number(msg.cursorY ?? 0) + 1;
-  const col = Number(msg.cursorX ?? 0) + 1;
-  term.write(`\x1b[${row};${col}H`);
+  term.write(cursorSequence(msg.cursorX, msg.cursorY));
 
   if (mode === "anchored") {
     const b = term.buffer && term.buffer.active;
     if (b) {
-      const target = b.baseY - anchorFromBottom;
-      if (target < 0) {
-        // The anchored line is gone: stand down to following (never guess).
-        jumpToBottom();
-      } else {
-        term.scrollToLine(target);
-      }
+      const target = anchoredTarget(b.baseY, fromBottom);
+      // The anchored line is gone: stand down to following (never guess).
+      if (target < 0) jumpToBottom();
+      else term.scrollToLine(target);
     }
   }
 }
@@ -284,10 +268,6 @@ function renderSessions() {
     els.sessions.appendChild(li);
   }
   if (!sessions.length) els.sessions.innerHTML = '<li class="s-meta">no sessions</li>';
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 function attach(sessionId) {

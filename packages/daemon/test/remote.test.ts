@@ -9,7 +9,7 @@ import { decodeFrames, FrameType, type Frame } from "../../protocol/src/frames.t
 const tmuxSocket = `ldmux-remotetest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-remote-"));
 const daemon = new LdmuxDaemon({ stateDir, tmuxSocket, remotePort: 0 });
-daemon.start();
+await daemon.start();
 
 afterAll(() => {
   daemon.stop();
@@ -122,7 +122,12 @@ test("serves the bundled web client, its assets, and the session list", async ()
   const index = await fetch(`${base}/`);
   expect(index.status).toBe(200);
   expect(index.headers.get("content-type")).toContain("text/html");
-  expect(await index.text()).toContain("app.js");
+  const html = await index.text();
+  expect(html).toContain("app.js");
+  expect(html).toContain("core.js");
+  const core = await fetch(`${base}/core.js`);
+  expect(core.status).toBe(200);
+  expect(core.headers.get("content-type") || "").toContain("javascript");
 
   const xterm = await fetch(`${base}/vendor/xterm.js`);
   expect(xterm.status).toBe(200);

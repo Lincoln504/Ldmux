@@ -10,7 +10,7 @@ import type { SessionRecord } from "../../protocol/src/rpc.ts";
 const tmuxSocket = `ldmux-daemontest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-daemon-"));
 const daemon = new LdmuxDaemon({ stateDir, tmuxSocket, remotePort: 0 });
-daemon.start();
+await daemon.start();
 
 const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
 
@@ -89,9 +89,9 @@ test("socket is owner-only (0600)", () => {
   expect(statSync(daemon.socketPath).mode & 0o777).toBe(0o600);
 });
 
-test("a second daemon on the same state dir refuses to start", () => {
+test("a second daemon on the same state dir refuses to start", async () => {
   const second = new LdmuxDaemon({ stateDir, tmuxSocket, enableRemote: false });
-  expect(() => second.start()).toThrow("already running");
+  await expect(second.start()).rejects.toThrow("already running");
 });
 
 test("new injects the child env contract", async () => {
@@ -132,4 +132,41 @@ test("register binds a pi session and session_end marks it dead", async () => {
   await call(daemon.socketPath, "session_end", { piSessionId });
   const after = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
   expect(after.sessions.find((s) => s.id === session.id)?.status).toBe("dead");
+});
+test("concurrent requests on one connection are answered in request order", async () => {
+  // handle() awaits tmux now; without the per-connection queue two handlers
+  // could interleave and reorder responses. Pipelining is the observable check.
+  const lines: string[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), 8000);
+    Bun.connect({
+      unix: daemon.socketPath,
+      socket: {
+        open: (s: any) => {
+          // Three requests in a single write: they land in one read chunk.
+          s.write(
+            ["a", "b", "c"].map((id) => JSON.stringify({ id, method: "ping" })).join("\n") + "\n",
+          );
+        },
+        data: (_s: any, chunk: Uint8Array) => {
+          lines.push(new TextDecoder().decode(chunk));
+          if (lines.join("").split("\n").filter(Boolean).length >= 3) {
+            clearTimeout(timer);
+            resolve();
+          }
+        },
+        error: (_s: any, err: Error) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      },
+    });
+  });
+  const replies = lines
+    .join("")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as { id: string; ok: boolean });
+  expect(replies.map((r) => r.id)).toEqual(["a", "b", "c"]);
+  expect(replies.every((r) => r.ok)).toBe(true);
 });

@@ -405,7 +405,12 @@ helper suffices), and owner/families.
 - **Crash-only design:** restart rebuilds from tmux + registry JSON.
 - **Idempotent startup:** `flock`; refuse to run twice.
 - **Graceful shutdown:** stop pollers, flush registry, leave tmux alive.
-- **No leaks:** track and reap all children with timeouts.
+- **No blocking calls:** every tmux CLI call is async (`Bun.spawn`, both pipes
+  drained concurrently) so the daemon's single event loop is never stalled on a
+  child process, and each call is bounded: SIGTERM at 15 s, SIGKILL at +2 s, and
+  a hard deadline past both, so a wedged tmux cannot pin a request or the
+  per-connection handler queue. A bounded call returns exit code `-1`, which is
+  reported as *unknown* liveness, never as "no sessions".
 - **`remain-on-exit`** + `pane_died` detection: record `exit_code`/`exited_at`,
   keep scrollback, mark `dead`, notify clients, remove from the *live* list.
 - **Extension lifecycle (ADR-0003):** the pi extension branches on

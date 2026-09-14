@@ -16,7 +16,7 @@ const daemon = new LdmuxDaemon({
 });
 
 try {
-  daemon.start();
+  await daemon.start();
   console.log(`ldmuxd listening on ${daemon.socketPath} (tmux -L ${daemon.cp.socket})`);} catch (err) {
   const message = (err as Error).message;
   // Another daemon won the startup race — not an error for the spawner.

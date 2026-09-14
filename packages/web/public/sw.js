@@ -5,8 +5,8 @@
  */
 "use strict";
 
-const VERSION = "ldmux-v1";
-const SHELL = ["/", "/index.html", "/app.css", "/app.js", "/manifest.webmanifest", "/icon.svg", "/vendor/xterm.css", "/vendor/xterm.js", "/vendor/addon-fit.js"];
+const VERSION = "ldmux-v2";
+const SHELL = ["/", "/index.html", "/app.css", "/core.js", "/app.js", "/manifest.webmanifest", "/icon.svg", "/vendor/xterm.css", "/vendor/xterm.js", "/vendor/addon-fit.js"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));

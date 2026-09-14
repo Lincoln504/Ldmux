@@ -57,6 +57,8 @@ interface RpcRequest {
 
 interface Conn {
   buf: string;
+  /** Serializes dispatch: handlers are async, so responses must stay ordered. */
+  queue: Promise<void>;
   write(data: string): void;
   close(): void;
 }
@@ -111,13 +113,13 @@ export class LdmuxDaemon {
    * Start the daemon. Throws "ldmuxd already running" if another live daemon
    * holds the lock (callers should treat that as success — someone else won).
    */
-  start(): void {
+  async start(): Promise<void> {
     if (!this.acquireLock()) throw new Error("ldmuxd already running");
     this.ownsLock = true;
     try {
-      this.cp.ensureServer({ historyLimit: this.historyLimit });
+      await this.cp.ensureServer({ historyLimit: this.historyLimit });
       this.registry.load();
-      this.reconcile();
+      await this.reconcile();
       try {
         rmSync(this.socketPath);
       } catch {
@@ -156,9 +158,9 @@ export class LdmuxDaemon {
         port: this.opts.remotePort ?? 7623,
         token: this.token,
         getSession: (id) => this.registry.get(id),
-        listSessions: () => {
+        listSessions: async () => {
           // A read-only listing must not mutate stream state.
-          this.reconcile({ sweep: false });
+          await this.reconcile({ sweep: false });
           return this.registry.list();
         },
         acquireStream: (record) => this.streamFor(record),
@@ -244,6 +246,7 @@ export class LdmuxDaemon {
   private makeConn(ws: any): Conn {
     return {
       buf: "",
+      queue: Promise.resolve(),
       write: (data: string) => this.safeWrite(ws, data),
       close: () => ws.close(),
     };
@@ -267,9 +270,13 @@ export class LdmuxDaemon {
       const line = conn.buf.slice(0, nl);
       conn.buf = conn.buf.slice(nl + 1);
       if (line.trim()) {
-        void this.dispatch(ws, conn, line).catch(() => {
-          /* dispatch never throws, but never surface an unhandled rejection */
-        });
+        // Chain, never start two handlers on one connection at once: handle()
+        // awaits tmux now, and interleaving would reorder responses.
+        conn.queue = conn.queue
+          .then(() => this.dispatch(ws, conn, line))
+          .catch(() => {
+            /* dispatch never throws, but never surface an unhandled rejection */
+          });
       }
     }
   }
@@ -284,7 +291,7 @@ export class LdmuxDaemon {
     }
     let response: unknown;
     try {
-      response = { id: req.id ?? null, ok: true, result: this.handle(req.method, req.params ?? {}) };
+      response = { id: req.id ?? null, ok: true, result: await this.handle(req.method, req.params ?? {}) };
     } catch (err) {
       response = { id: req.id ?? null, ok: false, error: (err as Error).message };
     }
@@ -350,8 +357,10 @@ export class LdmuxDaemon {
 
   // ── registry reconciliation ──────────────────────────────────────────────
 
-  private reconcile(opts: { sweep?: boolean } = {}): { dead: string[]; adopted: string[]; pruned: string[] } {
-    const liveSessions = this.cp.listSessions();
+  private async reconcile(
+    opts: { sweep?: boolean } = {},
+  ): Promise<{ dead: string[]; adopted: string[]; pruned: string[] }> {
+    const liveSessions = await this.cp.listSessions();
     const live = liveSessions ? new Set(liveSessions.map((s) => s.name)) : null;
     const { dead, adopted } = this.registry.reconcile(live);
     // A pi that died without a clean shutdown never sends session_end; expire
@@ -372,7 +381,7 @@ export class LdmuxDaemon {
 
   // ── RPC methods ──────────────────────────────────────────────────────────
 
-  private handle(method: string, params: Record<string, unknown>): unknown {
+  private async handle(method: string, params: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case "ping":
         return { pong: true, version: DAEMON_PROTOCOL_VERSION, tmuxSocket: this.cp.socket };
@@ -386,7 +395,7 @@ export class LdmuxDaemon {
         };
 
       case "list": {
-        this.reconcile();
+        await this.reconcile();
         return { sessions: this.registry.list() };
       }
 
@@ -396,26 +405,30 @@ export class LdmuxDaemon {
       case "send": {
         const p = params as unknown as SendParams;
         const record = this.require(p.id);
-        if (typeof p.text === "string") this.cp.sendText(record.tmuxName, p.text);
-        if (p.keys?.length) this.cp.sendKey(record.tmuxName, ...p.keys);
+        if (typeof p.text === "string") await this.cp.sendText(record.tmuxName, p.text);
+        if (p.keys?.length) await this.cp.sendKey(record.tmuxName, ...p.keys);
         return { ok: true };
       }
 
       case "capture":
         return {
-          screen: this.cp.capturePane(this.require(String(params.id)).tmuxName, {
+          screen: await this.cp.capturePane(this.require(String(params.id)).tmuxName, {
             history: Boolean(params.history),
           }),
         };
 
       case "snapshot": {
         const record = this.require(String(params.id));
-        return { screen: this.cp.capturePane(record.tmuxName), state: this.cp.snapshotState(record.tmuxName) };
+        const [screen, state] = await Promise.all([
+          this.cp.capturePane(record.tmuxName),
+          this.cp.snapshotState(record.tmuxName),
+        ]);
+        return { screen, state };
       }
 
       case "kill": {
         const record = this.require(String(params.id));
-        this.cp.killSession(record.tmuxName);
+        await this.cp.killSession(record.tmuxName);
         this.dropStream(record.tmuxName);
         record.status = "dead";
         record.exitedAt = Date.now();
@@ -425,10 +438,10 @@ export class LdmuxDaemon {
       }
 
       case "adopt":
-        return { session: this.adopt(params) };
+        return { session: await this.adopt(params) };
 
       case "register":
-        return { session: this.register(params as unknown as RegisterParams) };
+        return { session: await this.register(params as unknown as RegisterParams) };
 
       case "session_end":
         return this.endSession(params as unknown as SessionEndParams);
@@ -438,7 +451,7 @@ export class LdmuxDaemon {
     }
   }
 
-  private handleNew(p: NewParams): { session: SessionRecord } {
+  private async handleNew(p: NewParams): Promise<{ session: SessionRecord }> {
     const kind: SessionKind = p.kind ?? "shell";
     const cwd = String(p.cwd ?? process.cwd());
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`not a directory: ${cwd}`);
@@ -466,19 +479,23 @@ export class LdmuxDaemon {
       LDMUX_TMUX_NAME: tmuxName,
       LDMUX_TMUX_SOCK: this.cp.socket,
     };
-    this.cp.newSession({ name: tmuxName, cwd, command, env, ...this.canonical });
+    await this.cp.newSession({ name: tmuxName, cwd, command, env, ...this.canonical });
     this.registry.upsert(record);
     this.registry.save();
     return { session: record };
   }
 
-  private adopt(params: Record<string, unknown>): SessionRecord {
+  private async adopt(params: Record<string, unknown>): Promise<SessionRecord> {
     const tmuxName = String(params.tmuxName);
     if (!isValidSessionName(tmuxName)) throw new Error(`invalid tmux session name: ${tmuxName}`);
-    if (!this.cp.hasSession(tmuxName)) throw new Error(`no such tmux session: ${tmuxName}`);
+    if (!(await this.cp.hasSession(tmuxName))) throw new Error(`no such tmux session: ${tmuxName}`);
     const existing = this.registry.byTmuxName(tmuxName);
     if (existing) return existing;
-    const panes = this.cp.listPanes(tmuxName);
+    const panes = await this.cp.listPanes(tmuxName);
+    // Re-check after the awaits: handle() is async now, so two concurrent
+    // adopts of one tmux session could otherwise each create a record.
+    const raced = this.registry.byTmuxName(tmuxName);
+    if (raced) return raced;
     const now = Date.now();
     const record: SessionRecord = {
       id: shortId(),
@@ -497,7 +514,7 @@ export class LdmuxDaemon {
   }
 
   /** Bind a pi session to its (possibly RPC-only) ldmux record. Idempotent. */
-  private register(p: RegisterParams): SessionRecord {
+  private async register(p: RegisterParams): Promise<SessionRecord> {
     const now = Date.now();
     const tmuxName = p.tmuxName ?? "";
     if (tmuxName && !isValidSessionName(tmuxName)) throw new Error(`invalid tmux session name: ${tmuxName}`);
