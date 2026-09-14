@@ -20,7 +20,9 @@ mobile, with an exclusive lock) precisely to avoid geometry fights.
   (default: match the desktop display, e.g. detect → `120x40`; configurable).
 - The mobile client renders a **viewport over the canonical grid** (scale/pan/
   pinch); it **never** resizes the tmux pane and never calls `refresh-client -C`.
-- The `RESIZE` wire message carries the client viewport, not a tmux resize.
+- There is no resize message at all: the client scales the canonical grid in
+  CSS and sends no geometry (the v0.1 `RESIZE` message was cut — see
+  `docs/SPEC.md` §6.2).
 - Independent per-client sizes are only available via **grouped sessions**
   (`new-session -t`), which is a separate, explicitly non-synced mode; out of scope.
 

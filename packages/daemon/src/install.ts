@@ -10,6 +10,7 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { addExtension, detectLegacySymlink, extensionEntries, removeExtension, resolveSettingsPath } from "./pi-settings.ts";
 
 export interface InstallOptions {
@@ -33,20 +34,28 @@ export interface InstallResult {
 }
 
 function defaultExtensionPath(): string {
-  return new URL("../../extension", import.meta.url).pathname.replace(/\/$/, "");
+  // fileURLToPath, never `.pathname`: the latter percent-encodes, so a checkout
+  // under a path with a space would install a path pi cannot load.
+  return fileURLToPath(new URL("../../extension", import.meta.url)).replace(/\/$/, "");
 }
 
-function readSettings(path: string): { data: unknown; raw: string | null } {
-  if (!existsSync(path)) return { data: {}, raw: null };
+function readSettings(path: string): unknown {
+  if (!existsSync(path)) return {};
   const raw = readFileSync(path, "utf8");
-  if (raw.trim() === "") return { data: {}, raw };
+  if (raw.trim() === "") return {};
+  let parsed: unknown;
   try {
-    return { data: JSON.parse(raw), raw };
+    parsed = JSON.parse(raw);
   } catch (err) {
     // Never rewrite a file we cannot parse: the user may have a JSONC-ish
     // settings file, and clobbering it would be worse than failing.
     throw new Error(`${path} is not valid JSON (${(err as Error).message}); refusing to modify it`);
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    // Same principle for a file that parses but is not a settings object.
+    throw new Error(`${path} is not a JSON object; refusing to modify it`);
+  }
+  return parsed;
 }
 
 /**
@@ -58,7 +67,7 @@ export function installPiExtension(opts: InstallOptions = {}): InstallResult {
   const home = opts.home ?? process.env.HOME ?? "";
   const settingsPath = opts.settingsPath ?? resolveSettingsPath(process.env, home);
   const extensionPath = (opts.extensionPath ?? defaultExtensionPath()).replace(/\/$/, "");
-  const { data } = readSettings(settingsPath);
+  const data = readSettings(settingsPath);
   const warning = detectLegacySymlink(home, data) ?? undefined;
 
   const edit = opts.remove ? removeExtension(data, extensionPath) : addExtension(data, extensionPath);

@@ -346,6 +346,11 @@ function attach(sessionId) {
   currentId = sessionId;
   attachedOnce = false;
   lastEpoch = 0;
+  // The previous session's terminal modes must not linger in xterm: clear the
+  // local view of them and hide the mouse control until the next snapshot says.
+  paneModes = { mouse: false, bracketedPaste: false, appCursor: false };
+  paneHasMouse = false;
+  els.mouse.classList.add("hidden");
   mode = "following";
   els.jump.classList.add("hidden");
   const s = sessions.find((x) => x.id === sessionId);

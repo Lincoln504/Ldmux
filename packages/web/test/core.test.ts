@@ -210,3 +210,26 @@ test("app.js replays modes, tracks epochs, and gates mouse behind a toggle", () 
   const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
   expect(html.includes('id="mouse"')).toBe(true);
 });
+
+test("switching sessions clears the previous session's modes", () => {
+  const app = readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  const attach = app.slice(app.indexOf("function attach("), app.indexOf("function loadHistory"));
+  // A leftover MOUSE mode would take drags away from the new session's scroll.
+  expect(attach).toContain("paneModes = {");
+  expect(attach).toContain("paneHasMouse = false");
+  expect(attach).toContain('els.mouse.classList.add("hidden")');
+  expect(attach).toContain("lastEpoch = 0");
+});
+
+test("an attach always re-baselines the epoch, so a recreated stream cannot look stale", () => {
+  // The server's per-stream counter restarts at 1 when a stream is recreated;
+  // the client must therefore treat caps/attach as a new baseline rather than
+  // comparing the new epoch against the old one and ignoring every snapshot.
+  const app = readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  const caps = app.slice(app.indexOf('case "caps"'), app.indexOf('case "snapshot"'));
+  expect(caps).toContain("lastEpoch = Number(msg.snapshotEpoch");
+  // and the guard must be per-session as well as per-epoch
+  const snap = app.slice(app.indexOf('case "snapshot"'), app.indexOf('case "error"'));
+  expect(snap).toContain("isStaleSnapshot(");
+  expect(snap).toContain("msg.sessionId !== currentId");
+});

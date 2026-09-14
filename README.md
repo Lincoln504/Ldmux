@@ -20,7 +20,7 @@ either. It is deliberately simpler and tmux-native:
   gmux pain point).
 
 > **Status: Phase 1 (local core) + Phase 2 (pi extension) done; Phase 3 (remote
-> transport) + the web client implemented.** 161 tests pass. The authoritative
+> transport) + the web client implemented.** 167 tests pass. The authoritative
 > design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision is
 > [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
 > [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
@@ -59,7 +59,7 @@ just cli list          # sessions (and their tmux names)
 just cli mirror <id>   # read-only desktop mirror (i3 workspace 10)
 just pair              # phone url + ldmux:// deep link + tailscale serve command
 just expose            # expose the loopback remote over the tailnet
-just link-extension    # enable the pi extension in ~/.pi/agent/settings.json
+just link-extension    # enable the pi extension in ~/.pi/agent/settings.json (then restart pi)
 bun run packages/daemon/src/probe.ts <tmux-socket> <session>   # stream a pane
 ```
 
@@ -70,7 +70,7 @@ devShell).
 ## Status
 
 **Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**161 tests**, `bun test`; `bun run typecheck` clean):
+tested (**167 tests**, `bun test`; `bun run typecheck` clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by

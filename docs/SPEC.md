@@ -460,19 +460,31 @@ helper suffices), and owner/families.
   message, 64 KiB per inbound WebSocket frame, and a 1 MiB cap on the output
   buffered while a client is attaching (exceeding it forces a resync).
 
-### 6.2 Message types
+### 6.2 Message types (implemented)
 
-Text (JSON): `HELLO {clientId?, lastSnapshotEpoch?, resumeToken?}`,
-`CAPS {protocolVersion, sessionId, cols, rows, snapshotEpoch, capabilities}`,
-`SNAPSHOT {…state fields…}`, `SESSION_STATE`, `FOLLOW {mode}`,
-`SCROLLBACK`, `PING`, `PONG`, `ERROR`, `CLOSE`.
+This is the shipped set (the source of truth is
+`packages/protocol/src/messages.ts`; behaviour is in `docs/REMOTE.md`).
+Everything below is a JSON **text** message except the last line.
 
-Binary: `OUTPUT` (raw pane bytes), `INPUT` (raw keystrokes), `RESIZE` (client
-viewport scale/pan — **not** a tmux resize; see ADR-0002).
+Client → server: `attach {sessionId}`, `input {data}`, `key {keys}`,
+`follow {mode}`, `scrollback {sessionId, lines?}`, `list`, `ping {id?}`.
 
-`SNAPSHOT`/`CAPS` state fields (fixes v0.1's fidelity gap): `cols`, `rows`,
-`cursor_x`, `cursor_y`, `alternate_on`, `pane_in_mode`, `bracketed_paste`,
-`mouse`, `app_cursor`, `snapshotEpoch`, all sourced from
+Server → client: `caps {protocolVersion, sessionId, cols, rows, snapshotEpoch,
+capabilities {controlMode, scrollback}}`, `snapshot {…state fields…, history?}`,
+`sessions {sessions[]}`, `pong {id?}`, `error {code, message}`.
+
+Binary: exactly one frame type is emitted — `OUTPUT` (raw pane bytes) — using the
+one canonical 8-byte header (`FrameType` in `frames.ts` carries reserved members
+for later revisions; no shipped code sends them, and the `flags` byte is 0).
+
+Deliberately **cut** from the v0.1 draft: `HELLO`/`resumeToken`,
+`SESSION_STATE`, a server-side `SCROLLBACK` frame, `CLOSE`, and the binary
+`INPUT`/`RESIZE` frames (input is JSON; the client never resizes).
+
+`snapshot`/`caps` state fields (fixes v0.1's fidelity gap — the client replays
+bracketed-paste, application-cursor and opt-in mouse from them): `cols`, `rows`,
+`cursorX`, `cursorY`, `alternateOn`, `paneInMode`, `bracketedPaste`, `mouse`,
+`appCursor`, `historySize`, `snapshotEpoch`, sourced from
 `tmux display-message -p '#{cursor_x} #{cursor_y} #{alternate_on} #{pane_in_mode} …'`.
 
 ### 6.3 Connection lifecycle (snapshot-then-stream)
@@ -482,18 +494,22 @@ viewport scale/pan — **not** a tmux resize; see ADR-0002).
 tmux persists, so replaying a bounded frame window adds cache/eviction/desync bugs
 for marginal benefit.
 
-1. Client → `HELLO {clientId?, lastSnapshotEpoch?}`.
-2. Server → `CAPS`; then `SNAPSHOT` (declared geometry + state fields).
-3. Client applies the snapshot, then resumes the live `OUTPUT` stream.
-4. Client → `INPUT`/`RESIZE`.
+1. Client → `attach {sessionId}` (the handshake is attach-triggered; there is no
+   separate hello step).
+2. Server → `caps`, then `snapshot` (declared geometry + state fields).
+3. Client repaints from the snapshot, replays the terminal modes, and resumes the
+   live `OUTPUT` stream. The server subscribed to the pane *before* capturing the
+   snapshot and queues the overlap, so no output is lost in the gap.
+4. Client → `input`/`key`.
 5. Heartbeats: the client sends an application-level `PING` every **20 s** and
    the server answers `PONG` (implemented). The server does **not** track missed
    beats or drop idle clients; a dead socket is detected by the write failing or
    the client's own reconnect loop. The app must be a **foreground service** so
    the heartbeat is not suspended (Android).
 
-Known fidelity gap: `capture-pane` + state fields does not fully restore every VT
-mode; the R2 phase-3 seam (optional server-side VT emulator) closes it.
+Known fidelity gap: `capture-pane` + state fields does not restore every VT mode
+(`bracketedPaste` is empty before tmux 3.8, so it reads as false); the optional
+server-side VT emulator seam would close it.
 
 ### 6.4 tmux attachment discipline (desktop mirror)
 

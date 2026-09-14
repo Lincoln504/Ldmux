@@ -36,6 +36,17 @@ function withEntries(settings: Record<string, unknown>, entries: string[]): Reco
 }
 
 /**
+ * An entry that is this same extension, reached from elsewhere (a previous
+ * checkout, or the discovery-directory symlink). Adding a path must not leave
+ * the old one behind: ldmux would then be loaded twice, and a moved checkout
+ * would keep a broken path live forever.
+ */
+function isSameExtension(entry: string, extensionPath: string): boolean {
+  const suffix = "/packages/extension";
+  return entry !== extensionPath && entry.replace(/\/+$/, "").endsWith(suffix) && extensionPath.endsWith(suffix);
+}
+
+/**
  * Add `extensionPath` to `pi.extensions`, preserving every other key and the
  * order of existing entries. Idempotent: adding a path that is already present
  * reports `changed: false` so the caller can skip the backup+write entirely.
@@ -49,13 +60,18 @@ export function addExtension(settings: unknown, extensionPath: string): Settings
   }
   const obj = asObject(settings) ?? {};
   const entries = extensionEntries(settings);
-  if (entries.includes(extensionPath)) {
+  const stale = entries.filter((entry) => isSameExtension(entry, extensionPath));
+  if (entries.includes(extensionPath) && stale.length === 0) {
     return { settings: obj, changed: false, note: "already present" };
   }
+  const kept = entries.filter((entry) => !isSameExtension(entry, extensionPath));
   return {
-    settings: withEntries(obj, [...entries, extensionPath]),
+    settings: withEntries(obj, [...kept.filter((e) => e !== extensionPath), extensionPath]),
     changed: true,
-    note: `added ${extensionPath}`,
+    note:
+      stale.length > 0
+        ? `replaced ${stale.join(", ")} with ${extensionPath}`
+        : `added ${extensionPath}`,
   };
 }
 

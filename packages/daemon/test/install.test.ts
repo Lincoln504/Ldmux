@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addExtension, detectLegacySymlink, extensionEntries, removeExtension, resolveSettingsPath } from "../src/pi-settings.ts";
@@ -74,8 +74,8 @@ test("install writes the entry, backs up the original, and is idempotent", () =>
   expect(JSON.parse(readFileSync(first.backup!, "utf8"))).toEqual({ model: "keep-me", packages: ["p"] });
   // Everything except the extension key survives the edit.
   expect(JSON.parse(readFileSync(settings, "utf8"))).toEqual({ model: "keep-me", packages: ["p"], extensions: [EXT] });
-  // Written owner-only: it can hold paths, treat it as private config.
-  expect(Bun.file(settings).size).toBeGreaterThan(0);
+  // This file already existed, so its mode is the user's, not ours.
+  expect(statSync(settings).mode & 0o777).toBe(0o644);
 
   const second = installPiExtension({ settingsPath: settings, extensionPath: EXT, home: dir });
   expect(second.action).toBe("unchanged");
@@ -93,11 +93,45 @@ test("dry-run reports the intended change without touching the file", () => {
   expect(readFileSync(path, "utf8")).toBe("{}\n");
 });
 
+test("an existing settings file keeps its own permissions", () => {
+  const path = join(dir, "existing-mode.json");
+  writeFileSync(path, JSON.stringify({ model: "m" }), { mode: 0o644 });
+  chmodSync(path, 0o644);
+  installPiExtension({ settingsPath: path, extensionPath: EXT, home: dir });
+  // We rewrite the contents, not the user's chosen access mode.
+  expect(statSync(path).mode & 0o777).toBe(0o644);
+});
+
+test("a settings file that is valid JSON but not an object is refused", () => {
+  const path = join(dir, "array.json");
+  writeFileSync(path, "[1, 2, 3]");
+  expect(() => installPiExtension({ settingsPath: path, extensionPath: EXT, home: dir })).toThrow(/not a JSON object/);
+  expect(readFileSync(path, "utf8")).toBe("[1, 2, 3]");
+});
+
+test("adding replaces a stale entry from another checkout", () => {
+  const old = "/old/place/packages/extension";
+  const before = { model: "keep", extensions: ["/unrelated/ext", old] };
+  const { settings: after, changed, note } = addExtension(before, EXT);
+  expect(changed).toBe(true);
+  expect(note).toContain("replaced");
+  // The moved checkout's path is gone; unrelated entries survive.
+  expect(after).toEqual({ model: "keep", extensions: ["/unrelated/ext", EXT] });
+  // A trailing slash on the old entry is still recognised.
+  expect(addExtension({ extensions: [`${old}/`] }, EXT).settings).toEqual({ extensions: [EXT] });
+  // …but a different extension's directory is not touched.
+  expect(addExtension({ extensions: ["/other/packages/thing"] }, EXT).settings).toEqual({
+    extensions: ["/other/packages/thing", EXT],
+  });
+});
+
 test("a fresh settings file is created with its directory", () => {
   const path = join(dir, "nested", "deeper", "settings.json");
   const res = installPiExtension({ settingsPath: path, extensionPath: EXT, home: dir });
   expect(res.action).toBe("added");
   expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ extensions: [EXT] });
+  // A file we create ourselves is owner-only: it is private config.
+  expect(statSync(path).mode & 0o777).toBe(0o600);
 });
 
 test("unparseable settings are refused, never clobbered", () => {
@@ -121,4 +155,14 @@ test("a legacy symlink entry produces a warning in the result", () => {
   writeFileSync(path, JSON.stringify({ extensions: [`${home}/.pi/agent/extensions/ldmux`] }));
   const res = installPiExtension({ settingsPath: path, extensionPath: EXT, home });
   expect(res.warning).toContain("discovery directory");
+});
+test("the default extension path is a real filesystem path, not a URL", () => {
+  const path = join(dir, "default-path.json");
+  const res = installPiExtension({ settingsPath: path, home: dir });
+  // `URL.pathname` percent-encodes; a checkout under a path with a space would
+  // then install a string pi cannot load. It must be a real path (fileURLToPath).
+  expect(res.extensionPath).not.toContain("%");
+  expect(res.extensionPath.startsWith("/")).toBe(true);
+  // …and it must actually be the extension package.
+  expect(existsSync(join(res.extensionPath, "package.json"))).toBe(true);
 });

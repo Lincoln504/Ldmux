@@ -16,6 +16,12 @@ the installed package:
 
 - **Entry point:** default export factory, sync or async: `export default function (pi: ExtensionAPI) {}` (async is awaited before `session_start`).
 - **Location:** `~/.pi/agent/extensions/<name>/index.ts`, `~/.pi/agent/extensions/*.ts` (global); `.pi/extensions/...` (project-local, after trust); or `settings.json` `packages`/`extensions`; or `pi -e <path>`.
+- **Installing ldmux:** `ldmux install-extension` adds an *absolute real path* to
+  `settings.json` `extensions`. A **restart of pi** is required — only
+  auto-discovered extensions can be hot-reloaded with `/reload`. Do **not**
+  symlink the package into `~/.pi/agent/extensions/`: jiti resolves the
+  extension's relative imports against the symlink path, so the buildless
+  cross-package imports (`../../protocol/src/*.ts`) fail to load.
 - A directory extension may declare its entry via `package.json`: `{ "pi": { "extensions": ["./src/index.ts"] } }`.
 - Loaded with **jiti** — `.ts` runs with **no build step**. Relative `.ts` imports work; Node builtins (`node:net`, `node:child_process`) work.
 - `/reload` hot-reloads auto-discovered extensions.
