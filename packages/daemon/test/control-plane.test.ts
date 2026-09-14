@@ -3,11 +3,19 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TmuxControlPlane } from "../src/tmux/control-plane.ts";
+import { killTmuxServer } from "./tmux-cleanup.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "ldmux-faketmux-"));
 const realPath = process.env.PATH ?? "";
 
+/**
+ * These tests spawn real tmux servers; a leaked one outlives the test run, so
+ * every file that creates one must reap it even when a test fails or times out.
+ */
+const SOCKET = `ldmux-cp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+
 afterAll(() => {
+  killTmuxServer(SOCKET);
   process.env.PATH = realPath;
   rmSync(dir, { recursive: true, force: true });
 });
@@ -47,8 +55,7 @@ test("hard deadline returns even if the pipes never close", async () => {
 
 test("a normal tmux command is unaffected", async () => {
   process.env.PATH = realPath;
-  const socket = `ldmux-cp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  const cp = new TmuxControlPlane(socket);
+  const cp = new TmuxControlPlane(SOCKET);
   await cp.ensureServer({ historyLimit: 1000 });
   await cp.newSession({ name: "t", cwd: tmpdir(), command: [], cols: 80, rows: 24 });
   const sessions = await cp.listSessions();
@@ -56,5 +63,4 @@ test("a normal tmux command is unaffected", async () => {
   expect(await cp.hasSession("t")).toBe(true);
   expect(await cp.hasSession("nope")).toBe(false);
   await cp.killSession("t");
-  Bun.spawnSync(["tmux", "-L", socket, "kill-server"]);
 });

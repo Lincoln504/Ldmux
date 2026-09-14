@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../../daemon/src/daemon.ts";
 import { daemonCall } from "../../protocol/src/rpc.ts";
+import { killTmuxServer } from "../../daemon/test/tmux-cleanup.ts";
 import { ensureDaemon, isChildAgentSession, ping, resolveConfig } from "../src/config.ts";
 
 const tmuxSocket = `ldmux-exttest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
@@ -20,7 +21,7 @@ const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
 
 afterAll(() => {
   daemon.stop();
-  tm("kill-server");
+  killTmuxServer(tmuxSocket);
   rmSync(stateDir, { recursive: true, force: true });
 });
 

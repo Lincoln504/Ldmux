@@ -1,0 +1,34 @@
+/**
+ * Test hygiene: reap the tmux server a test started.
+ *
+ * `tmux -L <name> kill-server` exiting non-zero is not enough — when the server
+ * has already exited on its own the *socket file* remains, and test runs
+ * accumulate hundreds of them in tmux's socket directory. So: kill, then unlink
+ * every path tmux could have used for that socket name.
+ *
+ * tmux resolves a socket under `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/`, **not** under
+ * `os.tmpdir()` (inside `nix develop` TMPDIR is a nix-shell directory, which is
+ * why an earlier version of this helper silently deleted nothing), and if
+ * TMUX_TMPDIR is itself `/tmp/tmux-<uid>` tmux nests one level deeper.
+ */
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+
+export function killTmuxServer(socket: string): void {
+  try {
+    Bun.spawnSync(["tmux", "-L", socket, "kill-server"], { stdout: "ignore", stderr: "ignore" });
+  } catch {
+    /* no tmux on PATH */
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const dir = `tmux-${uid}`;
+  const base = process.env.TMUX_TMPDIR || "/tmp";
+  const candidates = [join(base, dir), join(base, dir, dir), join("/tmp", dir, dir)];
+  for (const candidate of new Set(candidates)) {
+    try {
+      rmSync(join(candidate, socket), { force: true });
+    } catch {
+      /* nothing to unlink */
+    }
+  }
+}

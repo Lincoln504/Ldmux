@@ -1,11 +1,12 @@
 import { test, expect, afterAll } from "bun:test";
 import { TmuxControlClient } from "../src/tmux/control-client.ts";
+import { killTmuxServer } from "./tmux-cleanup.ts";
 
 const SOCK = `ldmux-test-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const tm = (...args: string[]) => Bun.spawnSync(["tmux", "-L", SOCK, ...args]);
 
 afterAll(() => {
-  tm("kill-server");
+  killTmuxServer(SOCK);
 });
 
 async function waitFor(predicate: () => boolean, ms = 4000): Promise<void> {

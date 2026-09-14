@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
+import { killTmuxServer } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import { decodeFrames, FrameType, type Frame } from "../../protocol/src/frames.ts";
 
@@ -13,7 +14,7 @@ await daemon.start();
 
 afterAll(() => {
   daemon.stop();
-  Bun.spawnSync(["tmux", "-L", tmuxSocket, "kill-server"]);
+  killTmuxServer(tmuxSocket);
   rmSync(stateDir, { recursive: true, force: true });
 });
 

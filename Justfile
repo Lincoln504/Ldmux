@@ -42,3 +42,14 @@ mirror id:
 link-extension:
     ln -sfn {{justfile_directory()}}/packages/extension ~/.pi/agent/extensions/ldmux
     @echo "linked: ~/.pi/agent/extensions/ldmux -> packages/extension"
+# Reap tmux servers left behind by interrupted test runs or smoke scripts
+# (never touches non-ldmux servers such as the user's own tmux sessions).
+clean-tmux:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="/tmp/tmux-$(id -u)"
+    for sock in $(ls "$dir" 2>/dev/null | grep -E '^(ldmux|poll-debug)' || true); do
+      tmux -L "$sock" kill-server 2>/dev/null || true
+      rm -f "$dir/$sock"
+    done
+    echo "reaped stray ldmux tmux servers"

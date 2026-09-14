@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
 import { Registry } from "../src/registry.ts";
+import { killTmuxServer } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 
@@ -16,7 +17,7 @@ const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
 
 afterAll(() => {
   daemon.stop();
-  tm("kill-server");
+  killTmuxServer(tmuxSocket);
   rmSync(stateDir, { recursive: true, force: true });
 });
 
