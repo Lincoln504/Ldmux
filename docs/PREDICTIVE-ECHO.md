@@ -31,18 +31,19 @@ In rough order of value per unit of work:
    `packages/daemon/src/tmux/control-plane.ts`).
 2. **Key encoding on the client** — turn key events into the byte sequence the
    *application* expects, which depends on terminal modes the pane is in (cursor
-   keys application mode, bracketed paste, mouse). **Not done**: we currently
-   send tmux `send-keys` *names* and let tmux encode them. That is convenient and
-   covers the common cases, but it is the server guessing at client-side state,
-   and it cannot express what a future predictive-echo path needs (it must know
-   the exact bytes it is predicting).
+   keys application mode, bracketed paste, mouse). **Deliberately not done, and
+   now judged unnecessary for the prediction work** — see §5.1. We send literal
+   text as bytes (`input`) and named keys (`key`), and tmux encodes the named
+   keys with full knowledge of the pane's real modes, which is strictly more
+   information than our snapshot carries.
 3. **Predictive local echo** — show the keystroke before the echo returns.
    **Not done**; design in §5.
 4. **Frame coalescing / adaptive rate** — do not repaint faster than the link
    can carry; do not let a flood starve input. `dooboxes`
    (`MOBILE_TERMINAL_PERFORMANCE.md:186-196`) specifies *max 50 Hz, min
    max(2 Hz, 1/2 RTT)*, explicitly so that buffer bloat cannot delay Ctrl-C.
-   **Not done** (we repaint per output frame).
+   **Partially done**: the fixed 60 Hz ceiling is implemented
+   (`TerminalController.scheduleRender`); the RTT-adaptive floor is not.
 5. **Atomic repaint on connect/resize** — a snapshot is applied as a unit so a
    late capture cannot paint over a newer one. **Done** (`snapshotEpoch`,
    `sendState`).
@@ -132,25 +133,37 @@ correction if a zoom gesture is ever added.
 
 ## 5. Design for ldmux
 
-### 5.1 Phase 1 — key encoding (prerequisite, no prediction)
+### 5.1 Phase 1 — nothing to build: the input/key split *is* the gate
 
-Move key encoding into the shared core: `KeyEncoder.encode(key, modes) -> bytes`
-using the modes the snapshot already carries (`appCursor`, `bracketedPaste`,
-plus the alternate-screen flag). Send the bytes as `input`, not as tmux key
-names. This is what makes vim/tmux/less behave correctly, and it is a hard
-prerequisite for prediction because prediction needs to know the **exact bytes**
-it is guessing ahead with.
+An earlier draft of this document proposed moving key encoding into the shared
+core as a prerequisite for prediction. On inspection that is the wrong call, for
+two reasons:
 
-Keys stay filterable: the encoder produces bytes, so the daemon's existing
-"never forward a leading dash to tmux" rule is no longer carrying safety weight
-for input.
+- tmux's `send-keys` with a *name* (`Up`, `C-c`, `Escape`) is encoded by tmux
+  against the pane's **real** current modes. Our snapshot carries `appCursor`
+  and `bracketedPaste` but not the whole truth, so a client-side encoder would
+  be encoding from stale, partial state and would be *less* correct, not more.
+- Prediction needs the **exact bytes** it is guessing ahead with. Our protocol
+  already separates the two cases that matter:
+  - `input {data}` — literal text typed by the user, byte-for-byte what the tty
+    will echo. **Predictable.**
+  - `key {keys[]}` — named keys, resolved server-side. **Unpredictable.**
+
+The existing split therefore *is* the predictable/unpredictable gate of §3.3,
+enforced by construction: control keys, arrows, function keys and anything else
+with special meaning travel as `key` and are never predicted. Prediction is
+restricted to literal text, which is exactly the safe subset — and the unsafe
+subset (password entry is text, though) is handled by the echo-detection
+heuristic in §7.
+
+This is worth stating plainly because it removes what looked like the largest
+piece of prerequisite work and replaces it with a rule about which message type
+may be predicted.
 
 ### 5.2 Phase 2 — predictive echo
 
-**Gate:** predict only when `isPredictable(key, modes)` and the pane is on the
-normal screen. Control keys, arrows, function keys, the alternate screen, and
-anything that looks like password input are never predicted — they take the
-round trip, which is exactly what mosh does.
+**Gate:** predict only `input` (literal text), never `key`; only on the normal
+screen; and only while the last prediction is believed (see confidence below).
 
 **Paint:** feed the predicted bytes into the local `libghostty-vt` engine
 immediately, so the character appears with the key press. Record it as a
@@ -183,12 +196,21 @@ starve input or delay Ctrl-C. Measure RTT from the existing ping/pong.
 
 ## 6. Measuring it (so "feels fast" is falsifiable)
 
-1. **Round-trip echo latency:** send a marker command (`printf`), timestamp at
-   send, timestamp at the first output frame containing the marker. Report
-   p50/p95. This is the dooboxes SLA metric and the one to regress-test.
+A harness now exists: `scripts/measure_latency.ts` (`just latency <sid> [runs]`).
+It types a unique marker through the real path (client → daemon → tmux → pty →
+shell echo → back) and reports the distribution.
+
+**Measured 2026-09-14, over `adb reverse` (loopback): p50 1.0 ms, p95 3.3 ms,
+max 3.3 ms over 12 runs.** That is a *floor*, not a mobile number — it excludes
+the network entirely, and its value is as a regression baseline for the client
+and daemon (if this moves, we broke something local). The number that matters is
+the same tool pointed at the tailnet address (`--url ws://…`), which is not yet
+measured.
+
+1. **Round-trip echo latency:** as above. This is the dooboxes SLA metric.
 2. **Key-to-paint latency (local):** timestamp at key dispatch and at the
-   Compose frame that contains the predicted character. This is the number
-   prediction improves; it should be single-digit ms.
+   Compose frame containing the predicted character — the number prediction
+   improves; not measured yet.
 3. **Mispredict rate:** mispredicts / predictions. If this is not well under a
    few percent the gate is wrong, and the honest answer is to predict less.
 

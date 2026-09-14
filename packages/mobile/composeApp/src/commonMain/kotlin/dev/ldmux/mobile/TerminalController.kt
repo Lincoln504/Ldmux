@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -27,6 +29,9 @@ class TerminalController(
 
     private val _frame = MutableStateFlow<TerminalFrame.Frame?>(null)
     val frame: StateFlow<TerminalFrame.Frame?> = _frame
+
+    private var lastRenderAt = 0L
+    private var renderScheduled = false
 
     /** Server-reported terminal modes (affects input encoding later). */
     var modes by mutableStateOf(TerminalModes())
@@ -57,9 +62,39 @@ class TerminalController(
         }
         attach.onOutput = { bytes ->
             engine.write(bytes, bytes.size)
-            _frame.value = engine.render()
+            scheduleRender()
         }
         attach.start(scope)
+    }
+
+    /**
+     * Repaint at most once per frame.
+     *
+     * Output arrives per write() from tmux, which under a flood (`cat` a big
+     * file, `yes`) is far faster than the display: rendering each frame would
+     * burn the main thread on work nobody can see, and a saturated main thread
+     * delays *input*, which is the one thing that must stay responsive. The
+     * first frame after an idle moment paints immediately (so an echoed
+     * keystroke is not delayed); anything arriving inside the window is
+     * coalesced into the next one. `dooboxes` calls the adaptive version of
+     * this an MVP requirement for exactly this reason (see docs/PREDICTIVE-ECHO.md).
+     */
+    private fun scheduleRender() {
+        val now = System.currentTimeMillis()
+        val since = now - lastRenderAt
+        if (since >= FRAME_MS) {
+            lastRenderAt = now
+            _frame.value = engine.render()
+            return
+        }
+        if (renderScheduled) return
+        renderScheduled = true
+        scope.launch {
+            delay(FRAME_MS - since)
+            renderScheduled = false
+            lastRenderAt = System.currentTimeMillis()
+            _frame.value = engine.render()
+        }
     }
 
     override fun sendKey(name: String) = attach.keys(listOf(name))
@@ -90,5 +125,8 @@ class TerminalController(
         const val DEFAULT_COLS = 120
         const val DEFAULT_ROWS = 40
         const val MAX_HISTORY_LINES = 5000
+        /** ~60 Hz. The ceiling; phase 3 in docs/PREDICTIVE-ECHO.md lowers it to
+         *  max(2 Hz, 1/2 RTT) when the link is slow. */
+        const val FRAME_MS = 16L
     }
 }

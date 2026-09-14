@@ -75,3 +75,8 @@ android-install: android
 # with the JNI shim, so it is pinned without needing a device).
 android-test:
     nix develop .#mobile --command bash -c 'cd packages/mobile && ./gradlew :composeApp:testDebugUnitTest'
+
+# Round-trip echo latency (the number predictive echo would improve).
+# Over adb reverse this is loopback; point --url at the tailnet address for real.
+latency sid *runs:
+    nix develop --command bun run scripts/measure_latency.ts --session {{sid}} --runs {{runs}}
