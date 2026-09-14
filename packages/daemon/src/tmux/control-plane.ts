@@ -80,6 +80,10 @@ export class TmuxControlPlane {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      // Explicit env, not the default: Bun.spawn otherwise uses the environment
+      // snapshot from process start, so a PATH changed at runtime (a stubbed
+      // `tmux` in tests, or a user's PATH fix) would be ignored.
+      env: process.env as Record<string, string>,
     });
     const timeoutErr = `tmux timed out after ${this.timeoutMs}ms`;
     // kill() returns a boolean for an already-exited child in Bun, but never

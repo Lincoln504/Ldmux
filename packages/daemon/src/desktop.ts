@@ -9,6 +9,8 @@
  * alacritty) is isolated in `openMirror` so it can be skipped headlessly.
  */
 
+import { run } from "./exec.ts";
+
 export interface MirrorOptions {
   /** Read-only client (default true): mirror, never steal input. */
   readOnly?: boolean;
@@ -54,16 +56,20 @@ export interface MirrorResult {
  * Open the mirror via i3 (X11). Returns `ok: false` with a detail message when
  * i3 is unavailable — the caller treats this as best-effort, never fatal.
  */
-export function openMirror(tmuxSocket: string, tmuxName: string, opts: MirrorOptions = {}): MirrorResult {
+export async function openMirror(
+  tmuxSocket: string,
+  tmuxName: string,
+  opts: MirrorOptions = {},
+): Promise<MirrorResult> {
   const workspace = opts.workspace ?? DEFAULT_MIRROR_WORKSPACE;
   const argv = mirrorArgv(tmuxSocket, tmuxName, opts);
   if (!process.env.DISPLAY) return { ok: false, workspace, argv, detail: "no DISPLAY (not an X11 session)" };
-  const i3 = Bun.spawnSync(["i3-msg", `workspace number ${workspace}`]);
-  if (i3.exitCode !== 0) {
+  const i3 = await run(["i3-msg", `workspace number ${workspace}`]);
+  if (i3.code !== 0) {
     return { ok: false, workspace, argv, detail: "i3-msg not available" };
   }
-  const exec = Bun.spawnSync(["i3-msg", `exec -- ${mirrorCommand(tmuxSocket, tmuxName, opts)}`]);
-  if (exec.exitCode !== 0) {
+  const exec = await run(["i3-msg", `exec -- ${mirrorCommand(tmuxSocket, tmuxName, opts)}`]);
+  if (exec.code !== 0) {
     return { ok: false, workspace, argv, detail: "i3 exec failed" };
   }
   return { ok: true, workspace, argv };

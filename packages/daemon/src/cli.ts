@@ -154,7 +154,7 @@ async function main() {
         workspace: Number(flag(rest, "--workspace") ?? DEFAULT_MIRROR_WORKSPACE),
         terminal: flag(rest, "--terminal"),
       };
-      const res = openMirror(ping.tmuxSocket, session.tmuxName, opts);
+      const res = await openMirror(ping.tmuxSocket, session.tmuxName, opts);
       if (!res.ok) {
         console.error(`ldmux: mirror not opened (${res.detail})`);
         console.error(`run manually: ${mirrorCommand(ping.tmuxSocket, session.tmuxName, opts)}`);
@@ -166,7 +166,7 @@ async function main() {
 
     case "pair": {
       const info = await daemonCall(sock, "remote_info", {});
-      const host = tailnetHost();
+      const host = await tailnetHost();
       if (!host) {
         console.error("ldmux: tailscale unavailable; using localhost");
       }
@@ -184,12 +184,12 @@ async function main() {
         console.log(`tailscale serve --bg --https=443 http://127.0.0.1:${info.port}`);
         break;
       }
-      const res = expose({ port: info.port });
+      const res = await expose({ port: info.port });
       if (!res.ok) {
         console.error(`ldmux: ${res.detail}`);
         process.exit(1);
       }
-      const pair = buildPairInfo({ host: tailnetHost() ?? "127.0.0.1", port: info.port, token: info.token });
+      const pair = buildPairInfo({ host: (await tailnetHost()) ?? "127.0.0.1", port: info.port, token: info.token });
       console.log(`exposed on the tailnet: ${pair.url}`);
       break;
     }

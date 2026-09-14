@@ -44,6 +44,17 @@ scope unilaterally. `docs/PI-EXTENSIONS.md` is the contract for the extension.
 - **Daemon is a separate process.** The pi extension must never host long-lived
   state; it supervises the daemon and talks to it over the Unix socket.
 - Both gates must pass before a commit: `bun test` and `bun run typecheck`.
+- **`Bun.spawn` ignores a mutated `process.env`** (it uses the environment
+  snapshot from process start), so `process.env.PATH = stubDir + ":" + real`
+  before spawning does *not* pick up a stub binary — pass `env` explicitly
+  (`env: process.env`) and the change is seen. `exec.ts` and the tmux control
+  plane both do this. A test that stubs a binary must also assert the stub
+  *ran* (e.g. a marker file): a missing-socket `tmux` also yields
+  `listSessions() === null`, so a timeout test can silently pass against the
+  real binary.
+- **`Bun.spawnSync` deadlocks when the process under test lives in the same
+  process** (it blocks the event loop the daemon needs). CLI/integration tests
+  must use async `Bun.spawn` and drain via `Response(proc.stdout).text()`.
 - Live tests spawn a scratch tmux server; clean it up with
   `killTmuxServer()` (`packages/daemon/test/tmux-cleanup.ts`), not a bare
   `tmux -L <unique> kill-server` — that leaves the socket file behind when the

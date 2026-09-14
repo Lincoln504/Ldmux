@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TmuxControlPlane } from "../src/tmux/control-plane.ts";
@@ -24,11 +24,18 @@ afterAll(() => {
  * A tmux that ignores SIGTERM and never exits: without the SIGKILL-and-deadline
  * escalation in run(), the caller (and, in the daemon, a whole connection)
  * would hang forever.
+ *
+ * The stub drops a marker file so a test can prove the stub was the binary that
+ * ran. Without that, a test "passes" even when the real tmux is used (a
+ * nonexistent socket also yields a null session list), which is exactly the
+ * vacuous state this file was in before.
  */
+const MARKER = join(dir, "stub-ran");
 function installStubbornFakeTmux(): void {
   const script = join(dir, "tmux");
-  writeFileSync(script, '#!/bin/sh\ntrap "" TERM\necho started\nsleep 300\n');
+  writeFileSync(script, `#!/bin/sh\ntouch ${MARKER}\ntrap "" TERM\necho started\nsleep 300\n`);
   chmodSync(script, 0o755);
+  rmSync(MARKER, { force: true });
   process.env.PATH = `${dir}:${realPath}`;
 }
 
@@ -38,8 +45,14 @@ test("a tmux that ignores SIGTERM still returns (bounded, code -1)", async () =>
   const started = Date.now();
   const sessions = await cp.listSessions();
   const elapsed = Date.now() - started;
+  // The stub really ran (otherwise this test would silently exercise real tmux).
+  expect(existsSync(MARKER)).toBe(true);
   // code -1 must read as "unknown", never as "no sessions".
   expect(sessions).toBeNull();
+  // The stub never exits on its own, so returning at all proves the timeout
+  // fired; the lower bound proves we waited for it rather than getting a fast
+  // failure from a real tmux with no server.
+  expect(elapsed).toBeGreaterThanOrEqual(300);
   // 300ms SIGTERM + 150ms grace + 500ms deadline is the worst case.
   expect(elapsed).toBeLessThan(3000);
 });
@@ -49,8 +62,11 @@ test("hard deadline returns even if the pipes never close", async () => {
   const cp = new TmuxControlPlane("test-socket", 100);
   const started = Date.now();
   const sessions = await cp.listSessions();
+  expect(existsSync(MARKER)).toBe(true);
   expect(sessions).toBeNull();
-  expect(Date.now() - started).toBeLessThan(2500);
+  const elapsed = Date.now() - started;
+  expect(elapsed).toBeGreaterThanOrEqual(100);
+  expect(elapsed).toBeLessThan(2500);
 });
 
 test("a normal tmux command is unaffected", async () => {

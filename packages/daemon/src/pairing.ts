@@ -7,6 +7,8 @@
  * address bar.
  */
 
+import { run } from "./exec.ts";
+
 export interface PairInput {
   /** Tailnet hostname (MagicDNS) or 100.x address. */
   host: string;
@@ -42,13 +44,11 @@ export function buildPairInfo(input: PairInput): PairInfo {
 }
 
 /** The machine's tailnet hostname, or undefined when tailscale is unavailable. */
-export function tailnetHost(): string | undefined {
+export async function tailnetHost(): Promise<string | undefined> {
+  const res = await run(["tailscale", "status", "--json"]);
+  if (res.code !== 0) return undefined;
   try {
-    const proc = Bun.spawnSync(["tailscale", "status", "--json"]);
-    if (proc.exitCode !== 0) return undefined;
-    const status = JSON.parse(proc.stdout.toString()) as {
-      Self?: { DNSName?: string; TailscaleIPs?: string[] };
-    };
+    const status = JSON.parse(res.out) as { Self?: { DNSName?: string; TailscaleIPs?: string[] } };
     const dns = status.Self?.DNSName?.replace(/\.$/, "");
     return dns || status.Self?.TailscaleIPs?.[0];
   } catch {
@@ -57,15 +57,15 @@ export function tailnetHost(): string | undefined {
 }
 
 /** Run `tailscale serve` to expose the loopback port (best-effort). */
-export function expose(input: { port: number; publicPort?: number }): { ok: boolean; detail?: string } {
+export async function expose(input: { port: number; publicPort?: number }): Promise<{ ok: boolean; detail?: string }> {
   const publicPort = input.publicPort ?? 443;
-  const proc = Bun.spawnSync([
+  const res = await run([
     "tailscale",
     "serve",
     "--bg",
     `--https=${publicPort}`,
     `http://127.0.0.1:${input.port}`,
   ]);
-  if (proc.exitCode !== 0) return { ok: false, detail: proc.stderr.toString().trim() || "tailscale serve failed" };
+  if (res.code !== 0) return { ok: false, detail: res.err.trim() || "tailscale serve failed" };
   return { ok: true };
 }
