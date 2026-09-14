@@ -205,6 +205,11 @@ export class LdmuxDaemon {
     }));
   }
 
+  /** The bound remote endpoint, when remote started successfully. */
+  remoteInfoForTest(): { hostname: string; port: number } {
+    return this.remoteInfo ?? { hostname: "127.0.0.1", port: 0 };
+  }
+
   /** Get-or-create the live stream for a terminal-backed session. */
   private streamFor(record: SessionRecord): PaneStream {
     let stream = this.streams.get(record.tmuxName);

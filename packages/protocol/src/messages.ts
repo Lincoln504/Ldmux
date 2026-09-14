@@ -1,19 +1,12 @@
 /**
- * JSON control messages carried as text frames (see frames.ts). Terminal data
- * travels as binary OUTPUT/INPUT frames; these are the control/handshake shapes.
+ * JSON control messages carried as text frames (see frames.ts). Pane output
+ * travels as binary OUTPUT frames; everything in the other direction is one of
+ * these JSON shapes.
  */
 
 import type { SessionRecord } from "./rpc.ts";
 
 export const PROTOCOL_VERSION = 1;
-
-export interface Hello {
-  type: "hello";
-  protocolVersion: number;
-  clientId?: string;
-  resumeToken?: string;
-  lastSnapshotEpoch?: number;
-}
 
 export interface Caps {
   type: "caps";
@@ -55,7 +48,6 @@ export interface Follow {
 export interface Ping { type: "ping"; id?: number }
 export interface Pong { type: "pong"; id?: number }
 export interface ErrorMessage { type: "error"; code: string; message: string }
-export interface Close { type: "close"; reason?: string }
 
 /** Remote client → server: subscribe this connection to one session's stream. */
 export interface Attach { type: "attach"; sessionId: string }
@@ -94,15 +86,19 @@ export interface ListSessions { type: "list" }
 /** Server → client: answer to `list`. */
 export interface SessionsMessage { type: "sessions"; sessions: SessionInfo[] }
 
+/**
+ * The control-message union. Only these shapes are sent in v1: the v0.1 draft's
+ * `HELLO`/`resumeToken`, `SESSION_STATE` and `CLOSE` were cut (docs/SPEC.md §6.2),
+ * so they are not modelled here — a type nothing can send or receive is a
+ * contract nobody can keep.
+ */
 export type ControlMessage =
-  | Hello
   | Caps
   | Snapshot
   | Follow
   | Ping
   | Pong
   | ErrorMessage
-  | Close
   | Attach
   | Input
   | KeyMessage

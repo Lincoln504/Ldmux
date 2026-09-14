@@ -16,6 +16,7 @@ import { encodeFrame, FrameType } from "../../protocol/src/frames.ts";
 import {
   PROTOCOL_VERSION,
   type Caps,
+  type ControlMessage,
   type SessionInfo,
   type Snapshot,
 } from "../../protocol/src/messages.ts";
@@ -145,9 +146,11 @@ export class RemoteServer {
 
   private async onMessage(ws: any, raw: any): Promise<void> {
     const data = ws.data as ConnData;
-    let msg: any;
+    // Typed as the protocol union: the server and the contract cannot drift,
+    // and every member of the union has a sender (there is no dead wire surface).
+    let msg: ControlMessage;
     try {
-      msg = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw));
+      msg = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw)) as ControlMessage;
     } catch {
       this.sendError(ws, "bad_json", "invalid JSON");
       return;

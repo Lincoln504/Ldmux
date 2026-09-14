@@ -129,3 +129,21 @@ test("stop is idempotent and safe to call twice", async () => {
   daemon.stop();
   expect(() => daemon.stop()).not.toThrow();
 });
+
+test("a remote bind failure only disables remote; local control keeps working", async () => {
+  // Take a port with one daemon, then make a second daemon want it.
+  const holder = freshDaemon();
+  await holder.start();
+  const takenPort = holder.remoteInfoForTest().port;
+  expect(takenPort).toBeGreaterThan(0);
+
+  const blocked = freshDaemon({ remotePort: takenPort });
+  await blocked.start(); // must not throw
+
+  // Local RPC is unaffected…
+  const res = await call<{ pong: boolean }>(blocked.socketPath, "ping");
+  expect(res.pong).toBe(true);
+  // …and remote_info reports that remote is unavailable rather than a lie.
+  const info = await call<{ port: number }>(blocked.socketPath, "remote_info");
+  expect(info.port).toBe(0);
+});
