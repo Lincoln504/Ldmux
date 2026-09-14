@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isValidSessionName, resolveLoginShell, TmuxControlPlane } from "../src/tmux/control-plane.ts";
@@ -100,4 +100,29 @@ test("resolveLoginShell prefers the user's login shell over the inherited $SHELL
   expect(resolveLoginShell(4242, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, passwd)).toBe("/bin/sh");
   // A passwd shell that does not exist is skipped.
   expect(resolveLoginShell(5, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, "u:x:5:5::/:/no/such/shell\n")).toBe("/bin/sh");
+});
+
+test("resizeWindow asks tmux for an exact size, clamped to sane bounds", async () => {
+  // The stub records its argv instead of talking to tmux, so the assertion is
+  // about the *command we construct*, not about tmux's own behaviour.
+  const log = join(dir, "argv.log");
+  const script = join(dir, "tmux");
+  writeFileSync(script, `#!/bin/sh\nprintf '%s ' "$@" >> ${log}\necho >> ${log}\n`);
+  chmodSync(script, 0o755);
+  rmSync(log, { force: true });
+  process.env.PATH = `${dir}:${realPath}`;
+
+  const cp = new TmuxControlPlane("test-socket", 2000);
+  await cp.resizeWindow("sess", 100, 30);
+  await cp.resizeWindow("sess", 1, 1);
+  await cp.resizeWindow("sess", 9999, 9999);
+
+  const lines = readFileSync(log, "utf8").trim().split("\n");
+  expect(lines.length).toBe(3);
+  expect(lines[0]).toContain("resize-window -t sess -x 100 -y 30");
+  // The floor keeps a pane usable (a client bugging out at 1x1 leaves a shell
+  // nobody can recover); the ceiling stops a runaway request from demanding a
+  // window whose capture would blow the stream's byte budget.
+  expect(lines[1]).toContain("-x 20 -y 5");
+  expect(lines[2]).toContain("-x 500 -y 300");
 });

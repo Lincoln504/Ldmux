@@ -8,8 +8,13 @@
  * the whole app.
  *
  * Frame format returned by nativeRender (little-endian):
- *   header (10 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
- *                      u8 cursorVisible, u8 cursorStyle, u8 reserved0, u8 reserved1
+ *   header (16 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *                      u8 cursorVisible, u8 cursorStyle,
+ *                      u8 defFgR, u8 defFgG, u8 defFgB,
+ *                      u8 defBgR, u8 defBgG, u8 defBgB
+ *                      (the terminal's default colours, so the client can paint
+ *                      the whole surface — letterbox included — in the same
+ *                      background the cells use)
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -27,7 +32,7 @@
 
 #define CELL_MAX_UTF8 16
 #define CELL_RECORD_MAX (9 + CELL_MAX_UTF8)
-#define FRAME_HEADER 10
+#define FRAME_HEADER 16
 
 typedef struct {
   GhosttyTerminal terminal;
@@ -189,6 +194,8 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   size_t p = FRAME_HEADER;
   uint8_t def_fg[3] = {colors.foreground.r, colors.foreground.g, colors.foreground.b};
   uint8_t def_bg[3] = {colors.background.r, colors.background.g, colors.background.b};
+  out[10] = def_fg[0]; out[11] = def_fg[1]; out[12] = def_fg[2];
+  out[13] = def_bg[0]; out[14] = def_bg[1]; out[15] = def_bg[2];
   /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
    * encoder is mandatory: pad every missing cell with a blank. */
   bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);

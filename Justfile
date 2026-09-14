@@ -70,3 +70,8 @@ native-android *abis:
 # Build and install the debug APK on the attached phone.
 android-install: android
     adb install -r packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
+
+# JVM unit tests for the shared logic (the frame decoder is the wire contract
+# with the JNI shim, so it is pinned without needing a device).
+android-test:
+    nix develop .#mobile --command bash -c 'cd packages/mobile && ./gradlew :composeApp:testDebugUnitTest'

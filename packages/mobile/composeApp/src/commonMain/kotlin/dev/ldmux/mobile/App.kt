@@ -6,10 +6,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
@@ -32,14 +36,17 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
 /** The whole palette. Minimal, dark, one accent — no decoration. */
@@ -89,10 +96,18 @@ expect object AppPrefs {
  * top bar. The panel carries everything: prev/next between open shells, the
  * extra keys, new shell, and settings. Side (left/right) is a setting.
  */
+/**
+ * How the app is laid out. Chosen with an explicit button — the sensor never
+ * rotates us, because a terminal that reflows under a table is worse than one
+ * that stays put until you say so.
+ */
+enum class UiMode { Landscape, Portrait }
+
 @Composable
 fun App() {
     var config by remember { mutableStateOf(AppPrefs.load()) }
     var showSettings by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(UiMode.Landscape) }
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
 
@@ -107,29 +122,47 @@ fun App() {
         }
     }
 
-    // One handle per session, so the sidebar's keys reach the visible terminal.
+    // One handle per session, so the chrome's keys reach the visible terminal.
     // A snapshot state map, so the panel recomposes once a surface registers.
     val handles = remember { mutableStateMapOf<String, TerminalHandle>() }
+    val portrait = mode == UiMode.Portrait
+    val currentHandle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
 
-    Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
-        if (config.panelLeft) SidePanel(pages, pagerState, scope, client, handles) { showSettings = true }
-        Box(Modifier.weight(1f).fillMaxHeight().background(Bg)) {
-            if (pages.isEmpty()) {
-                Text(
-                    "No sessions. Open a terminal with a tmux session, or tap +sh.",
-                    color = Dim,
-                    fontSize = 13.sp,
-                    modifier = Modifier.align(Alignment.Center).padding(16.dp),
-                )
-            } else {
-                HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
-                    val s = pages[page]
-                    val handle = rememberTerminalSurface(config, s.id, Modifier.fillMaxSize())
-                    LaunchedEffect(handle, s.id) { handles[s.id] = handle }
+    // Portrait *means* typing, so the keyboard belongs to it: if the user
+    // dismisses the keyboard we return to landscape rather than sitting in
+    // portrait with none. Debounced, because the inset also passes through zero
+    // while the activity rotates.
+    val density = LocalDensity.current
+    val imeInsets = WindowInsets.ime
+    var sawIme by remember { mutableStateOf(false) }
+    LaunchedEffect(density) {
+        snapshotFlow { imeInsets.getBottom(density) }
+            .debounce(600)
+            .collect { bottom ->
+                if (bottom > 0) {
+                    sawIme = true
+                } else if (sawIme && mode == UiMode.Portrait) {
+                    sawIme = false
+                    mode = UiMode.Landscape
                 }
             }
+    }
+
+    if (portrait) {
+        Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
+            TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth())
+            PortraitBar(currentHandle, onLandscape = { mode = UiMode.Landscape })
         }
-        if (!config.panelLeft) SidePanel(pages, pagerState, scope, client, handles) { showSettings = true }
+    } else {
+        Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
+            if (config.panelLeft) {
+                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }) { showSettings = true }
+            }
+            TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
+            if (!config.panelLeft) {
+                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }) { showSettings = true }
+            }
+        }
     }
 
     if (showSettings) {
@@ -147,8 +180,77 @@ fun App() {
 }
 
 /**
- * The side panel. No session list: just back/forward between the open shells,
- * the title of the current one, the keys, and the few actions.
+ * The terminal itself, laid out the same in both modes. Handles are registered
+ * here so the chrome (whichever chrome is showing) can drive the visible one.
+ */
+@Composable
+private fun TerminalArea(
+    config: LdmuxConfig,
+    pages: List<Session>,
+    pagerState: PagerState,
+    handles: MutableMap<String, TerminalHandle>,
+    typing: Boolean,
+    modifier: Modifier,
+) {
+    Box(modifier.background(Bg)) {
+        if (pages.isEmpty()) {
+            Text(
+                "No sessions. Open a terminal with a tmux session, or tap +sh.",
+                color = Dim,
+                fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.Center).padding(16.dp),
+            )
+        } else {
+            HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
+                val s = pages[page]
+                val handle = rememberTerminalSurface(config, s.id, typing, Modifier.fillMaxSize())
+                LaunchedEffect(handle, s.id) { handles[s.id] = handle }
+            }
+        }
+    }
+}
+
+/**
+ * The thin bar that rides directly above the keyboard in portrait. Deliberately
+ * sparse — the way back to landscape is the important control, and the rest is
+ * only the handful of keys a soft keyboard cannot produce.
+ */
+@Composable
+private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TinyBtn("⤢") { onLandscape() }
+        TinyBtn("Esc") { handle?.sendKey("Escape") }
+        TinyBtn("Tab") { handle?.sendKey("Tab") }
+        TinyBtn("◀") { handle?.sendKey("Left") }
+        TinyBtn("▲") { handle?.sendKey("Up") }
+        TinyBtn("▼") { handle?.sendKey("Down") }
+        TinyBtn("▶") { handle?.sendKey("Right") }
+        Spacer(Modifier.weight(1f))
+        TinyBtn("C-c") { handle?.sendKey("C-c") }
+        TinyBtn("🎤") { handle?.startVoice() }
+    }
+}
+
+@Composable
+private fun TinyBtn(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Bg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Text(label, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    }
+}
+
+/**
+ * The side panel (landscape only). No session list: just back/forward between
+ * the open shells, the title of the current one, the keys, and the few actions.
  */
 @Composable
 private fun SidePanel(
@@ -157,6 +259,7 @@ private fun SidePanel(
     scope: CoroutineScope,
     client: LdmuxClient,
     handles: Map<String, TerminalHandle>,
+    onKeyboard: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val current = pagerState.currentPage
@@ -199,6 +302,15 @@ private fun SidePanel(
             }
         }
 
+        // Pinned below the scrolling keys so they are never pushed off-screen
+        // (which is exactly when they are needed). The on-screen keyboard is
+        // opt-in and this is the only switch: nothing raises the IME by
+        // accident, and dictation does not need it at all.
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            KeyBtn("⌨") { onKeyboard() }
+            KeyBtn("🎤") { handle?.startVoice() }
+        }
+
         TextButton(onClick = { client.create("shell") }) { Text("+sh", color = Accent, fontSize = 13.sp) }
         TextButton(onClick = onSettings) { Text("settings", color = Accent, fontSize = 13.sp) }
     }
@@ -218,15 +330,20 @@ private fun NavArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun KeyBtn(label: String, onClick: () -> Unit) {
+private fun KeyBtn(label: String, active: Boolean = false, onClick: () -> Unit) {
     Box(
         Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(Bg)
+            .background(if (active) Accent else Bg)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
-        Text(label, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text(
+            label,
+            color = if (active) Bg else Fg,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+        )
     }
 }
 

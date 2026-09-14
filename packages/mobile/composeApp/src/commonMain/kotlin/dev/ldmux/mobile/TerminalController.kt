@@ -32,6 +32,12 @@ class TerminalController(
     var modes by mutableStateOf(TerminalModes())
         private set
 
+    /**
+     * Set by the platform surface: it owns the microphone, which the shared
+     * sidebar can only ask for. Null until the surface is composed.
+     */
+    var onStartVoice: (() -> Unit)? = null
+
     private val attach = AttachClient(config, sessionId)
 
     init {
@@ -60,6 +66,19 @@ class TerminalController(
     override fun sendText(text: String) = attach.input(text)
     override fun loadHistory() = attach.scrollback(MAX_HISTORY_LINES)
     override fun jumpToBottom() = attach.scrollback(0)
+
+    override fun startVoice() {
+        onStartVoice?.invoke()
+    }
+
+    /**
+     * The grid the surface can paint. This is the resize request: the daemon
+     * sizes the tmux pane to it, so the shell is always the right size for the
+     * screen showing it rather than fixed at creation.
+     */
+    fun setGrid(cols: Int, rows: Int) {
+        attach.setGrid(cols, rows)
+    }
 
     fun dispose() {
         attach.stop()

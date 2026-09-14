@@ -91,6 +91,23 @@ export const TMUX_COMMAND_TIMEOUT_MS = 15_000;
 /** Grace between the polite SIGTERM and the SIGKILL that follows it. */
 export const TMUX_KILL_GRACE_MS = 2000;
 
+/**
+ * Bounds for a client-requested pane size. The floor keeps a pane usable (a
+ * client bugs out at 1x1 and the shell is unrecoverable); the ceiling is well
+ * above any real display and stops a bad client from asking tmux for a window
+ * whose capture would blow the stream's byte budget.
+ */
+export const MIN_PANE_COLS = 20;
+export const MAX_PANE_COLS = 500;
+export const MIN_PANE_ROWS = 5;
+export const MAX_PANE_ROWS = 300;
+
+function clampSize(value: number, min: number, max: number): number {
+  const n = Math.trunc(value);
+  if (!Number.isFinite(n)) throw new Error(`invalid size: ${value}`);
+  return Math.min(max, Math.max(min, n));
+}
+
 /** tmux session names we accept (adopt/register): conservative and argv-safe. */
 const SESSION_NAME_RE = /^[A-Za-z0-9_-]{1,128}$/;
 export function isValidSessionName(name: string): boolean {
@@ -274,6 +291,29 @@ export class TmuxControlPlane {
   async sendKey(target: string, ...keys: string[]): Promise<void> {
     const { code, err } = await this.run(["send-keys", "-t", target, "--", ...keys]);
     if (code !== 0) throw new Error(`tmux send-keys failed: ${err.trim() || code}`);
+  }
+
+  /**
+   * Set the window (and so its single pane) to an exact size.
+   *
+   * ldmux runs with `window-size manual`, which means nothing else will ever
+   * change a pane's geometry — so the *client* has to, or every session stays
+   * at whatever size it was created with regardless of the screen showing it.
+   * This is the mobile counterpart of a terminal's own TIOCSWINSZ.
+   */
+  async resizeWindow(name: string, cols: number, rows: number): Promise<void> {
+    const c = clampSize(cols, MIN_PANE_COLS, MAX_PANE_COLS);
+    const r = clampSize(rows, MIN_PANE_ROWS, MAX_PANE_ROWS);
+    const { code, err } = await this.run([
+      "resize-window",
+      "-t",
+      name,
+      "-x",
+      String(c),
+      "-y",
+      String(r),
+    ]);
+    if (code !== 0) throw new Error(`tmux resize-window failed: ${err.trim() || code}`);
   }
 
   async capturePane(target: string, opts: CaptureOptions = {}): Promise<string> {

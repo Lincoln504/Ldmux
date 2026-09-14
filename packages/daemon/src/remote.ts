@@ -15,6 +15,7 @@
 import { encodeFrame, FrameType } from "../../protocol/src/frames.ts";
 import {
   PROTOCOL_VERSION,
+  type Attach,
   type Caps,
   type ControlMessage,
   type SessionInfo,
@@ -22,7 +23,7 @@ import {
 } from "../../protocol/src/messages.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { tokenMatches } from "./auth.ts";
-import type { PaneStream } from "./stream.ts";
+import type { PaneStream, StreamSnapshot } from "./stream.ts";
 import { extname, join, normalize } from "node:path";
 import { realpath } from "node:fs/promises";
 
@@ -184,8 +185,34 @@ export class RemoteServer {
           return;
         }
         case "attach":
-          await this.attach(ws, data, String(msg.sessionId ?? ""));
+          await this.attach(ws, data, String(msg.sessionId ?? ""), msg);
           return;
+        case "resize": {
+          if (!data.stream || !data.live || !data.record) {
+            this.sendError(ws, "not_attached", "attach before resizing");
+            return;
+          }
+          const wantCols = Math.trunc(Number(msg.cols));
+          const wantRows = Math.trunc(Number(msg.rows));
+          if (!Number.isFinite(wantCols) || !Number.isFinite(wantRows)) {
+            this.sendError(ws, "bad_size", `invalid size: ${String(msg.cols)}x${String(msg.rows)}`);
+            return;
+          }
+          const gen = data.attachGen;
+          try {
+            await data.stream.resize(wantCols, wantRows);
+          } catch (err) {
+            this.sendError(ws, "resize_failed", (err as Error).message);
+            return;
+          }
+          // The pane geometry changed, so every pixel the client holds is stale:
+          // answer with a fresh snapshot rather than a diff against a different
+          // grid.
+          const resized = await data.stream.snapshot();
+          if (data.disposed || data.attachGen !== gen) return;
+          this.sendState(ws, String(data.sessionId ?? ""), resized);
+          return;
+        }
         case "input": {
           if (data.stream) {
             const text = String(msg.data ?? "");
@@ -224,23 +251,7 @@ export class RemoteServer {
             if (data.disposed || data.attachGen !== gen) return;
             // The client repaints from scratch, so this is a Snapshot carrying
             // the `history` flag rather than a separate message shape.
-            this.sendJson(ws, {
-              type: "snapshot",
-              sessionId: String(data.sessionId ?? ""),
-              cols: snap.state.cols,
-              rows: snap.state.rows,
-              screen: snap.screen,
-              cursorX: snap.state.cursorX,
-              cursorY: snap.state.cursorY,
-              alternateOn: snap.state.alternateOn,
-              paneInMode: snap.state.paneInMode,
-              bracketedPaste: snap.state.bracketedPaste,
-              mouse: snap.state.mouse,
-              appCursor: snap.state.appCursor,
-              historySize: snap.state.historySize,
-              snapshotEpoch: snap.epoch,
-              history: true,
-            } satisfies Snapshot);
+            this.sendState(ws, String(data.sessionId ?? ""), snap, { history: true });
           } else {
             this.sendError(ws, "not_attached", "attach before requesting scrollback");
           }
@@ -254,7 +265,7 @@ export class RemoteServer {
     }
   }
 
-  private async attach(ws: any, data: ConnData, sessionId: string): Promise<void> {
+  private async attach(ws: any, data: ConnData, sessionId: string, msg: Attach): Promise<void> {
     const record = this.opts.getSession(sessionId);
     if (!record || !record.tmuxName) {
       this.sendError(ws, "unknown_session", `no terminal-backed session: ${sessionId}`);
@@ -312,12 +323,50 @@ export class RemoteServer {
     }
     data.unsubscribe = unsubscribe;
 
+    // The viewing client owns the geometry (a phone's viewport is the authority
+    // on its own screen size). Resize *before* the snapshot so the screen we
+    // send already matches the grid the client is about to paint, instead of
+    // sending 120x40 and letting it reflow one frame later.
+    const wantCols = Math.trunc(Number(msg.cols));
+    const wantRows = Math.trunc(Number(msg.rows));
+    if (Number.isFinite(wantCols) && Number.isFinite(wantRows) && wantCols > 0 && wantRows > 0) {
+      try {
+        await stream.resize(wantCols, wantRows);
+      } catch (err) {
+        // Not fatal: an unsized pane still beats no pane at all.
+        this.opts.log?.(`remote: resize on attach failed: ${(err as Error).message}`);
+      }
+    }
+
     const snap = await stream.snapshot();
     // Re-check after the await: the socket may have gone or a newer attach won.
     if (data.disposed || data.attachGen !== gen) {
       this.opts.releaseStream?.(record);
       return;
     }
+    this.sendState(ws, sessionId, snap);
+
+    data.live = true;
+    const pending = data.pending;
+    data.pending = [];
+    data.pendingBytes = 0;
+    for (const text of pending) this.sendOutput(ws, text);
+  }
+
+  private sendJson(ws: any, msg: unknown): void {
+    try {
+      ws.send(JSON.stringify(msg));
+    } catch {
+      /* client gone */
+    }
+  }
+
+  /**
+   * CAPS + SNAPSHOT for one capture. The pair is always sent together (the
+   * client reads the size from both) and is the answer to attach, resize and
+   * scrollback, so the three cannot drift apart.
+   */
+  private sendState(ws: any, sessionId: string, snap: StreamSnapshot, opts: { history?: boolean } = {}): void {
     const caps: Caps = {
       type: "caps",
       protocolVersion: PROTOCOL_VERSION,
@@ -342,23 +391,10 @@ export class RemoteServer {
       appCursor: snap.state.appCursor,
       historySize: snap.state.historySize,
       snapshotEpoch: snap.epoch,
+      ...(opts.history ? { history: true } : {}),
     };
     this.sendJson(ws, caps);
     this.sendJson(ws, snapshot);
-
-    data.live = true;
-    const pending = data.pending;
-    data.pending = [];
-    data.pendingBytes = 0;
-    for (const text of pending) this.sendOutput(ws, text);
-  }
-
-  private sendJson(ws: any, msg: unknown): void {
-    try {
-      ws.send(JSON.stringify(msg));
-    } catch {
-      /* client gone */
-    }
   }
 
   /** Send the current session list (the answer to list/new/kill). */

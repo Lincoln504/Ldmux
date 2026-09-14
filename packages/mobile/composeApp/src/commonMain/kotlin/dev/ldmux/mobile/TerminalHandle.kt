@@ -12,8 +12,22 @@ interface TerminalHandle {
     fun sendText(text: String)
     fun loadHistory()
     fun jumpToBottom()
+
+    /** Start dictation. The transcript is typed into the pane, keyboard or not. */
+    fun startVoice() {}
 }
 
-/** Create (or reuse) the native terminal surface for one session. */
+/**
+ * Create (or reuse) the native terminal surface for one session.
+ *
+ * [typing] is the app-wide typing mode: the surface focuses its input
+ * connection (raising the keyboard) and the platform flips to portrait while it
+ * is set.
+ */
 @Composable
-expect fun rememberTerminalSurface(config: LdmuxConfig, sessionId: String, modifier: Modifier): TerminalHandle
+expect fun rememberTerminalSurface(
+    config: LdmuxConfig,
+    sessionId: String,
+    typing: Boolean,
+    modifier: Modifier,
+): TerminalHandle

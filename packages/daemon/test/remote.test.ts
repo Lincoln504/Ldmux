@@ -347,3 +347,50 @@ test("a client opens and kills a session over the WebSocket (FR-10)", async () =
   expect((await call(daemon.socketPath, "ping") as { pong: boolean }).pong).toBe(true);
   ws.close();
 });
+
+test("attach carries the client's grid, and resize re-sizes the pane", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text } = await connect(info, info.token);
+
+  // The client states its own geometry on attach, so the first snapshot is
+  // already the size it will paint (no 120x40 frame followed by a reflow).
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id, cols: 60, rows: 20 }));
+  expect(
+    await waitFor(() => text.some((m) => m.type === "snapshot" && m.cols === 60 && m.rows === 20)),
+  ).toBe(true);
+
+  // A viewport change: the pane follows the client, and the answer is a full
+  // snapshot of the *new* grid (a diff computed against the old one would be
+  // garbage).
+  const before = text.filter((m) => m.type === "snapshot").length;
+  ws.send(JSON.stringify({ type: "resize", cols: 88, rows: 26 }));
+  expect(
+    await waitFor(() => text.some((m) => m.type === "caps" && m.cols === 88 && m.rows === 26)),
+  ).toBe(true);
+  expect(text.filter((m) => m.type === "snapshot").length).toBeGreaterThan(before);
+  ws.close();
+});
+
+test("resize before attach is refused; an absurd size is clamped, not rejected", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text } = await connect(info, info.token);
+
+  ws.send(JSON.stringify({ type: "resize", cols: 50, rows: 20 }));
+  expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "not_attached"))).toBe(true);
+
+  // A hostile/buggy size must not be a way to make tmux fail the session: it is
+  // clamped into the pane bounds and the attach still succeeds.
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id, cols: 100000, rows: 0 }));
+  expect(
+    await waitFor(() => text.some((m) => m.type === "snapshot" && m.cols <= 500 && m.rows >= 5)),
+  ).toBe(true);
+  ws.close();
+});

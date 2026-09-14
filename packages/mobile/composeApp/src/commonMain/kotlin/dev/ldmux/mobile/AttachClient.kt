@@ -38,6 +38,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     private var ws: DefaultClientWebSocketSession? = null
     private var job: Job? = null
     private var scope: CoroutineScope? = null
+    /** The grid the surface will paint. Sent with attach, and on every change. */
+    private var wantCols = 0
+    private var wantRows = 0
 
     var onSnapshot: ((cols: Int, rows: Int, screen: String, history: Boolean, modes: TerminalModes) -> Unit)? = null
     var onOutput: ((ByteArray) -> Unit)? = null
@@ -54,7 +57,16 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             try {
                 http.webSocket(config.wsUrl) {
                     ws = this
-                    send(Frame.Text("""{"type":"attach","sessionId":${quote(sessionId)}}"""))
+                    send(Frame.Text(
+                        buildJsonObject {
+                            put("type", "attach")
+                            put("sessionId", sessionId)
+                            if (wantCols > 0 && wantRows > 0) {
+                                put("cols", wantCols)
+                                put("rows", wantRows)
+                            }
+                        }.toString(),
+                    ))
                     try {
                         for (frame in incoming) {
                             when (frame) {
@@ -116,6 +128,28 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
     fun input(text: String) {
         sendControl(buildJsonObject { put("type", "input"); put("data", text) }.toString())
+    }
+
+    /**
+     * Tell the daemon the grid this client will paint. Sent with attach (so the
+     * first snapshot is already the right size) and again on every viewport
+     * change; the daemon answers a change with a fresh snapshot.
+     */
+    fun setGrid(cols: Int, rows: Int) {
+        if (cols <= 0 || rows <= 0) return
+        if (cols == wantCols && rows == wantRows) return
+        wantCols = cols
+        wantRows = rows
+        // Before the socket exists the size rides along with attach; the daemon
+        // would have no stream to resize yet anyway.
+        if (ws == null) return
+        sendControl(
+            buildJsonObject {
+                put("type", "resize")
+                put("cols", cols)
+                put("rows", rows)
+            }.toString(),
+        )
     }
 
     fun keys(keys: List<String>) {

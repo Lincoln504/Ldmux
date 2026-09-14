@@ -50,7 +50,24 @@ export interface Pong { type: "pong"; id?: number }
 export interface ErrorMessage { type: "error"; code: string; message: string }
 
 /** Remote client → server: subscribe this connection to one session's stream. */
-export interface Attach { type: "attach"; sessionId: string }
+export interface Attach {
+  type: "attach";
+  sessionId: string;
+  /**
+   * The grid the client will paint. The viewing client owns the pane geometry,
+   * so the daemon resizes tmux to this before snapshotting (a phone's viewport
+   * is the authority on its own screen size). Omitted = leave the pane alone.
+   */
+  cols?: number;
+  rows?: number;
+}
+
+/**
+ * Remote client → server: the viewport changed. Like `attach`'s cols/rows, this
+ * is the client stating its own geometry; the daemon applies it to tmux and
+ * answers with a fresh snapshot so the repaint matches.
+ */
+export interface Resize { type: "resize"; cols: number; rows: number }
 /** Remote client → server: type literal text into the attached pane. */
 export interface Input { type: "input"; data: string }
 /** Remote client → server: send named keys (Enter, C-c, Up, ...). */
@@ -114,6 +131,7 @@ export type ControlMessage =
   | Pong
   | ErrorMessage
   | Attach
+  | Resize
   | Input
   | KeyMessage
   | ScrollbackRequest

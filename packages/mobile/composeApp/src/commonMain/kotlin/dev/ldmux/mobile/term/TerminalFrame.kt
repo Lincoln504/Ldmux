@@ -5,14 +5,18 @@ package dev.ldmux.mobile.term
  * Pure Kotlin so it is unit-testable without a device.
  *
  * Layout (little-endian):
- *   header (10 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
- *                      u8 cursorVisible, u8 cursorStyle, u8 reserved0, u8 reserved1
+ *   header (16 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *                      u8 cursorVisible, u8 cursorStyle,
+ *                      u8 defFgR, u8 defFgG, u8 defFgB,
+ *                      u8 defBgR, u8 defBgG, u8 defBgB
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
  *                      u8 utf8[utf8Len]
  */
 object TerminalFrame {
+    /** Bytes of frame header preceding the cell records. */
+    const val HEADER_SIZE = 16
     const val FLAG_BOLD = 1 shl 0
     const val FLAG_ITALIC = 1 shl 1
     const val FLAG_UNDERLINE = 1 shl 2
@@ -42,6 +46,10 @@ object TerminalFrame {
         val cursorY: Int,
         val cursorVisible: Boolean,
         val cursorStyle: Int,
+        /** The terminal's default foreground, as 0xRRGGBB. */
+        val defaultFg: Int,
+        /** The terminal's default background, as 0xRRGGBB. */
+        val defaultBg: Int,
         /** Row-major, [rows] * [cols] cells. */
         val cells: List<Cell>,
     )
@@ -55,16 +63,18 @@ object TerminalFrame {
             (b[o + 2].toInt() and 0xff)
 
     fun decode(b: ByteArray): Frame {
-        require(b.size >= 10) { "frame too short: ${b.size}" }
+        require(b.size >= HEADER_SIZE) { "frame too short: ${b.size}" }
         val cols = u16(b, 0)
         val rows = u16(b, 2)
         val cursorX = u16(b, 4)
         val cursorY = u16(b, 6)
         val cursorVisible = b[8].toInt() != 0
         val cursorStyle = b[9].toInt() and 0xff
+        val defaultFg = rgb(b, 10)
+        val defaultBg = rgb(b, 13)
 
         val cells = ArrayList<Cell>(cols * rows)
-        var p = 10
+        var p = HEADER_SIZE
         for (i in 0 until cols * rows) {
             if (p + 9 > b.size) break
             val len = b[p].toInt() and 0xff
@@ -80,6 +90,6 @@ object TerminalFrame {
             p += len
             cells.add(Cell(text, fg, bg, flags))
         }
-        return Frame(cols, rows, cursorX, cursorY, cursorVisible, cursorStyle, cells)
+        return Frame(cols, rows, cursorX, cursorY, cursorVisible, cursorStyle, defaultFg, defaultBg, cells)
     }
 }

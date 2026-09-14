@@ -151,6 +151,15 @@ export class PaneStream {
   }
 
   /**
+   * Resize the session's window to the viewing client's grid. Deliberately not
+   * routed through the control connection: the window size is a server option
+   * (`window-size manual`), and every subscriber must see the same geometry.
+   */
+  async resize(cols: number, rows: number): Promise<void> {
+    await this.cp.resizeWindow(this.sessionName, cols, rows);
+  }
+
+  /**
    * Switch to `capture-pane` diff polling. Used automatically when control mode
    * cannot be established; exposed so the fallback is directly testable.
    */

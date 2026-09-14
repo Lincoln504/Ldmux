@@ -31,6 +31,12 @@ kotlin {
             implementation(libs.kotlinx.coroutines.android)
             implementation(libs.ktor.client.okhttp)
         }
+        // The frame decoder is pure Kotlin on purpose: the wire format between
+        // the JNI shim and the renderer is the one thing that silently rots when
+        // the C side changes, so it is pinned by a test that needs no device.
+        androidUnitTest.dependencies {
+            implementation(kotlin("test"))
+        }
     }
 }
 
