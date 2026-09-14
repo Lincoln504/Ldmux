@@ -5,6 +5,8 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "test": "bun test",
+    "daemon": "bun run packages/daemon/src/main.ts",
+    "cli": "bun run packages/daemon/src/cli.ts",
     "probe": "bun run packages/daemon/src/probe.ts"
   }
 }

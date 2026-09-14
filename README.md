@@ -51,4 +51,16 @@ bun run packages/daemon/src/probe.ts <tmux-socket> <session>   # stream a pane
 
 The live tests spawn a scratch tmux server (`tmux -L <unique>`) and exercise the
 control-mode transport end to end; they require `tmux` on `PATH` (provided by the
-devShell). Phase 1 is in progress — see [`docs/SPEC.md`](docs/SPEC.md) §13.
+devShell).
+
+## Status
+
+**Phase 1 in progress** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
+tested (23 tests, `bun test`):
+
+- `packages/protocol` — canonical frame codec + control message types.
+- `packages/daemon` — tmux control-mode parser + live client; control plane;
+  JSON session registry with reconciliation; Unix-socket JSON daemon; CLI
+  (`ping`/`list`/`new`/`send`/`key`/`capture`/`snapshot`/`kill`/`adopt`).
+
+Not yet: pi extension, tailnet transport/auth, mobile app, desktop mirror.

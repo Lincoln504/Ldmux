@@ -148,6 +148,13 @@ Byte stream from control mode (LF-delimited records):
   `display-message -p` (`cursor_x`, `cursor_y`, `alternate_on`, `pane_in_mode`,
   `bracketed_paste`, `mouse`, `app_cursor`, `history_size`, `pane_width`,
   `pane_height`). Carry `snapshotEpoch` (ADR-0004).
+- **Field availability:** `bracketed_paste_flag` and `pane_private_modes` are
+  tmux **3.8+**; on older builds (e.g. 3.7b in the devShell, 3.5a system) those
+  query fields are empty. Treat missing as `false`; the remaining fields
+  (`cursor_x/y`, `alternate_on`, `pane_in_mode`, `history_size`, dimensions) are
+  available. Full mode fidelity remains the R2 phase-3 seam.
+- **Alternate screen:** use `capture-pane -a` when `alternate_on` is true (or
+  unconditionally, since `-a` falls back to the normal screen).
 - **Fallback:** adaptive `capture-pane` diff polling (active 60–120 ms, idle
   backoff, stopped with no viewers) whenever the control client is unavailable.
 

@@ -1,0 +1,85 @@
+import { test, expect, afterAll } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LdmuxDaemon } from "../src/daemon.ts";
+import { call } from "../src/socket-client.ts";
+import type { SessionRecord } from "../src/registry.ts";
+
+const tmuxSocket = `ldmux-daemontest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+const stateDir = mkdtempSync(join(tmpdir(), "ldmux-daemon-"));
+const daemon = new LdmuxDaemon({ stateDir, tmuxSocket });
+daemon.start();
+
+const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
+
+afterAll(() => {
+  daemon.stop();
+  tm("kill-server");
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+async function waitFor(pred: () => Promise<boolean>, ms = 6000): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await pred()) return true;
+    await Bun.sleep(60);
+  }
+  return false;
+}
+
+test("ping reports the tmux socket", async () => {
+  const res = await call<{ pong: boolean; tmuxSocket: string }>(daemon.socketPath, "ping");
+  expect(res.pong).toBe(true);
+  expect(res.tmuxSocket).toBe(tmuxSocket);
+});
+
+test("new -> list -> send -> capture -> snapshot -> kill lifecycle", async () => {
+  const created = await call<{ session: SessionRecord }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+    title: "lifecycle",
+  });
+  const id = created.session.id;
+  expect(created.session.tmuxName.startsWith("ldmux-")).toBe(true);
+  expect(created.session.status).toBe("running");
+
+  const list = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
+  expect(list.sessions.some((s) => s.id === id)).toBe(true);
+
+  await call(daemon.socketPath, "send", { id, text: "printf 'lifecycle-ok\\n'" });
+  await call(daemon.socketPath, "send", { id, keys: ["Enter"] });
+  const sawOutput = await waitFor(async () => {
+    const { screen } = await call<{ screen: string }>(daemon.socketPath, "capture", { id });
+    return screen.includes("lifecycle-ok");
+  });
+  expect(sawOutput).toBe(true);
+
+  const snap = await call<{ state: { cols: number; rows: number } }>(daemon.socketPath, "snapshot", { id });
+  expect(snap.state.cols).toBe(120);
+  expect(snap.state.rows).toBe(40);
+
+  await call(daemon.socketPath, "kill", { id });
+  const after = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
+  expect(after.sessions.find((s) => s.id === id)?.status).toBe("dead");
+});
+
+test("reconcile marks an externally killed session dead", async () => {
+  const created = await call<{ session: SessionRecord }>(daemon.socketPath, "new", { kind: "shell", cwd: tmpdir() });
+  const id = created.session.id;
+  tm("kill-session", "-t", created.session.tmuxName);
+  const list = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
+  expect(list.sessions.find((s) => s.id === id)?.status).toBe("dead");
+});
+
+test("adopt registers an existing tmux session", async () => {
+  tm("new-session", "-d", "-s", "external-one", "-c", tmpdir());
+  const adopted = await call<{ session: SessionRecord }>(daemon.socketPath, "adopt", { tmuxName: "external-one" });
+  expect(adopted.session.tmuxName).toBe("external-one");
+  tm("kill-session", "-t", "external-one");
+});
+
+test("unknown method and unknown session are errors", async () => {
+  await expect(call(daemon.socketPath, "nope")).rejects.toThrow();
+  await expect(call(daemon.socketPath, "capture", { id: "does-not-exist" })).rejects.toThrow();
+});
