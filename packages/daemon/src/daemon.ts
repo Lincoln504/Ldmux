@@ -570,7 +570,14 @@ export class LdmuxDaemon {
       LDMUX_TMUX_NAME: tmuxName,
       LDMUX_TMUX_SOCK: this.cp.socket,
     };
-    await this.cp.newSession({ name: tmuxName, cwd, command, env, ...this.canonical });
+    await this.cp.newSession({
+      name: tmuxName,
+      cwd,
+      command,
+      env,
+      destroyUnattached: Boolean(p.ephemeral),
+      ...this.canonical,
+    });
     this.registry.upsert(record);
     this.registry.save();
     return { session: record };

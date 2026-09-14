@@ -57,6 +57,12 @@ export interface NewParams {
   title?: string;
   command?: string[];
   createdBy?: string;
+  /**
+   * Tie the session's life to its clients: it is destroyed when the last one
+   * detaches. This is how a terminal window opening a tmux session makes it
+   * appear while the window is open and removes it when it closes.
+   */
+  ephemeral?: boolean;
 }
 
 export interface SendParams {

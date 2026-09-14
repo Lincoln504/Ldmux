@@ -42,8 +42,19 @@ adb reverse tcp:7629 tcp:7629
 
 ## Status
 
-- [x] KMP/Compose shell that builds and installs; landscape; WebView terminal.
-- [x] Settings (host + token) persisted on device.
-- [ ] Native session list + swipe pager between shells (FR-8).
-- [ ] Control quarter / extra-keys parity (FR-7, FR-15).
+- [x] KMP/Compose shell that builds, installs and runs; landscape; WebView terminal.
+- [x] Settings (host + token + panel side) persisted on device.
+- [x] **No top bar**: a slim side panel (left or right, a setting) carries
+      back/forward between open shells, the extra keys, `+shell` and settings.
+- [x] Session list + `new`/`kill` over the daemon's WebSocket; one page per live
+      tmux session in a `HorizontalPager` (swipe, or the side arrows).
+- [x] Sidebar keys drive the terminal through a small JS bridge
+      (`window.ldmuxSendKey`); verified on device (a tapped `|` reached the pane).
+- [ ] Native terminal rendering (libghostty or an alternative) to replace the
+      WebView — see the research note in `docs/`. Until then the WebView is the
+      only terminal engine (ADR-0006).
 - [ ] Foreground service so the heartbeat survives Doze (SPEC §6.3).
+
+Verified on a real Motorola Edge 2024 (2026-09-14): landscape, panel left/right,
+back/forward, `+sh`, sidebar key reaching the shell, and `chrome=0` removing the
+web client's own top bar so there is exactly one chrome.

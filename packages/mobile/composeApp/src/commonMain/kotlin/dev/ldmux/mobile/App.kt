@@ -1,18 +1,24 @@
 package dev.ldmux.mobile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -32,6 +38,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /** The whole palette. Minimal, dark, one accent — no decoration. */
 val Bg = Color(0xFF0B0E14)
@@ -41,7 +49,7 @@ val Accent = Color(0xFF4C8DFF)
 val Surface = Color(0xFF141822)
 
 /** Where the daemon is and how to authenticate. Persisted by the platform. */
-data class LdmuxConfig(val host: String, val token: String) {
+data class LdmuxConfig(val host: String, val token: String, val side: String = "left") {
     val baseUrl: String get() = if (host.startsWith("http")) host else "http://$host"
 
     val wsUrl: String get() {
@@ -49,17 +57,23 @@ data class LdmuxConfig(val host: String, val token: String) {
         return if (token.isEmpty()) "$ws/ws" else "$ws/ws?token=$token"
     }
 
-    /** The web-client URL for one session (each pager page is one shell). */
+    val panelLeft: Boolean get() = side != "right"
+
+    /**
+     * The web-client URL for one session. `chrome=0` tells the client the native
+     * shell owns the chrome, so it renders only the terminal.
+     */
     fun urlFor(sessionId: String?): String {
         val params = buildList {
             if (token.isNotEmpty()) add("token=$token")
             if (sessionId != null) add("session=$sessionId")
+            add("chrome=0")
         }
-        return if (params.isEmpty()) "$baseUrl/" else "$baseUrl/?${params.joinToString("&")}"
+        return "$baseUrl/?${params.joinToString("&")}"
     }
 
     companion object {
-        val DEFAULT = LdmuxConfig(host = "localhost:7623", token = "")
+        val DEFAULT = LdmuxConfig(host = "localhost:7623", token = "", side = "left")
     }
 }
 
@@ -69,14 +83,10 @@ expect object AppPrefs {
     fun save(config: LdmuxConfig)
 }
 
-/** The terminal surface: a WebView hosting the shared web client. */
-@Composable
-expect fun TerminalSurface(url: String, modifier: Modifier)
-
 /**
- * The app: one full-height terminal, one page per session, swipe left/right to
- * switch (FR-8). A 36dp bar carries the current session and settings; everything
- * else lives in the terminal itself.
+ * Landscape app: a terminal filling the screen with a slim **side** panel — no
+ * top bar. The panel carries everything: prev/next between open shells, the
+ * extra keys, new shell, and settings. Side (left/right) is a setting.
  */
 @Composable
 fun App() {
@@ -90,36 +100,34 @@ fun App() {
     val pages = sessions.filter { it.attachable }
 
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
-    // Sessions come and go; never leave the pager on a page that no longer exists.
     LaunchedEffect(pages.size) {
         if (pages.isNotEmpty() && pagerState.currentPage >= pages.size) {
             pagerState.scrollToPage(pages.size - 1)
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
-        TopBar(
-            title = pages.getOrNull(pagerState.currentPage)?.let { "${it.kind} · ${it.label}" } ?: "no sessions",
-            count = pages.size,
-            current = pagerState.currentPage,
-            onNewShell = { client.create("shell") },
-            onNewPi = { client.create("pi") },
-            onSettings = { showSettings = true },
-            onRefresh = { client.start(scope) },
-        )
-        if (pages.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text("No sessions. Open one from the host, or pull to refresh.", color = Dim, fontSize = 13.sp)
-            }
-        } else {
-            HorizontalPager(
-                state = pagerState,
-                beyondViewportPageCount = 2,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-            ) { page ->
-                TerminalSurface(config.urlFor(pages[page].id), Modifier.fillMaxSize())
+    // One handle per session, so the sidebar's keys reach the visible terminal.
+    val handles = remember { mutableMapOf<String, TerminalHandle>() }
+
+    Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
+        if (config.panelLeft) SidePanel(pages, pagerState, scope, client, handles) { showSettings = true }
+        Box(Modifier.weight(1f).fillMaxHeight().background(Bg)) {
+            if (pages.isEmpty()) {
+                Text(
+                    "No sessions. Open a terminal with a tmux session, or tap +sh.",
+                    color = Dim,
+                    fontSize = 13.sp,
+                    modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                )
+            } else {
+                HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
+                    val s = pages[page]
+                    val handle = rememberTerminalSurface(config.urlFor(s.id), Modifier.fillMaxSize())
+                    LaunchedEffect(handle, s.id) { handles[s.id] = handle }
+                }
             }
         }
+        if (!config.panelLeft) SidePanel(pages, pagerState, scope, client, handles) { showSettings = true }
     }
 
     if (showSettings) {
@@ -136,39 +144,87 @@ fun App() {
     }
 }
 
+/**
+ * The side panel. No session list: just back/forward between the open shells,
+ * the title of the current one, the keys, and the few actions.
+ */
 @Composable
-private fun TopBar(
-    title: String,
-    count: Int,
-    current: Int,
-    onNewShell: () -> Unit,
-    onNewPi: () -> Unit,
+private fun SidePanel(
+    pages: List<Session>,
+    pagerState: PagerState,
+    scope: CoroutineScope,
+    client: LdmuxClient,
+    handles: Map<String, TerminalHandle>,
     onSettings: () -> Unit,
-    onRefresh: () -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth().height(36.dp).background(Surface).padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    val current = pagerState.currentPage
+    val currentId = pages.getOrNull(current)?.id
+    val handle = currentId?.let { handles[it] }
+    val title = pages.getOrNull(current)?.label ?: "—"
+
+    fun step(delta: Int) {
+        val target = (current + delta).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+        if (target != current) scope.launch { pagerState.animateScrollToPage(target) }
+    }
+
+    Column(
+        Modifier.width(190.dp).fillMaxHeight().background(Surface).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("ldmux", color = Fg, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
-        if (count > 1) Dots(count, current)
-        Text(title, color = Dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        TextButton(onClick = onNewShell) { Text("+shell", color = Accent, fontSize = 12.sp) }
-        TextButton(onClick = onNewPi) { Text("+pi", color = Accent, fontSize = 12.sp) }
-        TextButton(onClick = onRefresh) { Text("↻", color = Dim, fontSize = 14.sp) }
-        TextButton(onClick = onSettings) { Text("settings", color = Accent, fontSize = 12.sp) }
+        // Back and forth between the open shells.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            NavArrow("◀", enabled = current > 0) { step(-1) }
+            Text(
+                title,
+                color = Fg,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                maxLines = 1,
+                modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+            )
+            NavArrow("▶", enabled = current < pages.size - 1) { step(1) }
+        }
+
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SIDEBAR_KEYS.forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    row.forEach { (label, key) -> KeyBtn(label) { handle?.sendKey(key) } }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                KeyBtn("⤒") { handle?.loadHistory() }
+                KeyBtn("↓") { handle?.jumpToBottom() }
+            }
+        }
+
+        TextButton(onClick = { client.create("shell") }) { Text("+sh", color = Accent, fontSize = 13.sp) }
+        TextButton(onClick = onSettings) { Text("settings", color = Accent, fontSize = 13.sp) }
     }
 }
 
 @Composable
-private fun Dots(count: Int, current: Int) {
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-        repeat(count) { i ->
-            Box(
-                Modifier.size(6.dp).clip(CircleShape).background(if (i == current) Accent else Dim),
-            )
-        }
+private fun NavArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
+    Text(
+        glyph,
+        color = if (enabled) Accent else Dim.copy(alpha = 0.4f),
+        fontSize = 18.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    )
+}
+
+@Composable
+private fun KeyBtn(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Bg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text(label, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
     }
 }
 
@@ -176,13 +232,20 @@ private fun Dots(count: Int, current: Int) {
 private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: (LdmuxConfig) -> Unit) {
     var host by remember { mutableStateOf(current.host) }
     var token by remember { mutableStateOf(current.token) }
+    var side by remember { mutableStateOf(current.side) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Connection", color = Fg) },
         containerColor = Surface,
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("panel", color = Dim, fontSize = 12.sp)
+                    TextButton(onClick = { side = "left" }) { Text("left", color = if (side == "left") Accent else Dim) }
+                    TextButton(onClick = { side = "right" }) { Text("right", color = if (side == "right") Accent else Dim) }
+                }
+                Box(Modifier.height(4.dp))
                 OutlinedTextField(
                     value = host,
                     onValueChange = { host = it },
@@ -190,7 +253,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Box(Modifier.height(10.dp))
+                Box(Modifier.height(6.dp))
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
@@ -201,7 +264,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(LdmuxConfig(host.trim(), token.trim())) }) {
+            TextButton(onClick = { onSave(LdmuxConfig(host.trim(), token.trim(), side)) }) {
                 Text("save", color = Accent)
             }
         },

@@ -111,6 +111,9 @@ function urlParam(name) {
 }
 /** The native shell opens one WebView per session with ?session=<id>. */
 const wantedSession = urlParam("session");
+/** ?chrome=0: the native shell supplies the chrome, so hide ours. */
+const embedded = urlParam("chrome") === "0";
+if (embedded) document.getElementById("app").classList.add("embedded");
 
 function readToken() {
   const { token, fromUrl, path } = tokenFrom(location.href, location.hash, localStorage.getItem("ldmux.token"));
@@ -193,6 +196,17 @@ function onBinary(buf) {
 function send(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
+
+// Bridge for the native shell (packages/mobile): its sidebar buttons drive the
+// terminal, so the extra keys live in native chrome rather than in a WebView row.
+window.ldmuxSendKey = (name) => send({ type: "key", keys: [String(name)] });
+window.ldmuxSendText = (text) => send({ type: "input", data: String(text) });
+window.ldmuxLoadHistory = () => {
+  if (currentId && canPageHistory) send({ type: "scrollback", sessionId: currentId, lines: SCROLLBACK });
+};
+window.ldmuxJumpToBottom = () => {
+  if (term) term.scrollToBottom();
+};
 
 function setStatus(text, cls) {
   els.status.textContent = text;

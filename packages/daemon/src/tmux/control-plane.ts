@@ -68,6 +68,11 @@ export interface NewSessionOptions {
   rows?: number;
   /** Environment variables injected into the session's command (tmux -e). */
   env?: Record<string, string>;
+  /**
+   * Destroy the session when its last client detaches. Used for a session that
+   * exists only as long as a desktop terminal window is open on it.
+   */
+  destroyUnattached?: boolean;
 }
 
 export interface CaptureOptions {
@@ -248,6 +253,10 @@ export class TmuxControlPlane {
     if (opts.command?.length) args.push("--");
     const { code, err } = await this.run([...args, ...(opts.command ?? [])]);
     if (code !== 0) throw new Error(`tmux new-session failed: ${err.trim() || code}`);
+    if (opts.destroyUnattached) {
+      // Session-scoped so it never affects ldmux's own or other sessions.
+      await this.run(["set-option", "-t", opts.name, "destroy-unattached", "on"]);
+    }
   }
 
   async killSession(name: string): Promise<void> {

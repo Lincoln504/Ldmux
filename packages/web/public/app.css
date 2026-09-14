@@ -282,3 +282,7 @@ body {
   color: #04121f;
   font-weight: 700;
 }
+/* Embedded in the native shell (packages/mobile): the native sidebar carries
+   the chrome, so hide ours and keep the extra-keys row available. */
+#app.embedded #topbar { display: none; }
+#app.embedded #keybar { display: none; }
