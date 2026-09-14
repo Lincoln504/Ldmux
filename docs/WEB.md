@@ -74,13 +74,19 @@ The client speaks exactly [`docs/REMOTE.md`](REMOTE.md):
   shortcut — a horizontal drag in the terminal body belongs to the running
   program (dooboxes `MOBILE_TERMINAL_UX` §5).
 - **Mobile keys.** A Termux-style extra-keys bar (Esc, Tab, sticky Ctrl, arrows,
-  C-c, C-d, common punctuation) sits above the soft keyboard. `touch-action:
-  pan-y` on the screen so vertical panning reaches xterm's viewport (native
-  scrollback) while horizontal drags stay available to the edge strips.
+  C-c, C-d, common punctuation) sits above the soft keyboard, with a `≡` page for
+  symbols. Every button is at least 44×44 px and glyph buttons carry an
+  `aria-label`. `touch-action: pan-y` on the screen so vertical panning reaches
+  xterm's viewport (native scrollback) while horizontal drags stay available to
+  the edge strips.
 - **Scrollback.** Local xterm scrollback is capped at 1,000 lines (mobile memory
-  bound). Server-side scrollback paging is **not** in v1 (`scrollback: false` in
-  `caps`), so the phone can scroll what arrived since attach; tmux still holds
-  the full history for `ldmux capture --history` (bounded to 5,000 lines).
+  bound). Older history is fetched on demand: the `⤒` button (shown when `caps`
+  advertises `scrollback`) sends a `scrollback` request and the server answers
+  with a snapshot carrying up to 5,000 lines of history, which the client
+  repaints from scratch so the older lines land in scrollback.
+- **Unread markers.** The session list carries `lastActivityAt`; the client
+  remembers the timestamp it last looked at per session (`localStorage`) and
+  shows a dot for anything newer.
 - **Reconnect.** On socket close the client reconnects with capped exponential
   backoff, re-`list`s and re-`attach`es. A server `error` with code `resync` or
   `too_far_behind` triggers a fresh `attach` (snapshot), so a client that fell

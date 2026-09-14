@@ -17,6 +17,8 @@
 export interface Sanitizer {
   /** Feed a chunk of decoded pane text; returns the chunk with policy applied. */
   push(text: string): string;
+  /** Drop any partial sequence and return to the ground state (resync point). */
+  reset(): void;
 }
 
 const ESC = "\x1b";
@@ -59,6 +61,7 @@ export function createSanitizer(): Sanitizer {
   }
 
   return {
+    reset,
     push(text: string): string {
       let out = "";
       for (let i = 0; i < text.length; i++) {

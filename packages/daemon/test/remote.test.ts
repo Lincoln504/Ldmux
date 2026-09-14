@@ -188,3 +188,51 @@ test("a superseded attach does not leak a subscription or mix panes", async () =
   expect(await waitFor(() => output.join("").includes("ACTIVE_B"))).toBe(true);
   ws.close();
 });
+
+test("scrollback request returns paged history as a snapshot", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text, output } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+
+  // Ask before attaching: the server must say so rather than guess.
+  const bare = await connect(info, info.token);
+  bare.ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id }));
+  expect(await waitFor(() => bare.text.some((m) => m.type === "error"))).toBe(true);
+  expect(bare.text.find((m) => m.type === "error").code).toBe("not_attached");
+  bare.ws.close();
+
+  await call(daemon.socketPath, "send", { id: session.id, text: "echo HISTORY_MARKER", keys: ["Enter"] });
+  expect(await waitFor(() => output.join("").includes("HISTORY_MARKER"))).toBe(true);
+  ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id, lines: 500 }));
+  expect(
+    await waitFor(() =>
+      text.some((m) => m.type === "snapshot" && m.history === true && String(m.screen).includes("HISTORY_MARKER")),
+    ),
+  ).toBe(true);
+  const caps = text.find((m) => m.type === "caps");
+  expect(caps.capabilities.scrollback).toBe(true);
+  ws.close();
+}, 20000);
+
+test("session list carries an activity clock and a cwd-derived title", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const cwd = mkdtempSync(join(tmpdir(), "ldmux-titled-"));
+  const { session } = await call<{ session: { id: string; tmuxName: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd,
+  });
+  const { ws, text } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "list" }));
+  expect(await waitFor(() => text.some((m) => m.type === "sessions"))).toBe(true);
+  const info2 = text.find((m) => m.type === "sessions").sessions.find((s: any) => s.id === session.id);
+  expect(info2.title).toBe(cwd.split("/").pop());
+  expect(info2.lastActivityAt).toBeGreaterThan(0);
+  expect(info2.tmuxName).toBe(session.tmuxName);
+  ws.close();
+  rmSync(cwd, { recursive: true, force: true });
+}, 20000);

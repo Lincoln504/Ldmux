@@ -128,3 +128,44 @@ test("app.js is wired to the shared core (no duplicated decoder)", () => {
   expect(coreAt).toBeGreaterThan(-1);
   expect(coreAt).toBeLessThan(appAt);
 });
+test("unread markers compare activity against the last look", () => {
+  expect(core.isUnread(2000, 1000)).toBe(true);
+  expect(core.isUnread(1000, 1000)).toBe(false);
+  expect(core.isUnread(1000, 2000)).toBe(false);
+  // Unknown activity is not "new".
+  expect(core.isUnread(undefined, 0)).toBe(false);
+  expect(core.isUnread(0, 0)).toBe(false);
+  // Never looked at: any real activity is unread.
+  expect(core.isUnread(12345, undefined)).toBe(true);
+});
+
+test("the client wires history paging, unread dots, and the symbol page", () => {
+  const app = readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  expect(app.includes('type: "scrollback"')).toBe(true);
+  expect(app.includes("isUnread(")).toBe(true);
+  expect(app.includes("SYMBOLS")).toBe(true);
+  // Every key button is built through the labelled/aria-aware helper.
+  expect(app.includes("aria-label")).toBe(true);
+  const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  expect(html.includes('id="history"')).toBe(true);
+});
+
+test("the service worker precaches the core and revalidates assets", () => {
+  const sw = readFileSync(fileURLToPath(new URL("../public/sw.js", import.meta.url)), "utf8");
+  expect(sw.includes('"/core.js"')).toBe(true);
+  // Cache-first with no revalidation pinned stale clients to an old app.js.
+  expect(sw.includes("stale-while-revalidate")).toBe(true);
+  expect(sw.includes("refreshed")).toBe(true);
+  expect(sw.includes('url.pathname.startsWith("/ws")')).toBe(true);
+});
+
+test("the shipped client is plain JavaScript (no type annotations)", () => {
+  // app.js is loaded directly by the browser; a stray TS annotation is a
+  // syntax error there and must be caught here.
+  const app = readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  const core = readFileSync(fileURLToPath(new URL("../public/core.js", import.meta.url)), "utf8");
+  expect(app.includes(": Record<")).toBe(false);
+  expect(app.includes(": string")).toBe(false);
+  expect(core.includes(": string")).toBe(false);
+  expect(app.includes("interface ")).toBe(false);
+});

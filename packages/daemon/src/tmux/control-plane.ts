@@ -38,7 +38,8 @@ export interface NewSessionOptions {
 
 export interface CaptureOptions {
   escapes?: boolean;
-  history?: boolean;
+  /** `true` captures the full bounded history; a number captures that many lines. */
+  history?: boolean | number;
   /** Capture the alternate screen (`-a`) — required for full-screen TUIs. */
   alternate?: boolean;
 }
@@ -227,7 +228,10 @@ export class TmuxControlPlane {
     // `-a` captures the alternate screen, which is where full-screen TUIs live.
     if (opts.alternate) args.push("-a");
     // History is bounded: capturing 50k lines blocks the event loop (see docs/WEB.md).
-    if (opts.history) args.push("-S", `-${HISTORY_CAPTURE_LINES}`, "-E", "-");
+    if (opts.history) {
+      const lines = typeof opts.history === "number" ? opts.history : HISTORY_CAPTURE_LINES;
+      args.push("-S", `-${Math.max(1, Math.floor(lines))}`, "-E", "-");
+    }
     const { code, out, err } = await this.run(args);
     if (code !== 0) throw new Error(`tmux capture-pane failed: ${err.trim() || code}`);
     return out;

@@ -9,8 +9,10 @@
  *   - octal -> BYTES at the byte level, then a per-pane incremental UTF-8
  *     decoder so a multibyte character split across notifications is reassembled
  *     (and so raw UTF-8 payloads are not corrupted);
- *   - `%begin/%end/%error` correlation with a FIFO of pending commands;
- *   - `%output` and `%extended-output` (flow control);
+ *   - `%begin/%end/%error <ts> <seq> <flags>` correlation: the sequence number
+ *     is reported so the client can match a response to its own command (with
+ *     an ordered fallback for tmux builds that do not number responses);
+ *   - `%output` and `%extended-output` (flow control) plus `%pause`/`%continue`;
  *   - unknown `%...` notifications are forwarded for forward-compatibility.
  */
 
@@ -27,6 +29,10 @@ export interface ControlParserHandlers {
   onNotification?: (line: string) => void;
   /** A command response block closed by `%end` (ok) or `%error`. */
   onResponse?: (seq: number, ok: boolean, lines: string[]) => void;
+  /** tmux paused a pane because we fell behind (`%pause %<pane>`). */
+  onPause?: (pane: string) => void;
+  /** tmux resumed a pane (`%continue %<pane>`). */
+  onContinue?: (pane: string) => void;
   onExit?: () => void;
 }
 
@@ -103,6 +109,14 @@ export class ControlParser {
       this.emitOutput(pane, colon >= 0 ? rest.subarray(colon + 3) : new Uint8Array(0));
       return;
     }
+    if (startsWith(line, "%pause ")) {
+      this.handlers.onPause?.(this.paneId(line, 7));
+      return;
+    }
+    if (startsWith(line, "%continue ")) {
+      this.handlers.onContinue?.(this.paneId(line, 10));
+      return;
+    }
     if (startsWith(line, "%exit")) {
       this.handlers.onExit?.();
       return;
@@ -120,6 +134,11 @@ export class ControlParser {
   private sequence(line: Uint8Array): number {
     const n = Number(this.text.decode(line).split(" ")[2]);
     return Number.isFinite(n) ? n : -1;
+  }
+
+  /** The `%<pane>` argument of a `%pause`/`%continue` notification. */
+  private paneId(line: Uint8Array, from: number): string {
+    return this.text.decode(line.subarray(from)).trim();
   }
 }
 

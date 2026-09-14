@@ -90,8 +90,7 @@
     );
   }
 
-  /** Extract the pairing token from the URL, the fragment, or storage. */
-  function tokenFrom(urlString, hash, stored) {
+  /** Extract the pairing token from the URL, the fragment, or storage. */  function tokenFrom(urlString, hash, stored) {
     let fromUrl = "";
     try {
       const url = new URL(urlString);
@@ -101,6 +100,16 @@
     } catch {
       return { token: stored || "", fromUrl: "", path: "/" };
     }
+  }
+
+  /**
+   * Unread marker: activity newer than the last time the user looked. Absent
+   * timestamps never produce a marker (unknown is not "new").
+   */
+  function isUnread(lastActivityAt, seenAt) {
+    const activity = Number(lastActivityAt ?? 0);
+    const seen = Number(seenAt ?? 0);
+    return activity > 0 && activity > seen;
   }
 
   root.LdmuxCore = {
@@ -114,5 +123,6 @@
     cursorSequence,
     escapeHtml,
     tokenFrom,
+    isUnread,
   };
 })(typeof globalThis !== "undefined" ? globalThis : this);

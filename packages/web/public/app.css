@@ -136,6 +136,7 @@ body {
 /* Mobile extra-keys bar (Termux-style), above the soft keyboard. */
 #keybar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   overflow-x: auto;
   padding: 6px 8px;
@@ -145,12 +146,15 @@ body {
 }
 #keybar.hidden,
 #drawer.hidden,
-#token-overlay.hidden {
+#token-overlay.hidden,
+#topbar button.hidden {
   display: none;
 }
 #keybar button {
   flex: 0 0 auto;
-  min-width: 40px;
+  /* 44px minimum touch target (dooboxes MOBILE_TERMINAL_UX §3). */
+  min-width: 44px;
+  min-height: 44px;
   padding: 8px 10px;
   background: #1b2231;
   color: var(--fg);
@@ -158,9 +162,23 @@ body {
   border-radius: 8px;
   font-size: 13px;
 }
+#keybar button.more {
+  background: #232c3f;
+}
 #keybar button.active {
   background: var(--accent);
   color: #04121f;
+}
+
+/* Unread activity dot in the session drawer. */
+.s-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  vertical-align: middle;
 }
 
 #drawer {

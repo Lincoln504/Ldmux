@@ -59,3 +59,34 @@ test("live: geometry is pinned with window-size manual (no per-viewer reflow)", 
   expect(await client.command("display-message -p -t s3:0 '#{window_width}x#{window_height}'")).toEqual(["100x30"]);
   client.close();
 });
+test("live: concurrent commands are matched to their own responses by sequence", async () => {
+  tm("new-session", "-d", "-s", "s2", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile");
+  const client = await TmuxControlClient.connect(SOCK, "s2", {});
+  // Issued without awaiting in between: with a naive FIFO both would still work
+  // in order, but a sequence mismatch (tmux numbering) would desynchronize the
+  // stream, so assert each promise sees its own command's output.
+  const [a, b, c] = await Promise.all([
+    client.command("display-message -p 'AAA'"),
+    client.command("display-message -p 'BBB'"),
+    client.command(["display-message", "-p", "CCC"]),
+  ]);
+  expect(a).toEqual(["AAA"]);
+  expect(b).toEqual(["BBB"]);
+  expect(c).toEqual(["CCC"]);
+  // The stream is still correlated afterwards.
+  expect(await client.command("display-message -p '#{session_name}'")).toEqual(["s2"]);
+  client.close();
+  tm("kill-session", "-t", "s2");
+});
+
+test("live: the resume command used on %pause is accepted by tmux", async () => {
+  // If this syntax were wrong, a paused pane would never resume and the
+  // control stream would stall silently (the failure is swallowed by .catch).
+  tm("new-session", "-d", "-s", "s3", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile");
+  const client = await TmuxControlClient.connect(SOCK, "s3", {});
+  const pane = (await client.command("display-message -p '#{pane_id}'"))[0];
+  expect(pane.startsWith("%")).toBe(true);
+  await expect(client.command(["refresh-client", "-A", `${pane}:continue`])).resolves.toBeDefined();
+  client.close();
+  tm("kill-session", "-t", "s3");
+});

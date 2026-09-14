@@ -55,6 +55,8 @@ Client → server (JSON):
 | `{type:"input",data}` | type literal text into the pane |
 | `{type:"key",keys:["Enter"]}` | send named keys |
 | `{type:"follow",mode}` | scroll intent; **client-owned** (ADR-0004) |
+| `{type:"list"}` | list sessions (id, kind, title, cwd, status, activity) |
+| `{type:"scrollback",sessionId,lines?}` | re-send the pane **including paged history** |
 
 Server → client:
 
@@ -62,8 +64,10 @@ Server → client:
 | --- | --- |
 | `{type:"caps",...}` | negotiated geometry, `snapshotEpoch`, capabilities |
 | `{type:"snapshot",...}` | full visible screen + terminal state (repaint from this) |
+| `{type:"snapshot",history:true,...}` | answer to `scrollback`: the screen includes older lines |
+| `{type:"sessions",sessions:[...]}` | answer to `list` |
 | binary `Output` frame | live pane output (UTF-8) |
-| `{type:"error",code,message}` | `unknown_session`, `bad_json`, `resync`, `too_far_behind`, … |
+| `{type:"error",code,message}` | `unknown_session`, `session_dead`, `not_attached`, `bad_json`, `resync`, `too_far_behind`, `input_too_large`, … |
 
 ### Attach ordering (why output is not lost)
 
@@ -79,10 +83,44 @@ closes; the client reconnects and re-attaches, receiving a fresh snapshot. If
 the control stream dies, subscribers get `error{code:"resync"}` and the stream
 reconnects with bounded backoff (`stream.ts`).
 
+Inbound payloads are capped: 16 KiB of `input` data (a typed paste), 32 keys per
+`key` message, and 64 KiB per WebSocket frame.
+
+### Paused panes (`%pause`)
+
+tmux pauses a pane whose output is not being consumed (`refresh-client -f
+pause-after=2`). A paused pane's **queued output is discarded**, so the server
+treats `%pause` as a resync point: subscribers receive `error{code:"resync"}`
+(throttled to once a second) and the client re-attaches for a fresh snapshot.
+The server then resumes the pane with `refresh-client -A <pane>:continue`
+(throttled per pane).
+
+### Stream modes
+
+A stream is in one of two modes:
+
+| mode | how output is produced | when |
+| --- | --- | --- |
+| `control` | `tmux -C` notifications (lowest latency, exact bytes) | normally |
+| `polling` | `capture-pane` at ~250 ms, diffed row-wise | when control mode cannot be established (3 failed reconnects) |
+
+Polling is a fallback, not a peer: it has no VT model, so it rewrites changed
+rows in place and repaints only when the row count changes. Control mode is
+retried every 30 s while polling. The selected mode is internal — the wire
+protocol is identical either way.
+
+## Session listing
+
+`{type:"list"}` answers with `sessions[]`, each carrying `id`, `kind`, `title`
+(derived from the working directory when the record only has a default title),
+`cwd`, `status`, `tmuxName`, and `lastActivityAt` (epoch ms, from tmux
+`session_activity` for terminal sessions) so a client can show an unread marker.
+Listing is **read-only**: it reconciles without sweeping streams.
+
 ## Deliberately out of scope (v1)
 
 - Per-client resizing — geometry is canonical and pinned (ADR-0002); a phone
   renders a scaled/panned viewport over the canonical grid.
-- Server-side scrollback paging beyond the snapshot (`Scrollback` frame type is
-  reserved).
+- Unbounded scrollback: paging is bounded to 5,000 lines per `scrollback`
+  request and the local client buffer to 1,000 lines.
 - Multiplexing many sessions on one socket (open N sockets).

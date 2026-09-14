@@ -3,7 +3,7 @@
  * travels as binary OUTPUT/INPUT frames; these are the control/handshake shapes.
  */
 
-import type { SessionKind, SessionStatus } from "./rpc.ts";
+import type { SessionKind, SessionRecord, SessionStatus } from "./rpc.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -42,6 +42,8 @@ export interface Snapshot {
   appCursor: boolean;
   historySize: number;
   snapshotEpoch: number;
+  /** True when `screen` includes paged scrollback (answer to `scrollback`). */
+  history?: boolean;
 }
 
 /** Client-owned scroll intent (ADR-0004). The server never resolves line ids. */
@@ -62,16 +64,30 @@ export interface Input { type: "input"; data: string }
 /** Remote client → server: send named keys (Enter, C-c, Up, ...). */
 export interface KeyMessage { type: "key"; keys: string[] }
 
-/** A session as advertised to remote clients (subset of SessionRecord). */
-export interface SessionInfo {
-  id: string;
-  kind: SessionKind;
-  title: string;
-  cwd: string;
-  status: SessionStatus;
-  tmuxName: string;
-  piSessionId?: string;
+/** Remote client → server: re-send the pane including paged scrollback. */
+export interface ScrollbackRequest {
+  type: "scrollback";
+  sessionId: string;
+  /** Lines of history to request (server clamps to its own bound). */
+  lines?: number;
 }
+
+/**
+ * A session as advertised to remote clients: the registry record minus the
+ * daemon's internal bookkeeping, plus the freshness signal clients need.
+ * Derived from `SessionRecord` so the two cannot drift apart.
+ */
+export type SessionInfo = Pick<
+  SessionRecord,
+  "id" | "kind" | "title" | "cwd" | "status" | "tmuxName" | "piSessionId"
+> & {
+  /**
+   * Last observed activity, epoch ms — the freshness signal for unread markers
+   * (tmux `session_activity` for terminal sessions, record updates for RPC-only
+   * ones). Absent when unknown.
+   */
+  lastActivityAt?: number;
+};
 
 /** Remote client → server: list sessions. */
 export interface ListSessions { type: "list" }
@@ -90,5 +106,6 @@ export type ControlMessage =
   | Attach
   | Input
   | KeyMessage
+  | ScrollbackRequest
   | ListSessions
   | SessionsMessage;

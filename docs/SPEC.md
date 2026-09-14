@@ -311,19 +311,22 @@ connect/reconnect/scrollback and as an automatic fallback.
   `-CC` — it requires a tty (`tcgetattr failed` over a pipe); `-C` needs no PTY.
 - **Backpressure:** `refresh-client -f pause-after=2` in the control client;
   `%extended-output <pane> <age_ms> : <data>` is parsed as the paused form.
-  **Implemented reality:** `%pause`/`%continue` are *not* acted on; the
-  backpressure mechanism that exists is closing a WebSocket client whose
-  `bufferedAmount` exceeds 4 MiB (`too_far_behind` → reconnect → snapshot).
-  Treat explicit pause/resume as future work, not a current guarantee.
+  `%pause` is treated as a resync point (tmux discards a paused pane's queued
+  output) and the pane is resumed with `refresh-client -A <pane>:continue`,
+  throttled per pane; a client whose WebSocket buffer exceeds 4 MiB is closed
+  with `too_far_behind` so it reconnects into a fresh snapshot.
   (Measured: ~1.5 MB/s burst, no stalls, ~0 tmux CPU when idle.)
 - **Input:** `send-keys` over the control connection (no process per keystroke).
 - **Snapshots (reconnect):** `capture-pane -p -e` (plus `-a` on the alternate
   screen) + `display-message -p` state fields (see §6.2).
-- **Scrollback paging:** `capture-pane -S/-E` on demand — **bounded to 5,000
-  lines** and not exposed as a paging protocol in v1.
+- **Scrollback paging:** `capture-pane -S/-E` on demand, **bounded to 5,000
+  lines** (`scrollback` message → snapshot with `history: true`).
 - **Fallback:** if the control client dies/stalls (`%exit`, EOF), it is
-  **reconnected with bounded backoff**; adaptive `capture-pane` diff polling is
-  **not implemented** (snapshot-on-attach is the correctness backstop).
+  **reconnected with bounded backoff** (3 attempts); if control mode still cannot
+  be established the stream switches to **`capture-pane` row-diff polling**
+  (~250 ms, in-place row rewrites) and retries control mode every 30 s. A
+  `%pause` (queued output discarded because we fell behind) is a resync point;
+  the pane is resumed with `refresh-client -A <pane>:continue`.
 
 A `PaneStream` interface abstracts this; `pipe-pane` (raw bytes) and a
 server-side VT emulator (perfect snapshots) slot in behind it later.

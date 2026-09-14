@@ -55,9 +55,12 @@ Runtime shape:
 - Robust parser: byte→line on `\n` (never readline); octal→**bytes**; **per-pane
   incremental UTF-8 decoder**; `%begin/%end/%error <seq>` correlation; tolerate
   unknown `%…` lines; stateful sanitizer on by default (**implemented**: `packages/daemon/src/sanitize.ts`, one instance per pane, drops OSC 52, DCS/SOS/PM/APC, and device-status queries).
-- Fallback on `%exit`/stall/EOF: the control client is **reconnected with bounded
-  backoff** and subscribers resync from a snapshot. Adaptive `capture-pane` diff
-  polling is **not implemented** (documented here as the original intent only).
+- Fallback on `%exit`/stall/EOF: the control client is reconnected with bounded
+  backoff (3 attempts), and if control mode still cannot be established the
+  stream switches to `capture-pane` **row-diff polling** (~250 ms) so a viewer
+  keeps seeing the pane; control mode is retried every 30 s. A `%pause` (tmux
+  dropped queued output because we fell behind) is treated as a resync point and
+the pane is resumed with `refresh-client -A <pane>:continue`.
 - Pinned `window-size manual` + canonical geometry (ADR-0002).
 
 ## Consequences

@@ -88,3 +88,53 @@ test("closing a stream while it is connecting rejects cleanly (no leaked client)
   expect(stream.subscriberCount).toBe(0);
   await expect(stream.subscribe({ onOutput: () => {}, onReset: () => {} })).rejects.toThrow(/stream closed/);
 });
+
+test("polling fallback keeps the pane visible when control mode is gone", async () => {
+  const name = "ldmux-stream-poll";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const stream = new PaneStream(tmuxSocket, name, cp, 40);
+  const chunks: string[] = [];
+  const resets: string[] = [];
+  await stream.subscribe({ onOutput: (t) => chunks.push(t), onReset: (r) => resets.push(r) });
+
+  stream.startPolling("test");
+  expect(stream.mode).toBe("polling");
+  expect(resets).toContain("test");
+  // Input still works with no control connection (goes through the CLI).
+  await stream.inputText("printf 'POLL_MARKER\\n'");
+  await stream.sendKey(["Enter"]);
+  expect(await waitFor(() => chunks.join("").includes("POLL_MARKER"))).toBe(true);
+  stream.close();
+}, 20000);
+
+test("snapshotWithHistory returns more lines than the visible screen", async () => {
+  const name = "ldmux-stream-hist";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 40, rows: 6 });
+  const stream = new PaneStream(tmuxSocket, name, cp);
+  await stream.subscribe({ onOutput: () => {}, onReset: () => {} });
+  await stream.inputText("for i in $(seq 1 40); do echo LINE_$i; done");
+  await stream.sendKey(["Enter"]);
+  expect(await waitFor(async () => (await stream.snapshot()).screen.includes("LINE_40"))).toBe(true);
+
+  const plain = await stream.snapshot();
+  const paged = await stream.snapshotWithHistory(500);
+  expect(paged.history).toBe(true);
+  expect(plain.history).toBeUndefined();
+  // The 6-row pane shows the tail; the paged capture reaches further back.
+  expect(paged.screen.length).toBeGreaterThan(plain.screen.length);
+  expect(paged.screen).toContain("LINE_1\n");
+  stream.close();
+});
+
+test("history paging is clamped to the capture bound", async () => {
+  const name = "ldmux-stream-clamp";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 40, rows: 6 });
+  const stream = new PaneStream(tmuxSocket, name, cp);
+  await stream.subscribe({ onOutput: () => {}, onReset: () => {} });
+  const snap = await stream.snapshotWithHistory(10_000_000);
+  expect(snap.history).toBe(true);
+  stream.close();
+});

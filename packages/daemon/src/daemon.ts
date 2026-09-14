@@ -9,7 +9,7 @@
  */
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isValidSessionName, TmuxControlPlane } from "./tmux/control-plane.ts";
 import { Registry } from "./registry.ts";
@@ -25,6 +25,7 @@ import type {
   SessionRecord,
 } from "../../protocol/src/rpc.ts";
 import { DAEMON_PROTOCOL_VERSION } from "../../protocol/src/rpc.ts";
+import type { SessionInfo } from "../../protocol/src/messages.ts";
 
 export interface LdmuxDaemonOptions {
   /** Directory for ldmuxd.sock + registry.json + ldmuxd.lock. */
@@ -64,6 +65,12 @@ interface Conn {
 }
 
 const shortId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 10);
+
+/** Default titles say nothing; the working directory does. */
+function sessionTitle(record: SessionRecord): string {
+  if (record.title && record.title !== "shell" && record.title !== "pi") return record.title;
+  return basename(record.cwd) || record.title || record.id;
+}
 
 /** The bundled web client ships beside the daemon package. */
 function defaultWebRoot(): string {
@@ -158,11 +165,7 @@ export class LdmuxDaemon {
         port: this.opts.remotePort ?? 7623,
         token: this.token,
         getSession: (id) => this.registry.get(id),
-        listSessions: async () => {
-          // A read-only listing must not mutate stream state.
-          await this.reconcile({ sweep: false });
-          return this.registry.list();
-        },
+        listSessions: () => this.describeSessions(),
         acquireStream: (record) => this.streamFor(record),
         releaseStream: (record) => this.releaseStreamIfIdle(record.tmuxName),
         webRoot: this.opts.webRoot ?? defaultWebRoot(),
@@ -175,6 +178,31 @@ export class LdmuxDaemon {
       this.remote = undefined;
       this.remoteInfo = undefined;
     }
+  }
+
+  /**
+   * The session list as remote clients see it: registry metadata enriched with
+   * tmux's own activity clock (so a client can show an unread marker) and with
+   * a title derived from the working directory when the record has only the
+   * default one.
+   */
+  private async describeSessions(): Promise<SessionInfo[]> {
+    // A read-only listing must not mutate stream state.
+    await this.reconcile({ sweep: false });
+    const live = await this.cp.listSessions();
+    const activity = new Map<string, number>();
+    if (live) for (const s of live) activity.set(s.name, s.activity * 1000);
+    return this.registry.list().map((record) => ({
+      id: record.id,
+      kind: record.kind,
+      title: sessionTitle(record),
+      cwd: record.cwd,
+      status: record.status,
+      tmuxName: record.tmuxName,
+      piSessionId: record.piSessionId,
+      lastActivityAt:
+        (record.tmuxName ? activity.get(record.tmuxName) : undefined) ?? record.updatedAt,
+    }));
   }
 
   /** Get-or-create the live stream for a terminal-backed session. */

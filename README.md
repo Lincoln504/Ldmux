@@ -69,7 +69,7 @@ devShell).
 ## Status
 
 **Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**82 tests**, `bun test`; `bun run typecheck` clean):
+tested (**105 tests**, `bun test`; `bun run typecheck` clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by
@@ -98,7 +98,6 @@ tested (**82 tests**, `bun test`; `bun run typecheck` clean):
 
 See [`docs/PI-EXTENSIONS.md`](docs/PI-EXTENSIONS.md) for the pi extension contract.
 
-Not yet: native Android WebView shell, server-side scrollback paging, `%pause`/
-`%continue` handling, `capture-pane` diff-polling fallback.
+Not yet: native Android WebView shell.
 Design divergences from dooboxes/gmux are recorded in
 [`docs/adr/0006-divergences.md`](docs/adr/0006-divergences.md).

@@ -77,3 +77,22 @@ test("parser: forwards unknown notifications and %exit", () => {
   expect(notes).toEqual(["%session-changed $0 s1", "%window-add @1"]);
   expect(exited).toBe(true);
 });
+test("parser: reports %pause and %continue with their pane id", () => {
+  const pauses: string[] = [];
+  const continues: string[] = [];
+  const p = new ControlParser({ onPause: (pane) => pauses.push(pane), onContinue: (pane) => continues.push(pane) });
+  p.feed(enc("%pause %1\n%continue %1\n%output %1 hi\n%pause %2\n"));
+  expect(pauses).toEqual(["%1", "%2"]);
+  expect(continues).toEqual(["%1"]);
+});
+
+test("parser: an unsolicited response block carries its own sequence", () => {
+  const seen: Array<[number, boolean]> = [];
+  const p = new ControlParser({ onResponse: (seq, ok) => seen.push([seq, ok]) });
+  p.feed(enc("%begin 1 0 0\n%end 1 0 0\n%begin 1 4 0\n%end 1 4 0\n%begin 1 5 0\n%error 1 5 0\n"));
+  expect(seen).toEqual([
+    [0, true],
+    [4, true],
+    [5, false],
+  ]);
+});

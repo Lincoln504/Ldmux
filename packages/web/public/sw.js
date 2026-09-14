@@ -5,8 +5,19 @@
  */
 "use strict";
 
-const VERSION = "ldmux-v2";
-const SHELL = ["/", "/index.html", "/app.css", "/core.js", "/app.js", "/manifest.webmanifest", "/icon.svg", "/vendor/xterm.css", "/vendor/xterm.js", "/vendor/addon-fit.js"];
+const VERSION = "ldmux-v3";
+const SHELL = [
+  "/",
+  "/index.html",
+  "/app.css",
+  "/core.js",
+  "/app.js",
+  "/manifest.webmanifest",
+  "/icon.svg",
+  "/vendor/xterm.css",
+  "/vendor/xterm.js",
+  "/vendor/addon-fit.js",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(VERSION).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -39,14 +50,22 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Assets: cache-first.
+  // Assets: stale-while-revalidate. Serving the cached copy instantly keeps the
+  // app fast and offline-capable, while the background fetch refreshes it — so
+  // a client that missed a deploy heals on the next load instead of pinning an
+  // old app.js forever (cache-first without revalidation did exactly that).
   event.respondWith(
-    caches.match(event.request).then((hit) => hit || fetch(event.request).then((res) => {
-      if (res.ok) {
-        const copy = res.clone();
-        caches.open(VERSION).then((c) => c.put(event.request, copy));
-      }
-      return res;
-    })),
+    caches.match(event.request).then((hit) => {
+      const refreshed = fetch(event.request)
+        .then((res) => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(VERSION).then((c) => c.put(event.request, copy));
+          }
+          return res;
+        })
+        .catch(() => hit);
+      return hit || refreshed;
+    }),
   );
 });

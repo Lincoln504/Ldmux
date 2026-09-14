@@ -22,7 +22,7 @@ if (!globalThis.LdmuxCore) {
   throw new Error("ldmux: core.js failed to load (incomplete app shell)");
 }
 
-const { decodeFrames, escapeHtml, scrollMode, anchorFromBottom, anchoredTarget, cursorSequence, tokenFrom } =
+const { decodeFrames, escapeHtml, scrollMode, anchorFromBottom, anchoredTarget, cursorSequence, tokenFrom, isUnread } =
   globalThis.LdmuxCore;
 const OUTPUT_FRAME = globalThis.LdmuxCore.OUTPUT_FRAME;
 const SCROLLBACK = 1000; // mobile memory bound (dooboxes MOBILE_TERMINAL_PERFORMANCE §15.1)
@@ -37,6 +37,7 @@ const els = {
   term: $("term"),
   empty: $("empty"),
   jump: $("jump"),
+  history: $("history"),
   drawer: $("drawer"),
   sessions: $("sessions"),
   keybar: $("keybar"),
@@ -55,6 +56,31 @@ let ctrlSticky = false;
 // streaming output never moves the viewport.
 let mode = "following";
 let attachedOnce = false;
+let canPageHistory = false;
+// Unread markers: id -> the activity timestamp the user last looked at.
+const seen = new Map(Object.entries(readSeen()));
+
+function readSeen() {
+  try {
+    return JSON.parse(localStorage.getItem("ldmux.seen") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function markSeen(session) {
+  if (!session) return;
+  seen.set(session.id, session.lastActivityAt || Date.now());
+  persistSeen();
+}
+
+function persistSeen() {
+  // localStorage is the wrong place for a growing map; keep it bounded.
+  if (seen.size > 200) {
+    for (const [id] of [...seen].slice(0, seen.size - 200)) seen.delete(id);
+  }
+  localStorage.setItem("ldmux.seen", JSON.stringify(Object.fromEntries(seen)));
+}
 
 // ── token ────────────────────────────────────────────────────────────────
 function readToken() {
@@ -194,10 +220,19 @@ function onControl(msg) {
     case "caps":
       ensureTerm();
       term.resize(msg.cols, msg.rows);
+      canPageHistory = Boolean(msg.capabilities && msg.capabilities.scrollback);
+      els.history.classList.toggle("hidden", !canPageHistory);
       setTimeout(scaleToFit, 0);
       els.empty.style.display = "none";
       break;
     case "snapshot":
+      if (msg.history) {
+        // Paged history: repaint from scratch so the older lines land in
+        // scrollback, then follow the bottom (the client asked for older lines,
+        // not for a reading position).
+        attachedOnce = false;
+        mode = "following";
+      }
       applySnapshot(msg);
       break;
     case "error":
@@ -258,9 +293,11 @@ function renderSessions() {
     const li = document.createElement("li");
     li.className = s.id === currentId ? "active" : "";
     const attachable = s.status === "running" && s.tmuxName;
+    const dot =
+      s.id !== currentId && isUnread(s.lastActivityAt, seen.get(s.id)) ? '<span class="s-dot"></span>' : "";
     li.innerHTML =
-      `<div class="s-title"><span class="s-kind">${s.kind}</span>${escapeHtml(s.title || s.id)}</div>` +
-      `<div class="s-meta">${escapeHtml(s.cwd || "")} · ${s.status}${attachable ? "" : " · rpc"}</div>`;
+      `<div class="s-title"><span class="s-kind">${s.kind}</span>${escapeHtml(s.title || s.id)}${dot}</div>` +
+      `<div class="s-meta">${escapeHtml(s.cwd || "")} · ${escapeHtml(s.status)}${attachable ? "" : " · rpc"}</div>`;
     li.addEventListener("click", () => {
       if (attachable) attach(s.id);
       els.drawer.classList.add("hidden");
@@ -276,9 +313,15 @@ function attach(sessionId) {
   mode = "following";
   els.jump.classList.add("hidden");
   const s = sessions.find((x) => x.id === sessionId);
+  markSeen(s);
   els.title.textContent = s ? `${s.kind} · ${s.title}` : "ldmux";
   send({ type: "attach", sessionId });
   renderSessions();
+}
+
+/** Ask the server for older lines (answered as a `snapshot` with `history`). */
+function loadHistory() {
+  if (currentId && canPageHistory) send({ type: "scrollback", sessionId: currentId, lines: 2000 });
 }
 
 function cycle(delta) {
@@ -290,30 +333,53 @@ function cycle(delta) {
 }
 
 // ── extra keys ───────────────────────────────────────────────────────────
+// Termux-style: named keys, a sticky Ctrl, and a symbol page. Every button
+// carries a label (glyphs get an aria-label) and meets the 44px touch target.
 const KEYS = [
   ["Esc", () => send({ type: "key", keys: ["Escape"] })],
   ["Tab", () => send({ type: "key", keys: ["Tab"] })],
   ["Ctrl", () => toggleCtrl()],
-  ["↑", () => send({ type: "key", keys: ["Up"] })],
-  ["↓", () => send({ type: "key", keys: ["Down"] })],
-  ["←", () => send({ type: "key", keys: ["Left"] })],
-  ["→", () => send({ type: "key", keys: ["Right"] })],
+  ["↑", () => send({ type: "key", keys: ["Up"] }), "Up"],
+  ["↓", () => send({ type: "key", keys: ["Down"] }), "Down"],
+  ["←", () => send({ type: "key", keys: ["Left"] }), "Left"],
+  ["→", () => send({ type: "key", keys: ["Right"] }), "Right"],
   ["C-c", () => send({ type: "key", keys: ["C-c"] })],
   ["C-d", () => send({ type: "key", keys: ["C-d"] })],
   ["|", () => send({ type: "input", data: "|" })],
   ["-", () => send({ type: "input", data: "-" })],
   ["/", () => send({ type: "input", data: "/" })],
+  ["≡", () => toggleSymbols(), "More symbols", "more"],
 ];
+const SYMBOLS = "~!@#$%^&*()_+=[]{};:'\"<>,.?\\`";
+
+function keyButton(label, fn, ariaLabel, cls) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  if (ariaLabel) b.setAttribute("aria-label", ariaLabel);
+  if (cls) b.className = cls;
+  b.addEventListener("click", (e) => {
+    e.preventDefault();
+    fn();
+  });
+  return b;
+}
+
 function buildKeybar() {
-  for (const [label, fn] of KEYS) {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.addEventListener("click", (e) => {
-      e.preventDefault();
-      fn();
-    });
-    els.keybar.appendChild(b);
+  for (const [label, fn, ariaLabel, cls] of KEYS) els.keybar.appendChild(keyButton(label, fn, ariaLabel, cls));
+}
+
+let symbolsRow = null;
+function toggleSymbols() {
+  if (!symbolsRow) {
+    symbolsRow = document.createElement("div");
+    symbolsRow.id = "keybar-symbols";
+    symbolsRow.style.display = "contents";
+    for (const ch of SYMBOLS) {
+      symbolsRow.appendChild(keyButton(ch, () => send({ type: "input", data: ch })));
+    }
   }
+  if (symbolsRow.parentNode) symbolsRow.remove();
+  else els.keybar.appendChild(symbolsRow);
 }
 function toggleCtrl() {
   ctrlSticky = !ctrlSticky;
@@ -350,6 +416,7 @@ edgeSwipe($("swipe-left"));
 edgeSwipe($("swipe-right"));
 
 els.jump.addEventListener("click", jumpToBottom);
+els.history.addEventListener("click", loadHistory);
 
 // ── wiring ───────────────────────────────────────────────────────────────
 $("menu").addEventListener("click", () => {

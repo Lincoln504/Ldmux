@@ -196,6 +196,37 @@ export class RemoteServer {
           return;
         case "follow":
           return; // client-owned scroll (ADR-0004)
+        case "scrollback": {
+          if (data.stream) {
+            const lines = Number(msg.lines ?? 0);
+            const snap = await data.stream.snapshotWithHistory(
+              Number.isFinite(lines) && lines > 0 ? lines : undefined,
+            );
+            if (data.disposed) return;
+            // The client repaints from scratch, so this is a Snapshot carrying
+            // the `history` flag rather than a separate message shape.
+            this.sendJson(ws, {
+              type: "snapshot",
+              sessionId: String(data.sessionId ?? ""),
+              cols: snap.state.cols,
+              rows: snap.state.rows,
+              screen: snap.screen,
+              cursorX: snap.state.cursorX,
+              cursorY: snap.state.cursorY,
+              alternateOn: snap.state.alternateOn,
+              paneInMode: snap.state.paneInMode,
+              bracketedPaste: snap.state.bracketedPaste,
+              mouse: snap.state.mouse,
+              appCursor: snap.state.appCursor,
+              historySize: snap.state.historySize,
+              snapshotEpoch: snap.epoch,
+              history: true,
+            } satisfies Snapshot);
+          } else {
+            this.sendError(ws, "not_attached", "attach before requesting scrollback");
+          }
+          return;
+        }
         default:
           this.sendError(ws, "bad_message", `unknown type: ${String(msg.type)}`);
       }
@@ -275,7 +306,7 @@ export class RemoteServer {
       cols: snap.state.cols,
       rows: snap.state.rows,
       snapshotEpoch: snap.epoch,
-      capabilities: { controlMode: true, scrollback: false },
+      capabilities: { controlMode: true, scrollback: true },
     };
     const snapshot: Snapshot = {
       type: "snapshot",
