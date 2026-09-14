@@ -31,7 +31,7 @@ export interface ControlParserHandlers {
 }
 
 export class ControlParser {
-  private buf = new Uint8Array(0);
+  private buf: Uint8Array = new Uint8Array(0);
   private readonly paneDecoders = new Map<string, TextDecoder>();
   private readonly text = new TextDecoder("utf-8", { fatal: false });
   private inBlock = false;

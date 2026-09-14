@@ -77,3 +77,14 @@ test("PaneStream survives subscriber churn (ref-counted control client)", async 
   unsubB();
   stream.close();
 });
+test("closing a stream while it is connecting rejects cleanly (no leaked client)", async () => {
+  const name = "ldmux-stream-c";
+  cp.ensureServer();
+  cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const stream = new PaneStream(tmuxSocket, name, cp);
+  const pending = stream.subscribe({ onOutput: () => {}, onReset: () => {} });
+  stream.close("session ended");
+  await expect(pending).rejects.toThrow(/stream closed/);
+  expect(stream.subscriberCount).toBe(0);
+  await expect(stream.subscribe({ onOutput: () => {}, onReset: () => {} })).rejects.toThrow(/stream closed/);
+});

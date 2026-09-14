@@ -68,12 +68,23 @@ export class TmuxControlPlane {
     }
   }
 
-  listSessions(): TmuxSession[] {
-    const { out } = this.run([
+  /**
+   * List live tmux sessions.
+   *
+   * Returns `null` when the tmux state is *unknown* (the probe failed), which
+   * is deliberately distinct from `[]` ("definitely no sessions"). Callers that
+   * reconcile external state must never treat `null` as "everything died".
+   */
+  listSessions(): TmuxSession[] | null {
+    const { code, out, err } = this.run([
       "list-sessions",
       "-F",
       "#{session_name}|#{session_windows}|#{session_created}|#{session_attached}|#{session_activity}",
     ]);
+    if (code !== 0) {
+      // A missing server is a legitimate empty world; anything else is unknown.
+      return /no server running|no sessions|failed to connect/i.test(err) ? [] : null;
+    }
     return out
       .split("\n")
       .filter(Boolean)

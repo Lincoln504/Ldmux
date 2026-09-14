@@ -30,7 +30,7 @@ test("handles an empty payload", () => {
 
 test("json frames round-trip", () => {
   const { frames } = decodeFrames(encodeJsonFrame(FrameType.Hello, { type: "hello", protocolVersion: 1 }));
-  expect(decodeJson(frames[0])).toEqual({ type: "hello", protocolVersion: 1 });
+  expect(decodeJson<{ type: string; protocolVersion: number }>(frames[0])).toEqual({ type: "hello", protocolVersion: 1 });
 });
 
 test("rejects oversized payloads", () => {

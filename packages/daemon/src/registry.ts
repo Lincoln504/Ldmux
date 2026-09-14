@@ -101,11 +101,14 @@ export class Registry {
    * Reconcile terminal-backed records against the live tmux session set.
    * Records with no tmuxName (RPC-only pi sessions) are left untouched.
    *
+   * @param liveTmuxNames live session names, or `null` when the probe failed
+   *   (unknown state: never mark anything dead on unknown).
    * @returns ids marked dead and live tmux sessions unknown to the registry.
    */
-  reconcile(liveTmuxNames: Set<string>, now = Date.now()): { dead: string[]; adopted: string[] } {
+  reconcile(liveTmuxNames: Set<string> | null, now = Date.now()): { dead: string[]; adopted: string[] } {
     const dead: string[] = [];
     const adopted: string[] = [];
+    if (!liveTmuxNames) return { dead, adopted };
     const known = new Set<string>();
     for (const record of this.sessions.values()) {
       if (!record.tmuxName) continue; // RPC-only; liveness is the pi process

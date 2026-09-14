@@ -9,6 +9,7 @@
 
 const OUTPUT_FRAME = 0x10;
 const HEADER_SIZE = 8;
+const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
 const SCROLLBACK = 5000;
 const PING_MS = 20000;
 
@@ -89,14 +90,26 @@ function onBinary(buf) {
   merged.set(tail);
   merged.set(bytes, tail.length);
   let offset = 0;
+  let poisoned = false;
   while (merged.length - offset >= HEADER_SIZE) {
     const view = new DataView(merged.buffer, merged.byteOffset + offset, HEADER_SIZE);
     const type = view.getUint8(0);
     const length = view.getUint32(4);
+    // Same DoS guard as the wire codec: never let a bogus length grow the tail.
+    if (length > MAX_FRAME_PAYLOAD) {
+      poisoned = true;
+      break;
+    }
     if (merged.length - offset - HEADER_SIZE < length) break;
     const payload = merged.subarray(offset + HEADER_SIZE, offset + HEADER_SIZE + length);
     if (type === OUTPUT_FRAME && term) term.write(new TextDecoder().decode(payload));
     offset += HEADER_SIZE + length;
+  }
+  if (poisoned) {
+    setStatus("protocol error", "err");
+    tail = new Uint8Array(0);
+    send({ type: "list" });
+    return;
   }
   tail = merged.subarray(offset);
 }
@@ -132,7 +145,14 @@ function connect() {
   });
 
   ws.addEventListener("message", (ev) => {
-    if (typeof ev.data === "string") return onControl(JSON.parse(ev.data));
+    if (typeof ev.data === "string") {
+      try {
+        onControl(JSON.parse(ev.data));
+      } catch {
+        /* ignore malformed control messages */
+      }
+      return;
+    }
     onBinary(ev.data);
   });
 
@@ -164,7 +184,13 @@ function onControl(msg) {
       break;
     case "error":
       if (msg.code === "resync" || msg.code === "too_far_behind") {
-        send({ type: "attach", sessionId: currentId });
+        if (currentId) send({ type: "attach", sessionId: currentId });
+      } else if (msg.code === "unknown_session" || msg.code === "session_dead" || msg.code === "attach_failed") {
+        currentId = null;
+        els.title.textContent = "ldmux";
+        els.empty.style.display = "";
+        setStatus(msg.code, "err");
+        renderSessions();
       } else {
         setStatus(msg.code, "err");
       }

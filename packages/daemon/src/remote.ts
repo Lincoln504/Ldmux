@@ -23,6 +23,7 @@ import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { tokenMatches } from "./auth.ts";
 import type { PaneStream } from "./stream.ts";
 import { extname, join, normalize } from "node:path";
+import { realpath } from "node:fs/promises";
 
 export interface RemoteServerOptions {
   hostname: string;
@@ -120,9 +121,13 @@ export class RemoteServer {
     const rel = pathname === "/" ? "/index.html" : pathname;
     const full = normalize(join(root, rel));
     if (full !== root && !full.startsWith(root + "/")) return new Response("forbidden\n", { status: 403 });
-    const file = Bun.file(full);
-    if (!(await file.exists())) return new Response("not found\n", { status: 404 });
-    return new Response(file, { headers: { "content-type": contentType(full) } });
+    // Confine again after symlink resolution (Bun.file follows links).
+    const realRoot = await realpath(root).catch(() => root);
+    const real = await realpath(full).catch(() => null);
+    if (!real) return new Response("not found\n", { status: 404 });
+    if (real !== realRoot && !real.startsWith(realRoot + "/")) return new Response("forbidden\n", { status: 403 });
+    const file = Bun.file(real);
+    return new Response(file, { headers: { "content-type": contentType(real) } });
   }
 
   private async onMessage(ws: any, raw: any): Promise<void> {
@@ -172,6 +177,10 @@ export class RemoteServer {
     const record = this.opts.getSession(sessionId);
     if (!record || !record.tmuxName) {
       this.sendError(ws, "unknown_session", `no terminal-backed session: ${sessionId}`);
+      return;
+    }
+    if (record.status !== "running") {
+      this.sendError(ws, "session_dead", `session is ${record.status}: ${sessionId}`);
       return;
     }
     this.cleanupSubscription(data);
@@ -254,8 +263,17 @@ export class RemoteServer {
   }
 
   private sendOutput(ws: any, text: string): void {
+    let frame: Uint8Array;
     try {
-      ws.send(encodeFrame(FrameType.Output, this.encoder.encode(text)));
+      frame = encodeFrame(FrameType.Output, this.encoder.encode(text));
+    } catch {
+      // Oversized payload (MAX_FRAME_PAYLOAD): force a snapshot resync instead
+      // of silently dropping output.
+      this.sendError(ws, "resync", "output frame too large");
+      return;
+    }
+    try {
+      ws.send(frame);
     } catch {
       /* client gone */
       return;

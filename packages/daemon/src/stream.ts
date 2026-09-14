@@ -60,6 +60,11 @@ export class PaneStream {
       this.subs.delete(sub);
       throw err;
     }
+    // The stream may have been closed while connecting (session killed).
+    if (this.closed) {
+      this.subs.delete(sub);
+      throw new Error("stream closed");
+    }
     return () => this.unsubscribe(sub);
   }
 
@@ -100,6 +105,7 @@ export class PaneStream {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.closed) throw new Error("stream closed");
     if (this.client) return;
     if (!this.connecting) this.connecting = this.connect();
     try {
@@ -107,6 +113,7 @@ export class PaneStream {
     } finally {
       this.connecting = null;
     }
+    if (this.closed) throw new Error("stream closed");
   }
 
   private async connect(): Promise<void> {
@@ -114,6 +121,16 @@ export class PaneStream {
       onOutput: (_pane, text) => this.fanout(text),
       onExit: () => this.onClientExit(),
     });
+    // If we were closed while connecting, ditch the client we just created:
+    // nobody can reach this stream any more, so it would leak forever.
+    if (this.closed) {
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
+      throw new Error("stream closed");
+    }
     this.client = client;
     this.reconnectAttempts = 0;
   }

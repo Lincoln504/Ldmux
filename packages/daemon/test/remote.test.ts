@@ -38,7 +38,7 @@ async function connect(info: RemoteInfo, token: string) {
   const ws = new WebSocket(`ws://${info.hostname}:${info.port}${info.path}?token=${token}`);
   const text: any[] = [];
   const output: string[] = [];
-  let tail = new Uint8Array(0);
+  let tail: Uint8Array = new Uint8Array(0);
   ws.addEventListener("message", (ev: any) => {
     const data = ev.data;
     if (typeof data === "string") {
@@ -136,5 +136,17 @@ test("serves the bundled web client, its assets, and the session list", async ()
   expect(await waitFor(() => text.some((m) => m.type === "sessions"))).toBe(true);
   const msg = text.find((m) => m.type === "sessions");
   expect(Array.isArray(msg.sessions)).toBe(true);
+  ws.close();
+});
+test("attaching to a dead session is rejected with session_dead", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  await call(daemon.socketPath, "kill", { id: session.id });
+  const { ws, text } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "session_dead"))).toBe(true);
   ws.close();
 });

@@ -3,7 +3,7 @@
  * travels as binary OUTPUT/INPUT frames; these are the control/handshake shapes.
  */
 
-import type { FrameType } from "./frames.ts";
+import type { SessionKind, SessionStatus } from "./rpc.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -65,17 +65,17 @@ export interface KeyMessage { type: "key"; keys: string[] }
 /** A session as advertised to remote clients (subset of SessionRecord). */
 export interface SessionInfo {
   id: string;
-  kind: "shell" | "pi";
+  kind: SessionKind;
   title: string;
   cwd: string;
-  status: "starting" | "running" | "dead";
+  status: SessionStatus;
   tmuxName: string;
   piSessionId?: string;
 }
 
 /** Remote client → server: list sessions. */
 export interface ListSessions { type: "list" }
-/** Server → client: session list (also pushed when sessions change). */
+/** Server → client: answer to `list`. */
 export interface SessionsMessage { type: "sessions"; sessions: SessionInfo[] }
 
 export type ControlMessage =
@@ -92,6 +92,3 @@ export type ControlMessage =
   | KeyMessage
   | ListSessions
   | SessionsMessage;
-
-export const textFrame = (type: FrameType, msg: ControlMessage) =>
-  ({ type, text: JSON.stringify(msg) });

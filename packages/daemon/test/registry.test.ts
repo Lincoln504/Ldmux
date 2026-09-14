@@ -66,3 +66,11 @@ test("save/load round-trips atomically", () => {
   expect(reloaded.get("persist")?.id).toBe("persist");
   rmSync(path, { force: true });
 });
+test("reconcile(null) treats tmux state as unknown and marks nothing dead", () => {
+  const reg = new Registry(join(dir, "unknown.json"));
+  const live = record({ id: "term", tmuxName: "ldmux-x", status: "running" });
+  reg.upsert(live);
+  const res = reg.reconcile(null);
+  expect(res).toEqual({ dead: [], adopted: [] });
+  expect(reg.get("term")!.status).toBe("running");
+});

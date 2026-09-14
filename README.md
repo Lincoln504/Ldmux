@@ -49,7 +49,9 @@ and binary cache are reused.
 
 ```bash
 nix develop            # bun 1.3.x, node 24, tmux 3.7b, just
+bun install            # dev-only type definitions (@types/bun, typescript)
 bun test               # unit + live tmux tests (run inside nix develop)
+bun run typecheck      # tsc --noEmit (strict, no build step)
 just daemon            # run ldmuxd in the foreground
 just cli run shell     # create a session and attach tmux
 just link-extension    # symlink the pi extension, then /reload in pi

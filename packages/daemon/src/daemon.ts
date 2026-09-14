@@ -120,10 +120,16 @@ export class LdmuxDaemon {
       this.server = Bun.listen({
         unix: this.socketPath,
         socket: {
-          open: (ws: any) => this.conns.set(ws, this.makeConn(ws)),
+          open: (ws: any) => {
+            this.conns.set(ws, this.makeConn(ws));
+          },
           data: (ws: any, data: Uint8Array) => this.onData(ws, data),
-          close: (ws: any) => this.conns.delete(ws),
-          error: (ws: any) => this.conns.delete(ws),
+          close: (ws: any) => {
+            this.conns.delete(ws);
+          },
+          error: (ws: any) => {
+            this.conns.delete(ws);
+          },
         },
       });
       // The socket is a full-control channel: owner-only.
@@ -145,7 +151,8 @@ export class LdmuxDaemon {
         token: this.token,
         getSession: (id) => this.registry.get(id),
         listSessions: () => {
-          this.reconcile();
+          // A read-only listing must not mutate stream state.
+          this.reconcile({ sweep: false });
           return this.registry.list();
         },
         acquireStream: (record) => this.streamFor(record),
@@ -337,12 +344,14 @@ export class LdmuxDaemon {
 
   // ── registry reconciliation ──────────────────────────────────────────────
 
-  private reconcile(): { dead: string[]; adopted: string[]; pruned: string[] } {
-    const live = new Set(this.cp.listSessions().map((s) => s.name));
+  private reconcile(opts: { sweep?: boolean } = {}): { dead: string[]; adopted: string[]; pruned: string[] } {
+    const liveSessions = this.cp.listSessions();
+    const live = liveSessions ? new Set(liveSessions.map((s) => s.name)) : null;
     const { dead, adopted } = this.registry.reconcile(live);
     const pruned = this.registry.prune({ maxDeadAgeMs: this.deadRecordTtlMs, maxRecords: this.maxRecords });
     if (dead.length || adopted.length || pruned.length) this.registry.save();
-    this.sweepStreams();
+    // Only sweep on a *known* live set, and never from a read-only listing.
+    if (opts.sweep !== false && live) this.sweepStreams();
     return { dead, adopted, pruned };
   }
 
