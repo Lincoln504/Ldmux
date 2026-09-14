@@ -40,13 +40,70 @@ it is the right long-term core.
 | **Flutter `xterm3`** | parser + renderer | yes | **AGPL-3.0** (v6+) | requires Flutter; AGPL |
 | **`termlib`** (ConnectBot) | parser + Canvas | yes | Apache-2.0 | older, Android-only, Java |
 
+## Prior art: the dooboxes project (read 2026-09-14)
+
+A sibling project (Rust) already worked this exact problem and its decisions are
+worth inheriting. Its renderer decision changed **three times**, and the older
+docs carry superseded banners — read the ADRs, not the specs.
+
+| When | Artifact | Mobile renderer decision |
+|---|---|---|
+| 2026-06-29 | `MOBILE_TERMINAL_PERFORMANCE.md`, `MOBILE_TERMINAL_UX.md` | xterm.js in a WebView; libghostty a post-MVP swap |
+| 2026-02-08 | `PREDICTIVE_ECHO_AND_TERMINAL_RENDERING_RESEARCH_FEBRUARY_2026.md` | keep xterm.js; native deferred |
+| 2026-07-05 | `ADR_2026-07_TAILNET_AND_RUST_TERMINAL_STACK.md` | one engine = **`alacritty_terminal`**, replacing xterm.js; mobile stays WebView for now |
+| 2026-07-14 | `ADR_2026-07-14_FLUTTER_MOBILE_AND_SEAMLESS_SESSIONS.md` | **authoritative:** Flutter + `flutter_rust_bridge` + the `alacritty_terminal` core + `CustomPainter` over the cell grid |
+
+Findings that transfer directly:
+
+- **Engine: `alacritty_terminal` v0.26, not libvterm.** Verified dependency-light —
+  only `vte`, `base64`, `bitflags`, `unicode-width`, `serde`, `parking_lot` (plus a
+  `tty` module they never use). It gives the **grid + scrollback + `Term` API**,
+  whereas libvterm is parser-only and would leave us to build and maintain the
+  grid. The infamous "Alacritty is hard on Android" is its *app* (winit/fontconfig/
+  crossfont), not this crate. It cross-compiles to Android NDK and `aarch64-apple-ios`.
+- **The reusable seam is proven in code** (`libs/dooboxes-terminal-core`):
+  `Terminal::new(cols, rows)` → `advance(bytes)` in → `take_pty_output()` (query
+  replies that must go back upstream or full-screen apps hang) → `cells()` /
+  `visible_rows()` / `cursor()` out, plus `encode_key`/`encode_mouse`. A renderer
+  only needs the styled-grid-out shape.
+- **libghostty was rejected twice, with a testable revisit trigger:** stable ABI
+  **and** shipped iOS/Android targets. Only one of those two conditions is not
+  enough. (The web research above confirms neither has happened as of 2026-09.)
+- **"Never split engines"** — one emulation core for every client. Pairing
+  libvterm on mobile with xterm.js on the web would repeat the anti-pattern they
+  forbade.
+- **The engine is the cheap part; the renderer + input + FFI is the real cost, and
+  it is platform-native regardless of engine.** Their effort estimate: WebView
+  5–9 weeks vs native 19–28 weeks (~4×).
+- **Framework-independent perf targets to reuse:** 30 FPS target (15 acceptable),
+  input latency < 100 ms (< 200 acceptable), memory < 50 MB (< 100), battery
+  < 3 %/h, frame rate capped at 50 Hz with an RTT-adaptive floor of `max(2 Hz,
+  1/2 RTT)`, and 1000-line mobile scrollback.
+- Mobile WebView measured (their research): 30–45 FPS iOS / 30–40 Android,
+  200–400 ms first paint, 15–25 MB + 5–10 MB per 1000 scrollback lines, 3–5 %/h.
+- Their `vte`-based sanitizer policy matches ldmux's existing one (drop device
+  queries server-side, by state machine, not by string blocklist).
+- Note: their `rendererType: 'canvas'` advice is stale for xterm.js 6 (no such
+  option) — same finding ldmux already hit.
+
 ## Recommendation
 
 1. **Now:** keep the WebView renderer. It is the working, tested engine and the
    smallest risk while the app's chrome/UX is being settled.
-2. **Best native path with an acceptable license:** **libvterm (MIT) via the NDK**
-   + a Compose Canvas grid renderer. This is the standard "C core + cinterop/JNI
-   + Skia" architecture:
+2. **Best native path, revised after reading dooboxes:** **`alacritty_terminal`
+   (Rust, Apache-2.0/MIT) over FFI + a Compose Canvas grid renderer** — preferred
+   over libvterm because it is a *complete* engine (grid, scrollback, reflow,
+   key/mouse encoding) rather than a parser we would have to grow into one. The
+   bridge is Rust→Kotlin: **UniFFI** (+ the UbiqueInnovation KMP plugin, which
+   targets Android JNI and iOS cinterop from one definition) is the 2026 tool of
+   choice; `cargo-ndk` builds the Android `.so`, `xcodebuild -create-xcframework`
+   the iOS artifact. The consume shape is exactly dooboxes' proven one:
+   `advance(bytes)` in, styled cell grid + cursor out. Cost: adds a Rust
+   toolchain to a TypeScript/Bun repo.
+
+   The older equivalent, if we would rather not add Rust: **libvterm (MIT) via the
+   NDK** + the same Compose Canvas renderer — but we then own the grid/scrollback
+   layer:
    - compile libvterm as a `.so` per ABI (arm64-v8a, x86_64) with CMake;
    - JNI bridge: opaque screen handle, a `TerminalFrame` snapshot (cells +
      attributes + cursor) copied out per frame;
