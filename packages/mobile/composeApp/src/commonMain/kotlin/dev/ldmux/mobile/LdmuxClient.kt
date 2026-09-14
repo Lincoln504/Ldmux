@@ -36,12 +36,10 @@ data class Session(
 }
 
 /**
- * A minimal daemon client for the native shell.
- *
- * The terminal itself is the shared web client inside a WebView, which speaks
- * the full protocol. This client only needs the session *list* (to build the
- * swipe pager) and the ability to open new sessions, so it subscribes to the
- * same `/ws` endpoint and sends `list` / `new`.
+ * A minimal daemon client for the native shell: the session *list* (for the
+ * pager) and the ability to open and end sessions. The terminal itself is
+ * attached over the same `/ws` endpoint by [AttachClient]; this keeps its own
+ * connection so a terminal stream failing never blinds the session list.
  */
 class LdmuxClient(private var config: LdmuxConfig) {
     private val http = HttpClient { install(WebSockets) }

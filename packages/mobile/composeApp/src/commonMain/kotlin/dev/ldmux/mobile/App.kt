@@ -135,6 +135,7 @@ fun App() {
     // One handle per session, so the chrome's keys reach the visible terminal.
     // A snapshot state map, so the panel recomposes once a surface registers.
     val handles = remember { mutableStateMapOf<String, TerminalHandle>() }
+    var killTarget by remember { mutableStateOf<Session?>(null) }
     val portrait = mode == UiMode.Portrait
     val currentHandle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
 
@@ -166,13 +167,31 @@ fun App() {
     } else {
         Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
             if (config.panelLeft) {
-                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }) { showSettings = true }
+                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
             }
             TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
             if (!config.panelLeft) {
-                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }) { showSettings = true }
+                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
             }
         }
+    }
+
+    killTarget?.let { target ->
+        // Ending a shell throws away whatever is running in it, so it is always
+        // confirmed — and named, so the wrong one cannot be closed by reflex.
+        AlertDialog(
+            onDismissRequest = { killTarget = null },
+            title = { Text("Close this shell?", color = Fg) },
+            containerColor = Surface,
+            text = { Text(target.label, color = Dim, fontSize = 12.sp) },
+            confirmButton = {
+                TextButton(onClick = {
+                    client.kill(target.id)
+                    killTarget = null
+                }) { Text("close", color = Color(0xFFFF6B6B)) }
+            },
+            dismissButton = { TextButton(onClick = { killTarget = null }) { Text("cancel", color = Dim) } },
+        )
     }
 
     if (showSettings) {
@@ -272,6 +291,7 @@ private fun SidePanel(
     client: LdmuxClient,
     handles: Map<String, TerminalHandle>,
     onKeyboard: () -> Unit,
+    onKill: (Session) -> Unit,
     onSettings: () -> Unit,
 ) {
     val current = pagerState.currentPage
@@ -300,6 +320,21 @@ private fun SidePanel(
                 modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
             )
             NavArrow("▶", enabled = current < pages.size - 1) { step(1) }
+        }
+        // No session list (by design), but the open shell still has to be
+        // closable from the phone — otherwise a stray `+sh` is permanent.
+        val here = pages.getOrNull(current)
+        if (here != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    here.cwd,
+                    color = Dim,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+                NavArrow("✕", enabled = true) { onKill(here) }
+            }
         }
 
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
