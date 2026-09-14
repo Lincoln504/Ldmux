@@ -327,3 +327,23 @@ test("rpc snapshot and history capture agree with the live pane", async () => {
   expect(hist.screen).toContain("1\n");
   expect(hist.screen).toContain("60");
 });
+
+test("a client opens and kills a session over the WebSocket (FR-10)", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { ws, text } = await connect(info, info.token);
+
+  const lastSessions = () => [...text].reverse().find((m) => m.type === "sessions")?.sessions ?? [];
+
+  ws.send(JSON.stringify({ type: "new", kind: "shell", cwd: tmpdir(), title: "ws-created" }));
+  expect(await waitFor(() => lastSessions().some((s: any) => s.title === "ws-created"))).toBe(true);
+  const created = lastSessions().find((s: any) => s.title === "ws-created");
+
+  ws.send(JSON.stringify({ type: "kill", sessionId: created.id }));
+  expect(await waitFor(() => lastSessions().find((s: any) => s.id === created.id)?.status === "dead")).toBe(true);
+
+  // A bad kill reports an error rather than taking the connection down.
+  ws.send(JSON.stringify({ type: "kill", sessionId: "nope" }));
+  expect(await waitFor(() => text.some((m) => m.type === "error"))).toBe(true);
+  expect((await call(daemon.socketPath, "ping") as { pong: boolean }).pong).toBe(true);
+  ws.close();
+});

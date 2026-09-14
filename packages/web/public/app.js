@@ -101,6 +101,17 @@ function persistSeen() {
 }
 
 // ── token ────────────────────────────────────────────────────────────────
+// Captured before readToken() strips the token from the address bar.
+function urlParam(name) {
+  try {
+    return new URL(location.href).searchParams.get(name) || "";
+  } catch {
+    return "";
+  }
+}
+/** The native shell opens one WebView per session with ?session=<id>. */
+const wantedSession = urlParam("session");
+
 function readToken() {
   const { token, fromUrl, path } = tokenFrom(location.href, location.hash, localStorage.getItem("ldmux.token"));
   if (fromUrl) {
@@ -203,7 +214,9 @@ function connect() {
     reconnectDelay = 500;
     setStatus("online", "");
     send({ type: "list" });
-    if (currentId) send({ type: "attach", sessionId: currentId });
+    // A pager page is pinned to one session; otherwise resume the last one.
+    if (wantedSession) attach(wantedSession);
+    else if (currentId) send({ type: "attach", sessionId: currentId });
     clearInterval(pingTimer);
     pingTimer = setInterval(() => send({ type: "ping", id: Date.now() }), PING_MS);
   });

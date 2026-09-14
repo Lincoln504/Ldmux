@@ -187,6 +187,12 @@ export class LdmuxDaemon {
         token: this.token,
         getSession: (id) => this.registry.get(id),
         listSessions: () => this.describeSessions(),
+        createSession: async (kind, cwd, title) => {
+          await this.handleNew({ kind, cwd: cwd ?? process.cwd(), title } as NewParams);
+        },
+        killSession: async (id) => {
+          await this.handle("kill", { id });
+        },
         acquireStream: (record) => this.streamFor(record),
         releaseStream: (record) => this.releaseStreamIfIdle(record.tmuxName),
         webRoot: this.opts.webRoot ?? defaultWebRoot(),

@@ -56,6 +56,8 @@ Client → server (JSON):
 | `{type:"key",keys:["Enter"]}` | send named keys |
 | `{type:"follow",mode}` | scroll intent; **client-owned** (ADR-0004) |
 | `{type:"list"}` | list sessions (id, kind, title, cwd, status, activity) |
+| `{type:"new",kind?,cwd?,title?}` | open a session on the host (FR-10); answers with a fresh `sessions` |
+| `{type:"kill",sessionId}` | end a session; answers with a fresh `sessions` |
 | `{type:"scrollback",sessionId,lines?}` | re-send the pane **including paged history** |
 
 Server → client:
@@ -65,7 +67,7 @@ Server → client:
 | `{type:"caps",...}` | negotiated geometry, `snapshotEpoch`, capabilities |
 | `{type:"snapshot",...}` | full visible screen + terminal state (repaint from this) |
 | `{type:"snapshot",history:true,...}` | answer to `scrollback`: the screen includes older lines |
-| `{type:"sessions",sessions:[...]}` | answer to `list` |
+| `{type:"sessions",sessions:[...]}` | answer to `list`, `new`, `kill` |
 | binary `Output` frame | live pane output (UTF-8) |
 | `{type:"error",code,message}` | `unknown_session`, `session_dead`, `not_attached`, `bad_json`, `resync`, `too_far_behind`, `input_too_large`, … |
 

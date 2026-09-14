@@ -467,11 +467,13 @@ This is the shipped set (the source of truth is
 Everything below is a JSON **text** message except the last line.
 
 Client → server: `attach {sessionId}`, `input {data}`, `key {keys}`,
-`follow {mode}`, `scrollback {sessionId, lines?}`, `list`, `ping {id?}`.
+`follow {mode}`, `scrollback {sessionId, lines?}`, `list`, `new {kind?, cwd?, title?}`,
+`kill {sessionId}`, `ping {id?}`.
 
 Server → client: `caps {protocolVersion, sessionId, cols, rows, snapshotEpoch,
 capabilities {controlMode, scrollback}}`, `snapshot {…state fields…, history?}`,
-`sessions {sessions[]}`, `pong {id?}`, `error {code, message}`.
+`sessions {sessions[]}` (the answer to `list`/`new`/`kill`), `pong {id?}`,
+`error {code, message}`.
 
 Binary: exactly one frame type is emitted — `OUTPUT` (raw pane bytes) — using the
 one canonical 8-byte header (`FrameType` in `frames.ts` carries reserved members

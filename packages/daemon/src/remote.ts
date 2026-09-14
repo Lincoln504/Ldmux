@@ -33,6 +33,10 @@ export interface RemoteServerOptions {
   token: string;
   getSession(id: string): SessionRecord | undefined;
   listSessions(): SessionInfo[] | Promise<SessionInfo[]>;
+  /** Open a new session on the host (FR-10). */
+  createSession?(kind: "shell" | "pi", cwd: string | undefined, title: string | undefined): Promise<void>;
+  /** End a session by id. */
+  killSession?(id: string): Promise<void>;
   acquireStream(record: SessionRecord): PaneStream;
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
@@ -167,8 +171,18 @@ export class RemoteServer {
           this.sendJson(ws, { type: "pong", id: msg.id });
           return;
         case "list":
-          this.sendJson(ws, { type: "sessions", sessions: await this.opts.listSessions() });
+          await this.sendSessions(ws);
           return;
+        case "new": {
+          await this.opts.createSession?.(msg.kind === "pi" ? "pi" : "shell", msg.cwd, msg.title);
+          await this.sendSessions(ws);
+          return;
+        }
+        case "kill": {
+          await this.opts.killSession?.(String(msg.sessionId ?? ""));
+          await this.sendSessions(ws);
+          return;
+        }
         case "attach":
           await this.attach(ws, data, String(msg.sessionId ?? ""));
           return;
@@ -345,6 +359,11 @@ export class RemoteServer {
     } catch {
       /* client gone */
     }
+  }
+
+  /** Send the current session list (the answer to list/new/kill). */
+  private async sendSessions(ws: any): Promise<void> {
+    this.sendJson(ws, { type: "sessions", sessions: await this.opts.listSessions() });
   }
 
   private sendError(ws: any, code: string, message: string): void {

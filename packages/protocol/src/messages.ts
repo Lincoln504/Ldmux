@@ -87,6 +87,20 @@ export interface ListSessions { type: "list" }
 export interface SessionsMessage { type: "sessions"; sessions: SessionInfo[] }
 
 /**
+ * Remote client → server: open a new session (FR-10 — from the phone, in any
+ * directory). The server answers with a fresh `sessions` list.
+ */
+export interface NewSessionMessage {
+  type: "new";
+  kind?: "shell" | "pi";
+  cwd?: string;
+  title?: string;
+}
+
+/** Remote client → server: end a session. The server answers with a fresh list. */
+export interface KillSessionMessage { type: "kill"; sessionId: string }
+
+/**
  * The control-message union. Only these shapes are sent in v1: the v0.1 draft's
  * `HELLO`/`resumeToken`, `SESSION_STATE` and `CLOSE` were cut (docs/SPEC.md §6.2),
  * so they are not modelled here — a type nothing can send or receive is a
@@ -104,4 +118,6 @@ export type ControlMessage =
   | KeyMessage
   | ScrollbackRequest
   | ListSessions
+  | NewSessionMessage
+  | KillSessionMessage
   | SessionsMessage;
