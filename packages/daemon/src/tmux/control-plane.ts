@@ -8,6 +8,40 @@
  * (see control-client.ts).
  */
 
+import { existsSync, readFileSync } from "node:fs";
+
+/**
+ * The shell a user's sessions should get.
+ *
+ * tmux runs `default-shell`, which tmux takes from `$SHELL`. When the daemon is
+ * started from an environment whose `$SHELL` is *not* the user's login shell
+ * (e.g. a nix devshell's minimal bash, which may lack builtins the system's
+ * completion scripts call), every new session is broken. Prefer the login shell
+ * from `/etc/passwd`, then `$SHELL`, then `/bin/bash` — each verified to exist.
+ *
+ * `passwd` is injectable for tests; the real one is read from disk.
+ */
+export function resolveLoginShell(
+  uid: number,
+  env: NodeJS.ProcessEnv = process.env,
+  passwd?: string,
+): string | undefined {
+  let content = passwd;
+  if (content === undefined) {
+    try {
+      content = readFileSync("/etc/passwd", "utf8");
+    } catch {
+      content = "";
+    }
+  }
+  const line = content.split("\n").find((l) => l.split(":")[2] === String(uid));
+  const fromPasswd = line?.split(":")[6]?.trim();
+  if (fromPasswd && existsSync(fromPasswd)) return fromPasswd;
+  const fromEnv = env.SHELL?.trim();
+  if (fromEnv && existsSync(fromEnv)) return fromEnv;
+  return existsSync("/bin/bash") ? "/bin/bash" : undefined;
+}
+
 export interface TmuxSession {
   name: string;
   windows: number;
@@ -133,8 +167,10 @@ export class TmuxControlPlane {
   /** Apply the canonical server option profile (docs/SPEC.md §5.2). */
   async ensureServer(opts: { historyLimit?: number } = {}): Promise<void> {
     const history = opts.historyLimit ?? 10000;
+    const loginShell = resolveLoginShell(typeof process.getuid === "function" ? process.getuid() : 0);
     for (const args of [
       ["set-option", "-g", "history-limit", String(history)],
+      ...(loginShell ? [["set-option", "-g", "default-shell", loginShell]] : []),
       ["set-option", "-g", "default-terminal", "tmux-256color"],
       ["set-option", "-g", "mouse", "on"],
       ["set-option", "-g", "status", "off"],
