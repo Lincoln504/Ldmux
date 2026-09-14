@@ -1,14 +1,20 @@
 package dev.ldmux.mobile
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.viewinterop.AndroidView
-import org.json.JSONObject
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.sp
+import dev.ldmux.mobile.term.TerminalPainter
 
 /** Set from MainActivity so [AppPrefs] can reach SharedPreferences. */
 object AndroidApp {
@@ -40,38 +46,36 @@ actual object AppPrefs {
     }
 }
 
-private class AndroidTerminalHandle : TerminalHandle {
-    var view: WebView? = null
-
-    private fun js(code: String) {
-        view?.evaluateJavascript(code, null)
-    }
-
-    override fun sendKey(name: String) = js("window.ldmuxSendKey(${JSONObject.quote(name)})")
-    override fun sendText(text: String) = js("window.ldmuxSendText(${JSONObject.quote(text)})")
-    override fun loadHistory() = js("window.ldmuxLoadHistory()")
-    override fun jumpToBottom() = js("window.ldmuxJumpToBottom()")
-}
-
-@SuppressLint("SetJavaScriptEnabled")
+/**
+ * The native terminal surface: a Compose Canvas painting the libghostty-vt cell
+ * grid, scaled to fit (the daemon owns the pane size, as with the web client).
+ */
 @Composable
-actual fun rememberTerminalSurface(url: String, modifier: Modifier): TerminalHandle {
-    val handle = remember(url) { AndroidTerminalHandle() }
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            WebView(ctx).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.useWideViewPort = true
-                settings.loadWithOverviewMode = false
-                settings.mediaPlaybackRequiresUserGesture = false
-                isScrollbarFadingEnabled = false
-                webViewClient = WebViewClient()
-                handle.view = this
-                loadUrl(url)
+actual fun rememberTerminalSurface(
+    config: LdmuxConfig,
+    sessionId: String,
+    modifier: Modifier,
+): TerminalHandle {
+    val controller = remember(config, sessionId) { TerminalController(config, sessionId) }
+    DisposableEffect(controller) { onDispose { controller.dispose() } }
+
+    val frame by controller.frame.collectAsState()
+    val density = LocalDensity.current
+    val fontSizePx = with(density) { 12.sp.toPx() }
+    val painter = remember(fontSizePx) { TerminalPainter(fontSizePx) }
+
+    Box(modifier.background(Bg)) {
+        Canvas(Modifier.fillMaxSize()) {
+            val f = frame ?: return@Canvas
+            val m = painter.metrics
+            val gridW = m.width * f.cols
+            val gridH = m.height * f.rows
+            if (gridW <= 0f || gridH <= 0f) return@Canvas
+            val scale = minOf(size.width / gridW, size.height / gridH)
+            withTransform({ scale(scale, scale) }) {
+                painter.paint(this, f)
             }
-        },
-    )
-    return handle
+        }
+    }
+    return controller
 }

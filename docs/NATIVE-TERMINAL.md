@@ -176,3 +176,24 @@ A native renderer means the app also speaks the rest of the protocol directly:
 `scrollback` — i.e. a native port of `packages/web/public/core.js` + `app.js`'s
 protocol half. That is the bulk of the work, and it is testable on the JVM
 without a device.
+
+## Implementation notes (2026-09-14)
+
+The first working native slice (JNI shim + Compose Canvas) surfaced two
+non-obvious facts, both confirmed on a real device:
+
+1. **Snapshots need CR+LF.** `tmux capture-pane` separates rows with a bare LF.
+   A VT treats LF as a line feed only — the column is preserved — so feeding the
+   raw snapshot to a fresh `libghostty-vt` terminal staircases the screen
+   diagonally. The snapshot must be normalised to CR+LF first. (Live PTY output
+   already carries CR+LF and must not be rewritten.)
+
+2. **The render-state row/cell iterators skip trailing blank cells.** The JNI
+   encoder must therefore emit exactly `cols*rows` cell records, padding the
+   missing ones with blanks. A variable count per row desynchronises the
+   client's fixed-stride decode, which also shows up as diagonal drift.
+
+Also confirmed: the render state must be populated into the pre-allocated row
+iterator with `ghostty_render_state_get(..., GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+...)` after every update, or iteration yields nothing (a header-only 10-byte
+frame).

@@ -28,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -107,7 +108,8 @@ fun App() {
     }
 
     // One handle per session, so the sidebar's keys reach the visible terminal.
-    val handles = remember { mutableMapOf<String, TerminalHandle>() }
+    // A snapshot state map, so the panel recomposes once a surface registers.
+    val handles = remember { mutableStateMapOf<String, TerminalHandle>() }
 
     Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         if (config.panelLeft) SidePanel(pages, pagerState, scope, client, handles) { showSettings = true }
@@ -122,7 +124,7 @@ fun App() {
             } else {
                 HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
                     val s = pages[page]
-                    val handle = rememberTerminalSurface(config.urlFor(s.id), Modifier.fillMaxSize())
+                    val handle = rememberTerminalSurface(config, s.id, Modifier.fillMaxSize())
                     LaunchedEffect(handle, s.id) { handles[s.id] = handle }
                 }
             }

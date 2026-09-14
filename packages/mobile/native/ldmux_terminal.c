@@ -157,6 +157,13 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   if (ghostty_render_state_update(t->render_state, t->terminal) != GHOSTTY_SUCCESS)
     return NULL;
 
+  /* Row data lives inside the render state; the iterator is populated from it
+   * and is only valid until the next update (see render.h). */
+  if (ghostty_render_state_get(t->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &t->row_iter) != GHOSTTY_SUCCESS)
+    return NULL;
+
   uint16_t cols = 0, rows = 0;
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &cols);
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows);
@@ -180,17 +187,26 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   out[9] = (uint8_t)cursor.visual_style;
 
   size_t p = FRAME_HEADER;
-  int row_idx = 0;
-  while (row_idx < rows && ghostty_render_state_row_iterator_next(t->row_iter)) {
-    row_idx++;
-    if (ghostty_render_state_row_get(t->row_iter,
-                                     GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                                     &t->cells) != GHOSTTY_SUCCESS)
-      break;
-    int col_idx = 0;
-    while (col_idx < cols && ghostty_render_state_row_cells_next(t->cells)) {
-      col_idx++;
+  uint8_t def_fg[3] = {colors.foreground.r, colors.foreground.g, colors.foreground.b};
+  uint8_t def_bg[3] = {colors.background.r, colors.background.g, colors.background.b};
+  /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
+   * encoder is mandatory: pad every missing cell with a blank. */
+  bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);
+  for (int row = 0; row < rows; row++) {
+    bool have_cells = false;
+    if (have_row) {
+      have_cells = ghostty_render_state_row_get(
+                       t->row_iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                       &t->cells) == GHOSTTY_SUCCESS;
+    }
+    for (int col = 0; col < cols; col++) {
       if (p + CELL_RECORD_MAX > t->frame_cap) break;
+      if (!have_cells || !ghostty_render_state_row_cells_next(t->cells)) {
+        out[p++] = 0; out[p++] = 0; out[p++] = 0;
+        out[p++] = def_fg[0]; out[p++] = def_fg[1]; out[p++] = def_fg[2];
+        out[p++] = def_bg[0]; out[p++] = def_bg[1]; out[p++] = def_bg[2];
+        continue;
+      }
 
       uint32_t glen = 0;
       ghostty_render_state_row_cells_get(
@@ -237,6 +253,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
       out[p++] = bg.r; out[p++] = bg.g; out[p++] = bg.b;
       if (n) { memcpy(out + p, utf8, n); p += n; }
     }
+    have_row = ghostty_render_state_row_iterator_next(t->row_iter);
   }
 
   jbyteArray result = (*env)->NewByteArray(env, (jsize)p);
