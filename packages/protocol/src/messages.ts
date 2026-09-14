@@ -62,6 +62,22 @@ export interface Input { type: "input"; data: string }
 /** Remote client → server: send named keys (Enter, C-c, Up, ...). */
 export interface KeyMessage { type: "key"; keys: string[] }
 
+/** A session as advertised to remote clients (subset of SessionRecord). */
+export interface SessionInfo {
+  id: string;
+  kind: "shell" | "pi";
+  title: string;
+  cwd: string;
+  status: "starting" | "running" | "dead";
+  tmuxName: string;
+  piSessionId?: string;
+}
+
+/** Remote client → server: list sessions. */
+export interface ListSessions { type: "list" }
+/** Server → client: session list (also pushed when sessions change). */
+export interface SessionsMessage { type: "sessions"; sessions: SessionInfo[] }
+
 export type ControlMessage =
   | Hello
   | Caps
@@ -73,7 +89,9 @@ export type ControlMessage =
   | Close
   | Attach
   | Input
-  | KeyMessage;
+  | KeyMessage
+  | ListSessions
+  | SessionsMessage;
 
 export const textFrame = (type: FrameType, msg: ControlMessage) =>
   ({ type, text: JSON.stringify(msg) });

@@ -114,3 +114,27 @@ test("killing an attached session resyncs the client and evicts the stream", asy
   expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "resync"))).toBe(true);
   ws.close();
 });
+
+test("serves the bundled web client, its assets, and the session list", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const base = `http://${info.hostname}:${info.port}`;
+
+  const index = await fetch(`${base}/`);
+  expect(index.status).toBe(200);
+  expect(index.headers.get("content-type")).toContain("text/html");
+  expect(await index.text()).toContain("app.js");
+
+  const xterm = await fetch(`${base}/vendor/xterm.js`);
+  expect(xterm.status).toBe(200);
+  expect(xterm.headers.get("content-type")).toContain("javascript");
+
+  const missing = await fetch(`${base}/nope.js`);
+  expect(missing.status).toBe(404);
+
+  const { ws, text } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "list" }));
+  expect(await waitFor(() => text.some((m) => m.type === "sessions"))).toBe(true);
+  const msg = text.find((m) => m.type === "sessions");
+  expect(Array.isArray(msg.sessions)).toBe(true);
+  ws.close();
+});

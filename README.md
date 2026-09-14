@@ -18,9 +18,11 @@ either. It is deliberately simpler and tmux-native:
   horizontal swipe switches sessions; scroll position is stable (the #1 gmux pain
   point).
 
-> **Status: design / spec phase.** Nothing here is implemented yet. The
-> authoritative design is [`docs/SPEC.md`](docs/SPEC.md); the evidence base from
-> which it was derived is [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
+> **Status: Phase 1 (local core) + Phase 2 (pi extension) done; Phase 3 (remote
+> transport) + the web client implemented.** 43 tests pass. The authoritative
+> design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision is
+> [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
+> [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 
 ## Documents
 
@@ -28,6 +30,8 @@ either. It is deliberately simpler and tmux-native:
 |-----|---------|
 | [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification. |
 | [`docs/TRANSPORT.md`](docs/TRANSPORT.md) | Transport deep-dive + decision (control mode `-C` over pipes, no PTY). |
+| [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
+| [`docs/WEB.md`](docs/WEB.md) | The buildless web/terminal client served by the daemon. |
 | [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md) | Investigation log: what exists on this machine, prior art, and citations. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
 
@@ -58,8 +62,8 @@ devShell).
 
 ## Status
 
-**Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport) underway** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**40 tests**, `bun test`):
+**Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
+tested (**43 tests**, `bun test`):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by
@@ -73,8 +77,12 @@ tested (**40 tests**, `bun test`):
 - `packages/extension` — pi extension: ensures the daemon is running, registers the
   pi session (reason-branched lifecycle), and exposes a `/ldmux` command + `ldmux`
   tool. Verified loading under pi's jiti loader and end-to-end from `session_start`
-  in a real `pi` run.
+  in a real `pi` run. Only **root** pi sessions register; fork/subagent children
+  are skipped.
+- `packages/web` — buildless xterm.js client served by the daemon at `/`
+  (canonical grid scaled to fit, session pager, swipe, mobile key bar,
+  reconnect/resync). See [`docs/WEB.md`](docs/WEB.md).
 
 See [`docs/PI-EXTENSIONS.md`](docs/PI-EXTENSIONS.md) for the pi extension contract.
 
-Not yet: tailnet transport/auth, mobile app, desktop mirror.
+Not yet: Android WebView shell, desktop mirror.

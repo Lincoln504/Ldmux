@@ -13,10 +13,16 @@
  */
 
 import { encodeFrame, FrameType } from "../../protocol/src/frames.ts";
-import { PROTOCOL_VERSION, type Caps, type Snapshot } from "../../protocol/src/messages.ts";
+import {
+  PROTOCOL_VERSION,
+  type Caps,
+  type SessionInfo,
+  type Snapshot,
+} from "../../protocol/src/messages.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { tokenMatches } from "./auth.ts";
 import type { PaneStream } from "./stream.ts";
+import { extname, join, normalize } from "node:path";
 
 export interface RemoteServerOptions {
   hostname: string;
@@ -24,9 +30,12 @@ export interface RemoteServerOptions {
   port: number;
   token: string;
   getSession(id: string): SessionRecord | undefined;
+  listSessions(): SessionInfo[];
   acquireStream(record: SessionRecord): PaneStream;
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
+  /** Directory of the static web client to serve at /. */
+  webRoot?: string;
   maxBufferedBytes?: number;
   log?: (msg: string) => void;
 }
@@ -91,9 +100,9 @@ export class RemoteServer {
     }
   }
 
-  private handleFetch(req: Request, server: any): Response | undefined {
+  private async handleFetch(req: Request, server: any): Promise<Response | undefined> {
     const url = new URL(req.url);
-    if (url.pathname !== "/ws") return new Response("ldmux remote\n", { status: 200 });
+    if (url.pathname !== "/ws") return this.serveStatic(url.pathname);
     const auth = req.headers.get("authorization") ?? "";
     const provided = auth.startsWith("Bearer ")
       ? auth.slice("Bearer ".length).trim()
@@ -102,6 +111,18 @@ export class RemoteServer {
     const data: ConnData = { authed: true, disposed: false, live: false, pending: [], epoch: 0 };
     if (server.upgrade(req, { data })) return undefined;
     return new Response("upgrade failed\n", { status: 400 });
+  }
+
+  /** Serve the bundled web client (buildless static assets). */
+  private async serveStatic(pathname: string): Promise<Response> {
+    const root = this.opts.webRoot;
+    if (!root) return new Response("ldmux remote\n", { status: 200 });
+    const rel = pathname === "/" ? "/index.html" : pathname;
+    const full = normalize(join(root, rel));
+    if (full !== root && !full.startsWith(root + "/")) return new Response("forbidden\n", { status: 403 });
+    const file = Bun.file(full);
+    if (!(await file.exists())) return new Response("not found\n", { status: 404 });
+    return new Response(file, { headers: { "content-type": contentType(full) } });
   }
 
   private async onMessage(ws: any, raw: any): Promise<void> {
@@ -121,6 +142,9 @@ export class RemoteServer {
       switch (msg.type) {
         case "ping":
           this.sendJson(ws, { type: "pong", id: msg.id });
+          return;
+        case "list":
+          this.sendJson(ws, { type: "sessions", sessions: this.opts.listSessions() });
           return;
         case "attach":
           await this.attach(ws, data, String(msg.sessionId ?? ""));
@@ -256,4 +280,21 @@ export class RemoteServer {
     data.unsubscribe = undefined;
     data.stream = undefined;
   }
+}
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+function contentType(path: string): string {
+  return CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
 }

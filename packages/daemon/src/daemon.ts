@@ -10,6 +10,7 @@
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { TmuxControlPlane } from "./tmux/control-plane.ts";
 import { Registry } from "./registry.ts";
 import { PaneStream } from "./stream.ts";
@@ -42,6 +43,8 @@ export interface LdmuxDaemonOptions {
   remotePort?: number;
   /** Set false to run without the remote transport (tests). */
   enableRemote?: boolean;
+  /** Static web client root to serve at / (defaults to the bundled client). */
+  webRoot?: string;
 }
 
 interface RpcRequest {
@@ -57,6 +60,15 @@ interface Conn {
 }
 
 const shortId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 10);
+
+/** The bundled web client ships beside the daemon package. */
+function defaultWebRoot(): string {
+  try {
+    return fileURLToPath(new URL("../../web/public", import.meta.url));
+  } catch {
+    return join(process.cwd(), "packages", "web", "public");
+  }
+}
 
 export class LdmuxDaemon {
   readonly socketPath: string;
@@ -132,8 +144,13 @@ export class LdmuxDaemon {
         port: this.opts.remotePort ?? 7623,
         token: this.token,
         getSession: (id) => this.registry.get(id),
+        listSessions: () => {
+          this.reconcile();
+          return this.registry.list();
+        },
         acquireStream: (record) => this.streamFor(record),
         releaseStream: (record) => this.releaseStreamIfIdle(record.tmuxName),
+        webRoot: this.opts.webRoot ?? defaultWebRoot(),
         log: (msg) => console.error(msg),
       });
       this.remoteInfo = this.remote.start();
