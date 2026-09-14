@@ -29,8 +29,10 @@ PTY nor scrollback nor session content**: tmux is the source of truth and the
 registry is a small JSON cache of metadata tmux cannot hold. Persistence,
 reconnect, and history are tmux's job.
 
-Consequence: server-side scrollback *paging* is out of scope for v1 (`caps`
-advertises `scrollback: false`). The phone scrolls what arrived since attach.
+Consequence: ldmux still owns no scrollback *store* — tmux keeps the history.
+History reaches a client on demand: a `scrollback` request is answered with a
+snapshot that includes up to 5,000 lines of paged history (`caps` advertises
+`scrollback: true`), and the client's local buffer stays bounded at 1,000 lines.
 
 ### 3. No embedded second tailnet node (vs gmux `tsnet`)
 

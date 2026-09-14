@@ -93,9 +93,15 @@ export class PaneStream {
     return () => this.unsubscribe(sub);
   }
 
-  /** A fresh full-screen snapshot plus terminal state (client repaints from this). */
+  /**
+   * A fresh full-screen snapshot plus terminal state (client repaints from this).
+   * Epochs count *delivered* snapshots, not captures: polling captures ~4×/s,
+   * so bumping on capture would make `snapshotEpoch` jump wildly between the
+   * snapshots a client actually sees.
+   */
   async snapshot(): Promise<StreamSnapshot> {
-    return this.capture(false);
+    const snap = await this.capture(false);
+    return { ...snap, epoch: ++this.epoch };
   }
 
   /**
@@ -105,7 +111,8 @@ export class PaneStream {
    */
   async snapshotWithHistory(lines = MAX_HISTORY_LINES): Promise<StreamSnapshot> {
     const bounded = Math.min(MAX_HISTORY_LINES, Math.max(1, Math.floor(lines)));
-    return this.capture(bounded);
+    const snap = await this.capture(bounded);
+    return { ...snap, epoch: ++this.epoch };
   }
 
   private async capture(historyLines: false | number): Promise<StreamSnapshot> {
@@ -119,7 +126,7 @@ export class PaneStream {
     return {
       screen: sanitizeOnce(raw),
       state,
-      epoch: ++this.epoch,
+      epoch: this.epoch,
       ...(historyLines === false ? {} : { history: true }),
     };
   }
@@ -195,7 +202,7 @@ export class PaneStream {
       // A paused pane has stopped streaming and its queued output is gone, so
       // subscribers must resync from a snapshot (the client resumes the pane).
       onPaused: () => this.onPaused(),
-      onExit: () => this.onClientExit(),
+      onExit: (client) => this.onClientExit(client),
     });
     // If we were closed while connecting, ditch the client we just created:
     // nobody can reach this stream any more, so it would leak forever.
@@ -218,7 +225,10 @@ export class PaneStream {
     }
   }
 
-  private onClientExit(): void {
+  private onClientExit(exiting?: TmuxControlClient): void {
+    // A superseded client's late exit must not clear a live successor: that
+    // would orphan a running `tmux -C` process with no owner.
+    if (exiting && this.client && this.client !== exiting) return;
     this.client = null;
     if (this.closed || this.subs.size === 0) return;
     for (const sub of this.subs) this.safe(() => sub.onReset("control stream ended"));
@@ -262,9 +272,10 @@ export class PaneStream {
     this.pollTimer = null;
     if (this.closed || !this.polling) return;
     if (this.subs.size === 0) {
-      // Nobody is watching: stop burning tmux processes, but stay in polling
-      // mode so the next subscriber does not pay for a doomed control connect.
-      this.schedulePoll(this.pollMs * 4);
+      // Nobody is watching: stop polling entirely. The linger timer closes the
+      // stream; a later subscriber reconnects (and re-enters polling if needed).
+      this.polling = false;
+      this.lastPolledScreen = "";
       return;
     }
     try {

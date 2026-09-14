@@ -3,7 +3,7 @@
  * travels as binary OUTPUT/INPUT frames; these are the control/handshake shapes.
  */
 
-import type { SessionKind, SessionRecord, SessionStatus } from "./rpc.ts";
+import type { SessionRecord } from "./rpc.ts";
 
 export const PROTOCOL_VERSION = 1;
 

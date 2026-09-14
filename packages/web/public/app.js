@@ -226,6 +226,9 @@ function onControl(msg) {
       els.empty.style.display = "none";
       break;
     case "snapshot":
+      // A late answer (e.g. a paged-history capture) for a session the user has
+      // already navigated away from must not repaint the current one.
+      if (msg.sessionId && currentId && msg.sessionId !== currentId) break;
       if (msg.history) {
         // Paged history: repaint from scratch so the older lines land in
         // scrollback, then follow the bottom (the client asked for older lines,
@@ -321,7 +324,9 @@ function attach(sessionId) {
 
 /** Ask the server for older lines (answered as a `snapshot` with `history`). */
 function loadHistory() {
-  if (currentId && canPageHistory) send({ type: "scrollback", sessionId: currentId, lines: 2000 });
+  // Match the local buffer: fetching more than xterm can hold just wastes
+  // transfer (the older half is discarded on write).
+  if (currentId && canPageHistory) send({ type: "scrollback", sessionId: currentId, lines: SCROLLBACK });
 }
 
 function cycle(delta) {

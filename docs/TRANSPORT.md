@@ -122,8 +122,12 @@ Byte stream from control mode (LF-delimited records):
 4. `%output %<pane> <data>` and `%extended-output %<pane> <age_ms> : <data>`:
    decode `\NNN` octal into **bytes** (control chars + backslash), then feed a
    **per-pane incremental UTF-8 decoder** (chars can straddle records).
-5. Handle `%pause` / `%continue`; when the WS buffer is full, stop reading
-   (backpressure) and let `pause-after` protect the pane.
+5. Handle `%pause` / `%continue`. tmux **discards** a paused pane's queued
+   output, so a `%pause` is a resync point: subscribers are told to re-snapshot
+   (throttled) and the pane is resumed with `refresh-client -A <pane>:continue`
+   on a coalescing timer (a dropped resume would freeze the pane). Backpressure
+   for a slow *client* is the remote layer closing a socket whose buffer exceeds
+   4 MiB (`too_far_behind`); reading is never stopped in-process.
 6. `%exit`/EOF → run the capture-pane fallback; restart the control client with
    backoff.
 7. Tolerate unknown `%…` lines (forward compatibility).
@@ -155,8 +159,11 @@ Byte stream from control mode (LF-delimited records):
   available. Full mode fidelity remains the R2 phase-3 seam.
 - **Alternate screen:** use `capture-pane -a` when `alternate_on` is true (or
   unconditionally, since `-a` falls back to the normal screen).
-- **Fallback:** adaptive `capture-pane` diff polling (active 60–120 ms, idle
-  backoff, stopped with no viewers) whenever the control client is unavailable.
+- **Fallback:** `capture-pane` diff polling at a fixed ~250 ms (no idle backoff;
+it stops when the stream has no subscribers and retries control mode every
+30 s) whenever the control client is unavailable. Diffs are **row-addressed**
+(`CSI <row>;1H` + `CSI K`) rather than whole-screen repaints, so polling does
+not push duplicate screens into the client's scrollback.
 
 ## 7. Stack decision
 

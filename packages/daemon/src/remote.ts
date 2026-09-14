@@ -198,11 +198,15 @@ export class RemoteServer {
           return; // client-owned scroll (ADR-0004)
         case "scrollback": {
           if (data.stream) {
+            const gen = data.attachGen;
             const lines = Number(msg.lines ?? 0);
             const snap = await data.stream.snapshotWithHistory(
               Number.isFinite(lines) && lines > 0 ? lines : undefined,
             );
-            if (data.disposed) return;
+            // Re-check after the await: a newer attach (or a disconnect) may have
+            // superseded this request, and repainting another session's screen
+            // into the new one is worse than sending nothing.
+            if (data.disposed || data.attachGen !== gen) return;
             // The client repaints from scratch, so this is a Snapshot carrying
             // the `history` flag rather than a separate message shape.
             this.sendJson(ws, {
