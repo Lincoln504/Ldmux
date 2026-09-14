@@ -42,7 +42,6 @@ export interface RemoteServerOptions {
 }
 
 interface ConnData {
-  authed: boolean;
   disposed: boolean;
   /** Incremented per attach; a superseded attach must not commit. */
   attachGen: number;
@@ -52,7 +51,6 @@ interface ConnData {
   live: boolean;
   pending: string[];
   pendingBytes: number;
-  epoch: number;
 }
 
 const DEFAULT_MAX_BUFFERED = 4 * 1024 * 1024;
@@ -92,9 +90,6 @@ export class RemoteServer {
           data.disposed = true;
           this.cleanupSubscription(data);
         },
-        drain: () => {
-          /* backpressure hook (unused) */
-        },
       },
       error: (err: unknown) => {
         opts.log?.(`remote: server error: ${(err as Error).message}`);
@@ -122,13 +117,11 @@ export class RemoteServer {
       : (url.searchParams.get("token") ?? "");
     if (!tokenMatches(this.opts.token, provided)) return new Response("unauthorized\n", { status: 401 });
     const data: ConnData = {
-      authed: true,
       disposed: false,
       attachGen: 0,
       live: false,
       pending: [],
       pendingBytes: 0,
-      epoch: 0,
     };
     if (server.upgrade(req, { data })) return undefined;
     return new Response("upgrade failed\n", { status: 400 });
@@ -152,10 +145,6 @@ export class RemoteServer {
 
   private async onMessage(ws: any, raw: any): Promise<void> {
     const data = ws.data as ConnData;
-    if (!data.authed) {
-      ws.close();
-      return;
-    }
     let msg: any;
     try {
       msg = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw));
@@ -302,7 +291,6 @@ export class RemoteServer {
       this.opts.releaseStream?.(record);
       return;
     }
-    data.epoch = snap.epoch;
     const caps: Caps = {
       type: "caps",
       protocolVersion: PROTOCOL_VERSION,

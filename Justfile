@@ -39,9 +39,11 @@ mirror id:
     bun run packages/daemon/src/cli.ts mirror {{id}}
 
 # Symlink the pi extension into pi's auto-discovery dir, then `/reload` in pi.
+# Enable the pi extension (writes an absolute path into pi's settings.json).
+# A symlink into pi's discovery directory does NOT work: jiti resolves the
+# extension's relative imports against the symlink path.
 link-extension:
-    ln -sfn {{justfile_directory()}}/packages/extension ~/.pi/agent/extensions/ldmux
-    @echo "linked: ~/.pi/agent/extensions/ldmux -> packages/extension"
+    bun run packages/daemon/src/cli.ts install-extension
 # Reap tmux servers left behind by interrupted test runs or smoke scripts
 # (never touches non-ldmux servers such as the user's own tmux sessions).
 clean-tmux:

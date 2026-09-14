@@ -9,17 +9,20 @@
  *   ldmux capture <id> [--history]
  *   ldmux snapshot <id>
  *   ldmux kill <id>
+ *   ldmux forget <id>                 # drop a record without touching tmux
  *   ldmux adopt <tmux-name>
  *   ldmux mirror <id> [--rw] [--workspace N]
  *   ldmux remote
  *   ldmux pair
  *   ldmux expose [--dry-run]
+ *   ldmux install-extension [--remove] [--dry-run]
  */
 
 import { daemonCall, defaultSocketPath } from "../../protocol/src/rpc.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { PingResult, SessionRecord } from "../../protocol/src/rpc.ts";
 import { DEFAULT_MIRROR_WORKSPACE, mirrorCommand, openMirror } from "./desktop.ts";
+import { installPiExtension } from "./install.ts";
 import { buildPairInfo, expose, tailnetHost } from "./pairing.ts";
 
 function flag(args: string[], name: string): string | undefined {
@@ -115,6 +118,13 @@ async function main() {
       break;
     }
 
+    case "forget": {
+      const [id] = positional(rest, []);
+      const res = await daemonCall(sock, "forget", { id });
+      console.log(res.removed ? `forgot ${id}` : `no such session ${id ?? ""}`);
+      break;
+    }
+
     case "adopt": {
       const [tmuxName] = positional(rest, []);
       const { session } = await daemonCall(sock, "adopt", { tmuxName });
@@ -184,9 +194,28 @@ async function main() {
       break;
     }
 
+    case "install-extension":
+    case "link-extension": {
+      // Loading ldmux from pi's discovery directory via a symlink breaks the
+      // buildless relative imports, so this edits pi's settings instead
+      // (absolute real path) — see docs/PI-EXTENSIONS.md.
+      const res = installPiExtension({
+        remove: rest.includes("--remove"),
+        dryRun: rest.includes("--dry-run"),
+      });
+      if (res.warning) console.error(`ldmux: warning: ${res.warning}`);
+      console.log(`${res.note} in ${res.settingsPath}`);
+      if (res.backup) console.log(`backup: ${res.backup}`);
+      console.log(`entries: ${res.entries.length ? res.entries.join(", ") : "(none)"}`);
+      if (!res.entries.includes(res.extensionPath) && res.action !== "removed") {
+        console.error(`ldmux: the extension is not enabled; restart pi to load it`);
+      }
+      break;
+    }
+
     default:
       console.error(
-        "usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|adopt|mirror|remote|pair|expose> [args]",
+        "usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|remote|pair|expose|install-extension> [args]",
       );
       process.exit(2);
   }

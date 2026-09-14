@@ -237,3 +237,93 @@ test("session list carries an activity clock and a cwd-derived title", async () 
   ws.close();
   rmSync(cwd, { recursive: true, force: true });
 }, 20000);
+
+test("protocol errors are reported per-message without dropping the connection", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text } = await connect(info, info.token);
+
+  ws.send("{ not json");
+  expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "bad_json"))).toBe(true);
+
+  ws.send(JSON.stringify({ type: "nonsense" }));
+  expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "bad_message"))).toBe(true);
+
+  // Oversized input is refused with a typed error (not a silent truncation and
+  // not a socket kill from Bun's frame limit).
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+  ws.send(JSON.stringify({ type: "input", data: "x".repeat(20_000) }));
+  expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "input_too_large"))).toBe(true);
+
+  // A scrollback request without an attach is refused with a typed error.
+  const bare = await connect(info, info.token);
+  bare.ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id }));
+  expect(await waitFor(() => bare.text.some((m) => m.code === "not_attached"))).toBe(true);
+  bare.ws.close();
+
+  // The original connection is still healthy after all of that.
+  ws.send(JSON.stringify({ type: "ping", id: 99 }));
+  expect(await waitFor(() => text.some((m) => m.type === "pong" && m.id === 99))).toBe(true);
+  ws.close();
+}, 20000);
+
+test("key names that would be read as tmux flags are dropped, not forwarded", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text, output } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+
+  // Type a command with no newline, then send Enter *plus* hostile "keys".
+  ws.send(JSON.stringify({ type: "input", data: "printf 'KEYFILTER_OK\\n'" }));
+  ws.send(JSON.stringify({ type: "key", keys: ["-t", "%999", "-l", "x", "Enter"] }));
+  // If the dashes were forwarded, tmux would treat them as flags (different
+  // target, literal mode) and the command would never run.
+  expect(await waitFor(() => output.join("").includes("KEYFILTER_OK"))).toBe(true);
+  ws.close();
+}, 20000);
+
+test("a malformed binary frame from a client does not break the connection", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { ws, text } = await connect(info, info.token);
+  ws.send(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]));
+  ws.send(new Uint8Array(0));
+  ws.send(JSON.stringify({ type: "ping", id: 5 }));
+  expect(await waitFor(() => text.some((m) => m.type === "pong" && m.id === 5))).toBe(true);
+  ws.close();
+}, 20000);
+
+test("rpc snapshot and history capture agree with the live pane", async () => {
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  await call(daemon.socketPath, "send", { id: session.id, text: "seq 1 60", keys: ["Enter"] });
+  // Wait for the command to actually produce output before asserting.
+  let hist = { screen: "" };
+  for (let i = 0; i < 80; i++) {
+    hist = await call<{ screen: string }>(daemon.socketPath, "capture", { id: session.id, history: true });
+    if (hist.screen.includes("\n60\n")) break;
+    await sleep(50);
+  }
+  const snap = await call<{ screen: string; state: { cols: number; rows: number; dead: boolean } }>(
+    daemon.socketPath,
+    "snapshot",
+    { id: session.id },
+  );
+  expect(snap.state.cols).toBe(120);
+  expect(snap.state.rows).toBe(40);
+  expect(snap.state.dead).toBe(false);
+
+  // The 40-row pane shows the tail; history reaches the beginning of the run.
+  expect(snap.screen).toContain("60");
+  expect(hist.screen).toContain("1\n");
+  expect(hist.screen).toContain("60");
+});

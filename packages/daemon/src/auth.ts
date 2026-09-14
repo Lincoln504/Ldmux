@@ -22,7 +22,13 @@ export function loadOrCreateToken(stateDir: string): string {
   return token;
 }
 
-/** Constant-time comparison (no early exit on length). */
+/**
+ * Constant-time comparison of the secret bytes.
+ *
+ * The length check is an early exit, which is safe *here*: the token length is
+ * fixed and public, so it leaks nothing, and `timingSafeEqual` would otherwise
+ * throw on a length mismatch.
+ */
 export function tokenMatches(expected: string, provided: string): boolean {
   const a = Buffer.from(expected);
   const b = Buffer.from(provided);

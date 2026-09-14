@@ -5,10 +5,12 @@ bundle (HTML + CSS + vendored xterm.js) served by the daemon itself. On a phone
 it is the whole product today; on Android it becomes the payload of the
 `TerminalSurface` WebView seam, so the rendering code is written once.
 
-There is **no build step and no runtime dependency**: xterm.js 6.0.0 and
-`@xterm/addon-fit` 0.11.0 are vendored as UMD files under `public/vendor/`
-(licenses included). This is consistent with the repo-wide "buildless" rule; the
-only third-party code is a static asset the daemon serves.
+There is **no build step and no runtime dependency**: xterm.js 6.0.0 is vendored
+as UMD files under `public/vendor/` (license included). `@xterm/addon-fit` is
+deliberately *not* vendored: fitting the terminal would reflow the canonical grid
+(ADR-0002), so scaling is done in CSS on the wrapper instead. This is consistent
+with the repo-wide "buildless" rule; the only third-party code is a static asset
+the daemon serves.
 
 ## Layout and testing
 
@@ -50,7 +52,8 @@ strips it from the address bar and persists it.
 The client speaks exactly [`docs/REMOTE.md`](REMOTE.md):
 
 - JSON text control messages: client→server `list`, `attach`, `input`, `key`,
-  `ping`; server→client `sessions`, `caps`, `snapshot`, `pong`, `error`.
+  `follow`, `scrollback`, `ping`; server→client `sessions`, `caps`, `snapshot`
+  (with `history: true` for a paged answer), `pong`, `error`.
 - Pane output as **binary frames** using the one canonical 8-byte header
   (`packages/protocol/src/frames.ts`, `FrameType.Output`). The client keeps a
   tail buffer so a frame split across WebSocket messages is reassembled — the
@@ -102,7 +105,9 @@ chrome — the interim mobile app until the native WebView shell exists.
 
 The service worker never touches `/ws` or non-GET requests: terminal traffic is
 live and must not be cached. Navigation is network-first (so a redeploy lands)
-with the cached shell as an offline fallback; assets are cache-first.
+with the cached shell as an offline fallback; assets are
+**stale-while-revalidate** (serve the cached copy, refresh it in the background),
+because cache-first pinned clients to a stale `app.js` after a deploy.
 
 ## Android (next)
 

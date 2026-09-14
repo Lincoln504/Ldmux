@@ -87,6 +87,8 @@ export interface DaemonMethods {
   capture: { params: { id: string; history?: boolean }; result: { screen: string } };
   snapshot: { params: { id: string }; result: { screen: string; state: PaneState } };
   kill: { params: { id: string }; result: { ok: true; session: SessionRecord } };
+  /** Drop a record without touching tmux (cleanup for dead/adopted leftovers). */
+  forget: { params: { id: string }; result: { ok: true; removed: boolean } };
   adopt: { params: { tmuxName: string; kind?: SessionKind; title?: string }; result: { session: SessionRecord } };
   register: { params: RegisterParams; result: { session: SessionRecord } };
   session_end: { params: SessionEndParams; result: { ok: true; session?: SessionRecord } };

@@ -7,10 +7,13 @@
  *
  *   offset  size  field
  *   0       1     type   (FrameType)
- *   1       1     flags  (bit 0 = compressed, reserved otherwise)
+ *   1       1     flags  (must be 0: no flags are defined in v1)
  *   2       2     reserved (must be 0)
  *   4       4     length (u32 big-endian, payload byte count)
  *   8       N     payload
+ *
+ * Only `FrameType.Output` is emitted by the shipped code; the remaining members
+ * are the reserved vocabulary for later revisions (see docs/REMOTE.md).
  */
 
 export enum FrameType {
@@ -30,7 +33,6 @@ export enum FrameType {
 }
 
 export const HEADER_SIZE = 8;
-export const FLAG_COMPRESSED = 0x01;
 
 /** Absolute payload ceiling (DoS guard). */
 export const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;

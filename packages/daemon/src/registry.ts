@@ -17,12 +17,11 @@ export type { SessionKind, SessionRecord, SessionStatus };
 interface RegistryFile {
   version: 1;
   sessions: SessionRecord[];
-  settings: Record<string, unknown>;
+  /** Older versions wrote a `settings` map that nothing ever read; ignored. */
 }
 
 export class Registry {
   private sessions = new Map<string, SessionRecord>();
-  private settings: Record<string, unknown> = {};
 
   constructor(private readonly path: string) {}
 
@@ -31,7 +30,6 @@ export class Registry {
       const raw = readFileSync(this.path, "utf8");
       const data = JSON.parse(raw) as RegistryFile;
       for (const record of data.sessions ?? []) this.sessions.set(record.id, record);
-      this.settings = data.settings ?? {};
     } catch {
       // Missing/corrupt registry: start empty (tmux will be re-adopted).
     }
@@ -39,7 +37,7 @@ export class Registry {
 
   save(): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    const data: RegistryFile = { version: 1, sessions: [...this.sessions.values()], settings: this.settings };
+    const data: RegistryFile = { version: 1, sessions: [...this.sessions.values()] };
     const tmp = `${this.path}.tmp`;
     writeFileSync(tmp, JSON.stringify(data, null, 2));
     renameSync(tmp, this.path); // atomic

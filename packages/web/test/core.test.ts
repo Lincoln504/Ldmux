@@ -169,3 +169,44 @@ test("the shipped client is plain JavaScript (no type annotations)", () => {
   expect(core.includes(": string")).toBe(false);
   expect(app.includes("interface ")).toBe(false);
 });
+
+test("terminal modes are replayed from the snapshot (ADR-0004 fidelity)", () => {
+  const all = { mouse: true, bracketedPaste: true, appCursor: true };
+  const seq = core.modeSequences(all, true);
+  expect(seq).toContain("\x1b[?2004h"); // bracketed paste
+  expect(seq).toContain("\x1b[?1h"); // application cursor keys
+  expect(seq).toContain("\x1b[?1000h"); // mouse button events
+  expect(seq).toContain("\x1b[?1006h"); // SGR coordinates
+
+  // Opt-in mouse: the pane wants it, the user has not asked for it.
+  const noMouse = core.modeSequences(all, false);
+  expect(noMouse).toContain("\x1b[?2004h");
+  expect(noMouse).toContain("\x1b[?1000l");
+  expect(noMouse).not.toContain("\x1b[?1000h");
+
+  // A plain shell: every mode explicitly off (never left over from before).
+  expect(core.modeSequences({}, true)).toBe("\x1b[?2004l\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1006l");
+  expect(core.modeSequences(undefined, true)).toContain("\x1b[?2004l");
+});
+
+test("stale snapshots are detected so a late capture cannot undo an attach", () => {
+  expect(core.isStaleSnapshot(3, 5)).toBe(true);
+  expect(core.isStaleSnapshot(5, 5)).toBe(false);
+  expect(core.isStaleSnapshot(6, 5)).toBe(false);
+  // Unknown epochs carry no ordering information: never stale.
+  expect(core.isStaleSnapshot(undefined, 5)).toBe(false);
+  expect(core.isStaleSnapshot(3, undefined)).toBe(false);
+  expect(core.isStaleSnapshot(0, 0)).toBe(false);
+});
+
+test("app.js replays modes, tracks epochs, and gates mouse behind a toggle", () => {
+  const app = readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+  expect(app.includes("modeSequences(")).toBe(true);
+  expect(app.includes("isStaleSnapshot(")).toBe(true);
+  expect(app.includes('localStorage.getItem("ldmux.mouse")')).toBe(true);
+  expect(app.includes("paneModes")).toBe(true);
+  // The mouse toggle must not clobber the other modes.
+  expect(app.includes("modeSequences(paneModes, mouseEnabled)")).toBe(true);
+  const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  expect(html.includes('id="mouse"')).toBe(true);
+});

@@ -44,8 +44,9 @@ ldmux binds to loopback and is exposed by the **system** `tailscale serve`
 
 dooboxes' renderer direction moved KMP → Flutter + `flutter_rust_bridge` →
 `libghostty` with little shipped. ldmux ships **xterm.js in a WebView behind a
-`TerminalSurface` seam**; a native renderer is a later, optional swap behind the
-same seam. Predictive echo and adaptive frame rate (mosh-derived, unimplemented
+`TerminalSurface` seam** — a seam that exists today only as the client's own
+module boundary (`core.js` is DOM-free and unit-tested; `app.js` is the host
+glue), with a native renderer as a later, optional swap behind it. Predictive echo and adaptive frame rate (mosh-derived, unimplemented
 in dooboxes) are rejected until a measured problem exists.
 
 ### 5. No 16-byte magic/version/sequence frame (vs dooboxes)

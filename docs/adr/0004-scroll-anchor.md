@@ -28,5 +28,8 @@ history indices that shift on eviction/ED3/reflow).
 ## Consequences
 
 - **+** Stable scrolling; no cross-boundary line-id ambiguity.
-- **+** Server stays simple; scrollback paging (`/scrollback`) is independent.
-- **−** The client (xterm.js addon) carries the complexity; must be well-tested.
+- **+** Server stays simple; scrollback paging (the `scrollback` message) is
+  independent.
+- **−** The client carries the complexity; the state machine is a ~30-line
+  module in `packages/web/public/core.js` with unit tests (`scrollMode`,
+  `anchorFromBottom`, `anchoredTarget`), not a separate xterm addon.

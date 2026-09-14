@@ -171,3 +171,19 @@ test("concurrent requests on one connection are answered in request order", asyn
   expect(replies.map((r) => r.id)).toEqual(["a", "b", "c"]);
   expect(replies.every((r) => r.ok)).toBe(true);
 });
+
+test("forget drops a record without killing or adopting the tmux session", async () => {
+  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const gone = await call<{ ok: true; removed: boolean }>(daemon.socketPath, "forget", { id: session.id });
+  expect(gone.removed).toBe(true);
+  const { sessions } = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list", {});
+  expect(sessions.some((s) => s.id === session.id)).toBe(false);
+  // The tmux session itself is untouched: it becomes adoptable again.
+  expect(tm("has-session", "-t", session.tmuxName).exitCode).toBe(0);
+  const again = await call<{ ok: true; removed: boolean }>(daemon.socketPath, "forget", { id: session.id });
+  expect(again.removed).toBe(false);
+  tm("kill-session", "-t", session.tmuxName);
+});

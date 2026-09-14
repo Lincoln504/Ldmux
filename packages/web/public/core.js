@@ -112,6 +112,40 @@
     return activity > 0 && activity > seen;
   }
 
+  /**
+   * The DECSET/DECRST sequences that reproduce the pane's terminal modes in
+   * xterm. `capture-pane` carries no mode information, so a snapshot without
+   * this repaint leaves a TUI's mouse, application-cursor and bracketed-paste
+   * state wrong (the fidelity gap ADR-0004 names).
+   *
+   * `allowMouse` is the user's choice: enabling mouse reporting in xterm makes
+   * touch drags report to the program instead of scrolling the viewport, so the
+   * phone keeps it off unless asked for (dooboxes MOBILE_TERMINAL_UX §5).
+   */
+  function modeSequences(state, allowMouse) {
+    let out = "";
+    out += state && state.bracketedPaste ? "\x1b[?2004h" : "\x1b[?2004l";
+    out += state && state.appCursor ? "\x1b[?1h" : "\x1b[?1l";
+    if (state && state.mouse && allowMouse) {
+      // 1000 = button events, 1002 = button+motion, 1006 = SGR coordinates.
+      out += "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+    } else {
+      out += "\x1b[?1000l\x1b[?1002l\x1b[?1006l";
+    }
+    return out;
+  }
+
+  /**
+   * Snapshots are delivered in order, but a paged-history capture can land
+   * after a fresh attach snapshot; repainting from the older one would undo the
+   * attach. Epoch 0/undefined means "no opinion" and is never stale.
+   */
+  function isStaleSnapshot(epoch, lastEpoch) {
+    const now = Number(epoch ?? 0);
+    const last = Number(lastEpoch ?? 0);
+    return now > 0 && last > 0 && now < last;
+  }
+
   root.LdmuxCore = {
     HEADER_SIZE,
     OUTPUT_FRAME,
@@ -124,5 +158,7 @@
     escapeHtml,
     tokenFrom,
     isUnread,
+    modeSequences,
+    isStaleSnapshot,
   };
 })(typeof globalThis !== "undefined" ? globalThis : this);

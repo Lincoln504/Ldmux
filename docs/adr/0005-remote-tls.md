@@ -17,10 +17,16 @@ resolve MagicDNS, so a `100.x` fallback is needed.
   optional `Tailscale-User-Login` identity headers). `tailscale cert` is the
   fallback if `serve` is unavailable.
 - **Two gates:** tailnet identity (WireGuard; optional `whois`/identity-header
-  allow list) + bearer token. Token stored `0600`, hashed at rest, never plaintext.
-- **Pairing:** host displays a **QR code + short code** (deep link
-  `ldmux://pair?host=…&port=…&token=…`); manual entry fallback; show the `100.x`
-  address for apps where MagicDNS fails.
+  allow list) + bearer token. The token is stored **plaintext** at
+  `<stateDir>/token` with mode `0600` (state dir `0700`) and compared in constant
+  time: another process running as the same user can read it, so it is a gate
+  against the network, not against a local user. The identity allow list
+  mentioned above is **not implemented**.
+- **Pairing:** `ldmux pair` prints an `https://<magicdns-host>/?token=…` URL, a
+  local URL, the `ldmux://pair?host=…&port=…&token=…` deep link and the
+  `tailscale serve` command. **No QR code is generated** (`qrencode` is not
+  installed on this machine) and there is no short code: the URL/deep link is
+  the pairing payload, with manual token entry as the fallback.
 - **No Funnel** by default. Refuse to bind a public interface.
 
 ## Consequences

@@ -22,8 +22,18 @@ if (!globalThis.LdmuxCore) {
   throw new Error("ldmux: core.js failed to load (incomplete app shell)");
 }
 
-const { decodeFrames, escapeHtml, scrollMode, anchorFromBottom, anchoredTarget, cursorSequence, tokenFrom, isUnread } =
-  globalThis.LdmuxCore;
+const {
+  decodeFrames,
+  escapeHtml,
+  scrollMode,
+  anchorFromBottom,
+  anchoredTarget,
+  cursorSequence,
+  tokenFrom,
+  isUnread,
+  modeSequences,
+  isStaleSnapshot,
+} = globalThis.LdmuxCore;
 const OUTPUT_FRAME = globalThis.LdmuxCore.OUTPUT_FRAME;
 const SCROLLBACK = 1000; // mobile memory bound (dooboxes MOBILE_TERMINAL_PERFORMANCE §15.1)
 const PING_MS = 20000;
@@ -38,6 +48,7 @@ const els = {
   empty: $("empty"),
   jump: $("jump"),
   history: $("history"),
+  mouse: $("mouse"),
   drawer: $("drawer"),
   sessions: $("sessions"),
   keybar: $("keybar"),
@@ -57,6 +68,13 @@ let ctrlSticky = false;
 let mode = "following";
 let attachedOnce = false;
 let canPageHistory = false;
+let lastEpoch = 0;
+// Mouse reporting is opt-in: with it on, a drag reports to the program instead
+// of scrolling, so the phone leaves it off until the user asks (key bar).
+let mouseEnabled = localStorage.getItem("ldmux.mouse") === "1";
+let paneHasMouse = false;
+/** Terminal modes reported by the last snapshot; replayed on every repaint. */
+let paneModes = { mouse: false, bracketedPaste: false, appCursor: false };
 // Unread markers: id -> the activity timestamp the user last looked at.
 const seen = new Map(Object.entries(readSeen()));
 
@@ -220,6 +238,7 @@ function onControl(msg) {
     case "caps":
       ensureTerm();
       term.resize(msg.cols, msg.rows);
+      lastEpoch = Number(msg.snapshotEpoch ?? 0);
       canPageHistory = Boolean(msg.capabilities && msg.capabilities.scrollback);
       els.history.classList.toggle("hidden", !canPageHistory);
       setTimeout(scaleToFit, 0);
@@ -229,6 +248,9 @@ function onControl(msg) {
       // A late answer (e.g. a paged-history capture) for a session the user has
       // already navigated away from must not repaint the current one.
       if (msg.sessionId && currentId && msg.sessionId !== currentId) break;
+      // …nor may an older snapshot undo a newer one.
+      if (isStaleSnapshot(msg.snapshotEpoch, lastEpoch)) break;
+      lastEpoch = Number(msg.snapshotEpoch ?? lastEpoch);
       if (msg.history) {
         // Paged history: repaint from scratch so the older lines land in
         // scrollback, then follow the bottom (the client asked for older lines,
@@ -277,6 +299,16 @@ function applySnapshot(msg) {
   }
   term.write(msg.screen || "");
   term.write(cursorSequence(msg.cursorX, msg.cursorY));
+  // capture-pane carries no terminal-mode register, so replay it (ADR-0004).
+  paneModes = {
+    mouse: Boolean(msg.mouse),
+    bracketedPaste: Boolean(msg.bracketedPaste),
+    appCursor: Boolean(msg.appCursor),
+  };
+  paneHasMouse = paneModes.mouse;
+  term.write(modeSequences(paneModes, mouseEnabled));
+  els.mouse.classList.toggle("hidden", !paneHasMouse);
+  els.mouse.classList.toggle("active", mouseEnabled);
 
   if (mode === "anchored") {
     const b = term.buffer && term.buffer.active;
@@ -313,6 +345,7 @@ function renderSessions() {
 function attach(sessionId) {
   currentId = sessionId;
   attachedOnce = false;
+  lastEpoch = 0;
   mode = "following";
   els.jump.classList.add("hidden");
   const s = sessions.find((x) => x.id === sessionId);
@@ -327,6 +360,20 @@ function loadHistory() {
   // Match the local buffer: fetching more than xterm can hold just wastes
   // transfer (the older half is discarded on write).
   if (currentId && canPageHistory) send({ type: "scrollback", sessionId: currentId, lines: SCROLLBACK });
+}
+
+/**
+ * Mouse reporting is a trade: with it on, a drag goes to the program (needed by
+ * mouse-tracking TUIs, which the pane's mode register told us about) instead of
+ * scrolling the viewport. Off by default, remembered per device.
+ */
+function toggleMouse() {
+  mouseEnabled = !mouseEnabled;
+  localStorage.setItem("ldmux.mouse", mouseEnabled ? "1" : "0");
+  els.mouse.classList.toggle("active", mouseEnabled);
+  // Re-apply the pane's modes with the new mouse choice; the other modes must
+  // keep the values the snapshot reported, not be reset to off.
+  if (term) term.write(modeSequences(paneModes, mouseEnabled));
 }
 
 function cycle(delta) {
@@ -355,6 +402,7 @@ const KEYS = [
   ["/", () => send({ type: "input", data: "/" })],
   ["≡", () => toggleSymbols(), "More symbols", "more"],
 ];
+
 const SYMBOLS = "~!@#$%^&*()_+=[]{};:'\"<>,.?\\`";
 
 function keyButton(label, fn, ariaLabel, cls) {
@@ -422,6 +470,7 @@ edgeSwipe($("swipe-right"));
 
 els.jump.addEventListener("click", jumpToBottom);
 els.history.addEventListener("click", loadHistory);
+els.mouse.addEventListener("click", toggleMouse);
 
 // ── wiring ───────────────────────────────────────────────────────────────
 $("menu").addEventListener("click", () => {

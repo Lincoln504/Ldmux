@@ -43,19 +43,30 @@ scope unilaterally. `docs/PI-EXTENSIONS.md` is the contract for the extension.
   and pi's jiti loader (extension). Do not add a bundling step without an ADR.
 - **Daemon is a separate process.** The pi extension must never host long-lived
   state; it supervises the daemon and talks to it over the Unix socket.
-- Run `bun test` after changes; live tests spawn a scratch tmux server and must
-  clean it up (`tmux -L <unique> kill-server`).
+- Both gates must pass before a commit: `bun test` and `bun run typecheck`.
+- Live tests spawn a scratch tmux server; clean it up with
+  `killTmuxServer()` (`packages/daemon/test/tmux-cleanup.ts`), not a bare
+  `tmux -L <unique> kill-server` — that leaves the socket file behind when the
+  server has already exited. `just clean-tmux` reaps strays after an interrupted
+  run, and never touches non-ldmux servers.
+- **Docs lag code faster than anything else here.** When a change makes a
+  documented statement false (a count, a path, an "out of scope"), grep the whole
+  docs tree plus README/AGENTS for the old wording in the same commit.
 - Conventional commits: `type(scope): summary`.
 - TypeScript: strict; avoid new runtime deps (the extension uses plain JSON-Schema
   tool params instead of typebox).
 - Rust (if/when used): match the style of the surrounding crate.
 - Work on branches off `main`; open PRs against `main`.
 
-## Environment facts (this machine)
+## Environment facts (this machine, observed 2026-09-13)
 
 - Tailscale host `debian.tail496756.ts.net` (`100.127.119.54`); system `tailscaled`
   v1.102.3. Phone: `motorola-edge-2024`.
+- These are observations, not guarantees: re-check before relying on any of them
+  (the devShell toolchain — currently bun 1.3.x, node 24, tmux 3.7b — is pinned
+  by `flake.nix`; system tmux/node are older and not used for tests).
 - i3 4.24 / X11 (`DISPLAY=:0.0`); workspaces `1..10` (`Mod+0` → `10`).
-- alacritty; tmux 3.5a (control mode OK); Node 25.8.2; Bun 1.3.9; Rust 1.95; Go 1.24.4.
+- System toolchain (unpinned, informational): alacritty, tmux 3.5a, Node 25.8.2,
+  Bun 1.3.9, Rust 1.95, Go 1.24.4. Tests run against the *devShell* versions.
 - pi 0.85.1, including `pi --mode rpc` (see `~/.config/nvm/.../pi-coding-agent/docs/rpc.md`).
 - gh authed as `Lincoln504`.

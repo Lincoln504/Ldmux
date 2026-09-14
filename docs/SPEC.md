@@ -28,9 +28,10 @@
   **tailnet** via a WebSocket API.
 - A **pi extension** makes the daemon "always available" while any pi session is
   alive, registers pi sessions, and adds tools/commands.
-- A **mobile app** (Kotlin Multiplatform / Compose Multiplatform, landscape-only)
-  renders terminals with a configurable left/right **control quarter** and a
-  horizontal **swipe session pager**.
+- A **mobile client** (v1: an installable landscape-locked **PWA**, built — see
+  `docs/WEB.md`; a Kotlin Multiplatform shell is the documented *target*, not yet
+  built) renders terminals with an extra-keys bar, a session **drawer**, and
+  edge-strip paging.
 - A thin **CLI** and an optional desktop **alacritty mirror** round it out.
 - **tmux itself** provides persistence, multi-client attach, and synchronized
   phone+desktop viewing.
@@ -72,8 +73,10 @@ Tailscale only, and far less functionality than dooboxes.
 
 ### 1.4 What we keep from dooboxes
 
-- tmux control mode as a **candidate** real-time transport (but see ADR-0001 —
-  it requires a PTY, which v1 avoids).
+- tmux control mode (`-C` over pipes) as the real-time transport — the
+  corrected finding (ADR-0001): `-C` needs **no** PTY, only `-CC` does. Its
+  concept of a *stateful per-stream sanitizer* and its diff/scroll lessons are
+  kept; its ControlModeClient is not a reference implementation.
 - A server-authoritative session model; clients are thin.
 - One terminal renderer behind one client interface.
 - Tailnet-first, WireGuard-encrypted, no public ACME.
@@ -176,7 +179,7 @@ Tailscale only, and far less functionality than dooboxes.
 | Component | Language | Role |
 |-----------|----------|------|
 | **`ldmuxd`** (daemon) | TypeScript on Bun (Node fallback) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
-| **`ldmux`** (CLI) | TypeScript (Bun) | `list`, `new`, `attach`, `send`, `capture`, `kill`, `adopt`, `doctor`, `daemon …`. Unix-socket local control. |
+| **`ldmux`** (CLI) | TypeScript (Bun) | `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`, `install-extension`. Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`.) |
 | **pi extension** | TypeScript | Ensures `ldmuxd` runs; registers the current pi session; `/ldmux` + `ldmux_*` tools; **reason-branched** `session_shutdown`. |
 | **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Landscape UI; xterm.js WebView renderer; Ktor WebSocket; foreground service; swipe pager; control quarter. |
 | **Desktop mirror** | shell + i3 | `i3-msg` + `alacritty -e tmux -L ldmux attach-session [-r] -t <name>`. |
@@ -223,7 +226,11 @@ pi() {
 | `LDMUX_SESSION_ID` | ldmux session id (`<ulid>`). |
 | `LDMUX_SOCKET` | daemon Unix socket path for child reporting. |
 | `LDMUX_KIND` | `shell` \| `pi`. |
-| `LDMUX_DAEMON_TOKEN` | short-lived local token for child callbacks (optional). |
+| `LDMUX_TMUX_NAME` | the session's tmux session name (for `tmux -L $LDMUX_TMUX_SOCK`). |
+| `LDMUX_TMUX_SOCK` | the private tmux server socket name (`ldmux` by default). |
+
+`LDMUX_DAEMON_TOKEN` is **not** implemented: children reach the daemon through
+the Unix socket, whose 0600 permission plus a 0700 state dir is the boundary.
 
 ### 4.5 Pi RPC as a complementary channel
 
@@ -259,8 +266,9 @@ under ldmux (`$LDMUX=1`).
 
 ### 5.1 Responsibilities
 
-1. Own/monitor a private tmux server (`-L ldmux`; socket under
-   `$XDG_RUNTIME_DIR/ldmux` via `TMUX_TMPDIR`).
+1. Own/monitor a private tmux server (`-L ldmux` — a bare socket *name*, so
+   tmux places it in its own directory, `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/`;
+   ldmux never sets `TMUX_TMPDIR`).
 2. Maintain a compact **session registry** reconciled against `tmux list-*`.
 3. **Stream** pane output (see ADR-0001) and provide **snapshots**.
 4. Accept **input** (`send-keys`).
@@ -349,7 +357,8 @@ only the *active* pane; the pane poller follows `display-message -p '#{pane_id}'
 ### 5.3 Session registry
 
 **tmux is authoritative.** v1 keeps a **compact JSON state file**
-(`~/.local/state/ldmux/registry.json` + `settings.json`) for metadata tmux does not
+(`<stateDir>/registry.json`, where `<stateDir>` is `$LDMUX_STATE_DIR`, else
+`${XDG_RUNTIME_DIR}/ldmux`, else `/tmp/ldmux`) for metadata tmux does not
 hold (kind, title, pi-session id, created-by, last-seen). SQLite is **deferred**
 until a proven need (it was over-engineered in v0.1).
 
@@ -377,8 +386,9 @@ metadata + scrollback reference for replay.
 > adopt/register/session_end/remote_info), one WebSocket per session at `WS /ws`
 > (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`), and the static web
 > client at `/`. No REST layer, no `/api/dirs`, no session creation from a
-> client, and no scrollback paging in v1. The table records original intent, not
-> the contract.
+> client. Scrollback paging **is** implemented, as the `scrollback` WebSocket
+> message (a snapshot carrying `history: true`, up to 5,000 lines) rather than
+> the REST route below. The table records original intent, not the contract.
 
 Local: Unix socket `$XDG_RUNTIME_DIR/ldmux/ldmuxd.sock`.
 Remote: `wss://debian.tail496756.ts.net/…` + `https://…/api/…` (via
@@ -436,16 +446,19 @@ helper suffices), and owner/families.
 - WebSocket over TLS (`wss://`) provided by **`tailscale serve`** with the daemon
   bound to **loopback** (ADR-0005). This removes bind-address churn (the tailnet IP
   can change) and gives MagicDNS + optional identity headers.
-- **Two gates** (gmux model): (1) tailnet identity (WireGuard; optionally verify
-  via `tailscale whois` / `Tailscale-User-Login` against an allow list), and
-  (2) a bearer **token**. Token stored `0600` at `~/.config/ldmux/token`; the DB
-  never stores plaintext (store only a salted hash if persisted).
-- **Pairing:** the host displays a **QR code + short code** (deep link
+- **Gates:** (1) WireGuard/tailnet reachability, and (2) a bearer **token**
+  stored plaintext at `<stateDir>/token` with mode `0600` and compared in
+  constant time. The optional `tailscale whois` / `Tailscale-User-Login` allow
+  list is **not implemented** (documented as a later hardening step): the token
+  is the only authentication, so treat it as the credential it is.
+- **Pairing:** `ldmux pair` prints the URL, local URL and deep link (no QR: `qrencode` is absent) (deep link
   `ldmux://pair?host=…&port=…&token=…`); manual entry fallback. If MagicDNS fails
   in the app, fall back to the `100.x` address shown at pairing.
 - **Framing:** terminal data is **binary**; control/handshake is **JSON text**
   frames. `protocolVersion` is negotiated in the handshake; enforces max frame
-  sizes (copy dooboxes' DoS limits: 16 MiB absolute, 1 MiB output, 16 KiB input).
+  sizes: 16 MiB absolute frame ceiling, 16 KiB of `input` data, 32 keys per
+  message, 64 KiB per inbound WebSocket frame, and a 1 MiB cap on the output
+  buffered while a client is attaching (exceeding it forces a resync).
 
 ### 6.2 Message types
 
@@ -473,9 +486,11 @@ for marginal benefit.
 2. Server → `CAPS`; then `SNAPSHOT` (declared geometry + state fields).
 3. Client applies the snapshot, then resumes the live `OUTPUT` stream.
 4. Client → `INPUT`/`RESIZE`.
-5. Heartbeats: application-level `PING`/`PONG` every **20 s** (mobile); server
-   drops a client after **2 missed** beats. The app must be a **foreground
-   service** so the heartbeat is not suspended (Android).
+5. Heartbeats: the client sends an application-level `PING` every **20 s** and
+   the server answers `PONG` (implemented). The server does **not** track missed
+   beats or drop idle clients; a dead socket is detected by the write failing or
+   the client's own reconnect loop. The app must be a **foreground service** so
+   the heartbeat is not suspended (Android).
 
 Known fidelity gap: `capture-pane` + state fields does not fully restore every VT
 mode; the R2 phase-3 seam (optional server-side VT emulator) closes it.
@@ -505,9 +520,10 @@ mode; the R2 phase-3 seam (optional server-side VT emulator) closes it.
 
 ### 7.2 Session switching (swipe)
 
-- Horizontal swipe on the terminal → previous/next session (FR-8), with page
-  indicators. The pager lists sessions; tap to jump. Edge-swipe opens a full
-  drawer (search, cwd). Switching is instant; adjacent sessions are warmed.
+- Session switching is a **drawer** action; the only swipe shortcut is a narrow
+  left/right **edge strip** (20 px), because a horizontal drag inside the
+  terminal belongs to the running program (dooboxes `MOBILE_TERMINAL_UX` §5).
+  The pager lists sessions; tap to jump. Switching is instant.
 
 ### 7.3 Input & keys
 
@@ -546,8 +562,8 @@ server-facing integer line id has no stable meaning across snapshots/reflow/ED3)
   to `following` — never guess.**
 - Persistent **"↓ jump to bottom"** affordance while anchored (dooboxes requirement).
 - Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; `packages/web/public/app.js`)
-  with a configurable max; server retains up to `history-limit` (50,000) and
-  `/scrollback` serves older pages on demand.
+  with a configurable max; server-side tmux `history-limit` is **10,000** lines
+  (~40 MB/pane) and the `scrollback` message serves older pages on demand.
 
 ### 7.5 Session list semantics (FR-9)
 
@@ -631,8 +647,10 @@ KMP + Compose + WebView/xterm.js (**recommended v1**); native KMP via Rust
 Flutter + `flutter_rust_bridge` (viable fallback); PWA (instant fallback);
 libghostty (**not viable** — no mobile target, unstable ABI).
 
-**Recommendation: KMP + Compose Multiplatform**, landscape-only, WebView/xterm.js
-`TerminalSurface` for v1. Libraries: **Ktor** (`ktor-client-websockets`; OkHttp on
+**Recommendation (target, not built): KMP + Compose Multiplatform**, landscape-only,
+WebView/xterm.js `TerminalSurface` for v1. **What shipped instead** is the
+buildless PWA in `packages/web/public` (`docs/WEB.md`), because this machine has
+no gradle/kotlin toolchain; it is the renderer the WebView shell will host. Libraries: **Ktor** (`ktor-client-websockets`; OkHttp on
 Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
 (backoff + `StateFlow`), `compose-webview-multiplatform`, foreground service +
 `ConnectivityManager`.
@@ -650,7 +668,8 @@ Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
 
 ### 11.3 Rendering engine (client)
 
-- **v1:** xterm.js in WebView + `@xterm/addon-fit`, optional
+- **v1:** xterm.js in a WebView (no fit addon: the canonical grid is
+  CSS-scaled, never reflowed — ADR-0002), optional
   `@xterm/addon-webgl` (canvas/DOM fallback). Scroll-anchor implemented as a small
   client addon around the xterm.js viewport.
 - **Future:** native renderer behind the same `TerminalSurface` seam.
@@ -661,18 +680,18 @@ Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
 
 ```
 ldmux/
-├─ README.md · AGENTS.md
+├─ README.md · AGENTS.md · Justfile · flake.nix · package.json · tsconfig.json
 ├─ docs/
-│  ├─ SPEC.md · INVESTIGATION.md
-│  └─ adr/            # 0001 transport, 0002 geometry, 0003 lifecycle, 0005 tls
+│  ├─ SPEC.md · INVESTIGATION.md · TRANSPORT.md · REMOTE.md · WEB.md ·
+│  │  PI-EXTENSIONS.md
+│  └─ adr/            # 0001 transport, 0002 geometry, 0003 lifecycle,
+│                     # 0004 scroll, 0005 remote/tls, 0006 divergences
 ├─ packages/
-│  ├─ protocol/       # shared frame/message types + schemas
-│  ├─ daemon/         # ldmuxd: tmux/, stream/, registry/, server/, mirror/
-│  ├─ cli/            # ldmux CLI
-│  └─ pi-extension/   # pi extension (supervision, tools, commands)
-├─ apps/mobile/       # KMP/Compose app (+ webview-assets/ xterm.js bundle)
-├─ scripts/           # install, doctor, dev
-└─ Justfile · package.json
+│  ├─ protocol/       # frames, messages, rpc, socket client, paths
+│  ├─ daemon/         # ldmuxd + cli + probe + tmux/, stream.ts, remote.ts
+│  ├─ extension/      # the pi extension
+│  └─ web/public/     # buildless web client (core.js + app.js + vendor/)
+└─ (no apps/mobile or scripts yet: the mobile client is the PWA)
 ```
 
 Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
@@ -692,7 +711,9 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 - **Transport (ADR-0001):** DONE — `-C` over pipes proven on tmux 3.5a + Bun 1.3.9.
   Remaining: implement the robust parser (framing, octal→bytes, per-pane
   incremental UTF-8, `%begin/%end` correlation) and a burst/`%pause` test.
-- `ldmux` CLI: `list`, `new`, `attach`, `send`, `capture`, `kill`, `adopt`, `doctor`.
+- `ldmux` CLI: `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`,
+  `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`,
+  `install-extension` (all implemented).
 - **Geometry probe (ADR-0002):** confirm `window-size manual` behavior and the
   canonical-size default.
 
@@ -702,13 +723,16 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 - E2E: pi sessions appear/update/disappear correctly across `/new`,`/resume`,`quit`.
 
 **Phase 3 — remote + auth.**
-- `tailscale serve` + token + pairing (QR/short code); loopback bind.
+- `tailscale serve` + token + pairing (URL/deep link; no QR generator on this
+  machine); loopback bind. **DONE.**
 - Reconnect (snapshot-then-stream), heartbeats, `resumeToken`.
 
-**Phase 4 — mobile app (Android v1).**
-- KMP scaffold (landscape), Ktor WS, foreground service, `TerminalSurface`
-  (xterm.js WebView), control quarter, extra keys, copy-mode, swipe pager.
-- Client-owned scroll-anchor state machine + `FOLLOW`; `/scrollback` paging.
+**Phase 4 — mobile client (Android v1).**
+- **Shipped:** the PWA — canonical-grid scaling, extra-keys bar, session drawer +
+  edge-strip paging, client-owned scroll state machine + `follow`, `scrollback`
+  paging, unread markers, offline app shell.
+- **Remaining (target):** KMP scaffold, Ktor WS, foreground service,
+  `TerminalSurface` WebView host, copy-mode.
 - New-session dialog + directory browser. E2E over Tailscale from the phone.
 
 **Phase 5 — desktop mirror + polish.**
@@ -726,10 +750,10 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 | R3 | tmux version differences (3.5a here). | Conformance tests; feature-detect; probe before freezing ADRs. |
 | R4 | Android background kill severs the WS. | Foreground service, wake lock, backoff + jitter, tmux persistence, resync on resume. |
 | R5 | WebView WebGL2 availability. | Fallback to canvas/DOM; test on the real device. |
-| R6 | tmux socket under `/tmp` / `TMUX_TMPDIR` nesting. | Dedicated `TMUX_TMPDIR` under `$XDG_RUNTIME_DIR/ldmux`; unique per-run test names. |
+| R6 | tmux socket under `/tmp` / `TMUX_TMPDIR` nesting. | A bare `-L ldmux` name (no `TMUX_TMPDIR` override); unique per-run socket names in tests, and `killTmuxServer` also unlinks the socket file, which `kill-server` leaves behind when the server already exited. |
 | R7 | Split input with a desktop mirror. | Mirror read-only by default; explicit "take control". |
 | R8 | i3 placement races. | `for_window` rule keyed by `ldmux-mirror`. |
-| R9 | Token/identity security. | Loopback bind, `tailscale serve` TLS, token 0600 + hashed at rest, optional allow list. |
+| R9 | Token/identity security. | Loopback bind, `tailscale serve` TLS, token `0600` (plaintext at rest; the state dir is `0700`). No identity allow list yet. |
 | R10 | Language choice. | TS/Bun v1 with a `PaneStream` seam to Rust. |
 | R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |
 | R12 | Control-mode parser robustness (octal, split UTF-8, sequence correlation). | Robust parser + tests; capture-pane fallback; tmux owns state. |
@@ -783,4 +807,6 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0005** | **TLS/remote:** loopback bind + `tailscale serve --bg`; token + QR pairing; no Funnel. |
 
 Individual ADRs live under `docs/adr/`. ADR-0001 is now **frozen** (proven on this
-machine); ADR-0002 awaits the Phase-1 geometry probe.
+machine); ADR-0002's geometry probe is **done** (asserted in the daemon tests:
+a pinned 120×40 grid under `window-size manual`). ADR-0006 records the deliberate
+divergences from dooboxes/gmux.

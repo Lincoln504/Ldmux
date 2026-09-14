@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Registry } from "../src/registry.ts";
@@ -94,4 +94,29 @@ test("expireRpcOnly marks a quiet RPC-only pi record dead (a crashed pi)", () =>
   expect(reg.get("pi-fresh")!.status).toBe("running");
   // Terminal-backed records are the tmux reconciler's job, not this one.
   expect(reg.get("term")!.status).toBe("running");
+});
+
+test("remove() drops exactly one record and leaves the rest", () => {
+  const reg = new Registry(join(dir, "remove.json"));
+  reg.upsert(record({ id: "a" }));
+  reg.upsert(record({ id: "b" }));
+  reg.remove("a");
+  expect(reg.get("a")).toBeUndefined();
+  expect(reg.get("b")).toBeDefined();
+  reg.remove("nope"); // no throw
+  expect(reg.list().length).toBe(1);
+});
+
+test("a registry written by an older version (with a settings map) still loads", () => {
+  const path = join(dir, "legacy.json");
+  writeFileSync(
+    path,
+    JSON.stringify({ version: 1, sessions: [record({ id: "legacy" })], settings: { whatever: true } }),
+  );
+  const reg = new Registry(path);
+  reg.load();
+  expect(reg.get("legacy")).toBeDefined();
+  reg.save();
+  // …and the dead field is not carried forward.
+  expect(JSON.parse(readFileSync(path, "utf8")).settings).toBeUndefined();
 });

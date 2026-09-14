@@ -85,7 +85,7 @@ export class LdmuxDaemon {
   readonly socketPath: string;
   readonly cp: TmuxControlPlane;
   readonly registry: Registry;
-  private readonly stateDir: string;
+  readonly stateDir: string;
   private readonly lockPath: string;
   private readonly canonical: { cols: number; rows: number };
   private readonly historyLimit: number;
@@ -463,6 +463,19 @@ export class LdmuxDaemon {
         record.updatedAt = Date.now();
         this.registry.save();
         return { ok: true, session: record };
+      }
+
+      case "forget": {
+        // Deliberately does not touch tmux: `kill` ends a session, `forget`
+        // only removes the registry entry (a dead record or an adopted one the
+        // user no longer wants to see).
+        const id = String(params.id);
+        const record = this.registry.get(id);
+        if (!record) return { ok: true, removed: false };
+        if (record.tmuxName) this.dropStream(record.tmuxName, "session forgotten");
+        this.registry.remove(id);
+        this.registry.save();
+        return { ok: true, removed: true };
       }
 
       case "adopt":

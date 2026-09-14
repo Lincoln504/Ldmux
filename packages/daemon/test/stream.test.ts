@@ -139,3 +139,45 @@ test("history paging is clamped to the capture bound", async () => {
   expect(snap.history).toBe(true);
   stream.close();
 });
+
+test("snapshot state reflects the pane's terminal modes, not hardcoded false", async () => {
+  const name = "ldmux-stream-modes";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const stream = new PaneStream(tmuxSocket, name, cp);
+  await stream.subscribe({ onOutput: () => {}, onReset: () => {} });
+
+  // A pane that turns on DECCKM (application cursor keys) and mouse reporting.
+  await stream.inputText("printf '\\033[?1h\\033[?1000h'");
+  await stream.sendKey(["Enter"]);
+  const on = await (async () => {
+    for (let i = 0; i < 60; i++) {
+      const snap = await stream.snapshot();
+      if (snap.state.appCursor && snap.state.mouse) return snap;
+      await Bun.sleep(50);
+    }
+    return await stream.snapshot();
+  })();
+  expect(on.state.appCursor).toBe(true);
+  expect(on.state.mouse).toBe(true);
+
+  // …and off again, so the fields track the pane rather than being sticky.
+  await stream.inputText("printf '\\033[?1l\\033[?1000l'");
+  await stream.sendKey(["Enter"]);
+  const off = await (async () => {
+    for (let i = 0; i < 60; i++) {
+      const snap = await stream.snapshot();
+      if (!snap.state.appCursor && !snap.state.mouse) return snap;
+      await Bun.sleep(50);
+    }
+    return await stream.snapshot();
+  })();
+  expect(off.state.appCursor).toBe(false);
+  expect(off.state.mouse).toBe(false);
+
+  // The wire shape the client replays must carry all three modes as booleans.
+  for (const key of ["mouse", "appCursor", "bracketedPaste"] as const) {
+    expect(typeof off.state[key]).toBe("boolean");
+  }
+  stream.close();
+}, 30000);

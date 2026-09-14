@@ -246,7 +246,7 @@ Decision: ADR-0001 — control mode `-C` over pipes + `capture-pane`
 snapshots/fallback, Bun + TypeScript, no native modules. Details in
 [`TRANSPORT.md`](TRANSPORT.md).
 
-## 5. Sources
+## 6. Sources
 
 Local: `~/.local/bin/{gmux,gmuxd}`, `~/.config/gmux/`, `~/.local/state/gmux/`,
 `~/.bashrc`, `~/Documents/dooboxes/**`, `~/.pi/agent/**`,

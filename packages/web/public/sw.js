@@ -16,7 +16,6 @@ const SHELL = [
   "/icon.svg",
   "/vendor/xterm.css",
   "/vendor/xterm.js",
-  "/vendor/addon-fit.js",
 ];
 
 self.addEventListener("install", (event) => {
