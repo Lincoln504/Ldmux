@@ -132,8 +132,13 @@ with the cached shell as an offline fallback; assets are
 **stale-while-revalidate** (serve the cached copy, refresh it in the background),
 because cache-first pinned clients to a stale `app.js` after a deploy.
 
-## Android (next)
+## Android
 
-The WebView host is intentionally unimplemented: `packages/web/public` is
-platform-neutral. The Android shell adds landscape lock, a foreground service
-holding the WebSocket, and the session pager; the terminal itself stays here.
+`packages/web/public` stays platform-neutral: the native KMP/Compose shell in
+`packages/mobile` hosts it in a `WebView` (the `TerminalSurface` seam), so the
+terminal is the client below and there is still exactly one terminal engine
+(ADR-0006). The app adds landscape lock, a thin top bar, and a `HorizontalPager`
+that puts one session per page — **swipe between shells** (FR-8) — with the
+session list fetched over the daemon's WebSocket (`list`/`new`/`kill`). A
+foreground service (so the heartbeat survives Doze) is still to come; see
+`packages/mobile/README.md` for the build.

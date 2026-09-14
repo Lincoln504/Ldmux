@@ -120,6 +120,9 @@ test("app.js is wired to the shared core (no duplicated decoder)", () => {
   const app = readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
   expect(app.includes("LdmuxCore")).toBe(true);
   expect(app.includes("decodeFrames")).toBe(true);
+  // The native shell pins each pager page to one session with ?session=<id>.
+  expect(app.includes("urlParam(\"session\")")).toBe(true);
+  expect(app.includes("if (wantedSession) attach(wantedSession)")).toBe(true);
   expect(app.includes("function escapeHtml")).toBe(false);
   expect(app.includes("MAX_FRAME_PAYLOAD =")).toBe(false);
   // Every field interpolated into an innerHTML string must go through

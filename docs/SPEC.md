@@ -28,10 +28,11 @@
   **tailnet** via a WebSocket API.
 - A **pi extension** makes the daemon "always available" while any pi session is
   alive, registers pi sessions, and adds tools/commands.
-- A **mobile client** (v1: an installable landscape-locked **PWA**, built — see
-  `docs/WEB.md`; a Kotlin Multiplatform shell is the documented *target*, not yet
-  built) renders terminals with an extra-keys bar, a session **drawer**, and
-  edge-strip paging.
+- A **mobile client**: a native **KMP + Compose Multiplatform** Android app
+  (`packages/mobile`, landscape, WebView hosting `packages/web/public`, swipe
+  pager) — see `packages/mobile/README.md`. The installable
+  landscape-locked **PWA** (`docs/WEB.md`) is the renderer the app hosts, and
+  remains usable standalone from a browser.
 - A thin **CLI** and an optional desktop **alacritty mirror** round it out.
 - **tmux itself** provides persistence, multi-client attach, and synchronized
   phone+desktop viewing.
@@ -708,8 +709,10 @@ ldmux/
 │  ├─ protocol/       # frames, messages, rpc, socket client, paths
 │  ├─ daemon/         # ldmuxd + cli + probe + tmux/, stream.ts, remote.ts
 │  ├─ extension/      # the pi extension
-│  └─ web/public/     # buildless web client (core.js + app.js + vendor/)
-└─ (no apps/mobile or scripts yet: the mobile client is the PWA)
+│  ├─ web/public/     # buildless web client (core.js + app.js + vendor/)
+│  └─ mobile/         # KMP + Compose Multiplatform Android shell (WebView
+│                     # hosts web/public; landscape; swipe pager)
+└─ (the mobile app is native KMP/Compose; the PWA is its renderer payload)
 ```
 
 Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
