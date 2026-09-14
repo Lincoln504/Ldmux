@@ -120,3 +120,27 @@ test("a registry written by an older version (with a settings map) still loads",
   // …and the dead field is not carried forward.
   expect(JSON.parse(readFileSync(path, "utf8")).settings).toBeUndefined();
 });
+
+test("load() starts empty on a missing or corrupt file, never throws", () => {
+  const missing = new Registry(join(dir, "does-not-exist.json"));
+  expect(() => missing.load()).not.toThrow();
+  expect(missing.list()).toEqual([]);
+
+  const corrupt = join(dir, "corrupt.json");
+  writeFileSync(corrupt, "{ this is not json");
+  const r = new Registry(corrupt);
+  expect(() => r.load()).not.toThrow();
+  expect(r.list()).toEqual([]);
+});
+
+test("reconcile revives a dead record tmux still has, and reports orphans", () => {
+  const r = new Registry(join(dir, "reconcile.json"));
+  r.upsert(record({ id: "revive", tmuxName: "tmux-revive", status: "dead", exitedAt: 5 }));
+  // A session tmux has but the registry does not is an adoption candidate.
+  const { dead, adopted } = r.reconcile(new Set(["tmux-revive", "tmux-orphan"]));
+  expect(dead).toEqual([]);
+  expect(adopted).toEqual(["tmux-orphan"]);
+  const revived = r.list().find((s) => s.id === "revive")!;
+  expect(revived.status).toBe("running");
+  expect(revived.exitedAt).toBeNull();
+});

@@ -96,3 +96,39 @@ test("parser: an unsolicited response block carries its own sequence", () => {
     [5, false],
   ]);
 });
+
+test("parser: a non-numeric response sequence is reported as -1, not a crash", () => {
+  const seen: Array<[number, boolean]> = [];
+  const p = new ControlParser({ onResponse: (seq, ok) => seen.push([seq, ok]) });
+  p.feed(enc("%begin 1 x 0\n%end 1 x 0\n"));
+  expect(seen).toEqual([[-1, true]]);
+});
+
+test("parser: a malformed %extended-output is dropped, not thrown or garbled", () => {
+  const out: Array<[string, string]> = [];
+  const p = new ControlParser({ onOutput: (pane, text) => out.push([pane, text]) });
+  // No " : " separator: the record has no payload; it must not crash or leak.
+  expect(() => p.feed(enc("%extended-output %1 200\n"))).not.toThrow();
+  expect(out).toEqual([]);
+  // The next well-formed record still parses.
+  p.feed(enc("%output %1 ok\n"));
+  expect(out).toEqual([["%1", "ok"]]);
+});
+
+test("parser: a line split across two feeds is reassembled", () => {
+  const out: Array<[string, string]> = [];
+  const p = new ControlParser({ onOutput: (pane, text) => out.push([pane, text]) });
+  p.feed(enc("%output %1 hel"));
+  expect(out).toEqual([]); // no LF yet: nothing emitted
+  p.feed(enc("lo\n"));
+  expect(out).toEqual([["%1", "hello"]]);
+});
+
+test("parser: an unterminated block emits nothing until %end arrives", () => {
+  const seen: Array<[number, boolean, string[]]> = [];
+  const p = new ControlParser({ onResponse: (seq, ok, lines) => seen.push([seq, ok, lines]) });
+  p.feed(enc("%begin 1 3 0\npartial\n"));
+  expect(seen).toEqual([]);
+  p.feed(enc("rest\n%end 1 3 0\n"));
+  expect(seen).toEqual([[3, true, ["partial", "rest"]]]);
+});

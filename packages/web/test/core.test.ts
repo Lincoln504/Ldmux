@@ -240,3 +240,15 @@ test("an attach always re-baselines the epoch, so a recreated stream cannot look
   expect(snap).toContain("isStaleSnapshot(");
   expect(snap).toContain("msg.sessionId !== currentId");
 });
+
+test("decodeFrames accepts a plain array chunk (WebSocket may hand one over)", () => {
+  const { frames } = core.decodeFrames([], Array.from(frame(core.OUTPUT_FRAME, "array")));
+  expect(frames.length).toBe(1);
+  expect(new TextDecoder().decode(frames[0].payload)).toBe("array");
+});
+
+test("modeSequences(null) disables every mode rather than throwing", () => {
+  expect(core.modeSequences(null, true)).toBe("\x1b[?2004l\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1006l");
+  // null vs undefined vs {}: all three are "no modes set".
+  expect(core.modeSequences(undefined, true)).toBe(core.modeSequences({}, true));
+});

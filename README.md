@@ -20,7 +20,7 @@ either. It is deliberately simpler and tmux-native:
   gmux pain point).
 
 > **Status: Phase 1 (local core) + Phase 2 (pi extension) done; Phase 3 (remote
-> transport) + the web client implemented.** 212 tests pass. The authoritative
+> transport) + the web client implemented.** 229 tests pass. The authoritative
 > design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision is
 > [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
 > [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
@@ -70,7 +70,7 @@ devShell).
 ## Status
 
 **Phase 1 complete; Phase 2 (pi extension) + Phase 3 (remote transport + web client) implemented** (see [`docs/SPEC.md`](docs/SPEC.md) §13). Implemented and
-tested (**212 tests**, `bun test`; `bun run typecheck` clean):
+tested (**229 tests**, `bun test`; `bun run typecheck` clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by

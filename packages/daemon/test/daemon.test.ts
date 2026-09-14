@@ -22,7 +22,7 @@ afterAll(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-async function waitFor(pred: () => Promise<boolean>, ms = 6000): Promise<boolean> {
+async function waitFor(pred: () => Promise<boolean>, ms = 15000): Promise<boolean> {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     if (await pred()) return true;

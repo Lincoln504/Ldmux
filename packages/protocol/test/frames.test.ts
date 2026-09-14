@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import {
-  FrameType, HEADER_SIZE, encodeFrame, encodeJsonFrame, decodeFrames, decodeJson,
+  FrameType, HEADER_SIZE, MAX_FRAME_PAYLOAD, encodeFrame, encodeJsonFrame, decodeFrames, decodeJson,
 } from "../src/frames.ts";
 
 test("round-trips a binary frame", () => {
@@ -35,4 +35,22 @@ test("json frames round-trip", () => {
 
 test("rejects oversized payloads", () => {
   expect(() => encodeFrame(FrameType.Output, new Uint8Array(17 * 1024 * 1024))).toThrow();
+});
+test("decode rejects an oversized length field instead of allocating", () => {
+  // A hostile/corrupt header must not make the decoder trust the length.
+  const header = new Uint8Array(HEADER_SIZE);
+  new DataView(header.buffer).setUint32(4, MAX_FRAME_PAYLOAD + 1);
+  expect(() => decodeFrames(header)).toThrow(/too large/);
+});
+
+test("decodes correctly from a subarray with a non-zero byteOffset", () => {
+  // The decoder builds a DataView from buf.buffer + byteOffset; a view into the
+  // middle of a larger ArrayBuffer must not read the wrong bytes.
+  const inner = encodeJsonFrame(FrameType.Output, { hello: "world" });
+  const padded = new Uint8Array(inner.length + 8);
+  padded.set([0xaa, 0xbb, 0xcc], 0);
+  padded.set(inner, 5);
+  const view = padded.subarray(5, 5 + inner.length);
+  const { frames } = decodeFrames(view);
+  expect(decodeJson<{ hello: string }>(frames[0])).toEqual({ hello: "world" });
 });
