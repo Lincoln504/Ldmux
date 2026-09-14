@@ -4,9 +4,11 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
@@ -27,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -36,6 +39,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
+import dev.ldmux.mobile.term.TerminalFrame
 import dev.ldmux.mobile.term.TerminalPainter
 import dev.ldmux.mobile.voice.VoiceDictation
 import dev.ldmux.mobile.voice.VoiceState
@@ -160,7 +164,31 @@ actual fun rememberTerminalSurface(
     val termBg = frame?.defaultBg?.let { Color(0xFF000000.toInt() or (it and 0xFFFFFF)) } ?: TermBg
 
     Box(modifier.background(termBg)) {
-        Canvas(Modifier.fillMaxSize().onSizeChanged { viewport = it }) {
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                .onSizeChanged { viewport = it }
+                .pointerInput(Unit) {
+                    var carry = 0f
+                    val rowPx = painter.metrics.height
+                    detectVerticalDragGestures(
+                        onVerticalDrag = { change, dragAmount ->
+                            change.consume()
+                            if (rowPx <= 0f) return@detectVerticalDragGestures
+                            carry += dragAmount
+                            // Dragging down moves the content down, i.e. back
+                            // into history: the emulator's delta is negative up.
+                            val rows = (carry / rowPx).toInt()
+                            if (rows != 0) {
+                                carry -= rows * rowPx
+                                controller.scrollBy(-rows)
+                            }
+                        },
+                        onDragEnd = { carry = 0f },
+                        onDragCancel = { carry = 0f },
+                    )
+                },
+        ) {
             val f = frame ?: return@Canvas
             val m = painter.metrics
             val gridW = m.width * f.cols
@@ -178,10 +206,12 @@ actual fun rememberTerminalSurface(
             }) {
                 painter.paint(this, f)
             }
+            drawScrollbar(f, scale, dx, size.width, size.height)
         }
 
-        // Typing is opt-in: this field only exists while the keyboard is up, so
-        // a tap on the grid can never raise the IME.
+        // Typing is opt-in, and the field is deliberately tiny: it only has to
+        // be focusable for the IME, and covering the grid with it would eat the
+        // scroll gesture.
         if (typing) {
             var field by remember { mutableStateOf("") }
             BasicTextField(
@@ -224,7 +254,7 @@ actual fun rememberTerminalSurface(
                     field = next
                 },
                 modifier = Modifier
-                    .fillMaxSize()
+                    .size(1.dp)
                     .alpha(0f)
                     .focusRequester(focusRequester),
                 cursorBrush = SolidColor(Color.Transparent),
@@ -238,6 +268,34 @@ actual fun rememberTerminalSurface(
         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
     }
     return controller
+}
+
+/**
+ * A thin scrollbar while the view is parked in history. The emulator polls its
+ * own scrollbar geometry per frame (there is deliberately no change event), and
+ * the frame carries it, so nothing extra is requested to draw this.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScrollbar(
+    f: TerminalFrame.Frame,
+    scale: Float,
+    dx: Float,
+    width: Float,
+    height: Float,
+) {
+    if (f.viewportActive || f.scrollTotal <= 0 || f.scrollLen <= 0) return
+    val trackTop = 0f
+    val trackH = height
+    val frac = f.scrollLen.toFloat() / f.scrollTotal.toFloat()
+    val barH = (trackH * frac).coerceAtLeast(24f)
+    val maxOffset = (f.scrollTotal - f.scrollLen).coerceAtLeast(0).toFloat()
+    val pos = if (maxOffset <= 0f) 0f else (f.scrollOffset.toFloat() / maxOffset).coerceIn(0f, 1f)
+    val top = trackTop + (trackH - barH) * pos
+    val x = dx + width - 6f * scale
+    drawRect(
+        color = Color(0x66FFFFFF),
+        topLeft = androidx.compose.ui.geometry.Offset(x, top),
+        size = androidx.compose.ui.geometry.Size(4f * scale, barH),
+    )
 }
 
 /** A small line of feedback while dictation is running. */

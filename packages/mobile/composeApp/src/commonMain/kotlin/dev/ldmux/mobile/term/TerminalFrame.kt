@@ -5,10 +5,13 @@ package dev.ldmux.mobile.term
  * Pure Kotlin so it is unit-testable without a device.
  *
  * Layout (little-endian):
- *   header (16 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (32 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
- *                      u8 defBgR, u8 defBgG, u8 defBgB
+ *                      u8 defBgR, u8 defBgG, u8 defBgB,
+ *                      u8 passwordInput, u8 viewportActive, u8 reserved0,
+ *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
+ *                      u8 reserved1
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -16,7 +19,7 @@ package dev.ldmux.mobile.term
  */
 object TerminalFrame {
     /** Bytes of frame header preceding the cell records. */
-    const val HEADER_SIZE = 16
+    const val HEADER_SIZE = 32
     const val FLAG_BOLD = 1 shl 0
     const val FLAG_ITALIC = 1 shl 1
     const val FLAG_UNDERLINE = 1 shl 2
@@ -50,12 +53,29 @@ object TerminalFrame {
         val defaultFg: Int,
         /** The terminal's default background, as 0xRRGGBB. */
         val defaultBg: Int,
+        /**
+         * The cursor is at a field that will not echo (a password prompt).
+         * Input must not be shown before the server confirms it.
+         */
+        val passwordInput: Boolean,
+        /** True when the viewport is following the live output, not history. */
+        val viewportActive: Boolean,
+        /** Scrollable area in rows: total, the viewport's offset, and its size. */
+        val scrollTotal: Long,
+        val scrollOffset: Long,
+        val scrollLen: Long,
         /** Row-major, [rows] * [cols] cells. */
         val cells: List<Cell>,
     )
 
     private fun u16(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xff) or ((b[o + 1].toInt() and 0xff) shl 8)
+
+    private fun u32(b: ByteArray, o: Int): Long =
+        ((b[o].toInt() and 0xff).toLong()) or
+            ((b[o + 1].toInt() and 0xff).toLong() shl 8) or
+            ((b[o + 2].toInt() and 0xff).toLong() shl 16) or
+            ((b[o + 3].toInt() and 0xff).toLong() shl 24)
 
     private fun rgb(b: ByteArray, o: Int): Int =
         ((b[o].toInt() and 0xff) shl 16) or
@@ -72,6 +92,11 @@ object TerminalFrame {
         val cursorStyle = b[9].toInt() and 0xff
         val defaultFg = rgb(b, 10)
         val defaultBg = rgb(b, 13)
+        val passwordInput = b[16].toInt() != 0
+        val viewportActive = b[17].toInt() != 0
+        val scrollTotal = u32(b, 19)
+        val scrollOffset = u32(b, 23)
+        val scrollLen = u32(b, 27)
 
         val cells = ArrayList<Cell>(cols * rows)
         var p = HEADER_SIZE
@@ -90,6 +115,21 @@ object TerminalFrame {
             p += len
             cells.add(Cell(text, fg, bg, flags))
         }
-        return Frame(cols, rows, cursorX, cursorY, cursorVisible, cursorStyle, defaultFg, defaultBg, cells)
+        return Frame(
+            cols,
+            rows,
+            cursorX,
+            cursorY,
+            cursorVisible,
+            cursorStyle,
+            defaultFg,
+            defaultBg,
+            passwordInput,
+            viewportActive,
+            scrollTotal,
+            scrollOffset,
+            scrollLen,
+            cells,
+        )
     }
 }

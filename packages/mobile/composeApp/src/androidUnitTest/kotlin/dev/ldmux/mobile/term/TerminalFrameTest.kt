@@ -28,6 +28,13 @@ class TerminalFrameTest {
             out.add((v and 0xff).toByte())
         }
 
+        fun u32(v: Long) {
+            out.add((v and 0xff).toByte())
+            out.add(((v shr 8) and 0xff).toByte())
+            out.add(((v shr 16) and 0xff).toByte())
+            out.add(((v shr 24) and 0xff).toByte())
+        }
+
         fun byte(v: Int) = out.add(v.toByte())
 
         fun cell(text: String, fg: Int, bg: Int, flags: Int = 0) {
@@ -54,6 +61,11 @@ class TerminalFrameTest {
         style: Int = 1,
         defFg: Int = 0xE6E6E6,
         defBg: Int = 0x1E1E1E,
+        passwordInput: Boolean = false,
+        viewportActive: Boolean = true,
+        scrollTotal: Long = 0,
+        scrollOffset: Long = 0,
+        scrollLen: Long = 0,
     ): ByteArray = Builder().apply {
         u16(cols)
         u16(rows)
@@ -63,6 +75,13 @@ class TerminalFrameTest {
         byte(style)
         rgb(defFg)
         rgb(defBg)
+        byte(if (passwordInput) 1 else 0)
+        byte(if (viewportActive) 1 else 0)
+        byte(0) // reserved0
+        u32(scrollTotal)
+        u32(scrollOffset)
+        u32(scrollLen)
+        byte(0) // reserved1
         for ((text, fg, bg) in cells) cell(text, fg, bg)
     }.build()
 
@@ -74,7 +93,29 @@ class TerminalFrameTest {
         assertEquals(0xE6E6E6, f.defaultFg)
         assertEquals(0x1E1E1E, f.defaultBg)
         // The C side and this decoder must agree on where the cells start.
-        assertEquals(16, TerminalFrame.HEADER_SIZE)
+        assertEquals(32, TerminalFrame.HEADER_SIZE)
+        assertEquals(TerminalFrame.HEADER_SIZE, frame(1, 1, listOf(Triple("x", 1, 2))).size - 10)
+    }
+
+    @Test
+    fun `decodes the password flag and the scroll geometry`() {
+        val f = TerminalFrame.decode(
+            frame(
+                1,
+                1,
+                listOf(Triple("x", 1, 2)),
+                passwordInput = true,
+                viewportActive = false,
+                scrollTotal = 5000,
+                scrollOffset = 1234,
+                scrollLen = 29,
+            ),
+        )
+        assertTrue(f.passwordInput, "the emulator knows, so nothing has to guess")
+        assertFalse(f.viewportActive)
+        assertEquals(5000L, f.scrollTotal)
+        assertEquals(1234L, f.scrollOffset)
+        assertEquals(29L, f.scrollLen)
     }
 
     @Test
@@ -123,6 +164,9 @@ class TerminalFrameTest {
             u16(1); u16(1); u16(0); u16(0)
             byte(1); byte(1)
             rgb(0); rgb(0)
+            byte(0); byte(1); byte(0) // password, viewport-active, reserved
+            u32(0); u32(0); u32(0)
+            byte(0)
             cell("x", 1, 2, TerminalFrame.FLAG_BOLD or TerminalFrame.FLAG_UNDERLINE)
         }.build()
         val f = TerminalFrame.decode(bytes)
@@ -140,6 +184,6 @@ class TerminalFrameTest {
 
     @Test
     fun `rejects a frame shorter than the header`() {
-        assertFailsWith<IllegalArgumentException> { TerminalFrame.decode(ByteArray(15)) }
+        assertFailsWith<IllegalArgumentException> { TerminalFrame.decode(ByteArray(31)) }
     }
 }

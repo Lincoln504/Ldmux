@@ -163,7 +163,10 @@ may be predicted.
 ### 5.2 Phase 2 — predictive echo
 
 **Gate:** predict only `input` (literal text), never `key`; only on the normal
-screen; and only while the last prediction is believed (see confidence below).
+screen; and never at a password prompt. That last one needs no heuristic: the
+emulator reports `GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT`, which the
+frame header now carries to the client. The timeout heuristic below stays as a
+second line of defence for panes where the flag is not set.
 
 **Paint:** feed the predicted bytes into the local `libghostty-vt` engine
 immediately, so the character appears with the key press. Record it as a
@@ -192,7 +195,21 @@ request, not a diff-undo. The architecture already has the recovery primitive.
 
 Coalesce output frames and repaint on a schedule bounded by min/max rates
 (50 Hz ceiling; floor of max(2 Hz, ½ RTT)) so that a `yes`-style flood cannot
-starve input or delay Ctrl-C. Measure RTT from the existing ping/pong.
+starve input or delay Ctrl-C. Measure RTT from the existing ping/pong. The
+ceiling half is done (`TerminalController.scheduleRender`, 16 ms); the
+RTT-adaptive floor is not.
+
+### 5.4 Scrollback is the emulator's, not a client-side buffer (done)
+
+Not in dooboxes' list, but part of the same honesty about where the truth lives.
+libghostty-vt owns the scrollback and exposes a viewport-scroll API
+(`ghostty_terminal_scroll_viewport` with TOP/BOTTOM/DELTA/ROW tags) plus a
+scrollbar struct (`GHOSTTY_TERMINAL_DATA_SCROLLBAR`, `{total, offset, len}`). The
+client scrolls the *emulator's* viewport and the existing render path simply
+shows the result — there is no second history buffer to keep in sync with the
+pane, and no per-swipe round trip. History is paged in once (`scrollback` with a
+line count) and then scrolled locally, which is only possible because the
+scrollback lives in the engine.
 
 ## 6. Measuring it (so "feels fast" is falsifiable)
 
@@ -218,13 +235,20 @@ None of this is implemented; there is no latency harness yet.
 
 ## 7. Open questions
 
-- **Password/echo-off detection.** We cannot see the remote's ECHO flag from a
-  tmux capture. mosh infers from output; we would need a heuristic (e.g. no
-  echo after a short window ⇒ stop predicting) before predicting on a fresh
-  line.
-- **Prefix matching across chunk boundaries.** The echo may be split across
-  output frames; the reconciler needs a small buffer, and needs to give up
-  cleanly (snapshot) if the buffer grows past a bound.
+- **Password/echo-off detection — SOLVED, and better than expected.** An earlier
+  draft proposed a timing heuristic (no echo in N ms ⇒ stop predicting) because
+  a tmux capture cannot show the remote's ECHO flag. That turns out to be
+  unnecessary: libghostty-vt's render state exposes
+  `GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT` (`render.h:187-188`), i.e.
+  the emulator *already knows* when the cursor is at a field that will not echo.
+  The frame header now carries it (byte 16) and `TerminalController.sendText`
+  refuses to predict when it is set. The timing rule is kept only as a fallback.
+  This is a case where the engine is strictly better informed than the protocol.
+- **Prefix matching across chunk boundaries.** Implemented (the reconciler keeps
+  the unmatched tail of the prediction and treats an exhausted output as a
+  partial confirmation, not a failure) and unit-tested. Still unbounded in the
+  pathological case: a prediction that is neither confirmed nor diverged keeps
+  its bytes until the stale timer fires, which is bounded at 900 ms.
 - **Interaction with line editing.** readline redraws a line on completion and
   on history navigation; those are "unpredictable" by the gate, so the risk is
   bounded, but a completion menu is exactly where a prediction would look

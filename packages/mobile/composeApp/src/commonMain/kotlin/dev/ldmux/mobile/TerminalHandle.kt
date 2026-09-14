@@ -10,8 +10,15 @@ import androidx.compose.ui.Modifier
 interface TerminalHandle {
     fun sendKey(name: String)
     fun sendText(text: String)
+
+    /** Page the session's history into the emulator and show its oldest row. */
     fun loadHistory()
+
+    /** Return to the live prompt. */
     fun jumpToBottom()
+
+    /** Scroll the emulator's viewport by [rows] (negative is up). */
+    fun scrollBy(rows: Int) {}
 
     /** Start dictation. The transcript is typed into the pane, keyboard or not. */
     fun startVoice() {}

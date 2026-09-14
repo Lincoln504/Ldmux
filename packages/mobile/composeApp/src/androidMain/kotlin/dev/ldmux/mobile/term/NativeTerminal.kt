@@ -28,6 +28,18 @@ object NativeTerminal {
     external fun resize(handle: Long, cols: Int, rows: Int)
 
     /**
+     * Scroll the viewport by [delta] rows (negative is up), or to an end with
+     * [SCROLL_TOP] / [SCROLL_BOTTOM].
+     *
+     * The special values are sentinels rather than an enum so the seam stays a
+     * single integer; they are far outside any real row count.
+     */
+    external fun scroll(handle: Long, delta: Int)
+
+    const val SCROLL_TOP: Int = Int.MIN_VALUE
+    const val SCROLL_BOTTOM: Int = Int.MAX_VALUE
+
+    /**
      * Encode the current screen as a frame (see native/ldmux_terminal.c for the
      * wire format) or null if the core had nothing to render.
      */

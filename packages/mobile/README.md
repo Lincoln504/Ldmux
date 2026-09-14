@@ -97,10 +97,15 @@ right size for the screen showing it.
 - [x] Sidebar keys drive the native terminal directly; on-screen keyboard is
       opt-in through the `⌨` button (a tap on the grid never raises it).
 - [x] **Headless dictation** (Android `SpeechRecognizer`) — no keyboard needed.
-- [ ] Key encoding in the shared core (today keys are sent as tmux key names).
-- [ ] Predictive local echo / adaptive frame rate — designed in
-      `docs/PREDICTIVE-ECHO.md`, not implemented.
-- [ ] Cursor rendering and touch scrollback.
+- [x] **Scrollback**: the emulator's own viewport is scrolled (drag, or `⤒`/
+      `⤓`), with a scrollbar and the frame carrying total/offset. History is
+      paged in once, then scrolled locally with no round trip per swipe.
+- [x] **Predictive local echo**, off by default (settings). The emulator tells
+      us when the cursor is at a password prompt, so prediction is refused there
+      rather than guessed at.
+- [x] Frame coalescing (60 Hz ceiling) so a flood cannot starve input.
+- [ ] RTT-adaptive frame rate floor (the ceiling is in).
+- [ ] Cursor blink.
 - [ ] Foreground service so the heartbeat survives Doze (SPEC §6.3).
 - [ ] iOS (needs a macOS host for the xcframework).
 

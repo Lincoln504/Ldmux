@@ -239,6 +239,8 @@ private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
         TinyBtn("▲") { handle?.sendKey("Up") }
         TinyBtn("▼") { handle?.sendKey("Down") }
         TinyBtn("▶") { handle?.sendKey("Right") }
+        // Reading history must not be a trap: one tap back to the live prompt.
+        TinyBtn("⤓") { handle?.jumpToBottom() }
         Spacer(Modifier.weight(1f))
         TinyBtn("C-c") { handle?.sendKey("C-c") }
         TinyBtn("🎤") { handle?.startVoice() }

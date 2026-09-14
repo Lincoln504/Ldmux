@@ -12,6 +12,18 @@ actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
         if (handle != 0L) NativeTerminal.resize(handle, cols, rows)
     }
 
+    actual fun scrollBy(rows: Int) {
+        if (handle != 0L && rows != 0) NativeTerminal.scroll(handle, rows)
+    }
+
+    actual fun scrollToTop() {
+        if (handle != 0L) NativeTerminal.scroll(handle, NativeTerminal.SCROLL_TOP)
+    }
+
+    actual fun scrollToBottom() {
+        if (handle != 0L) NativeTerminal.scroll(handle, NativeTerminal.SCROLL_BOTTOM)
+    }
+
     actual fun render(): TerminalFrame.Frame? {
         if (handle == 0L) return null
         val bytes = NativeTerminal.render(handle) ?: return null

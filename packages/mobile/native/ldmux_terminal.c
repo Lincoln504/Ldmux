@@ -8,13 +8,19 @@
  * the whole app.
  *
  * Frame format returned by nativeRender (little-endian):
- *   header (16 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (32 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
- *                      u8 defBgR, u8 defBgG, u8 defBgB
- *                      (the terminal's default colours, so the client can paint
- *                      the whole surface — letterbox included — in the same
- *                      background the cells use)
+ *                      u8 defBgR, u8 defBgG, u8 defBgB,
+ *                      u8 passwordInput, u8 viewportActive, u8 reserved0,
+ *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
+ *                      u8 reserved1
+ *                      (the terminal's default colours so the client can paint
+ *                      the whole surface in the same background; whether the
+ *                      cursor is at a password prompt, which decides whether
+ *                      input may be echoed before the server confirms it; and
+ *                      the scrollbar geometry so the client can show position
+ *                      without a second call)
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -32,7 +38,7 @@
 
 #define CELL_MAX_UTF8 16
 #define CELL_RECORD_MAX (9 + CELL_MAX_UTF8)
-#define FRAME_HEADER 16
+#define FRAME_HEADER 32
 
 typedef struct {
   GhosttyTerminal terminal;
@@ -59,6 +65,13 @@ static GhosttyColorRgb resolve_color(GhosttyStyleColor color,
 static void wr16(uint8_t *p, uint16_t v) {
   p[0] = (uint8_t)(v & 0xff);
   p[1] = (uint8_t)((v >> 8) & 0xff);
+}
+
+static void wr32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v & 0xff);
+  p[1] = (uint8_t)((v >> 8) & 0xff);
+  p[2] = (uint8_t)((v >> 16) & 0xff);
+  p[3] = (uint8_t)((v >> 24) & 0xff);
 }
 
 static bool ensure_frame(LdmuxTerminal *t, size_t need) {
@@ -153,6 +166,39 @@ Java_dev_ldmux_mobile_term_NativeTerminal_resize(JNIEnv *env, jclass cls,
   ghostty_terminal_resize(t->terminal, (uint16_t)cols, (uint16_t)rows, 0, 0);
 }
 
+/**
+ * Scroll the viewport. `delta` is in rows and follows the emulator's
+ * convention (negative is up); the special values below mean top/bottom.
+ *
+ * This is the emulator's own scrollback, not a client-side one, so the render
+ * state simply reflects the new position on the next frame — no separate
+ * history buffer to keep in sync.
+ */
+#define LDMUX_SCROLL_TOP INT32_MIN
+#define LDMUX_SCROLL_BOTTOM INT32_MAX
+
+JNIEXPORT void JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_scroll(JNIEnv *env, jclass cls,
+                                                 jlong handle, jint delta) {
+  (void)env; (void)cls;
+  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
+  if (!t) return;
+  GhosttyTerminalScrollViewport behavior;
+  if (delta == LDMUX_SCROLL_TOP) {
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_TOP;
+    behavior.value.delta = 0;
+  } else if (delta == LDMUX_SCROLL_BOTTOM) {
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM;
+    behavior.value.delta = 0;
+  } else if (delta == 0) {
+    return;
+  } else {
+    behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+    behavior.value.delta = (intptr_t)delta;
+  }
+  ghostty_terminal_scroll_viewport(t->terminal, behavior);
+}
+
 JNIEXPORT jbyteArray JNICALL
 Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
                                                  jlong handle) {
@@ -196,6 +242,30 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   uint8_t def_bg[3] = {colors.background.r, colors.background.g, colors.background.b};
   out[10] = def_fg[0]; out[11] = def_fg[1]; out[12] = def_fg[2];
   out[13] = def_bg[0]; out[14] = def_bg[1]; out[15] = def_bg[2];
+
+  /* Whether the cursor sits at a password prompt. This is the signal that lets
+   * a client decide it must NOT echo input locally: the emulator already knows,
+   * so nothing has to guess. */
+  bool password_input = false;
+  ghostty_render_state_get(t->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT,
+                           &password_input);
+  out[16] = (uint8_t)(password_input ? 1 : 0);
+
+  /* Scroll position. There is deliberately no change notification for this
+   * (the header says to poll and diff per frame), which is exactly what a
+   * render-state read does. */
+  GhosttyTerminalScrollbar sb = {0, 0, 0};
+  ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &sb);
+  bool viewport_active = false;
+  ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE,
+                       &viewport_active);
+  out[17] = (uint8_t)(viewport_active ? 1 : 0);
+  out[18] = 0;
+  wr32(out + 19, (uint32_t)sb.total);
+  wr32(out + 23, (uint32_t)sb.offset);
+  wr32(out + 27, (uint32_t)sb.len);
+  memset(out + 31, 0, 1);
   /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
    * encoder is mandatory: pad every missing cell with a blank. */
   bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);

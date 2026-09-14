@@ -36,6 +36,7 @@ class TerminalController(
 
     private val predictor = Predictor()
     private var staleJob: Job? = null
+    private var scrollTopOnNextSnapshot = false
 
     /** Server-reported terminal modes (affects input encoding later). */
     var modes by mutableStateOf(TerminalModes())
@@ -64,6 +65,10 @@ class TerminalController(
                 val normalized = screen.replace("\r\n", "\n").replace("\n", "\r\n")
                 val bytes = normalized.encodeToByteArray()
                 engine.write(bytes, bytes.size)
+            }
+            if (scrollTopOnNextSnapshot) {
+                scrollTopOnNextSnapshot = false
+                engine.scrollToTop()
             }
             modes = m
             _frame.value = engine.render()
@@ -142,7 +147,14 @@ class TerminalController(
 
     override fun sendText(text: String) {
         val bytes = text.encodeToByteArray()
-        val canShowNow = config.predict && !modes.alternateOn && predictor.canPredict(bytes)
+        // Three gates, any one of which is enough to refuse: the setting; a
+        // full-screen app (alternate screen, which does not echo the way a
+        // shell does); and a password prompt, which the emulator itself tells us
+        // about — so we never have to guess from timing.
+        val canShowNow = config.predict &&
+            !modes.alternateOn &&
+            _frame.value?.passwordInput != true &&
+            predictor.canPredict(bytes)
         if (canShowNow) {
             // Paint it before the server is even asked. If the echo disagrees,
             // writeOutput() throws this away and repaints from a snapshot.
@@ -169,8 +181,30 @@ class TerminalController(
             }
         }
     }
-    override fun loadHistory() = attach.scrollback(MAX_HISTORY_LINES)
-    override fun jumpToBottom() = attach.scrollback(0)
+    override fun loadHistory() {
+        // The emulator holds its own scrollback, so history is paged in once and
+        // then scrolled locally — scrolling must not cost a round trip per
+        // swipe. The view is parked on the oldest row when it arrives.
+        scrollTopOnNextSnapshot = true
+        attach.scrollback(MAX_HISTORY_LINES)
+    }
+
+    override fun jumpToBottom() {
+        engine.scrollToBottom()
+        renderNow()
+    }
+
+    override fun scrollBy(rows: Int) {
+        if (rows == 0) return
+        engine.scrollBy(rows)
+        renderNow()
+    }
+
+    /** Scrolling is a local view change: paint it immediately, never coalesced. */
+    private fun renderNow() {
+        lastRenderAt = System.currentTimeMillis()
+        _frame.value = engine.render()
+    }
 
     override fun startVoice() {
         onStartVoice?.invoke()
