@@ -55,6 +55,41 @@ adb install -r packages/mobile/composeApp/build/outputs/apk/debug/composeApp-deb
 machine the SDK is `/home/ldeen/Android/Sdk`. `ANDROID_HOME` is exported by the
 `mobile` devShell as a fallback.
 
+### The native library is a build output
+
+`libldmux_terminal.so` is produced by `scripts/build-libghostty-vt.sh` (pinned
+`GHOSTTY_COMMIT`) into `composeApp/src/androidMain/jniLibs/<abi>/` and is
+git-ignored. The build script resolves the NDK by each directory's
+`Pkg.Revision`, never by sorting names — `sort -V` orders `30.0.16248370` before
+`android-ndk-r27c`, which silently picks the *older* toolkit.
+
+## A test daemon, and the two ways it lies
+
+The daemon talks to tmux in control mode. A dev daemon started outside the
+devShell uses the **system tmux (3.5a)** while the server was created by the
+devShell's **3.7b**, and the two cannot talk: the daemon starts, listens, accepts
+a WebSocket and serves nothing at all. The app shows a healthy `link 20 ms`
+readout over a black screen, which is indistinguishable from a rendering bug.
+Run the dev daemon on the devShell's own `node` and `tmux`:
+
+```bash
+# resolve once, then paste the store paths into the launcher script
+nix develop --command bash -c 'readlink -f "$(command -v node)" "$(command -v tmux)"'
+```
+
+`nix develop` itself cannot be used as the launcher: it does not survive being
+backgrounded from an agent shell (`nix` is then not on the unit's `PATH` either).
+A transient user unit does survive, and is how the daemon runs in production too:
+
+```bash
+systemd-run --user --unit=ldmux-test-daemon --collect /tmp/ldmux-test/run.sh
+journalctl --user -u ldmux-test-daemon -n 20 --no-pager
+```
+
+One more trap, for inspecting that server: the system tmux cannot see it either,
+so every query has to go through the devShell —
+`nix develop --command bash -c 'tmux -L ldmux-test list-sessions'`.
+
 ## Pointing it at a daemon
 
 The app's `settings` opens a dialog for `host[:port]` and the bearer token. For a
