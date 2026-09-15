@@ -206,22 +206,36 @@ iterator with `ghostty_render_state_get(..., GHOSTTY_RENDER_STATE_DATA_ROW_ITERA
 frame).
 
 3. **Ask the engine when the question is about the terminal's own state.**
-   Tap-to-cursor has two regimes — a synthesized SGR click for a program that
-   asked for the mouse, relative cursor motion for a plain shell — and the first
-   one was dead on device: a program that had *just* enabled mouse reporting
-   (`vim`, `less`) still got arrow keys. The mode flags the daemon reads from
-   tmux (`#{mouse_any_flag}`, `#{mouse_sgr_flag}`) are accurate but only arrive
-   with a **snapshot**, so the client's copy was stale for as long as the user
-   stayed attached. The emulator had already parsed the enabling escape
-   sequence, so it can answer for free and immediately:
+   Tap-to-cursor has three shapes, chosen from the shape of the input surface
+   rather than from the application's name — a synthesized SGR click for a
+   program that asked for the mouse, strip motion for a wrapping prompt, grid
+   motion for a full-screen program. The click path was dead on device: a
+   program that had *just* enabled mouse reporting still got arrow keys. The mode
+   flags the daemon reads from tmux (`#{mouse_any_flag}`, `#{mouse_sgr_flag}`) are
+   accurate but only arrive with a **snapshot**, so the client's copy was stale
+   for as long as the user stayed attached. The emulator had already parsed the
+   enabling escape sequence, so it can answer for free and immediately:
    `GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING` (any of X10/1000/1002/1003) and
    `GHOSTTY_TERMINAL_DATA_MODE` with `GHOSTTY_MODE_SGR_MOUSE` (1006, the only
    encoding we synthesize — the older ones cap coordinates at 223). The frame
-   header now carries both (`native/ldmux_terminal.c` byte 18 and byte 31, the
-   two former reserved bytes), so a tap is a click on the very frame after the
-   program asks for one. The daemon still re-checks before writing anything to
-   the pty, where its view is fresh because it polls at click time — the local
-   flag only chooses the regime.
+   header carries both (byte 18 and byte 31), so a tap is a click on the very
+   frame after the program asks for one.
+
+   The same argument would have made a blocklist of full-screen programs stale
+   and wrong, so it is the alternate screen that is read from the engine
+   (`GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN`, byte 32 — the header grew from 32 to
+   40 bytes) rather than a list of program names being kept by hand. Measured on
+   this box, that one flag separates the two cases exactly: `pi` and `claude`
+   draw a composer of their own on the **primary** screen (`alternate_on=0`,
+   no mouse) where arrows are ordinary cursor keys, while `vim`, `less`, `htop`
+   and `nano` take the **alternate** screen where an arrow is a command.
+
+   The daemon still re-checks before writing anything to the pty, where its view
+   is fresh because it polls at click time — and it refuses a click outright when
+   the pane's foreground command is a shell (`#{pane_current_command}`), because
+   the mouse mode is *sticky*: a program that enables reporting and then exits
+   leaves it latched, so the flags say "mouse" while a shell is what would
+   receive the bytes, and a shell prints them.
 
    Same shape as the password-prompt signal (`docs/PREDICTIVE-ECHO.md` §7):
    when the question is about the terminal's own state, the engine is both

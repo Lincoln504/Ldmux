@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -43,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +58,9 @@ val Fg = Color(0xFFE6E6E6)
 val Dim = Color(0xFF8A8F98)
 val Accent = Color(0xFF4C8DFF)
 val Surface = Color(0xFF141822)
+
+/** The landscape panel's width. The terminal gets everything else. */
+private val PANEL_WIDTH = 190.dp
 
 /** Where the daemon is and how to authenticate. Persisted by the platform. */
 data class LdmuxConfig(
@@ -178,11 +184,11 @@ fun App() {
     } else {
         Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
             if (config.panelLeft) {
-                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
+                SidePanel(pages, pagerState, scope, client, handles, onFlip = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
             }
             TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
             if (!config.panelLeft) {
-                SidePanel(pages, pagerState, scope, client, handles, onKeyboard = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
+                SidePanel(pages, pagerState, scope, client, handles, onFlip = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
             }
         }
     }
@@ -266,11 +272,13 @@ private fun TerminalArea(
 @Composable
 private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TinyBtn("⟳") { onLandscape() }
+        // The way back to landscape, drawn: two arrows going round, the same
+        // control as the panel's. Nothing here is a keyboard glyph.
+        IconBtn(onClick = onLandscape) { IconFlip(Accent, box = 20.dp) }
         TinyBtn("Esc") { handle?.sendKey("Escape") }
         TinyBtn("Tab") { handle?.sendKey("Tab") }
         TinyBtn("◀") { handle?.sendKey("Left") }
@@ -310,60 +318,88 @@ private fun SidePanel(
     scope: CoroutineScope,
     client: LdmuxClient,
     handles: Map<String, TerminalHandle>,
-    onKeyboard: () -> Unit,
+    onFlip: () -> Unit,
     onKill: (Session) -> Unit,
     onSettings: () -> Unit,
 ) {
     val current = pagerState.currentPage
-    val currentId = pages.getOrNull(current)?.id
-    val handle = currentId?.let { handles[it] }
-    val title = pages.getOrNull(current)?.label ?: "—"
+    val here = pages.getOrNull(current)
+    val handle = here?.id?.let { handles[it] }
+    val total = pages.size.coerceAtLeast(1)
 
     fun step(delta: Int) {
-        val target = (current + delta).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+        val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
         if (target != current) scope.launch { pagerState.animateScrollToPage(target) }
     }
 
     Column(
-        Modifier.width(190.dp).fillMaxHeight().background(Surface).padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        Modifier.width(PANEL_WIDTH).fillMaxHeight().background(Surface)
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Back and forth between the open shells.
+        // Where you are, and how to move. There is no session list by design, so
+        // this is the only navigation — which is why it gets the widest row and
+        // the biggest touch targets in the panel rather than being strung across
+        // a title. The path is tildified because the tail of it is the only part
+        // that tells two shells apart.
         Row(verticalAlignment = Alignment.CenterVertically) {
             NavArrow("◀", enabled = current > 0) { step(-1) }
-            Text(
-                title,
-                color = Fg,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                maxLines = 1,
-                modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
-            )
-            NavArrow("▶", enabled = current < pages.size - 1) { step(1) }
-        }
-        // No session list (by design), but the open shell still has to be
-        // closable from the phone — otherwise a stray `+sh` is permanent.
-        val here = pages.getOrNull(current)
-        if (here != null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    here.cwd,
-                    color = Dim,
-                    fontSize = 10.sp,
+                    tildify(here?.cwd ?: ""),
+                    color = Fg,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
                     maxLines = 1,
-                    modifier = Modifier.weight(1f),
+                    overflow = TextOverflow.Ellipsis,
                 )
-                NavArrow("✕", enabled = true) { onKill(here) }
+                Text(
+                    "${current + 1} / $total",
+                    color = Dim,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                )
             }
+            NavArrow("▶", enabled = current < total - 1) { step(1) }
         }
 
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            SIDEBAR_KEYS.forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    row.forEach { (label, key) -> KeyBtn(label) { handle?.sendKey(key) } }
+        PanelDivider()
+
+        // Controls that change the *app*, not the shell. Kept in their own group
+        // with a rule above, because the flip button used to sit first in the key
+        // row wearing a glyph that read as a keyboard — it looked like a key.
+        //
+        // One flip control, one meaning, in both orientations: portrait is where
+        // the keyboard lives, so flipping to it *is* the keyboard action, and
+        // there is no separate keyboard button to confuse it with.
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            IconBtn(onClick = onFlip) { IconFlip(Accent) }
+            // Landscape only: portrait always has the keyboard up and the IME
+            // carries its own microphone. Two microphones is one too many.
+            IconBtn(onClick = { handle?.startVoice() }) { IconMic(tint = Fg) }
+        }
+
+        PanelDivider()
+
+        @OptIn(ExperimentalLayoutApi::class)
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            // One wrapping flow per group, rather than one flow for everything or
+            // hand-laid rows. Hand-laid rows clipped the last key of the widest
+            // group off the panel's edge; a single flow split the arrow cluster
+            // across two lines. This keeps each group together and lets only the
+            // one that needs to wrap do so.
+            SIDEBAR_KEYS.forEach { group ->
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    group.forEach { (label, key) -> KeyBtn(label) { handle?.sendKey(key) } }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 // Words, not glyphs: `⤒`/`↓` and the cursor arrows both render as
                 // arrows in a monospace fallback, so the two pairs were
                 // indistinguishable. These two do different things (page in
@@ -373,32 +409,46 @@ private fun SidePanel(
             }
         }
 
-        // Pinned below the scrolling keys so they are never pushed off-screen
-        // (which is exactly when they are needed). The on-screen keyboard is
-        // opt-in and this is the only switch: nothing raises the IME by
-        // accident, and dictation does not need it at all.
-        val link by (handle?.link ?: TerminalHandle.EMPTY_LINK).collectAsState()
-        if (link.measured) {
-            // The repaint cadence follows the round trip, so this is not
-            // decoration: it is the reason a slow link feels the way it does.
-            Text(
-                "link ${link.rttMs} ms · ${link.fps} fps",
-                color = Dim,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            KeyBtn("⌨") { onKeyboard() }
-            KeyBtn("🎤") { handle?.startVoice() }
+        // Actions, at the bottom where a thumb reaches them: a new shell is the
+        // primary one, so it is the only button that gets the accent.
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AccentBtn("+ shell", Modifier.weight(1f)) { client.create("shell") }
+            IconBtn(onClick = onSettings) { IconCog(Dim) }
+            val closable = pages.getOrNull(current)
+            if (closable != null) {
+                IconBtn(onClick = { onKill(closable) }) { IconClose(Dim) }
+            }
         }
 
-        // Side by side, not stacked: two full-width TextButtons are most of the
-        // panel's spare height, and the key matrix needs it more than they do.
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = { client.create("shell") }) { Text("+sh", color = Accent, fontSize = 13.sp) }
-            TextButton(onClick = onSettings) { Text("settings", color = Accent, fontSize = 13.sp) }
+        // Diagnostics, not a control: the repaint cadence follows the round trip,
+        // so this is the reason a slow link feels the way it does.
+        val link by (handle?.link ?: TerminalHandle.EMPTY_LINK).collectAsState()
+        if (link.measured) {
+            Text(
+                "link ${link.rttMs} ms · ${link.fps} fps",
+                color = Dim.copy(alpha = 0.7f),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+            )
         }
+    }
+}
+
+/** A button that carries the accent, for the single primary action. */
+@Composable
+private fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Accent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = Bg, fontSize = 13.sp)
     }
 }
 
@@ -417,12 +467,17 @@ private fun NavArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun KeyBtn(label: String, active: Boolean = false, onClick: () -> Unit) {
+    // Single-glyph keys are given less padding than word keys. They are one
+    // character wide carrying two characters' worth of margin, which is enough to
+    // push the symbol group past the panel's edge and wrap its last key onto a
+    // line of its own.
+    val pad = if (label.length == 1) 4.dp else 8.dp
     Box(
         Modifier
             .clip(RoundedCornerShape(6.dp))
             .background(if (active) Accent else Bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 5.dp),
+            .padding(horizontal = pad, vertical = 5.dp),
     ) {
         Text(
             label,
