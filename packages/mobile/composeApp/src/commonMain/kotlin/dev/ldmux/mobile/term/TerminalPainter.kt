@@ -11,5 +11,15 @@ class CellMetrics(val width: Float, val height: Float, val baseline: Float)
  */
 expect class TerminalPainter(fontSizePx: Float) {
     val metrics: CellMetrics
+
+    /** Paint the grid. The cursor is drawn separately (see [paintCursor]). */
     fun paint(scope: DrawScope, frame: TerminalFrame.Frame)
+
+    /**
+     * Paint just the cursor, at the canvas origin.
+     *
+     * The caller puts a one-cell canvas on the cursor's cell, so a blinking
+     * cursor costs one cell, not a whole grid.
+     */
+    fun paintCursor(scope: DrawScope, frame: TerminalFrame.Frame)
 }

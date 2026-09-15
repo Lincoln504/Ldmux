@@ -6,7 +6,10 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -37,7 +40,16 @@ data class TerminalModes(
  * payload bytes. See packages/protocol/src/frames.ts and remote.ts.
  */
 class AttachClient(private val config: LdmuxConfig, private val sessionId: String) {
-    private val http = HttpClient { install(WebSockets) }
+    /**
+     * Recreated on every start, because [stop] closes it: the pager keeps a
+     * neighbouring page composed but should not keep it *connected* (see
+     * `TerminalController.setActive`).
+     */
+    private var http: HttpClient? = null
+
+    private fun httpClient(): HttpClient =
+        http ?: HttpClient { install(WebSockets) }.also { http = it }
+
     private val json = Json { ignoreUnknownKeys = true }
     private var ws: DefaultClientWebSocketSession? = null
     private var job: Job? = null
@@ -49,17 +61,37 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     var onSnapshot: ((cols: Int, rows: Int, screen: String, history: Boolean, modes: TerminalModes) -> Unit)? = null
     var onOutput: ((ByteArray) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    /**
+     * A measured round trip, in ms. The display's repaint cadence follows this
+     * (see FramePacing): a phone should not paint faster than the link can
+     * answer, and it should slow down rather than queue up when the link is bad.
+     */
+    var onRtt: ((Long) -> Unit)? = null
+    /** The connection went away; the current round-trip estimate is worthless. */
+    var onOffline: (() -> Unit)? = null
+
+    private var pingSeq = 0
+    private var pingSentAt: TimeMark? = null
 
     fun start(scope: CoroutineScope) {
-        this.scope = scope
         if (job != null) return
+        this.scope = scope
         job = scope.launch { loop() }
+    }
+
+    /** Detach and stop streaming. The connection is not kept in any form. */
+    fun stop() {
+        job?.cancel()
+        job = null
+        scope = null
+        http?.let { runCatching { it.close() } }
+        http = null
     }
 
     private suspend fun loop() {
         while (currentCoroutineContext().isActive) {
             try {
-                http.webSocket(config.wsUrl) {
+                httpClient().webSocket(config.wsUrl) {
                     ws = this
                     send(Frame.Text(
                         buildJsonObject {
@@ -71,6 +103,19 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                             }
                         }.toString(),
                     ))
+                    // Measure the link from inside the same connection the output
+                    // travels on, so the number the pacing uses is the delay the
+                    // user actually experiences. The first ping waits for the
+                    // handshake to settle.
+                    val pinger = launch {
+                        delay(FIRST_PING_MS)
+                        while (isActive) {
+                            val id = ++pingSeq
+                            pingSentAt = TimeSource.Monotonic.markNow()
+                            runCatching { send(Frame.Text("""{"type":"ping","id":$id}""")) }
+                            delay(PING_INTERVAL_MS)
+                        }
+                    }
                     try {
                         for (frame in incoming) {
                             when (frame) {
@@ -80,12 +125,18 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                             }
                         }
                     } finally {
+                        pinger.cancel()
                         ws = null
                     }
                 }
+            } catch (e: CancellationException) {
+                // Deactivation, not a broken link: the caller asked for this.
+                throw e
             } catch (_: Throwable) {
                 /* offline / daemon restart: retry below */
             }
+            pingSentAt = null
+            onOffline?.invoke()
             delay(1500)
         }
     }
@@ -94,6 +145,11 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         when (root["type"]?.jsonPrimitive?.content) {
             "caps" -> Unit
+            "pong" -> {
+                val sent = pingSentAt ?: return
+                pingSentAt = null
+                onRtt?.invoke(sent.elapsedNow().inWholeMilliseconds)
+            }
             "snapshot" -> {
                 val cols = root["cols"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
                 val rows = root["rows"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
@@ -196,12 +252,16 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     fun snapshotNow() = scrollback(0)
 
-    fun stop() {
-        job?.cancel()
-        job = null
-        scope = null
-        runCatching { http.close() }
-    }
-
     private fun quote(s: String): String = kotlinx.serialization.json.JsonPrimitive(s).toString()
+
+    private companion object {
+        /** Long enough that the handshake is not what gets measured. */
+        const val FIRST_PING_MS = 600L
+        /**
+         * Every few seconds is plenty: the estimate only has to follow a real
+         * change in link quality, and a phone on a metered connection should not
+         * spend its budget on keep-alives. Each ping is a handful of bytes.
+         */
+        const val PING_INTERVAL_MS = 4_000L
+    }
 }

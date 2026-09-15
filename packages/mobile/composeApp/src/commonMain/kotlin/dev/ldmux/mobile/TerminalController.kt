@@ -15,6 +15,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 
 /**
  * Owns one session's terminal: the libghostty engine plus the attach stream.
@@ -24,7 +26,20 @@ import kotlin.math.abs
 class TerminalController(
     private val config: LdmuxConfig,
     private val sessionId: String,
+    active: Boolean = true,
 ) : TerminalHandle {
+
+    /**
+     * Whether the stream should be running.
+     *
+     * The pager keeps a neighbouring page composed so a swipe is instant, but
+     * composed is not the same as *connected*: attached-and-hidden would mean
+     * streaming output for a terminal nobody is looking at, and — because the
+     * viewing client owns the pane geometry — resizing the panes of sessions the
+     * user is not even on. So an inactive page keeps its last painted frame and
+     * drops its connection until it is the one on screen.
+     */
+    private var active = active
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var engine = TerminalEngine(DEFAULT_COLS, DEFAULT_ROWS)
@@ -32,8 +47,15 @@ class TerminalController(
     private val _frame = MutableStateFlow<TerminalFrame.Frame?>(null)
     val frame: StateFlow<TerminalFrame.Frame?> = _frame
 
-    private var lastRenderAt = 0L
+    private var lastRenderAt: TimeMark? = null
     private var renderScheduled = false
+
+    /**
+     * The repaint cadence, which follows the measured round trip. A phone should
+     * not paint faster than the link can answer, and it should slow down rather
+     * than queue up when the link is bad (docs/PREDICTIVE-ECHO.md, phase 3).
+     */
+    private val pacing = FramePacing()
 
     private val predictor = Predictor()
     private var staleJob: Job? = null
@@ -50,6 +72,17 @@ class TerminalController(
     var onStartVoice: (() -> Unit)? = null
 
     private val attach = AttachClient(config, sessionId)
+
+    private val _link = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
+
+    /** What the link is doing, for the chrome to show. */
+    override val link: StateFlow<LinkStats> = _link
+
+    private fun linkStats() = LinkStats(
+        rttMs = pacing.rttMs,
+        frameIntervalMs = pacing.intervalMs,
+        measured = pacing.measured,
+    )
 
     init {
         attach.onSnapshot = { cols, rows, screen, _, m ->
@@ -75,7 +108,15 @@ class TerminalController(
             _frame.value = engine.render()
         }
         attach.onOutput = { bytes -> writeOutput(bytes) }
-        attach.start(scope)
+        attach.onRtt = { sample ->
+            pacing.onRttSample(sample)
+            _link.value = linkStats()
+        }
+        attach.onOffline = {
+            pacing.onDisconnected()
+            _link.value = linkStats()
+        }
+        if (active) attach.start(scope)
     }
 
     /**
@@ -122,21 +163,35 @@ class TerminalController(
      * this an MVP requirement for exactly this reason (see docs/PREDICTIVE-ECHO.md).
      */
     private fun scheduleRender() {
-        val now = System.currentTimeMillis()
-        val since = now - lastRenderAt
-        if (since >= FRAME_MS) {
-            lastRenderAt = now
+        // The window is the link's, not a constant: half a round trip is roughly
+        // how long a keystroke's echo takes to come back, which is the cadence
+        // the user is watching. On a fast link this is the 33 ms floor (~30 Hz),
+        // on a slow one it stretches toward 150 ms so the client stops queuing
+        // frames nobody will see.
+        val frameMs = pacing.intervalMs
+        // Monotonic, not wall clock: this is a duration, and a common-code file
+        // shared with iOS must not reach for `System.currentTimeMillis`.
+        val since = lastRenderAt?.elapsedNow()?.inWholeMilliseconds ?: Long.MAX_VALUE
+        if (since >= frameMs) {
+            lastRenderAt = TimeSource.Monotonic.markNow()
             _frame.value = engine.render()
             return
         }
         if (renderScheduled) return
         renderScheduled = true
         scope.launch {
-            delay(FRAME_MS - since)
+            delay(frameMs - since)
             renderScheduled = false
-            lastRenderAt = System.currentTimeMillis()
+            lastRenderAt = TimeSource.Monotonic.markNow()
             _frame.value = engine.render()
         }
+    }
+
+    /** Start or stop the stream as this page enters or leaves the foreground. */
+    fun setActive(value: Boolean) {
+        if (value == active) return
+        active = value
+        if (value) attach.start(scope) else attach.stop()
     }
 
     override fun sendKey(name: String) {
@@ -203,7 +258,7 @@ class TerminalController(
 
     /** Scrolling is a local view change: paint it immediately, never coalesced. */
     private fun renderNow() {
-        lastRenderAt = System.currentTimeMillis()
+        lastRenderAt = TimeSource.Monotonic.markNow()
         _frame.value = engine.render()
     }
 
@@ -230,7 +285,12 @@ class TerminalController(
         if (!f.viewportActive || f.passwordInput) return
         if (col < 0 || row < 0 || col >= f.cols || row >= f.rows) return
 
-        if (modes.mouse && modes.mouseSgr) {
+        // Frames of the emulator's own mouse modes, not the snapshot's: see
+        // TerminalFrame.Frame.mouseTracking. The server re-checks before it
+        // writes anything, so this gate only decides which of the two regimes to
+        // use — and being local, it is right immediately rather than at the next
+        // snapshot.
+        if (f.mouseTracking && f.mouseSgr) {
             attach.mouseClick(col, row)
             return
         }
@@ -288,8 +348,5 @@ class TerminalController(
         /** Upper bound on the keys one tap may generate, so a stray tap at the
          *  edge of a wide pane cannot become a key storm. */
         const val MAX_TAP_KEYS = 120
-        /** ~60 Hz. The ceiling; phase 3 in docs/PREDICTIVE-ECHO.md lowers it to
-         *  max(2 Hz, 1/2 RTT) when the link is slow. */
-        const val FRAME_MS = 16L
     }
 }

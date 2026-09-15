@@ -12,15 +12,18 @@
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
- *                      u8 passwordInput, u8 viewportActive, u8 reserved0,
+ *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 reserved1
+ *                      u8 mouseSgr
  *                      (the terminal's default colours so the client can paint
  *                      the whole surface in the same background; whether the
  *                      cursor is at a password prompt, which decides whether
- *                      input may be echoed before the server confirms it; and
- *                      the scrollbar geometry so the client can show position
- *                      without a second call)
+ *                      input may be echoed before the server confirms it; the
+ *                      scrollbar geometry so the client can show position
+ *                      without a second call; and the mouse modes, so a tap can
+ *                      be sent as a click the moment a program asks for the
+ *                      mouse rather than when the next server snapshot happens
+ *                      to arrive)
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -261,11 +264,34 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE,
                        &viewport_active);
   out[17] = (uint8_t)(viewport_active ? 1 : 0);
-  out[18] = 0;
+
+  /* Mouse modes, read from the emulator rather than from a server-side poll.
+   *
+   * This has to be local: a program can enable mouse reporting at any moment
+   * (`vim` on startup, `less` on a keypress), and the client only learns the
+   * server's view of the pane when a snapshot arrives. Waiting for one meant a
+   * program that had just asked for the mouse still got cursor keys, so taps
+   * scrolled its view instead of clicking. The emulator saw the escape sequence,
+   * so it is right on the very frame that follows it. */
+  bool mouse_tracking = false;
+  ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
+                       &mouse_tracking);
+  out[18] = (uint8_t)(mouse_tracking ? 1 : 0);
+
   wr32(out + 19, (uint32_t)sb.total);
   wr32(out + 23, (uint32_t)sb.offset);
   wr32(out + 27, (uint32_t)sb.len);
-  memset(out + 31, 0, 1);
+
+  /* SGR encoding (1006) specifically: it is the only encoding we synthesize,
+   * because the older forms cap coordinates at 223 columns. */
+  GhosttyTerminalModeConfig sgr_mouse = {0};
+  sgr_mouse.mode = GHOSTTY_MODE_SGR_MOUSE;
+  bool sgr_mouse_on = false;
+  if (ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_MODE, &sgr_mouse) ==
+      GHOSTTY_SUCCESS) {
+    sgr_mouse_on = sgr_mouse.value;
+  }
+  out[31] = (uint8_t)(sgr_mouse_on ? 1 : 0);
   /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
    * encoder is mandatory: pad every missing cell with a blank. */
   bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);

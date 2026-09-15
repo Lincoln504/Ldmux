@@ -101,11 +101,18 @@ avoid. `RECORD_AUDIO` is requested at first use, never at launch. iOS will use
   with `window-size manual` there is exactly one window size, so two clients of
   different sizes cannot both be "exactly right". `window-size latest` or
   `aggressive-resize` are the levers (see ADR-0002 for the geometry contract).
-- The scale transform is retained (rounding, and any future zoom), so the sshx
-  warning stands: if pinch-zoom is added, pointer→cell mapping must divide by
-  the scale.
+- The scale-to-fit transform was **removed**. Nothing is scaled; the grid is
+  drawn 1:1 and an oversized one (a rotation or font change whose resize has not
+  landed yet) is clipped, anchored bottom-left, so the prompt stays on screen.
+  Pointer→cell mapping is therefore a pure translate, and the warning below no
+  longer applies — but if a scale ever returns, it returns here, and both the
+  draw and the hit-test must keep reading one `GridPlacement`.
+- Font size is a **client setting** (settings dialog, or pinch), and it feeds
+  back into the geometry: a bigger font means fewer columns, so the shell is
+  reflowed rather than the grid being scaled down. This is the same ownership
+  rule as §2, applied to the font.
 - Input latency is unchanged by this ADR. Predictive echo is designed in
-  `docs/PREDICTIVE-ECHO.md` and is not implemented.
+  `docs/PREDICTIVE-ECHO.md`.
 
 ## Alternatives rejected
 

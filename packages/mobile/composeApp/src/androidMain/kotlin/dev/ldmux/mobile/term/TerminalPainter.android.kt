@@ -50,22 +50,38 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 val baseline = y + m.baseline
                 nc.drawText(cell.text, x, baseline, fgPaint)
             }
-            drawCursor(nc, frame, m)
         }
     }
 
     /**
-     * The cursor is drawn last, over the grid. Shapes follow the VT styles:
-     * BAR=0, BLOCK=1, UNDERLINE=2, BLOCK_HOLLOW=3. A block inverts its cell by
-     * filling with the foreground colour, so the glyph underneath has to be
-     * repainted in the background colour to stay readable.
+     * Draw the cursor at the canvas origin.
+     *
+     * This is a method of its own so the cursor can live in its own tiny canvas:
+     * a terminal cursor blinks, and blinking it by repainting the whole grid two
+     * or three times a second forever would be a permanent tax on a phone's
+     * battery for no picture anyone asked for. The caller positions a one-cell
+     * canvas at the cursor's cell, so this only ever draws one cell.
+     */
+    actual fun paintCursor(scope: DrawScope, frame: TerminalFrame.Frame) {
+        scope.drawIntoCanvas { canvas -> drawCursor(canvas.nativeCanvas, frame, metrics) }
+    }
+
+    /**
+     * The cursor, drawn over the grid. Shapes follow the VT styles: BAR=0,
+     * BLOCK=1, UNDERLINE=2, BLOCK_HOLLOW=3. A block inverts its cell by filling
+     * with the foreground colour, so the glyph underneath has to be repainted in
+     * the background colour to stay readable.
+     *
+     * Coordinates are relative to the canvas, which the caller has already
+     * positioned on the cursor's cell — hence the cell's own text, not the
+     * text at `cursorX`/`cursorY` in a full-grid context.
      */
     private fun drawCursor(nc: android.graphics.Canvas, frame: TerminalFrame.Frame, m: CellMetrics) {
         if (!frame.cursorVisible) return
         if (frame.cursorX < 0 || frame.cursorY < 0) return
         if (frame.cursorX >= frame.cols || frame.cursorY >= frame.rows) return
-        val x = frame.cursorX * m.width
-        val y = frame.cursorY * m.height
+        val x = 0f
+        val y = 0f
         cursorPaint.color = argb(frame.defaultFg)
         when (frame.cursorStyle) {
             0 -> { // bar

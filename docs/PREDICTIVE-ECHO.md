@@ -42,8 +42,8 @@ In rough order of value per unit of work:
    can carry; do not let a flood starve input. `dooboxes`
    (`MOBILE_TERMINAL_PERFORMANCE.md:186-196`) specifies *max 50 Hz, min
    max(2 Hz, 1/2 RTT)*, explicitly so that buffer bloat cannot delay Ctrl-C.
-   **Partially done**: the fixed 60 Hz ceiling is implemented
-   (`TerminalController.scheduleRender`); the RTT-adaptive floor is not.
+   **Done** (`FramePacing` + `TerminalController.scheduleRender`). See §5.3 for
+   where this deviates from the source and why.
 5. **Atomic repaint on connect/resize** — a snapshot is applied as a unit so a
    late capture cannot paint over a newer one. **Done** (`snapshotEpoch`,
    `sendState`).
@@ -191,13 +191,25 @@ next one immediate.
 (`TerminalController.onSnapshot`), "discard the prediction" is one snapshot
 request, not a diff-undo. The architecture already has the recovery primitive.
 
-### 5.3 Phase 3 — adaptive frame rate
+### 5.3 Phase 3 — adaptive frame rate (done)
 
-Coalesce output frames and repaint on a schedule bounded by min/max rates
-(50 Hz ceiling; floor of max(2 Hz, ½ RTT)) so that a `yes`-style flood cannot
-starve input or delay Ctrl-C. Measure RTT from the existing ping/pong. The
-ceiling half is done (`TerminalController.scheduleRender`, 16 ms); the
-RTT-adaptive floor is not.
+Coalesce output frames and repaint on a schedule bounded by the link, so a
+`yes`-style flood cannot starve input. Implemented in `FramePacing`
+(`commonMain/.../FramePacing.kt`), and consumed by `TerminalController.scheduleRender`.
+RTT comes from the `ping`/`pong` the protocol already had: `AttachClient` sends a
+ping every 4 s on the *same* connection the output arrives on, so the number is
+the delay the user actually experiences. It is shown in the sidebar
+(`link 42 ms · 30 fps`), because a number the user can see is the only way to
+tell "this link is slow" from "this app is slow".
+
+| | dooboxes' note | here | why |
+|---|---|---|---|
+| ceiling | max 50 Hz | **30 Hz** (`33 ms`) | Terminals stream text, not video. Input responsiveness is protected by coalescing and the predictor, not by painting faster; 60 Hz just wakes the CPU. |
+| floor | max(2 Hz, ½ RTT) | **6.7 Hz** (`150 ms`) | 2 Hz reads as broken rather than slow, and below the floor the predictor is the better answer to latency than more draws. |
+| estimate | ½ RTT | **½ RTT, asymmetric** | A pong queues behind whatever is already in flight, so one slow sample says nothing about the link: a *lower* sample is adopted whole, a higher one is absorbed at 0.25. |
+
+Scrolling is exempt: it is a local view change, so it paints immediately
+(`renderNow`) and never goes through the pacing window.
 
 ### 5.4 Scrollback is the emulator's, not a client-side buffer (done)
 

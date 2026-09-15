@@ -54,23 +54,30 @@ API (pinned as `0.1.0-dev`).
 
 ## Verified build (2026-09-14)
 
-`libghostty-vt` **builds for Android on this machine today.** From Ghostty
-`d5eba8d` with Zig `0.16.0` (from the pinned nixpkgs) and
-`ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/android-ndk-r27c`:
+`libghostty-vt` **builds for Android on this machine**, and the whole thing —
+engine *and* our JNI bridge — is built by `packages/mobile/scripts/build-libghostty-vt.sh`
+from Ghostty `d5eba8d` with Zig `0.16.0` (from the pinned nixpkgs) and the NDK
+that `nix develop .#mobile` resolves into `ANDROID_NDK_HOME`:
 
 ```
-nix shell nixpkgs#zig -c zig build -Demit-lib-vt \
-  -Dtarget=aarch64-linux-android -Doptimize=ReleaseSafe
+nix develop .#mobile --command packages/mobile/scripts/build-libghostty-vt.sh arm64-v8a
 ```
 
-Output: `zig-out/lib/libghostty-vt.a` (21 MB, static),
-`libghostty-vt.so.0.1.0` (12.8 MB, shared), and the full
-`include/ghostty/vt/*.h` header set. The build's own `pkg/android-ndk/build.zig`
-needs the NDK only for bionic libc include/lib paths — the VT core itself is
-libc-free — so a *newer* NDK is not strictly required for the engine, though we
-will take the latest. This proves the native Android path end to end at the
-**engine** level; what remains is the JNI wrapper, the shared Kotlin core, and
-the Compose Canvas renderer.
+The devShell resolves the NDK by the `Pkg.Revision` each installed directory
+declares, **not** by sorting the directory names — SDK Manager uses two shapes at
+once (`android-ndk-r27c`, `30.0.16248370`), and `sort -V` orders a digit-leading
+name before a letter-leading one, which silently picks the *older* toolkit.
+
+Re-verified 2026-09-14 against **NDK r30** (`30.0.16248370`), the current stable:
+a `arm64-v8a` `libldmux_terminal.so` of 12,694,672 bytes, against 12.7 MB from the
+previous r27c build — the toolkit change is not load-bearing for the engine. The
+build's own `pkg/android-ndk/build.zig` needs the NDK only for bionic libc
+include/lib paths, and the VT core itself is libc-free.
+
+Before that, the engine alone: `zig build -Demit-lib-vt
+-Dtarget=aarch64-linux-android -Doptimize=ReleaseSafe` produces
+`zig-out/lib/libghostty-vt.a` (21 MB, static), `libghostty-vt.so.0.1.0` (12.8 MB,
+shared) and the full `include/ghostty/vt/*.h` header set.
 
 ## Viable alternatives (checked 2026-09-14)
 
@@ -197,3 +204,25 @@ Also confirmed: the render state must be populated into the pre-allocated row
 iterator with `ghostty_render_state_get(..., GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
 ...)` after every update, or iteration yields nothing (a header-only 10-byte
 frame).
+
+3. **Ask the engine when the question is about the terminal's own state.**
+   Tap-to-cursor has two regimes — a synthesized SGR click for a program that
+   asked for the mouse, relative cursor motion for a plain shell — and the first
+   one was dead on device: a program that had *just* enabled mouse reporting
+   (`vim`, `less`) still got arrow keys. The mode flags the daemon reads from
+   tmux (`#{mouse_any_flag}`, `#{mouse_sgr_flag}`) are accurate but only arrive
+   with a **snapshot**, so the client's copy was stale for as long as the user
+   stayed attached. The emulator had already parsed the enabling escape
+   sequence, so it can answer for free and immediately:
+   `GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING` (any of X10/1000/1002/1003) and
+   `GHOSTTY_TERMINAL_DATA_MODE` with `GHOSTTY_MODE_SGR_MOUSE` (1006, the only
+   encoding we synthesize — the older ones cap coordinates at 223). The frame
+   header now carries both (`native/ldmux_terminal.c` byte 18 and byte 31, the
+   two former reserved bytes), so a tap is a click on the very frame after the
+   program asks for one. The daemon still re-checks before writing anything to
+   the pty, where its view is fresh because it polls at click time — the local
+   flag only chooses the regime.
+
+   Same shape as the password-prompt signal (`docs/PREDICTIVE-ECHO.md` §7):
+   when the question is about the terminal's own state, the engine is both
+   better informed and cheaper to ask than the protocol.

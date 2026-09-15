@@ -63,6 +63,8 @@ class TerminalFrameTest {
         defBg: Int = 0x1E1E1E,
         passwordInput: Boolean = false,
         viewportActive: Boolean = true,
+        mouseTracking: Boolean = false,
+        mouseSgr: Boolean = false,
         scrollTotal: Long = 0,
         scrollOffset: Long = 0,
         scrollLen: Long = 0,
@@ -77,11 +79,11 @@ class TerminalFrameTest {
         rgb(defBg)
         byte(if (passwordInput) 1 else 0)
         byte(if (viewportActive) 1 else 0)
-        byte(0) // reserved0
+        byte(if (mouseTracking) 1 else 0)
         u32(scrollTotal)
         u32(scrollOffset)
         u32(scrollLen)
-        byte(0) // reserved1
+        byte(if (mouseSgr) 1 else 0)
         for ((text, fg, bg) in cells) cell(text, fg, bg)
     }.build()
 
@@ -116,6 +118,24 @@ class TerminalFrameTest {
         assertEquals(5000L, f.scrollTotal)
         assertEquals(1234L, f.scrollOffset)
         assertEquals(29L, f.scrollLen)
+    }
+
+    @Test
+    fun `decodes the mouse modes, which are what decide click versus cursor keys`() {
+        // Both, and independently: a program can turn mouse reporting on with a
+        // legacy encoding we cannot synthesize, and a tap must fall back to
+        // cursor keys then rather than write bytes the program will misread.
+        val both = TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)), mouseTracking = true, mouseSgr = true))
+        assertTrue(both.mouseTracking)
+        assertTrue(both.mouseSgr)
+
+        val legacy = TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)), mouseTracking = true))
+        assertTrue(legacy.mouseTracking)
+        assertFalse(legacy.mouseSgr, "tracking without SGR is not clickable")
+
+        val none = TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2))))
+        assertFalse(none.mouseTracking)
+        assertFalse(none.mouseSgr)
     }
 
     @Test
@@ -164,9 +184,9 @@ class TerminalFrameTest {
             u16(1); u16(1); u16(0); u16(0)
             byte(1); byte(1)
             rgb(0); rgb(0)
-            byte(0); byte(1); byte(0) // password, viewport-active, reserved
+            byte(0); byte(1); byte(0) // password, viewport-active, mouse-tracking
             u32(0); u32(0); u32(0)
-            byte(0)
+            byte(0) // mouse-sgr
             cell("x", 1, 2, TerminalFrame.FLAG_BOLD or TerminalFrame.FLAG_UNDERLINE)
         }.build()
         val f = TerminalFrame.decode(bytes)

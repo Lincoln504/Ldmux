@@ -4,10 +4,12 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.BasicTextField
@@ -20,6 +22,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -31,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -42,17 +46,22 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
+import dev.ldmux.mobile.term.GridPlacement
 import dev.ldmux.mobile.term.TerminalFrame
 import dev.ldmux.mobile.term.TerminalPainter
+import dev.ldmux.mobile.term.placeGrid
 import dev.ldmux.mobile.voice.VoiceDictation
 import dev.ldmux.mobile.voice.VoiceState
 import dev.ldmux.mobile.voice.findActivity
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.floor
+import kotlin.math.roundToInt
 
 /** Set from MainActivity so [AppPrefs] can reach SharedPreferences. */
 object AndroidApp {
@@ -65,6 +74,7 @@ actual object AppPrefs {
     private const val KEY_TOKEN = "token"
     private const val KEY_SIDE = "side"
     private const val KEY_PREDICT = "predict"
+    private const val KEY_FONT = "font_sp"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -73,6 +83,8 @@ actual object AppPrefs {
             token = sp.getString(KEY_TOKEN, null) ?: LdmuxConfig.DEFAULT.token,
             side = sp.getString(KEY_SIDE, null) ?: LdmuxConfig.DEFAULT.side,
             predict = sp.getBoolean(KEY_PREDICT, LdmuxConfig.DEFAULT.predict),
+            fontSp = sp.getFloat(KEY_FONT, LdmuxConfig.DEFAULT_FONT_SP)
+                .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
         )
     }
 
@@ -83,6 +95,7 @@ actual object AppPrefs {
             .putString(KEY_TOKEN, config.token)
             .putString(KEY_SIDE, config.side)
             .putBoolean(KEY_PREDICT, config.predict)
+            .putFloat(KEY_FONT, config.fontSp)
             .apply()
     }
 }
@@ -112,15 +125,26 @@ actual fun rememberTerminalSurface(
     config: LdmuxConfig,
     sessionId: String,
     typing: Boolean,
+    active: Boolean,
     modifier: Modifier,
 ): TerminalHandle {
-    val controller = remember(config, sessionId) { TerminalController(config, sessionId) }
+    val controller = remember(config, sessionId) { TerminalController(config, sessionId, active) }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
+
+    // Entering or leaving the foreground starts or drops the stream. The last
+    // painted frame stays, so swiping back is instant rather than blank.
+    LaunchedEffect(active) { controller.setActive(active) }
 
     val frame by controller.frame.collectAsState()
     val density = LocalDensity.current
-    val fontSizePx = with(density) { 12.sp.toPx() }
+    // Font size is a client setting, not a scaling factor: a bigger font means
+    // fewer cells fit, and the daemon reflows the pane to that grid. Nothing is
+    // ever shrunk to fit a fixed grid (ADR-0008), which is also what keeps the
+    // touch mapping honest — there is no scale to divide by.
+    var fontSp by remember { mutableStateOf(config.fontSp) }
+    val fontSizePx = with(density) { fontSp.sp.toPx() }
     val painter = remember(fontSizePx) { TerminalPainter(fontSizePx) }
+    val scope = rememberCoroutineScope()
 
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -130,11 +154,16 @@ actual fun rememberTerminalSurface(
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     /** Where the user last tapped, so the snap is visible before the server answers. */
     var tapAt by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    /** A pinch is in flight; a tap must not be read out of it. */
+    var pinching by remember { mutableStateOf(false) }
+    /** The cursor blink phase. Its own canvas, so a blink repaints one cell. */
+    var blinkOn by remember { mutableStateOf(true) }
 
-    // The tap detector must read the *current* frame without being restarted by
-    // it (restarting would cancel an in-flight gesture).
+    // The gesture detectors must read the *current* frame and metrics without
+    // being restarted by them (restarting would cancel an in-flight gesture).
     val currentFrame by rememberUpdatedState(frame)
     val currentViewport by rememberUpdatedState(viewport)
+    val currentPainter by rememberUpdatedState(painter)
     LaunchedEffect(tapAt) {
         if (tapAt != null) {
             delay(600)
@@ -143,6 +172,33 @@ actual fun rememberTerminalSurface(
     }
 
     val metrics = painter.metrics
+    // The render transform and the touch hit-test are the same geometry, so it
+    // is computed once, here, and both read it (term/GridPlacement.kt).
+    val placement = remember(frame?.cols, frame?.rows, metrics.width, metrics.height, viewport) {
+        placeGrid(
+            cellWidth = metrics.width,
+            cellHeight = metrics.height,
+            cols = frame?.cols ?: 0,
+            rows = frame?.rows ?: 0,
+            viewportWidth = viewport.width.toFloat(),
+            viewportHeight = viewport.height.toFloat(),
+        )
+    }
+    val currentPlacement by rememberUpdatedState(placement)
+
+    // The blink follows the pane's idle time: any new cursor position restarts
+    // the cycle with the cursor *shown*, so a cursor never looks "off" at the
+    // moment the user is typing at it.
+    val liveCursor = frame?.let { it.cursorVisible && it.viewportActive } == true
+    val blinkKey = frame?.let { "${it.cursorX}:${it.cursorY}:${it.cursorVisible}:${it.viewportActive}" }
+    LaunchedEffect(blinkKey) {
+        blinkOn = true
+        if (!liveCursor) return@LaunchedEffect
+        while (true) {
+            delay(BLINK_MS)
+            blinkOn = !blinkOn
+        }
+    }
     // The pane follows the viewport, always. In portrait the keyboard is part of
     // that viewport (it is always up there), so the grid simply fits the space
     // that is actually visible; nothing is scaled down to a postage stamp.
@@ -223,22 +279,53 @@ actual fun rememberTerminalSurface(
                 .onSizeChanged { viewport = it }
                 .pointerInput(Unit) {
                     // A tap places the cursor. The hit-test is the exact inverse of
-                    // the draw transform below; keeping them adjacent is the point
-                    // (the recorded failure mode of scale-to-fit is pointer
-                    // coordinates that forgot to divide by the scale).
+                    // the draw below — both read the same GridPlacement, which is
+                    // the fix for the recorded failure mode (pointer coordinates
+                    // that forgot to divide by a scale factor).
                     detectTapGestures { pos ->
-                        val f = currentFrame ?: return@detectTapGestures
-                        val cell = cellAt(pos, currentViewport, f, painter.metrics) ?: return@detectTapGestures
-                        tapAt = cell
-                        controller.tapCell(cell.first, cell.second)
+                        if (pinching) return@detectTapGestures
+                        currentFrame ?: return@detectTapGestures
+                        val p = currentPlacement
+                        // cellAt answers with a row-major index, so the column
+                        // comes back out of the same arithmetic that put it in.
+                        val index = p.cellAt(pos.x, pos.y) ?: return@detectTapGestures
+                        val row = index / p.cols
+                        val col = index % p.cols
+                        tapAt = col to row
+                        controller.tapCell(col, row)
                     }
                 }
                 .pointerInput(Unit) {
+                    // Two fingers change the font size, which changes how many
+                    // cells fit, which resizes the shell. Narrow on purpose: it
+                    // never consumes a single-finger event, so tap and scroll
+                    // are untouched by it.
+                    detectPinch(
+                        onZoom = { factor ->
+                            if (!pinching) pinching = true
+                            fontSp = (fontSp * factor)
+                                .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP)
+                        },
+                        onEnd = {
+                            // Persist through a fresh load, so a stale config
+                            // capture cannot write back an old host or token.
+                            val persisted = AppPrefs.load()
+                            if (persisted.fontSp != fontSp) AppPrefs.save(persisted.copy(fontSp = fontSp))
+                            // A pinch ends with one finger still down, and that
+                            // finger's release must not then be read as a tap.
+                            scope.launch {
+                                delay(150)
+                                pinching = false
+                            }
+                        },
+                    )
+                }
+                .pointerInput(Unit) {
                     var carry = 0f
-                    val rowPx = painter.metrics.height
                     detectVerticalDragGestures(
                         onVerticalDrag = { change, dragAmount ->
                             change.consume()
+                            val rowPx = currentPainter.metrics.height
                             if (rowPx <= 0f) return@detectVerticalDragGestures
                             carry += dragAmount
                             // Dragging down moves the content down, i.e. back
@@ -255,34 +342,48 @@ actual fun rememberTerminalSurface(
                 },
         ) {
             val f = frame ?: return@Canvas
-            val m = painter.metrics
-            val gridW = m.width * f.cols
-            val gridH = m.height * f.rows
-            if (gridW <= 0f || gridH <= 0f) return@Canvas
-            // 1:1 after a resize; the scale only absorbs rounding (or the
-            // keyboard's inset while typing), and the leftover is split evenly
-            // so the grid sits centred rather than jammed into a corner.
-            val scale = minOf(size.width / gridW, size.height / gridH)
-            val dx = (size.width - gridW * scale) / 2f
-            val dy = (size.height - gridH * scale) / 2f
-            withTransform({
-                translate(dx, dy)
-                scale(scale, scale, pivot = androidx.compose.ui.geometry.Offset.Zero)
-            }) {
+            if (placement.cellWidth <= 0f || placement.gridWidth <= 0f) return@Canvas
+            // 1:1 with the grid's top-left at the placement's origin. The grid is
+            // sized to the viewport, so what is left over is under one cell, and
+            // an oversized grid (a font change whose resize has not landed) is
+            // clipped rather than squashed — the cells keep the size the user
+            // chose.
+            withTransform({ translate(placement.dx, placement.dy) }) {
                 painter.paint(this, f)
             }
-            drawScrollbar(f, scale, dx, size.width, size.height)
+            drawScrollbar(f, placement, size.width, size.height)
             tapAt?.let { (col, row) ->
-                val m2 = painter.metrics
+                val (x, y) = placement.cellOrigin(col, row)
                 drawRect(
                     color = Accent,
-                    topLeft = androidx.compose.ui.geometry.Offset(
-                        dx + col * m2.width * scale,
-                        dy + row * m2.height * scale,
-                    ),
-                    size = androidx.compose.ui.geometry.Size(m2.width * scale, m2.height * scale),
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f * scale),
+                    topLeft = androidx.compose.ui.geometry.Offset(x, y),
+                    size = androidx.compose.ui.geometry.Size(placement.cellWidth, placement.cellHeight),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f),
                 )
+            }
+        }
+
+        // The cursor gets its own one-cell canvas. Blinking it is the one thing
+        // that must keep happening while nothing else changes, and repainting a
+        // 5000-cell grid two or three times a second forever is a permanent tax
+        // on a phone's battery for a picture nobody asked for.
+
+        // The cursor, in its own one-cell canvas. Blinking is the one thing that
+        // must keep happening while nothing else changes, and repainting a
+        // whole grid two or three times a second forever is a permanent tax on a
+        // phone's battery for a picture nobody asked for.
+        val cursorFrame = frame
+        if (cursorFrame != null && liveCursor && blinkOn && placement.gridWidth > 0f) {
+            val (cx, cy) = placement.cellOrigin(cursorFrame.cursorX, cursorFrame.cursorY)
+            Canvas(
+                Modifier
+                    .offset { IntOffset(cx.roundToInt(), cy.roundToInt()) }
+                    .size(
+                        with(density) { placement.cellWidth.toDp() },
+                        with(density) { placement.cellHeight.toDp() },
+                    ),
+            ) {
+                painter.paintCursor(this, cursorFrame)
             }
         }
 
@@ -355,27 +456,56 @@ actual fun rememberTerminalSurface(
 }
 
 /**
- * The inverse of the draw transform: a touch point to a terminal cell, or null
- * when the point is in the letterbox beside the grid.
+ * Two-finger pinch to font size.
+ *
+ * Written by hand rather than with `detectTransformGestures` for one reason:
+ * that detector also claims single-finger "pan", which on this surface would
+ * fight the scroll gesture and swallow taps. This one never consumes a
+ * single-finger event at all, so it is invisible to everything else.
+ *
+ * The distance ratio between the two pointers *is* the zoom; it is compared
+ * against [SLOP] because two fingers resting still still jitter, and a stream of
+ * 1.001x steps would resize the shell continuously for no reason.
  */
-private fun cellAt(
-    pos: androidx.compose.ui.geometry.Offset,
-    viewport: IntSize,
-    f: TerminalFrame.Frame,
-    m: dev.ldmux.mobile.term.CellMetrics,
-): Pair<Int, Int>? {
-    if (viewport.width <= 0 || viewport.height <= 0) return null
-    val gridW = m.width * f.cols
-    val gridH = m.height * f.rows
-    if (gridW <= 0f || gridH <= 0f) return null
-    val scale = minOf(viewport.width / gridW, viewport.height / gridH)
-    val dx = (viewport.width - gridW * scale) / 2f
-    val dy = (viewport.height - gridH * scale) / 2f
-    val col = floor((pos.x - dx) / (m.width * scale)).toInt()
-    val row = floor((pos.y - dy) / (m.height * scale)).toInt()
-    if (col < 0 || row < 0 || col >= f.cols || row >= f.rows) return null
-    return col to row
+private suspend fun PointerInputScope.detectPinch(
+    slop: Float = PINCH_SLOP,
+    onZoom: (Float) -> Unit,
+    onEnd: () -> Unit,
+) {
+    awaitEachGesture {
+        var previous = 0f
+        var zoomed = false
+        do {
+            val event = awaitPointerEvent()
+            val held = event.changes.filter { it.pressed }.take(2)
+            if (held.size == 2) {
+                val distance = (held[0].position - held[1].position).getDistance()
+                if (previous > 0f && distance > 0f) {
+                    val factor = distance / previous
+                    if (factor < 1f - slop || factor > 1f + slop) {
+                        zoomed = true
+                        onZoom(factor)
+                        held.forEach { it.consume() }
+                    }
+                }
+                previous = distance
+            } else {
+                // Back to one finger: the next two-finger distance is a fresh
+                // baseline, not a jump from wherever the last pinch left off.
+                previous = 0f
+            }
+        } while (event.changes.any { it.pressed })
+        if (zoomed) onEnd()
+    }
 }
+
+private const val PINCH_SLOP = 0.03f
+
+/**
+ * The cursor blink half-period, in ms. 530 is the classic rate (the VT220's),
+ * and it is the one users recognise without noticing it.
+ */
+private const val BLINK_MS = 530L
 
 /**
  * A thin scrollbar while the view is parked in history. The emulator polls its
@@ -384,24 +514,21 @@ private fun cellAt(
  */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScrollbar(
     f: TerminalFrame.Frame,
-    scale: Float,
-    dx: Float,
+    placement: GridPlacement,
     width: Float,
     height: Float,
 ) {
     if (f.viewportActive || f.scrollTotal <= 0 || f.scrollLen <= 0) return
-    val trackTop = 0f
-    val trackH = height
     val frac = f.scrollLen.toFloat() / f.scrollTotal.toFloat()
-    val barH = (trackH * frac).coerceAtLeast(24f)
+    val barH = (height * frac).coerceAtLeast(24f)
     val maxOffset = (f.scrollTotal - f.scrollLen).coerceAtLeast(0).toFloat()
     val pos = if (maxOffset <= 0f) 0f else (f.scrollOffset.toFloat() / maxOffset).coerceIn(0f, 1f)
-    val top = trackTop + (trackH - barH) * pos
-    val x = dx + width - 6f * scale
+    val top = (height - barH) * pos
+    val x = placement.dx + placement.gridWidth - 6f
     drawRect(
         color = Color(0x66FFFFFF),
         topLeft = androidx.compose.ui.geometry.Offset(x, top),
-        size = androidx.compose.ui.geometry.Size(4f * scale, barH),
+        size = androidx.compose.ui.geometry.Size(4f, barH),
     )
 }
 

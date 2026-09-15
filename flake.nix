@@ -54,9 +54,19 @@
           shellHook = ''
             export ANDROID_HOME="$HOME/Android/Sdk"
             export ANDROID_SDK_ROOT="$ANDROID_HOME"
-            # libghostty-vt's build locates the NDK via ANDROID_NDK_HOME;
-            # pick the newest installed one (sort -V), never hard-code a version.
-            export ANDROID_NDK_HOME="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1)"
+            # libghostty-vt's build locates the NDK via ANDROID_NDK_HOME. Never
+            # hard-code a version, and never sort the *directory names*: SDK
+            # Manager installs side-by-side revisions as both `android-ndk-rNNx`
+            # and `<revision>`, and `sort -V` orders a digit-leading name before a
+            # letter-leading one — so with r27c and 30.0.16248370 both installed it
+            # silently picks the *older* toolkit. Resolve by the Pkg.Revision each
+            # directory declares, which is the version SDK Manager itself reports.
+            export ANDROID_NDK_HOME="$(
+              for p in "$ANDROID_HOME"/ndk/*/source.properties; do
+                [ -f "$p" ] || continue
+                echo "$(sed -n 's/^Pkg.Revision *= *//p' "$p") $(dirname "$p")"
+              done | sort -V | tail -1 | cut -d' ' -f2-
+            )"
             echo "ldmux mobile devshell"
             echo "  java   $(${pkgs.jdk25}/bin/javac -version 2>&1)"
             echo "  gradle $(gradle --version 2>/dev/null | awk '/^Gradle/{print $2}')"

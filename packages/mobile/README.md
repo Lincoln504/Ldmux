@@ -74,12 +74,31 @@ Two explicit modes, switched by a button — the sensor never rotates the app
 - **Landscape** — side panel (side is a setting), key matrix, `+sh`, settings;
   the keyboard is never up.
 - **Portrait (typing)** — no panel, terminal fills the width, keyboard always
-  up, and a thin bar rides directly above the keyboard with `⤢` (back to
-  landscape) plus Esc, Tab, arrows, C-c and the microphone.
+  up, and a thin bar rides directly above the keyboard with `⟳` (back to
+  landscape) plus Esc, Tab, arrows, C-c. No microphone here: the keyboard is
+  always up in portrait and has its own mic.
 
 The terminal is resized to the viewport in both modes: the daemon sizes the tmux
 pane to the grid the surface can actually paint, so the shell is always the
 right size for the screen showing it.
+
+## Rendering
+
+**Nothing is scaled to fit.** The grid the surface reports *is* the grid the
+pane is resized to, so after a resize the leftover is under one cell and the
+draw is 1:1 (`term/GridPlacement.kt`). An oversized grid — a font change or a
+rotation whose resize has not landed yet — is clipped, anchored bottom-left,
+rather than squashed. The render transform and the touch hit-test read the same
+`GridPlacement`, which is what keeps tap-to-cursor pointing where the user
+pointed.
+
+- **Text size**: a setting, or a two-finger pinch. A bigger font means fewer
+  columns, and the shell is reflowed to match — the client owns the geometry
+  (ADR-0008).
+- **Cursor**: drawn in its own one-cell canvas so the blink repaints one cell
+  instead of the whole grid two or three times a second.
+- **Frame rate**: follows the measured round trip — `RTT/2`, clamped to
+  33–150 ms (`FramePacing.kt`). The sidebar shows `link 42 ms · 30 fps`.
 
 ## Status
 
@@ -103,14 +122,19 @@ right size for the screen showing it.
 - [x] **Predictive local echo**, off by default (settings). The emulator tells
       us when the cursor is at a password prompt, so prediction is refused there
       rather than guessed at.
-- [x] Frame coalescing (60 Hz ceiling) so a flood cannot starve input.
-- [ ] RTT-adaptive frame rate floor (the ceiling is in).
-- [ ] Cursor blink.
+- [x] Frame coalescing + **RTT-adaptive frame rate** (`RTT/2`, 33–150 ms), with
+      the measured link shown in the sidebar.
+- [x] **Cursor blink** (~2 Hz), drawn in its own one-cell canvas.
+- [x] **Pinch/text-size zoom**: font size is a client setting, and a bigger font
+      reflows the pane instead of scaling the grid.
+- [x] **Tap-to-cursor**, in two regimes chosen from the pane's own state — a real
+      synthesized SGR click for a mouse-aware program, relative cursor motion for
+      a plain shell.
 - [ ] Foreground service so the heartbeat survives Doze (SPEC §6.3).
 - [ ] iOS (needs a macOS host for the xcframework).
 
 Verified on a real Motorola Edge 2024 (2026-09-14): landscape with the side
 panel; `⌨` flips to portrait with the keyboard up and the key bar above it;
-typing reaches the pane; `⤢` returns to landscape; the pane resizes per mode
+typing reaches the pane; `⟳` returns to landscape; the pane resizes per mode
 (76x20 landscape, 46x29 portrait) and the grid draws 1:1 in the terminal's own
 colours.

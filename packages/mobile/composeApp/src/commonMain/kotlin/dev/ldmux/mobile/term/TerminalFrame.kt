@@ -9,9 +9,9 @@ package dev.ldmux.mobile.term
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
- *                      u8 passwordInput, u8 viewportActive, u8 reserved0,
+ *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 reserved1
+ *                      u8 mouseSgr
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -60,6 +60,18 @@ object TerminalFrame {
         val passwordInput: Boolean,
         /** True when the viewport is following the live output, not history. */
         val viewportActive: Boolean,
+        /**
+         * The program is tracking the mouse (mode 1000/1002/1003).
+         *
+         * Read from the emulator, not from a server snapshot, because a program
+         * can enable this at any moment and the emulator is what saw the escape
+         * sequence — so it is current on the frame right after it. Waiting for a
+         * snapshot meant a program that had just asked for the mouse was still
+         * sent cursor keys.
+         */
+        val mouseTracking: Boolean,
+        /** SGR mouse encoding (1006) is on: the only form we synthesize. */
+        val mouseSgr: Boolean,
         /** Scrollable area in rows: total, the viewport's offset, and its size. */
         val scrollTotal: Long,
         val scrollOffset: Long,
@@ -94,6 +106,8 @@ object TerminalFrame {
         val defaultBg = rgb(b, 13)
         val passwordInput = b[16].toInt() != 0
         val viewportActive = b[17].toInt() != 0
+        val mouseTracking = b[18].toInt() != 0
+        val mouseSgr = b[31].toInt() != 0
         val scrollTotal = u32(b, 19)
         val scrollOffset = u32(b, 23)
         val scrollLen = u32(b, 27)
@@ -126,6 +140,8 @@ object TerminalFrame {
             defaultBg,
             passwordInput,
             viewportActive,
+            mouseTracking,
+            mouseSgr,
             scrollTotal,
             scrollOffset,
             scrollLen,

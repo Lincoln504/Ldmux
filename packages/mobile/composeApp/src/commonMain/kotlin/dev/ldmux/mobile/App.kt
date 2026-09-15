@@ -67,6 +67,13 @@ data class LdmuxConfig(
      * prompt that does not echo is exactly where the trade is most visible.
      */
     val predict: Boolean = false,
+    /**
+     * Terminal font size. It is a client setting because the client owns the
+     * geometry: a bigger font means fewer cells fit, and the client tells the
+     * daemon the grid it can paint, so the pane reflows to match instead of
+     * being scaled down to fit (ADR-0008).
+     */
+    val fontSp: Float = DEFAULT_FONT_SP,
 ) {
     val baseUrl: String get() = if (host.startsWith("http")) host else "http://$host"
 
@@ -91,6 +98,10 @@ data class LdmuxConfig(
     }
 
     companion object {
+        const val DEFAULT_FONT_SP = 12f
+        const val MIN_FONT_SP = 7f
+        const val MAX_FONT_SP = 28f
+
         val DEFAULT = LdmuxConfig(host = "localhost:7623", token = "", side = "left", predict = false)
     }
 }
@@ -232,7 +243,15 @@ private fun TerminalArea(
         } else {
             HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
                 val s = pages[page]
-                val handle = rememberTerminalSurface(config, s.id, typing, Modifier.fillMaxSize())
+                // Composed if it is within a swipe, connected only if it is the
+                // one on screen (see TerminalHandle.rememberTerminalSurface).
+                val handle = rememberTerminalSurface(
+                    config,
+                    s.id,
+                    typing,
+                    active = page == pagerState.currentPage,
+                    Modifier.fillMaxSize(),
+                )
                 LaunchedEffect(handle, s.id) { handles[s.id] = handle }
             }
         }
@@ -306,8 +325,8 @@ private fun SidePanel(
     }
 
     Column(
-        Modifier.width(190.dp).fillMaxHeight().background(Surface).padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        Modifier.width(190.dp).fillMaxHeight().background(Surface).padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // Back and forth between the open shells.
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -338,15 +357,19 @@ private fun SidePanel(
             }
         }
 
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             SIDEBAR_KEYS.forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     row.forEach { (label, key) -> KeyBtn(label) { handle?.sendKey(key) } }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                KeyBtn("⤒") { handle?.loadHistory() }
-                KeyBtn("↓") { handle?.jumpToBottom() }
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                // Words, not glyphs: `⤒`/`↓` and the cursor arrows both render as
+                // arrows in a monospace fallback, so the two pairs were
+                // indistinguishable. These two do different things (page in
+                // history vs. return to the live prompt) and must read as such.
+                KeyBtn("hist") { handle?.loadHistory() }
+                KeyBtn("live") { handle?.jumpToBottom() }
             }
         }
 
@@ -354,13 +377,28 @@ private fun SidePanel(
         // (which is exactly when they are needed). The on-screen keyboard is
         // opt-in and this is the only switch: nothing raises the IME by
         // accident, and dictation does not need it at all.
+        val link by (handle?.link ?: TerminalHandle.EMPTY_LINK).collectAsState()
+        if (link.measured) {
+            // The repaint cadence follows the round trip, so this is not
+            // decoration: it is the reason a slow link feels the way it does.
+            Text(
+                "link ${link.rttMs} ms · ${link.fps} fps",
+                color = Dim,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             KeyBtn("⌨") { onKeyboard() }
             KeyBtn("🎤") { handle?.startVoice() }
         }
 
-        TextButton(onClick = { client.create("shell") }) { Text("+sh", color = Accent, fontSize = 13.sp) }
-        TextButton(onClick = onSettings) { Text("settings", color = Accent, fontSize = 13.sp) }
+        // Side by side, not stacked: two full-width TextButtons are most of the
+        // panel's spare height, and the key matrix needs it more than they do.
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(onClick = { client.create("shell") }) { Text("+sh", color = Accent, fontSize = 13.sp) }
+            TextButton(onClick = onSettings) { Text("settings", color = Accent, fontSize = 13.sp) }
+        }
     }
 }
 
@@ -384,7 +422,7 @@ private fun KeyBtn(label: String, active: Boolean = false, onClick: () -> Unit) 
             .clip(RoundedCornerShape(6.dp))
             .background(if (active) Accent else Bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 9.dp, vertical = 5.dp),
     ) {
         Text(
             label,
@@ -401,6 +439,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
     var token by remember { mutableStateOf(current.token) }
     var side by remember { mutableStateOf(current.side) }
     var predict by remember { mutableStateOf(current.predict) }
+    var fontSp by remember { mutableStateOf(current.fontSp) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -445,10 +484,37 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     color = Dim,
                     fontSize = 10.sp,
                 )
+                Box(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("text size", color = Dim, fontSize = 12.sp)
+                    TextButton(onClick = { fontSp = (fontSp - 1f).coerceAtLeast(LdmuxConfig.MIN_FONT_SP) }) {
+                        Text("−", color = Accent, fontSize = 16.sp)
+                    }
+                    Text("${fontSp.toInt()}", color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                    TextButton(onClick = { fontSp = (fontSp + 1f).coerceAtMost(LdmuxConfig.MAX_FONT_SP) }) {
+                        Text("+", color = Accent, fontSize = 16.sp)
+                    }
+                }
+                Text(
+                    "a bigger font means fewer columns, and the shell is resized to match — " +
+                        "nothing is scaled down to fit. Pinch on the terminal to change it too.",
+                    color = Dim,
+                    fontSize = 10.sp,
+                )
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(LdmuxConfig(host.trim(), token.trim(), side, predict)) }) {
+            TextButton(onClick = {
+                onSave(
+                    LdmuxConfig(
+                        host.trim(),
+                        token.trim(),
+                        side,
+                        predict,
+                        fontSp.coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
+                    ),
+                )
+            }) {
                 Text("save", color = Accent)
             }
         },
