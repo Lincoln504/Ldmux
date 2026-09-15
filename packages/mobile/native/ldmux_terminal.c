@@ -8,13 +8,13 @@
  * the whole app.
  *
  * Frame format returned by nativeRender (little-endian):
- *   header (32 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (40 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
  *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 mouseSgr
+ *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7]
  *                      (the terminal's default colours so the client can paint
  *                      the whole surface in the same background; whether the
  *                      cursor is at a password prompt, which decides whether
@@ -41,7 +41,7 @@
 
 #define CELL_MAX_UTF8 16
 #define CELL_RECORD_MAX (9 + CELL_MAX_UTF8)
-#define FRAME_HEADER 32
+#define FRAME_HEADER 40
 
 typedef struct {
   GhosttyTerminal terminal;
@@ -281,6 +281,18 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   wr32(out + 19, (uint32_t)sb.total);
   wr32(out + 23, (uint32_t)sb.offset);
   wr32(out + 27, (uint32_t)sb.len);
+
+  /* The alternate screen, read from the emulator for the same reason as the
+   * mouse modes above: it changes the instant a program starts, and the client
+   * needs it on that frame. It separates the two kinds of full-screen program a
+   * person can be running. `pi` and Claude Code draw their own composer on the
+   * PRIMARY screen and want arrow keys; `vim`, `less`, `htop` and `nano` take
+   * the alternate screen, where an arrow key is a command rather than "put the
+   * cursor here". Only the first kind should have taps moved into it. */
+  GhosttyTerminalScreen active_screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+  ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+                       &active_screen);
+  out[32] = (uint8_t)(active_screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE ? 1 : 0);
 
   /* SGR encoding (1006) specifically: it is the only encoding we synthesize,
    * because the older forms cap coordinates at 223 columns. */

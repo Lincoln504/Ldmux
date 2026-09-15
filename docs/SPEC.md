@@ -30,7 +30,8 @@
 > **Revision note (v0.3):** The transport decision (ADR-0001) was settled by
 > hands-on experiment: **tmux control mode `-C` runs over plain pipes with no PTY**
 > (only `-CC` requires a tty). v1 therefore uses control-mode streaming +
-> capture-pane snapshots/fallback, still under Bun with no native dependency.
+> capture-pane snapshots/fallback. (It was implemented on Bun; since
+> [ADR-0009](adr/0009-node-runtime-and-no-pi-extension.md) it runs on Node 26.)
 > See [`TRANSPORT.md`](TRANSPORT.md).
 
 ---
@@ -41,13 +42,13 @@
 
 - A long-lived **daemon** owns a private `tmux` server and exposes it over the
   **tailnet** via a WebSocket API.
-- A **pi extension** makes the daemon "always available" while any pi session is
-  alive, registers pi sessions, and adds tools/commands.
-- A **mobile client**: a native **KMP + Compose Multiplatform** Android app
-  (`packages/mobile`, landscape, WebView hosting `packages/web/public`, swipe
-  pager) — see `packages/mobile/README.md`. The installable
-  landscape-locked **PWA** (`docs/WEB.md`) is the renderer the app hosts, and
-  remains usable standalone from a browser.
+- A **native mobile client**: a KMP + Compose Multiplatform Android app
+  (`packages/mobile`) that renders the terminal itself — libghostty-vt behind a
+  JNI seam, painted on a Compose `Canvas` — and speaks the protocol directly.
+  The browser client (`docs/WEB.md`) is a separate, standalone renderer, and is
+  no longer what the app hosts (ADR-0007).
+- **No pi extension.** ldmux is not a pi plugin; `pi` is simply a program one can
+  run in a session (see the status note above and ADR-0009).
 - A thin **CLI** and an optional desktop **alacritty mirror** round it out.
 - **tmux itself** provides persistence, multi-client attach, and synchronized
   phone+desktop viewing.
@@ -107,8 +108,11 @@ Tailscale only, and far less functionality than dooboxes.
 ### 2.1 Goals
 
 1. **G1 — tmux-native.** Every session is a tmux session on a private socket.
-2. **G2 — pi extension first.** `ldmux` is available whenever a pi session process
-   is active; it registers pi sessions and can spawn new pi/shell sessions.
+2. **G2 — withdrawn.** The original goal was "pi extension first": ldmux
+   available whenever a pi session is active, registering pi sessions. ldmux is
+   not a pi plugin (ADR-0009). What survives is the part that was never really
+   about pi: the daemon is a long-lived process independent of any client, and
+   `pi` can be run inside a session like any other program.
 3. **G3 — Mobile app, landscape-only.** Terminal ~3/4; configurable left/right
    control quarter; horizontal swipe to switch sessions; stable scrolling.
 4. **G4 — Open shells/pi in any directory from the phone**, optionally mirrored
@@ -138,7 +142,7 @@ Tailscale only, and far less functionality than dooboxes.
 | ID | Requirement |
 |----|-------------|
 | FR-1 | pi sessions are discoverable and controllable through `ldmux` (within a defined scope — see §4.6). |
-| FR-2 | `ldmux` runs as a **pi extension** and is "up and ready" whenever a pi session process is active. |
+| FR-2 | **Dropped** — `ldmux` is not a pi extension (ADR-0009). The daemon is still "up and ready" independent of any client, which is what this requirement was for. |
 | FR-3 | The backend must be **tmux-based**. |
 | FR-4 | Remote access is **Tailscale-only**. |
 | FR-5 | A **multi-platform mobile app** exists (KMP/Compose preferred). |
@@ -173,9 +177,9 @@ Tailscale only, and far less functionality than dooboxes.
  │  MOBILE APP   │        │        ldmuxd daemon          │     │  DESKTOP     │
  │ KMP/Compose   │◄──────►│  • pane stream + snapshots    │     │  MIRROR      │
  │ landscape     │  WS    │  • session registry (JSON)    │     │ alacritty -e │
- │ xterm.js in   │        │  • WS+HTTP over tailnet       │     │ tmux attach  │
- │ WebView       │        │  • spawn/kill/list sessions   │     └──────┬───────┘
- │ control 1/4   │        │  • optional i3 mirror helper  │            │
+ │ libghostty-vt │        │  • WS+HTTP over tailnet       │     │ tmux attach  │
+ │ Compose Canvas│        │  • spawn/kill/list sessions   │     └──────┬───────┘
+ │ side panel    │        │  • optional i3 mirror helper  │            │
  └───────────────┘        └───────┬───────────────────────┘            │
                                   │ tmux commands + pane stream        │
                           ┌───────▼───────────────────────┐           │
@@ -183,30 +187,25 @@ Tailscale only, and far less functionality than dooboxes.
                           │  session: ldmux-<ulid>        │  (native multi-client attach)
                           │    pane 0: bash | pi          │
                           └───────────────────────────────┘
-                                  ▲
-                                  │ session_start (reason-branched)
-                          ┌───────┴───────────────────────┐
-                          │    pi extension (in-process)  │
-                          └───────────────────────────────┘
 ```
 
 ### 4.2 Components
 
 | Component | Language | Role |
 |-----------|----------|------|
-| **`ldmuxd`** (daemon) | TypeScript on Bun (Node fallback) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
-| **`ldmux`** (CLI) | TypeScript (Bun) | `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`, `install-extension`. Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`.) |
-| **pi extension** | TypeScript | Ensures `ldmuxd` runs; registers the current pi session; `/ldmux` + `ldmux_*` tools; **reason-branched** `session_shutdown`. |
-| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Landscape UI; xterm.js WebView renderer; Ktor WebSocket; foreground service; swipe pager; control quarter. |
+| **`ldmuxd`** (daemon) | TypeScript on Node 26 (types stripped, no build step) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
+| **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`. Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
+| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Landscape (side panel) and portrait (typing) modes; native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
 | **Desktop mirror** | shell + i3 | `i3-msg` + `alacritty -e tmux -L ldmux attach-session [-r] -t <name>`. |
 
-### 4.3 Why the daemon is separate from the pi extension
+### 4.3 Why the daemon is a separate process
 
-pi extensions run **in-process**; they cannot host a robust long-lived multi-client
-server that outlives a single pi session. So the extension is a
-**supervisor/bridge**, and the daemon is a separate process (spawned detached on
-first need and/or installed as a `systemd --user` service). The daemon outlives
-individual pi sessions — required by FR-9/FR-12.
+An in-process host cannot be a robust long-lived multi-client server that
+outlives any one client. So the daemon is a separate process (spawned detached on
+first need and/or installed as a `systemd --user` service) and outlives every
+session — required by FR-9/FR-12. Historically the reason was stated as "why the
+daemon is separate from the pi extension"; the extension is gone (ADR-0009) and
+the separation is unchanged.
 
 ### 4.4 Session model
 

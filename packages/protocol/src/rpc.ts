@@ -47,6 +47,17 @@ export interface PaneState {
   cols: number;
   rows: number;
   dead: boolean;
+  /**
+   * The pane's foreground command name (tmux `pane_current_command`), e.g.
+   * `bash`, `vim`, `less`.
+   *
+   * This exists because the mouse mode is *sticky*: a program that enables
+   * reporting and then exits (or is killed) leaves the mode on, so the emulator
+   * — and tmux — still report `mouse: true` while a plain shell is what would
+   * actually receive the bytes. A shell prints them, which is exactly the
+   * `^[[<0;42;8M` garbage a tap produced on device.
+   */
+  foreground: string;
 }
 
 export interface PingResult {

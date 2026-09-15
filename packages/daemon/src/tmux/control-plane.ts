@@ -399,9 +399,13 @@ export class TmuxControlPlane {
       "#{mouse_any_flag},#{keypad_cursor_flag},#{bracket_paste_flag}," +
       // SGR (1006) is the only mouse encoding we can synthesize for: the older
       // encodings cap coordinates at 223 and are not worth carrying.
-      "#{mouse_sgr_flag}";
+      "#{mouse_sgr_flag}," +
+      // Who is actually in the foreground. Needed because the mouse mode is
+      // sticky: a program that enabled reporting and then exited leaves it on,
+      // so the flags alone would have us writing click bytes to a shell.
+      "#{pane_current_command}";
     const line = await this.displayMessage(target, fmt);
-    const [cursorX, cursorY, alt, mode, history, width, height, dead, mouse, appCursor, bracketedPaste, mouseSgr] =
+    const [cursorX, cursorY, alt, mode, history, width, height, dead, mouse, appCursor, bracketedPaste, mouseSgr, foreground] =
       line.split(",");
     return {
       cursorX: Number(cursorX),
@@ -416,6 +420,7 @@ export class TmuxControlPlane {
       cols: Number(width),
       rows: Number(height),
       dead: dead === "1",
+      foreground: String(foreground ?? ""),
     };
   }
 }

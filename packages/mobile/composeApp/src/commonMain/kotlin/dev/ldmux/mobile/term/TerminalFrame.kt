@@ -5,13 +5,13 @@ package dev.ldmux.mobile.term
  * Pure Kotlin so it is unit-testable without a device.
  *
  * Layout (little-endian):
- *   header (32 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (40 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
  *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 mouseSgr
+ *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7], u8 alternateOn, u8 reserved[7]
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -19,7 +19,7 @@ package dev.ldmux.mobile.term
  */
 object TerminalFrame {
     /** Bytes of frame header preceding the cell records. */
-    const val HEADER_SIZE = 32
+    const val HEADER_SIZE = 40
     const val FLAG_BOLD = 1 shl 0
     const val FLAG_ITALIC = 1 shl 1
     const val FLAG_UNDERLINE = 1 shl 2
@@ -72,6 +72,18 @@ object TerminalFrame {
         val mouseTracking: Boolean,
         /** SGR mouse encoding (1006) is on: the only form we synthesize. */
         val mouseSgr: Boolean,
+        /**
+         * The alternate screen is active — `vim`, `less`, `htop`, `nano`, `top`.
+         *
+         * This is what separates them from `pi`, Claude Code and Codex, which
+         * draw a composer of their own on the *primary* screen: in those, an
+         * arrow key means "move the cursor", which is what a tap is asking for,
+         * while on the alternate screen it is a command to the program (scroll
+         * the view, move the selection, move the vim cursor) — the user's own
+         * words were that vim "would probably be a bad thing". Read from the
+         * emulator for the same freshness reason as [mouseTracking].
+         */
+        val alternateOn: Boolean,
         /** Scrollable area in rows: total, the viewport's offset, and its size. */
         val scrollTotal: Long,
         val scrollOffset: Long,
@@ -108,6 +120,7 @@ object TerminalFrame {
         val viewportActive = b[17].toInt() != 0
         val mouseTracking = b[18].toInt() != 0
         val mouseSgr = b[31].toInt() != 0
+        val alternateOn = b[32].toInt() != 0
         val scrollTotal = u32(b, 19)
         val scrollOffset = u32(b, 23)
         val scrollLen = u32(b, 27)
@@ -142,6 +155,7 @@ object TerminalFrame {
             viewportActive,
             mouseTracking,
             mouseSgr,
+            alternateOn,
             scrollTotal,
             scrollOffset,
             scrollLen,

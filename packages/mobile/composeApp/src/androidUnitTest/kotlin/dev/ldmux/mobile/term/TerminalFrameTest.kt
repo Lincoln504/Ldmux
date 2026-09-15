@@ -65,6 +65,7 @@ class TerminalFrameTest {
         viewportActive: Boolean = true,
         mouseTracking: Boolean = false,
         mouseSgr: Boolean = false,
+        alternateOn: Boolean = false,
         scrollTotal: Long = 0,
         scrollOffset: Long = 0,
         scrollLen: Long = 0,
@@ -84,6 +85,8 @@ class TerminalFrameTest {
         u32(scrollOffset)
         u32(scrollLen)
         byte(if (mouseSgr) 1 else 0)
+        byte(if (alternateOn) 1 else 0)
+        repeat(7) { byte(0) } // reserved
         for ((text, fg, bg) in cells) cell(text, fg, bg)
     }.build()
 
@@ -95,7 +98,7 @@ class TerminalFrameTest {
         assertEquals(0xE6E6E6, f.defaultFg)
         assertEquals(0x1E1E1E, f.defaultBg)
         // The C side and this decoder must agree on where the cells start.
-        assertEquals(32, TerminalFrame.HEADER_SIZE)
+        assertEquals(40, TerminalFrame.HEADER_SIZE)
         assertEquals(TerminalFrame.HEADER_SIZE, frame(1, 1, listOf(Triple("x", 1, 2))).size - 10)
     }
 
@@ -187,12 +190,20 @@ class TerminalFrameTest {
             byte(0); byte(1); byte(0) // password, viewport-active, mouse-tracking
             u32(0); u32(0); u32(0)
             byte(0) // mouse-sgr
+            byte(0) // alternate screen
+            repeat(7) { byte(0) } // reserved
             cell("x", 1, 2, TerminalFrame.FLAG_BOLD or TerminalFrame.FLAG_UNDERLINE)
         }.build()
         val f = TerminalFrame.decode(bytes)
         assertTrue(f.cells[0].bold)
         assertTrue(f.cells[0].underline)
         assertFalse(f.cells[0].italic)
+    }
+
+    @Test
+    fun `decodes the alternate-screen flag, which is what keeps taps out of vim`() {
+        assertTrue(TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)), alternateOn = true)).alternateOn)
+        assertFalse(TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)))).alternateOn)
     }
 
     @Test

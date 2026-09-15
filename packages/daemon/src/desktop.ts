@@ -25,6 +25,25 @@ export interface MirrorOptions {
 export const DEFAULT_MIRROR_WORKSPACE = 10;
 export const DEFAULT_MIRROR_CLASS = "ldmux-mirror";
 
+/**
+ * Shells that cannot use a mouse click.
+ *
+ * The mouse mode is sticky: a program that enables reporting and then exits
+ * leaves the mode enabled in both the emulator and tmux, so `mouse`/`mouseSgr`
+ * still read true while a shell is what would receive the bytes. A shell prints
+ * them — the `^[[<0;42;8M` garbage that appeared on a phone tap — so the
+ * synthesized click has to be refused before it reaches the pty.
+ */
+const SHELLS = new Set([
+  "bash", "sh", "dash", "ash", "zsh", "fish", "ksh", "ksh93", "mksh",
+  "tcsh", "csh", "yash", "nu", "nushell", "elvish", "xonsh", "pwsh",
+]);
+
+/** Is this pane's foreground command an interactive shell? */
+export function isShellForeground(command: string): boolean {
+  return SHELLS.has(command.trim().toLowerCase().replace(/^-/, ""));
+}
+
 /** tmux argv for a mirror client (no emulator wrapper). */
 export function mirrorTmuxArgs(tmuxSocket: string, tmuxName: string, opts: MirrorOptions = {}): string[] {
   const ro = opts.readOnly ?? true;

@@ -1,5 +1,23 @@
 import { test, expect } from "../../testing/src/expect.ts";
-import { mirrorArgv, mirrorCommand, mirrorTmuxArgs } from "../src/desktop.ts";
+import { isShellForeground, mirrorArgv, mirrorCommand, mirrorTmuxArgs } from "../src/desktop.ts";
+
+test("a shell cannot use a mouse click, so it is never sent one", () => {
+  // The mouse mode is sticky: a program that enables reporting and then exits
+  // (or is killed) leaves it on, so the pane flags still say "mouse" while a
+  // shell is what would receive the bytes — and a shell prints them.
+  for (const sh of ["bash", "sh", "zsh", "fish", "dash", "nu"]) {
+    expect(isShellForeground(sh)).toBe(true);
+  }
+  // tmux reports the login shell with a leading dash.
+  expect(isShellForeground("-bash")).toBe(true);
+  expect(isShellForeground("BASH")).toBe(true);
+});
+
+test("a program that can use a click is not mistaken for a shell", () => {
+  for (const p of ["vim", "less", "htop", "pi", "claude", "codex", "node", "lazygit", ""]) {
+    expect(isShellForeground(p)).toBe(false);
+  }
+});
 
 test("mirror is read-only by default (input stays with the phone)", () => {
   expect(mirrorTmuxArgs("sock", "ldmux-x")).toEqual(["-L", "sock", "attach", "-r", "-t", "ldmux-x"]);

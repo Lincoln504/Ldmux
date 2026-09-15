@@ -59,6 +59,8 @@ function stubStream() {
           cols: 80,
           rows: 24,
           dead: false,
+          // A program, not a shell: the shell guard is exercised separately.
+          foreground: "vim",
         },
         epoch: 1,
       };

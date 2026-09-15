@@ -26,6 +26,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
@@ -282,18 +283,34 @@ actual fun rememberTerminalSurface(
                     // the draw below — both read the same GridPlacement, which is
                     // the fix for the recorded failure mode (pointer coordinates
                     // that forgot to divide by a scale factor).
-                    detectTapGestures { pos ->
-                        if (pinching) return@detectTapGestures
-                        currentFrame ?: return@detectTapGestures
-                        val p = currentPlacement
-                        // cellAt answers with a row-major index, so the column
-                        // comes back out of the same arithmetic that put it in.
-                        val index = p.cellAt(pos.x, pos.y) ?: return@detectTapGestures
-                        val row = index / p.cols
-                        val col = index % p.cols
-                        tapAt = col to row
-                        controller.tapCell(col, row)
-                    }
+                    // Where the finger went down, so a wobble that never reached
+                    // the drag threshold is not mistaken for a tap.
+                    var downAt: Offset? = null
+                    detectTapGestures(
+                        onPress = { downAt = it },
+                        onTap = { pos ->
+                            if (pinching) return@detectTapGestures
+                            // A finger that wandered is a scroll attempt, not a
+                            // tap. `detectTapGestures` fires on ANY unconsumed
+                            // up, however far the finger travelled, so without
+                            // this a wobble shorter than the drag threshold would
+                            // move the remote cursor — the same class of bug as a
+                            // scroll that clicks.
+                            val down = downAt
+                            if (down != null && (pos - down).getDistance() > TAP_SLOP_PX) {
+                                return@detectTapGestures
+                            }
+                            currentFrame ?: return@detectTapGestures
+                            val p = currentPlacement
+                            // cellAt answers with a row-major index, so the column
+                            // comes back out of the same arithmetic that put it in.
+                            val index = p.cellAt(pos.x, pos.y) ?: return@detectTapGestures
+                            val row = index / p.cols
+                            val col = index % p.cols
+                            tapAt = col to row
+                            controller.tapCell(col, row)
+                        },
+                    )
                 }
                 .pointerInput(Unit) {
                     // Two fingers change the font size, which changes how many
@@ -336,7 +353,13 @@ actual fun rememberTerminalSurface(
                                 controller.scrollBy(-rows)
                             }
                         },
-                        onDragEnd = { carry = 0f },
+                        // The remainder deliberately survives the end of a drag.
+                        // Resetting it here threw away the sub-cell part of every
+                        // gesture, so a short drag — under one cell, which is
+                        // easy to do — consumed the gesture, produced no rows and
+                        // then also cancelled the tap, i.e. nothing happened at
+                        // all. Kept, a 20 px drag followed by another still adds
+                        // up to a line.
                         onDragCancel = { carry = 0f },
                     )
                 },
@@ -356,7 +379,7 @@ actual fun rememberTerminalSurface(
                 val (x, y) = placement.cellOrigin(col, row)
                 drawRect(
                     color = Accent,
-                    topLeft = androidx.compose.ui.geometry.Offset(x, y),
+                    topLeft = Offset(x, y),
                     size = androidx.compose.ui.geometry.Size(placement.cellWidth, placement.cellHeight),
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f),
                 )
@@ -502,6 +525,18 @@ private suspend fun PointerInputScope.detectPinch(
 private const val PINCH_SLOP = 0.03f
 
 /**
+ * How far a finger may wander and still count as a tap, in px.
+ *
+ * Slightly tighter than the system's touch slop on purpose. `detectTapGestures`
+ * fires `onTap` on any unconsumed up, however far the finger travelled, so the
+ * window between "too small to be a drag" and "big enough to be a tap" is where
+ * a sloppy scroll would move the remote cursor — the same class of bug as a
+ * scroll that clicks. Anything in that window now does nothing instead, which is
+ * the safe failure.
+ */
+private const val TAP_SLOP_PX = 20f
+
+/**
  * The cursor blink half-period, in ms. 530 is the classic rate (the VT220's),
  * and it is the one users recognise without noticing it.
  */
@@ -527,7 +562,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScrollbar(
     val x = placement.dx + placement.gridWidth - 6f
     drawRect(
         color = Color(0x66FFFFFF),
-        topLeft = androidx.compose.ui.geometry.Offset(x, top),
+        topLeft = Offset(x, top),
         size = androidx.compose.ui.geometry.Size(4f, barH),
     )
 }

@@ -7,3 +7,6 @@ target/
 *.local
 .env
 .env.*
+
+# Local backups taken before removing gmux; never part of the project.
+.gmux-removal-backup/

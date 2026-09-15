@@ -23,6 +23,7 @@ import {
 } from "../../protocol/src/messages.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { tokenMatches } from "./auth.ts";
+import { isShellForeground } from "./desktop.ts";
 import type { PaneStream, StreamSnapshot } from "./stream.ts";
 import { extname, join, normalize } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
@@ -381,6 +382,19 @@ export class RemoteServer {
           const state = await data.stream.getState();
           if (!(state.mouse && state.mouseSgr)) {
             this.sendError(ws, "no_mouse", "pane has not enabled SGR mouse reporting");
+            return;
+          }
+          // The mode is sticky: a program that enabled reporting and then exited
+          // leaves it on, so the flags above still say "mouse" while a shell is
+          // what would receive the bytes. A shell prints them as junk
+          // (`^[[<0;42;8M`), so refuse — and the client answers this by moving
+          // the cursor instead, which is what the tap meant.
+          if (isShellForeground(state.foreground)) {
+            this.sendError(
+              ws,
+              "shell_foreground",
+              `pane is at a shell prompt (${state.foreground}), not a mouse-aware program`,
+            );
             return;
           }
           if (col >= state.cols || row >= state.rows) {

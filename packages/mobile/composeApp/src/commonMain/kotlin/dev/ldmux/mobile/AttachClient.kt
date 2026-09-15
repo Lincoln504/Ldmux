@@ -30,6 +30,18 @@ data class TerminalModes(
     val alternateOn: Boolean = false,
     /** The program negotiated SGR mouse reporting, so a click can be synthesized. */
     val mouseSgr: Boolean = false,
+    /**
+     * Where the pane's cursor actually is, from tmux.
+     *
+     * This is not the same as where the emulator's cursor ends up after the
+     * snapshot is replayed. `capture-pane` pads the screen with blank rows, so
+     * replaying it leaves the cursor at the bottom-left of the padded area — and
+     * everything downstream trusts the emulator's cursor: it is what gets drawn,
+     * and it is what a tap measures its distance from. Left alone, every tap
+     * computes its delta from the wrong place.
+     */
+    val cursorX: Int = 0,
+    val cursorY: Int = 0,
 )
 
 /**
@@ -161,6 +173,8 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     bracketedPaste = bool(root, "bracketedPaste"),
                     alternateOn = bool(root, "alternateOn"),
                     mouseSgr = bool(root, "mouseSgr"),
+                    cursorX = root["cursorX"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    cursorY = root["cursorY"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 )
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }

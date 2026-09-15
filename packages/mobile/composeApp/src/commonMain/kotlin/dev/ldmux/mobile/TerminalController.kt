@@ -14,7 +14,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlin.math.abs
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
@@ -71,6 +70,20 @@ class TerminalController(
      */
     var onStartVoice: (() -> Unit)? = null
 
+    /**
+     * A tap waiting on the server's verdict about whether this pane takes
+     * clicks. Kept so a refused click can still move the cursor, which is what
+     * the user meant by tapping in the first place.
+     */
+    private var pendingTap: Pair<Int, Int>? = null
+    private var pendingTapJob: Job? = null
+
+    /**
+     * The server has told us this pane will not accept a mouse click. Cleared on
+     * every snapshot, because the foreground program may have changed.
+     */
+    private var mouseRefused = false
+
     private val attach = AttachClient(config, sessionId)
 
     private val _link = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
@@ -100,14 +113,25 @@ class TerminalController(
                 val bytes = normalized.encodeToByteArray()
                 engine.write(bytes, bytes.size)
             }
+            // Then put the cursor where the pane actually has it. Replaying the
+            // screen leaves it at the end of the padded area (capture-pane fills
+            // the full height with blank rows), which is not the cursor's
+            // position — and the emulator's cursor is what gets drawn and what
+            // every tap measures its distance from.
+            val place = cursorSequence(m.cursorX, m.cursorY, cols, rows).encodeToByteArray()
+            engine.write(place, place.size)
             if (scrollTopOnNextSnapshot) {
                 scrollTopOnNextSnapshot = false
                 engine.scrollToTop()
             }
             modes = m
+            // A fresh snapshot is the only thing that knows the foreground
+            // program again, so it is also what re-arms the click path.
+            mouseRefused = false
             _frame.value = engine.render()
         }
         attach.onOutput = { bytes -> writeOutput(bytes) }
+        attach.onError = { code -> onServerError(code) }
         attach.onRtt = { sample ->
             pacing.onRttSample(sample)
             _link.value = linkStats()
@@ -265,57 +289,53 @@ class TerminalController(
     /**
      * Move the remote cursor to a tapped cell.
      *
-     * There is no "set cursor to (x,y)" in a terminal, so this is built out of
-     * what a terminal actually has. Two regimes, chosen from the pane's own
-     * state rather than guessed:
-     *
-     * - **A program that asked for the mouse** (vim, less, htop, a TUI) gets a
-     *   real SGR click, and its own click-to-position logic runs. Exact, and one
-     *   round trip.
-     * - **A plain shell** gets relative motion, because readline has no absolute
-     *   position to set. The screen is treated as a continuous strip so a tap on
-     *   a wrapped segment still lands where it looks like it should, and
-     *   readline's own clamping at the line ends is what makes a tap past the
-     *   start snap to the beginning.
+     * The decision itself lives in [planTap], which is pure and tested; this
+     * only carries it out. A click is a request to the server (only it can see
+     * the pane), so it may come back refused — see [onServerError].
      */
     override fun tapCell(col: Int, row: Int) {
         val f = _frame.value ?: return
-        // Not while reading history (there is no live cursor up there), and never
-        // at a password prompt.
-        if (!f.viewportActive || f.passwordInput) return
-        if (col < 0 || row < 0 || col >= f.cols || row >= f.rows) return
-
-        // Frames of the emulator's own mouse modes, not the snapshot's: see
-        // TerminalFrame.Frame.mouseTracking. The server re-checks before it
-        // writes anything, so this gate only decides which of the two regimes to
-        // use — and being local, it is right immediately rather than at the next
-        // snapshot.
-        if (f.mouseTracking && f.mouseSgr) {
-            attach.mouseClick(col, row)
-            return
+        when (val action = planTap(col, row, f, mouseRefused)) {
+            is TapAction.Click -> {
+                pendingTap = action.col to action.row
+                pendingTapJob?.cancel()
+                pendingTapJob = scope.launch {
+                    delay(CLICK_VERDICT_MS)
+                    // No answer in time: do not let the tap vanish.
+                    val stuck = pendingTap ?: return@launch
+                    pendingTap = null
+                    _frame.value?.let { moveCursorTo(stuck.first, stuck.second, it) }
+                }
+                attach.mouseClick(action.col, action.row)
+            }
+            is TapAction.Keys -> sendKeyBatches(action.keys)
+            TapAction.Ignore -> Unit
         }
+    }
 
-        if (col == f.cursorX && row == f.cursorY) return
+    /**
+     * The server refused a click. That is the expected answer when the pane's
+     * mouse mode is stuck on from a program that has since exited — so this is
+     * not an error to report, it is the signal to use cursor motion instead.
+     */
+    private fun onServerError(code: String) {
+        if (code != "no_mouse" && code != "shell_foreground") return
+        mouseRefused = true
+        pendingTapJob?.cancel()
+        val tap = pendingTap ?: return
+        pendingTap = null
+        _frame.value?.let { moveCursorTo(tap.first, tap.second, it) }
+    }
 
-        // Tapping well above the input line means "the beginning". One Home is
-        // both exact and cheap, where walking there would be dozens of keys and
-        // dozens of readline redraws — on a metered link that matters.
-        if (row < f.cursorY - 1) {
-            attach.keys(listOf("Home"))
-            return
+    private fun moveCursorTo(col: Int, row: Int, f: TerminalFrame.Frame) {
+        when (val action = planTap(col, row, f, mouseRefused = true)) {
+            is TapAction.Keys -> sendKeyBatches(action.keys)
+            else -> Unit
         }
+    }
 
-        val delta = (row - f.cursorY) * f.cols + (col - f.cursorX)
-        if (delta == 0) return
-        val key = if (delta < 0) "Left" else "Right"
-        var remaining = minOf(abs(delta), MAX_TAP_KEYS)
-        // One message per 32 keys (the daemon's cap), so a long move is a couple
-        // of frames rather than one per character.
-        while (remaining > 0) {
-            val batch = minOf(remaining, 32)
-            attach.keys(List(batch) { key })
-            remaining -= batch
-        }
+    private fun sendKeyBatches(keys: List<String>) {
+        for (batch in batchKeys(keys)) attach.keys(batch)
     }
 
     override fun startVoice() {
@@ -345,8 +365,21 @@ class TerminalController(
         /** How long an unconfirmed prediction may stay on screen before we
          *  conclude the pane is not echoing. Roughly 2-3 mobile round trips. */
         const val STALE_MS = 900L
-        /** Upper bound on the keys one tap may generate, so a stray tap at the
-         *  edge of a wide pane cannot become a key storm. */
-        const val MAX_TAP_KEYS = 120
+        /** How long to wait for the server's verdict on a click before giving
+         *  up and using cursor motion instead. Two mobile round trips. */
+        const val CLICK_VERDICT_MS = 1200L
     }
+}
+
+/**
+ * A VT sequence that puts the cursor at a cell, 1-based on the wire and clamped
+ * to the grid.
+ *
+ * Written after a snapshot is replayed, because the replayed screen ends
+ * wherever its last non-blank row ended. See [TerminalModes.cursorX].
+ */
+internal fun cursorSequence(col: Int, row: Int, cols: Int, rows: Int): String {
+    val c = col.coerceIn(0, maxOf(cols - 1, 0)) + 1
+    val r = row.coerceIn(0, maxOf(rows - 1, 0)) + 1
+    return "\u001b[$r;${c}H"
 }
