@@ -1,7 +1,7 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { ContinueCoalescer, matchWaiter } from "../src/tmux/control-client.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 
-const sleep = (ms: number) => Bun.sleep(ms);
 
 test("an exact sequence match wins even when it is not the oldest waiter", () => {
   expect(matchWaiter([1, 2, 3], 3, true)).toBe(2);

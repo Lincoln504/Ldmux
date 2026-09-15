@@ -1,6 +1,6 @@
 /**
  * Daemon entrypoint:
- *   bun run packages/daemon/src/main.ts
+ *   node packages/daemon/src/main.ts
  *
  * Environment: LDMUX_STATE_DIR, LDMUX_SOCK, LDMUX_TMUX_SOCK (resolved via
  * `protocol/paths.ts`), plus LDMUX_REMOTE_HOST and LDMUX_REMOTE_PORT for the
@@ -9,6 +9,27 @@
 
 import { resolveStateDir, resolveTmuxSocket } from "../../protocol/src/paths.ts";
 import { LdmuxDaemon } from "./daemon.ts";
+
+/**
+ * Last-resort backstops.
+ *
+ * The daemon holds every client's terminal; exiting because one request or one
+ * promise went wrong is the worst outcome available. So an unhandled rejection
+ * or a stray exception is logged loudly and survived, and each specific path
+ * that could raise one is still fixed at its source — these are a net, not the
+ * mechanism.
+ */
+process.on("unhandledRejection", (reason) => {
+  console.error(`ldmuxd: unhandled rejection (survived): ${format(reason)}`);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`ldmuxd: uncaught exception (survived): ${format(err)}`);
+});
+
+function format(value: unknown): string {
+  if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack ?? ""}`;
+  return String(value);
+}
 
 const daemon = new LdmuxDaemon({
   stateDir: resolveStateDir(),

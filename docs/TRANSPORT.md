@@ -4,7 +4,7 @@
 mobile/desktop clients, and with which stack?
 
 **Answer:** **tmux control mode `-C` over plain pipes (no PTY), + `capture-pane`
-snapshots/fallback, under Bun + TypeScript.** This is ADR-0001 (frozen).
+snapshots/fallback, under Node + TypeScript.** This is ADR-0001 (frozen).
 
 This document records the experiments, the comparison, and the exact parser
 contract, so implementation is unambiguous.
@@ -17,7 +17,8 @@ dooboxes' `TMUX_SESSION_MANAGEMENT.md` and its `control.rs` call tmux control mo
 "PTY-based". That is **convention, not a requirement**. tmux's own man page says
 `-CC` disables echo; it does not say `-C` needs a tty.
 
-Hands-on result on this machine (tmux **3.5a**, Bun **1.3.9**):
+Hands-on result on this machine (tmux **3.5a**, originally driven from Bun
+1.3.9; the transport is now exercised on every run of the suite under Node 26):
 
 ```
 # A) -C over pipes, no tty — WORKS

@@ -43,8 +43,11 @@ export class ControlParser {
   private inBlock = false;
   private blockLines: string[] = [];
 
-  constructor(private readonly handlers: ControlParserHandlers) {}
+  private readonly handlers: ControlParserHandlers;
 
+  constructor(handlers: ControlParserHandlers) {
+    this.handlers = handlers;
+  }
   feed(chunk: Uint8Array): void {
     if (chunk.length === 0) return;
     if (this.buf.length === 0) {

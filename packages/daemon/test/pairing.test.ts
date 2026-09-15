@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { buildPairInfo } from "../src/pairing.ts";
 
 test("pair builds the https url, local url, deep link and serve command", () => {
@@ -24,7 +24,7 @@ test("the token is url-encoded", () => {
 // ── tailnetHost/expose against a stub `tailscale` ─────────────────────────
 // These parse real command output, so they are tested with a fake binary on
 // PATH rather than skipped when the machine's tailscale is absent or logged out.
-import { afterAll, beforeEach } from "bun:test";
+import { afterAll, beforeEach } from "../../testing/src/expect.ts";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

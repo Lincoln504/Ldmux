@@ -25,7 +25,9 @@ import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { tokenMatches } from "./auth.ts";
 import type { PaneStream, StreamSnapshot } from "./stream.ts";
 import { extname, join, normalize } from "node:path";
-import { realpath } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { WebSocketServer, type WebSocket } from "ws";
 
 export interface RemoteServerOptions {
   hostname: string;
@@ -59,6 +61,21 @@ interface ConnData {
   live: boolean;
   pending: string[];
   pendingBytes: number;
+  /** Output waiting for the coalescing window (see [RemoteServer.queueOutput]). */
+  outBuf: string[];
+  outBytes: number;
+  flushTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * Serializes control-message handling for this connection.
+   *
+   * Handlers await tmux, so two messages that arrive in the same tick would
+   * otherwise interleave — and for `attach` that is not merely untidy: the second
+   * attach invalidates the first mid-flight, so which snapshot a client receives
+   * would depend on the timing of the transport. Chaining makes the order the
+   * client sent them the order they take effect (the Unix-socket path already
+   * works this way).
+   */
+  queue: Promise<void>;
 }
 
 const DEFAULT_MAX_BUFFERED = 4 * 1024 * 1024;
@@ -67,46 +84,127 @@ const MAX_INPUT_BYTES = 16 * 1024;
 const MAX_KEYS = 32;
 /** Output queued between subscribe and snapshot is bounded before we resync. */
 const MAX_PENDING_BYTES = 1024 * 1024;
+/**
+ * Output coalescing. The pane is fed by tmux in many small writes; sending each
+ * as its own WebSocket frame costs a packet header, a wakeup and a render on the
+ * phone for what is usually one visible line. A short window merges a burst into
+ * one frame instead, which is both lighter on the network and far cheaper for the
+ * client. It is deliberately small: it is a batching window, not a frame rate,
+ * and it must stay under the threshold where a keystroke echo feels delayed.
+ */
+const OUTPUT_FLUSH_MS = 8;
+const OUTPUT_FLUSH_BYTES = 16 * 1024;
 
 export class RemoteServer {
-  private server: any;
+  private server: Server | undefined;
+  private wss: WebSocketServer | undefined;
+  /**
+   * Per-connection state. `ws` has no place to hang it on the socket, so it
+   * lives here, keyed by the socket itself.
+   */
+  private readonly connState = new WeakMap<object, ConnData>();
   private readonly encoder = new TextEncoder();
 
-  constructor(private readonly opts: RemoteServerOptions) {}
+  private readonly opts: RemoteServerOptions;
 
-  get port(): number {
-    return this.server?.port ?? this.opts.port;
+  constructor(opts: RemoteServerOptions) {
+    this.opts = opts;
   }
 
-  start(): { hostname: string; port: number } {
+  get port(): number {
+    const addr = this.server?.address();
+    if (addr && typeof addr === "object") return addr.port;
+    return this.opts.port;
+  }
+
+  /**
+   * Bind and begin serving. Resolves once the socket is actually listening, so
+   * the returned port is real — with port 0 (tests, ephemeral) the caller cannot
+   * know it any other way.
+   */
+  async start(): Promise<{ hostname: string; port: number }> {
     const opts = this.opts;
-    this.server = Bun.serve({
-      hostname: opts.hostname,
-      port: opts.port,
-      fetch: (req: Request, server: any) => this.handleFetch(req, server),
-      websocket: {
-        // Bun closes on a bigger frame (1009) before our handler can answer;
-        // 64 KiB leaves room for the JSON envelope around a 16 KiB payload,
-        // which is where the graceful `input_too_large` check fires.
-        maxPayloadLength: MAX_INPUT_BYTES * 4,
-        open: () => {
-          /* wait for attach */
-        },
-        message: (ws: any, raw: any) => void this.onMessage(ws, raw),
-        close: (ws: any) => {
-          const data = ws.data as ConnData;
-          data.disposed = true;
-          this.cleanupSubscription(data);
-          // Consistent with the failed/superseded attach paths: a stream with no
-          // remaining subscribers is dropped rather than cached for the daemon's
-          // lifetime. `releaseStreamIfIdle` is a no-op if another client attached.
-          if (data.record) this.opts.releaseStream?.(data.record);
-        },
-      },
-      error: (err: unknown) => {
-        opts.log?.(`remote: server error: ${(err as Error).message}`);
-        return new Response("error\n", { status: 500 });
-      },
+    this.server = createServer((req, res) => {
+      // Never leave this promise unobserved: an unhandled rejection here is a
+      // dead daemon, and every attached terminal with it.
+      this.handleRequest(req, res).catch((err: Error) => {
+        this.opts.log?.(`remote: request failed: ${err.message}`);
+        try {
+          if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
+          res.end("error\n");
+        } catch {
+          /* the socket is already gone */
+        }
+      });
+    });
+    // The transport closes on an oversized frame (1009) before our handler can
+    // answer; a 64 KiB limit leaves room for the JSON envelope around a 16 KiB
+    // payload, which is where the graceful `input_too_large` check fires.
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_INPUT_BYTES * 4 });
+    this.wss.on("connection", (socket: WebSocket) => {
+      const data = this.connState.get(socket);
+      if (!data) {
+        socket.close();
+        return;
+      }
+      socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+        const msg = normaliseIncoming(raw, isBinary);
+        data.queue = data.queue
+          .then(() => this.onMessage(socket, msg))
+          .catch((err: Error) => {
+            this.sendError(socket, "internal", err.message);
+          });
+      });
+      socket.on("close", () => {
+        const conn = this.connState.get(socket);
+        if (!conn) return;
+        conn.disposed = true;
+        if (conn.flushTimer) {
+          clearTimeout(conn.flushTimer);
+          conn.flushTimer = null;
+        }
+        this.cleanupSubscription(conn);
+        // Consistent with the failed/superseded attach paths: a stream with no
+        // remaining subscribers is dropped rather than cached for the daemon's
+        // lifetime. `releaseStreamIfIdle` is a no-op if another client attached.
+        if (conn.record) this.opts.releaseStream?.(conn.record);
+      });
+      socket.on("error", () => {
+        /* a dropped client is not an event */
+      });
+    });
+    this.server.on("upgrade", (req: IncomingMessage, socket, head) => {
+      if (!this.authorized(req)) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      const data: ConnData = {
+        disposed: false,
+        attachGen: 0,
+        live: false,
+        pending: [],
+        pendingBytes: 0,
+        outBuf: [],
+        outBytes: 0,
+        flushTimer: null,
+        queue: Promise.resolve(),
+      };
+      this.wss!.handleUpgrade(req, socket, head, (client: WebSocket) => {
+        this.connState.set(client, data);
+        this.wss!.emit("connection", client);
+      });
+    });
+    this.server.on("error", (err: Error) => {
+      opts.log?.(`remote: server error: ${err.message}`);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => reject(err);
+      this.server!.once("error", onError);
+      this.server!.listen(opts.port, opts.hostname, () => {
+        this.server!.off("error", onError);
+        resolve();
+      });
     });
     opts.log?.(`remote: ws://${opts.hostname}:${this.port}/ws`);
     return { hostname: opts.hostname, port: this.port };
@@ -114,49 +212,97 @@ export class RemoteServer {
 
   stop(): void {
     try {
-      this.server?.stop(true);
+      for (const client of this.wss?.clients ?? []) client.terminate();
+      this.wss?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.server?.close();
     } catch {
       /* ignore */
     }
   }
 
-  private async handleFetch(req: Request, server: any): Promise<Response | undefined> {
-    const url = new URL(req.url);
-    if (url.pathname !== "/ws") return this.serveStatic(url.pathname);
-    const auth = req.headers.get("authorization") ?? "";
-    const provided = auth.startsWith("Bearer ")
-      ? auth.slice("Bearer ".length).trim()
+  /**
+   * Parse the request target defensively.
+   *
+   * `req.url` and `Host` are both attacker-controlled, and the WHATWG parser
+   * *throws* on some of what an HTTP client may legally send — an absolute-form
+   * target with no authority (`GET http:// HTTP/1.1`) is accepted by Node's HTTP
+   * parser and reaches us verbatim. This runs before any token check, so an
+   * unguarded `new URL` here is an unauthenticated way to take the daemon down.
+   */
+  private parseUrl(req: IncomingMessage): URL | null {
+    try {
+      return new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Is this upgrade carrying the bearer token (header or query)? */
+  private authorized(req: IncomingMessage): boolean {
+    const url = this.parseUrl(req);
+    if (!url) return false;
+    const header = req.headers.authorization ?? "";
+    const provided = header.startsWith("Bearer ")
+      ? header.slice("Bearer ".length).trim()
       : (url.searchParams.get("token") ?? "");
-    if (!tokenMatches(this.opts.token, provided)) return new Response("unauthorized\n", { status: 401 });
-    const data: ConnData = {
-      disposed: false,
-      attachGen: 0,
-      live: false,
-      pending: [],
-      pendingBytes: 0,
-    };
-    if (server.upgrade(req, { data })) return undefined;
-    return new Response("upgrade failed\n", { status: 400 });
+    return tokenMatches(this.opts.token, provided);
+  }
+
+  private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = this.parseUrl(req);
+    if (!url) {
+      res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      res.end("bad request\n");
+      return;
+    }
+    // /ws is handled by the upgrade event; a plain GET there is a mistake, but
+    // an unauthenticated one is still a 401 — the token gate must not be
+    // bypassable by declining to upgrade.
+    if (url.pathname === "/ws") {
+      if (!this.authorized(req)) {
+        res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+        res.end("unauthorized\n");
+        return;
+      }
+      res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      res.end("upgrade required\n");
+      return;
+    }
+    const staticRes = await this.serveStatic(url.pathname);
+    res.writeHead(staticRes.status, { "content-type": staticRes.headers.get("content-type") ?? "text/plain" });
+    res.end(Buffer.from(await staticRes.arrayBuffer()));
   }
 
   /** Serve the bundled web client (buildless static assets). */
   private async serveStatic(pathname: string): Promise<Response> {
+    const text = (status: number, body: string) =>
+      new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
     const root = this.opts.webRoot;
     if (!root) return new Response("ldmux remote\n", { status: 200 });
     const rel = pathname === "/" ? "/index.html" : pathname;
     const full = normalize(join(root, rel));
-    if (full !== root && !full.startsWith(root + "/")) return new Response("forbidden\n", { status: 403 });
-    // Confine again after symlink resolution (Bun.file follows links).
-    const realRoot = await realpath(root).catch(() => root);
+    // `normalize` strips a trailing slash from the root, so one comparison covers
+    // both `/srv/web` and `/srv/web/` (and a root of `/`).
+    const base = normalize(root);
+    if (full !== base && !full.startsWith(base + "/")) return text(403, "forbidden\n");
+    // Confine again after symlink resolution: a symlink inside the web root must
+    // not become a way to read the rest of the filesystem.
+    const realRoot = normalize(await realpath(base).catch(() => base));
     const real = await realpath(full).catch(() => null);
-    if (!real) return new Response("not found\n", { status: 404 });
-    if (real !== realRoot && !real.startsWith(realRoot + "/")) return new Response("forbidden\n", { status: 403 });
-    const file = Bun.file(real);
-    return new Response(file, { headers: { "content-type": contentType(real) } });
+    if (!real) return text(404, "not found\n");
+    if (real !== realRoot && !real.startsWith(realRoot + "/")) return text(403, "forbidden\n");
+    const body = await readFile(real).catch(() => null);
+    if (!body) return text(404, "not found\n");
+    return new Response(body, { headers: { "content-type": contentType(real) } });
   }
 
   private async onMessage(ws: any, raw: any): Promise<void> {
-    const data = ws.data as ConnData;
+    const data = this.connState.get(ws);
+    if (!data) return;
     // Typed as the protocol union: the server and the contract cannot drift,
     // and every member of the union has a sender (there is no dead wire surface).
     let msg: ControlMessage;
@@ -176,11 +322,13 @@ export class RemoteServer {
           return;
         case "new": {
           await this.opts.createSession?.(msg.kind === "pi" ? "pi" : "shell", msg.cwd, msg.title);
+          if (data.disposed) return;
           await this.sendSessions(ws);
           return;
         }
         case "kill": {
           await this.opts.killSession?.(String(msg.sessionId ?? ""));
+          if (data.disposed) return;
           await this.sendSessions(ws);
           return;
         }
@@ -210,7 +358,36 @@ export class RemoteServer {
           // grid.
           const resized = await data.stream.snapshot();
           if (data.disposed || data.attachGen !== gen) return;
+          // Anything buffered must land before the repaint it predates.
+          this.flushOutput(ws, data);
           this.sendState(ws, String(data.sessionId ?? ""), resized);
+          return;
+        }
+        case "mouseclick": {
+          if (!data.stream) {
+            this.sendError(ws, "not_attached", "attach before clicking");
+            return;
+          }
+          const col = Math.trunc(Number(msg.col));
+          const row = Math.trunc(Number(msg.row));
+          if (!Number.isFinite(col) || !Number.isFinite(row) || col < 0 || row < 0) {
+            this.sendError(ws, "bad_cell", `invalid cell: ${String(msg.col)},${String(msg.row)}`);
+            return;
+          }
+          // Only for a pane whose program actually asked for mouse reporting;
+          // anything else would be fed an escape sequence it will print as junk.
+          // Deliberately not `getState?.()`: the method is required, and failing
+          // open here would defeat the guard it exists to provide.
+          const state = await data.stream.getState();
+          if (!(state.mouse && state.mouseSgr)) {
+            this.sendError(ws, "no_mouse", "pane has not enabled SGR mouse reporting");
+            return;
+          }
+          if (col >= state.cols || row >= state.rows) {
+            this.sendError(ws, "bad_cell", `cell outside the pane: ${col},${row}`);
+            return;
+          }
+          await data.stream.mouseClick(col, row);
           return;
         }
         case "input": {
@@ -256,6 +433,7 @@ export class RemoteServer {
             if (data.disposed || data.attachGen !== gen) return;
             // The client repaints from scratch, so this is a Snapshot carrying
             // the `history` flag rather than a separate message shape.
+            this.flushOutput(ws, data);
             this.sendState(ws, String(data.sessionId ?? ""), snap, { history: wantsHistory });
           } else {
             this.sendError(ws, "not_attached", "attach before requesting scrollback");
@@ -294,7 +472,7 @@ export class RemoteServer {
     try {
       unsubscribe = await stream.subscribe({
         onOutput: (text) => {
-          if (data.live) this.sendOutput(ws, text);
+          if (data.live) this.queueOutput(ws, data, text);
           else {
             data.pendingBytes += text.length;
             if (data.pendingBytes > MAX_PENDING_BYTES) {
@@ -349,13 +527,55 @@ export class RemoteServer {
       this.opts.releaseStream?.(record);
       return;
     }
+    this.flushOutput(ws, data);
     this.sendState(ws, sessionId, snap);
 
     data.live = true;
     const pending = data.pending;
     data.pending = [];
     data.pendingBytes = 0;
-    for (const text of pending) this.sendOutput(ws, text);
+    // Whatever queued up while we were snapshotting goes out as one frame.
+    for (const text of pending) this.queueOutput(ws, data, text);
+    this.flushOutput(ws, data);
+  }
+
+  /**
+   * Queue pane output, and flush it when the window closes or the buffer grows.
+   *
+   * Every message this replaces would otherwise have been its own WebSocket
+   * frame: one packet, one wakeup and one render on the phone, for output that is
+   * usually a single visible line. Merging a burst is strictly cheaper on both
+   * ends and changes nothing a user can perceive (8 ms).
+   */
+  private queueOutput(ws: any, data: ConnData, text: string): void {
+    data.outBuf.push(text);
+    data.outBytes += text.length;
+    if (data.outBytes >= OUTPUT_FLUSH_BYTES) {
+      this.flushOutput(ws, data);
+      return;
+    }
+    if (data.flushTimer) return;
+    data.flushTimer = setTimeout(() => {
+      data.flushTimer = null;
+      this.flushOutput(ws, data);
+    }, OUTPUT_FLUSH_MS);
+  }
+
+  /**
+   * Send everything queued as one frame. Called before anything that must land
+   * *after* the output (a snapshot in particular): letting a repaint overtake
+   * buffered output would show a screen that is already stale.
+   */
+  private flushOutput(ws: any, data: ConnData): void {
+    if (data.flushTimer) {
+      clearTimeout(data.flushTimer);
+      data.flushTimer = null;
+    }
+    if (data.outBuf.length === 0) return;
+    const text = data.outBuf.length === 1 ? data.outBuf[0] : data.outBuf.join("");
+    data.outBuf = [];
+    data.outBytes = 0;
+    this.sendOutput(ws, text);
   }
 
   private sendJson(ws: any, msg: unknown): void {
@@ -393,6 +613,7 @@ export class RemoteServer {
       paneInMode: snap.state.paneInMode,
       bracketedPaste: snap.state.bracketedPaste,
       mouse: snap.state.mouse,
+      mouseSgr: snap.state.mouseSgr,
       appCursor: snap.state.appCursor,
       historySize: snap.state.historySize,
       snapshotEpoch: snap.epoch,
@@ -427,7 +648,7 @@ export class RemoteServer {
       /* client gone */
       return;
     }
-    const buffered = typeof ws.getBufferedAmount === "function" ? ws.getBufferedAmount() : 0;
+    const buffered = typeof ws.bufferedAmount === "number" ? ws.bufferedAmount : 0;
     if (buffered > (this.opts.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED)) {
       this.sendError(ws, "too_far_behind", "client lagging; reconnect for a fresh snapshot");
       try {
@@ -462,6 +683,22 @@ const CONTENT_TYPES: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
+
+/**
+ * Normalise a `ws` message into the string-or-bytes the handler expects.
+ *
+ * `ws` hands back a Buffer for both kinds, so the only reliable discriminator is
+ * its `isBinary` flag (a Buffer that happens to be valid UTF-8 would otherwise be
+ * read as JSON text).
+ */
+function normaliseIncoming(raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean): string | Uint8Array {
+  const bytes = Array.isArray(raw)
+    ? Buffer.concat(raw)
+    : raw instanceof ArrayBuffer
+      ? new Uint8Array(raw)
+      : raw;
+  return isBinary ? new Uint8Array(bytes) : bytes.toString("utf8");
+}
 
 function contentType(path: string): string {
   return CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";

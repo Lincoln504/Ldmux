@@ -6,8 +6,8 @@
  * client -> daemon -> tmux -> pty -> shell -> back without waiting for command
  * execution. See docs/PREDICTIVE-ECHO.md §6.
  *
- *   bun run scripts/measure_latency.ts --session <id> [--runs 20]
- *   bun run scripts/measure_latency.ts --url ws://host:port/ws?token=... [--runs 20]
+ *   node scripts/measure_latency.ts --session <id> [--runs 20]
+ *   node scripts/measure_latency.ts --url ws://host:port/ws?token=... [--runs 20]
  *
  * Needs a running daemon (LDMUX_SOCK, like the CLI) for the --session form.
  * Reports p50/p95/p99, which is the shape the dooboxes latency SLA is written
@@ -20,6 +20,7 @@
 import { call } from "../packages/protocol/src/socket-client.ts";
 import { resolveSocketPath } from "../packages/protocol/src/paths.ts";
 import { decodeFrames, FrameType, type Frame } from "../packages/protocol/src/frames.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 
 interface RemoteInfo {
   hostname: string;
@@ -37,7 +38,7 @@ const sessionId = arg("session");
 const runs = Number(arg("runs", "20"));
 const explicitUrl = arg("url");
 if (!sessionId && !explicitUrl) {
-  console.error("usage: bun run scripts/measure_latency.ts --session <id> | --url <ws-url> [--runs N]");
+  console.error("usage: node scripts/measure_latency.ts --session <id> | --url <ws-url> [--runs N]");
   process.exit(2);
 }
 
@@ -46,6 +47,8 @@ const wsUrl = explicitUrl ?? await (async () => {
   return `ws://${info.hostname}:${info.port}${info.path}?token=${encodeURIComponent(info.token)}`;
 })();
 const socket = new WebSocket(wsUrl);
+// Binary frames arrive as a Blob unless we ask for bytes.
+socket.binaryType = "arraybuffer";
 let tail: Uint8Array = new Uint8Array(0);
 let onOutput: ((text: string) => void) | null = null;
 
@@ -86,7 +89,7 @@ function waitForOutput(needle: string, timeoutMs: number): Promise<number> {
 }
 
 const send = (msg: unknown) => socket.send(JSON.stringify(msg));
-const settle = (ms: number) => Bun.sleep(ms);
+const settle = (ms: number) => sleep(ms);
 
 // Attach (the --session form) and let the stream settle before timing: an
 // un-attached socket has no pane to type into.

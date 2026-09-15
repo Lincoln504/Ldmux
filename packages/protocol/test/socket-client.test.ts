@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { createServer, type Server } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

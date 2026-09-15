@@ -4,7 +4,7 @@
  * Framework-free, DOM-free helpers shared by the client (app.js) and its tests.
  * It attaches one global: `LdmuxCore`. Keeping the protocol-critical logic here
  * means the frame decoder, the scroll state machine, and the snapshot repaint
- * math are unit-testable under `bun test` without a browser.
+  * math are unit-testable under `node --test` without a browser.
  */
 (function (root) {
   "use strict";

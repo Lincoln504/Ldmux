@@ -1,6 +1,7 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
-import { connect } from "node:net";
+import { connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
@@ -8,13 +9,14 @@ import { Registry } from "../src/registry.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const tmuxSocket = `ldmux-daemontest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-daemon-"));
 const daemon = new LdmuxDaemon({ stateDir, tmuxSocket, remotePort: 0 });
 await daemon.start();
 
-const tm = (...a: string[]) => Bun.spawnSync(["tmux", "-L", tmuxSocket, ...a]);
+const tm = (...a: string[]) => spawnSync("tmux", ["-L", tmuxSocket, ...a]);
 
 afterAll(() => {
   daemon.stop();
@@ -26,7 +28,7 @@ async function waitFor(pred: () => Promise<boolean>, ms = 15000): Promise<boolea
   const end = Date.now() + ms;
   while (Date.now() < end) {
     if (await pred()) return true;
-    await Bun.sleep(60);
+    await sleep(60);
   }
   return false;
 }
@@ -71,6 +73,11 @@ test("reconcile marks an externally killed session dead", async () => {
   const created = await call<{ session: SessionRecord }>(daemon.socketPath, "new", { kind: "shell", cwd: tmpdir() });
   const id = created.session.id;
   tm("kill-session", "-t", created.session.tmuxName);
+  // Wait until tmux itself agrees the session is gone: the subject here is the
+  // daemon's reconcile, not how quickly a killed tmux session disappears, and
+  // asserting straight after kill-session made this test race its own fixture.
+  const gone = await waitFor(async () => tm("has-session", "-t", created.session.tmuxName).status !== 0);
+  expect(gone).toBe(true);
   const list = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
   expect(list.sessions.find((s) => s.id === id)?.status).toBe("dead");
 });
@@ -110,58 +117,30 @@ test("new injects the child env contract", async () => {
   expect(ok).toBe(true);
 });
 
-test("register binds a pi session and session_end marks it dead", async () => {
-  const piSessionId = "pi-01HMOCKULID00000000000000";
-  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "register", {
-    piSessionId,
-    cwd: tmpdir(),
-    kind: "pi",
-  });
-  expect(session.piSessionId).toBe(piSessionId);
-  expect(session.tmuxName).toBe("");
-
-  // RPC-only sessions have no tmux counterpart and must survive reconcile.
-  const list = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
-  expect(list.sessions.find((s) => s.id === session.id)?.status).toBe("running");
-
-  // Re-registering is idempotent (same record).
-  const again = await call<{ session: SessionRecord }>(daemon.socketPath, "register", {
-    piSessionId,
-    cwd: tmpdir(),
-  });
-  expect(again.session.id).toBe(session.id);
-
-  await call(daemon.socketPath, "session_end", { piSessionId });
-  const after = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list");
-  expect(after.sessions.find((s) => s.id === session.id)?.status).toBe("dead");
-});
 test("concurrent requests on one connection are answered in request order", async () => {
   // handle() awaits tmux now; without the per-connection queue two handlers
   // could interleave and reorder responses. Pipelining is the observable check.
   const lines: string[] = [];
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timed out")), 8000);
-    Bun.connect({
-      unix: daemon.socketPath,
-      socket: {
-        open: (s: any) => {
-          // Three requests in a single write: they land in one read chunk.
-          s.write(
-            ["a", "b", "c"].map((id) => JSON.stringify({ id, method: "ping" })).join("\n") + "\n",
-          );
-        },
-        data: (_s: any, chunk: Uint8Array) => {
-          lines.push(new TextDecoder().decode(chunk));
-          if (lines.join("").split("\n").filter(Boolean).length >= 3) {
-            clearTimeout(timer);
-            resolve();
-          }
-        },
-        error: (_s: any, err: Error) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-      },
+    const socket = netConnect(daemon.socketPath);
+    socket.on("connect", () => {
+      // Three requests in a single write: they land in one read chunk.
+      socket.write(
+        ["a", "b", "c"].map((id) => JSON.stringify({ id, method: "ping" })).join("\n") + "\n",
+      );
+    });
+    socket.on("data", (chunk: Buffer) => {
+      lines.push(chunk.toString("utf8"));
+      if (lines.join("").split("\n").filter(Boolean).length >= 3) {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve();
+      }
+    });
+    socket.on("error", (err: Error) => {
+      clearTimeout(timer);
+      reject(err);
     });
   });
   const replies = lines
@@ -183,32 +162,10 @@ test("forget drops a record without killing or adopting the tmux session", async
   const { sessions } = await call<{ sessions: SessionRecord[] }>(daemon.socketPath, "list", {});
   expect(sessions.some((s) => s.id === session.id)).toBe(false);
   // The tmux session itself is untouched: it becomes adoptable again.
-  expect(tm("has-session", "-t", session.tmuxName).exitCode).toBe(0);
+  expect(tm("has-session", "-t", session.tmuxName).status).toBe(0);
   const again = await call<{ ok: true; removed: boolean }>(daemon.socketPath, "forget", { id: session.id });
   expect(again.removed).toBe(false);
   tm("kill-session", "-t", session.tmuxName);
-});
-
-test("RPC-only sessions give a clear error instead of an empty tmux target", async () => {
-  const { session } = await call<{ session: SessionRecord }>(daemon.socketPath, "register", {
-    piSessionId: "pi-rpc-only-test",
-    cwd: tmpdir(),
-    kind: "pi",
-  });
-  expect(session.tmuxName).toBe("");
-
-  // The three terminal operations must explain the real problem.
-  for (const [method, params] of [
-    ["capture", { id: session.id }],
-    ["snapshot", { id: session.id }],
-    ["send", { id: session.id, text: "x" }],
-  ] as const) {
-    await expect(call(daemon.socketPath, method, params as never)).rejects.toThrow(/no terminal/);
-  }
-
-  // Killing one still works: there is just nothing to kill in tmux.
-  const killed = await call<{ session: SessionRecord }>(daemon.socketPath, "kill", { id: session.id });
-  expect(killed.session.status).toBe("dead");
 });
 
 test("an invalid kind is refused at the daemon boundary, for new and adopt", async () => {
@@ -250,9 +207,9 @@ test("a multi-byte character split across socket reads is reassembled, not corru
   const cut = prefixBytes + 1;
 
   const reply = await new Promise<string>((resolve, reject) => {
-    const sock = connect(daemon.socketPath);
+    const sock = netConnect(daemon.socketPath);
     let buf = "";
-    sock.on("data", (d) => {
+    sock.on("data", (d: Buffer) => {
       buf += d.toString("utf8");
       if (buf.includes("\n")) {
         sock.end();
@@ -272,17 +229,8 @@ test("a multi-byte character split across socket reads is reassembled, not corru
   await call(daemon.socketPath, "kill", { id: res.result.session.id });
 });
 
-test("register also refuses an invalid kind (not just new/adopt)", async () => {
-  await expect(
-    call(daemon.socketPath, "register", { piSessionId: "bad-kind-reg", cwd: tmpdir(), kind: "<b>" }),
-  ).rejects.toThrow(/invalid kind/);
-});
-
-test("adopt and register reject a session name that could be read as argv", async () => {
+test("adopt rejects a session name that could be read as argv", async () => {
   await expect(call(daemon.socketPath, "adopt", { tmuxName: "bad name!" })).rejects.toThrow(
-    /invalid tmux session name/,
-  );
-  await expect(call(daemon.socketPath, "register", { piSessionId: "x", cwd: tmpdir(), tmuxName: "bad name!" })).rejects.toThrow(
     /invalid tmux session name/,
   );
 });

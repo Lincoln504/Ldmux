@@ -2,8 +2,8 @@
  * The daemon wire contract: shared request/response types and a typed client.
  *
  * This is the single source of truth for the Unix-socket RPC surface, imported
- * by the daemon (server), the CLI, tests, and the pi extension (client). No
- * build step: consumers import this module directly.
+ * by the daemon (server), the CLI, and tests. No build step: consumers import
+ * this module directly.
  */
 
 import { call } from "./socket-client.ts";
@@ -16,7 +16,7 @@ export type SessionStatus = "starting" | "running" | "dead";
 
 export interface SessionRecord {
   id: string;
-  /** Empty string when the pi session is not terminal-attached (RPC-only). */
+  /** Empty string when the session is not terminal-attached (RPC-only). */
   tmuxName: string;
   kind: SessionKind;
   cwd: string;
@@ -25,8 +25,6 @@ export interface SessionRecord {
   updatedAt: number;
   createdBy: string;
   status: SessionStatus;
-  /** Present when a pi session registered itself with the daemon. */
-  piSessionId?: string;
   exitCode?: number | null;
   exitedAt?: number | null;
 }
@@ -37,6 +35,12 @@ export interface PaneState {
   alternateOn: boolean;
   paneInMode: boolean;
   mouse: boolean;
+  /**
+   * The running program negotiated SGR mouse reporting (1006). Only then can we
+   * synthesize a click it will understand; the legacy encodings cap coordinates
+   * at 223 and are not worth supporting.
+   */
+  mouseSgr: boolean;
   appCursor: boolean;
   bracketedPaste: boolean;
   historySize: number;
@@ -71,19 +75,6 @@ export interface SendParams {
   keys?: string[];
 }
 
-export interface RegisterParams {
-  piSessionId: string;
-  cwd: string;
-  /** tmux session name when terminal-attached; omitted for RPC-only sessions. */
-  tmuxName?: string;
-  kind?: SessionKind;
-  title?: string;
-}
-
-export interface SessionEndParams {
-  piSessionId: string;
-}
-
 /** Method name -> { params, result }. Drives the typed `daemonCall` below. */
 export interface DaemonMethods {
   ping: { params: Record<string, never>; result: PingResult };
@@ -96,8 +87,6 @@ export interface DaemonMethods {
   /** Drop a record without touching tmux (cleanup for dead/adopted leftovers). */
   forget: { params: { id: string }; result: { ok: true; removed: boolean } };
   adopt: { params: { tmuxName: string; kind?: SessionKind; title?: string }; result: { session: SessionRecord } };
-  register: { params: RegisterParams; result: { session: SessionRecord } };
-  session_end: { params: SessionEndParams; result: { ok: true; session?: SessionRecord } };
   remote_info: {
     params: Record<string, never>;
     result: { hostname: string; port: number; path: string; token: string };

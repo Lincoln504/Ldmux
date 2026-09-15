@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { decodeOctalEscapes } from "../src/tmux/octal.ts";
 import { ControlParser } from "../src/tmux/control-parser.ts";
 

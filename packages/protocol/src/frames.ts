@@ -16,21 +16,29 @@
  * are the reserved vocabulary for later revisions (see docs/REMOTE.md).
  */
 
-export enum FrameType {
-  Hello = 0x01,
-  Caps = 0x02,
-  Output = 0x10,
-  Input = 0x11,
-  Resize = 0x12,
-  Snapshot = 0x13,
-  Follow = 0x14,
-  SessionState = 0x15,
-  Scrollback = 0x16,
-  Ping = 0x30,
-  Pong = 0x31,
-  Close = 0x40,
-  Error = 0xf0,
-}
+/**
+ * A `const` object rather than a TS `enum`: Node runs this file directly by
+ * stripping types, and an enum is runtime syntax it cannot strip. The type of
+ * the same name keeps every existing `FrameType.Output` and `: FrameType`
+ * usage working unchanged.
+ */
+export const FrameType = {
+  Hello: 0x01,
+  Caps: 0x02,
+  Output: 0x10,
+  Input: 0x11,
+  Resize: 0x12,
+  Snapshot: 0x13,
+  Follow: 0x14,
+  SessionState: 0x15,
+  Scrollback: 0x16,
+  Ping: 0x30,
+  Pong: 0x31,
+  Close: 0x40,
+  Error: 0xf0,
+} as const;
+
+export type FrameType = (typeof FrameType)[keyof typeof FrameType];
 
 export const HEADER_SIZE = 8;
 

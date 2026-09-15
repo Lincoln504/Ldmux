@@ -1,14 +1,15 @@
 /**
  * ldmux daemon: owns one private tmux server, keeps a session registry
  * reconciled against it, and serves a newline-delimited JSON API on a Unix
- * socket. The pi extension and CLI are clients of this same API.
+ * socket. The CLI and the mobile/web clients are clients of this same API.
  *
  * Single-instance guarantee: a pid lockfile (`ldmuxd.lock`) serialises startup
- * so concurrent spawn attempts (e.g. several pi sessions starting at once)
- * cannot race two daemons into existence or clobber each other's socket.
+ * so concurrent spawn attempts cannot race two daemons into existence or clobber
+ * each other's socket.
  */
 
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isValidSessionName, TmuxControlPlane } from "./tmux/control-plane.ts";
@@ -18,9 +19,7 @@ import { RemoteServer } from "./remote.ts";
 import { loadOrCreateToken } from "./auth.ts";
 import type {
   NewParams,
-  RegisterParams,
   SendParams,
-  SessionEndParams,
   SessionKind,
   SessionRecord,
 } from "../../protocol/src/rpc.ts";
@@ -38,8 +37,6 @@ export interface LdmuxDaemonOptions {
   deadRecordTtlMs?: number;
   /** Hard cap on registry size before oldest records are pruned (default 500). */
   maxRecords?: number;
-  /** Staleness TTL for RPC-only pi sessions whose process vanished (default 15 min). */
-  rpcOnlyTtlMs?: number;
   /** Remote WebSocket bind host (default 127.0.0.1 — never a public interface). */
   remoteHost?: string;
   /** Remote WebSocket port; 0 picks an ephemeral port (tests). */
@@ -112,16 +109,18 @@ export class LdmuxDaemon {
   private readonly historyLimit: number;
   private readonly deadRecordTtlMs: number;
   private readonly maxRecords: number;
-  private readonly rpcOnlyTtlMs: number;
   private ownsLock = false;
-  private server: { stop(closeActive?: boolean): void } | undefined;
+  private server: Server | undefined;
   private readonly conns = new Map<unknown, Conn>();
   private remote: RemoteServer | undefined;
   private readonly streams = new Map<string, PaneStream>();
   private remoteInfo: { hostname: string; port: number } | undefined;
   private token = "";
 
-  constructor(private readonly opts: LdmuxDaemonOptions) {
+  private readonly opts: LdmuxDaemonOptions;
+
+  constructor(opts: LdmuxDaemonOptions) {
+    this.opts = opts;
     this.stateDir = opts.stateDir;
     mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     this.socketPath = join(this.stateDir, "ldmuxd.sock");
@@ -133,8 +132,6 @@ export class LdmuxDaemon {
     this.historyLimit = opts.historyLimit ?? 10000;
     this.deadRecordTtlMs = opts.deadRecordTtlMs ?? 24 * 60 * 60 * 1000;
     this.maxRecords = opts.maxRecords ?? 500;
-    // The extension re-registers every 5 min; 3 missed beats means it is gone.
-    this.rpcOnlyTtlMs = opts.rpcOnlyTtlMs ?? 15 * 60 * 1000;
   }
 
   /**
@@ -153,31 +150,46 @@ export class LdmuxDaemon {
       } catch {
         /* no stale socket */
       }
-      this.server = Bun.listen({
-        unix: this.socketPath,
-        socket: {
-          open: (ws: any) => {
-            this.conns.set(ws, this.makeConn(ws));
-          },
-          data: (ws: any, data: Uint8Array) => this.onData(ws, data),
-          close: (ws: any) => {
-            this.conns.delete(ws);
-          },
-          error: (ws: any) => {
-            this.conns.delete(ws);
-          },
-        },
+      this.server = createServer((socket) => {
+        const conn = this.makeConn(socket);
+        this.conns.set(socket, conn);
+        socket.on("data", (chunk: Buffer) => this.onData(socket, chunk));
+        const forget = () => this.conns.delete(socket);
+        socket.on("close", forget);
+        socket.on("error", forget);
       });
-      // The socket is a full-control channel: owner-only.
+      // The socket is a full-control channel: owner-only. The umask closes the
+      // window between the bind (which creates the file with the process umask,
+      // typically 0755) and the chmod below — otherwise another local user could
+      // connect to a control channel in that instant.
+      const previousUmask = process.umask(0o077);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onError = (err: Error) => reject(err);
+          this.server!.once("error", onError);
+          this.server!.listen(this.socketPath, () => {
+            this.server!.off("error", onError);
+            resolve();
+          });
+        });
+      } finally {
+        process.umask(previousUmask);
+      }
       chmodSync(this.socketPath, 0o600);
-      this.startRemote();
+      // Keep an error listener for the server's whole life: an 'error' event
+      // with no listener is rethrown by EventEmitter, which would take the
+      // daemon down (the remote HTTP server does the same).
+      this.server.on("error", (err: Error) => {
+        console.error(`ldmuxd: control socket error: ${err.message}`);
+      });
+      await this.startRemote();
     } catch (err) {
       this.releaseLock();
       throw err;
     }
   }
 
-  private startRemote(): void {
+  private async startRemote(): Promise<void> {
     if (this.opts.enableRemote === false) return;
     try {
       this.token = loadOrCreateToken(this.stateDir);
@@ -198,7 +210,7 @@ export class LdmuxDaemon {
         webRoot: this.opts.webRoot ?? defaultWebRoot(),
         log: (msg) => console.error(msg),
       });
-      this.remoteInfo = this.remote.start();
+      this.remoteInfo = await this.remote.start();
     } catch (err) {
       // Remote is optional: a bind failure must not take down local control.
       console.error(`ldmuxd: remote disabled: ${(err as Error).message}`);
@@ -226,7 +238,6 @@ export class LdmuxDaemon {
       cwd: record.cwd,
       status: record.status,
       tmuxName: record.tmuxName,
-      piSessionId: record.piSessionId,
       lastActivityAt:
         (record.tmuxName ? activity.get(record.tmuxName) : undefined) ?? record.updatedAt,
     }));
@@ -281,7 +292,7 @@ export class LdmuxDaemon {
     for (const stream of this.streams.values()) stream.close();
     this.streams.clear();
     try {
-      this.server?.stop(true);
+      this.server?.close();
     } catch {
       /* ignore */
     }
@@ -303,27 +314,27 @@ export class LdmuxDaemon {
 
   // ── connection handling ────────────────────────────────────────────────
 
-  private makeConn(ws: any): Conn {
+  private makeConn(socket: Socket): Conn {
     return {
       buf: "",
       decoder: new TextDecoder(),
       queue: Promise.resolve(),
-      write: (data: string) => this.safeWrite(ws, data),
-      close: () => ws.close(),
+      write: (data: string) => this.safeWrite(socket, data),
+      close: () => socket.destroy(),
     };
   }
 
   /** Never let a client disconnect mid-write crash the daemon. */
-  private safeWrite(ws: any, data: string): void {
+  private safeWrite(socket: Socket, data: string): void {
     try {
-      ws.write(data);
+      socket.write(data);
     } catch {
       /* client went away */
     }
   }
 
-  private onData(ws: any, data: Uint8Array): void {
-    const conn = this.conns.get(ws);
+  private onData(socket: Socket, data: Uint8Array): void {
+    const conn = this.conns.get(socket);
     if (!conn) return;
     conn.buf += conn.decoder.decode(data, { stream: true });
     let nl: number;
@@ -334,7 +345,7 @@ export class LdmuxDaemon {
         // Chain, never start two handlers on one connection at once: handle()
         // awaits tmux now, and interleaving would reorder responses.
         conn.queue = conn.queue
-          .then(() => this.dispatch(ws, conn, line))
+          .then(() => this.dispatch(socket, conn, line))
           .catch(() => {
             /* dispatch never throws, but never surface an unhandled rejection */
           });
@@ -424,14 +435,11 @@ export class LdmuxDaemon {
     const liveSessions = await this.cp.listSessions();
     const live = liveSessions ? new Set(liveSessions.map((s) => s.name)) : null;
     const { dead, adopted } = this.registry.reconcile(live);
-    // A pi that died without a clean shutdown never sends session_end; expire
-    // its RPC-only record rather than showing a phantom session forever.
-    const stale = this.registry.expireRpcOnly(this.rpcOnlyTtlMs);
     const pruned = this.registry.prune({ maxDeadAgeMs: this.deadRecordTtlMs, maxRecords: this.maxRecords });
-    if (dead.length || adopted.length || stale.length || pruned.length) this.registry.save();
+    if (dead.length || adopted.length || pruned.length) this.registry.save();
     // Only sweep on a *known* live set, and never from a read-only listing.
     if (opts.sweep !== false && live) this.sweepStreams();
-    return { dead: [...dead, ...stale], adopted, pruned };
+    return { dead, adopted, pruned };
   }
 
   private require(id: string): SessionRecord {
@@ -448,7 +456,7 @@ export class LdmuxDaemon {
   private requireTerminal(id: string): SessionRecord {
     const record = this.require(id);
     if (!record.tmuxName) {
-      throw new Error(`session ${id} has no terminal (RPC-only pi session)`);
+      throw new Error(`session ${id} has no terminal attached`);
     }
     return record;
   }
@@ -531,12 +539,6 @@ export class LdmuxDaemon {
       case "adopt":
         return { session: await this.adopt(params) };
 
-      case "register":
-        return { session: await this.register(params as unknown as RegisterParams) };
-
-      case "session_end":
-        return this.endSession(params as unknown as SessionEndParams);
-
       default:
         throw new Error(`unknown method: ${method}`);
     }
@@ -609,49 +611,5 @@ export class LdmuxDaemon {
     this.registry.upsert(record);
     this.registry.save();
     return record;
-  }
-
-  /** Bind a pi session to its (possibly RPC-only) ldmux record. Idempotent. */
-  private async register(p: RegisterParams): Promise<SessionRecord> {
-    const now = Date.now();
-    const tmuxName = p.tmuxName ?? "";
-    if (tmuxName && !isValidSessionName(tmuxName)) throw new Error(`invalid tmux session name: ${tmuxName}`);
-    const existing = this.registry.byPiSessionId(p.piSessionId) ?? this.registry.byTmuxName(tmuxName);
-    if (existing) {
-      existing.piSessionId = p.piSessionId;
-      existing.cwd = p.cwd;
-      existing.status = "running";
-      existing.exitedAt = null;
-      existing.updatedAt = now;
-      if (tmuxName) existing.tmuxName = tmuxName;
-      this.registry.save();
-      return existing;
-    }
-    const record: SessionRecord = {
-      id: shortId(),
-      tmuxName,
-      kind: parseKind(p.kind ?? "pi"),
-      cwd: p.cwd,
-      title: String(p.title ?? "pi"),
-      createdAt: now,
-      updatedAt: now,
-      createdBy: "pi-extension",
-      status: "running",
-      piSessionId: p.piSessionId,
-    };
-    this.registry.upsert(record);
-    this.registry.save();
-    return record;
-  }
-
-  private endSession(p: SessionEndParams): { ok: true; session?: SessionRecord } {
-    const record = this.registry.byPiSessionId(p.piSessionId);
-    if (!record) return { ok: true };
-    if (record.tmuxName) this.dropStream(record.tmuxName);
-    record.status = "dead";
-    record.exitedAt = Date.now();
-    record.updatedAt = Date.now();
-    this.registry.save();
-    return { ok: true, session: record };
   }
 }

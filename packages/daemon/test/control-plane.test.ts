@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,4 +125,39 @@ test("resizeWindow asks tmux for an exact size, clamped to sane bounds", async (
   // window whose capture would blow the stream's byte budget.
   expect(lines[1]).toContain("-x 20 -y 5");
   expect(lines[2]).toContain("-x 500 -y 300");
+});
+
+test("sendMouseClick writes a real SGR click straight to the pty", async () => {
+  // The point of `-H`: these bytes are the *program's* protocol, not tmux's
+  // vocabulary. They must reach the pty verbatim.
+  const log = join(dir, "argv.log");
+  const script = join(dir, "tmux");
+  writeFileSync(script, `#!/bin/sh\nprintf '%s ' "$@" >> ${log}\necho >> ${log}\n`);
+  chmodSync(script, 0o755);
+  rmSync(log, { force: true });
+  process.env.PATH = `${dir}:${realPath}`;
+
+  const cp = new TmuxControlPlane("test-socket", 2000);
+  // Cell (4,2) is 1-based (5,3) on the wire.
+  await cp.sendMouseClick("sess", 4, 2);
+
+  const line = readFileSync(log, "utf8").trim();
+  expect(line).toContain("send-keys -t sess -H");
+  // ESC [ < 0 ; 5 ; 3 M   then   ESC [ < 0 ; 5 ; 3 m
+  const hex = line.slice(line.indexOf("-H ") + 3).trim().split(" ");
+  expect(hex.join(" ")).toBe(
+    "1b 5b 3c 30 3b 35 3b 33 4d 1b 5b 3c 30 3b 35 3b 33 6d",
+  );
+});
+
+test("sendBytes refuses to send nothing", async () => {
+  const log = join(dir, "argv2.log");
+  const script = join(dir, "tmux");
+  writeFileSync(script, `#!/bin/sh\nprintf '%s ' "$@" >> ${log}\necho >> ${log}\n`);
+  chmodSync(script, 0o755);
+  rmSync(log, { force: true });
+  process.env.PATH = `${dir}:${realPath}`;
+  const cp = new TmuxControlPlane("test-socket", 2000);
+  await cp.sendBytes("sess", new Uint8Array(0));
+  expect(existsSync(log)).toBe(false);
 });

@@ -2,48 +2,42 @@
 
 # Unit + live tests (live tests spawn a scratch tmux server).
 test:
-    bun test
+    node --test "packages/*/test/*.test.ts"
 
 # Strict typecheck (no build step).
 typecheck:
-    bun run typecheck
+    node --run typecheck
 
 # Start the daemon in the foreground (default state dir, tmux -L ldmux).
 daemon:
-    bun run packages/daemon/src/main.ts
+    node packages/daemon/src/main.ts
 
 # CLI against the running daemon, e.g. `just cli run shell`.
 cli *args:
-    bun run packages/daemon/src/cli.ts {{args}}
+    node packages/daemon/src/cli.ts {{args}}
 
 # Stream a tmux pane via control mode:
 #   just probe <tmux-socket> <session>
 probe socket session:
-    bun run packages/daemon/src/probe.ts {{socket}} {{session}}
+    node packages/daemon/src/probe.ts {{socket}} {{session}}
 
 # Print remote connection info (host/port/token) + the tailscale serve command.
 remote:
-    bun run packages/daemon/src/cli.ts remote
+    node packages/daemon/src/cli.ts remote
 
 # Pair the phone: https url + ldmux:// deep link + the tailscale serve command.
 pair:
-    bun run packages/daemon/src/cli.ts pair
+    node packages/daemon/src/cli.ts pair
 
 # Expose the loopback remote over the tailnet via `tailscale serve`.
 expose:
-    bun run packages/daemon/src/cli.ts expose
+    node packages/daemon/src/cli.ts expose
 
 # Open a read-only mirror of a session on the desktop (i3 workspace 10).
 #   just mirror <id>
 mirror id:
-    bun run packages/daemon/src/cli.ts mirror {{id}}
+    node packages/daemon/src/cli.ts mirror {{id}}
 
-# Symlink the pi extension into pi's auto-discovery dir, then `/reload` in pi.
-# Enable the pi extension (writes an absolute path into pi's settings.json).
-# A symlink into pi's discovery directory does NOT work: jiti resolves the
-# extension's relative imports against the symlink path.
-link-extension:
-    bun run packages/daemon/src/cli.ts install-extension
 # Reap tmux servers left behind by interrupted test runs or smoke scripts
 # (never touches non-ldmux servers such as the user's own tmux sessions).
 clean-tmux:
@@ -79,4 +73,4 @@ android-test:
 # Round-trip echo latency (the number predictive echo would improve).
 # Over adb reverse this is loopback; point --url at the tailnet address for real.
 latency sid *runs:
-    nix develop --command bun run scripts/measure_latency.ts --session {{sid}} --runs {{runs}}
+    nix develop --command node scripts/measure_latency.ts --session {{sid}} --runs {{runs}}

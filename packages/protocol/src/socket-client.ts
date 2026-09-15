@@ -1,9 +1,8 @@
 /**
  * Newline-delimited JSON client for the daemon's Unix socket.
  *
- * Uses node:net (not Bun.connect) so the same client works under Bun (daemon
- * tests/CLI in the devShell) and under Node (the pi extension, which runs in
- * the pi process). Used by the CLI, tests, and the pi extension.
+ * Uses node:net: the same client serves the CLI, the tests, and the
+ * mobile/web clients.
  *
  * One call == one connection == one request/response; the first LF-terminated
  * line is the answer. (Do not multiplex requests on one connection without

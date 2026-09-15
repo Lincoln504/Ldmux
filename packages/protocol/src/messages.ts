@@ -32,6 +32,8 @@ export interface Snapshot {
   paneInMode: boolean;
   bracketedPaste: boolean;
   mouse: boolean;
+  /** The program negotiated SGR mouse reporting, so a synthesized click is valid. */
+  mouseSgr: boolean;
   appCursor: boolean;
   historySize: number;
   snapshotEpoch: number;
@@ -63,6 +65,17 @@ export interface Attach {
 }
 
 /**
+ * Remote client → server: the user tapped a cell. The server decides what that
+ * means, because only it can see the pane:
+ *   - a mouse-aware program gets a synthesized SGR click (vim, less, htop, a
+ *     TUI) — byte-identical to a real click, injected straight to the pty;
+ *   - a plain shell gets the tap turned into cursor motion by the *client*, so
+ *     this message is not sent at all.
+ * Coordinates are 0-based cells.
+ */
+export interface MouseClick { type: "mouseclick"; col: number; row: number }
+
+/**
  * Remote client → server: the viewport changed. Like `attach`'s cols/rows, this
  * is the client stating its own geometry; the daemon applies it to tmux and
  * answers with a fresh snapshot so the repaint matches.
@@ -92,7 +105,7 @@ export interface ScrollbackRequest {
  */
 export type SessionInfo = Pick<
   SessionRecord,
-  "id" | "kind" | "title" | "cwd" | "status" | "tmuxName" | "piSessionId"
+  "id" | "kind" | "title" | "cwd" | "status" | "tmuxName"
 > & {
   /**
    * Last observed activity, epoch ms — the freshness signal for unread markers
@@ -136,6 +149,7 @@ export type ControlMessage =
   | ErrorMessage
   | Attach
   | Resize
+  | MouseClick
   | Input
   | KeyMessage
   | ScrollbackRequest

@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

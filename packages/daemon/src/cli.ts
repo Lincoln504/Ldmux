@@ -15,14 +15,13 @@
  *   ldmux remote
  *   ldmux pair
  *   ldmux expose [--dry-run]
- *   ldmux install-extension [--remove] [--dry-run]
  */
 
+import { spawnSync } from "node:child_process";
 import { daemonCall, defaultSocketPath } from "../../protocol/src/rpc.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { PingResult, SessionRecord } from "../../protocol/src/rpc.ts";
 import { DEFAULT_MIRROR_WORKSPACE, mirrorCommand, openMirror } from "./desktop.ts";
-import { installPiExtension } from "./install.ts";
 import { buildPairInfo, expose, tailnetHost } from "./pairing.ts";
 
 function flag(args: string[], name: string): string | undefined {
@@ -90,10 +89,10 @@ async function main() {
         cwd: cwd ?? process.cwd(),
       });
       console.error(`ldmux: session ${session.id} (${session.tmuxName}) — detach with Ctrl-b d`);
-      const proc = Bun.spawnSync(["tmux", "-L", ping.tmuxSocket, "attach", "-t", session.tmuxName], {
-        stdio: ["inherit", "inherit", "inherit"],
+      const proc = spawnSync("tmux", ["-L", ping.tmuxSocket, "attach", "-t", session.tmuxName], {
+        stdio: "inherit",
       });
-      process.exit(proc.exitCode ?? 0);
+      process.exit(proc.status ?? 0);
     }
 
     case "send": {
@@ -204,35 +203,9 @@ async function main() {
       break;
     }
 
-    case "install-extension":
-    case "link-extension": {
-      // Loading ldmux from pi's discovery directory via a symlink breaks the
-      // buildless relative imports, so this edits pi's settings instead
-      // (absolute real path) — see docs/PI-EXTENSIONS.md.
-      const res = installPiExtension({
-        remove: rest.includes("--remove"),
-        dryRun: rest.includes("--dry-run"),
-      });
-      if (res.warning) console.error(`ldmux: warning: ${res.warning}`);
-      console.log(`${res.note} in ${res.settingsPath}`);
-      if (res.backup) console.log(`backup: ${res.backup}`);
-      console.log(`entries: ${res.entries.length ? res.entries.join(", ") : "(none)"}`);
-      // A settings-declared extension only loads on a pi restart: unlike
-      // auto-discovered extensions, it is not hot-reloaded by /reload. Say so
-      // on the paths that actually changed something.
-      if (rest.includes("--dry-run")) {
-        console.log("dry run: nothing written");
-      } else if (res.action === "added" || (res.action === "unchanged" && res.entries.includes(res.extensionPath))) {
-        console.log("restart pi to load the extension (settings-declared extensions do not hot-reload)");
-      } else if (res.action === "removed") {
-        console.log("restart pi to unload the extension");
-      }
-      break;
-    }
-
     default:
       console.error(
-        "usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|remote|pair|expose|install-extension> [args]",
+        "usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|remote|pair|expose> [args]",
       );
       process.exit(2);
   }

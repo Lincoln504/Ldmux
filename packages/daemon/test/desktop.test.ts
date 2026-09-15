@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { mirrorArgv, mirrorCommand, mirrorTmuxArgs } from "../src/desktop.ts";
 
 test("mirror is read-only by default (input stays with the phone)", () => {
@@ -48,7 +48,7 @@ test("mirrorCommand shell-quotes every argument, so i3-msg exec cannot inject", 
 // The IO half of desktop.ts was left untested when the pure helpers were
 // extracted. Now that run() honours an explicit env, it can be driven with a
 // fake i3-msg on PATH (no X11 needed).
-import { afterAll, beforeEach } from "bun:test";
+import { afterAll, beforeEach } from "../../testing/src/expect.ts";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

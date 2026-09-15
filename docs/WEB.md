@@ -22,7 +22,7 @@ the daemon serves.
 | `public/sw.js`, `public/manifest.webmanifest`, `public/icon.svg` | installable app shell |
 
 `core.js` exists so the protocol-critical logic is unit-testable without a
-browser: `packages/web/test/core.test.ts` runs it under `bun test` (frame
+browser: `packages/web/test/core.test.ts` runs it under `node --test` (frame
 reassembly across chunks, the poisoned-length DoS guard, the scroll/anchor
 state machine, 1-based cursor restore, escaping, token precedence) and asserts
 `index.html` loads `core.js` before `app.js`.

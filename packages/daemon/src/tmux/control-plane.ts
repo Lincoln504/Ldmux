@@ -1,7 +1,7 @@
 /**
  * Thin wrapper over the tmux CLI for the ldmux private server.
  *
- * Every call is **asynchronous**: `Bun.spawnSync` blocks the daemon's single
+ * Every call is **asynchronous**: a synchronous spawn blocks the daemon's single
  * event loop for the whole lifetime of the tmux process (measured ~3 ms per
  * `capture-pane`), which would stall every WebSocket reader and every other
  * client. Live streaming is handled separately by the control-mode client
@@ -9,6 +9,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { spawnCaptured } from "../proc.ts";
 
 /**
  * The shell a user's sessions should get.
@@ -81,6 +82,13 @@ export interface CaptureOptions {
   history?: boolean | number;
   /** Capture the alternate screen (`-a`) — required for full-screen TUIs. */
   alternate?: boolean;
+  /**
+   * Join rows the terminal wrapped (`-J`, tmux 3.2+). On by default, and the
+   * caller should leave it on: without it a wrapped long line is
+   * indistinguishable from a real line break, and a client cannot reproduce the
+   * pane's wrap state (which is what makes deleting back past a wrap work).
+   */
+  joinWrapped?: boolean;
 }
 
 /** Upper bound for a history capture: unbounded `-S -` blocks the event loop. */
@@ -115,10 +123,12 @@ export function isValidSessionName(name: string): boolean {
 }
 
 export class TmuxControlPlane {
+  readonly socket: string;
   private readonly timeoutMs: number;
   private readonly graceMs: number;
 
-  constructor(readonly socket: string, timeoutMs = TMUX_COMMAND_TIMEOUT_MS) {
+  constructor(socket: string, timeoutMs = TMUX_COMMAND_TIMEOUT_MS) {
+    this.socket = socket;
     this.timeoutMs = timeoutMs;
     this.graceMs = Math.min(TMUX_KILL_GRACE_MS, Math.max(50, Math.floor(timeoutMs / 2)));
   }
@@ -132,26 +142,14 @@ export class TmuxControlPlane {
    * wedge that connection for good).
    */
   private async run(args: string[]): Promise<{ code: number; out: string; err: string }> {
-    const proc = Bun.spawn(["tmux", "-L", this.socket, ...args], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      // Explicit env, not the default: Bun.spawn otherwise uses the environment
-      // snapshot from process start, so a PATH changed at runtime (a stubbed
-      // `tmux` in tests, or a user's PATH fix) would be ignored.
-      env: process.env as Record<string, string>,
+    const proc = spawnCaptured(["tmux", "-L", this.socket, ...args], {
+      // Explicit env, not the default: a child must see the environment as it is
+      // now, so a PATH changed at runtime (a stubbed `tmux` in tests, or a user's
+      // PATH fix) is honoured rather than a snapshot from process start.
+      env: process.env,
     });
     const timeoutErr = `tmux timed out after ${this.timeoutMs}ms`;
-    // kill() returns a boolean for an already-exited child in Bun, but never
-    // let a throw in a timer callback become an uncaught exception.
-    const kill = (signal?: number) => {
-      try {
-        if (signal === undefined) proc.kill();
-        else proc.kill(signal);
-      } catch {
-        /* already gone */
-      }
-    };
+    const kill = (signal?: number) => proc.kill(signal);
 
     let timedOut = false;
     const termTimer = setTimeout(() => {
@@ -167,17 +165,21 @@ export class TmuxControlPlane {
     try {
       // Drain both pipes concurrently: reading them serially can deadlock when
       // one fills while we wait on the other.
-      const drained = Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]).then(([out, err, code]) => ({ out, err, code: code ?? -1 }));
+      const drained = Promise.all([proc.drained, proc.exited]).then(([{ out, err }, code]) => ({
+        out,
+        err,
+        code,
+      }));
       // If we abandon it below, it must not surface as an unhandled rejection.
       drained.catch(() => {});
 
       const result = await Promise.race([drained, hardDeadline]);
       if (!result) return { code: -1, out: "", err: timeoutErr };
       if (timedOut) return { code: -1, out: result.out, err: timeoutErr };
+      // A binary that could not be started at all (ENOENT) has to be an error,
+      // not a silent "exit 0 with no output": its callers act on the output.
+      const failure = await proc.spawnError;
+      if (failure) throw failure;
       return result;
     } finally {
       clearTimeout(termTimer);
@@ -294,6 +296,37 @@ export class TmuxControlPlane {
   }
 
   /**
+   * Write raw bytes to the pane's pty.
+   *
+   * `send-keys -H` takes hex byte values and writes them verbatim, which is the
+   * only way to deliver an escape sequence a *program* is expecting: the named
+   * keys above are tmux's vocabulary, and this is the program's.
+   */
+  async sendBytes(target: string, bytes: Uint8Array): Promise<void> {
+    if (bytes.length === 0) return;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+    const { code, err } = await this.run(["send-keys", "-t", target, "-H", ...hex]);
+    if (code !== 0) throw new Error(`tmux send-keys -H failed: ${err.trim() || code}`);
+  }
+
+  /**
+   * Synthesize a mouse click for a program that has enabled SGR mouse reporting.
+   *
+   * The press and release are separate sequences, sent together: a program sees
+   * exactly what a real terminal would have sent it, so its own click-to-position
+   * logic runs, and we implement nothing protocol-specific on the far side.
+   * Coordinates are 1-based on the wire.
+   */
+  async sendMouseClick(target: string, col: number, row: number): Promise<void> {
+    const x = Math.max(1, Math.floor(col) + 1);
+    const y = Math.max(1, Math.floor(row) + 1);
+    // CSI < button ; x ; y M  (press, button 0 = left) ... m (release)
+    const press = `\u001b[<0;${x};${y}M`;
+    const release = `\u001b[<0;${x};${y}m`;
+    await this.sendBytes(target, new TextEncoder().encode(press + release));
+  }
+
+  /**
    * Set the window (and so its single pane) to an exact size.
    *
    * ldmux runs with `window-size manual`, which means nothing else will ever
@@ -317,18 +350,38 @@ export class TmuxControlPlane {
   }
 
   async capturePane(target: string, opts: CaptureOptions = {}): Promise<string> {
+    const withJoined = opts.joinWrapped !== false;
+    const res = await this.runCapture(target, opts, withJoined);
+    if (res.code === 0) return res.out;
+    // `-J` needs tmux 3.2+. A build without it still has to produce a screen,
+    // so fall back once rather than failing every snapshot on an old host.
+    if (withJoined) {
+      const fallback = await this.runCapture(target, opts, false);
+      if (fallback.code === 0) return fallback.out;
+    }
+    throw new Error(`tmux capture-pane failed: ${res.err.trim() || res.code}`);
+  }
+
+  private async runCapture(
+    target: string,
+    opts: CaptureOptions,
+    joinWrapped: boolean,
+  ): Promise<{ code: number; out: string; err: string }> {
     const args = ["capture-pane", "-p", "-t", target];
     if (opts.escapes !== false) args.push("-e");
     // `-a` captures the alternate screen, which is where full-screen TUIs live.
     if (opts.alternate) args.push("-a");
+    // `-J` joins rows the terminal *wrapped*, so a long logical line comes back
+    // as one line. Without it every row is a hard newline, and a client cannot
+    // tell a wrap from a real line break — which is what breaks the cursor when
+    // the user deletes back past the wrap point. (tmux 3.2+.)
+    if (joinWrapped) args.push("-J");
     // History is bounded: capturing 50k lines blocks the event loop (see docs/WEB.md).
     if (opts.history) {
       const lines = typeof opts.history === "number" ? opts.history : HISTORY_CAPTURE_LINES;
       args.push("-S", `-${Math.max(1, Math.floor(lines))}`, "-E", "-");
     }
-    const { code, out, err } = await this.run(args);
-    if (code !== 0) throw new Error(`tmux capture-pane failed: ${err.trim() || code}`);
-    return out;
+    return this.run(args);
   }
 
   async displayMessage(target: string, format: string): Promise<string> {
@@ -343,9 +396,12 @@ export class TmuxControlPlane {
       "#{pane_width},#{pane_height},#{pane_dead}," +
       // mouse_any_flag and keypad_cursor_flag are old; bracket_paste_flag is tmux
       // 3.8+ and comes back empty on older builds (treated as false).
-      "#{mouse_any_flag},#{keypad_cursor_flag},#{bracket_paste_flag}";
+      "#{mouse_any_flag},#{keypad_cursor_flag},#{bracket_paste_flag}," +
+      // SGR (1006) is the only mouse encoding we can synthesize for: the older
+      // encodings cap coordinates at 223 and are not worth carrying.
+      "#{mouse_sgr_flag}";
     const line = await this.displayMessage(target, fmt);
-    const [cursorX, cursorY, alt, mode, history, width, height, dead, mouse, appCursor, bracketedPaste] =
+    const [cursorX, cursorY, alt, mode, history, width, height, dead, mouse, appCursor, bracketedPaste, mouseSgr] =
       line.split(",");
     return {
       cursorX: Number(cursorX),
@@ -353,6 +409,7 @@ export class TmuxControlPlane {
       alternateOn: alt === "1",
       paneInMode: mode === "1",
       mouse: mouse === "1",
+      mouseSgr: mouseSgr === "1",
       appCursor: appCursor === "1",
       bracketedPaste: bracketedPaste === "1",
       historySize: Number(history),

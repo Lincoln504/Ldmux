@@ -1,9 +1,11 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { TmuxControlClient } from "../src/tmux/control-client.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
+import { spawnSync } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const SOCK = `ldmux-test-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-const tm = (...args: string[]) => Bun.spawnSync(["tmux", "-L", SOCK, ...args]);
+const tm = (...args: string[]) => spawnSync("tmux", ["-L", SOCK, ...args]);
 
 afterAll(() => {
   killTmuxServer(SOCK);
@@ -11,12 +13,12 @@ afterAll(() => {
 
 async function waitFor(predicate: () => boolean, ms = 4000): Promise<void> {
   const deadline = Date.now() + ms;
-  while (Date.now() < deadline && !predicate()) await Bun.sleep(40);
+  while (Date.now() < deadline && !predicate()) await sleep(40);
 }
 
 test("live: control mode lists, runs commands, and streams output over pipes", async () => {
-  expect(tm("new-session", "-d", "-s", "s1", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile").exitCode).toBe(0);
-  expect(tm("has-session", "-t", "s1").exitCode).toBe(0);
+  expect(tm("new-session", "-d", "-s", "s1", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile").status).toBe(0);
+  expect(tm("has-session", "-t", "s1").status).toBe(0);
 
   const output: string[] = [];
   let stderr = "";
@@ -47,14 +49,14 @@ test("live: control mode lists, runs commands, and streams output over pipes", a
 });
 
 test("live: control mode errors are reported", async () => {
-  expect(tm("new-session", "-d", "-s", "s2", "bash", "--norc", "--noprofile").exitCode).toBe(0);
+  expect(tm("new-session", "-d", "-s", "s2", "bash", "--norc", "--noprofile").status).toBe(0);
   const client = await TmuxControlClient.connect(SOCK, "s2");
   await expect(client.command("this-is-not-a-tmux-command")).rejects.toThrow();
   client.close();
 });
 
 test("live: geometry is pinned with window-size manual (no per-viewer reflow)", async () => {
-  expect(tm("new-session", "-d", "-s", "s3", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile").exitCode).toBe(0);
+  expect(tm("new-session", "-d", "-s", "s3", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile").status).toBe(0);
   tm("set-option", "-g", "window-size", "manual");
   const client = await TmuxControlClient.connect(SOCK, "s3");
   expect(await client.command("display-message -p -t s3:0 '#{window_width}x#{window_height}'")).toEqual(["100x30"]);

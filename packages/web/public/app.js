@@ -8,7 +8,7 @@
 "use strict";
 
 // The client's protocol-critical logic lives in core.js (DOM-free, unit-tested
-// under `bun test`). Fail loudly rather than at the first destructure below, so
+// under `node --test`). Fail loudly rather than at the first destructure below, so
 // a partial deploy shows a message instead of an inert app.
 if (!globalThis.LdmuxCore) {
   const overlay = document.getElementById("token-overlay");

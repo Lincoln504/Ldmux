@@ -26,7 +26,7 @@ spec. No source files were modified during investigation.
 | tmux | **3.5a** at `/usr/bin/tmux`; **control mode `-C`/`-CC` supported** | `tmux -V`, `man tmux` |
 | tmux server | none running on default socket; stale sockets exist (`dbx-drive*`, `default`, `tmux-1000/`) | `ls /tmp/tmux-1000/` |
 | Node | v25.8.2 (nvm) | `node -v` |
-| Bun | 1.3.9 | `bun -v` |
+| Node (devShell) | 26.8.2 | `node --version` |
 | Rust | 1.95.0 / cargo 1.95.0 | `cargo -V` |
 | Go | 1.24.4 | `go version` |
 | gh | authed as **Lincoln504** (keyring), git user `Lincoln504` | `gh auth status`, `git config` |

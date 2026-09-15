@@ -1,24 +1,29 @@
 {
-  description = "ldmux — tmux-native remote terminal (pi extension + daemon + CLI + mobile)";
+  description = "ldmux — tmux-native remote terminal (daemon + CLI + mobile)";
 
-  # Pinned to the same nixpkgs-unstable revision used by the dooboxes flake so
-  # the source tree and binary cache are shared on this machine.
+  # Main toolchain pin: the same nixpkgs-unstable revision used by the dooboxes
+  # flake, so the source tree and binary cache are shared on this machine.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/6cdc7fc76e8bf7fde9fa43a849fcaaa70e230dee";
+  # Second pin, for the Node runtime only. The revision above tops out at
+  # nodejs_24; Node 26 is the Current line (26.8.2) and is what the daemon and
+  # CLI run on. Pinning a second input keeps that upgrade from dragging the
+  # whole toolchain forward at the same time.
+  inputs.nixpkgs-node.url = "github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, nixpkgs-node }:
     let
       # v1 targets Linux; keep darwin in the matrix for future mobile/desktop work.
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
         inherit system;
         pkgs = import nixpkgs { inherit system; };
+        nodePkgs = import nixpkgs-node { inherit system; };
       });
 
-      # The runtime + dev toolchain. Bun is the daemon/CLI/extension runtime;
-      # tmux is the backend under test; the rest are dev conveniences.
-      toolchain = pkgs: with pkgs; [
-        bun
-        nodejs_24
+      # The runtime + dev toolchain. Node is the daemon/CLI runtime; tmux is the
+      # backend under test; the rest are dev conveniences.
+      toolchain = pkgs: nodePkgs: with pkgs; [
+        nodePkgs.nodejs_26
         tmux
         just
         jq
@@ -29,13 +34,13 @@
       ];
     in
     {
-      devShells = forAllSystems ({ pkgs, ... }: {
+      devShells = forAllSystems ({ pkgs, nodePkgs, ... }: {
         default = pkgs.mkShell {
-          packages = toolchain pkgs;
+          packages = toolchain pkgs nodePkgs;
           shellHook = ''
             echo "ldmux devshell"
-            echo "  bun   $(bun --version)"
             echo "  node  $(node --version)"
+            echo "  npm   $(npm --version)"
             echo "  tmux  $(tmux -V)"
           '';
         };
@@ -44,7 +49,7 @@
         # default shell because it is only needed to build packages/mobile and
         # the native libghostty-vt core. `nix develop .#mobile`
         mobile = pkgs.mkShell {
-          packages = toolchain pkgs ++ [ pkgs.jdk25 pkgs.gradle pkgs.zig ];
+          packages = toolchain pkgs nodePkgs ++ [ pkgs.jdk25 pkgs.gradle pkgs.zig ];
           JAVA_HOME = "${pkgs.jdk25}";
           shellHook = ''
             export ANDROID_HOME="$HOME/Android/Sdk"
@@ -65,8 +70,8 @@
       # `nix fmt`
       formatter = forAllSystems ({ pkgs, ... }: pkgs.nixpkgs-fmt);
 
-      # NOTE: reproducible builds of ldmuxd/ldmux (via bun2nix) and the
-      # KMP/Android app are added in later phases. Phase 1 only needs the
-      # devShell (bun + tmux + tests), which is fully reproducible here.
+      # NOTE: reproducible builds of ldmuxd/ldmux (via npm) and the KMP/Android
+      # app are added in later phases. Phase 1 only needs the devShell
+      # (node + tmux + tests), which is fully reproducible here.
     };
 }

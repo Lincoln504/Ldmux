@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { CLEAR_AND_HOME, screenUpdate } from "../src/tmux/screen-diff.ts";
 
 test("identical screens produce no output", () => {

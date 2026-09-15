@@ -11,6 +11,7 @@
  * the correctness backstop (ADR-0001/0004): live output is best-effort.
  */
 
+import { setTimeout as sleep } from "node:timers/promises";
 import type { PaneState } from "../../protocol/src/rpc.ts";
 import { createSanitizer, sanitizeOnce } from "./sanitize.ts";
 import { TmuxControlClient } from "./tmux/control-client.ts";
@@ -56,12 +57,22 @@ export class PaneStream {
   private lastControlAttempt = 0;
   private lastPauseReset = 0;
 
+  private readonly tmuxSocket: string;
+  readonly sessionName: string;
+  private readonly cp: TmuxControlPlane;
+  private readonly opts: { pollMs?: number; pauseAfter?: number };
+
   constructor(
-    private readonly tmuxSocket: string,
-    readonly sessionName: string,
-    private readonly cp: TmuxControlPlane,
-    private readonly opts: { pollMs?: number; pauseAfter?: number } = {},
-  ) {}
+    tmuxSocket: string,
+    sessionName: string,
+    cp: TmuxControlPlane,
+    opts: { pollMs?: number; pauseAfter?: number } = {},
+  ) {
+    this.tmuxSocket = tmuxSocket;
+    this.sessionName = sessionName;
+    this.cp = cp;
+    this.opts = opts;
+  }
 
   get subscriberCount(): number {
     return this.subs.size;
@@ -157,6 +168,19 @@ export class PaneStream {
    */
   async resize(cols: number, rows: number): Promise<void> {
     await this.cp.resizeWindow(this.sessionName, cols, rows);
+  }
+
+  /**
+   * The pane's terminal state as of now (modes, cursor, size). Used to decide
+   * whether an input gesture is even meaningful for the running program.
+   */
+  async getState(): Promise<PaneState> {
+    return this.cp.snapshotState(this.sessionName);
+  }
+
+  /** Synthesize a click for a mouse-aware program in this pane. */
+  async mouseClick(col: number, row: number): Promise<void> {
+    await this.cp.sendMouseClick(this.sessionName, col, row);
   }
 
   /**
@@ -268,7 +292,7 @@ export class PaneStream {
         return;
       }
       this.reconnectAttempts++;
-      await Bun.sleep(Math.min(200 * this.reconnectAttempts, 2000));
+      await sleep(Math.min(200 * this.reconnectAttempts, 2000));
       try {
         await this.ensureConnected();
       } catch {

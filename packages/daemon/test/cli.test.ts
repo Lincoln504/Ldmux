@@ -1,9 +1,11 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const tmuxSocket = `ldmux-clitest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-cli-"));
@@ -17,9 +19,6 @@ afterAll(() => {
 });
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
-/** A private settings file: a test must never touch the user's real pi config. */
-const piSettings = join(stateDir, "pi-settings.json");
-
 /**
  * Run the real CLI as a child process, exactly as a user would.
  *
@@ -29,32 +28,42 @@ const piSettings = join(stateDir, "pi-settings.json");
  * argv, real socket.
  */
 async function cli(...args: string[]) {
-  const proc = Bun.spawn(["bun", "run", cliPath, ...args], {
+  const proc = spawn("node", [cliPath, ...args], {
     env: {
       ...process.env,
       LDMUX_STATE_DIR: stateDir,
       LDMUX_TMUX_SOCK: tmuxSocket,
       LDMUX_SOCK: join(stateDir, "ldmuxd.sock"),
-      LDMUX_PI_SETTINGS: piSettings,
     },
-    stdout: "pipe",
-    stderr: "pipe",
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  const [out, err, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { code: code ?? -1, out, err };
+  const drained = Promise.all([readAll(proc.stdout), readAll(proc.stderr)]);
+  const exited = new Promise<number>((resolve) => {
+    proc.once("close", (code, signal) => resolve(signal ? -1 : (code ?? -1)));
+    proc.once("error", () => resolve(-1));
+  });
+  const [out, err] = await drained;
+  return { code: await exited, out, err };
 }
 
-test("ping prints the daemon's JSON answer", async () => {
+/** Collect a stream as text; a broken pipe is not a test failure. */
+function readAll(stream: NodeJS.ReadableStream | null): Promise<string> {
+  if (!stream) return Promise.resolve("");
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+    stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    stream.on("error", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  });
+}
+
+test("ping prints the daemon's JSON answer", { timeout: 20000 }, async () => {
   const res = await cli("ping");
   expect(res.code).toBe(0);
   expect(JSON.parse(res.out).pong).toBe(true);
-}, 20000);
+});
 
-test("new prints an id, list shows the session, and kill removes it", async () => {
+test("new prints an id, list shows the session, and kill removes it", { timeout: 30000 }, async () => {
   const created = await cli("new", "shell", tmpdir());
   expect(created.code).toBe(0);
   const id = created.out.trim();
@@ -70,9 +79,9 @@ test("new prints an id, list shows the session, and kill removes it", async () =
   expect(killed.code).toBe(0);
   expect(killed.out).toContain(`killed ${id}`);
   expect((await cli("list")).out).toContain("dead");
-}, 30000);
+});
 
-test("send/key/capture round-trip through the daemon", async () => {
+test("send/key/capture round-trip through the daemon", { timeout: 30000 }, async () => {
   const id = (await cli("new", "shell", tmpdir())).out.trim();
   expect((await cli("send", id, "printf 'CLI_MARKER\\n'")).code).toBe(0);
   expect((await cli("key", id, "Enter")).code).toBe(0);
@@ -80,7 +89,7 @@ test("send/key/capture round-trip through the daemon", async () => {
   for (let i = 0; i < 60; i++) {
     screen = (await cli("capture", id)).out;
     if (screen.includes("CLI_MARKER")) break;
-    await Bun.sleep(50);
+    await sleep(50);
   }
   expect(screen).toContain("CLI_MARKER");
 
@@ -90,9 +99,9 @@ test("send/key/capture round-trip through the daemon", async () => {
   expect(parsed.state.cols).toBe(120);
   expect(typeof parsed.screen).toBe("string");
   await cli("kill", id);
-}, 30000);
+});
 
-test("an unknown command exits 2 with usage, and a daemon error exits 1", async () => {
+test("an unknown command exits 2 with usage, and a daemon error exits 1", { timeout: 20000 }, async () => {
   const bad = await cli("definitely-not-a-command");
   expect(bad.code).toBe(2);
   expect(bad.err).toContain("usage: ldmux");
@@ -101,39 +110,6 @@ test("an unknown command exits 2 with usage, and a daemon error exits 1", async 
   expect(missing.code).toBe(1);
   expect(missing.err).toContain("unknown session");
 });
-
-test("install-extension edits a settings file without needing a daemon", async () => {
-  const dry = await cli("install-extension", "--dry-run");
-  expect(dry.code).toBe(0);
-  expect(dry.out).toContain("would add");
-  expect(dry.out).toContain("dry run: nothing written");
-  // A dry run must NOT claim the extension needs enabling or a restart.
-  expect(dry.out).not.toContain("not enabled");
-  expect(dry.out).not.toContain("restart pi");
-  expect(existsSync(piSettings)).toBe(false); // dry run touches nothing
-
-  const installed = await cli("install-extension");
-  expect(installed.code).toBe(0);
-  expect(installed.out).toContain("entries:");
-  // A settings-declared extension only loads on restart (it does not hot-reload).
-  expect(installed.out).toContain("restart pi");
-  const entries = JSON.parse(readFileSync(piSettings, "utf8")).extensions as string[];
-  expect(entries.length).toBe(1);
-  expect(entries[0]).toEndWith("/packages/extension");
-  expect(entries[0].startsWith("/")).toBe(true);
-
-  // A second install is a no-op (no clobbering, no second rewrite).
-  const again = await cli("link-extension");
-  expect(again.code).toBe(0);
-  expect(again.out).toContain("already present");
-  expect(JSON.parse(readFileSync(piSettings, "utf8")).extensions).toEqual(entries);
-
-  // Removal takes the entry back out.
-  const removed = await cli("install-extension", "--remove");
-  expect(removed.code).toBe(0);
-  expect(JSON.parse(readFileSync(piSettings, "utf8")).extensions).toEqual([]);
-  expect(readdirSync(stateDir).some((f) => f.includes(".bak-ldmux-"))).toBe(true);
-}, 30000);
 
 test("the daemon still answers after an unusual CLI invocation", async () => {
   // An empty capture id must not take the daemon down, and the next call works.
@@ -156,8 +132,8 @@ test("send -- types a leading-dash string instead of swallowing it as a flag", a
   while (Date.now() < end) {
     screen = (await call<{ screen: string }>(daemon.socketPath, "capture", { id })).screen;
     if (screen.includes("--dash-cli-marker")) break;
-    await Bun.sleep(60);
+    await sleep(60);
   }
   expect(screen).toContain("--dash-cli-marker");
   await cli("kill", id);
-}, 20000);
+});

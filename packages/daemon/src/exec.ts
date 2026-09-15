@@ -7,6 +7,8 @@
  * binary cannot hang the command forever.
  */
 
+import { spawnCaptured } from "./proc.ts";
+
 export interface ExecResult {
   code: number;
   out: string;
@@ -14,47 +16,41 @@ export interface ExecResult {
 }
 
 export const EXEC_TIMEOUT_MS = 10_000;
+/** How long a command may ignore SIGTERM before it is killed outright. */
+export const EXEC_KILL_GRACE_MS = 500;
 
 export async function run(
   argv: string[],
   opts: { timeoutMs?: number; env?: Record<string, string | undefined> } = {},
 ): Promise<ExecResult> {
   const timeoutMs = opts.timeoutMs ?? EXEC_TIMEOUT_MS;
-  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
-  try {
-    // Pass `env` explicitly (the caller's, else the live process env): Bun.spawn
-    // without it uses the environment snapshot from process start, so a PATH
-    // changed later is ignored. That silently ran the real binary in tests that
-    // stub one, and would ignore runtime env changes in the daemon.
-    const spawnOpts: Parameters<typeof Bun.spawn>[1] = {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: (opts.env ?? process.env) as Record<string, string>,
-    };
-    proc = Bun.spawn(argv, spawnOpts);
-  } catch (err) {
-    // Missing binary, permission denied, …
-    return { code: -1, out: "", err: (err as Error).message };
-  }
+  // The caller's environment (else the live one): a child must not see a
+  // snapshot taken at process start, or a PATH changed later is silently
+  // ignored — which once made tests run the real binary instead of the stub.
+  const proc = spawnCaptured(argv, { env: (opts.env ?? process.env) as NodeJS.ProcessEnv });
+
   let timedOut = false;
-  const timer = setTimeout(() => {
+  // Escalate, like the tmux control plane does: SIGTERM, then SIGKILL. A
+  // SIGTERM alone is not a bound — a binary that traps or ignores it would hang
+  // this call (and the daemon's event loop work behind it) forever, which is
+  // exactly what this function promises not to do.
+  const termTimer = setTimeout(() => {
     timedOut = true;
-    try {
-      proc.kill();
-    } catch {
-      /* already gone */
-    }
+    proc.kill();
   }, timeoutMs);
+  const killTimer = setTimeout(() => proc.kill(9), timeoutMs + EXEC_KILL_GRACE_MS);
+
   try {
-    const [out, err, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    const failure = await proc.spawnError;
+    if (failure) {
+      // Missing binary, permission denied, …
+      return { code: -1, out: "", err: failure.message };
+    }
+    const [{ out, err }, code] = await Promise.all([proc.drained, proc.exited]);
     if (timedOut) return { code: -1, out, err: `command timed out after ${timeoutMs}ms` };
-    return { code: code ?? -1, out, err };
+    return { code, out, err };
   } finally {
-    clearTimeout(timer);
+    clearTimeout(termTimer);
+    clearTimeout(killTimer);
   }
 }

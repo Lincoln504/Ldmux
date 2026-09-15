@@ -2,16 +2,22 @@
   "name": "ldmux",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "test": "bun test",
+    "test": "node --test \"packages/*/test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "daemon": "bun run packages/daemon/src/main.ts",
-    "cli": "bun run packages/daemon/src/cli.ts",
-    "probe": "bun run packages/daemon/src/probe.ts"
+    "daemon": "node packages/daemon/src/main.ts",
+    "cli": "node packages/daemon/src/cli.ts",
+    "probe": "node packages/daemon/src/probe.ts"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5"
+    "@types/node": "^26.5.1",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3"
   }
 }

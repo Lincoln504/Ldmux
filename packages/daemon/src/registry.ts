@@ -23,7 +23,11 @@ interface RegistryFile {
 export class Registry {
   private sessions = new Map<string, SessionRecord>();
 
-  constructor(private readonly path: string) {}
+  private readonly path: string;
+
+  constructor(path: string) {
+    this.path = path;
+  }
 
   load(): void {
     try {
@@ -50,12 +54,6 @@ export class Registry {
   byTmuxName(name: string): SessionRecord | undefined {
     if (!name) return undefined;
     for (const r of this.sessions.values()) if (r.tmuxName === name) return r;
-    return undefined;
-  }
-
-  byPiSessionId(piSessionId: string): SessionRecord | undefined {
-    if (!piSessionId) return undefined;
-    for (const r of this.sessions.values()) if (r.piSessionId === piSessionId) return r;
     return undefined;
   }
 
@@ -96,26 +94,8 @@ export class Registry {
   }
 
   /**
-   * Expire RPC-only records (no tmuxName) that have not been touched recently.
-   * Their liveness is the pi process; a crash never sends `session_end`.
-   */
-  expireRpcOnly(ttlMs: number, now = Date.now()): string[] {
-    const expired: string[] = [];
-    for (const record of this.sessions.values()) {
-      if (record.tmuxName || record.status !== "running") continue;
-      if (now - record.updatedAt > ttlMs) {
-        record.status = "dead";
-        record.exitedAt = record.exitedAt ?? now;
-        record.updatedAt = now;
-        expired.push(record.id);
-      }
-    }
-    return expired;
-  }
-
-  /**
    * Reconcile terminal-backed records against the live tmux session set.
-   * Records with no tmuxName (RPC-only pi sessions) are left untouched.
+   * Records with no tmuxName are left untouched.
    *
    * @param liveTmuxNames live session names, or `null` when the probe failed
    *   (unknown state: never mark anything dead on unknown).

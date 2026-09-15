@@ -1,4 +1,4 @@
-import { test, expect, afterEach } from "bun:test";
+import { test, expect, afterEach } from "../../testing/src/expect.ts";
 import { resolveSocketPath, resolveStateDir, resolveTmuxSocket } from "../../protocol/src/paths.ts";
 
 const KEYS = ["LDMUX_STATE_DIR", "LDMUX_SOCK", "LDMUX_TMUX_SOCK", "XDG_RUNTIME_DIR"] as const;

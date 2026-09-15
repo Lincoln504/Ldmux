@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

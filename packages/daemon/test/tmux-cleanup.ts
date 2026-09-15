@@ -13,10 +13,11 @@
  */
 import { rmSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export function killTmuxServer(socket: string): void {
   try {
-    Bun.spawnSync(["tmux", "-L", socket, "kill-server"], { stdout: "ignore", stderr: "ignore" });
+    spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
   } catch {
     /* no tmux on PATH */
   }

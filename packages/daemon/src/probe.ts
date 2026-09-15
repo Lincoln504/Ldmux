@@ -1,7 +1,7 @@
 /**
  * Manual probe: stream a tmux session's pane output via control mode.
  *
- *   nix develop --command bun run packages/daemon/src/probe.ts <socket> <session>
+ *   nix develop --command node packages/daemon/src/probe.ts <socket> <session>
  *
  * Ctrl-C to stop. Proves the ADR-0001 transport end to end.
  */
@@ -10,7 +10,7 @@ import { TmuxControlClient } from "./tmux/control-client.ts";
 
 const [socket = "default", session] = process.argv.slice(2);
 if (!session) {
-  console.error("usage: bun run packages/daemon/src/probe.ts <socket> <session>");
+  console.error("usage: node packages/daemon/src/probe.ts <socket> <session>");
   process.exit(2);
 }
 

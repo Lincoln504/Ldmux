@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { run, EXEC_TIMEOUT_MS } from "../src/exec.ts";
 
 test("captures stdout, stderr and a zero exit code", async () => {

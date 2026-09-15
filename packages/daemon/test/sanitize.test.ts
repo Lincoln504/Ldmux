@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import { createSanitizer, sanitizeOnce } from "../src/sanitize.ts";
 
 test("passes plain text and SGR through", () => {

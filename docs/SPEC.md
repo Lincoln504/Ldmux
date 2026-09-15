@@ -1,5 +1,20 @@
 # ldmux — Software Specification
 
+> **Status note (2026-09-14) — two decisions post-date this document.**
+>
+> - **Runtime: Node 26, not Bun.** The daemon/CLI/protocol run on Node 26 with
+>   TypeScript stripped by Node itself (no build step, erasable syntax only).
+>   `ws` is the only production dependency. See
+>   [ADR-0009](adr/0009-node-runtime-and-no-pi-extension.md).
+> - **The pi extension has been removed.** ldmux is not a pi plugin; the
+>   `packages/extension` package, the `install-extension` CLI command, and the
+>   `register`/`session_end` RPC methods are gone, along with the RPC-only session
+>   expiry that existed to serve them. Sessions are created with `new`/`adopt`.
+>
+> The rest of this document is still the design of record for the transport,
+> geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime" and
+> any extension reference as historical.
+
 **Version:** 0.3 (design; transport decision finalized)
 **Date:** 2026-09-13
 **Author:** Lincoln Deen (with the pi coding agent)
@@ -702,17 +717,19 @@ ldmux/
 ├─ README.md · AGENTS.md · Justfile · flake.nix · package.json · tsconfig.json
 ├─ docs/
 │  ├─ SPEC.md · INVESTIGATION.md · TRANSPORT.md · REMOTE.md · WEB.md ·
-│  │  PI-EXTENSIONS.md
+│  │  NATIVE-TERMINAL.md · PREDICTIVE-ECHO.md
 │  └─ adr/            # 0001 transport, 0002 geometry, 0003 lifecycle,
-│                     # 0004 scroll, 0005 remote/tls, 0006 divergences
+│                     # 0004 scroll, 0005 remote/tls, 0006 divergences,
+│                     # 0007 native terminal engine, 0008 mobile UI modes,
+│                     # 0009 Node runtime / extension removed
 ├─ packages/
 │  ├─ protocol/       # frames, messages, rpc, socket client, paths
 │  ├─ daemon/         # ldmuxd + cli + probe + tmux/, stream.ts, remote.ts
-│  ├─ extension/      # the pi extension
+│  ├─ testing/        # the test/expect vocabulary over node:test
 │  ├─ web/public/     # buildless web client (core.js + app.js + vendor/)
-│  └─ mobile/         # KMP + Compose Multiplatform Android shell (WebView
-│                     # hosts web/public; landscape; swipe pager)
-└─ (the mobile app is native KMP/Compose; the PWA is its renderer payload)
+│  └─ mobile/         # native KMP + Compose Multiplatform client (Android
+│                     # first), with the libghostty-vt core behind JNI
+└─ (the web client is served by the daemon; the mobile app is native)
 ```
 
 Binaries: `ldmux` (CLI), `ldmuxd` (daemon).

@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { LdmuxDaemon } from "../src/daemon.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import { decodeFrames, FrameType, type Frame } from "../../protocol/src/frames.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const tmuxSocket = `ldmux-remotetest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-remote-"));
@@ -25,7 +26,6 @@ interface RemoteInfo {
   token: string;
 }
 
-const sleep = (ms: number) => Bun.sleep(ms);
 async function waitFor(pred: () => boolean, ms = 6000): Promise<boolean> {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -37,6 +37,9 @@ async function waitFor(pred: () => boolean, ms = 6000): Promise<boolean> {
 
 async function connect(info: RemoteInfo, token: string) {
   const ws = new WebSocket(`ws://${info.hostname}:${info.port}${info.path}?token=${token}`);
+  // Node's WebSocket defaults binary payloads to a Blob, which cannot be read
+  // as bytes; ldmux frames are binary, so ask for the ArrayBuffer.
+  ws.binaryType = "arraybuffer";
   const text: any[] = [];
   const output: string[] = [];
   let tail: Uint8Array = new Uint8Array(0);
@@ -64,7 +67,7 @@ async function connect(info: RemoteInfo, token: string) {
   return { ws, text, output };
 }
 
-test("remote endpoint rejects a missing/incorrect token", async () => {
+test("remote endpoint rejects a missing/incorrect token", { timeout: 20000 }, async () => {
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const res = await fetch(`http://${info.hostname}:${info.port}/ws`);
   expect(res.status).toBe(401);
@@ -218,9 +221,9 @@ test("scrollback request returns paged history as a snapshot", async () => {
   const caps = text.find((m) => m.type === "caps");
   expect(caps.capabilities.scrollback).toBe(true);
   ws.close();
-}, 20000);
+});
 
-test("session list carries an activity clock and a cwd-derived title", async () => {
+test("session list carries an activity clock and a cwd-derived title", { timeout: 20000 }, async () => {
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const cwd = mkdtempSync(join(tmpdir(), "ldmux-titled-"));
   const { session } = await call<{ session: { id: string; tmuxName: string } }>(daemon.socketPath, "new", {
@@ -236,9 +239,9 @@ test("session list carries an activity clock and a cwd-derived title", async () 
   expect(info2.tmuxName).toBe(session.tmuxName);
   ws.close();
   rmSync(cwd, { recursive: true, force: true });
-}, 20000);
+});
 
-test("protocol errors are reported per-message without dropping the connection", async () => {
+test("protocol errors are reported per-message without dropping the connection", { timeout: 20000 }, async () => {
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
     kind: "shell",
@@ -253,7 +256,7 @@ test("protocol errors are reported per-message without dropping the connection",
   expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "bad_message"))).toBe(true);
 
   // Oversized input is refused with a typed error (not a silent truncation and
-  // not a socket kill from Bun's frame limit).
+  // not a socket kill from the transport's frame limit).
   ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
   expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
   ws.send(JSON.stringify({ type: "input", data: "x".repeat(20_000) }));
@@ -269,9 +272,9 @@ test("protocol errors are reported per-message without dropping the connection",
   ws.send(JSON.stringify({ type: "ping", id: 99 }));
   expect(await waitFor(() => text.some((m) => m.type === "pong" && m.id === 99))).toBe(true);
   ws.close();
-}, 20000);
+});
 
-test("key names that would be read as tmux flags are dropped, not forwarded", async () => {
+test("key names that would be read as tmux flags are dropped, not forwarded", { timeout: 20000 }, async () => {
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
     kind: "shell",
@@ -288,9 +291,9 @@ test("key names that would be read as tmux flags are dropped, not forwarded", as
   // target, literal mode) and the command would never run.
   expect(await waitFor(() => output.join("").includes("KEYFILTER_OK"))).toBe(true);
   ws.close();
-}, 20000);
+});
 
-test("a malformed binary frame from a client does not break the connection", async () => {
+test("a malformed binary frame from a client does not break the connection", { timeout: 20000 }, async () => {
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const { ws, text } = await connect(info, info.token);
   ws.send(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]));
@@ -298,7 +301,7 @@ test("a malformed binary frame from a client does not break the connection", asy
   ws.send(JSON.stringify({ type: "ping", id: 5 }));
   expect(await waitFor(() => text.some((m) => m.type === "pong" && m.id === 5))).toBe(true);
   ws.close();
-}, 20000);
+});
 
 test("rpc snapshot and history capture agree with the live pane", async () => {
   const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
@@ -419,5 +422,51 @@ test("scrollback with lines 0 re-sends the visible screen, not 5000 lines", asyn
   // taller and would carry the history flag.
   expect(last.rows).toBe(10);
   expect(last.history).toBeUndefined();
+  ws.close();
+});
+
+test("a wrapped line is captured joined, so the client can re-wrap it", async () => {
+  // Why this matters: without -J every screen row is a hard newline, so a client
+  // cannot tell "the terminal wrapped here" from "the user pressed Enter". The
+  // visible symptom is a cursor that will not move back up when deleting past
+  // the wrap point.
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text, output } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id, cols: 40, rows: 24 }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+
+  const long = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD";
+  ws.send(JSON.stringify({ type: "input", data: `echo ${long}` }));
+  ws.send(JSON.stringify({ type: "key", keys: ["Enter"] }));
+  expect(await waitFor(() => output.join("").includes("DDDDDDDDDD"))).toBe(true);
+  await new Promise((r) => setTimeout(r, 400));
+
+  const before = text.filter((m) => m.type === "snapshot").length;
+  ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id, lines: 0 }));
+  expect(await waitFor(() => text.filter((m) => m.type === "snapshot").length > before)).toBe(true);
+  const snap = text.filter((m) => m.type === "snapshot").at(-1) as any;
+  // The logical line must come back whole: 60 columns of text on a 40-column
+  // pane, with no newline in the middle of it.
+  expect(snap.screen as string).toContain(long);
+  ws.close();
+});
+
+test("a click on a pane that never enabled mouse reporting is refused", async () => {
+  // Sending an SGR sequence to a program that did not ask for one would just
+  // print garbage in the session.
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  const { ws, text } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+  ws.send(JSON.stringify({ type: "mouseclick", col: 3, row: 1 }));
+  expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "no_mouse"))).toBe(true);
   ws.close();
 });

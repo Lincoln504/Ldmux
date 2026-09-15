@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 import {
   FrameType, HEADER_SIZE, MAX_FRAME_PAYLOAD, encodeFrame, encodeJsonFrame, decodeFrames, decodeJson,
 } from "../src/frames.ts";

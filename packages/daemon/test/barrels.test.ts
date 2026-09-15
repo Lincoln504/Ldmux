@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "../../testing/src/expect.ts";
 
 // The package entry points exist for consumers that want the whole surface in
 // one import (each package declares them in package.json). Nothing in the repo

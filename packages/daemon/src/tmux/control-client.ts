@@ -7,6 +7,8 @@
  * shell-quoted when commands are passed as arrays.
  */
 
+import { spawn } from "node:child_process";
+import { killTree } from "../proc.ts";
 import { ControlParser } from "./control-parser.ts";
 
 export interface TmuxControlClientOptions {
@@ -74,10 +76,13 @@ export function matchWaiter(waiterSeqs: readonly number[], seq: number, attached
 export class ContinueCoalescer {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(
-    private readonly send: (pane: string) => void,
-    private readonly delayMs = PAUSE_CONTINUE_MIN_MS,
-  ) {}
+  private readonly send: (pane: string) => void;
+  private readonly delayMs: number;
+
+  constructor(send: (pane: string) => void, delayMs = PAUSE_CONTINUE_MIN_MS) {
+    this.send = send;
+    this.delayMs = delayMs;
+  }
 
   request(pane: string): void {
     if (this.pending.has(pane)) return;
@@ -98,6 +103,82 @@ export class ContinueCoalescer {
   }
 }
 
+export interface ControlProc {
+  stdout: AsyncIterable<Uint8Array>;
+  stderr: AsyncIterable<Uint8Array>;
+  stdin: { write(data: string): Promise<void>; end(): void };
+  exited: Promise<number>;
+  kill(): void;
+}
+
+/**
+ * The tmux control-mode child, adapted to the small surface the client needs.
+ *
+ * A pipe write that reports backpressure is awaited rather than dropped: the
+ * control stream is a command/response protocol, so losing a command silently
+ * would desynchronise the response FIFO.
+ */
+function spawnTmuxControl(socket: string, session: string): ControlProc {
+  const child = spawn("tmux", ["-L", socket, "-C", "attach", "-t", session], {
+    stdio: ["pipe", "pipe", "pipe"],
+    // Its own process group: closing a control client must not leave tmux's
+    // helpers behind holding our pipes open.
+    detached: true,
+  });
+  const exited = new Promise<number>((resolve) => {
+    child.once("error", () => resolve(-1));
+    child.once("close", (code, signal) => resolve(signal ? -1 : (code ?? -1)));
+  });
+  return {
+    stdout: child.stdout!,
+    stderr: child.stderr!,
+    stdin: {
+      write: (data: string) =>
+        new Promise<void>((resolve, reject) => {
+          const sink = child.stdin!;
+          if (!sink.writable) {
+            reject(new Error("control stream is closed"));
+            return;
+          }
+          try {
+            if (sink.write(data)) {
+              resolve();
+              return;
+            }
+          } catch (err) {
+            reject(err as Error);
+            return;
+          }
+          // The kernel buffer is full: wait for it to drain, then the write has
+          // been handed off. `error` can fire instead (EPIPE on a dead tmux).
+          const onDrain = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = (err: Error) => {
+            cleanup();
+            reject(err);
+          };
+          const cleanup = () => {
+            sink.off("drain", onDrain);
+            sink.off("error", onError);
+          };
+          sink.once("drain", onDrain);
+          sink.once("error", onError);
+        }),
+      end: () => {
+        try {
+          child.stdin?.end();
+        } catch {
+          /* already closed */
+        }
+      },
+    },
+    exited,
+    kill: () => killTree(child),
+  };
+}
+
 export class TmuxControlClient {
   private readonly parser: ControlParser;
   private readonly waiters: Waiter[] = [];
@@ -115,10 +196,12 @@ export class TmuxControlClient {
   private closed = false;
   readonly exited: Promise<number>;
 
-  private constructor(
-    private readonly proc: any,
-    private readonly opts: TmuxControlClientOptions,
-  ) {
+  private readonly proc: ControlProc;
+  private readonly opts: TmuxControlClientOptions;
+
+  private constructor(proc: ControlProc, opts: TmuxControlClientOptions) {
+    this.proc = proc;
+    this.opts = opts;
     this.parser = new ControlParser({
       onOutput: opts.onOutput,
       onNotification: (line) => this.handleNotification(line),
@@ -145,11 +228,7 @@ export class TmuxControlClient {
     session: string,
     opts: TmuxControlClientOptions = {},
   ): Promise<TmuxControlClient> {
-    const proc = Bun.spawn(["tmux", "-L", socket, "-C", "attach", "-t", session], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const proc = spawnTmuxControl(socket, session);
     const client = new TmuxControlClient(proc, opts);
     // tmux emits an unsolicited empty `%begin/%end` block on attach; wait for
     // `%session-changed` (which follows it) before issuing commands so the
@@ -260,7 +339,6 @@ export class TmuxControlClient {
     const sink = this.proc.stdin;
     try {
       await sink.write(line + "\n");
-      await sink.flush();
     } catch (err) {
       // The write failed (dead tmux, EPIPE): drop the waiter we just registered
       // and observe the promise, so its rejection cannot surface unhandled when

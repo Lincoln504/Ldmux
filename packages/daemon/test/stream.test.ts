@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { LdmuxDaemon } from "../src/daemon.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 import { PaneStream } from "../src/stream.ts";
 import { TmuxControlPlane } from "../src/tmux/control-plane.ts";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const tmuxSocket = `ldmux-streamtest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-stream-"));
@@ -20,7 +21,6 @@ afterAll(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
-const sleep = (ms: number) => Bun.sleep(ms);
 
 async function waitFor(pred: () => boolean | Promise<boolean>, ms = 6000): Promise<boolean> {
   const end = Date.now() + ms;
@@ -31,7 +31,7 @@ async function waitFor(pred: () => boolean | Promise<boolean>, ms = 6000): Promi
   return false;
 }
 
-test("PaneStream fans out live output and snapshots the screen", async () => {
+test("PaneStream fans out live output and snapshots the screen", { timeout: 20000 }, async () => {
   const name = "ldmux-stream-a";
   await cp.ensureServer();
   await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
@@ -107,9 +107,9 @@ test("polling fallback keeps the pane visible when control mode is gone", async 
   await stream.sendKey(["Enter"]);
   expect(await waitFor(() => chunks.join("").includes("POLL_MARKER"))).toBe(true);
   stream.close();
-}, 20000);
+});
 
-test("snapshotWithHistory returns more lines than the visible screen", async () => {
+test("snapshotWithHistory returns more lines than the visible screen", { timeout: 30000 }, async () => {
   const name = "ldmux-stream-hist";
   await cp.ensureServer();
   await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 40, rows: 6 });
@@ -154,7 +154,7 @@ test("snapshot state reflects the pane's terminal modes, not hardcoded false", a
     for (let i = 0; i < 60; i++) {
       const snap = await stream.snapshot();
       if (snap.state.appCursor && snap.state.mouse) return snap;
-      await Bun.sleep(50);
+      await sleep(50);
     }
     return await stream.snapshot();
   })();
@@ -168,7 +168,7 @@ test("snapshot state reflects the pane's terminal modes, not hardcoded false", a
     for (let i = 0; i < 60; i++) {
       const snap = await stream.snapshot();
       if (!snap.state.appCursor && !snap.state.mouse) return snap;
-      await Bun.sleep(50);
+      await sleep(50);
     }
     return await stream.snapshot();
   })();
@@ -180,9 +180,9 @@ test("snapshot state reflects the pane's terminal modes, not hardcoded false", a
     expect(typeof off.state[key]).toBe("boolean");
   }
   stream.close();
-}, 30000);
+});
 
-test("a real tmux %pause resyncs subscribers and then resumes the pane", async () => {
+test("a real tmux %pause resyncs subscribers and then resumes the pane", { timeout: 30000 }, async () => {
   // pause-after=0 makes tmux pause the pane as soon as this client lags at all,
   // so the whole path can be exercised for real: tmux pauses -> the client
   // reports it -> the stream tells subscribers to resync -> the pane is resumed.
@@ -206,4 +206,4 @@ test("a real tmux %pause resyncs subscribers and then resumes the pane", async (
   expect(await waitFor(() => chunks.join("").includes("PAUSE_DONE"), 15000)).toBe(true);
   expect(stream.mode).toBe("control");
   stream.close();
-}, 30000);
+});
