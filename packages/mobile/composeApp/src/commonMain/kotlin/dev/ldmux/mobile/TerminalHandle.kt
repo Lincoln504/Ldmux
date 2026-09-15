@@ -20,6 +20,12 @@ interface TerminalHandle {
     /** Scroll the emulator's viewport by [rows] (negative is up). */
     fun scrollBy(rows: Int) {}
 
+    /**
+     * The user tapped a cell. Whether that moves the shell's cursor, clicks for a
+     * mouse-aware program, or does nothing, is decided by the pane's state.
+     */
+    fun tapCell(col: Int, row: Int) {}
+
     /** Start dictation. The transcript is typed into the pane, keyboard or not. */
     fun startVoice() {}
 }

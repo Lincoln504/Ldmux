@@ -251,7 +251,7 @@ private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TinyBtn("⤢") { onLandscape() }
+        TinyBtn("⟳") { onLandscape() }
         TinyBtn("Esc") { handle?.sendKey("Escape") }
         TinyBtn("Tab") { handle?.sendKey("Tab") }
         TinyBtn("◀") { handle?.sendKey("Left") }
@@ -262,7 +262,8 @@ private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
         TinyBtn("⤓") { handle?.jumpToBottom() }
         Spacer(Modifier.weight(1f))
         TinyBtn("C-c") { handle?.sendKey("C-c") }
-        TinyBtn("🎤") { handle?.startVoice() }
+        // No microphone here: the keyboard is always up in portrait, and it has
+        // its own mic. Two microphones is one too many.
     }
 }
 

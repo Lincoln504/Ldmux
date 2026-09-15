@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlin.math.abs
 
 /**
  * Owns one session's terminal: the libghostty engine plus the attach stream.
@@ -206,6 +207,57 @@ class TerminalController(
         _frame.value = engine.render()
     }
 
+    /**
+     * Move the remote cursor to a tapped cell.
+     *
+     * There is no "set cursor to (x,y)" in a terminal, so this is built out of
+     * what a terminal actually has. Two regimes, chosen from the pane's own
+     * state rather than guessed:
+     *
+     * - **A program that asked for the mouse** (vim, less, htop, a TUI) gets a
+     *   real SGR click, and its own click-to-position logic runs. Exact, and one
+     *   round trip.
+     * - **A plain shell** gets relative motion, because readline has no absolute
+     *   position to set. The screen is treated as a continuous strip so a tap on
+     *   a wrapped segment still lands where it looks like it should, and
+     *   readline's own clamping at the line ends is what makes a tap past the
+     *   start snap to the beginning.
+     */
+    override fun tapCell(col: Int, row: Int) {
+        val f = _frame.value ?: return
+        // Not while reading history (there is no live cursor up there), and never
+        // at a password prompt.
+        if (!f.viewportActive || f.passwordInput) return
+        if (col < 0 || row < 0 || col >= f.cols || row >= f.rows) return
+
+        if (modes.mouse && modes.mouseSgr) {
+            attach.mouseClick(col, row)
+            return
+        }
+
+        if (col == f.cursorX && row == f.cursorY) return
+
+        // Tapping well above the input line means "the beginning". One Home is
+        // both exact and cheap, where walking there would be dozens of keys and
+        // dozens of readline redraws — on a metered link that matters.
+        if (row < f.cursorY - 1) {
+            attach.keys(listOf("Home"))
+            return
+        }
+
+        val delta = (row - f.cursorY) * f.cols + (col - f.cursorX)
+        if (delta == 0) return
+        val key = if (delta < 0) "Left" else "Right"
+        var remaining = minOf(abs(delta), MAX_TAP_KEYS)
+        // One message per 32 keys (the daemon's cap), so a long move is a couple
+        // of frames rather than one per character.
+        while (remaining > 0) {
+            val batch = minOf(remaining, 32)
+            attach.keys(List(batch) { key })
+            remaining -= batch
+        }
+    }
+
     override fun startVoice() {
         onStartVoice?.invoke()
     }
@@ -233,6 +285,9 @@ class TerminalController(
         /** How long an unconfirmed prediction may stay on screen before we
          *  conclude the pane is not echoing. Roughly 2-3 mobile round trips. */
         const val STALE_MS = 900L
+        /** Upper bound on the keys one tap may generate, so a stray tap at the
+         *  edge of a wide pane cannot become a key storm. */
+        const val MAX_TAP_KEYS = 120
         /** ~60 Hz. The ceiling; phase 3 in docs/PREDICTIVE-ECHO.md lowers it to
          *  max(2 Hz, 1/2 RTT) when the link is slow. */
         const val FRAME_MS = 16L

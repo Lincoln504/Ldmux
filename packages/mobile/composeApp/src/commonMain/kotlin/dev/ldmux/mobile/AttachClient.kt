@@ -25,6 +25,8 @@ data class TerminalModes(
     val bracketedPaste: Boolean = false,
     /** A full-screen application is running; keys rarely echo there. */
     val alternateOn: Boolean = false,
+    /** The program negotiated SGR mouse reporting, so a click can be synthesized. */
+    val mouseSgr: Boolean = false,
 )
 
 /**
@@ -102,6 +104,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     appCursor = bool(root, "appCursor"),
                     bracketedPaste = bool(root, "bracketedPaste"),
                     alternateOn = bool(root, "alternateOn"),
+                    mouseSgr = bool(root, "mouseSgr"),
                 )
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }
@@ -158,6 +161,21 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     fun keys(keys: List<String>) {
         val array = keys.joinToString(",") { quote(it) }
         sendControl("""{"type":"key","keys":[$array]}""")
+    }
+
+    /**
+     * Deliver a tap to a mouse-aware program. Only valid when the pane reported
+     * SGR mouse reporting; the server synthesizes the click so the byte sequence
+     * never has to live in the client.
+     */
+    fun mouseClick(col: Int, row: Int) {
+        sendControl(
+            buildJsonObject {
+                put("type", "mouseclick")
+                put("col", col)
+                put("row", row)
+            }.toString(),
+        )
     }
 
     fun scrollback(lines: Int) {

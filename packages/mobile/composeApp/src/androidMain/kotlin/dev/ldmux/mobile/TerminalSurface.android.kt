@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,6 +20,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,6 +32,11 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -84,6 +91,13 @@ actual object AppPrefs {
 private val TermBg = Color(0xFF000000)
 
 /**
+ * A zero-width character kept in the hidden input field so the IME always has
+ * something to delete. See the field's comment: without it, backspace is
+ * unreliable because the IME and the app disagree about the field's contents.
+ */
+private const val SENTINEL = "\u200b"
+
+/**
  * The native terminal surface: a Compose Canvas painting the libghostty-vt cell
  * grid.
  *
@@ -114,6 +128,19 @@ actual fun rememberTerminalSurface(
     val focusRequester = remember { FocusRequester() }
     var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    /** Where the user last tapped, so the snap is visible before the server answers. */
+    var tapAt by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    // The tap detector must read the *current* frame without being restarted by
+    // it (restarting would cancel an in-flight gesture).
+    val currentFrame by rememberUpdatedState(frame)
+    val currentViewport by rememberUpdatedState(viewport)
+    LaunchedEffect(tapAt) {
+        if (tapAt != null) {
+            delay(600)
+            tapAt = null
+        }
+    }
 
     val metrics = painter.metrics
     // The pane follows the viewport, always. In portrait the keyboard is part of
@@ -163,11 +190,49 @@ actual fun rememberTerminalSurface(
 
     val termBg = frame?.defaultBg?.let { Color(0xFF000000.toInt() or (it and 0xFFFFFF)) } ?: TermBg
 
-    Box(modifier.background(termBg)) {
+    Box(modifier.background(termBg).onPreviewKeyEvent { event ->
+        // A hardware keyboard (and some IMEs' "send key" buttons) produce key
+        // events rather than committed text. Anything that is a *terminal key*
+        // must bypass the text field entirely, so it can never be mangled by the
+        // IME — and Backspace here is the reliable path that the sentinel above
+        // is the fallback for.
+        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        val key = when (event.key) {
+            Key.Backspace -> "BSpace"
+            Key.Enter, Key.NumPadEnter -> "Enter"
+            Key.Tab -> "Tab"
+            Key.Escape -> "Escape"
+            Key.DirectionUp -> "Up"
+            Key.DirectionDown -> "Down"
+            Key.DirectionLeft -> "Left"
+            Key.DirectionRight -> "Right"
+            Key.MoveHome -> "Home"
+            Key.MoveEnd -> "End"
+            Key.PageUp -> "PageUp"
+            Key.PageDown -> "PageDown"
+            Key.Delete -> "DC"
+            else -> null
+        }
+        if (key == null) return@onPreviewKeyEvent false
+        controller.sendKey(key)
+        true
+    }) {
         Canvas(
             Modifier
                 .fillMaxSize()
                 .onSizeChanged { viewport = it }
+                .pointerInput(Unit) {
+                    // A tap places the cursor. The hit-test is the exact inverse of
+                    // the draw transform below; keeping them adjacent is the point
+                    // (the recorded failure mode of scale-to-fit is pointer
+                    // coordinates that forgot to divide by the scale).
+                    detectTapGestures { pos ->
+                        val f = currentFrame ?: return@detectTapGestures
+                        val cell = cellAt(pos, currentViewport, f, painter.metrics) ?: return@detectTapGestures
+                        tapAt = cell
+                        controller.tapCell(cell.first, cell.second)
+                    }
+                }
                 .pointerInput(Unit) {
                     var carry = 0f
                     val rowPx = painter.metrics.height
@@ -207,51 +272,70 @@ actual fun rememberTerminalSurface(
                 painter.paint(this, f)
             }
             drawScrollbar(f, scale, dx, size.width, size.height)
+            tapAt?.let { (col, row) ->
+                val m2 = painter.metrics
+                drawRect(
+                    color = Accent,
+                    topLeft = androidx.compose.ui.geometry.Offset(
+                        dx + col * m2.width * scale,
+                        dy + row * m2.height * scale,
+                    ),
+                    size = androidx.compose.ui.geometry.Size(m2.width * scale, m2.height * scale),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f * scale),
+                )
+            }
         }
 
         // Typing is opt-in, and the field is deliberately tiny: it only has to
         // be focusable for the IME, and covering the grid with it would eat the
         // scroll gesture.
+        //
+        // The field's value is a **sentinel**: a single zero-width character,
+        // restored after every change. That is what makes deletion reliable.
+        // With an accumulating buffer the IME's own idea of the text (composing
+        // regions, autocorrect, suggestions) drifts from ours, and a backspace
+        // can arrive as a change we cannot interpret — which is exactly the
+        // "delete randomly stops working" bug. With a sentinel there is always
+        // one character to delete, so the IME always reports the deletion.
         if (typing) {
-            var field by remember { mutableStateOf("") }
+            var field by remember { mutableStateOf(SENTINEL) }
+            val sentinelLen = SENTINEL.length
             BasicTextField(
                 value = field,
                 onValueChange = { next ->
-                    val old = field
-                    when {
-                        next.length > old.length -> {
-                            val added = next.substring(old.length)
-                            val pending = StringBuilder()
-                            for (ch in added) {
-                                when (ch) {
-                                    '\n', '\r' -> {
-                                        if (pending.isNotEmpty()) {
-                                            controller.sendText(pending.toString())
-                                            pending.clear()
-                                        }
-                                        controller.sendKey("Enter")
-                                    }
-                                    // Tab is a named key, not text: it must reach
-                                    // tmux as Tab so the shell's completion and
-                                    // tmux's own bindings see a real TAB, and so
-                                    // it can never be a prediction candidate.
-                                    '\t' -> {
-                                        if (pending.isNotEmpty()) {
-                                            controller.sendText(pending.toString())
-                                            pending.clear()
-                                        }
-                                        controller.sendKey("Tab")
-                                    }
-                                    else -> pending.append(ch)
+                    // Reset first: no state may accumulate across changes.
+                    field = SENTINEL
+                    val content = next.replace(SENTINEL, "")
+                    if (content.isEmpty()) {
+                        // The only thing removed was the sentinel: a backspace
+                        // with nothing left on our side of the line.
+                        if (next.length < sentinelLen) controller.sendKey("BSpace")
+                        return@BasicTextField
+                    }
+                    val pending = StringBuilder()
+                    for (ch in content) {
+                        when (ch) {
+                            '\n', '\r' -> {
+                                if (pending.isNotEmpty()) {
+                                    controller.sendText(pending.toString())
+                                    pending.clear()
                                 }
+                                controller.sendKey("Enter")
                             }
-                            if (pending.isNotEmpty()) controller.sendText(pending.toString())
-                        }
-                        next.length < old.length -> repeat(old.length - next.length) {
-                            controller.sendKey("BSpace")
+                            // Tab is a named key, not text: it must reach tmux as
+                            // Tab so completion and tmux's own bindings see a
+                            // real TAB, and so it can never be predicted.
+                            '\t' -> {
+                                if (pending.isNotEmpty()) {
+                                    controller.sendText(pending.toString())
+                                    pending.clear()
+                                }
+                                controller.sendKey("Tab")
+                            }
+                            else -> pending.append(ch)
                         }
                     }
-                    field = next
+                    if (pending.isNotEmpty()) controller.sendText(pending.toString())
                 },
                 modifier = Modifier
                     .size(1.dp)
@@ -268,6 +352,29 @@ actual fun rememberTerminalSurface(
         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
     }
     return controller
+}
+
+/**
+ * The inverse of the draw transform: a touch point to a terminal cell, or null
+ * when the point is in the letterbox beside the grid.
+ */
+private fun cellAt(
+    pos: androidx.compose.ui.geometry.Offset,
+    viewport: IntSize,
+    f: TerminalFrame.Frame,
+    m: dev.ldmux.mobile.term.CellMetrics,
+): Pair<Int, Int>? {
+    if (viewport.width <= 0 || viewport.height <= 0) return null
+    val gridW = m.width * f.cols
+    val gridH = m.height * f.rows
+    if (gridW <= 0f || gridH <= 0f) return null
+    val scale = minOf(viewport.width / gridW, viewport.height / gridH)
+    val dx = (viewport.width - gridW * scale) / 2f
+    val dy = (viewport.height - gridH * scale) / 2f
+    val col = floor((pos.x - dx) / (m.width * scale)).toInt()
+    val row = floor((pos.y - dy) / (m.height * scale)).toInt()
+    if (col < 0 || row < 0 || col >= f.cols || row >= f.rows) return null
+    return col to row
 }
 
 /**
