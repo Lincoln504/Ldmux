@@ -16,6 +16,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -45,6 +48,63 @@ data class Session(
 }
 
 /**
+ * One desktop workspace, as the daemon's window manager reports it.
+ *
+ * `windowCount` is what makes this useful in the launcher: a workspace with five
+ * windows on it is a place with things in it, not just a number.
+ */
+data class DesktopWorkspace(
+    val name: String,
+    val index: Int?,
+    val focused: Boolean,
+    val visible: Boolean,
+    val windowCount: Int,
+)
+
+/** One window on the desktop. */
+data class DesktopWindow(
+    val id: String,
+    val appClass: String,
+    val title: String,
+    val workspace: String,
+    val pid: Int?,
+)
+
+/**
+ * A pi agent session running on the host.
+ *
+ * [label] is the directory's basename and is what the launcher shows, because
+ * "which project is that agent on" is the question a person is actually asking.
+ *
+ * [sessionId] is resolved from the transcript and is a best effort — pi does not
+ * report which session a process is writing to (see the daemon's
+ * `assignTranscripts`). [pid] and [cwd] are facts.
+ */
+data class DesktopPiSession(
+    val pid: Int,
+    val cwd: String,
+    val sessionId: String?,
+    val startedAt: String?,
+    val windowId: String?,
+    val workspace: String?,
+    val label: String,
+)
+
+/** Everything the launcher shows before a terminal. */
+data class DesktopInventory(
+    val wm: String,
+    val workspaces: List<DesktopWorkspace>,
+    val windows: List<DesktopWindow>,
+    val piSessions: List<DesktopPiSession>,
+    /** Set when windows could not be listed; the pi sessions are still real. */
+    val detail: String? = null,
+) {
+    /** Is there anything to show at all? */
+    val isEmpty: Boolean
+        get() = workspaces.isEmpty() && windows.isEmpty() && piSessions.isEmpty()
+}
+
+/**
  * A minimal daemon client for the native shell: the session *list* (for the
  * pager) and the ability to open and end sessions. The terminal itself is
  * attached over the same `/ws` endpoint by [AttachClient]; this keeps its own
@@ -54,6 +114,27 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private val http = HttpClient { install(WebSockets) }
     private val _sessions = MutableStateFlow<List<Session>>(emptyList())
     val sessions: StateFlow<List<Session>> = _sessions
+
+    private val _desktop = MutableStateFlow<DesktopInventory?>(null)
+    val desktop: StateFlow<DesktopInventory?> = _desktop
+
+    /**
+     * Bumped for every inventory that arrives.
+     *
+     * The value itself is not enough to know a refresh finished: two readings a
+     * second apart are usually identical, and a screen watching the value would
+     * never see the second one and would sit on its spinner forever.
+     */
+    private val _desktopTick = MutableStateFlow(0)
+    val desktopTick: StateFlow<Int> = _desktopTick
+
+    /**
+     * Ask the host what is on its desktop.
+     *
+     * On demand, not polled: answering spawns the window manager's own tools, and
+     * nothing about the answer is worth waking the radio for on a timer.
+     */
+    fun requestDesktop() = sendControl("""{"type":"desktop"}""")
 
     private var job: Job? = null
     private var scope: CoroutineScope? = null
@@ -128,6 +209,10 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private fun onMessage(text: String) {
         val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         when (root["type"]?.jsonPrimitive?.content) {
+            "desktop" -> {
+                _desktop.value = parseDesktop(root["inventory"]?.jsonObject)
+                _desktopTick.value += 1
+            }
             "sessions" -> {
                 val arr = root["sessions"] as? JsonArray ?: return
                 _sessions.value = arr.mapNotNull { element ->
@@ -145,4 +230,65 @@ class LdmuxClient(private var config: LdmuxConfig) {
             }
         }
     }
+}
+
+// Reading JSON without `jsonPrimitive`, which throws on a null or an object.
+// Every accessor here answers "nothing" instead, so one unexpected field cannot
+// take down the launcher.
+
+private fun JsonObject.text(key: String): String =
+    ((this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content ?: ""
+
+private fun JsonObject.optionalText(key: String): String? =
+    ((this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content
+
+private fun JsonObject.number(key: String): Int? = text(key).toIntOrNull()
+
+private fun JsonObject.flag(key: String): Boolean = text(key) == "true"
+
+private fun JsonObject.objects(key: String): List<JsonObject> =
+    (this[key] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
+
+/**
+ * Read a desktop inventory out of the wire JSON.
+ *
+ * Tolerant by design: a field this client has not learned yet reads as empty,
+ * and a daemon that cannot enumerate windows sends an empty list with a `detail`
+ * rather than an error. The launcher must always have something to draw.
+ */
+internal fun parseDesktop(o: JsonObject?): DesktopInventory? {
+    if (o == null) return null
+    return DesktopInventory(
+        wm = o.text("wm"),
+        workspaces = o.objects("workspaces").map {
+            DesktopWorkspace(
+                name = it.text("name"),
+                index = it.number("index"),
+                focused = it.flag("focused"),
+                visible = it.flag("visible"),
+                windowCount = it.number("windowCount") ?: 0,
+            )
+        },
+        windows = o.objects("windows").map {
+            DesktopWindow(
+                id = it.text("id"),
+                appClass = it.text("appClass"),
+                title = it.text("title"),
+                workspace = it.text("workspace"),
+                pid = it.number("pid"),
+            )
+        },
+        piSessions = o.objects("piSessions").map {
+            DesktopPiSession(
+                pid = it.number("pid") ?: 0,
+                cwd = it.text("cwd"),
+                sessionId = it.optionalText("sessionId"),
+                startedAt = it.optionalText("startedAt"),
+                windowId = it.optionalText("windowId"),
+                workspace = it.optionalText("workspace"),
+                label = it.text("label"),
+            )
+        },
+        detail = o.optionalText("detail"),
+    )
 }

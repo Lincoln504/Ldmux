@@ -140,7 +140,32 @@ fun App() {
 
     LaunchedEffect(Unit) { client.start(scope) }
     val sessions by client.sessions.collectAsState()
-    val pages = sessions.filter { it.attachable }
+    val desktop by client.desktop.collectAsState()
+
+    // The launcher comes first: a terminal is somewhere you go, and which shell
+    // you are going to is a question worth asking before you are in one.
+    var showLauncher by remember { mutableStateOf(true) }
+    // Which shells the pager pages through. `null` means all of them; the
+    // launcher sets a set when the user chooses, and that set is what ◀ ▶ walk.
+    var pageSelection by remember { mutableStateOf<Set<String>?>(null) }
+    // Directories a shell has been asked for and not yet seen. A chosen pi session
+    // has no ldmux shell yet, so its page cannot be named by id until the daemon
+    // reports the new one; until then the pager is briefly empty rather than
+    // falling back to every shell on the host, which would ignore the choice.
+    var awaitingCwds by remember { mutableStateOf(setOf<String>()) }
+
+    val attachable = sessions.filter { it.attachable }
+    val pages = pageSelection?.let { chosen -> attachable.filter { it.id in chosen } } ?: attachable
+
+    // A shell asked for in a directory joins the selection as soon as it exists.
+    LaunchedEffect(sessions, awaitingCwds) {
+        if (awaitingCwds.isEmpty()) return@LaunchedEffect
+        val arrived = attachable.filter { it.cwd in awaitingCwds }
+        if (arrived.isNotEmpty()) {
+            pageSelection = (pageSelection ?: emptySet()) + arrived.map { it.id }
+            awaitingCwds = awaitingCwds - arrived.map { it.cwd }.toSet()
+        }
+    }
 
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
     LaunchedEffect(pages.size) {
@@ -176,6 +201,52 @@ fun App() {
             }
     }
 
+    if (showLauncher) {
+        var desktopLoading by remember { mutableStateOf(false) }
+        // Cleared by the *arrival* of a reading, not by the value changing: two
+        // readings a second apart are usually identical, and keying on the value
+        // would leave the button saying "…" with the answer already on screen.
+        val desktopTick by client.desktopTick.collectAsState()
+        LaunchedEffect(desktopTick) { if (desktopTick > 0) desktopLoading = false }
+        Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
+        LauncherScreen(
+            host = config.host,
+            sessions = sessions,
+            desktop = desktop,
+            desktopLoading = desktopLoading,
+            onRefresh = {
+                desktopLoading = true
+                client.requestDesktop()
+            },
+            onOpen = { choices ->
+                val ids = choices.mapNotNull { (it as? LauncherChoice.Session)?.id }.toSet()
+                val fresh = choices.filterIsInstance<LauncherChoice.NewShell>()
+                for (c in fresh) client.create("shell", c.cwd, c.label)
+                awaitingCwds = fresh.map { it.cwd }.toSet()
+                pageSelection = ids
+                showLauncher = false
+                mode = UiMode.Landscape
+            },
+            onKill = { killTarget = it },
+            onSettings = { showSettings = true },
+        )
+        }
+        killTarget?.let { ConfirmKill(it, onDismiss = { killTarget = null }) { client.kill(it.id); killTarget = null } }
+        if (showSettings) {
+            SettingsDialog(
+                current = config,
+                onDismiss = { showSettings = false },
+                onSave = {
+                    config = it
+                    AppPrefs.save(it)
+                    client.reconfigure(it)
+                    showSettings = false
+                },
+            )
+        }
+        return
+    }
+
     if (portrait) {
         Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
             TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth())
@@ -183,32 +254,29 @@ fun App() {
         }
     } else {
         Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
-            if (config.panelLeft) {
-                SidePanel(pages, pagerState, scope, client, handles, onFlip = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
+            val panel: @Composable () -> Unit = {
+                SidePanel(
+                    pages,
+                    pagerState,
+                    scope,
+                    client,
+                    handles,
+                    onFlip = { mode = UiMode.Portrait },
+                    onKill = { killTarget = it },
+                    onLauncher = { showLauncher = true },
+                ) { showSettings = true }
             }
+            if (config.panelLeft) panel()
             TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
-            if (!config.panelLeft) {
-                SidePanel(pages, pagerState, scope, client, handles, onFlip = { mode = UiMode.Portrait }, onKill = { killTarget = it }) { showSettings = true }
-            }
+            if (!config.panelLeft) panel()
         }
     }
 
     killTarget?.let { target ->
-        // Ending a shell throws away whatever is running in it, so it is always
-        // confirmed — and named, so the wrong one cannot be closed by reflex.
-        AlertDialog(
-            onDismissRequest = { killTarget = null },
-            title = { Text("Close this shell?", color = Fg) },
-            containerColor = Surface,
-            text = { Text(target.label, color = Dim, fontSize = 12.sp) },
-            confirmButton = {
-                TextButton(onClick = {
-                    client.kill(target.id)
-                    killTarget = null
-                }) { Text("close", color = Color(0xFFFF6B6B)) }
-            },
-            dismissButton = { TextButton(onClick = { killTarget = null }) { Text("cancel", color = Dim) } },
-        )
+        ConfirmKill(target, onDismiss = { killTarget = null }) {
+            client.kill(target.id)
+            killTarget = null
+        }
     }
 
     if (showSettings) {
@@ -269,6 +337,24 @@ private fun TerminalArea(
  * sparse — the way back to landscape is the important control, and the rest is
  * only the handful of keys a soft keyboard cannot produce.
  */
+/**
+ * Ending a shell throws away whatever is running in it, so it is always
+ * confirmed — and named, so the wrong one cannot be closed by reflex.
+ */
+@Composable
+fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Close this shell?", color = Fg) },
+        containerColor = Surface,
+        text = { Text(target.label, color = Dim, fontSize = 12.sp) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("close", color = Color(0xFFFF6B6B)) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
+    )
+}
+
 @Composable
 private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
     Row(
@@ -320,6 +406,7 @@ private fun SidePanel(
     handles: Map<String, TerminalHandle>,
     onFlip: () -> Unit,
     onKill: (Session) -> Unit,
+    onLauncher: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val current = pagerState.currentPage
@@ -416,6 +503,9 @@ private fun SidePanel(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AccentBtn("+ shell", Modifier.weight(1f)) { client.create("shell") }
+            // A way back to the menu. The terminal is somewhere you went, so
+            // leaving it has to be possible without ending anything.
+            IconBtn(onClick = onLauncher) { IconLauncher(Dim) }
             IconBtn(onClick = onSettings) { IconCog(Dim) }
             val closable = pages.getOrNull(current)
             if (closable != null) {
@@ -439,7 +529,7 @@ private fun SidePanel(
 
 /** A button that carries the accent, for the single primary action. */
 @Composable
-private fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier
             .clip(RoundedCornerShape(8.dp))

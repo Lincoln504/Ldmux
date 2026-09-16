@@ -106,6 +106,29 @@ fun IconCog(tint: Color, box: Dp = 20.dp) {
 }
 
 /**
+ * The launcher: a 2×2 grid of panes.
+ *
+ * Four tiles, because the launcher is a *set of places* to choose between — and
+ * because one tile, or three bars, would read as "menu" or "list" and this is
+ * not a list of one thing.
+ */
+@Composable
+fun IconLauncher(tint: Color, box: Dp = 20.dp) {
+    Canvas(Modifier.size(box)) {
+        val w = size.minDimension
+        val inset = w * 0.16f
+        val gap = w * 0.12f
+        val side = (w - inset * 2f - gap) / 2f
+        val radius = CornerRadius(side * 0.22f, side * 0.22f)
+        for (x in listOf(inset, inset + side + gap)) {
+            for (y in listOf(inset, inset + side + gap)) {
+                drawRoundRect(tint, Offset(x, y), Size(side, side), radius)
+            }
+        }
+    }
+}
+
+/**
  * Two arrows chasing each other round a circle.
  *
  * Drawn as two arcs with the gaps left where the arrowheads sit, so the head is
