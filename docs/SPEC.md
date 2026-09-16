@@ -196,7 +196,7 @@ Tailscale only, and far less functionality than dooboxes.
 | **`ldmuxd`** (daemon) | TypeScript on Node 26 (types stripped, no build step) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
 | **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`. Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
 | **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Landscape (side panel) and portrait (typing) modes; native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
-| **Desktop mirror** | shell + i3 | `i3-msg` + `alacritty -e tmux -L ldmux attach-session [-r] -t <name>`. |
+| **Desktop mirror / live window** | shell + WM | `i3-msg exec -- alacritty --class ldmux-live-<id> -e <abs tmux> -L ldmux attach -t <name>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. See docs/DESKTOP-INTEGRATION.md. |
 
 ### 4.3 Why the daemon is a separate process
 

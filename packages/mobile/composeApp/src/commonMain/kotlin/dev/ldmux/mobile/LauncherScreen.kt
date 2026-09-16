@@ -161,12 +161,30 @@ fun LauncherScreen(
                     // shell someone started at their desk is theirs to keep; the
                     // phone may look at it, but not move or end it.
                     if (s.openedByPhone) {
+                        val live = s.workspaceOf(desktop)
                         val target = targetWorkspace
+                        // One button, two meanings, decided by where the window
+                        // already is: put it on the chosen desktop, or take it off
+                        // the one it is on. A second button for "undo" would be a
+                        // control the user has to find rather than a state they
+                        // can see.
                         IconBtn(
-                            onClick = { if (target != null) onMakeLive(s, target) },
-                            caption = if (target == null) "pick a desktop" else null,
+                            onClick = {
+                                if (live != null) onCloseLive(s) else if (target != null) onMakeLive(s, target)
+                            },
+                            caption = when {
+                                live != null -> "on $live"
+                                target == null -> "pick a desktop"
+                                else -> null
+                            },
                         ) {
-                            IconPush(if (target == null) Dim.copy(alpha = 0.5f) else Accent)
+                            IconPush(
+                                when {
+                                    live != null -> Accent
+                                    target == null -> Dim.copy(alpha = 0.5f)
+                                    else -> Accent
+                                },
+                            )
                         }
                     }
                 }
