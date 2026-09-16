@@ -436,7 +436,13 @@ export class LdmuxDaemon {
     const live = liveSessions ? new Set(liveSessions.map((s) => s.name)) : null;
     const { dead, adopted } = this.registry.reconcile(live);
     const pruned = this.registry.prune({ maxDeadAgeMs: this.deadRecordTtlMs, maxRecords: this.maxRecords });
-    if (dead.length || adopted.length || pruned.length) this.registry.save();
+    if (dead.length || adopted.length || pruned.length) {
+      this.registry.save();
+      // The set of live sessions changed, so every connected client's pager is
+      // now wrong. Tell them, rather than waiting for a request that may never
+      // come: a page whose session died is a page that silently does nothing.
+      void this.remote?.broadcastSessions().catch(() => {});
+    }
     // Only sweep on a *known* live set, and never from a read-only listing.
     if (opts.sweep !== false && live) this.sweepStreams();
     return { dead, adopted, pruned };

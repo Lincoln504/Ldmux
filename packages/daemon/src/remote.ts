@@ -592,6 +592,24 @@ export class RemoteServer {
     this.sendOutput(ws, text);
   }
 
+  /**
+   * Push the session list to every connected client.
+   *
+   * The pager must not go stale. Sessions appear and disappear on their own — a
+   * shell exits, someone opens one elsewhere — and a client that only learns the
+   * list from replies to its own requests keeps showing pages that no longer
+   * exist, or misses ones that do. This is "they pop up and sink" made visible:
+   * the fix is to tell every client when the list actually changes.
+   */
+  async broadcastSessions(): Promise<void> {
+    if (!this.wss || this.wss.clients.size === 0) return;
+    const msg = JSON.stringify({ type: "sessions", sessions: await this.opts.listSessions() });
+    for (const client of this.wss.clients) {
+      // 1 === OPEN: a socket mid-handshake or closing is not worth waiting for.
+      if (client.readyState === 1) client.send(msg);
+    }
+  }
+
   private sendJson(ws: any, msg: unknown): void {
     try {
       ws.send(JSON.stringify(msg));

@@ -9,18 +9,43 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { spawnCaptured } from "../proc.ts";
+
+/**
+ * A shell worth handing a person.
+ *
+ * Bash is the default and zsh is welcome. `sh` and `dash` are skipped on purpose:
+ * they have no line editor, so a session running one cannot be walked back or
+ * edited at all — which is the state this function exists to prevent.
+ */
+function isUsableShell(candidate: string | undefined): boolean {
+  if (!candidate) return false;
+  return existsSync(candidate) && /^(bash|zsh)/.test(basename(candidate));
+}
 
 /**
  * The shell a user's sessions should get.
  *
- * tmux runs `default-shell`, which tmux takes from `$SHELL`. When the daemon is
- * started from an environment whose `$SHELL` is *not* the user's login shell
- * (e.g. a nix devshell's minimal bash, which may lack builtins the system's
- * completion scripts call), every new session is broken. Prefer the login shell
- * from `/etc/passwd`, then `$SHELL`, then `/bin/bash` — each verified to exist.
+ * tmux runs `default-shell`, which tmux takes from `$SHELL` — and `$SHELL` is
+ * not the user's shell when the daemon was started from a devshell, a
+ * virtualenv, or a CI image. A nix devshell is the sharp edge: its `$SHELL` is
+ * the devshell's own bash, built without readline, so every session it created
+ * had no line editing at all — arrow keys echoed as `^[[D`, the cursor could not
+ * be walked back past a wrapped line, and `\[`/`\]` were printed literally, so
+ * the prompt looked doubled.
+ *
+ * So the host is asked instead. `/etc/passwd` says which shell this user uses,
+ * and that is the one their rc files, aliases and expectations belong to. `$SHELL`
+ * is consulted last, only for the case where passwd says nothing useful.
+ *
+ * Deliberately not a capability probe. Which shell a person runs is the host's
+ * business; the job here is to stop a build environment from deciding it.
  *
  * `passwd` is injectable for tests; the real one is read from disk.
+ *
+ * Returns `undefined` when the host has neither bash nor zsh — a host with only
+ * `sh` is left to tmux's own default rather than handed a shell nobody wants.
  */
 export function resolveLoginShell(
   uid: number,
@@ -36,11 +61,9 @@ export function resolveLoginShell(
     }
   }
   const line = content.split("\n").find((l) => l.split(":")[2] === String(uid));
-  const fromPasswd = line?.split(":")[6]?.trim();
-  if (fromPasswd && existsSync(fromPasswd)) return fromPasswd;
-  const fromEnv = env.SHELL?.trim();
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
-  return existsSync("/bin/bash") ? "/bin/bash" : undefined;
+  return [line?.split(":")[6]?.trim(), "/bin/bash", "/usr/bin/bash", env.SHELL?.trim()].find(
+    isUsableShell,
+  );
 }
 
 export interface TmuxSession {

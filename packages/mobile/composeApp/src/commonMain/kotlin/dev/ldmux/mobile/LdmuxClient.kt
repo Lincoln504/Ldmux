@@ -31,7 +31,16 @@ data class Session(
     /** Empty for an RPC-only pi session (nothing to attach to in tmux). */
     val tmuxName: String,
 ) {
-    val attachable: Boolean get() = tmuxName.isNotEmpty()
+    /**
+     * Can this session be opened as a terminal page?
+     *
+     * Not merely "has a tmux name": a session that has **died** keeps its name in
+     * the registry until the record is pruned, so the pager used to spend pages
+     * on corpses — and since the page you were looking at could be one of them,
+     * taps and keys went nowhere with no explanation. Only a running session is
+     * a page; `starting` counts, because it is on its way.
+     */
+    val attachable: Boolean get() = tmuxName.isNotEmpty() && status != "dead"
     val label: String get() = if (title.isNotEmpty()) title else id
 }
 

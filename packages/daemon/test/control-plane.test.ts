@@ -2,7 +2,11 @@ import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isValidSessionName, resolveLoginShell, TmuxControlPlane } from "../src/tmux/control-plane.ts";
+import {
+  isValidSessionName,
+  resolveLoginShell,
+  TmuxControlPlane,
+} from "../src/tmux/control-plane.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "ldmux-faketmux-"));
@@ -91,15 +95,37 @@ test("isValidSessionName is the argv-safety boundary, tested directly", () => {
   }
 });
 
+test("a shell that cannot edit a line is never the session shell", () => {
+  // Started from a nix devshell, $SHELL is the devshell's own bash, built without
+  // readline: no `bind`, no `complete`, no line editing at all. A session created
+  // with it echoes every arrow key as `^[[D`, cannot be walked back past a
+  // wrapped line, and prints the prompt's \[ \] markers, so the prompt itself
+  // looks broken. The host's answer in /etc/passwd is what counts.
+  const passwd = "ldeen:x:1000:1000::/home/ldeen:/bin/sh\n";
+  expect(resolveLoginShell(1000, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, passwd)).toBe("/bin/bash");
+  // A zsh login shell is honoured: it has an editor of its own.
+  const zsh = existsSync("/usr/bin/zsh") || existsSync("/bin/zsh");
+  if (zsh) {
+    const p = "ldeen:x:1000:1000::/home/ldeen:/usr/bin/zsh\n";
+    const got = resolveLoginShell(1000, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, p);
+    expect(got === "/usr/bin/zsh" || got === "/bin/zsh").toBe(true);
+  }
+});
+
 test("resolveLoginShell prefers the user's login shell over the inherited $SHELL", () => {
   const passwd = "root:x:0:0:root:/root:/bin/sh\nldeen:x:1000:1000::/home/ldeen:/bin/bash\n";
   // The passwd login shell wins: a daemon started from a devshell must not hand
   // sessions that devshell's $SHELL (the bug that spammed every new shell).
   expect(resolveLoginShell(1000, { SHELL: "/nonexistent/zzz" } as NodeJS.ProcessEnv, passwd)).toBe("/bin/bash");
-  // Unknown uid: fall back to $SHELL when it exists.
-  expect(resolveLoginShell(4242, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, passwd)).toBe("/bin/sh");
-  // A passwd shell that does not exist is skipped.
-  expect(resolveLoginShell(5, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, "u:x:5:5::/:/no/such/shell\n")).toBe("/bin/sh");
+  // Unknown uid, and the inherited $SHELL is `sh`: bash is used instead, because
+  // `sh` has no line editor.
+  expect(resolveLoginShell(4242, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, passwd)).toBe("/bin/bash");
+  // A passwd shell that does not exist is skipped, and so is the `sh` inherited
+  // in its place.
+  expect(resolveLoginShell(5, { SHELL: "/bin/sh" } as NodeJS.ProcessEnv, "u:x:5:5::/:/no/such/shell\n")).toBe("/bin/bash");
+  // An inherited bash is still honoured when there is no passwd entry at all.
+  const bash = existsSync("/bin/bash") ? "/bin/bash" : "/usr/bin/bash";
+  expect(resolveLoginShell(4242, { SHELL: bash } as NodeJS.ProcessEnv, "")).toBe(bash);
 });
 
 test("resizeWindow asks tmux for an exact size, clamped to sane bounds", async () => {
