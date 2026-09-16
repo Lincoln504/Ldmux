@@ -130,6 +130,24 @@ async function main() {
       break;
     }
 
+    case "live": {
+      // `live <id> <workspace>` puts a session's terminal on the desktop's
+      // screen; `unlive <id>` takes it away.
+      const [id, workspace] = positional(rest, []);
+      const res = await daemonCall(sock, "makeLive", { id: id ?? "", workspace: workspace ?? "" });
+      console.log(res.ok ? `on the desktop (${workspace})` : `could not: ${res.detail ?? "failed"}`);
+      if (!res.ok) process.exit(1);
+      break;
+    }
+
+    case "unlive": {
+      const [id] = positional(rest, []);
+      const res = await daemonCall(sock, "closeLive", { id: id ?? "" });
+      console.log(res.ok ? "closed" : `could not: ${res.detail ?? "failed"}`);
+      if (!res.ok) process.exit(1);
+      break;
+    }
+
     case "capture": {
       const [id] = positional(rest, []);
       const { screen } = await daemonCall(sock, "capture", { id, history: rest.includes("--history") });
@@ -228,7 +246,7 @@ async function main() {
 
     default:
       console.error(
-        "usage: ldmux <ping|list|desktop|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|remote|pair|expose> [args]",
+        "usage: ldmux <ping|list|desktop|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
       );
       process.exit(2);
   }

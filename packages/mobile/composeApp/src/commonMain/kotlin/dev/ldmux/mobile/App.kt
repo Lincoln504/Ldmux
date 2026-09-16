@@ -208,6 +208,7 @@ fun App() {
         // would leave the button saying "…" with the answer already on screen.
         val desktopTick by client.desktopTick.collectAsState()
         LaunchedEffect(desktopTick) { if (desktopTick > 0) desktopLoading = false }
+        val liveResult by client.liveResult.collectAsState()
         Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         LauncherScreen(
             host = config.host,
@@ -228,6 +229,10 @@ fun App() {
                 mode = UiMode.Landscape
             },
             onKill = { killTarget = it },
+            onMakeLive = { session, workspace -> client.makeLive(session.id, workspace) },
+            onCloseLive = { session -> client.closeLive(session.id) },
+            liveResult = liveResult,
+            onDismissLiveResult = { client.clearLiveResult() },
             onSettings = { showSettings = true },
         )
         }

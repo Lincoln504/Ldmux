@@ -9,8 +9,34 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { spawnCaptured } from "../proc.ts";
+
+/**
+ * Find the tmux binary to run.
+ *
+ * `LDMUX_TMUX_BIN` wins, because a systemd unit or an image may know exactly
+ * which one it means. Otherwise PATH is searched in order and the absolute path
+ * is kept — the path matters as much as the binary: anything this daemon spawns
+ * later (a live window on the desktop) inherits a *different* environment, and a
+ * bare `tmux` there would resolve to whatever the window manager finds.
+ *
+ * Falls back to the bare name, so a host where nothing is found behaves exactly
+ * as it did before rather than failing here.
+ */
+export function resolveTmuxBin(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (p: string) => boolean = existsSync,
+): string {
+  const explicit = env.LDMUX_TMUX_BIN?.trim();
+  if (explicit && exists(explicit)) return explicit;
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, "tmux");
+    if (exists(candidate)) return candidate;
+  }
+  return "tmux";
+}
 
 /**
  * A shell worth handing a person.
@@ -150,9 +176,22 @@ export class TmuxControlPlane {
   private readonly timeoutMs: number;
   private readonly graceMs: number;
 
-  constructor(socket: string, timeoutMs = TMUX_COMMAND_TIMEOUT_MS) {
+  /**
+   * The tmux binary this control plane runs.
+   *
+   * Resolved to an absolute path once, and used for every spawn *and* for any
+   * client this daemon launches on the desktop. A bare `tmux` is not good enough
+   * for either: the daemon may be running a tmux from a nix profile or a
+   * container while the window manager's environment resolves the system one, and
+   * two tmux versions cannot share a server — the second client exits immediately
+   * with a protocol mismatch, so a live window would flash and vanish.
+   */
+  readonly bin: string;
+
+  constructor(socket: string, timeoutMs = TMUX_COMMAND_TIMEOUT_MS, bin?: string) {
     this.socket = socket;
     this.timeoutMs = timeoutMs;
+    this.bin = bin ?? resolveTmuxBin();
     this.graceMs = Math.min(TMUX_KILL_GRACE_MS, Math.max(50, Math.floor(timeoutMs / 2)));
   }
 
@@ -165,7 +204,7 @@ export class TmuxControlPlane {
    * wedge that connection for good).
    */
   private async run(args: string[]): Promise<{ code: number; out: string; err: string }> {
-    const proc = spawnCaptured(["tmux", "-L", this.socket, ...args], {
+    const proc = spawnCaptured([this.bin, "-L", this.socket, ...args], {
       // Explicit env, not the default: a child must see the environment as it is
       // now, so a PATH changed at runtime (a stubbed `tmux` in tests, or a user's
       // PATH fix) is honoured rather than a snapshot from process start.

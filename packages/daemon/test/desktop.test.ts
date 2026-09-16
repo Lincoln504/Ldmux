@@ -1,5 +1,18 @@
 import { test, expect } from "../../testing/src/expect.ts";
-import { isShellForeground, mirrorArgv, mirrorCommand, mirrorTmuxArgs } from "../src/desktop.ts";
+import {
+  closeLive,
+  findWindowIdByClass,
+  isShellForeground,
+  liveArgv,
+  liveExecArgv,
+  liveWindowClass,
+  mirrorArgv,
+  mirrorCommand,
+  mirrorTmuxArgs,
+  placeLive,
+  safeWorkspace,
+} from "../src/desktop.ts";
+import { resolveTmuxBin } from "../src/tmux/control-plane.ts";
 
 test("a shell cannot use a mouse click, so it is never sent one", () => {
   // The mouse mode is sticky: a program that enables reporting and then exits
@@ -118,4 +131,139 @@ test("openMirror reports a failure when i3-msg is unavailable", async () => {
   const res = await openMirror("sock", "ldmux-x");
   expect(res.ok).toBe(false);
   expect(res.detail).toContain("i3-msg");
+});
+
+// ── the live window: placed, never followed ───────────────────────────────
+
+test("liveWindowClass is derived from the session id and cannot carry i3 syntax", () => {
+  expect(liveWindowClass("0de567c644")).toBe("ldmux-live-0de567c644");
+  // An adopted session's id is caller-supplied, and the class is interpolated
+  // into an i3 criterion. A quote here would end `[class="…"]` and turn the rest
+  // of the argument into i3 commands.
+  const nasty = liveWindowClass('x"] kill; exec -- rm -rf /');
+  expect(nasty).toBe("ldmux-live-xkillexec--rm-rf");
+  expect(nasty).not.toContain('"');
+  expect(nasty).not.toContain(" ");
+  expect(nasty).not.toContain("[");
+  // Bounded, so nothing enormous reaches the window manager.
+  expect(liveWindowClass("a".repeat(200)).length).toBeLessThanOrEqual(51);
+});
+
+test("safeWorkspace accepts real workspace names and refuses i3 syntax", () => {
+  for (const ok of ["1", "10", "2", "web", "code-2", "a.b"]) {
+    expect(safeWorkspace(ok)).toBe(ok);
+  }
+  // A workspace name also reaches i3 as a criterion in closeLive, so anything
+  // that could be syntax is refused rather than escaped.
+  for (const bad of ["", "  ", "1; workspace 2", 'x"] kill', "$(id)", "a/b", "a".repeat(33)]) {
+    expect(safeWorkspace(bad)).toBe(null);
+  }
+  expect(safeWorkspace("  7  ")).toBe("7");
+});
+
+test("liveArgv attaches writably, because 'live' means it can be typed in", () => {
+  // Not `-r`: the point of putting a shell on the desktop is to use it there.
+  // Geometry is safe because the pane owns its size (window-size manual).
+  expect(liveArgv("sock", "ldmux-x", "abc")).toEqual([
+    "alacritty",
+    "--class",
+    "ldmux-live-abc",
+    "-e",
+    "tmux",
+    "-L",
+    "sock",
+    "attach",
+    "-t",
+    "ldmux-x",
+  ]);
+});
+
+test("findWindowIdByClass finds a window nested in a split or floating", () => {
+  const tree = JSON.stringify({
+    type: "root",
+    nodes: [
+      {
+        type: "workspace",
+        name: "1",
+        nodes: [
+          { type: "con", window: 1, window_properties: { class: "firefox" } },
+          { type: "con", nodes: [{ type: "con", window: 73400325, window_properties: { class: "ldmux-live-abc" } }] },
+        ],
+        floating_nodes: [],
+      },
+    ],
+  });
+  expect(findWindowIdByClass(tree, "ldmux-live-abc")).toBe("0x4600005");
+});
+
+test("findWindowIdByClass reads sway's app_id and returns null when absent", () => {
+  const sway = JSON.stringify({ type: "con", window: 5, app_id: "ldmux-live-abc" });
+  expect(findWindowIdByClass(sway, "ldmux-live-abc")).toBe("0x5");
+  expect(findWindowIdByClass(JSON.stringify({ type: "con", window: 5, app_id: "other" }), "ldmux-live-abc")).toBe(null);
+  // Unparseable output is not a crash: i3 may be mid-restart.
+  expect(findWindowIdByClass("not json", "x")).toBe(null);
+});
+
+test("placeLive refuses a workspace it cannot safely name, before touching i3", async () => {
+  const res = await placeLive("abc", '1; exec -- rm -rf /');
+  expect(res.ok).toBe(false);
+  expect(res.detail).toContain("workspace");
+});
+
+test("closeLive reports whether i3 could be asked at all", async () => {
+  const previous = process.env.PATH;
+  process.env.PATH = join(binDir, "definitely-empty");
+  try {
+    const res = await closeLive("abc");
+    expect(res.ok).toBe(false);
+    expect(res.detail).toContain("i3-msg");
+  } finally {
+    process.env.PATH = previous;
+  }
+});
+
+test("liveExecArgv passes the command as separate arguments, never one string", () => {
+  // Measured on this machine, same session and class, back to back:
+  //   i3-msg "exec -- alacritty …"   -> no window (i3-msg still says success)
+  //   i3-msg exec -- "alacritty …"   -> window
+  // So the split form is the only one that works, and this test is what keeps it.
+  const argv = liveExecArgv(["alacritty", "--class", "ldmux-live-x", "-e", "/nix/store/tmux/bin/tmux"]);
+  expect(argv[0]).toBe("i3-msg");
+  expect(argv[1]).toBe("exec");
+  expect(argv[2]).toBe("--");
+  // The command is expanded into the argv, not joined into one element: 5
+  // command words become 5 elements after `i3-msg exec --`.
+  expect(argv.length).toBe(3 + 5);
+  expect(argv[3]).toBe("alacritty");
+  expect(argv[5]).toBe("ldmux-live-x");
+  expect(argv[7]).toBe("/nix/store/tmux/bin/tmux");
+  expect(argv.some((a) => a.includes(" "))).toBe(false);
+});
+
+test("liveExecArgv shell-quotes each element, because i3 re-parses through sh", () => {
+  // i3-msg joins its arguments back into one string and i3 runs it with `sh -c`,
+  // so quoting happens per element and an injection cannot ride in on one.
+  const argv = liveExecArgv(["alacritty", "--class", "c$(id)"]);
+  expect(argv).toContain("'c$(id)'");
+  // i3-msg's own `--` is the only one; a second would be for the wrong parser.
+  expect(argv.filter((a) => a === "--").length).toBe(1);
+});
+
+test("resolveTmuxBin prefers LDMUX_TMUX_BIN, then PATH order, keeping an absolute path", () => {
+  // The absolute path is the point: the live window is launched through the
+  // window manager, whose PATH is not this process's, and a bare `tmux` there
+  // resolves to the system one — two tmux versions cannot share a server, so the
+  // window would exit on arrival with a protocol mismatch.
+  expect(
+    resolveTmuxBin({ LDMUX_TMUX_BIN: "/opt/tmux/bin/tmux", PATH: "/usr/bin" }, () => true),
+  ).toBe("/opt/tmux/bin/tmux");
+  // An override that does not exist is not honoured.
+  expect(resolveTmuxBin({ LDMUX_TMUX_BIN: "/nope/tmux", PATH: "/a:/b" }, (p) => p === "/b/tmux")).toBe("/b/tmux");
+  // First match on PATH wins, in order.
+  expect(resolveTmuxBin({ PATH: "/a:/b" }, (p) => p === "/a/tmux" || p === "/b/tmux")).toBe("/a/tmux");
+  // Nothing found falls back to the bare name rather than failing here.
+  expect(resolveTmuxBin({ PATH: "/a" }, () => false)).toBe("tmux");
+  expect(resolveTmuxBin({}, () => false)).toBe("tmux");
+  // An empty PATH entry must not become "/tmux".
+  expect(resolveTmuxBin({ PATH: ":/a" }, (p) => p === "/tmux" || p === "/a/tmux")).toBe("/a/tmux");
 });

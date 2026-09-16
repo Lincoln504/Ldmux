@@ -80,14 +80,67 @@ with declared capabilities, so the UI can hide an action rather than lie about i
 a backend cannot do something, the launcher must say so rather than offering a
 button that silently fails.
 
+## Three things that make "make it live" silently do nothing
+
+All three were measured on 2026-09-15 against a live i3, and all three present
+identically: the call reports success and no window appears.
+
+**1. `i3-msg` must be given the command as separate arguments.** This is the one
+that cost the most time, because the wrong form is *accepted*:
+
+| invocation | window? |
+| --- | --- |
+| `i3-msg "exec -- alacritty --class ldmux-live-x -e …"` | **no** — `[{"success":true}]`, nothing runs |
+| `i3-msg exec -- "alacritty --class ldmux-live-x -e …"` | yes |
+| `i3-msg exec "alacritty --class ldmux-live-x -e …"` | yes |
+
+So the command is expanded into argv (`i3-msg exec -- <word> <word> …`), and each
+word is still shell-quoted because `i3-msg` joins its arguments back into one
+string that i3 runs through `sh -c`. `liveExecArgv()` holds this and is tested.
+
+The lesson beyond the flag: **a command being accepted is not evidence it ran.**
+i3-msg's success reply is a parse acknowledgement. What proved the window had
+actually been created was polling `get_tree` for the class — which is why
+`openLive()` reports "the window did not appear" instead of trusting the reply.
+
+**2. The tmux binary must be an absolute path.** A live window is launched
+*through the window manager*, which has the session's `PATH`, not the daemon's.
+A bare `tmux` there resolves to the system one — here 3.5a, against the daemon's
+3.7b server — and two tmux versions cannot share a server, so the window exits on
+arrival with a protocol mismatch and is gone before anyone sees it.
+`resolveTmuxBin()` resolves the daemon's own binary once (honouring
+`LDMUX_TMUX_BIN`) and every spawn and every launched client uses that path.
+
+**3. A dead session has a tmux name, so it must be checked.** `requireTerminal()`
+accepts any record with a non-empty `tmuxName`, and a dead record keeps its name
+until it is pruned. Attaching to it fails and the window closes the instant it
+opens. `makeLive` refuses a session that is not `running`, with a reason.
+
 ## Session provenance
 
-`SessionRecord.createdBy` already exists (`packages/protocol/src/rpc.ts`), is set
-from the `NewParams.createdBy` param in `handleNew()` and hardcodes `"adopt"` in
-`adopt()`. So "only shells opened from the phone get a make-live/close menu"
-needs **no schema change** — the mobile path passes `createdBy: "phone"` and the
-launcher filters on it. Live values on the dev box today are `pi-extension` (from
-before the extension was removed) and `local`.
+`SessionRecord.createdBy` exists and is set from the `NewParams.createdBy` param
+in `handleNew()` (and hardcodes `"adopt"` in `adopt()`). Live values on the dev
+box are `pi-extension` (from before the extension was removed) and `local`.
+
+**Correction to an earlier note here:** this did *not* need no schema change. It
+was missing from `SessionInfo` (`packages/protocol/src/messages.ts`), which is
+what the remote client actually receives — so the phone could not have filtered
+on it even though the daemon knew. It is now part of `SessionInfo`, the remote
+`new` path passes `createdBy: "phone"`, and the launcher shows the per-shell menu
+only for shells that report it.
+
+## Sessions must outlive the daemon — and do not, under `systemd-run`
+
+Measured: stopping the test daemon's transient unit killed **every session on the
+tmux server**. The sessions are not children of the daemon, but they are in its
+**cgroup**, and a systemd unit's default `KillMode=control-group` sends the
+signal to everything in the cgroup — including the tmux server, which daemonizes
+but cannot leave the cgroup it was started in.
+
+This contradicts the stated design ("the daemon outlives every session"). The fix
+is a property of the unit, not the code: `KillMode=process`, so stopping the
+service stops the service and leaves the tmux server (and every shell in it)
+alone. `deploy/ldmux.service` carries it with the reason written next to it.
 
 ## Opening a shell in an arbitrary directory
 

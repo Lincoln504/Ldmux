@@ -39,11 +39,20 @@ export interface RemoteServerOptions {
   getSession(id: string): SessionRecord | undefined;
   listSessions(): SessionInfo[] | Promise<SessionInfo[]>;
   /** Open a new session on the host (FR-10). */
-  createSession?(kind: "shell" | "pi", cwd: string | undefined, title: string | undefined): Promise<void>;
+  createSession?(
+    kind: "shell" | "pi",
+    cwd: string | undefined,
+    title: string | undefined,
+    createdBy: string,
+  ): Promise<void>;
   /** End a session by id. */
   killSession?(id: string): Promise<void>;
   /** What is on the machine's desktop, for the launcher. */
   desktopInventory?(): Promise<DesktopInventory>;
+  /** Put a session's terminal on the desktop's screen, on a chosen workspace. */
+  makeLive?(id: string, workspace: string): Promise<{ ok: boolean; detail?: string }>;
+  /** Take a session's desktop window away. */
+  closeLive?(id: string): Promise<{ ok: boolean; detail?: string }>;
   acquireStream(record: SessionRecord): PaneStream;
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
@@ -336,9 +345,33 @@ export class RemoteServer {
           return;
         }
         case "new": {
-          await this.opts.createSession?.(msg.kind === "pi" ? "pi" : "shell", msg.cwd, msg.title);
+          // `phone` is a fact about origin, not a label: the client shows a
+          // per-shell menu only for shells it opened itself.
+          await this.opts.createSession?.(
+            msg.kind === "pi" ? "pi" : "shell",
+            msg.cwd,
+            msg.title,
+            "phone",
+          );
           if (data.disposed) return;
           await this.sendSessions(ws);
+          return;
+        }
+        case "makelive": {
+          const id = String(msg.sessionId ?? "");
+          const workspace = String(msg.workspace ?? "");
+          const result = this.opts.makeLive
+            ? await this.opts.makeLive(id, workspace)
+            : { ok: false, detail: "not supported by this daemon" };
+          this.sendJson(ws, { type: "live", sessionId: id, ...result });
+          return;
+        }
+        case "closelive": {
+          const id = String(msg.sessionId ?? "");
+          const result = this.opts.closeLive
+            ? await this.opts.closeLive(id)
+            : { ok: false, detail: "not supported by this daemon" };
+          this.sendJson(ws, { type: "live", sessionId: id, ...result });
           return;
         }
         case "kill": {

@@ -105,7 +105,7 @@ export interface ScrollbackRequest {
  */
 export type SessionInfo = Pick<
   SessionRecord,
-  "id" | "kind" | "title" | "cwd" | "status" | "tmuxName"
+  "id" | "kind" | "title" | "cwd" | "status" | "tmuxName" | "createdBy"
 > & {
   /**
    * Last observed activity, epoch ms — the freshness signal for unread markers
@@ -143,6 +143,27 @@ export interface KillSessionMessage { type: "kill"; sessionId: string }
 /** Remote client → server: what is on the machine's desktop. */
 export interface DesktopRequest { type: "desktop" }
 
+/**
+ * Remote client → server: put this shell on the desktop's screen.
+ *
+ * [workspace] is the desktop workspace to put it on, by the window manager's own
+ * name. It is required in spirit: choosing where a window appears is the point,
+ * and a default would mean a window could land on a desktop nobody is looking
+ * at.
+ */
+export interface MakeLiveMessage { type: "makelive"; sessionId: string; workspace: string }
+
+/** Remote client → server: take this shell's desktop window away. */
+export interface CloseLiveMessage { type: "closelive"; sessionId: string }
+
+/** Server → client: what came of a make-live or close-live request. */
+export interface LiveResultMessage {
+  type: "live";
+  sessionId: string;
+  ok: boolean;
+  detail?: string;
+}
+
 /** Server → client: answer to `desktop`. */
 export interface DesktopMessage { type: "desktop"; inventory: DesktopInventory }
 
@@ -164,4 +185,7 @@ export type ControlMessage =
   | KillSessionMessage
   | SessionsMessage
   | DesktopRequest
-  | DesktopMessage;
+  | DesktopMessage
+  | MakeLiveMessage
+  | CloseLiveMessage
+  | LiveResultMessage;

@@ -58,6 +58,10 @@ fun LauncherScreen(
     onRefresh: () -> Unit,
     onOpen: (List<LauncherChoice>) -> Unit,
     onKill: (Session) -> Unit,
+    onMakeLive: (Session, String) -> Unit,
+    onCloseLive: (Session) -> Unit,
+    liveResult: LiveResult?,
+    onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
 ) {
     // Which shells and pi sessions are chosen. Keys, not objects, so a list that
@@ -145,11 +149,27 @@ fun LauncherScreen(
             items(openShells, key = { "s:${it.id}" }) { s ->
                 ChoiceRow(
                     title = s.label,
-                    subtitle = tildify(s.cwd),
+                    subtitle = buildString {
+                        append(tildify(s.cwd))
+                        s.workspaceOf(desktop)?.let { append(" · on desktop ").append(it) }
+                    },
                     chosen = s.id in chosen,
                     onClick = { chosen = toggle(chosen, s.id) },
                     onKill = { onKill(s) },
-                )
+                ) {
+                    // The per-shell menu belongs to shells this phone opened. A
+                    // shell someone started at their desk is theirs to keep; the
+                    // phone may look at it, but not move or end it.
+                    if (s.openedByPhone) {
+                        val target = targetWorkspace
+                        IconBtn(
+                            onClick = { if (target != null) onMakeLive(s, target) },
+                            caption = if (target == null) "pick a desktop" else null,
+                        ) {
+                            IconPush(if (target == null) Dim.copy(alpha = 0.5f) else Accent)
+                        }
+                    }
+                }
             }
         }
 
@@ -171,11 +191,22 @@ fun LauncherScreen(
         }
         if (targetWorkspace != null) {
             Spacer(Modifier.height(6.dp))
-            Text(
-                "new shells will open on desktop $targetWorkspace",
-                color = Dim,
-                fontSize = 11.sp,
-            )
+            Text("aimed at desktop $targetWorkspace", color = Dim, fontSize = 11.sp)
+        }
+        // What came of the last desktop request. Shown rather than assumed: the
+        // host may have no window manager, and doing nothing silently looks
+        // exactly like a broken button.
+        liveResult?.let { result ->
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (result.ok) "on the desktop" else "could not: ${result.detail ?: "failed"}",
+                    color = if (result.ok) Accent else Color(0xFFFF6B6B),
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                SmallAction("ok", onDismissLiveResult)
+            }
         }
     }
 }
@@ -195,6 +226,15 @@ sealed interface LauncherChoice {
         override val key: String get() = "new:$cwd"
     }
 }
+
+/**
+ * Which desktop a shell's live window is on, or null when it has none.
+ *
+ * Read from the window that *this session's class* names, so it is the window the
+ * phone put there and not some other alacritty that happens to be open.
+ */
+private fun Session.workspaceOf(desktop: DesktopInventory?): String? =
+    desktop?.windows?.firstOrNull { it.appClass == "ldmux-live-$id" }?.workspace?.ifEmpty { null }
 
 private fun toggle(current: Set<String>, key: String): Set<String> =
     if (key in current) current - key else current + key
@@ -312,6 +352,7 @@ private fun ChoiceRow(
     chosen: Boolean,
     onClick: () -> Unit,
     onKill: (() -> Unit)? = null,
+    trailing: @Composable () -> Unit = {},
 ) {
     Row(
         Modifier
@@ -344,6 +385,7 @@ private fun ChoiceRow(
             Text(title, color = Fg, fontSize = 14.sp, maxLines = 1, fontWeight = FontWeight.Medium)
             Text(subtitle, color = Dim, fontSize = 11.sp, maxLines = 1, fontFamily = FontFamily.Monospace)
         }
+        trailing()
         if (onKill != null) {
             Spacer(Modifier.width(6.dp))
             IconBtn(onClick = onKill) { IconClose(Dim) }

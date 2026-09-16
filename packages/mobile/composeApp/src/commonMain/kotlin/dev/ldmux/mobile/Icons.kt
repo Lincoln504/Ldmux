@@ -106,6 +106,35 @@ fun IconCog(tint: Color, box: Dp = 20.dp) {
 }
 
 /**
+ * Put this on the desktop: a panel with an arrow leaving it.
+ *
+ * The arrow points out and up, so it reads as "send it over there" rather than
+ * "download" (down) or "open" (up, no panel).
+ */
+@Composable
+fun IconPush(tint: Color, box: Dp = 20.dp) {
+    Canvas(Modifier.size(box)) {
+        val w = size.minDimension
+        val stroke = w * 0.11f
+        // The panel: three sides, left open where the arrow leaves.
+        val x0 = w * 0.16f
+        val y0 = w * 0.34f
+        val x1 = w * 0.62f
+        val y1 = w * 0.86f
+        drawLine(tint, Offset(x0, y0), Offset(x0, y1), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(x0, y1), Offset(x1, y1), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(x1, y1), Offset(x1, y0), stroke, StrokeCap.Round)
+        // The arrow, leaving through the open corner.
+        val ax = w * 0.88f
+        val ay = w * 0.12f
+        drawLine(tint, Offset(w * 0.52f, w * 0.48f), Offset(ax, ay), stroke, StrokeCap.Round)
+        val head = w * 0.16f
+        drawLine(tint, Offset(ax, ay), Offset(ax - head, ay), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(ax, ay), Offset(ax, ay + head), stroke, StrokeCap.Round)
+    }
+}
+
+/**
  * The launcher: a 2×2 grid of panes.
  *
  * Four tiles, because the launcher is a *set of places* to choose between — and

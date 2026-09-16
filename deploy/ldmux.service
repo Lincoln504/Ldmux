@@ -1,0 +1,49 @@
+# ldmux daemon, as a systemd --user service.
+#
+# The daemon must outlive every session (docs/SPEC.md §4.3): a phone that puts
+# its phone down, or a laptop that reboots the daemon, must not lose the shells
+# that are running. That requires two things of this unit, neither of which is
+# the default.
+[Unit]
+Description=ldmux daemon — remote terminal sessions over tmux
+Documentation=file:///usr/local/share/doc/ldmux/docs/SPEC.md
+After=default.target
+
+[Service]
+Type=simple
+
+# KillMode=process is the important line.
+#
+# The tmux server, and therefore every shell in it, is *not* a child of this
+# process — but it is in this unit's cgroup, because the daemon was what started
+# it. The default KillMode=control-group signals the whole cgroup on stop, which
+# kills the tmux server and every session with it: measured, all sessions gone on
+# a single `systemctl --user restart` (docs/DESKTOP-INTEGRATION.md). `process`
+# signals only the daemon, and the shells survive it — which is the entire point
+# of a tmux-backed session.
+KillMode=process
+
+# A restart is a daemon restart, not a session wipe, so it is always safe to
+# bring the daemon back: sessions are re-adopted from the tmux server on boot
+# (Registry.reconcile), never recreated.
+Restart=on-failure
+RestartSec=2
+
+# The window manager's own environment, for "make it live on the desktop": the
+# daemon launches a window through i3, and without DISPLAY and XAUTHORITY it can
+# only report "no DISPLAY (not an X11 session)".
+#
+# User-specific: install.sh rewrites these for the installing user.
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+# The tmux binary the daemon owns. A live window is launched through the window
+# manager, whose PATH is not this process's; without this, a bare `tmux` there can
+# resolve to a different version and the window dies with a protocol mismatch.
+# Leave unset to search PATH, which is right when only one tmux is installed.
+# Environment=LDMUX_TMUX_BIN=/usr/bin/tmux
+
+Environment=LDMUX_STATE_DIR=%t/ldmux
+ExecStart=/usr/local/bin/ldmuxd
+
+[Install]
+WantedBy=default.target

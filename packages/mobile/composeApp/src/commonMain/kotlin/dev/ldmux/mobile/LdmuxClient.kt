@@ -33,6 +33,8 @@ data class Session(
     val status: String,
     /** Empty for an RPC-only pi session (nothing to attach to in tmux). */
     val tmuxName: String,
+    /** Who opened it: "phone", "local", "cli", "adopt". */
+    val createdBy: String = "",
 ) {
     /**
      * Can this session be opened as a terminal page?
@@ -45,6 +47,15 @@ data class Session(
      */
     val attachable: Boolean get() = tmuxName.isNotEmpty() && status != "dead"
     val label: String get() = if (title.isNotEmpty()) title else id
+
+    /**
+     * Did this phone open it?
+     *
+     * Only a shell the phone opened gets the per-shell menu (put it on the
+     * desktop / close it). A shell someone started at their desk is theirs: the
+     * phone may look at it, but it is not the phone's to move or end.
+     */
+    val openedByPhone: Boolean get() = createdBy == "phone"
 }
 
 /**
@@ -90,6 +101,9 @@ data class DesktopPiSession(
     val label: String,
 )
 
+/** The outcome of a make-live or close-live request. */
+data class LiveResult(val sessionId: String, val ok: Boolean, val detail: String?)
+
 /** Everything the launcher shows before a terminal. */
 data class DesktopInventory(
     val wm: String,
@@ -129,12 +143,44 @@ class LdmuxClient(private var config: LdmuxConfig) {
     val desktopTick: StateFlow<Int> = _desktopTick
 
     /**
+     * The last thing that happened to a shell's desktop window.
+     *
+     * Reported rather than assumed: putting a window on the desktop is
+     * best-effort — the host may have no window manager, or an environment this
+     * daemon cannot place windows in — and silently doing nothing would look
+     * exactly like the button being broken.
+     */
+    private val _liveResult = MutableStateFlow<LiveResult?>(null)
+    val liveResult: StateFlow<LiveResult?> = _liveResult
+
+    fun clearLiveResult() {
+        _liveResult.value = null
+    }
+
+    /**
      * Ask the host what is on its desktop.
      *
      * On demand, not polled: answering spawns the window manager's own tools, and
      * nothing about the answer is worth waking the radio for on a timer.
      */
     fun requestDesktop() = sendControl("""{"type":"desktop"}""")
+
+    /** Put this shell's terminal on the desktop's screen, on a chosen workspace. */
+    fun makeLive(sessionId: String, workspace: String) = sendControl(
+        buildJsonObject {
+            put("type", "makelive")
+            put("sessionId", sessionId)
+            put("workspace", workspace)
+        }.toString(),
+    )
+
+    /** Take this shell's desktop window away. */
+    fun closeLive(sessionId: String) = sendControl(
+        buildJsonObject {
+            put("type", "closelive")
+            put("sessionId", sessionId)
+        }.toString(),
+    )
 
     private var job: Job? = null
     private var scope: CoroutineScope? = null
@@ -213,6 +259,11 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 _desktop.value = parseDesktop(root["inventory"]?.jsonObject)
                 _desktopTick.value += 1
             }
+            "live" -> _liveResult.value = LiveResult(
+                sessionId = root["sessionId"]?.jsonPrimitive?.content ?: "",
+                ok = root["ok"]?.jsonPrimitive?.content == "true",
+                detail = root["detail"]?.jsonPrimitive?.content,
+            )
             "sessions" -> {
                 val arr = root["sessions"] as? JsonArray ?: return
                 _sessions.value = arr.mapNotNull { element ->
@@ -225,6 +276,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                         cwd = o["cwd"]?.jsonPrimitive?.content ?: "",
                         status = o["status"]?.jsonPrimitive?.content ?: "",
                         tmuxName = o["tmuxName"]?.jsonPrimitive?.content ?: "",
+                        createdBy = o["createdBy"]?.jsonPrimitive?.content ?: "",
                     )
                 }
             }

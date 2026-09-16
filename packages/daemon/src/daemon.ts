@@ -17,6 +17,7 @@ import { Registry } from "./registry.ts";
 import { PaneStream } from "./stream.ts";
 import { RemoteServer } from "./remote.ts";
 import { readDesktop } from "./desktop-inventory.ts";
+import { closeLive, openLive } from "./desktop.ts";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 import { loadOrCreateToken } from "./auth.ts";
 import type {
@@ -210,9 +211,16 @@ export class LdmuxDaemon {
         token: this.token,
         getSession: (id) => this.registry.get(id),
         listSessions: () => this.describeSessions(),
-        createSession: async (kind, cwd, title) => {
-          await this.handleNew({ kind, cwd: cwd ?? process.cwd(), title } as NewParams);
+        createSession: async (kind, cwd, title, createdBy) => {
+          await this.handleNew({
+            kind,
+            cwd: cwd ?? process.cwd(),
+            title,
+            createdBy,
+          } as unknown as NewParams);
         },
+        makeLive: (id, workspace) => this.handle("makeLive", { id, workspace }) as Promise<{ ok: boolean; detail?: string }>,
+        closeLive: (id) => this.handle("closeLive", { id }) as Promise<{ ok: boolean; detail?: string }>,
         killSession: async (id) => {
           await this.handle("kill", { id });
         },
@@ -250,6 +258,9 @@ export class LdmuxDaemon {
       cwd: record.cwd,
       status: record.status,
       tmuxName: record.tmuxName,
+      // Who opened it. The phone shows a per-shell menu only for shells it
+      // opened itself, so this has to survive to the client.
+      createdBy: record.createdBy,
       lastActivityAt:
         (record.tmuxName ? activity.get(record.tmuxName) : undefined) ?? record.updatedAt,
     }));
@@ -513,6 +524,27 @@ export class LdmuxDaemon {
 
       case "desktop":
         return this.desktopInventory();
+
+      case "makeLive": {
+        const p = params as { id?: unknown; workspace?: unknown };
+        const record = this.requireTerminal(String(p.id ?? ""));
+        // A dead session still has a tmux name, so `requireTerminal` is happy —
+        // but attaching to it fails and the window closes the instant it opens,
+        // which looks exactly like the button doing nothing. Refuse it here,
+        // where there is something true to say.
+        if (record.status !== "running") {
+          return { ok: false, detail: `that shell is ${record.status}` };
+        }
+        const workspace = String(p.workspace ?? "");
+        // Best-effort by design: not every host has a window manager, and a phone
+        // must not be told its shell is broken because the desktop is headless.
+        return await openLive(this.cp.socket, record.tmuxName, record.id, workspace, this.cp.bin);
+      }
+
+      case "closeLive": {
+        const record = this.require(String((params as { id?: unknown }).id ?? ""));
+        return await closeLive(record.id);
+      }
 
       case "remote_info":
         return {

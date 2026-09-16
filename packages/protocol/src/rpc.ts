@@ -145,6 +145,11 @@ export interface DaemonMethods {
   forget: { params: { id: string }; result: { ok: true; removed: boolean } };
   adopt: { params: { tmuxName: string; kind?: SessionKind; title?: string }; result: { session: SessionRecord } };
   desktop: { params: Record<string, never>; result: DesktopInventory };
+  makeLive: {
+    params: { id: string; workspace: string };
+    result: { ok: boolean; detail?: string };
+  };
+  closeLive: { params: { id: string }; result: { ok: boolean; detail?: string } };
   remote_info: {
     params: Record<string, never>;
     result: { hostname: string; port: number; path: string; token: string };
