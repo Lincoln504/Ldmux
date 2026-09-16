@@ -107,6 +107,29 @@ async function main() {
       break;
     }
 
+    case "desktop": {
+      // What the launcher shows. `--json` is for piping into jq or a test.
+      const inv = await daemonCall(sock, "desktop", {});
+      if (flag(rest, "--json")) {
+        console.log(JSON.stringify(inv, null, 2));
+        break;
+      }
+      console.log(`wm: ${inv.wm}${inv.detail ? `  (${inv.detail})` : ""}`);
+      for (const ws of inv.workspaces) {
+        console.log(
+          `  ${ws.focused ? "*" : " "} ${ws.name.padEnd(12)} ${ws.windowCount} window${ws.windowCount === 1 ? "" : "s"}`,
+        );
+      }
+      if (inv.piSessions.length) {
+        console.log("pi sessions:");
+        for (const p of inv.piSessions) {
+          const where = p.workspace ? `ws ${p.workspace}` : "no window";
+          console.log(`  ${p.label.padEnd(18)} ${where.padEnd(10)} pid ${p.pid}  ${p.cwd}`);
+        }
+      }
+      break;
+    }
+
     case "capture": {
       const [id] = positional(rest, []);
       const { screen } = await daemonCall(sock, "capture", { id, history: rest.includes("--history") });
@@ -205,7 +228,7 @@ async function main() {
 
     default:
       console.error(
-        "usage: ldmux <ping|list|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|remote|pair|expose> [args]",
+        "usage: ldmux <ping|list|desktop|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|remote|pair|expose> [args]",
       );
       process.exit(2);
   }

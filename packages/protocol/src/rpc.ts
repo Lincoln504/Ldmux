@@ -29,6 +29,52 @@ export interface SessionRecord {
   exitedAt?: number | null;
 }
 
+/**
+ * The desktop inventory: what the launcher shows *before* a terminal.
+ *
+ * Defined here rather than in the daemon because the phone renders it — one
+ * description of the shape, or the two drift.
+ */
+export interface DesktopWorkspace {
+  /** The WM's own name for it ("1", "web", "code"). */
+  name: string;
+  /** Numeric part when the name is a plain number, else null. */
+  index: number | null;
+  focused: boolean;
+  visible: boolean;
+  windowCount: number;
+}
+
+export interface DesktopWindow {
+  id: string;
+  appClass: string;
+  title: string;
+  workspace: string;
+  pid: number | null;
+}
+
+export interface DesktopPiSession {
+  pid: number;
+  cwd: string;
+  sessionId: string | null;
+  startedAt: string | null;
+  transcript: string | null;
+  windowId: string | null;
+  workspace: string | null;
+  /** What to show in the menu: the directory's basename. */
+  label: string;
+}
+
+export interface DesktopInventory {
+  /** "i3" | "sway" | "niri" | "hyprland" | "ewmh" | "unknown". */
+  wm: string;
+  workspaces: DesktopWorkspace[];
+  windows: DesktopWindow[];
+  piSessions: DesktopPiSession[];
+  /** Set when windows could not be listed; pi sessions are still reported. */
+  detail?: string;
+}
+
 export interface PaneState {
   cursorX: number;
   cursorY: number;
@@ -98,6 +144,7 @@ export interface DaemonMethods {
   /** Drop a record without touching tmux (cleanup for dead/adopted leftovers). */
   forget: { params: { id: string }; result: { ok: true; removed: boolean } };
   adopt: { params: { tmuxName: string; kind?: SessionKind; title?: string }; result: { session: SessionRecord } };
+  desktop: { params: Record<string, never>; result: DesktopInventory };
   remote_info: {
     params: Record<string, never>;
     result: { hostname: string; port: number; path: string; token: string };

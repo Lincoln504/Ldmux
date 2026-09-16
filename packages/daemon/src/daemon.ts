@@ -16,6 +16,8 @@ import { isValidSessionName, TmuxControlPlane } from "./tmux/control-plane.ts";
 import { Registry } from "./registry.ts";
 import { PaneStream } from "./stream.ts";
 import { RemoteServer } from "./remote.ts";
+import { readDesktop } from "./desktop-inventory.ts";
+import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 import { loadOrCreateToken } from "./auth.ts";
 import type {
   NewParams,
@@ -70,6 +72,15 @@ interface Conn {
 const shortId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 10);
 
 const SESSION_KINDS: readonly SessionKind[] = ["shell", "pi"];
+
+/**
+ * How long a desktop reading stays fresh.
+ *
+ * Long enough that a launcher opening, closing and re-opening does not repeat
+ * the probes, short enough that a window closed by hand is gone by the time
+ * anyone looks again.
+ */
+const DESKTOP_TTL_MS = 1000;
 
 /**
  * `kind` is stored on the record and rendered by clients, so it is validated at
@@ -205,6 +216,7 @@ export class LdmuxDaemon {
         killSession: async (id) => {
           await this.handle("kill", { id });
         },
+        desktopInventory: () => this.desktopInventory(),
         acquireStream: (record) => this.streamFor(record),
         releaseStream: (record) => this.releaseStreamIfIdle(record.tmuxName),
         webRoot: this.opts.webRoot ?? defaultWebRoot(),
@@ -448,6 +460,31 @@ export class LdmuxDaemon {
     return { dead, adopted, pruned };
   }
 
+  /**
+   * The desktop inventory, briefly cached.
+   *
+   * Building it spawns `i3-msg`/`xprop` and walks `/proc`, which is cheap but
+   * not free; a launcher opening, closing and re-opening within a moment should
+   * not repeat all of it. A second is short enough that a window closed by hand
+   * is gone by the time anyone looks again.
+   */
+  private desktopCache: { at: number; value: Promise<DesktopInventory> } | undefined;
+
+  private desktopInventory(): Promise<DesktopInventory> {
+    const now = Date.now();
+    if (this.desktopCache && now - this.desktopCache.at < DESKTOP_TTL_MS) {
+      return this.desktopCache.value;
+    }
+    // The promise is cached, not its value: concurrent callers share one read
+    // instead of stacking up probes.
+    const value = readDesktop().catch((err: unknown) => {
+      this.desktopCache = undefined;
+      throw err;
+    });
+    this.desktopCache = { at: now, value };
+    return value;
+  }
+
   private require(id: string): SessionRecord {
     const record = this.registry.get(id);
     if (!record) throw new Error(`unknown session: ${id}`);
@@ -473,6 +510,9 @@ export class LdmuxDaemon {
     switch (method) {
       case "ping":
         return { pong: true, version: DAEMON_PROTOCOL_VERSION, tmuxSocket: this.cp.socket };
+
+      case "desktop":
+        return this.desktopInventory();
 
       case "remote_info":
         return {

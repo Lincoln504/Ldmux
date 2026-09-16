@@ -4,7 +4,7 @@
  * these JSON shapes.
  */
 
-import type { SessionRecord } from "./rpc.ts";
+import type { DesktopInventory, SessionRecord } from "./rpc.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -140,6 +140,12 @@ export interface KillSessionMessage { type: "kill"; sessionId: string }
  * so they are not modelled here — a type nothing can send or receive is a
  * contract nobody can keep.
  */
+/** Remote client → server: what is on the machine's desktop. */
+export interface DesktopRequest { type: "desktop" }
+
+/** Server → client: answer to `desktop`. */
+export interface DesktopMessage { type: "desktop"; inventory: DesktopInventory }
+
 export type ControlMessage =
   | Caps
   | Snapshot
@@ -156,4 +162,6 @@ export type ControlMessage =
   | ListSessions
   | NewSessionMessage
   | KillSessionMessage
-  | SessionsMessage;
+  | SessionsMessage
+  | DesktopRequest
+  | DesktopMessage;

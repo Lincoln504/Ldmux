@@ -29,6 +29,7 @@ import { extname, join, normalize } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
+import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 
 export interface RemoteServerOptions {
   hostname: string;
@@ -41,6 +42,8 @@ export interface RemoteServerOptions {
   createSession?(kind: "shell" | "pi", cwd: string | undefined, title: string | undefined): Promise<void>;
   /** End a session by id. */
   killSession?(id: string): Promise<void>;
+  /** What is on the machine's desktop, for the launcher. */
+  desktopInventory?(): Promise<DesktopInventory>;
   acquireStream(record: SessionRecord): PaneStream;
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
@@ -321,6 +324,17 @@ export class RemoteServer {
         case "list":
           await this.sendSessions(ws);
           return;
+
+        case "desktop": {
+          // The launcher asks for this. A daemon that cannot answer still
+          // answers: an empty inventory with a reason beats an error, because
+          // the client can always render a screen from it.
+          const inventory = this.opts.desktopInventory
+            ? await this.opts.desktopInventory()
+            : { wm: "unknown", workspaces: [], windows: [], piSessions: [], detail: "not available" };
+          this.sendJson(ws, { type: "desktop", inventory });
+          return;
+        }
         case "new": {
           await this.opts.createSession?.(msg.kind === "pi" ? "pi" : "shell", msg.cwd, msg.title);
           if (data.disposed) return;
