@@ -233,4 +233,47 @@ class TapPolicyTest {
     fun `an empty capture stays empty`() {
         assertEquals("", snapshotReplay(""))
     }
+
+    // ── a snapshot is state, not a picture ───────────────────────────────────
+
+    @Test
+    fun `a snapshot on the alternate screen switches screens BEFORE its text`() {
+        // The bug this is written against: micro's screen was replayed into the
+        // primary buffer, so the shell's prompt and history showed through it and
+        // its own redraws landed on top of the scrollback it was meant to hide.
+        // The switch has to come first, or the text is written to the wrong screen
+        // and then discarded by the switch.
+        val bytes = snapshotBytes(
+            screen = "micro\n",
+            alternateOn = true,
+            cursorX = 0,
+            cursorY = 0,
+            cols = 80,
+            rows = 24,
+        ).decodeToString()
+        val switchAt = bytes.indexOf("\u001b[?1049h")
+        val textAt = bytes.indexOf("micro")
+        val cursorAt = bytes.indexOf("\u001b[1;1H")
+        assertTrue(switchAt >= 0, "the alternate screen is never entered")
+        assertTrue(switchAt < textAt, "the text is written before the screen is switched")
+        assertTrue(textAt < cursorAt, "the cursor is placed before the text it belongs to")
+    }
+
+    @Test
+    fun `leaving the alternate screen is sent too, not just entering it`() {
+        // Quitting micro must return to the shell's own screen. Unconditional, so
+        // the two screens cannot drift apart across snapshots.
+        val bytes = snapshotBytes("", alternateOn = false, cursorX = 0, cursorY = 0, cols = 80, rows = 24)
+        assertTrue(bytes.decodeToString().contains("\u001b[?1049l"))
+    }
+
+    @Test
+    fun `an empty capture still places the cursor and the screen`() {
+        // A snapshot with nothing on screen is a real state (a blank pane), and
+        // skipping the switch for it would leave the previous program's screen up.
+        val bytes = snapshotBytes("", alternateOn = true, cursorX = 3, cursorY = 2, cols = 80, rows = 24)
+            .decodeToString()
+        assertTrue(bytes.contains("\u001b[?1049h"))
+        assertTrue(bytes.endsWith("\u001b[3;4H"))
+    }
 }

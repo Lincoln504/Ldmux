@@ -128,17 +128,32 @@ export class PaneStream {
 
   private async capture(historyLines: false | number): Promise<StreamSnapshot> {
     const state = await this.cp.snapshotState(this.sessionName);
-    // Full-screen TUIs live on the alternate screen; `-a` captures that one.
+    // A full-screen program is on the *alternate* screen, and that screen has no
+    // scrollback — the history belongs to the primary screen, which is a different
+    // buffer that is not on screen at all. Asking for it anyway returns the shell's
+    // own prompt and history, and the client then draws that where the program's
+    // screen should be. Measured: `-S -50` on an alternate-screen pane returns 70
+    // lines of the *primary* screen's scrollback. So on the alternate screen what
+    // is captured is the visible screen and nothing else.
+    //
+    // (This is also why scrolling inside vim is copy-mode rather than scrollback
+    // pagination: there is no scrollback there to page.)
+    const wanted = state.alternateOn ? false : historyLines;
     const raw = await this.cp.capturePane(this.sessionName, {
       escapes: true,
-      alternate: state.alternateOn,
-      history: historyLines === false ? false : historyLines,
+      history: wanted === false ? false : wanted,
+      // The whole grid, not the trimmed content: a client is replaying this into
+      // an emulator, and a row that stops early is a row whose background it gets
+      // wrong for everything after the last character.
+      pad: true,
     });
     return {
       screen: sanitizeOnce(raw),
       state,
       epoch: this.epoch,
-      ...(historyLines === false ? {} : { history: true }),
+      // Reported from what was actually captured, not from what was asked for:
+      // a client told it has history scrolls into a buffer that is not there.
+      ...(wanted === false ? {} : { history: true }),
     };
   }
 

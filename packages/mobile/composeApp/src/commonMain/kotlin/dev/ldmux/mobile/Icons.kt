@@ -158,27 +158,37 @@ fun IconLauncher(tint: Color, box: Dp = 20.dp) {
 }
 
 /**
- * Two arrows chasing each other round a circle.
+ * Two arrows chasing each other round a circle — a refresh mark.
  *
- * Each arc **ends in an arrow head**, and that is the whole difference between a
- * glyph that reads as "rotate" and two decorative curves: the head is what says
- * which way it turns. The head is two strokes rather than a filled triangle,
- * because at 20dp a triangle is a blob while two strokes are still an arrow.
+ * The two arcs are equal and sit opposite each other, and each one carries a head
+ * at its end, so the ring reads as a ring with two turns in it rather than as a
+ * circle with a line sticking out of each side. The heads are **V**s: two strokes
+ * set back from the tip at the same angle as the tangent, which is what an arrow
+ * actually looks like. A single barb, or a triangle, reads as a spike.
  */
 private fun DrawScope.drawFlip(tint: Color) {
     val w = size.minDimension
-    val stroke = w * 0.11f
-    val inset = w * 0.26f
+    val stroke = w * 0.115f
+    // Room for the heads to sit *outside* the arcs' radius without clipping.
+    val inset = w * 0.24f
     val d = w - inset * 2f
+    val gate = 52f      // degrees of gap at each head, so the heads have air
+    val sweep = 180f - gate
     val style = Stroke(stroke, cap = StrokeCap.Round)
-    for (start in listOf(-58f, 122f)) {
-        val sweep = 108f
-        drawArc(tint, start, sweep, false, Offset(inset, inset), Size(d, d), style = style)
+    for (start in listOf(-90f + gate / 2f, 90f + gate / 2f)) {
+        val topLeft = Offset(inset, inset)
+        drawArc(tint, start, sweep, false, topLeft, Size(d, d), style = style)
         arrowHead(tint, inset, d, start + sweep, w, stroke)
     }
 }
 
-/** An arrow head at [angleDeg] on the circle, tangent to it, pointing clockwise. */
+/**
+ * A V-shaped head at [angleDeg] on the circle, tangent to it, turning clockwise.
+ *
+ * Both barbs are swept back from the tip by the same angle, and both are shorter
+ * than the gap between the two arcs — an arrow head wider than the gap it sits in
+ * is what made the previous version look like a spike rather than an arrow.
+ */
 private fun DrawScope.arrowHead(
     tint: Color,
     inset: Float,
@@ -194,15 +204,16 @@ private fun DrawScope.arrowHead(
     val co = cos(a).toFloat()
     val si = sin(a).toFloat()
     val tip = Offset(cx + r * co, cy + r * si)
-    // With y growing downwards, the clockwise tangent at `a` is (-sin, cos).
+    // Clockwise, with y growing downwards, the tangent is (-sin, cos).
     val tx = -si
     val ty = co
-    val len = w * 0.27f
-    val spread = 0.62f
-    val cs = cos(spread).toFloat()
-    val sn = sin(spread)
+    // Long enough to see, short enough to stay inside the gap between the arcs.
+    val len = w * 0.30f
+    val barb = 42.0 * (PI / 180.0)
+    val cs = cos(barb).toFloat()
+    val sn = sin(barb)
     for (sign in listOf(1.0, -1.0)) {
-        // The *backwards* tangent, rotated by ±spread — the two barbs.
+        // Sweep the *backwards* tangent by ±barb: the two sides of the V.
         val s2 = (sn * sign).toFloat()
         val rx = -tx * cs - -ty * s2
         val ry = -tx * s2 + -ty * cs

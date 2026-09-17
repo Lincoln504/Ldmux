@@ -125,7 +125,23 @@ test("snapshotWithHistory returns more lines than the visible screen", { timeout
   expect(plain.history).toBeUndefined();
   // The 6-row pane shows the tail; the paged capture reaches further back.
   expect(paged.screen.length).toBeGreaterThan(plain.screen.length);
-  expect(paged.screen).toContain("LINE_1\n");
+  // `LINE_1` and not `LINE_1\n`: every row comes back padded to the pane's full
+  // width, because a row that stops at its last character is a row whose
+  // attributes the client has for only part of it. See CaptureOptions.pad — with
+  // a full-screen program on screen, the dropped tail is exactly where its
+  // background colour lived.
+  expect(paged.screen).toContain("LINE_1");
+  expect(paged.screen).toContain("LINE_1 ");
+  // Every row is the pane's width once the escapes are removed. (Matched on
+  // `LINE_40` and not `LINE_1`, which `LINE_10` also begins with.)
+  const row = paged.screen
+    .split("\n")
+    .map((r) => r.replace(/\u001b\[[0-9;]*m/g, ""))
+    .find((r) => r.startsWith("LINE_40"));
+  // Longer than the text and no wider than the pane: trimming would give exactly
+  // the text's length, which is the regression this is here to catch.
+  expect(row!.length).toBeGreaterThan("LINE_40".length);
+  expect(row!.length).toBeLessThanOrEqual(40);
   stream.close();
 });
 

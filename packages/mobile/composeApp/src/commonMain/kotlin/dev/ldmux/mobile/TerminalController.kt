@@ -108,17 +108,17 @@ class TerminalController(
             _ownedBy.value = null
             engine.close()
             engine = TerminalEngine(cols, rows)
-            if (screen.isNotEmpty()) {
-                val bytes = snapshotReplay(screen).encodeToByteArray()
-                engine.write(bytes, bytes.size)
-            }
-            // Then put the cursor where the pane actually has it. Replaying the
-            // screen leaves it at the end of the padded area (capture-pane fills
-            // the full height with blank rows), which is not the cursor's
-            // position — and the emulator's cursor is what gets drawn and what
-            // every tap measures its distance from.
-            val place = cursorSequence(m.cursorX, m.cursorY, cols, rows).encodeToByteArray()
-            engine.write(place, place.size)
+            // State, then content, then cursor — see [snapshotBytes], which is the
+            // only thing that decides that order.
+            val bytes = snapshotBytes(
+                screen = screen,
+                alternateOn = m.alternateOn,
+                cursorX = m.cursorX,
+                cursorY = m.cursorY,
+                cols = cols,
+                rows = rows,
+            )
+            engine.write(bytes, bytes.size)
             // A history page rebuilds the engine, so the view has to be put back
             // where it was: the same offset from the live bottom is the same
             // content, because what arrived is above it.
@@ -455,6 +455,48 @@ class TerminalController(
  * Written after a snapshot is replayed, because the replayed screen ends
  * wherever its last non-blank row ended. See [TerminalModes.cursorX].
  */
+/**
+ * A whole snapshot, as the bytes that reproduce the pane.
+ *
+ * **A snapshot is a piece of terminal *state*, not a picture**, and this is the
+ * one place that knows it. Everything a program has set which changes how the
+ * *next* bytes are read has to be re-established before those bytes arrive, and
+ * in the right order:
+ *
+ *  1. **the screen** — a full-screen program (`micro`, `vim`, `less`, `htop`)
+ *     runs on the alternate screen. Replaying its text without switching screens
+ *     writes it into the *primary* buffer, which still holds the shell's prompt
+ *     and history: the program's output lands on top of the scrollback it was
+ *     supposed to hide, the prompt shows through it, and the stray text scrolls
+ *     the shell away. That is not a rendering artefact; it is the wrong screen.
+ *  2. **the content** — the capture, minus the defects [snapshotReplay] records.
+ *  3. **the cursor** — because the capture pads to the full height, so replaying
+ *     it leaves the cursor at the bottom of the padding, not where the program
+ *     put it.
+ *
+ * The engine is rebuilt for every snapshot, so `1049h` here *establishes* a
+ * screen rather than toggling one, and the saved primary screen it discards is
+ * genuinely disposable: the next snapshot carries whatever is on screen then.
+ */
+internal fun snapshotBytes(
+    screen: String,
+    alternateOn: Boolean,
+    cursorX: Int,
+    cursorY: Int,
+    cols: Int,
+    rows: Int,
+): ByteArray {
+    val state = StringBuilder()
+    // `?1049` is the save/switch form, which is what a full-screen program uses.
+    // Sent on every snapshot, `l` included: on a fresh engine leaving the primary
+    // screen is a no-op, and being unconditional is what makes the two screens
+    // impossible to get out of step.
+    state.append(if (alternateOn) "\u001b[?1049h" else "\u001b[?1049l")
+    if (screen.isNotEmpty()) state.append(snapshotReplay(screen))
+    state.append(cursorSequence(cursorX, cursorY, cols, rows))
+    return state.toString().encodeToByteArray()
+}
+
 /**
  * A captured screen, as bytes safe to write into an emulator.
  *

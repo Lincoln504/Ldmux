@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
+import { daemonCall } from "../../protocol/src/rpc.ts";
 import { decodeFrames, FrameType, type Frame } from "../../protocol/src/frames.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -490,3 +491,53 @@ test("a click on a pane that never enabled mouse reporting is refused", async ()
   expect(await waitFor(() => text.some((m) => m.type === "error" && m.code === "no_mouse"))).toBe(true);
   ws.close();
 });
+
+/**
+ * The screen and its scrollback come from the same buffer, or they are two
+ * different screens.
+ *
+ * Written against a real failure. tmux is unambiguous about this once measured:
+ * with a full-screen program running (`alternate_on=1`),
+ *
+ *     capture-pane                          -> the program's screen
+ *     capture-pane -a                       -> the shell's screen
+ *     capture-pane -S -100                  -> the shell's *scrollback*
+ *     capture-pane -a -S -100               -> the shell's screen
+ *
+ * So `-a` does not mean "the alternate one", it means "the other one" — and
+ * scrollback is not a property of the alternate screen at all, because that
+ * screen has none: it belongs to the primary, which is not on screen. Asking for
+ * either while a TUI is up hands the client the shell's prompt and history, and
+ * the client — told `alternate_on=1` — draws them on the alternate screen. That
+ * is a full-screen program with its own shell showing through it, which is
+ * exactly what it looked like.
+ */
+test("a snapshot of an alternate-screen pane is that screen and no scrollback", { timeout: 30000 }, async () => {
+  const { session } = await daemonCall(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: "/tmp",
+    title: "altscreen",
+  });
+  const name = session.tmuxName;
+
+  // Something on the shell's own screen, which must never appear in a snapshot of
+  // the program's screen.
+  await daemonCall(daemon.socketPath, "send", { id: session.id, text: "echo PRIMARY-MARKER" });
+  await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
+  await sleep(400);
+
+  // `tput smcup` emits the real sequence; a hand-written escape through send-keys
+  // does not survive the round trip and silently tests nothing (measured: alt=0).
+  await daemonCall(daemon.socketPath, "send", {
+    id: session.id,
+    text: "tput smcup; echo ALTERNATE-MARKER",
+  });
+  await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
+  await sleep(600);
+
+  const state = await daemonCall(daemon.socketPath, "snapshot", { id: session.id });
+  expect(state.state.alternateOn).toBe(true);
+  expect(state.screen.includes("ALTERNATE-MARKER")).toBe(true);
+  expect(state.screen.includes("PRIMARY-MARKER")).toBe(false);
+});
+

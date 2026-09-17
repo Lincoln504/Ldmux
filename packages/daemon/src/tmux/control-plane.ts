@@ -142,8 +142,22 @@ export interface CaptureOptions {
   escapes?: boolean;
   /** `true` captures the full bounded history; a number captures that many lines. */
   history?: boolean | number;
-  /** Capture the alternate screen (`-a`) — required for full-screen TUIs. */
-  alternate?: boolean;
+  /**
+   * Capture every cell of every row, including the blank tail (`-N`).
+   *
+   * **On, for anything a client replays.** `capture-pane` trims a row at its last
+   * non-blank cell, so the rest of the row is not "blank" to the client — it is
+   * *absent*, and the client fills it with whatever its emulator's default is.
+   * Measured on tmux 3.7b with `micro` running: rows came back 45, 34 and 47
+   * characters wide in a 76-column pane, and the cells that were dropped were the
+   * ones `micro` had painted its own background on. The result is a full-screen
+   * program with the right colours around its text and black everywhere it had
+   * painted and written nothing — which is most of the screen.
+   *
+   * With `-N` the same rows come back padded to the full width, still under the
+   * last cell's attributes, so the blank tail is correctly `micro`'s grey.
+   */
+  pad?: boolean;
   /**
    * Join rows the terminal wrapped (`-J`, tmux 3.2+). **Off by default, and it
    * must stay off for anything a client replays.**
@@ -561,8 +575,9 @@ export class TmuxControlPlane {
     const res = await this.runCapture(target, opts, withJoined);
     if (res.code === 0) return res.out;
     // `-J` needs tmux 3.2+. A build without it still has to produce a screen,
-    // so fall back once rather than failing every snapshot on an old host.
-    if (withJoined) {
+    // so fall back once rather than failing every snapshot on an old host. The
+    // same goes for `-N`: an older tmux gives the trimmed rows it always did.
+    if (withJoined || opts.pad === true) {
       const fallback = await this.runCapture(target, opts, false);
       if (fallback.code === 0) return fallback.out;
     }
@@ -576,13 +591,29 @@ export class TmuxControlPlane {
   ): Promise<{ code: number; out: string; err: string }> {
     const args = ["capture-pane", "-p", "-t", target];
     if (opts.escapes !== false) args.push("-e");
-    // `-a` captures the alternate screen, which is where full-screen TUIs live.
-    if (opts.alternate) args.push("-a");
+    // `-a` is deliberately never passed, and this comment is the reason.
+    //
+    // It reads as "capture the alternate screen", which sounds like exactly what a
+    // full-screen program needs. It is not: `capture-pane` with **no flags** already
+    // captures the screen that is *visible*, and for a TUI that is the alternate
+    // one. Measured on tmux 3.7b with micro running (`alternate_on=1`):
+    //
+    //     capture-pane -p        -> "1 erifufkfff"   (micro — the visible screen)
+    //     capture-pane -p -a     -> "history-line-14" (the shell — the OTHER one)
+    //
+    // So `-a` inverts it. A client that is told `alternate_on=1` and handed the
+    // primary screen draws the shell's prompt and history on the alternate screen,
+    // which is the "full-screen program with a shell showing through it" bug in its
+    // entirety. The option is gone rather than fixed, so it cannot come back.
     // `-J` joins rows the terminal *wrapped*, so a long logical line comes back
     // as one line. Without it every row is a hard newline, and a client cannot
     // tell a wrap from a real line break — which is what breaks the cursor when
     // the user deletes back past the wrap point. (tmux 3.2+.)
     if (joinWrapped) args.push("-J");
+    // `-N` keeps the blank tail of every row, with its attributes still in
+    // effect. Without it the dropped cells are not blank to a client — they are
+    // missing, and it fills them with its own default. See CaptureOptions.pad.
+    if (opts.pad === true) args.push("-N");
     // History is bounded: capturing 50k lines blocks the event loop (see docs/WEB.md).
     if (opts.history) {
       const lines = typeof opts.history === "number" ? opts.history : HISTORY_CAPTURE_LINES;

@@ -187,4 +187,3 @@ test("sendBytes refuses to send nothing", async () => {
   await cp.sendBytes("sess", new Uint8Array(0));
   expect(existsSync(log)).toBe(false);
 });
-

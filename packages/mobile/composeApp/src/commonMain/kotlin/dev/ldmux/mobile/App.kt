@@ -241,16 +241,45 @@ fun App() {
         onDispose { BackgroundSession.setActive(false, "") }
     }
 
+    // The sticky modifiers live here, not in the panel, because **both** bars send
+    // keys and a latch belongs to the session rather than to the chrome that armed
+    // it. Kept in the panel it existed twice — and the portrait bar, having no
+    // latch of its own, had its Ctrl key wired straight to `C-c`, which is not a
+    // modifier at all: pressing Ctrl and then `d` there sent C-c, then a d.
+    var modifiers by remember { mutableStateOf(Modifiers()) }
+
+    // One handle per session, so the chrome's keys reach the visible terminal.
+    // A snapshot state map, so the panel recomposes once a surface registers.
+    val handles = remember { mutableStateMapOf<String, TerminalHandle>() }
+
+    // The one place a key is sent, for both modes, so the latch can neither leak
+    // nor be forgotten: every key in either bar goes through here.
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
+
+    // A latch that survived a glance at another shell would be a latch that
+    // surprises you, so anything that ends the gesture clears it.
+    LaunchedEffect(pagerState.currentPage) { modifiers = modifiers.cleared() }
+
+    // The one place a key is sent, for both modes, so the latch cannot leak or be
+    // forgotten: every key in either bar goes through here, modified or not.
+    val press: (String) -> Unit = { key ->
+        val handle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
+        val armed = modifiers
+        if (armed.armed) {
+            handle?.sendModifiedKey(key, armed)
+            modifiers = modifiers.cleared()
+        } else {
+            handle?.sendKey(key)
+        }
+    }
     LaunchedEffect(pages.size) {
         if (pages.isNotEmpty() && pagerState.currentPage >= pages.size) {
             pagerState.scrollToPage(pages.size - 1)
         }
     }
 
-    // One handle per session, so the chrome's keys reach the visible terminal.
-    // A snapshot state map, so the panel recomposes once a surface registers.
-    val handles = remember { mutableStateMapOf<String, TerminalHandle>() }
+
+
     var killTarget by remember { mutableStateOf<Session?>(null) }
     val portrait = mode == UiMode.Portrait
     val currentHandle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
@@ -369,6 +398,9 @@ fun App() {
                 onLauncher = { showLauncher = true },
                 onSettings = { showSettings = true },
                 onClose = pages.getOrNull(pagerState.currentPage)?.let { s -> { killTarget = s } },
+                modifiers = modifiers,
+                onModifiers = { modifiers = it },
+                press = press,
             )
         }
     } else {
@@ -383,7 +415,13 @@ fun App() {
                     onFlip = { mode = UiMode.Portrait },
                     onKill = { killTarget = it },
                     onLauncher = { showLauncher = true },
-                ) { showSettings = true }
+                    // Named rather than trailing: `press` is a parameter now, and a
+                    // trailing lambda would bind to it.
+                    onSettings = { showSettings = true },
+                    modifiers = modifiers,
+                    onModifiers = { modifiers = it },
+                    press = press,
+                )
             }
             if (config.panelLeft) panel()
             TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
@@ -515,6 +553,9 @@ private fun PortraitBar(
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
     onClose: (() -> Unit)?,
+    modifiers: Modifiers,
+    onModifiers: (Modifiers) -> Unit,
+    press: (String) -> Unit,
 ) {
     Column(
         Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 5.dp),
@@ -529,25 +570,31 @@ private fun PortraitBar(
         // bar you type on.
         PortraitKeyRow(
             listOf(
-                "Esc" to { handle?.sendKey("Escape") },
-                "Tab" to { handle?.sendKey("Tab") },
-                "\u2190" to { handle?.sendKey("Left") },
-                "\u2191" to { handle?.sendKey("Up") },
-                "\u2193" to { handle?.sendKey("Down") },
-                "\u2192" to { handle?.sendKey("Right") },
-                "\u23ce" to { handle?.sendKey("Enter") },
+                "Esc" to { press("Escape") },
+                "Tab" to { press("Tab") },
+                "\u2190" to { press("Left") },
+                "\u2191" to { press("Up") },
+                "\u2193" to { press("Down") },
+                "\u2192" to { press("Right") },
+                "\u23ce" to { press("Enter") },
             ),
             flip = onLandscape,
         )
         PortraitKeyRow(
             listOf(
-                "Ctrl" to { handle?.sendKey("C-c") },
-                "C-c" to { handle?.sendKey("C-c") },
-                "C-d" to { handle?.sendKey("C-d") },
-                "|" to { handle?.sendKey("|") },
-                "-" to { handle?.sendKey("-") },
-                "/" to { handle?.sendKey("/") },
+                // The same latch as the panel's, from the same state: arm Ctrl,
+                // then press any key, and Ctrl applies to that key. It used to be
+                // wired straight to `C-c` here, which sent an interrupt instead of
+                // arming anything — so Ctrl-then-`d` sent C-c and then a d.
+                "Ctrl" to { onModifiers(modifiers.toggled(StickyKey.Ctrl)) },
+                "Alt" to { onModifiers(modifiers.toggled(StickyKey.Alt)) },
+                "C-c" to { press("C-c") },
+                "C-d" to { press("C-d") },
+                "|" to { press("|") },
+                "-" to { press("-") },
+                "/" to { press("/") },
             ),
+            active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
             menu = onMenu,
             menuExpanded = menuExpanded,
             onMenuDismiss = onMenuDismiss,
@@ -571,6 +618,7 @@ private fun PortraitKeyRow(
     onLauncher: () -> Unit = {},
     onSettings: () -> Unit = {},
     onClose: (() -> Unit)? = null,
+    active: List<Boolean> = emptyList(),
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -582,7 +630,9 @@ private fun PortraitKeyRow(
             // mode rather than one that types into it.
             IconBtn(onClick = flip, modifier = Modifier.weight(1f)) { IconFlip(Accent, box = 18.dp) }
         }
-        for ((label, action) in keys) PortraitKey(label, Modifier.weight(1f), action)
+        keys.forEachIndexed { i, (label, action) ->
+            PortraitKey(label, Modifier.weight(1f), active.getOrElse(i) { false }, action)
+        }
         if (menu != null) {
             Box(Modifier.weight(1f)) {
                 IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth()) {
@@ -595,11 +645,16 @@ private fun PortraitKeyRow(
 }
 
 @Composable
-private fun PortraitKey(label: String, modifier: Modifier, onClick: () -> Unit) {
+private fun PortraitKey(
+    label: String,
+    modifier: Modifier,
+    active: Boolean,
+    onClick: () -> Unit,
+) {
     Box(
         modifier
             .clip(RoundedCornerShape(7.dp))
-            .background(Bg)
+            .background(if (active) Accent else Bg)
             .clickable(onClick = onClick)
             .padding(vertical = 9.dp),
         contentAlignment = Alignment.Center,
@@ -636,32 +691,17 @@ private fun SidePanel(
     onKill: (Session) -> Unit,
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
+    modifiers: Modifiers,
+    onModifiers: (Modifiers) -> Unit,
+    press: (String) -> Unit,
 ) {
     val current = pagerState.currentPage
     val here = pages.getOrNull(current)
     val handle = here?.id?.let { handles[it] }
     val total = pages.size.coerceAtLeast(1)
 
-    // Sticky modifiers. Armed here, consumed by the next key, and cleared on
-    // anything that ends the gesture — a page turn or a tap — because a latch
-    // that survives a glance at another shell is a latch that surprises you.
-    var modifiers by remember { mutableStateOf(Modifiers()) }
-    LaunchedEffect(current) { modifiers = modifiers.cleared() }
-
     /** The overflow menu, which owns every action that is not a key. */
     var menuOpen by remember { mutableStateOf(false) }
-
-    // One place a key is sent, so the latch cannot leak: every key in the panel
-    // goes through here, modified or not.
-    fun press(key: String) {
-        val armed = modifiers
-        if (armed.armed) {
-            handle?.sendModifiedKey(key, armed)
-            modifiers = modifiers.cleared()
-        } else {
-            handle?.sendKey(key)
-        }
-    }
 
     fun step(delta: Int) {
         val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
@@ -713,8 +753,8 @@ private fun SidePanel(
             // and, more to the point, says how many keys are in it.
             KeyRow(
                 listOf(
-                    "Ctrl" to { modifiers = modifiers.toggled(StickyKey.Ctrl) },
-                    "Alt" to { modifiers = modifiers.toggled(StickyKey.Alt) },
+                    "Ctrl" to { onModifiers(modifiers.toggled(StickyKey.Ctrl)) },
+                    "Alt" to { onModifiers(modifiers.toggled(StickyKey.Alt)) },
                     "copy" to { handle?.setCopyMode(handle?.inCopyMode != true) },
                 ),
                 active = listOf(modifiers.ctrl, modifiers.alt, handle?.inCopyMode == true),
