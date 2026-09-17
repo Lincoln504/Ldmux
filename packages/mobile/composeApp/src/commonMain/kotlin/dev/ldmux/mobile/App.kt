@@ -366,7 +366,15 @@ fun App() {
             onKill = { killTarget = it },
             onMakeLive = { session, workspace -> client.makeLive(session.id, workspace) },
             onCloseLive = { session -> client.closeLive(session.id) },
-            onNewShell = { workspace -> client.create("shell") },
+            onNewShell = { path, command ->
+                // The command is what the user typed, and `bash` means a shell.
+                // Both are the same request to the daemon: the *shell* is the
+                // host's login shell, and the command is the program inside it.
+                // A blank path is not the empty string: it is "wherever the daemon
+                // is", which is the host's working directory — the same default
+                // every other caller gets.
+                client.create("shell", path.ifBlank { null }, null, command.ifBlank { null })
+            },
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
             onSettings = { showSettings = true },
@@ -635,8 +643,8 @@ private fun PortraitKeyRow(
         }
         if (menu != null) {
             Box(Modifier.weight(1f)) {
-                IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth()) {
-                    IconWaffle(Dim, box = 18.dp)
+                IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth(), filled = true) {
+                    IconWaffle(Bg, box = 18.dp)
                 }
                 AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings, onClose)
             }
@@ -718,6 +726,24 @@ private fun SidePanel(
         // the biggest touch targets in the panel rather than being strung across
         // a title. The path is tildified because the tail of it is the only part
         // that tells two shells apart.
+        // The launcher, its own control at the top and wearing the accent.
+        //
+        // It used to sit in the action row beside the flip and the microphone,
+        // where three identical dark squares made it read as one more key in the
+        // column of keys below it. It is not a key: it leaves this screen.
+        Box {
+            IconBtn(onClick = { menuOpen = true }, filled = true, modifier = Modifier.fillMaxWidth()) {
+                IconWaffle(Bg)
+            }
+            AppMenu(
+                expanded = menuOpen,
+                onDismiss = { menuOpen = false },
+                onLauncher = onLauncher,
+                onSettings = onSettings,
+                onClose = here?.let { s -> { onKill(s) } },
+            )
+        }
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             NavArrow("◀", enabled = current > 0) { step(-1) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -808,20 +834,6 @@ private fun SidePanel(
             // Landscape only: portrait always has the keyboard up and the IME
             // carries its own microphone. Two microphones is one too many.
             IconBtn(onClick = { handle?.startVoice() }) { IconMic(tint = Fg) }
-            Spacer(Modifier.weight(1f))
-            // Everything rare, behind one control. Three visible icons for three
-            // occasional actions was three buttons of chrome competing with the
-            // keys the panel exists for.
-            Box {
-                IconBtn(onClick = { menuOpen = true }) { IconWaffle(Dim) }
-                AppMenu(
-                    expanded = menuOpen,
-                    onDismiss = { menuOpen = false },
-                    onLauncher = onLauncher,
-                    onSettings = onSettings,
-                    onClose = here?.let { s -> { onKill(s) } },
-                )
-            }
         }
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,

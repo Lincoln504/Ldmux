@@ -22,6 +22,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -282,12 +284,17 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private var ws: DefaultClientWebSocketSession? = null
 
     /** Open a new session on the host (FR-10). The list refreshes from the reply. */
-    fun create(kind: String, cwd: String? = null, title: String? = null) {
+    fun create(kind: String, cwd: String? = null, title: String? = null, command: String? = null) {
         val msg = buildJsonObject {
             put("type", "new")
             put("kind", kind)
             if (cwd != null) put("cwd", cwd)
             if (title != null) put("title", title)
+            // argv, not a command line: nothing is left for a shell to re-split,
+            // and `bash` here is a program name rather than syntax.
+            if (!command.isNullOrBlank()) {
+                put("command", buildJsonArray { for (w in command.trim().split(Regex("\\s+"))) add(w) })
+            }
         }.toString()
         sendControl(msg)
     }

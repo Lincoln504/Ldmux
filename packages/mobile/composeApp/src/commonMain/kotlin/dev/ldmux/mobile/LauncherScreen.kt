@@ -2,8 +2,6 @@ package dev.ldmux.mobile
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,8 +60,8 @@ fun LauncherScreen(
     onKill: (Session) -> Unit,
     onMakeLive: (Session, String) -> Unit,
     onCloseLive: (Session) -> Unit,
-    /** Start a shell on the chosen desktop, or wherever the desktop already is. */
-    onNewShell: (String?) -> Unit,
+    /** Start a shell, where the user said, running what the user said. */
+    onNewShell: (path: String, command: String) -> Unit,
     liveResult: LiveResult?,
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
@@ -71,7 +69,9 @@ fun LauncherScreen(
     // Which shells and pi sessions are chosen. Keys, not objects, so a list that
     // refreshes under the user does not silently drop a selection.
     var chosen by remember { mutableStateOf(setOf<String>()) }
-    var targetWorkspace by remember { mutableStateOf<String?>(null) }
+    var newShellOpen by remember { mutableStateOf(false) }
+    // Which shell the desktop picker is choosing for. Null means closed.
+    var pickerFor by remember { mutableStateOf<Session?>(null) }
 
     // The desktop is fetched when the screen appears and when asked for, never on
     // a timer: it is a run of window-manager and /proc reads on the host.
@@ -80,6 +80,7 @@ fun LauncherScreen(
     val openShells = sessions.filter { it.attachable }
     val entries = launcherEntries(desktop?.piSessions.orEmpty(), openShells)
 
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(Bg).padding(12.dp)) {
         // ── header ───────────────────────────────────────────────────────────
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -97,34 +98,12 @@ fun LauncherScreen(
             IconBtn(onClick = onSettings) { IconCog(Dim) }
         }
 
-        // Where a new shell goes, when a new shell is opened. A control, not a
-        // section: one row of chips, not a list of desktops each carrying every
-        // window on it. With nothing chosen the shell lands where the desktop
-        // already is.
-        val workspaces = desktop?.workspaces.orEmpty()
-        if (workspaces.isNotEmpty()) {
-            Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                // "push to", not "new shell on": these chips choose where a
-                // *pushed window* lands, which is the one thing the target is
-                // actually used for. The old label promised something the code
-                // did not do.
-                Text("push to", color = Dim, fontSize = 10.sp)
-                for (ws in workspaces) {
-                    WorkspaceChip(
-                        ws = ws,
-                        targeted = targetWorkspace == ws.name,
-                        onTarget = {
-                            targetWorkspace = if (targetWorkspace == ws.name) null else ws.name
-                        },
-                    )
-                }
-            }
-        } else if (desktop?.detail != null) {
+        // Where a new shell goes is asked for in the dialogue that creates it, and
+        // where a pushed window goes is asked for when it is pushed. There used to
+        // be a row of target chips up here that set a mode for both, which is a
+        // choice made in one place and spent in another — and the button that spent
+        // it did nothing at all until a chip had been pressed.
+        if (desktop?.detail != null) {
             Spacer(Modifier.height(6.dp))
             Text(desktop.detail, color = Dim, fontSize = 10.sp, maxLines = 2)
         }
@@ -157,31 +136,20 @@ fun LauncherScreen(
                         // the phone may look at it, but not move or end it.
                         if (e.openedByPhone && session != null) {
                             val live = e.liveWorkspace
-                            val target = targetWorkspace
-                            // One button, two meanings, decided by where the window
-                            // already is: put it on the chosen desktop, or take it
-                            // off the one it is on. A second button for "undo"
-                            // would be a control to hunt for rather than a state you
-                            // can see.
-                            IconBtn(
-                                onClick = {
-                                    if (live != null) onCloseLive(session)
-                                    else if (target != null) onMakeLive(session, target)
-                                },
-                                caption = when {
-                                    live != null -> "on $live"
-                                    target == null -> "pick a desktop"
-                                    else -> null
-                                },
-                            ) {
-                                IconPush(
-                                    when {
-                                        live != null -> Accent
-                                        target == null -> Dim.copy(alpha = 0.5f)
-                                        else -> Accent
-                                    },
-                                )
-                            }
+                            // Words, not a button. It said "pick a desktop" and
+                            // could not pick one — it acted on a target chosen
+                            // elsewhere, so on its own it did nothing, which is
+                            // what a button that does nothing teaches you about
+                            // the rest of them.
+                            Text(
+                                if (live != null) "on $live" else "send to desktop",
+                                color = if (live != null) Accent else Dim,
+                                fontSize = 11.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { pickerFor = session }
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                            )
                         }
                     }
                 }
@@ -202,8 +170,39 @@ fun LauncherScreen(
                 val picked = entries.filter { it.key in chosen }
                 if (picked.isNotEmpty()) onOpen(picked)
             }
-            OutlinedBtn("+ shell", Modifier.weight(1f)) { onNewShell(targetWorkspace) }
+            OutlinedBtn("+ shell", Modifier.weight(1f)) { newShellOpen = true }
         }
+    }
+
+    if (newShellOpen) {
+        NewShellModal(
+            // The real directory, never the `~` form: that is how a path is
+            // *shown*, and the daemon resolves a path by asking the filesystem.
+            // A suggestion that cannot be used is worse than an empty field.
+            suggestedPath = entries.firstOrNull { it.key in chosen }?.cwd.orEmpty(),
+            onDismiss = { newShellOpen = false },
+            onCreate = { path, command ->
+                newShellOpen = false
+                onNewShell(path, command)
+            },
+        )
+    }
+    pickerFor?.let { session ->
+        DesktopPickerModal(
+            workspaces = desktop?.workspaces.orEmpty(),
+            windows = desktop?.windows.orEmpty(),
+            liveOn = session.liveWorkspace,
+            onDismiss = { pickerFor = null },
+            onPick = { ws ->
+                pickerFor = null
+                onMakeLive(session, ws)
+            },
+            onTakeOff = {
+                pickerFor = null
+                onCloseLive(session)
+            },
+        )
+    }
     }
 }
 
@@ -288,34 +287,6 @@ internal fun launcherEntries(
 }
 
 /** One workspace, as a chip to aim a new shell at. */
-@Composable
-private fun WorkspaceChip(ws: DesktopWorkspace, targeted: Boolean, onTarget: () -> Unit) {
-    Row(
-        Modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (targeted) Accent.copy(alpha = 0.22f) else Surface)
-            .border(
-                width = if (targeted) 1.5.dp else 1.dp,
-                color = if (targeted) Accent else Line,
-                shape = RoundedCornerShape(14.dp),
-            )
-            .clickable(onClick = onTarget)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            ws.name,
-            color = if (targeted) Fg else Fg.copy(alpha = 0.8f),
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
-        )
-        if (ws.focused) {
-            Spacer(Modifier.width(4.dp))
-            Text("\u25cf", color = Accent, fontSize = 8.sp)
-        }
-    }
-}
-
 @Composable
 private fun ChoiceRow(
     title: String,

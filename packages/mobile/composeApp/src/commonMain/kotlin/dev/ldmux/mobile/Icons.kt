@@ -47,12 +47,21 @@ fun IconBtn(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     caption: String? = null,
+    /**
+     * Carry the accent, for a control that belongs to the app rather than to the
+     * shell.
+     *
+     * Every other icon button is a dark square the same size as a key, which is
+     * what a key looks like. A control that *leaves* this screen must not be
+     * mistaken for one you type into.
+     */
+    filled: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     Column(
         modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(Bg)
+            .background(if (filled) Accent else Bg)
             .clickable(onClick = onClick)
             .padding(horizontal = 9.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

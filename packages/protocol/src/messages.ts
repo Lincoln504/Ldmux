@@ -184,6 +184,14 @@ export interface NewSessionMessage {
   kind?: "shell" | "pi";
   cwd?: string;
   title?: string;
+  /**
+   * What to run in it, as argv.
+   *
+   * The shell is the *host's* login shell either way (docs/SPEC.md §7) — this is
+   * the program started inside it, so a new shell can be a shell or an editor or
+   * an agent without the client having to know how to spell any of them.
+   */
+  command?: string[];
 }
 
 /** Remote client → server: end a session. The server answers with a fresh list. */

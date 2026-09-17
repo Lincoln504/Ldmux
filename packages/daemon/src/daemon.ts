@@ -254,12 +254,13 @@ export class LdmuxDaemon {
         token: this.token,
         getSession: (id) => this.registry.get(id),
         listSessions: () => this.describeSessions(),
-        createSession: async (kind, cwd, title, createdBy) => {
+        createSession: async (kind, cwd, title, createdBy, command) => {
           await this.handleNew({
             kind,
             cwd: cwd ?? process.cwd(),
             title,
             createdBy,
+            command,
           } as unknown as NewParams);
         },
         makeLive: (id, workspace) => this.handle("makeLive", { id, workspace }) as Promise<{ ok: boolean; detail?: string }>,
@@ -741,6 +742,12 @@ export class LdmuxDaemon {
           record.id,
           workspace,
           this.cp.bin,
+          // The shim is a script written beside the daemon's own state, and the
+          // window it starts is handed its path. Omitted, `openLive` had nothing
+          // to write and refused with "no state directory for the live shim" —
+          // so the button reported nothing and did nothing, every time. The
+          // parameter was added with the shim; the caller was not.
+          this.stateDir,
         );
         if (result.ok) {
           // Recorded only on success, so the fact the client is told cannot

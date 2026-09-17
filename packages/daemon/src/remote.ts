@@ -31,6 +31,26 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { WebSocketServer, type WebSocket } from "ws";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 
+
+/**
+ * A `command` field off the wire, as argv.
+ *
+ * Untrusted, so it is filtered to strings and given no special treatment: the
+ * array goes to `tmux new-session` as separate arguments, never through a shell,
+ * so nothing in it can become a command of its own. An empty or unusable value is
+ * no command at all, which is a shell — the host's login shell, as always.
+ */
+export function commandArgv(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const argv = value
+    .filter((a): a is string => typeof a === "string" && a.length > 0)
+    .slice(0, MAX_COMMAND_ARGS);
+  return argv.length > 0 ? argv : undefined;
+}
+
+/** A command is started, not pasted: more than this is not a command line. */
+const MAX_COMMAND_ARGS = 32;
+
 export interface RemoteServerOptions {
   hostname: string;
   /** 0 = ephemeral (tests). */
@@ -44,6 +64,7 @@ export interface RemoteServerOptions {
     cwd: string | undefined,
     title: string | undefined,
     createdBy: string,
+    command?: string[],
   ): Promise<void>;
   /** End a session by id. */
   killSession?(id: string): Promise<void>;
@@ -417,6 +438,7 @@ export class RemoteServer {
             msg.cwd,
             msg.title,
             "phone",
+            commandArgv(msg.command),
           );
           if (data.disposed) return;
           await this.sendSessions(ws);
