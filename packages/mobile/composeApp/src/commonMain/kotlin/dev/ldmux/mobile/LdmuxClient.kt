@@ -40,6 +40,14 @@ data class Session(
     /** Who opened it: "phone", "local", "cli", "adopt". */
     val createdBy: String = "",
     /**
+     * What the pane is running — `bash`, `vim`, `pi`.
+     *
+     * The launcher shows this because a directory alone does not identify a
+     * shell: two rows in the same folder are otherwise the same row, and "which
+     * of these is my editor" is the question the list is for.
+     */
+    val process: String = "",
+    /**
      * Whether a desktop window is holding this shell open, and where.
      *
      * The server's fact, not a window-manager probe: a client cannot see the
@@ -442,6 +450,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                         status = o["status"]?.jsonPrimitive?.content ?: "",
                         tmuxName = o["tmuxName"]?.jsonPrimitive?.content ?: "",
                         createdBy = o["createdBy"]?.jsonPrimitive?.content ?: "",
+                        process = o["process"]?.jsonPrimitive?.content ?: "",
                         liveWorkspace = o.optionalText("liveWorkspace"),
                         ownerName = (o["owner"] as? JsonObject)
                             ?.get("name")?.let { (it as? JsonPrimitive)?.content },

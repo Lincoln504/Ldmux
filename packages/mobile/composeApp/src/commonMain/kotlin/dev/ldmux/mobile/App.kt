@@ -1,6 +1,8 @@
 package dev.ldmux.mobile
 
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -279,12 +281,16 @@ fun App() {
                 desktopLoading = true
                 client.requestDesktop()
             },
-            onOpen = { choices ->
-                val ids = choices.mapNotNull { (it as? LauncherChoice.Session)?.id }.toSet()
-                val fresh = choices.filterIsInstance<LauncherChoice.NewShell>()
-                for (c in fresh) client.create("shell", c.cwd, c.label)
+            onOpen = { picked ->
+                // Two kinds of row, one gesture: an existing shell becomes a
+                // page, and a row that is only a directory gets a shell opened
+                // in it. Opening is asynchronous, so the selection is remembered
+                // by directory and resolved when the list comes back.
+                val existing = picked.mapNotNull { it.sessionId }.toSet()
+                val fresh = picked.filter { it.sessionId == null }
+                for (e in fresh) client.create("shell", e.cwd, e.label)
                 awaitingCwds = fresh.map { it.cwd }.toSet()
-                pageSelection = ids
+                pageSelection = existing
                 showLauncher = false
                 mode = UiMode.Landscape
             },
@@ -384,6 +390,12 @@ private fun TerminalArea(
             )
         } else {
             HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
+              // One Box per page, and it is not cosmetic: a pager page stacks its
+              // children only if the content is itself a Box. As two siblings the
+              // overlay was laid out *after* a fillMaxSize terminal, i.e. below the
+              // bottom of the screen — so a refused attach showed a blank terminal
+              // and no explanation, which is exactly what it was built to prevent.
+              Box(Modifier.fillMaxSize()) {
                 val s = pages[page]
                 // Composed if it is within a swipe, connected only if it is the
                 // one on screen (see TerminalHandle.rememberTerminalSurface).
@@ -415,6 +427,7 @@ private fun TerminalArea(
                         },
                     )
                 }
+              }
             }
         }
     }
@@ -508,6 +521,9 @@ private fun SidePanel(
     var modifiers by remember { mutableStateOf(Modifiers()) }
     LaunchedEffect(current) { modifiers = modifiers.cleared() }
 
+    /** The overflow menu, which owns every action that is not a key. */
+    var menuOpen by remember { mutableStateOf(false) }
+
     // One place a key is sent, so the latch cannot leak: every key in the panel
     // goes through here, modified or not.
     fun press(key: String) {
@@ -558,22 +574,6 @@ private fun SidePanel(
 
         PanelDivider()
 
-        // Controls that change the *app*, not the shell. Kept in their own group
-        // with a rule above, because the flip button used to sit first in the key
-        // row wearing a glyph that read as a keyboard — it looked like a key.
-        //
-        // One flip control, one meaning, in both orientations: portrait is where
-        // the keyboard lives, so flipping to it *is* the keyboard action, and
-        // there is no separate keyboard button to confuse it with.
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            IconBtn(onClick = onFlip) { IconFlip(Accent) }
-            // Landscape only: portrait always has the keyboard up and the IME
-            // carries its own microphone. Two microphones is one too many.
-            IconBtn(onClick = { handle?.startVoice() }) { IconMic(tint = Fg) }
-        }
-
-        PanelDivider()
-
         @OptIn(ExperimentalLayoutApi::class)
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()),
@@ -618,25 +618,47 @@ private fun SidePanel(
             }
         }
 
-        // Actions, at the bottom where a thumb reaches them.
-        //
-        // The icons get their own row above the primary button rather than
-        // sharing one. Side by side they left "+ shell" about 66dp in a 190dp
-        // panel — right at the width of the words — and it wrapped into three
-        // lines ("+ she" / "ll"), which reads as a broken button. A primary
-        // action does not compete for room with a settings cog.
+        // Everything that acts on the *app* lives in this one bar, and nothing
+        // that acts on the shell does. That is the whole rule: the middle of the
+        // panel scrolls and holds keys, the ends are fixed and hold navigation
+        // and actions. It used to be neither — a flip button above the scroll, a
+        // settings cog below it, and no way to tell which was which.
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // A way back to the menu. The terminal is somewhere you went, so
-            // leaving it has to be possible without ending anything.
-            IconBtn(onClick = onLauncher) { IconLauncher(Dim) }
-            IconBtn(onClick = onSettings) { IconCog(Dim) }
-            val closable = pages.getOrNull(current)
-            if (closable != null) {
-                IconBtn(onClick = { onKill(closable) }) { IconClose(Dim) }
+            // One flip control, one meaning, in both orientations: portrait is
+            // where the keyboard lives, so flipping to it *is* the keyboard
+            // action, and a separate keyboard button only confuses it.
+            IconBtn(onClick = onFlip) { IconFlip(Accent) }
+            // Landscape only: portrait always has the keyboard up and the IME
+            // carries its own microphone. Two microphones is one too many.
+            IconBtn(onClick = { handle?.startVoice() }) { IconMic(tint = Fg) }
+            Spacer(Modifier.weight(1f))
+            // Everything rare, behind one control. Three visible icons for three
+            // occasional actions was three buttons of chrome competing with the
+            // keys the panel exists for.
+            Box {
+                IconBtn(onClick = { menuOpen = true }) { IconWaffle(Dim) }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    // A way back to the menu. The terminal is somewhere you went,
+                    // so leaving it has to be possible without ending anything.
+                    DropdownMenuItem(
+                        text = { Text("shells", color = Fg) },
+                        onClick = { menuOpen = false; onLauncher() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("settings", color = Fg) },
+                        onClick = { menuOpen = false; onSettings() },
+                    )
+                    if (here != null) {
+                        DropdownMenuItem(
+                            text = { Text("close this shell", color = Fg) },
+                            onClick = { menuOpen = false; onKill(here) },
+                        )
+                    }
+                }
             }
         }
         AccentBtn("+ shell", Modifier.fillMaxWidth()) { client.create("shell") }

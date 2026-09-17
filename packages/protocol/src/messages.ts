@@ -143,6 +143,14 @@ export type SessionInfo = Pick<
    */
   lastActivityAt?: number;
   /**
+   * What the pane is currently running (`bash`, `vim`, `pi`), when known.
+   *
+   * The launcher shows this so a row says what a shell *is*, not only where it
+   * is: two entries in the same directory are otherwise indistinguishable, and
+   * "which of these is my editor" is the question the list exists to answer.
+   */
+  process?: string;
+  /**
    * The device holding this shell, when one does (ADR-0010).
    *
    * Sent so the launcher can show *where* a shell is open from a fact, rather

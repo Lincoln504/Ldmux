@@ -2,6 +2,8 @@ package dev.ldmux.mobile
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -56,7 +58,7 @@ fun LauncherScreen(
     desktop: DesktopInventory?,
     desktopLoading: Boolean,
     onRefresh: () -> Unit,
-    onOpen: (List<LauncherChoice>) -> Unit,
+    onOpen: (List<LauncherEntry>) -> Unit,
     onKill: (Session) -> Unit,
     onMakeLive: (Session, String) -> Unit,
     onCloseLive: (Session) -> Unit,
@@ -74,9 +76,7 @@ fun LauncherScreen(
     LaunchedEffect(Unit) { onRefresh() }
 
     val openShells = sessions.filter { it.attachable }
-    val piSessions = desktop?.piSessions.orEmpty()
-    val choices = launcherChoices(piSessions, openShells)
-    val chosenCount = choices.count { it.key in chosen }
+    val entries = launcherEntries(desktop?.piSessions.orEmpty(), openShells)
 
     Column(Modifier.fillMaxSize().background(Bg).padding(12.dp)) {
         // ── header ───────────────────────────────────────────────────────────
@@ -95,279 +95,209 @@ fun LauncherScreen(
             IconBtn(onClick = onSettings) { IconCog(Dim) }
         }
 
-        Spacer(Modifier.height(12.dp))
-
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            // ── desktops ─────────────────────────────────────────────────────
-            val workspaces = desktop?.workspaces.orEmpty()
-            if (workspaces.isNotEmpty()) {
-                item { Section("desktops", "${desktop?.wm ?: ""} · tap the ring to aim a new shell") }
-                items(workspaces, key = { "ws:${it.name}" }) { ws ->
-                    WorkspaceRow(
+        // Where a new shell goes, when a new shell is opened. A control, not a
+        // section: one row of chips, not a list of desktops each carrying every
+        // window on it. With nothing chosen the shell lands where the desktop
+        // already is.
+        val workspaces = desktop?.workspaces.orEmpty()
+        if (workspaces.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("new shell on", color = Dim, fontSize = 10.sp)
+                for (ws in workspaces) {
+                    WorkspaceChip(
                         ws = ws,
-                        // The windows on it, which is what makes a workspace a place.
-                        windows = desktop?.windows.orEmpty().filter { it.workspace == ws.name },
                         targeted = targetWorkspace == ws.name,
-                        onTarget = { targetWorkspace = if (targetWorkspace == ws.name) null else ws.name },
+                        onTarget = {
+                            targetWorkspace = if (targetWorkspace == ws.name) null else ws.name
+                        },
                     )
                 }
-            } else if (desktop != null && desktop.detail != null) {
-                // Not an error state: the pi and shell lists below are still real.
-                item { Section("desktops", desktop.detail) }
             }
-
-            // ── pi agent sessions ─────────────────────────────────────────────
-            if (piSessions.isNotEmpty()) {
-                item { Section("pi sessions", "running on the host right now") }
-                items(piSessions, key = { "pi:${it.pid}" }) { pi ->
-                    val existing = openShells.firstOrNull { it.cwd == pi.cwd }
-                    if (existing != null) {
-                        ChoiceRow(
-                            title = existing.label,
-                            subtitle = "${tildify(pi.cwd)} · already open",
-                            chosen = existing.id in chosen,
-                            onClick = { chosen = toggle(chosen, existing.id) },
-                            onKill = { onKill(existing) },
-                        )
-                    } else {
-                        val key = LauncherChoice.NewShell(pi.cwd, pi.label).key
-                        ChoiceRow(
-                            title = pi.label,
-                            subtitle = buildString {
-                                append(tildify(pi.cwd))
-                                pi.workspace?.let { append(" · ws ").append(it) }
-                            },
-                            chosen = key in chosen,
-                            onClick = { chosen = toggle(chosen, key) },
-                        )
-                    }
-                }
-            }
-
-            // ── open shells ───────────────────────────────────────────────────
-            item { Section("shells", if (openShells.isEmpty()) "none open" else "already open on the host") }
-            items(openShells, key = { "s:${it.id}" }) { s ->
-                ChoiceRow(
-                    title = s.label,
-                    subtitle = buildString {
-                        append(tildify(s.cwd))
-                        s.workspaceOf(desktop)?.let { append(" · on desktop ").append(it) }
-                        // Who has it, when it is not us. A shell held elsewhere
-                        // is not refused — it is offered, and this is the sentence
-                        // that makes the offer make sense.
-                        if (s.heldElsewhere && s.ownerName != null) {
-                            append(" · open on ").append(s.ownerName)
-                        }
-                    },
-                    chosen = s.id in chosen,
-                    onClick = { chosen = toggle(chosen, s.id) },
-                    onKill = { onKill(s) },
-                ) {
-                    // The per-shell menu belongs to shells this phone opened. A
-                    // shell someone started at their desk is theirs to keep; the
-                    // phone may look at it, but not move or end it.
-                    if (s.openedByPhone) {
-                        val live = s.workspaceOf(desktop)
-                        val target = targetWorkspace
-                        // One button, two meanings, decided by where the window
-                        // already is: put it on the chosen desktop, or take it off
-                        // the one it is on. A second button for "undo" would be a
-                        // control the user has to find rather than a state they
-                        // can see.
-                        IconBtn(
-                            onClick = {
-                                if (live != null) onCloseLive(s) else if (target != null) onMakeLive(s, target)
-                            },
-                            caption = when {
-                                live != null -> "on $live"
-                                target == null -> "pick a desktop"
-                                else -> null
-                            },
-                        ) {
-                            IconPush(
-                                when {
-                                    live != null -> Accent
-                                    target == null -> Dim.copy(alpha = 0.5f)
-                                    else -> Accent
-                                },
-                            )
-                        }
-                    }
-                }
-            }
+        } else if (desktop?.detail != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(desktop.detail, color = Dim, fontSize = 10.sp, maxLines = 2)
         }
 
         Spacer(Modifier.height(10.dp))
 
-        // ── open ─────────────────────────────────────────────────────────────
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            AccentBtn(
-                // Nothing chosen means everything, which is what a session list
-                // should do; choosing narrows it to the set you page through.
-                label = if (chosenCount == 0) "open all (${choices.size})" else "open ($chosenCount)",
-                modifier = Modifier.weight(1f),
-                onClick = {
-                    val picked = if (chosenCount == 0) choices else choices.filter { it.key in chosen }
-                    chosen = setOf()
-                    onOpen(picked)
-                },
-            )
-        }
-        if (targetWorkspace != null) {
-            Spacer(Modifier.height(6.dp))
-            Text("aimed at desktop $targetWorkspace", color = Dim, fontSize = 11.sp)
-        }
-        // What came of the last desktop request. Shown rather than assumed: the
-        // host may have no window manager, and doing nothing silently looks
-        // exactly like a broken button.
-        liveResult?.let { result ->
-            Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    if (result.ok) "on the desktop" else "could not: ${result.detail ?: "failed"}",
-                    color = if (result.ok) Accent else Color(0xFFFF6B6B),
-                    fontSize = 11.sp,
-                    modifier = Modifier.weight(1f),
-                )
-                SmallAction("ok", onDismissLiveResult)
+        // ── one list ─────────────────────────────────────────────────────────
+        if (entries.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text("Nothing open yet. Tap + shell.", color = Dim, fontSize = 12.sp)
+            }
+        } else {
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(entries, key = { it.key }) { e ->
+                    val session = e.sessionId?.let { id -> openShells.firstOrNull { it.id == id } }
+                    ChoiceRow(
+                        // The folder is always shown, because it is what tells two
+                        // shells of the same kind apart. The process is the name.
+                        title = e.label,
+                        subtitle = listOfNotNull(tildify(e.cwd), e.note).joinToString(" · "),
+                        chosen = e.key in chosen,
+                        onClick = { chosen = toggle(chosen, e.key) },
+                        onKill = session?.let { s -> { onKill(s) } },
+                    ) {
+                        // The per-shell menu belongs to shells this phone opened.
+                        // A shell someone started at their desk is theirs to keep;
+                        // the phone may look at it, but not move or end it.
+                        if (e.openedByPhone && session != null) {
+                            val live = e.liveWorkspace
+                            val target = targetWorkspace
+                            // One button, two meanings, decided by where the window
+                            // already is: put it on the chosen desktop, or take it
+                            // off the one it is on. A second button for "undo"
+                            // would be a control to hunt for rather than a state you
+                            // can see.
+                            IconBtn(
+                                onClick = {
+                                    if (live != null) onCloseLive(session)
+                                    else if (target != null) onMakeLive(session, target)
+                                },
+                                caption = when {
+                                    live != null -> "on $live"
+                                    target == null -> "pick a desktop"
+                                    else -> null
+                                },
+                            ) {
+                                IconPush(
+                                    when {
+                                        live != null -> Accent
+                                        target == null -> Dim.copy(alpha = 0.5f)
+                                        else -> Accent
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        Spacer(Modifier.height(8.dp))
+        AccentBtn(
+            if (chosen.isEmpty()) "open" else "open (${chosen.size})",
+            Modifier.fillMaxWidth(),
+        ) {
+            val picked = entries.filter { it.key in chosen }
+            if (picked.isNotEmpty()) onOpen(picked)
+        }
     }
 }
 
 /**
- * What a launcher row stands for: a shell that is already open, or a directory a
- * new shell should be opened in.
+ * One row of the launcher.
+ *
+ * There are no sections any more. Everything the launcher offers is a place you
+ * can have a shell — one already running, or a directory something is already
+ * working in — and splitting that into "desktops", "pi sessions" and "shells"
+ * made the reader pass three headers to reach one list. A header promises its
+ * contents are a *different kind of thing*; these were not. The rows of window
+ * titles under each desktop were worse still: a window manager's inventory, not
+ * anything you could open.
  */
-sealed interface LauncherChoice {
-    val key: String
-
-    data class Session(val id: String, val label: String, val cwd: String) : LauncherChoice {
-        override val key: String get() = id
-    }
-
-    data class NewShell(val cwd: String, val label: String) : LauncherChoice {
-        override val key: String get() = "new:$cwd"
-    }
+data class LauncherEntry(
+    val key: String,
+    /** The open session; null when this row would start a new shell. */
+    val sessionId: String?,
+    /** `bash`, `vim`, `pi` — what the row *is*, not only where it is. */
+    val process: String,
+    val cwd: String,
+    /** Where it already is, when that is worth saying. */
+    val note: String? = null,
+    val openedByPhone: Boolean = false,
+    val liveWorkspace: String? = null,
+) {
+    val label: String get() = process.ifEmpty { "shell" }
 }
 
 /**
- * Which desktop a shell's live window is on, or null when it has none.
+ * The launcher's rows, as one flat list.
  *
- * The **server's** answer (ADR-0010), not a lookup in the window inventory. The
- * inventory version was a guess, cached for a second, and wrong in both
- * directions: a window that had just closed still looked open, and one that had
- * just opened still looked absent — so the button offered to "bring back" a shell
- * already on screen, or hid itself on one that was.
+ * Order is pi-derived rows first, then open shells, because this is also the
+ * order pages are opened in and therefore the order they are paged through — an
+ * order that must be decided somewhere, and deciding it here keeps the screen and
+ * the pager from disagreeing.
+ *
+ * A pi session in a directory that already has a shell is *that shell*, not a
+ * second row: offering both would show one piece of work twice, and choosing the
+ * wrong one would open a duplicate shell.
  */
-private fun Session.workspaceOf(@Suppress("UNUSED_PARAMETER") desktop: DesktopInventory?): String? =
-    liveWorkspace?.ifEmpty { null }
-
-private fun toggle(current: Set<String>, key: String): Set<String> =
-    if (key in current) current - key else current + key
-
-/**
- * Everything the launcher can open, in the order it appears on screen.
- *
- * Two rules, both of which matter more than they look:
- *
- *   - A pi session that already has an ldmux shell in the same directory **is**
- *     that shell, not a second thing. Offering both would present the same work
- *     twice, and choosing the wrong one would open a second shell into a
- *     directory that already has one.
- *   - The order is the screen's order, so ◀ ▶ walk the list the way it is read,
- *     not the order the rows happened to be tapped in.
- *
- * Entries are de-duplicated by key, which is not decoration: two pi agents in the
- * same directory are two agents but one place to go, and their key — the
- * directory — is what a chosen row is remembered by. Left in, the second would
- * be a row that could never be toggled independently of the first.
- */
-internal fun launcherChoices(
+internal fun launcherEntries(
     piSessions: List<DesktopPiSession>,
     openShells: List<Session>,
-): List<LauncherChoice> {
+): List<LauncherEntry> {
     val shellCwds = openShells.map { it.cwd }.toSet()
     return buildList {
+        val seen = mutableSetOf<String>()
         for (pi in piSessions) {
-            if (pi.cwd !in shellCwds) add(LauncherChoice.NewShell(pi.cwd, pi.label))
+            if (pi.cwd in shellCwds) continue
+            if (!seen.add(pi.cwd)) continue
+            add(
+                LauncherEntry(
+                    key = "new:${pi.cwd}",
+                    sessionId = null,
+                    // The process *is* pi — that is what makes the directory worth
+                    // offering, and it is the one thing the row can honestly say.
+                    process = "pi",
+                    cwd = pi.cwd,
+                    note = pi.workspace?.let { "ws $it" },
+                ),
+            )
         }
-        for (s in openShells) add(LauncherChoice.Session(s.id, s.label, s.cwd))
-    }.distinctBy { it.key }
-}
-
-@Composable
-private fun Section(title: String, detail: String) {
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp), verticalAlignment = Alignment.Bottom) {
-        Text(title.uppercase(), color = Dim, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.width(8.dp))
-        Text(detail, color = Dim.copy(alpha = 0.7f), fontSize = 10.sp, maxLines = 1)
+        for (shell in openShells) {
+            add(
+                LauncherEntry(
+                    key = shell.id,
+                    sessionId = shell.id,
+                    process = shell.process,
+                    cwd = shell.cwd,
+                    note = when {
+                        shell.liveWorkspace != null -> "on desktop ${shell.liveWorkspace}"
+                        shell.heldElsewhere -> shell.ownerName?.let { "open on $it" }
+                        else -> null
+                    },
+                    openedByPhone = shell.openedByPhone,
+                    liveWorkspace = shell.liveWorkspace,
+                ),
+            )
+        }
     }
 }
 
+/** One workspace, as a chip to aim a new shell at. */
 @Composable
-private fun WorkspaceRow(
-    ws: DesktopWorkspace,
-    windows: List<DesktopWindow>,
-    targeted: Boolean,
-    onTarget: () -> Unit,
-) {
-    Column(
+private fun WorkspaceChip(ws: DesktopWorkspace, targeted: Boolean, onTarget: () -> Unit) {
+    Row(
         Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(Surface)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (targeted) Accent.copy(alpha = 0.22f) else Surface)
             .border(
-                width = if (targeted) 1.5.dp else 0.dp,
-                color = if (targeted) Accent else Color.Transparent,
-                shape = RoundedCornerShape(8.dp),
+                width = if (targeted) 1.5.dp else 1.dp,
+                color = if (targeted) Accent else Color(0xFF232838),
+                shape = RoundedCornerShape(14.dp),
             )
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .clickable(onClick = onTarget)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // The target ring, not a checkbox: aiming a shell somewhere is not the
-            // same act as choosing a shell to open, and they must not look alike.
-            Box(
-                Modifier
-                    .size(18.dp)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(if (targeted) Accent else Color.Transparent)
-                    .border(1.5.dp, if (targeted) Accent else Dim, RoundedCornerShape(9.dp))
-                    .clickable(onClick = onTarget),
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                if (ws.focused) "${ws.name} ●" else ws.name,
-                color = if (ws.focused) Fg else Fg.copy(alpha = 0.85f),
-                fontSize = 14.sp,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = if (ws.focused) FontWeight.SemiBold else FontWeight.Normal,
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                if (ws.visible && !ws.focused) "visible" else "",
-                color = Dim,
-                fontSize = 10.sp,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (ws.windowCount == 0) "empty" else "${ws.windowCount} window${if (ws.windowCount == 1) "" else "s"}",
-                color = Dim,
-                fontSize = 11.sp,
-            )
-        }
-        for (w in windows) {
-            Row(Modifier.fillMaxWidth().padding(start = 28.dp, top = 3.dp)) {
-                Text(
-                    w.title.ifBlank { w.appClass },
-                    color = Dim,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(w.appClass, color = Dim.copy(alpha = 0.6f), fontSize = 10.sp, maxLines = 1)
-            }
+        Text(
+            ws.name,
+            color = if (targeted) Fg else Fg.copy(alpha = 0.8f),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        if (ws.focused) {
+            Spacer(Modifier.width(4.dp))
+            Text("\u25cf", color = Accent, fontSize = 8.sp)
         }
     }
 }
@@ -432,3 +362,7 @@ private fun SmallAction(label: String, onClick: () -> Unit) {
         Text(label, color = Dim, fontSize = 11.sp)
     }
 }
+
+/** Add or remove a key from a selection, without mutating the set. */
+private fun toggle(current: Set<String>, key: String): Set<String> =
+    if (key in current) current - key else current + key

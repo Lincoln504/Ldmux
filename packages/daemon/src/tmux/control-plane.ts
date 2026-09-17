@@ -328,6 +328,30 @@ export class TmuxControlPlane {
       });
   }
 
+  /**
+   * What each session's pane is currently running, in one call.
+   *
+   * One `list-panes -a` rather than one per session: the session list is asked
+   * for constantly and every extra subprocess per session is a subprocess the
+   * daemon's event loop waits on. The answer is what lets the launcher say
+   * *what* a shell is — `bash`, `vim`, `pi` — instead of only where it is.
+   */
+  async paneCommands(): Promise<Map<string, string>> {
+    const { code, out } = await this.run([
+      "list-panes", "-a", "-F", "#{session_name}|#{pane_current_command}",
+    ]);
+    if (code !== 0) return new Map();
+    const commands = new Map<string, string>();
+    for (const line of out.split("\n")) {
+      if (!line) continue;
+      const [name, command] = line.split("|");
+      // First pane wins: it is the session's own pane, and a session with an
+      // exotic layout should not have its label decided by a split.
+      if (name && command && !commands.has(name)) commands.set(name, command);
+    }
+    return commands;
+  }
+
   async listPanes(session: string): Promise<TmuxPane[]> {
     const { out } = await this.run([
       "list-panes",

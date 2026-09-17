@@ -312,6 +312,9 @@ export class LdmuxDaemon {
     const live = await this.cp.listSessions();
     const activity = new Map<string, number>();
     if (live) for (const s of live) activity.set(s.name, s.activity * 1000);
+    // What each pane is running, so a row can say `bash` or `pi` and not just a
+    // directory. Skipped when there is nothing terminal-backed to ask about.
+    const commands = live && live.length > 0 ? await this.cp.paneCommands() : new Map<string, string>();
     return this.registry.list().map((record) => ({
       id: record.id,
       kind: record.kind,
@@ -322,6 +325,7 @@ export class LdmuxDaemon {
       // Who opened it. The phone shows a per-shell menu only for shells it
       // opened itself, so this has to survive to the client.
       createdBy: record.createdBy,
+      process: record.tmuxName ? commands.get(record.tmuxName) : undefined,
       lastActivityAt:
         (record.tmuxName ? activity.get(record.tmuxName) : undefined) ?? record.updatedAt,
       // Where it is, and who has it, as facts. The launcher used to infer the

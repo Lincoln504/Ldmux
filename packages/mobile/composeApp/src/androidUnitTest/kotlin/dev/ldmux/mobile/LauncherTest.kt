@@ -30,58 +30,80 @@ class LauncherTest {
         Session(id = id, kind = "shell", title = title, cwd = cwd, status = "running", tmuxName = "ldmux-$id")
 
     @Test
-    fun `a pi session with no shell becomes a new shell in its directory`() {
-        val choices = launcherChoices(listOf(pi(100, "/home/ldeen/proj", "proj")), emptyList())
-        assertEquals(1, choices.size)
-        assertEquals(LauncherChoice.NewShell("/home/ldeen/proj", "proj"), choices[0])
+    fun `a pi session with no shell becomes a row to open a shell in its directory`() {
+        val rows = launcherEntries(listOf(pi(100, "/home/ldeen/proj", "proj")), emptyList())
+        assertEquals(1, rows.size)
+        assertEquals("new:/home/ldeen/proj", rows[0].key)
+        assertEquals("pi", rows[0].process)
+        assertEquals("/home/ldeen/proj", rows[0].cwd)
+        assertNull(rows[0].sessionId)
+    }
+
+    @Test
+    fun `an open shell is named by its process and located by its folder`() {
+        // The row has to answer "which of these is my editor", and a directory
+        // alone cannot: two shells in one folder would otherwise be the same row.
+        val rows = launcherEntries(
+            emptyList(),
+            listOf(shell("abc", "/home/ldeen/proj").copy(process = "vim")),
+        )
+        assertEquals("vim", rows[0].label)
+        assertEquals("/home/ldeen/proj", rows[0].cwd)
+        assertEquals("abc", rows[0].sessionId)
+    }
+
+    @Test
+    fun `a shell with an unknown process still has a name`() {
+        val rows = launcherEntries(emptyList(), listOf(shell("abc", "/x")))
+        assertEquals("shell", rows[0].label)
+    }
+
+    @Test
+    fun `a held shell says who has it`() {
+        val rows = launcherEntries(
+            emptyList(),
+            listOf(shell("abc", "/x").copy(heldElsewhere = true, ownerName = "Pixel 8")),
+        )
+        assertEquals("open on Pixel 8", rows[0].note)
     }
 
     @Test
     fun `a pi session that already has a shell is that shell, not a second thing`() {
-        val choices = launcherChoices(
+        val rows = launcherEntries(
             listOf(pi(100, "/home/ldeen/proj", "proj")),
             listOf(shell("abc", "/home/ldeen/proj", "proj")),
         )
         // Exactly one entry: the existing shell. Offering both would show the same
         // work twice, and choosing wrong would open a duplicate shell.
-        assertEquals(1, choices.size)
-        assertEquals(LauncherChoice.Session("abc", "proj", "/home/ldeen/proj"), choices[0])
+        assertEquals(1, rows.size)
+        assertEquals("abc", rows[0].key)
     }
 
     @Test
-    fun `two pi sessions in one directory are one shell, because the shell is per directory`() {
-        val choices = launcherChoices(
-            listOf(pi(100, "/a", "a"), pi(200, "/a", "a")),
-            emptyList(),
-        )
-        assertEquals(1, choices.size)
-        assertEquals(LauncherChoice.NewShell("/a", "a"), choices[0])
+    fun `two pi sessions in one directory are one row, because the shell is per directory`() {
+        val rows = launcherEntries(listOf(pi(100, "/a", "a"), pi(200, "/a", "a")), emptyList())
+        assertEquals(1, rows.size)
+        assertEquals("new:/a", rows[0].key)
     }
 
     @Test
-    fun `pi sessions come first, then shells, so the pager order is the screen order`() {
-        val choices = launcherChoices(
+    fun `pi rows come first, then shells, so the pager order is the screen order`() {
+        val rows = launcherEntries(
             listOf(pi(100, "/new", "new")),
             listOf(shell("one", "/x"), shell("two", "/y")),
         )
-        assertEquals(
-            listOf("new:/new", "one", "two"),
-            choices.map { it.key },
+        assertEquals(listOf("new:/new", "one", "two"), rows.map { it.key })
+    }
+
+    @Test
+    fun `the keys of a new-shell row and a session id cannot collide`() {
+        val rows = launcherEntries(
+            listOf(pi(100, "/x", "x")),
+            listOf(shell("/x", "/x")),
         )
-    }
-
-    @Test
-    fun `a shell with no title falls back to its id`() {
-        val choices = launcherChoices(emptyList(), listOf(shell("abc123", "/x")))
-        assertEquals("abc123", (choices[0] as LauncherChoice.Session).label)
-    }
-
-    @Test
-    fun `choice keys do not collide between a new shell and a session id`() {
-        // A cwd can never be an id, but the keys still must not be able to meet.
-        val fresh = LauncherChoice.NewShell("/x", "x").key
-        val existing = LauncherChoice.Session("/x", "x", "/x").key
-        assertTrue(fresh != existing)
+        // A cwd can never equal a session id, but the keys still must not meet.
+        assertEquals(1, rows.size)
+        assertEquals("/x", rows[0].key)
     }
 
     // ── reading the daemon's answer ────────────────────────────────────────────

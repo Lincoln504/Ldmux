@@ -264,3 +264,26 @@ fun tildify(path: String): String {
     val m = Regex("^/(home|Users)/[^/]+").find(path) ?: return path
     return "~" + path.removePrefix(m.value)
 }
+/**
+ * The overflow menu: six dots, not three lines.
+ *
+ * A hamburger reads as "list", and this is not a list — it is the few things
+ * that act on the app rather than on the shell, kept out of the way of the keys.
+ * Dots read as "more", which is what it is.
+ */
+@Composable
+fun IconWaffle(tint: Color, box: Dp = 20.dp) {
+    Canvas(Modifier.size(box)) {
+        val w = size.minDimension
+        val r = w * 0.085f
+        for (row in 0..2) {
+            for (col in 0..1) {
+                drawCircle(
+                    tint,
+                    r,
+                    Offset(w * (0.36f + col * 0.28f), w * (0.22f + row * 0.28f)),
+                )
+            }
+        }
+    }
+}

@@ -614,7 +614,14 @@ export class RemoteServer {
    * to read it, and it would still be *typing* into it.
    */
   private notifyDisplaced(deviceId: string, sessionId: string, newOwner: DeviceInfo): void {
-    for (const client of this.byDevice.get(deviceId) ?? []) {
+    const holders = this.byDevice.get(deviceId);
+    // Logged because "who took my shell" is the first question a user asks, and
+    // the answer has to outlive the moment it happened.
+    this.opts.log?.(
+      `remote: ${newOwner.name} took ${sessionId} from ${deviceId} ` +
+        `(${holders?.size ?? 0} connection(s) held by that device)`,
+    );
+    for (const client of holders ?? []) {
       const conn = this.connState.get(client);
       if (!conn || conn.sessionId !== sessionId) continue;
       this.sendJson(client, {
