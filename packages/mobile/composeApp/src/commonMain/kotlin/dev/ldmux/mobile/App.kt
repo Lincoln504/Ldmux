@@ -144,17 +144,6 @@ fun App() {
     val desktop by client.desktop.collectAsState()
     val connected by client.connected.collectAsState()
 
-    // The link is the only reason to stay alive in the background, so the
-    // platform is told exactly when there is one and what it is holding. The
-    // count is in the text because a notification that says "1 shell" is
-    // information and one that says "connected" is decoration.
-    LaunchedEffect(connected, sessions) {
-        val open = sessions.count { it.attachable }
-        BackgroundSession.setActive(
-            connected,
-            if (open == 1) "1 shell open" else "$open shells open",
-        )
-    }
     // A phone that has just rejoined the wifi should not wait out the retry
     // backoff: the network callback cuts it short.
     DisposableEffect(Unit) {
@@ -185,6 +174,34 @@ fun App() {
             pageSelection = (pageSelection ?: emptySet()) + arrived.map { it.id }
             awaitingCwds = awaitingCwds - arrived.map { it.cwd }.toSet()
         }
+    }
+
+    // Stay alive in the background while a terminal is OPEN — deliberately not
+    // while *connected*.
+    //
+    // Keying it on connectivity is a deadlock, and it measured as one on the
+    // device: backgrounding the app drops the socket, which cleared `connected`,
+    // which stopped the service, which is the only thing that would have kept the
+    // process alive to reconnect. The service has to be up *before* the link is
+    // lost for the link to survive.
+    //
+    // Leaving the terminal (back to the launcher) stops it, because nothing is
+    // being watched then — and the shells themselves are unharmed either way:
+    // they live in tmux on the host, not in this process.
+    val terminalOpen = !showLauncher && pages.isNotEmpty()
+    LaunchedEffect(terminalOpen, pages.size) {
+        BackgroundSession.setActive(
+            terminalOpen,
+            if (pages.size == 1) "1 shell open" else "${pages.size} shells open",
+        )
+    }
+    // Backgrounding the app does NOT dispose this composition, so the service
+    // keeps running and the link survives — which is the whole point. Leaving the
+    // app entirely does dispose it, and then the service must go too: a
+    // notification saying a shell is open, with nothing behind it, is worse than
+    // no notification, and the process would stay alive for no reason.
+    DisposableEffect(Unit) {
+        onDispose { BackgroundSession.setActive(false, "") }
     }
 
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
@@ -229,6 +246,17 @@ fun App() {
         val desktopTick by client.desktopTick.collectAsState()
         LaunchedEffect(desktopTick) { if (desktopTick > 0) desktopLoading = false }
         val liveResult by client.liveResult.collectAsState()
+
+        // Ask for the machine's desktop when the launcher appears, and again if
+        // the link was not up yet when it did. Keyed on `connected` as well as the
+        // flag because the question is only answerable while connected, and on the
+        // first frame after launch the socket is not open.
+        LaunchedEffect(showLauncher, connected) {
+            if (showLauncher && connected) {
+                desktopLoading = true
+                client.requestDesktop()
+            }
+        }
         Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         LauncherScreen(
             host = config.host,
@@ -570,13 +598,18 @@ private fun SidePanel(
             }
         }
 
-        // Actions, at the bottom where a thumb reaches them: a new shell is the
-        // primary one, so it is the only button that gets the accent.
+        // Actions, at the bottom where a thumb reaches them.
+        //
+        // The icons get their own row above the primary button rather than
+        // sharing one. Side by side they left "+ shell" about 66dp in a 190dp
+        // panel — right at the width of the words — and it wrapped into three
+        // lines ("+ she" / "ll"), which reads as a broken button. A primary
+        // action does not compete for room with a settings cog.
         Row(
+            Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            AccentBtn("+ shell", Modifier.weight(1f)) { client.create("shell") }
             // A way back to the menu. The terminal is somewhere you went, so
             // leaving it has to be possible without ending anything.
             IconBtn(onClick = onLauncher) { IconLauncher(Dim) }
@@ -586,6 +619,7 @@ private fun SidePanel(
                 IconBtn(onClick = { onKill(closable) }) { IconClose(Dim) }
             }
         }
+        AccentBtn("+ shell", Modifier.fillMaxWidth()) { client.create("shell") }
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,
         // so this is the reason a slow link feels the way it does.

@@ -580,6 +580,9 @@ export class LdmuxDaemon {
         return {
           screen: await this.cp.capturePane(this.requireTerminal(String(params.id)).tmuxName, {
             history: Boolean(params.history),
+            // Reading, not replaying: a wrapped long line is one line to a
+            // person, so this is the one caller that wants `-J`.
+            joinWrapped: true,
           }),
         };
 

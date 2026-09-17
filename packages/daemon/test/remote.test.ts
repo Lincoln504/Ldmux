@@ -425,11 +425,25 @@ test("scrollback with lines 0 re-sends the visible screen, not 5000 lines", asyn
   ws.close();
 });
 
-test("a wrapped line is captured joined, so the client can re-wrap it", async () => {
-  // Why this matters: without -J every screen row is a hard newline, so a client
-  // cannot tell "the terminal wrapped here" from "the user pressed Enter". The
-  // visible symptom is a cursor that will not move back up when deleting past
-  // the wrap point.
+test("a wrapped line comes back as the screen has it, so replaying it does not scroll", async () => {
+  // This test used to assert the opposite — that the capture *joined* a wrapped
+  // line into one row — and that was wrong in two ways.
+  //
+  // The reasoning was that a client cannot tell "the terminal wrapped here" from
+  // "the user pressed Enter", and the symptom was a cursor that would not move
+  // back up past a wrap. That symptom was real but the cause was elsewhere: the
+  // session shells were running a bash built without readline, which is fixed by
+  // taking the login shell from the host, not by joining rows.
+  //
+  // And joining rows actively breaks the screen. Measured on a device: a
+  // 105-column line came back as ONE row, the client re-wrapped it into two, the
+  // capture had one row more than the pane had, and the emulator scrolled by one
+  // — silently deleting the top line. On a 20-row pane whose first row is the
+  // prompt, the prompt is simply gone.
+  //
+  // A client is not reading the rows, it is replaying them into an emulator of
+  // the same width, and the wrap is a consequence of that width. So the capture
+  // must be the raw screen.
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
     kind: "shell",
@@ -449,9 +463,15 @@ test("a wrapped line is captured joined, so the client can re-wrap it", async ()
   ws.send(JSON.stringify({ type: "scrollback", sessionId: session.id, lines: 0 }));
   expect(await waitFor(() => text.filter((m) => m.type === "snapshot").length > before)).toBe(true);
   const snap = text.filter((m) => m.type === "snapshot").at(-1) as any;
-  // The logical line must come back whole: 60 columns of text on a 40-column
-  // pane, with no newline in the middle of it.
-  expect(snap.screen as string).toContain(long);
+  const screen = snap.screen as string;
+  // The logical line must come back the way the pane holds it: wrapped at the
+  // pane's width, so the client's emulator reproduces the same screen.
+  expect(screen).not.toContain(long);
+  expect(screen).toContain("AAAAAAAAA");
+  // And the screen must not have grown a row — that is the scroll which deletes
+  // the top line. Counting breaks rather than pieces: a blank bottom row leaves a
+  // trailing empty element, which would read as one row too many.
+  expect((screen.match(/\n/g) ?? []).length).toBeLessThanOrEqual(24);
   ws.close();
 });
 

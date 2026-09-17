@@ -184,7 +184,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
      * On demand, not polled: answering spawns the window manager's own tools, and
      * nothing about the answer is worth waking the radio for on a timer.
      */
-    fun requestDesktop() = sendControl("""{"type":"desktop"}""")
+    fun requestDesktop() = sendControl("""{"type":"desktop"}""", queueIfOffline = true)
 
     /** Put this shell's terminal on the desktop's screen, on a chosen workspace. */
     fun makeLive(sessionId: String, workspace: String) = sendControl(
@@ -227,9 +227,31 @@ class LdmuxClient(private var config: LdmuxConfig) {
         sendControl(msg)
     }
 
-    private fun sendControl(msg: String) {
+    /**
+     * Messages asked for before the socket exists.
+     *
+     * The first thing the app does is ask what is on the machine, and that
+     * reliably happens *before* the websocket finishes opening — so without this
+     * the launcher sat empty until someone thought to pull to refresh, and
+     * nothing anywhere said anything had been lost.
+     *
+     * Only reads are kept. A keystroke or a click held across a reconnect would
+     * be delivered at a moment nobody meant it for; asking again for the state of
+     * the world is harmless whenever it arrives.
+     */
+    private val pending = ArrayDeque<String>()
+
+    /** Bounded, because a client that cannot reach the daemon must not grow. */
+    private val maxPending = 16
+
+    private fun sendControl(msg: String, queueIfOffline: Boolean = false) {
+        val socket = ws
+        if (socket == null) {
+            if (queueIfOffline && pending.size < maxPending) pending.addLast(msg)
+            return
+        }
         scope?.launch {
-            runCatching { ws?.send(Frame.Text(msg)) }
+            runCatching { socket.send(Frame.Text(msg)) }
         }
     }
 
@@ -271,6 +293,10 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 http.webSocket(config.wsUrl) {
                     ws = this
                     waitMs = 400L
+                    // Flush what was asked for while there was no socket, oldest
+                    // first, before the fresh list — the order the user asked in.
+                    for (queued in pending) runCatching { send(Frame.Text(queued)) }
+                    pending.clear()
                     _connected.value = true
                     send(Frame.Text("""{"type":"list"}"""))
                     try {

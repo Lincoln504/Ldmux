@@ -160,10 +160,22 @@ export interface CaptureOptions {
   /** Capture the alternate screen (`-a`) — required for full-screen TUIs. */
   alternate?: boolean;
   /**
-   * Join rows the terminal wrapped (`-J`, tmux 3.2+). On by default, and the
-   * caller should leave it on: without it a wrapped long line is
-   * indistinguishable from a real line break, and a client cannot reproduce the
-   * pane's wrap state (which is what makes deleting back past a wrap work).
+   * Join rows the terminal wrapped (`-J`, tmux 3.2+). **Off by default, and it
+   * must stay off for anything a client replays.**
+   *
+   * This was on by default until it was measured on a device, and the reasoning
+   * behind it was exactly backwards. The idea was that a client cannot tell a
+   * wrap from a real line break without `-J`. But a client is not *reading* the
+   * rows — it is replaying them into an emulator of the same width, and the wrap
+   * is a consequence of that width, so it reproduces itself. Joining destroys
+   * that: a 105-column line comes back as one row, the client re-wraps it into
+   * two, the capture has one row more than the pane does, and the screen scrolls
+   * by one — silently deleting the top line. On a 20-row pane whose first row is
+   * the prompt, the prompt is simply gone, and what is left looks like a
+   * rendering bug rather than a captured one.
+   *
+   * Turn it on only when the output is text being read rather than a screen being
+   * reproduced (`ldmux capture`).
    */
   joinWrapped?: boolean;
 }
@@ -496,7 +508,7 @@ export class TmuxControlPlane {
   }
 
   async capturePane(target: string, opts: CaptureOptions = {}): Promise<string> {
-    const withJoined = opts.joinWrapped !== false;
+    const withJoined = opts.joinWrapped === true;
     const res = await this.runCapture(target, opts, withJoined);
     if (res.code === 0) return res.out;
     // `-J` needs tmux 3.2+. A build without it still has to produce a screen,
