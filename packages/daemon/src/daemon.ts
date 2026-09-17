@@ -276,9 +276,6 @@ export class LdmuxDaemon {
         copyMode: async (id: string, on: boolean) => {
           await this.handle("copyMode", { id, on });
         },
-        tmuxAction: async (id: string, action: string, name?: string) => {
-          await this.handle("tmuxAction", { id, action, name });
-        },
         killSession: async (id) => {
           await this.handle("kill", { id });
         },
@@ -819,25 +816,6 @@ export class LdmuxDaemon {
         // state, and a session nobody has open should still be able to enter it.
         const record = this.requireTerminal(String(params.id));
         await this.cp.copyMode(record.tmuxName, Boolean(params.on));
-        return { ok: true };
-      }
-
-      case "tmuxAction": {
-        const record = this.requireTerminal(String(params.id));
-        const action = String(params.action ?? "");
-        if (
-          action !== "split-right" &&
-          action !== "split-down" &&
-          action !== "new-window" &&
-          action !== "rename"
-        ) {
-          throw new Error(`unknown tmux action: ${action}`);
-        }
-        await this.cp.tmuxAction(
-          record.tmuxName,
-          action,
-          typeof params.name === "string" ? params.name : undefined,
-        );
         return { ok: true };
       }
 

@@ -506,7 +506,6 @@ private fun SidePanel(
     // anything that ends the gesture — a page turn or a tap — because a latch
     // that survives a glance at another shell is a latch that surprises you.
     var modifiers by remember { mutableStateOf(Modifiers()) }
-    var menuOpen by remember { mutableStateOf(false) }
     LaunchedEffect(current) { modifiers = modifiers.cleared() }
 
     // One place a key is sent, so the latch cannot leak: every key in the panel
@@ -599,20 +598,6 @@ private fun SidePanel(
                 // state shown is the pane's, not our last request.
                 KeyBtn("copy", active = handle?.inCopyMode == true) {
                     handle?.setCopyMode(handle?.inCopyMode != true)
-                }
-                KeyBtn("tmux", active = menuOpen) { menuOpen = !menuOpen }
-            }
-            if (menuOpen) {
-                // The prefix key cannot be sent — it would land in the program in
-                // the pane, where it is just a control character — so the actions
-                // it would have started are named instead.
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    KeyBtn("│split") { handle?.tmuxAction("split-right") }
-                    KeyBtn("─split") { handle?.tmuxAction("split-down") }
-                    KeyBtn("+win") { handle?.tmuxAction("new-window") }
                 }
             }
             SIDEBAR_KEYS.forEach { group ->

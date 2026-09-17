@@ -156,17 +156,6 @@ async function main() {
       break;
     }
 
-    case "tmux": {
-      const [id, action, ...nameParts] = positional(rest, []);
-      await daemonCall(sock, "tmuxAction", {
-        id: id ?? "",
-        action: action ?? "",
-        name: nameParts.join(" "),
-      });
-      console.log(`${action} done`);
-      break;
-    }
-
     case "capture": {
       const [id] = positional(rest, []);
       const { screen } = await daemonCall(sock, "capture", { id, history: rest.includes("--history") });

@@ -332,23 +332,6 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     }
 
     /**
-     * A tmux prefix-key action.
-     *
-     * The prefix itself cannot be sent: a keystroke goes *into the pane*, where
-     * the running program reads it, and the prefix is only a prefix to a tmux
-     * client. The daemon is the client, so the action is named.
-     */
-    fun tmuxAction(action: String, name: String? = null) {
-        sendControl(
-            buildJsonObject {
-                put("type", "tmux")
-                put("action", action)
-                if (name != null) put("name", name)
-            }.toString(),
-        )
-    }
-
-    /**
      * Deliver a tap to a mouse-aware program. Only valid when the pane reported
      * SGR mouse reporting; the server synthesizes the click so the byte sequence
      * never has to live in the client.

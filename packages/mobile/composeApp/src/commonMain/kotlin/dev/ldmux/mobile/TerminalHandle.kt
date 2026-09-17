@@ -62,9 +62,6 @@ data class LinkStats(
      */
     fun setCopyMode(on: Boolean) {}
 
-    /** A tmux prefix action — split, new window, rename. */
-    fun tmuxAction(action: String, name: String? = null) {}
-
     /**
      * Another device holds this shell, named when known (ADR-0010).
      *

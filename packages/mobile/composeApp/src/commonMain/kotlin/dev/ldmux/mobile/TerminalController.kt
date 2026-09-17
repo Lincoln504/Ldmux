@@ -258,10 +258,6 @@ class TerminalController(
         attach.copyMode(on)
     }
 
-    override fun tmuxAction(action: String, name: String?) {
-        attach.tmuxAction(action, name)
-    }
-
     /**
      * Whether the pane is in a tmux mode.
      *

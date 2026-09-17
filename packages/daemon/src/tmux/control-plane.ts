@@ -110,33 +110,18 @@ export interface TmuxPane {
   height: number;
 }
 
-/**
- * The tmux argv for one prefix action.
+/*
+ * There is no split, no new-window and no rename here any more.
  *
- * Pure and exported because the flag is easy to get backwards, and getting it
- * backwards is invisible: both splits succeed, both report success, and only the
- * *shape* of the result is wrong. Measured on tmux 3.7b — tmux's own default is a
- * horizontal *divider*, so the new pane lands **below** and the rows halve;
- * `-h` is what puts panes side by side and halves the columns. Hence the names
- * here say where the pane goes, not which flag it is.
+ * They were built, verified against tmux, and then removed: tmux is the backend,
+ * not the product, and its tiling is not part of what this is for — a shell, on
+ * your phone, that is also a shell on your desktop. The measured behaviour is
+ * kept as a note because the flag is genuinely backwards and will be reached for
+ * again: on tmux 3.7b, a plain `split-window` is a horizontal *divider* and puts
+ * the new pane **below** (120x40 becomes 120x19), while `-h` is what puts panes
+ * side by side (59x40). Anyone adding it back should not have to measure that
+ * twice.
  */
-export function tmuxActionArgs(action: Exclude<TmuxAction, "rename">, target: string): string[] {
-  switch (action) {
-    case "split-right":
-      return ["split-window", "-h", "-t", target];
-    case "split-down":
-      return ["split-window", "-t", target];
-    case "new-window":
-      return ["new-window", "-t", target];
-  }
-}
-
-/**
- * The prefix-key actions the phone offers, named for what they do to the screen
- * rather than for tmux's own flags (`split-down` reads better than `-h`, which in
- * tmux means a horizontal split *line* and produces a stacked pair).
- */
-export type TmuxAction = "split-right" | "split-down" | "new-window" | "rename";
 
 export interface NewSessionOptions {
   name: string;
@@ -493,26 +478,6 @@ export class TmuxControlPlane {
    * backward-char, not tmux. The prefix is interpreted by a tmux *client*, and
    * the client here is the daemon, so these are the command directly.
    */
-  async tmuxAction(target: string, action: TmuxAction, name?: string): Promise<void> {
-    if (action === "rename") return this.renameWindow(target, name ?? "");
-    const { code, err } = await this.run(tmuxActionArgs(action, target));
-    if (code !== 0) throw new Error(`tmux ${action} failed: ${err.trim() || code}`);
-  }
-
-  /**
-   * Rename the session's current window.
-   *
-   * The window, not the session: the phone shows a window, and a rename that
-   * changed the machine name of the session would break the thing the client is
-   * attached to.
-   */
-  async renameWindow(target: string, name: string): Promise<void> {
-    const clean = name.trim().slice(0, 64);
-    if (clean === "") throw new Error("window name is empty");
-    const { code, err } = await this.run(["rename-window", "-t", target, "--", clean]);
-    if (code !== 0) throw new Error(`tmux rename-window failed: ${err.trim() || code}`);
-  }
-
   /**
    * Write raw bytes to the pane's pty.
    *

@@ -15,7 +15,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { PaneState } from "../../protocol/src/rpc.ts";
 import { createSanitizer, sanitizeOnce } from "./sanitize.ts";
 import { TmuxControlClient } from "./tmux/control-client.ts";
-import type { TmuxAction, TmuxControlPlane } from "./tmux/control-plane.ts";
+import type { TmuxControlPlane } from "./tmux/control-plane.ts";
 import { screenUpdate } from "./tmux/screen-diff.ts";
 
 export interface StreamSubscriber {
@@ -178,10 +178,6 @@ export class PaneStream {
   }
 
   /** A prefix-key action, applied to this session. */
-  async tmuxAction(action: TmuxAction, name?: string): Promise<void> {
-    await this.cp.tmuxAction(this.sessionName, action, name);
-  }
-
   async resize(cols: number, rows: number): Promise<void> {
     await this.cp.resizeWindow(this.sessionName, cols, rows);
   }
