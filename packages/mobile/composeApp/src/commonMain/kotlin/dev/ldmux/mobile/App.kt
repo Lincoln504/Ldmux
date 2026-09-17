@@ -588,8 +588,8 @@ private fun PortraitBar(
                 // arming anything — so Ctrl-then-`d` sent C-c and then a d.
                 "Ctrl" to { onModifiers(modifiers.toggled(StickyKey.Ctrl)) },
                 "Alt" to { onModifiers(modifiers.toggled(StickyKey.Alt)) },
-                "C-c" to { press("C-c") },
-                "C-d" to { press("C-d") },
+                controlLabel("C-c") to { press("C-c") },
+                controlLabel("C-d") to { press("C-d") },
                 "|" to { press("|") },
                 "-" to { press("-") },
                 "/" to { press("/") },
@@ -782,8 +782,8 @@ private fun SidePanel(
             // number row where they can be reached.
             KeyRow(
                 listOf(
-                    "C-c" to { press("C-c") },
-                    "C-d" to { press("C-d") },
+                    controlLabel("C-c") to { press("C-c") },
+                    controlLabel("C-d") to { press("C-d") },
                     "|" to { press("|") },
                     "-" to { press("-") },
                     "/" to { press("/") },

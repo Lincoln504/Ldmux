@@ -117,6 +117,9 @@ class TerminalController(
                 cursorY = m.cursorY,
                 cols = cols,
                 rows = rows,
+                // Everything else the program had set, which a fresh engine does
+                // not know. See [modeSequence].
+                modes = m,
             )
             engine.write(bytes, bytes.size)
             // A history page rebuilds the engine, so the view has to be put back
@@ -135,6 +138,13 @@ class TerminalController(
         }
         attach.onOutput = { bytes -> writeOutput(bytes) }
         attach.onError = { code -> onServerError(code) }
+        // The click landed, so the tap is finished. The timer in [tapCell] is
+        // only ever for "no answer at all"; a program that took the click must
+        // not then be walked to the cell as well.
+        attach.onMouseDelivered = {
+            pendingTapJob?.cancel()
+            pendingTap = null
+        }
         attach.onOwned = { holder ->
             // The attach was refused because another device holds this shell,
             // not because anything is broken (ADR-0010). Surfaced rather than
@@ -485,6 +495,7 @@ internal fun snapshotBytes(
     cursorY: Int,
     cols: Int,
     rows: Int,
+    modes: TerminalModes = TerminalModes(),
 ): ByteArray {
     val state = StringBuilder()
     // `?1049` is the save/switch form, which is what a full-screen program uses.
@@ -492,6 +503,7 @@ internal fun snapshotBytes(
     // screen is a no-op, and being unconditional is what makes the two screens
     // impossible to get out of step.
     state.append(if (alternateOn) "\u001b[?1049h" else "\u001b[?1049l")
+    state.append(modeSequence(modes))
     if (screen.isNotEmpty()) state.append(snapshotReplay(screen))
     state.append(cursorSequence(cursorX, cursorY, cols, rows))
     return state.toString().encodeToByteArray()
@@ -517,6 +529,38 @@ internal fun snapshotBytes(
 internal fun snapshotReplay(screen: String): String {
     val rows = if (screen.endsWith("\n")) screen.dropLast(1) else screen
     return rows.replace("\r\n", "\n").replace("\n", "\r\n")
+}
+
+/**
+ * The modes the program had turned on, re-established on a fresh engine.
+ *
+ * A snapshot rebuilds the emulator, so everything the program set before it is
+ * gone — and the emulator's flags are what the whole client reasons with. They
+ * are not decoration: `mouseTracking` and `mouseSgr` are what decide whether a tap
+ * is a click or a walk, and what a walk is measured from.
+ *
+ * Measured failure. `micro` has mouse reporting on. After a snapshot the client's
+ * frame still said `mouseTracking=false mouseSgr=false`, so a tap was read as "a
+ * full-screen program that did not ask for the mouse", synthesised Up/Down/Left/
+ * Right from a cursor that was itself stale, and landed on a cell nobody tapped.
+ * Tapping `charlie` moved the cursor to an empty line. The pane was right, the
+ * screen was right, the cell the client computed was right (`col=41 row=2`) — the
+ * mode was missing, and the mode is what chose the branch.
+ *
+ * `?1000` and not `?1002`/`?1003`: tmux reports only that *some* mouse mode is on,
+ * and this client synthesises presses alone, so the press-reporting mode is the
+ * one it needs. A program that wanted drag reporting loses nothing it does not
+ * get back the next time it enables it.
+ *
+ * The `l` forms are sent too, and unconditionally, for the same reason `?1049l`
+ * is: on a fresh engine they are no-ops, and being unconditional is what makes
+ * this impossible to get out of step with what is on screen.
+ */
+internal fun modeSequence(modes: TerminalModes): String = buildString {
+    append(if (modes.mouse) "\u001b[?1000h" else "\u001b[?1000l")
+    append(if (modes.mouseSgr) "\u001b[?1006h" else "\u001b[?1006l")
+    append(if (modes.appCursor) "\u001b[?1h" else "\u001b[?1l")
+    append(if (modes.bracketedPaste) "\u001b[?2004h" else "\u001b[?2004l")
 }
 
 internal fun cursorSequence(col: Int, row: Int, cols: Int, rows: Int): String {

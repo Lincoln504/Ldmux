@@ -530,6 +530,10 @@ export class RemoteServer {
             return;
           }
           await data.stream.mouseClick(col, row);
+          // Told, not assumed: the pane's program asked for mouse input, so the
+          // click is the whole of what the tap meant. The client would otherwise
+          // fall back to cursor motion after its click had already worked.
+          this.sendJson(ws, { type: "mousedelivered", col, row });
           return;
         }
         case "input": {

@@ -541,3 +541,44 @@ test("a snapshot of an alternate-screen pane is that screen and no scrollback", 
   expect(state.screen.includes("PRIMARY-MARKER")).toBe(false);
 });
 
+/**
+ * A click that was taken is answered, so the client knows the tap is over.
+ *
+ * Written against a measured double move. The client keeps a fallback for panes
+ * that will not take a click (the mouse mode is sticky, so a shell can be left
+ * with it on). Nothing cancelled that fallback when the click *worked*, so one
+ * tap moved the cursor twice: `micro` clamped the click to the end of its line
+ * (`col 41` -> `col 7`), and 1.2 s later the fallback walked back toward the
+ * tapped cell from a stale frame cursor, finished on an empty line and clamped
+ * to the gutter. The tap ended at `(2,4)` instead of `(7,2)`.
+ *
+ * The pane here enables mouse reporting and is left at a non-shell foreground,
+ * which is the shape the guard accepts. `cat` rather than the shell, because the
+ * shell foreground is refused by design: those bytes would be printed as junk.
+ */
+test("a click a mouse-aware program can take is answered", { timeout: 30000 }, async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  // 1000 = report button presses, 1006 = SGR coordinates. Then `cat`, so the
+  // pane is not sitting at a shell prompt.
+  await daemonCall(daemon.socketPath, "send", {
+    id: session.id,
+    text: "printf '\\033[?1000h\\033[?1006h'; cat",
+  });
+  await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
+  await sleep(700);
+
+  const { ws, text } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+  ws.send(JSON.stringify({ type: "mouseclick", col: 3, row: 1 }));
+  expect(await waitFor(() => text.some((m) => m.type === "mousedelivered"))).toBe(true);
+  // And not a refusal: the two answers are different outcomes and must not be
+  // sent for the same click.
+  expect(text.some((m) => m.type === "error" && m.code === "no_mouse")).toBe(false);
+  ws.close();
+});
+

@@ -214,6 +214,30 @@ export interface OwnedMessage {
 }
 
 /**
+ * The answer to a click: the server put it into a pane whose program asked for
+ * mouse input, so the click is the tap and nothing else should follow it.
+ *
+ * Without this the client could only tell a *refusal* from nothing at all, and a
+ * click that worked looked identical to a click that vanished — so the client's
+ * refusal fallback, which exists for the second case, also ran for the first.
+ * Measured consequence: one tap moved the cursor twice. `micro` clamped the click
+ * to the end of the line it was on (`col 41 -> col 7`), then 1.2 s later the
+ * fallback walked back toward the tapped cell from a stale frame cursor, landed
+ * on an empty line and clamped to the gutter — `(2,4)` for a tap that should have
+ * ended at `(7,2)`.
+ *
+ * Deliberately not called "success": this is not "the program moved its cursor",
+ * which the server cannot know. It is "a program that asked for mouse input was
+ * given this click", which is the fact the client needs to decide whether to do
+ * anything else.
+ */
+export interface MouseDeliveredMessage {
+  type: "mousedelivered";
+  col: number;
+  row: number;
+}
+
+/**
  * The control-message union. Only these shapes are sent in v1: the v0.1 draft's
  * `HELLO`/`resumeToken`, `SESSION_STATE` and `CLOSE` were cut (docs/SPEC.md §6.2),
  * so they are not modelled here — a type nothing can send or receive is a
@@ -256,6 +280,7 @@ export type ControlMessage =
   | ErrorMessage
   | Attach
   | OwnedMessage
+  | MouseDeliveredMessage
   | Resize
   | MouseClick
   | Input

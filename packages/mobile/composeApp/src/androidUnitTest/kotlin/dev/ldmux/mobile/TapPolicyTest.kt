@@ -276,4 +276,45 @@ class TapPolicyTest {
         assertTrue(bytes.contains("\u001b[?1049h"))
         assertTrue(bytes.endsWith("\u001b[3;4H"))
     }
+
+    /**
+     * A snapshot is state, and the modes are state.
+     *
+     * Written against a measured failure: `micro` had mouse reporting on, the
+     * client's frame after a snapshot said it did not, and so a tap was classified
+     * as a walk rather than a click and moved the cursor to a cell nobody tapped.
+     * The cell the client computed was correct (`col=41 row=2`) — the mode was
+     * what chose the wrong branch, so the mode is what has to be restored.
+     */
+    @Test
+    fun `a snapshot restores the modes the program had set`() {
+        val bytes = snapshotBytes(
+            screen = "",
+            alternateOn = true,
+            cursorX = 0,
+            cursorY = 0,
+            cols = 80,
+            rows = 24,
+            modes = TerminalModes(mouse = true, mouseSgr = true, appCursor = true, bracketedPaste = true),
+        ).decodeToString()
+        assertTrue(bytes.contains("\u001b[?1000h"), "mouse reporting is not restored")
+        assertTrue(bytes.contains("\u001b[?1006h"), "SGR encoding is not restored")
+        assertTrue(bytes.contains("\u001b[?1h"), "application cursor keys are not restored")
+        assertTrue(bytes.contains("\u001b[?2004h"), "bracketed paste is not restored")
+
+        // Before the content, like the screen switch: a mode established after the
+        // text is read by whatever wrote the text, which is the wrong order.
+        val switchAt = bytes.indexOf("\u001b[?1049h")
+        val modeAt = bytes.indexOf("\u001b[?1000h")
+        val cursorAt = bytes.indexOf("\u001b[1;1H")
+        assertTrue(switchAt < modeAt, "the screen switch does not come first")
+        assertTrue(modeAt < cursorAt, "the modes are set after the cursor")
+
+        // And off is stated as clearly as on, so nothing is left over from a
+        // program that has exited.
+        val off = snapshotBytes("", alternateOn = false, cursorX = 0, cursorY = 0, cols = 80, rows = 24)
+            .decodeToString()
+        assertTrue(off.contains("\u001b[?1000l"))
+        assertTrue(off.contains("\u001b[?1006l"))
+    }
 }

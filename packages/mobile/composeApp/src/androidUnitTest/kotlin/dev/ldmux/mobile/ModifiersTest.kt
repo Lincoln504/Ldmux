@@ -2,6 +2,7 @@ package dev.ldmux.mobile
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -110,5 +111,25 @@ class ModifiersTest {
     @Test
     fun `an empty key sends nothing`() {
         assertEquals(ModifiedKey.None, modifiedKey("", Modifiers(ctrl = true)))
+    }
+
+    /**
+     * A control key is written `C/c`.
+     *
+     * `C-c` is tmux's name for the key, not a way to write it down: the dash reads as
+     * a range or a minus, and the key is "control, then c". Both bars show these, so
+     * the label is derived from the name in one place rather than typed beside it in
+     * two — which is how the panel and the portrait bar came to disagree.
+     */
+    @Test
+    fun controlKeysReadWithASlash() {
+        assertEquals("C/c", controlLabel("C-c"))
+        assertEquals("C/d", controlLabel("C-d"))
+        // The wire name is untouched: this is a label, not a translation.
+        assertFalse(controlLabel("C-c").contains("-"))
+        // Anything that is not a control key is itself, so the helper can be applied
+        // to a whole row without special-casing.
+        assertEquals("Tab", controlLabel("Tab"))
+        assertEquals("|", controlLabel("|"))
     }
 }

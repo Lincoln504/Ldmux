@@ -86,6 +86,15 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     var onSnapshot: ((cols: Int, rows: Int, screen: String, history: Boolean, modes: TerminalModes) -> Unit)? = null
     var onOutput: ((ByteArray) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+
+    /**
+     * The server put a click into a mouse-aware program.
+     *
+     * The tap is finished when this arrives, so the refusal fallback must stand
+     * down: on a program that took the click, cursor motion afterwards is a
+     * second, wrong move. Measured: a tap ended `(2,4)` instead of `(7,2)`.
+     */
+    var onMouseDelivered: (() -> Unit)? = null
     /**
      * A measured round trip, in ms. The display's repaint cadence follows this
      * (see FramePacing): a phone should not paint faster than the link can
@@ -255,6 +264,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }
             "error" -> onError?.invoke(root["code"]?.jsonPrimitive?.content ?: "error")
+            "mousedelivered" -> onMouseDelivered?.invoke()
             "owned" -> {
                 // Refused, not broken: the shell is held by another device. Told
                 // as an ordinary outcome so the UI can offer to take it over
