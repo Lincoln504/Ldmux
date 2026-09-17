@@ -19,7 +19,7 @@ import { hostname } from "node:os";
 import { PaneStream } from "./stream.ts";
 import { RemoteServer } from "./remote.ts";
 import { readDesktop } from "./desktop-inventory.ts";
-import { closeLive, openLive } from "./desktop.ts";
+import { closeLive, liveWindowState, openLive } from "./desktop.ts";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 import { loadOrCreateToken } from "./auth.ts";
 import type {
@@ -31,6 +31,18 @@ import type {
 import type { DeviceInfo, SessionOwner } from "../../protocol/src/rpc.ts";
 import { DAEMON_PROTOCOL_VERSION } from "../../protocol/src/rpc.ts";
 import type { SessionInfo } from "../../protocol/src/messages.ts";
+
+/**
+ * How often the desktop live windows are re-checked.
+ *
+ * They are reached from the session list, which clients ask for constantly, and
+ * each check costs a tmux option read plus a client list (plus an i3 tree read
+ * when the client is missing). A second is far below the scale of a human
+ * walking back to their desk.
+ */
+const LIVE_RECHECK_MS = 1000;
+/** The session option a live window records its own client tty in. */
+const LIVE_TTY_OPTION = "@ldmux_live_tty";
 
 export interface LdmuxDaemonOptions {
   /** Directory for ldmuxd.sock + registry.json + ldmuxd.lock. */
@@ -145,6 +157,8 @@ export class LdmuxDaemon {
    * both directions (a window that had just closed still looked open).
    */
   private readonly liveWindows = new Map<string, { workspace: string }>();
+  /** When the live windows were last checked, and when to check again. */
+  private liveCheckedAt = 0;
   /**
    * The device identity that owns a desktop window.
    *
@@ -292,6 +306,12 @@ export class LdmuxDaemon {
   private async describeSessions(): Promise<SessionInfo[]> {
     // A read-only listing must not mutate stream state.
     await this.reconcile({ sweep: false });
+    // ...but it *may* settle who has a shell, because the list it is about to
+    // build says where each one is. A stale answer here is a launcher that offers
+    // to bring back a shell already on screen.
+    if (await this.reconcileLive()) {
+      void this.remote?.broadcastSessions().catch(() => {});
+    }
     const live = await this.cp.listSessions();
     const activity = new Map<string, number>();
     if (live) for (const s of live) activity.set(s.name, s.activity * 1000);
@@ -338,7 +358,15 @@ export class LdmuxDaemon {
   ): { ok: true; displaced?: DeviceInfo } | { ok: false; heldBy: SessionOwner } {
     const result = this.ownership.claim(sessionId, device, { takeover });
     if (!result.ok) return { ok: false, heldBy: { ...result.heldBy, since: 0 } };
-    if (result.previous && result.previous.id !== device.id) return { ok: true, displaced: result.previous };
+    if (result.previous && result.previous.id !== device.id) {
+      // The window has to be told to step aside, or it keeps a live client on a
+      // shell someone else is driving. Fire-and-forget: it is a tmux detach, and
+      // the attach that displaced it must not wait on it.
+      if (result.previous.id === this.desktopDevice.id) {
+        void this.detachLiveWindow(sessionId).catch(() => {});
+      }
+      return { ok: true, displaced: result.previous };
+    }
     return { ok: true };
   }
 
@@ -552,6 +580,78 @@ export class LdmuxDaemon {
     this.ownership.retain(known);
     for (const id of [...this.liveWindows.keys()]) if (!known.has(id)) this.liveWindows.delete(id);
     return { dead, adopted, pruned };
+  }
+
+  /**
+   * Reconcile the desktop live windows against reality.
+   *
+   * Two things are decided here, and both are facts only the daemon can see:
+   *
+   * 1. **The window's client reappeared.** The only way that happens is the user
+   *    pressing a key on the "open on another device" screen — we detached it
+   *    deliberately, and a detached attach does not come back on its own. That
+   *    keystroke is the consent to reclaim (ADR-0010), so the shell returns to
+   *    the desktop.
+   *
+   * 2. **The window is gone.** A live window *is* the shell on the desktop, so
+   *    closing it ends the shell rather than putting it away. This has to be told
+   *    apart from a detach, and it is: a detached window is still on screen,
+   *    showing who has the shell.
+   *
+   * Rate-limited because it costs a tmux read per live session, and it is reached
+   * from the session list, which clients ask for constantly.
+   */
+  private async reconcileLive(): Promise<boolean> {
+    if (this.liveWindows.size === 0) return false;
+    const now = Date.now();
+    if (now - this.liveCheckedAt < LIVE_RECHECK_MS) return false;
+    this.liveCheckedAt = now;
+
+    let changed = false;
+    for (const id of [...this.liveWindows.keys()]) {
+      const record = this.registry.get(id);
+      if (!record?.tmuxName) {
+        this.liveWindows.delete(id);
+        changed = true;
+        continue;
+      }
+      const tty = await this.cp.getSessionOption(record.tmuxName, LIVE_TTY_OPTION);
+      const attached = tty !== null && (await this.cp.listClientTtys(record.tmuxName)).includes(tty);
+
+      if (attached) {
+        // The window has a client again. If it is not the holder, the user took
+        // it back by hand.
+        const owner = this.ownership.owner(id);
+        if (owner && owner.device.id !== this.desktopDevice.id) {
+          this.ownership.claim(id, this.desktopDevice, { takeover: true });
+          changed = true;
+        }
+        continue;
+      }
+
+      // Detached, or closed? Only an explicit "absent" may end a session — an
+      // unanswered window manager must not be read as a closed window.
+      if (record.status === "running" && (await liveWindowState(id)) === "absent") {
+        this.liveWindows.delete(id);
+        changed = true;
+        await this.handle("kill", { id });
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Take a shell away from a live window without ending anything.
+   *
+   * Detaching makes the window's `attach` *return*, which is what lets it say who
+   * took the shell instead of disappearing — the reason the window runs a loop
+   * rather than tmux directly.
+   */
+  private async detachLiveWindow(sessionId: string): Promise<void> {
+    const record = this.registry.get(sessionId);
+    if (!record?.tmuxName) return;
+    const tty = await this.cp.getSessionOption(record.tmuxName, LIVE_TTY_OPTION);
+    if (tty) await this.cp.detachClient(tty);
   }
 
   /**

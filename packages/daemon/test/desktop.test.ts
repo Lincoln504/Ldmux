@@ -5,6 +5,7 @@ import {
   isShellForeground,
   liveArgv,
   liveExecArgv,
+  liveShimScript,
   liveWindowClass,
   mirrorArgv,
   mirrorCommand,
@@ -161,21 +162,55 @@ test("safeWorkspace accepts real workspace names and refuses i3 syntax", () => {
   expect(safeWorkspace("  7  ")).toBe("7");
 });
 
-test("liveArgv attaches writably, because 'live' means it can be typed in", () => {
-  // Not `-r`: the point of putting a shell on the desktop is to use it there.
-  // Geometry is safe because the pane owns its size (window-size manual).
-  expect(liveArgv("sock", "ldmux-x", "abc")).toEqual([
+test("liveArgv runs the shim, not tmux directly", () => {
+  // A bare `tmux attach` cannot be the live window any more: under exclusive
+  // ownership a window is *detached* when another device takes the shell over,
+  // and an attach that exits takes the window with it — so the window would
+  // vanish instead of saying who has it (ADR-0010).
+  expect(liveArgv("/state/live/live-ldmux-live-abc.sh", "abc")).toEqual([
     "alacritty",
     "--class",
     "ldmux-live-abc",
     "-e",
-    "tmux",
-    "-L",
-    "sock",
-    "attach",
-    "-t",
-    "ldmux-x",
+    "/bin/sh",
+    "/state/live/live-ldmux-live-abc.sh",
   ]);
+});
+
+test("the shim records its tty before attaching", () => {
+  // The daemon compares this against tmux's client list, and it is the only
+  // handle on a client the window itself can write down. Recorded *before* the
+  // attach, because during the attach there is no second chance.
+  const s = liveShimScript("/usr/bin/tmux", "ldmux", "sess");
+  const ttyAt = s.indexOf("LDMUX_LIVE_TTY=$(tty");
+  const setAt = s.indexOf("set-option");
+  const attachAt = s.indexOf("attach -t");
+  expect(ttyAt).toBeGreaterThan(-1);
+  expect(setAt).toBeGreaterThan(ttyAt);
+  expect(attachAt).toBeGreaterThan(setAt);
+  expect(s).toContain("@ldmux_live_tty");
+});
+
+test("the shim loops, so being detached does not close the window", () => {
+  // The loop is the feature. Without it, a detach ends the process and the
+  // window disappears, which is the behaviour this design exists to avoid.
+  const s = liveShimScript("/usr/bin/tmux", "ldmux", "sess");
+  expect(s).toContain("while :; do");
+  expect(s).toContain("Press Enter to take it back");
+  expect(s).toContain("read -r _");
+  // A shell that ended says so and stops, rather than offering a reclaim that
+  // cannot work.
+  expect(s).toContain("has-session");
+  expect(s).toContain("break");
+});
+
+test("the shim quotes what it interpolates", () => {
+  // This text is executed. A socket or session name with a quote in it would
+  // otherwise end the argument and run whatever followed.
+  const s = liveShimScript("/usr/bin/tmux", "so'ck", "na'me");
+  expect(s).toContain(`'so'\\''ck'`);
+  expect(s).toContain(`'na'\\''me'`);
+  expect(s).not.toContain("-L so'ck");
 });
 
 test("findWindowIdByClass finds a window nested in a split or floating", () => {
