@@ -35,12 +35,6 @@ data class LinkStats(
      */
     fun sendModifiedKey(key: String, modifiers: Modifiers)
 
-    /** Page the session's history into the emulator and show its oldest row. */
-    fun loadHistory()
-
-    /** Return to the live prompt. */
-    fun jumpToBottom()
-
     /** Scroll the emulator's viewport by [rows] (negative is up). */
     fun scrollBy(rows: Int) {}
 

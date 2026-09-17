@@ -62,6 +62,8 @@ fun LauncherScreen(
     onKill: (Session) -> Unit,
     onMakeLive: (Session, String) -> Unit,
     onCloseLive: (Session) -> Unit,
+    /** Start a shell on the chosen desktop, or wherever the desktop already is. */
+    onNewShell: (String?) -> Unit,
     liveResult: LiveResult?,
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
@@ -107,7 +109,11 @@ fun LauncherScreen(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("new shell on", color = Dim, fontSize = 10.sp)
+                // "push to", not "new shell on": these chips choose where a
+                // *pushed window* lands, which is the one thing the target is
+                // actually used for. The old label promised something the code
+                // did not do.
+                Text("push to", color = Dim, fontSize = 10.sp)
                 for (ws in workspaces) {
                     WorkspaceChip(
                         ws = ws,
@@ -183,12 +189,20 @@ fun LauncherScreen(
         }
 
         Spacer(Modifier.height(8.dp))
-        AccentBtn(
-            if (chosen.isEmpty()) "open" else "open (${chosen.size})",
-            Modifier.fillMaxWidth(),
-        ) {
-            val picked = entries.filter { it.key in chosen }
-            if (picked.isNotEmpty()) onOpen(picked)
+        // Two actions, sharing the width: opening what is chosen, and starting
+        // something new. A new shell lives *here*, where you are choosing what to
+        // work in — not in the sidebar, which is for typing into what you already
+        // opened. Neither is full width: a full-width bar reads as a page's whole
+        // purpose, and this is one of two things you might do next.
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AccentBtn(
+                if (chosen.isEmpty()) "open" else "open (${chosen.size})",
+                Modifier.weight(1.6f),
+            ) {
+                val picked = entries.filter { it.key in chosen }
+                if (picked.isNotEmpty()) onOpen(picked)
+            }
+            OutlinedBtn("+ shell", Modifier.weight(1f)) { onNewShell(targetWorkspace) }
         }
     }
 }
@@ -366,3 +380,26 @@ private fun SmallAction(label: String, onClick: () -> Unit) {
 /** Add or remove a key from a selection, without mutating the set. */
 private fun toggle(current: Set<String>, key: String): Set<String> =
     if (key in current) current - key else current + key
+
+/**
+ * The second action, deliberately not a filled button.
+ *
+ * Two filled buttons of different widths would read as "one primary, one less
+ * primary", which is exactly right — but two of the *same* fill just reads as a
+ * bar split in half. An outline says "this is the other thing you can do" without
+ * competing for the eye.
+ */
+@Composable
+fun OutlinedBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, Line, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = Fg, fontSize = 13.sp)
+    }
+}
+

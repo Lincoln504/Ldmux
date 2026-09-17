@@ -160,49 +160,54 @@ fun IconLauncher(tint: Color, box: Dp = 20.dp) {
 /**
  * Two arrows chasing each other round a circle.
  *
- * Drawn as two arcs with the gaps left where the arrowheads sit, so the head is
- * always tangent to the circle — the sketch of "rotate" rather than a character
- * that a font may or may not contain.
+ * Each arc **ends in an arrow head**, and that is the whole difference between a
+ * glyph that reads as "rotate" and two decorative curves: the head is what says
+ * which way it turns. The head is two strokes rather than a filled triangle,
+ * because at 20dp a triangle is a blob while two strokes are still an arrow.
  */
 private fun DrawScope.drawFlip(tint: Color) {
     val w = size.minDimension
-    val stroke = w * 0.10f
-    val inset = w * 0.28f
+    val stroke = w * 0.11f
+    val inset = w * 0.26f
     val d = w - inset * 2f
-    val tl = Offset(inset, inset)
-    val arc = Size(d, d)
-    val first = -35f
-    val sweep = 120f
     val style = Stroke(stroke, cap = StrokeCap.Round)
-    drawArc(tint, first, sweep, false, tl, arc, style = style)
-    drawArc(tint, first + 180f, sweep, false, tl, arc, style = style)
-    arrowHead(tint, tl, d, first + sweep, w * 0.22f)
-    arrowHead(tint, tl, d, first + 180f + sweep, w * 0.22f)
+    for (start in listOf(-58f, 122f)) {
+        val sweep = 108f
+        drawArc(tint, start, sweep, false, Offset(inset, inset), Size(d, d), style = style)
+        arrowHead(tint, inset, d, start + sweep, w, stroke)
+    }
 }
 
-/** A filled triangle tangent to the circle at [angleDeg], pointing clockwise. */
-private fun DrawScope.arrowHead(tint: Color, tl: Offset, d: Float, angleDeg: Float, len: Float) {
+/** An arrow head at [angleDeg] on the circle, tangent to it, pointing clockwise. */
+private fun DrawScope.arrowHead(
+    tint: Color,
+    inset: Float,
+    d: Float,
+    angleDeg: Float,
+    w: Float,
+    stroke: Float,
+) {
     val r = d / 2f
-    val cx = tl.x + r
-    val cy = tl.y + r
+    val cx = inset + r
+    val cy = inset + r
     val a = angleDeg * (PI / 180.0)
     val co = cos(a).toFloat()
     val si = sin(a).toFloat()
     val tip = Offset(cx + r * co, cy + r * si)
     // With y growing downwards, the clockwise tangent at `a` is (-sin, cos).
-    val back = Offset(tip.x + si * len, tip.y - co * len)
-    val half = Offset(co * len * 0.42f, si * len * 0.42f)
-    val p1 = Offset(back.x + half.x, back.y + half.y)
-    val p2 = Offset(back.x - half.x, back.y - half.y)
-    drawPath(
-        Path().apply {
-            moveTo(tip.x, tip.y)
-            lineTo(p1.x, p1.y)
-            lineTo(p2.x, p2.y)
-            close()
-        },
-        tint,
-    )
+    val tx = -si
+    val ty = co
+    val len = w * 0.27f
+    val spread = 0.62f
+    val cs = cos(spread).toFloat()
+    val sn = sin(spread)
+    for (sign in listOf(1.0, -1.0)) {
+        // The *backwards* tangent, rotated by ±spread — the two barbs.
+        val s2 = (sn * sign).toFloat()
+        val rx = -tx * cs - -ty * s2
+        val ry = -tx * s2 + -ty * cs
+        drawLine(tint, tip, Offset(tip.x + rx * len, tip.y + ry * len), stroke, StrokeCap.Round)
+    }
 }
 
 /** A keyboard: a rounded case, two rows of keys, and a space bar. */

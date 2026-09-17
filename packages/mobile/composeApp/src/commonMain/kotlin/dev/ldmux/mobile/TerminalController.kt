@@ -58,7 +58,7 @@ class TerminalController(
 
     private val predictor = Predictor()
     private var staleJob: Job? = null
-    private var scrollTopOnNextSnapshot = false
+    /** Set once the whole scrollback has been asked for, so it is asked once. */
 
     /** Server-reported terminal modes (affects input encoding later). */
     var modes by mutableStateOf(TerminalModes())
@@ -119,10 +119,14 @@ class TerminalController(
             // every tap measures its distance from.
             val place = cursorSequence(m.cursorX, m.cursorY, cols, rows).encodeToByteArray()
             engine.write(place, place.size)
-            if (scrollTopOnNextSnapshot) {
-                scrollTopOnNextSnapshot = false
-                engine.scrollToTop()
-            }
+            // A history page rebuilds the engine, so the view has to be put back
+            // where it was: the same offset from the live bottom is the same
+            // content, because what arrived is above it.
+            val restore = restoreOffset
+            restoreOffset = null
+            historyLoading = false
+            historyRequested = true
+            if (restore != null && restore > 0) engine.scrollBy(restore.toInt())
             modes = m
             // A fresh snapshot is the only thing that knows the foreground
             // program again, so it is also what re-arms the click path.
@@ -301,24 +305,42 @@ class TerminalController(
             }
         }
     }
-    override fun loadHistory() {
-        // The emulator holds its own scrollback, so history is paged in once and
-        // then scrolled locally — scrolling must not cost a round trip per
-        // swipe. The view is parked on the oldest row when it arrives.
-        scrollTopOnNextSnapshot = true
-        attach.scrollback(MAX_HISTORY_LINES)
-    }
-
-    override fun jumpToBottom() {
-        engine.scrollToBottom()
-        renderNow()
-    }
-
     override fun scrollBy(rows: Int) {
         if (rows == 0) return
         engine.scrollBy(rows)
         renderNow()
+        // History arrives when it is asked for by the act of scrolling to the end
+        // of what is already here. It used to be a button, which is the machine
+        // showing its working: two controls whose difference ("show me history"
+        // vs "go back to now") is a distinction the user should never have had to
+        // hold, because the gesture already means both.
+        if (rows < 0) maybeExtendHistory()
     }
+
+    /**
+     * Page in older output when the user reaches the top of what is loaded.
+     *
+     * Once per attach at most, and only when they are actually at the top: the
+     * scrollback request re-sends the whole screen, so asking on every pixel of
+     * drag would be a round trip per frame.
+     */
+    private fun maybeExtendHistory() {
+        val f = _frame.value ?: return
+        // scrollOffset < scrollTotal means there is still loaded history above.
+        if (f.scrollOffset < f.scrollTotal) return
+        if (historyRequested || historyLoading) return
+        historyLoading = true
+        // Remember where the view was. Older lines arrive *above* what is already
+        // displayed, and the offset is measured from the live bottom, so the same
+        // content stays at the same offset — restoring the number restores the
+        // view rather than dumping the user at the top.
+        restoreOffset = f.scrollOffset
+        attach.scrollback(MAX_HISTORY_LINES)
+    }
+
+    private var historyLoading = false
+    private var historyRequested = false
+    private var restoreOffset: Long? = null
 
     /** Scrolling is a local view change: paint it immediately, never coalesced. */
     private fun renderNow() {

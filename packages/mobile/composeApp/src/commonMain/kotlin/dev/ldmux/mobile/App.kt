@@ -337,6 +337,7 @@ fun App() {
             onKill = { killTarget = it },
             onMakeLive = { session, workspace -> client.makeLive(session.id, workspace) },
             onCloseLive = { session -> client.closeLive(session.id) },
+            onNewShell = { workspace -> client.create("shell") },
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
             onSettings = { showSettings = true },
@@ -358,7 +359,17 @@ fun App() {
     } else if (portrait) {
         Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
             TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth())
-            PortraitBar(currentHandle, onLandscape = { mode = UiMode.Landscape })
+            var portraitMenu by remember { mutableStateOf(false) }
+            PortraitBar(
+                handle = currentHandle,
+                onLandscape = { mode = UiMode.Landscape },
+                menuExpanded = portraitMenu,
+                onMenu = { portraitMenu = true },
+                onMenuDismiss = { portraitMenu = false },
+                onLauncher = { showLauncher = true },
+                onSettings = { showSettings = true },
+                onClose = pages.getOrNull(pagerState.currentPage)?.let { s -> { killTarget = s } },
+            )
         }
     } else {
         Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
@@ -495,27 +506,105 @@ fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
 }
 
 @Composable
-private fun PortraitBar(handle: TerminalHandle?, onLandscape: () -> Unit) {
-    Row(
+private fun PortraitBar(
+    handle: TerminalHandle?,
+    onLandscape: () -> Unit,
+    onMenu: () -> Unit,
+    menuExpanded: Boolean,
+    onMenuDismiss: () -> Unit,
+    onLauncher: () -> Unit,
+    onSettings: () -> Unit,
+    onClose: (() -> Unit)?,
+) {
+    Column(
         Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        // Two rows, each sharing the width. One scrolling row hid half its keys
+        // off the edge, which is the one thing a keyboard-adjacent strip must not
+        // do: a key you cannot see is a key that does not exist.
+        //
+        // Nothing here is a keyboard glyph, and nothing here is a shell button: a
+        // new shell belongs to the menu, where you are choosing one, not to the
+        // bar you type on.
+        PortraitKeyRow(
+            listOf(
+                "Esc" to { handle?.sendKey("Escape") },
+                "Tab" to { handle?.sendKey("Tab") },
+                "\u2190" to { handle?.sendKey("Left") },
+                "\u2191" to { handle?.sendKey("Up") },
+                "\u2193" to { handle?.sendKey("Down") },
+                "\u2192" to { handle?.sendKey("Right") },
+                "\u23ce" to { handle?.sendKey("Enter") },
+            ),
+            flip = onLandscape,
+        )
+        PortraitKeyRow(
+            listOf(
+                "Ctrl" to { handle?.sendKey("C-c") },
+                "C-c" to { handle?.sendKey("C-c") },
+                "C-d" to { handle?.sendKey("C-d") },
+                "|" to { handle?.sendKey("|") },
+                "-" to { handle?.sendKey("-") },
+                "/" to { handle?.sendKey("/") },
+            ),
+            menu = onMenu,
+            menuExpanded = menuExpanded,
+            onMenuDismiss = onMenuDismiss,
+            onLauncher = onLauncher,
+            onSettings = onSettings,
+            onClose = onClose,
+        )
+        // No microphone: the keyboard is always up in portrait and it has its own.
+        // Two microphones is one too many.
+    }
+}
+
+/** One row of the portrait bar: the flip control, then keys sharing the width. */
+@Composable
+private fun PortraitKeyRow(
+    keys: List<Pair<String, () -> Unit>>,
+    flip: (() -> Unit)? = null,
+    menu: (() -> Unit)? = null,
+    menuExpanded: Boolean = false,
+    onMenuDismiss: () -> Unit = {},
+    onLauncher: () -> Unit = {},
+    onSettings: () -> Unit = {},
+    onClose: (() -> Unit)? = null,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // The way back to landscape, drawn: two arrows going round, the same
-        // control as the panel's. Nothing here is a keyboard glyph.
-        IconBtn(onClick = onLandscape) { IconFlip(Accent, box = 20.dp) }
-        TinyBtn("Esc") { handle?.sendKey("Escape") }
-        TinyBtn("Tab") { handle?.sendKey("Tab") }
-        TinyBtn("◀") { handle?.sendKey("Left") }
-        TinyBtn("▲") { handle?.sendKey("Up") }
-        TinyBtn("▼") { handle?.sendKey("Down") }
-        TinyBtn("▶") { handle?.sendKey("Right") }
-        // Reading history must not be a trap: one tap back to the live prompt.
-        TinyBtn("⤓") { handle?.jumpToBottom() }
-        Spacer(Modifier.weight(1f))
-        TinyBtn("C-c") { handle?.sendKey("C-c") }
-        // No microphone here: the keyboard is always up in portrait, and it has
-        // its own mic. Two microphones is one too many.
+        if (flip != null) {
+            // The way back to landscape, first: it is the control that leaves this
+            // mode rather than one that types into it.
+            IconBtn(onClick = flip, modifier = Modifier.weight(1f)) { IconFlip(Accent, box = 18.dp) }
+        }
+        for ((label, action) in keys) PortraitKey(label, Modifier.weight(1f), action)
+        if (menu != null) {
+            Box(Modifier.weight(1f)) {
+                IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth()) {
+                    IconWaffle(Dim, box = 18.dp)
+                }
+                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings, onClose)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PortraitKey(label: String, modifier: Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(7.dp))
+            .background(Bg)
+            .clickable(onClick = onClick)
+            .padding(vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
     }
 }
 
@@ -615,45 +704,51 @@ private fun SidePanel(
         @OptIn(ExperimentalLayoutApi::class)
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // One wrapping flow per group, rather than one flow for everything or
-            // hand-laid rows. Hand-laid rows clipped the last key of the widest
-            // group off the panel's edge; a single flow split the arrow cluster
-            // across two lines. This keeps each group together and lets only the
-            // one that needs to wrap do so.
-            // Modifiers first, because they change what every key below them
-            // means — reading order is the order they take effect in.
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                KeyBtn("Ctrl", active = modifiers.ctrl) { modifiers = modifiers.toggled(StickyKey.Ctrl) }
-                KeyBtn("Alt", active = modifiers.alt) { modifiers = modifiers.toggled(StickyKey.Alt) }
-                // copy-mode is where a full-screen program's history lives: its
-                // screen has no scrollback, so this is the only way to scroll vim
-                // or htop at all. Toggling it off is the same button, and the
-                // state shown is the pane's, not our last request.
-                KeyBtn("copy", active = handle?.inCopyMode == true) {
-                    handle?.setCopyMode(handle?.inCopyMode != true)
-                }
-            }
-            SIDEBAR_KEYS.forEach { group ->
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    group.forEach { (label, key) -> KeyBtn(label) { press(key) } }
-                }
-            }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                // Words, not glyphs: `⤒`/`↓` and the cursor arrows both render as
-                // arrows in a monospace fallback, so the two pairs were
-                // indistinguishable. These two do different things (page in
-                // history vs. return to the live prompt) and must read as such.
-                KeyBtn("hist") { handle?.loadHistory() }
-                KeyBtn("live") { handle?.jumpToBottom() }
-            }
+            // One row per group, each row sharing the panel's width between its
+            // keys. Keys used to be chips sized to their own text, which made a
+            // ragged column where "C-d" and "|" had the same weight and nothing
+            // lined up with anything. A row that fills the width is easier to hit
+            // and, more to the point, says how many keys are in it.
+            KeyRow(
+                listOf(
+                    "Ctrl" to { modifiers = modifiers.toggled(StickyKey.Ctrl) },
+                    "Alt" to { modifiers = modifiers.toggled(StickyKey.Alt) },
+                    "copy" to { handle?.setCopyMode(handle?.inCopyMode != true) },
+                ),
+                active = listOf(modifiers.ctrl, modifiers.alt, handle?.inCopyMode == true),
+            )
+            PanelDivider()
+            KeyRow(
+                listOf(
+                    "Esc" to { press("Escape") },
+                    "Tab" to { press("Tab") },
+                    "⏎" to { press("Enter") },
+                ),
+            )
+            PanelDivider()
+            KeyRow(
+                listOf(
+                    "←" to { press("Left") },
+                    "↑" to { press("Up") },
+                    "↓" to { press("Down") },
+                    "→" to { press("Right") },
+                ),
+            )
+            PanelDivider()
+            // The six things a soft keyboard cannot produce and a shell wants
+            // most: two control keys, and the four characters that are not on the
+            // number row where they can be reached.
+            KeyRow(
+                listOf(
+                    "C-c" to { press("C-c") },
+                    "C-d" to { press("C-d") },
+                    "|" to { press("|") },
+                    "-" to { press("-") },
+                    "/" to { press("/") },
+                ),
+            )
         }
 
         // Everything that acts on the *app* lives in this one bar, and nothing
@@ -679,40 +774,15 @@ private fun SidePanel(
             // keys the panel exists for.
             Box {
                 IconBtn(onClick = { menuOpen = true }) { IconWaffle(Dim) }
-                // The menu is Material's, so it arrives wearing Material's default
-                // scheme — which is *light*, and this app is a dark one with its
-                // own palette. Wrapping it is how Material components anywhere in
-                // this app should be used, or they will each be a white rectangle.
-                MaterialTheme(
-                    colorScheme = darkColorScheme(
-                        surface = Surface,
-                        onSurface = Fg,
-                        onSurfaceVariant = Dim,
-                        primary = Accent,
-                    ),
-                ) {
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    // A way back to the menu. The terminal is somewhere you went,
-                    // so leaving it has to be possible without ending anything.
-                    DropdownMenuItem(
-                        text = { Text("shells", color = Fg) },
-                        onClick = { menuOpen = false; onLauncher() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("settings", color = Fg) },
-                        onClick = { menuOpen = false; onSettings() },
-                    )
-                    if (here != null) {
-                        DropdownMenuItem(
-                            text = { Text("close this shell", color = Fg) },
-                            onClick = { menuOpen = false; onKill(here) },
-                        )
-                    }
-                }
-                }
+                AppMenu(
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false },
+                    onLauncher = onLauncher,
+                    onSettings = onSettings,
+                    onClose = here?.let { s -> { onKill(s) } },
+                )
             }
         }
-        AccentBtn("+ shell", Modifier.fillMaxWidth()) { client.create("shell") }
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,
         // so this is the reason a slow link feels the way it does.
@@ -757,24 +827,36 @@ private fun NavArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun KeyBtn(label: String, active: Boolean = false, onClick: () -> Unit) {
-    // Single-glyph keys are given less padding than word keys. They are one
-    // character wide carrying two characters' worth of margin, which is enough to
-    // push the symbol group past the panel's edge and wrap its last key onto a
-    // line of its own.
-    val pad = if (label.length == 1) 4.dp else 8.dp
+private fun KeyBtn(
+    label: String,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+    onClick: () -> Unit,
+) {
+    // Padding is only breathing room now. It was sized for a key that measured
+    // itself — where a single-glyph key had to be told to carry less margin than
+    // a word key — and it no longer is: the row divides the width and the key
+    // takes its share. Keeping a word key's margin here is what clipped "C-c" to
+    // "C-", because the margin came out of the label's own space.
+    val pad = 3.dp
     Box(
-        Modifier
+        modifier
             .clip(RoundedCornerShape(6.dp))
             .background(if (active) Accent else Bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = pad, vertical = 5.dp),
+            .padding(horizontal = pad, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Text(
             label,
             color = if (active) Bg else Fg,
             fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
+            // Three-character labels get a point less: they are the widest thing
+            // in a five-key row, and a point of type is cheaper than a key that
+            // clips or a row that wraps.
+            fontSize = if (label.length > 1) 11.sp else 12.sp,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }
@@ -910,3 +992,67 @@ private fun BoxScope.HeldElsewhere(
         }
     }
 }
+
+/**
+ * One row of keys sharing the width between them.
+ *
+ * `weight(1f)` each rather than sized to their own text: a row of equally wide
+ * targets is easier to hit without looking, and it reads as a set — which is what
+ * `C-c` and `C-d` are and what a ragged column of chips was not.
+ */
+@Composable
+private fun KeyRow(keys: List<Pair<String, () -> Unit>>, active: List<Boolean> = emptyList()) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        keys.forEachIndexed { i, (label, action) ->
+            KeyBtn(label, Modifier.weight(1f), active.getOrElse(i) { false }) { action() }
+        }
+    }
+}
+
+/**
+ * The overflow menu: the few things that act on the *app*.
+ *
+ * One composable for both modes, because it is the same three actions in both and
+ * a second copy would be a second place for them to drift apart. Wrapped in a
+ * dark scheme because Material components arrive wearing Material's default
+ * *light* theme, and a white rectangle in a dark app is what that looks like.
+ */
+@Composable
+fun AppMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onLauncher: () -> Unit,
+    onSettings: () -> Unit,
+    onClose: (() -> Unit)?,
+) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            surface = Surface,
+            onSurface = Fg,
+            onSurfaceVariant = Dim,
+            primary = Accent,
+        ),
+    ) {
+        DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+            DropdownMenuItem(
+                text = { Text("shells", color = Fg) },
+                onClick = { onDismiss(); onLauncher() },
+            )
+            DropdownMenuItem(
+                text = { Text("settings", color = Fg) },
+                onClick = { onDismiss(); onSettings() },
+            )
+            if (onClose != null) {
+                DropdownMenuItem(
+                    text = { Text("close this shell", color = Fg) },
+                    onClick = { onDismiss(); onClose() },
+                )
+            }
+        }
+    }
+}
+
