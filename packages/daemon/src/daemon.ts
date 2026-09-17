@@ -14,6 +14,8 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isValidSessionName, TmuxControlPlane } from "./tmux/control-plane.ts";
 import { Registry } from "./registry.ts";
+import { Ownership } from "./ownership.ts";
+import { hostname } from "node:os";
 import { PaneStream } from "./stream.ts";
 import { RemoteServer } from "./remote.ts";
 import { readDesktop } from "./desktop-inventory.ts";
@@ -26,6 +28,7 @@ import type {
   SessionKind,
   SessionRecord,
 } from "../../protocol/src/rpc.ts";
+import type { DeviceInfo, SessionOwner } from "../../protocol/src/rpc.ts";
 import { DAEMON_PROTOCOL_VERSION } from "../../protocol/src/rpc.ts";
 import type { SessionInfo } from "../../protocol/src/messages.ts";
 
@@ -128,6 +131,32 @@ export class LdmuxDaemon {
   private readonly streams = new Map<string, PaneStream>();
   private remoteInfo: { hostname: string; port: number } | undefined;
   private token = "";
+  /**
+   * Who holds each session (ADR-0010). In memory and nowhere else: a claim that
+   * outlives its connection blocks the next attach, so a restart losing every
+   * claim is not a bug — a restart also loses every client.
+   */
+  private readonly ownership = new Ownership();
+  /**
+   * Sessions with a window open on the desktop's screen, and where.
+   *
+   * The daemon's own record rather than a window-manager probe: it is what makes
+   * "closing on the phone leaves it open" decidable, and the probe was wrong in
+   * both directions (a window that had just closed still looked open).
+   */
+  private readonly liveWindows = new Map<string, { workspace: string }>();
+  /**
+   * The device identity that owns a desktop window.
+   *
+   * One per host, because there is one desktop: it is not the identity of the
+   * *window* but of the machine the window is on, which is what a phone needs to
+   * name when it says who took a shell from it.
+   */
+  private readonly desktopDevice: DeviceInfo = {
+    id: `desktop:${hostname()}`,
+    name: hostname(),
+    kind: "desktop",
+  };
 
   private readonly opts: LdmuxDaemonOptions;
 
@@ -221,6 +250,15 @@ export class LdmuxDaemon {
         },
         makeLive: (id, workspace) => this.handle("makeLive", { id, workspace }) as Promise<{ ok: boolean; detail?: string }>,
         closeLive: (id) => this.handle("closeLive", { id }) as Promise<{ ok: boolean; detail?: string }>,
+        // The three ownership hooks the transport needs. They live here, not in
+        // the transport, because the daemon's session list is built from them —
+        // two copies of "who owns this" is how a client ends up being told one
+        // thing and enforced against another (ADR-0010).
+        claim: (sessionId, device, takeover) => this.claimSession(sessionId, device, takeover),
+        releaseDevice: (deviceId) => this.ownership.releaseDevice(deviceId),
+        releaseClaim: (sessionId, deviceId) => this.ownership.release(sessionId, deviceId),
+        closeSession: async (id) =>
+          (await this.handle("close", { id })) as { ok: boolean; ended: boolean; detail?: string },
         copyMode: async (id: string, on: boolean) => {
           await this.handle("copyMode", { id, on });
         },
@@ -269,7 +307,39 @@ export class LdmuxDaemon {
       createdBy: record.createdBy,
       lastActivityAt:
         (record.tmuxName ? activity.get(record.tmuxName) : undefined) ?? record.updatedAt,
+      // Where it is, and who has it, as facts. The launcher used to infer the
+      // desktop side from a WM probe cached for a second, which is wrong in both
+      // directions — so it would offer to "bring back" a shell already here, or
+      // hide the button on one that was.
+      liveWorkspace: this.liveWindows.get(record.id)?.workspace,
+      owner: this.ownerOf(record.id) ?? undefined,
     }));
+  }
+
+  /** The device holding a session, as clients are told about it. */
+  private ownerOf(sessionId: string): SessionOwner | null {
+    const claim = this.ownership.owner(sessionId);
+    if (!claim) return null;
+    return { ...claim.device, since: claim.since };
+  }
+
+  /**
+   * Claim a session for a device (ADR-0010).
+   *
+   * A desktop window taking a shell is *not* a takeover: it is the same user on
+   * the same machine, and `makeLive` already decided the shell belongs there.
+   * Everything else goes through the caller, which only sets `takeover` after the
+   * user was told who has it.
+   */
+  private claimSession(
+    sessionId: string,
+    device: DeviceInfo,
+    takeover: boolean,
+  ): { ok: true; displaced?: DeviceInfo } | { ok: false; heldBy: SessionOwner } {
+    const result = this.ownership.claim(sessionId, device, { takeover });
+    if (!result.ok) return { ok: false, heldBy: { ...result.heldBy, since: 0 } };
+    if (result.previous && result.previous.id !== device.id) return { ok: true, displaced: result.previous };
+    return { ok: true };
   }
 
   /** The bound remote endpoint, when remote started successfully. */
@@ -474,7 +544,27 @@ export class LdmuxDaemon {
     }
     // Only sweep on a *known* live set, and never from a read-only listing.
     if (opts.sweep !== false && live) this.sweepStreams();
+    // Claims for sessions that no longer exist are the other half of the Stale
+    // State problem: a session killed outside ldmux (`exit`, a hand-run
+    // `tmux kill-session`) leaves an owner pointing at nothing, and a later
+    // session reusing that id would inherit it — and its window.
+    const known = new Set(this.registry.list().map((r) => r.id));
+    this.ownership.retain(known);
+    for (const id of [...this.liveWindows.keys()]) if (!known.has(id)) this.liveWindows.delete(id);
     return { dead, adopted, pruned };
+  }
+
+  /**
+   * Drop every per-session fact the daemon holds about a session.
+   *
+   * A session id can be reused, so state that outlives its session is state the
+   * *next* session inherits: an owner it never had, a desktop window that was
+   * never opened. Called wherever a session ends.
+   */
+  private forgetSessionState(sessionId: string): void {
+    const owner = this.ownership.owner(sessionId);
+    if (owner) this.ownership.release(sessionId, owner.device.id);
+    this.liveWindows.delete(sessionId);
   }
 
   /**
@@ -544,12 +634,50 @@ export class LdmuxDaemon {
         const workspace = String(p.workspace ?? "");
         // Best-effort by design: not every host has a window manager, and a phone
         // must not be told its shell is broken because the desktop is headless.
-        return await openLive(this.cp.socket, record.tmuxName, record.id, workspace, this.cp.bin);
+        const result = await openLive(
+          this.cp.socket,
+          record.tmuxName,
+          record.id,
+          workspace,
+          this.cp.bin,
+        );
+        if (result.ok) {
+          // Recorded only on success, so the fact the client is told cannot
+          // claim a window that was never opened.
+          this.liveWindows.set(record.id, { workspace });
+          // ...and the shell moves to the desktop. The window is writable, so
+          // leaving the phone holding it would be two writers on one pty — the
+          // split input the exclusive rule exists to prevent (ADR-0010).
+          this.ownership.claim(record.id, this.desktopDevice, { takeover: true });
+          void this.remote?.broadcastSessions().catch(() => {});
+        }
+        return result;
       }
 
       case "closeLive": {
         const record = this.require(String((params as { id?: unknown }).id ?? ""));
-        return await closeLive(record.id);
+        const result = await closeLive(record.id);
+        // Cleared whether or not a window was found: the caller asked for it to
+        // be gone, and continuing to advertise a workspace would make the phone
+        // show a window it no longer has.
+        this.liveWindows.delete(record.id);
+        this.ownership.release(record.id, this.desktopDevice.id);
+        void this.remote?.broadcastSessions().catch(() => {});
+        return result;
+      }
+
+      case "reclaim": {
+        // A desktop live window asking for a shell back, after the user pressed a
+        // key on the "open on another device" screen. The keystroke is the
+        // consent (ADR-0010), which is why this can take over at all.
+        const p = params as { id?: unknown; device?: unknown };
+        const record = this.require(String(p.id ?? ""));
+        const device = p.device as DeviceInfo | undefined;
+        if (!device?.id) return { ok: false, detail: "no device given" };
+        const result = this.ownership.claim(record.id, device, { takeover: true });
+        if (!result.ok) return { ok: false, detail: "could not claim" };
+        void this.remote?.broadcastSessions().catch(() => {});
+        return { ok: true };
       }
 
       case "remote_info":
@@ -634,7 +762,27 @@ export class LdmuxDaemon {
         record.exitedAt = Date.now();
         record.updatedAt = Date.now();
         this.registry.save();
+        // Everything about the session goes with it, or a later session reusing
+        // the id would inherit its owner and its window (ADR-0010).
+        this.forgetSessionState(record.id);
         return { ok: true, session: record };
+      }
+
+      case "close": {
+        // What the user means by closing a shell in the UI, which is *not* the
+        // same as ending it (ADR-0010).
+        const record = this.require(String(params.id));
+        // A shell with a window on the desktop is being kept there by something
+        // the user can see and walk back to. Closing it on the phone lets go of
+        // it; it does not dispose of it.
+        if (this.liveWindows.has(record.id)) {
+          // Deliberately not `forgetSessionState`: the window stays, the shell
+          // stays. The caller's own claim is released by the transport, which is
+          // the only layer that knows which device asked.
+          return { ok: true, ended: false, session: record };
+        }
+        await this.handle("kill", { id: record.id });
+        return { ok: true, ended: true, session: record };
       }
 
       case "forget": {

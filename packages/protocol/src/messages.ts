@@ -4,7 +4,7 @@
  * these JSON shapes.
  */
 
-import type { DesktopInventory, SessionRecord } from "./rpc.ts";
+import type { DesktopInventory, DeviceInfo, SessionOwner, SessionRecord } from "./rpc.ts";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -51,6 +51,14 @@ export interface Ping { type: "ping"; id?: number }
 export interface Pong { type: "pong"; id?: number }
 export interface ErrorMessage { type: "error"; code: string; message: string }
 
+/** Remote client → server: who this connection is (ADR-0010).
+ *
+ * Sent once, before anything else. Ownership is keyed on the connection plus
+ * this identity, and a device's claims are dropped when the connection ends —
+ * which is the whole defence against attachment state outliving the socket.
+ */
+export interface Hello { type: "hello"; device: DeviceInfo }
+
 /** Remote client → server: subscribe this connection to one session's stream. */
 export interface Attach {
   type: "attach";
@@ -62,6 +70,14 @@ export interface Attach {
    */
   cols?: number;
   rows?: number;
+  /**
+   * The user was told who holds this shell and chose to take it anyway.
+   *
+   * Attachment is never a silent steal (ADR-0010): a plain attach that finds
+   * another owner is *refused*, and the client is answered with who holds it so
+   * it can ask. Only a second attach carrying this flag displaces them.
+   */
+  takeover?: boolean;
 }
 
 /**
@@ -141,6 +157,24 @@ export type SessionInfo = Pick<
    * ones). Absent when unknown.
    */
   lastActivityAt?: number;
+  /**
+   * The device holding this shell, when one does (ADR-0010).
+   *
+   * Sent so the launcher can show *where* a shell is open from a fact, rather
+   * than from a window-manager probe it would otherwise have to guess with.
+   */
+  owner?: SessionOwner;
+  /**
+   * The desktop workspace this shell has a window on, when it has one.
+   *
+   * This is what makes "closing on the phone leaves it open on the desktop"
+   * decidable: it is set when `makeLive` succeeds and cleared when the window is
+   * closed or the session ends. The phone previously inferred it from a WM probe
+   * cached for one second, which is wrong in both directions — a window that had
+   * just closed still looked open, and one that had just opened still looked
+   * absent.
+   */
+  liveWorkspace?: string;
 };
 
 /** Remote client → server: list sessions. */
@@ -161,6 +195,30 @@ export interface NewSessionMessage {
 
 /** Remote client → server: end a session. The server answers with a fresh list. */
 export interface KillSessionMessage { type: "kill"; sessionId: string }
+
+/**
+ * Remote client → server: the user closed this shell in the UI.
+ *
+ * Deliberately **not** `kill` (ADR-0010). Closing lets go of a shell, and
+ * whether that also *ends* it depends on whether something else is holding it
+ * open — a fact only the server has, so the client cannot be the authority on
+ * it. `kill` stays the unconditional end: the CLI uses it, and so does a desktop
+ * window being closed.
+ */
+export interface CloseSessionMessage { type: "close"; sessionId: string }
+
+/**
+ * Server → client: a shell is held by another device, or was taken from you.
+ *
+ * Sent both when an attach is refused and when an attach that already succeeded
+ * is displaced — the same situation from the user's point of view, so the same
+ * message. `owner` is null when nobody holds it (the holder left).
+ */
+export interface OwnedMessage {
+  type: "owned";
+  sessionId: string;
+  owner: SessionOwner | null;
+}
 
 /**
  * The control-message union. Only these shapes are sent in v1: the v0.1 draft's
@@ -198,11 +256,13 @@ export interface DesktopMessage { type: "desktop"; inventory: DesktopInventory }
 export type ControlMessage =
   | Caps
   | Snapshot
+  | Hello
   | Follow
   | Ping
   | Pong
   | ErrorMessage
   | Attach
+  | OwnedMessage
   | Resize
   | MouseClick
   | Input
@@ -213,6 +273,7 @@ export type ControlMessage =
   | ListSessions
   | NewSessionMessage
   | KillSessionMessage
+  | CloseSessionMessage
   | SessionsMessage
   | DesktopRequest
   | DesktopMessage

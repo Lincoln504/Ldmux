@@ -21,7 +21,7 @@ import {
   type SessionInfo,
   type Snapshot,
 } from "../../protocol/src/messages.ts";
-import type { SessionRecord } from "../../protocol/src/rpc.ts";
+import type { DeviceInfo, SessionOwner, SessionRecord } from "../../protocol/src/rpc.ts";
 import { tokenMatches } from "./auth.ts";
 import { isShellForeground } from "./desktop.ts";
 import type { PaneStream, StreamSnapshot } from "./stream.ts";
@@ -47,6 +47,29 @@ export interface RemoteServerOptions {
   ): Promise<void>;
   /** End a session by id. */
   killSession?(id: string): Promise<void>;
+  /**
+   * The user closed a shell in the UI, which is not the same as ending it.
+   *
+   * The daemon decides what that means, because the answer depends on facts only
+   * it holds: a shell with a window open on the desktop is kept, and only the
+   * caller's claim is released (ADR-0010). Returns whether it actually ended.
+   */
+  closeSession?(id: string): Promise<{ ok: boolean; ended: boolean; detail?: string }>;
+  /**
+   * Claim a session for a device (ADR-0010).
+   *
+   * Returns the holder when someone else has it — the caller answers with who,
+   * and the user decides. `takeover` is only ever set after the user was told.
+   */
+  claim?(
+    sessionId: string,
+    device: DeviceInfo,
+    takeover: boolean,
+  ): { ok: true; displaced?: DeviceInfo } | { ok: false; heldBy: SessionOwner };
+  /** Drop every claim a device holds — what a closing socket calls. */
+  releaseDevice?(deviceId: string): string[];
+  /** Let go of one session without ending it. */
+  releaseClaim?(sessionId: string, deviceId: string): boolean;
   /** What is on the machine's desktop, for the launcher. */
   desktopInventory?(): Promise<DesktopInventory>;
   /** Put a session's terminal on the desktop's screen, on a chosen workspace. */
@@ -74,6 +97,14 @@ interface ConnData {
   stream?: PaneStream;
   /** The record of the attached session, so the close path can release it. */
   record?: SessionRecord;
+  /**
+   * Who this connection is, from its `hello` (ADR-0010).
+   *
+   * Absent until the client identifies itself, and a connection that never does
+   * can still browse and create — it simply cannot hold a session, because
+   * holding one is a claim and a claim needs a holder to attribute it to.
+   */
+  device?: DeviceInfo;
   unsubscribe?: () => void;
   live: boolean;
   pending: string[];
@@ -185,6 +216,18 @@ export class RemoteServer {
         // remaining subscribers is dropped rather than cached for the daemon's
         // lifetime. `releaseStreamIfIdle` is a no-op if another client attached.
         if (conn.record) this.opts.releaseStream?.(conn.record);
+        // ...and its claims go with it. This is the entire defence against the
+        // failure dooboxes calls *Stale State*: a claim that outlives its
+        // connection does not merely look wrong, it **blocks the next attach**,
+        // so a phone that lost signal would lock its own shell until the daemon
+        // restarted. Released here, the shell is claimable the moment anyone
+        // asks again.
+        if (conn.device) {
+          this.byDevice.get(conn.device.id)?.delete(socket);
+          if (this.byDevice.get(conn.device.id)?.size === 0) this.byDevice.delete(conn.device.id);
+          const freed = this.opts.releaseDevice?.(conn.device.id) ?? [];
+          if (freed.length > 0) void this.broadcastSessions().catch(() => {});
+        }
       });
       socket.on("error", () => {
         /* a dropped client is not an event */
@@ -334,6 +377,25 @@ export class RemoteServer {
         case "ping":
           this.sendJson(ws, { type: "pong", id: msg.id });
           return;
+        case "hello": {
+          // Identity, not authentication (ADR-0010): it only has to be stable
+          // enough to tell two devices apart in a message about a shell.
+          const device = msg.device;
+          if (device && typeof device.id === "string" && device.id !== "") {
+            data.device = {
+              id: device.id.slice(0, 64),
+              name: String(device.name ?? "device").slice(0, 32),
+              kind: device.kind === "desktop" ? "desktop" : "phone",
+            };
+            let set = this.byDevice.get(data.device.id);
+            if (!set) {
+              set = new Set();
+              this.byDevice.set(data.device.id, set);
+            }
+            set.add(ws);
+          }
+          return;
+        }
         case "list":
           await this.sendSessions(ws);
           return;
@@ -380,6 +442,22 @@ export class RemoteServer {
         }
         case "kill": {
           await this.opts.killSession?.(String(msg.sessionId ?? ""));
+          if (data.disposed) return;
+          await this.sendSessions(ws);
+          return;
+        }
+        case "close": {
+          // The user closed a shell here. Whether that *ends* it is the daemon's
+          // question, because only it knows whether a desktop window is holding
+          // it open (ADR-0010). Reusing `kill` for this would make the phone the
+          // authority on a fact it cannot see, which is the bug being fixed.
+          const id = String(msg.sessionId ?? "");
+          const result = this.opts.closeSession
+            ? await this.opts.closeSession(id)
+            : { ok: true, ended: true };
+          // Let go even when the session survives: a shell held open by the
+          // desktop is not one this connection should keep streaming.
+          if (data.device && !result.ended) this.opts.releaseClaim?.(id, data.device.id);
           if (data.disposed) return;
           await this.sendSessions(ws);
           return;
@@ -531,6 +609,45 @@ export class RemoteServer {
     }
   }
 
+  /**
+   * Sockets by the device they announced themselves as.
+   *
+   * The connection table is a WeakMap (nothing should keep a socket alive), so
+   * it cannot be iterated — but a takeover has to be able to *reach* the device
+   * being displaced, which is usually not the connection that caused it. One
+   * device may hold several connections (a reconnect overlapping a stale one), so
+   * this is a set, and it is cleaned up on close.
+   */
+  private readonly byDevice = new Map<string, Set<WebSocket>>();
+
+  /**
+   * Tell a displaced device it no longer holds a shell, and stop streaming it.
+   *
+   * Sent to whoever holds that identity, which is usually *not* the connection
+   * that caused the takeover — the other device is the one that needs to know.
+   * The stream is torn down here rather than left running, because a client that
+   * has lost a shell must not keep receiving its output: it would still be able
+   * to read it, and it would still be *typing* into it.
+   */
+  private notifyDisplaced(deviceId: string, sessionId: string, newOwner: DeviceInfo): void {
+    for (const client of this.byDevice.get(deviceId) ?? []) {
+      const conn = this.connState.get(client);
+      if (!conn || conn.sessionId !== sessionId) continue;
+      this.sendJson(client, {
+        type: "owned",
+        sessionId,
+        // Who has it *now*, so the displaced device can say so by name rather
+        // than with a shrug.
+        owner: { ...newOwner, since: Date.now() },
+      });
+      this.cleanupSubscription(conn);
+      if (conn.record) this.opts.releaseStream?.(conn.record);
+      conn.sessionId = undefined;
+      conn.record = undefined;
+      conn.live = false;
+    }
+  }
+
   private async attach(ws: any, data: ConnData, sessionId: string, msg: Attach): Promise<void> {
     const record = this.opts.getSession(sessionId);
     if (!record || !record.tmuxName) {
@@ -540,6 +657,20 @@ export class RemoteServer {
     if (record.status !== "running") {
       this.sendError(ws, "session_dead", `session is ${record.status}: ${sessionId}`);
       return;
+    }
+
+    // Exclusivity (ADR-0010). Order matters: the refusal has to happen before
+    // anything is torn down, or a plain attach to somebody else's shell would
+    // displace the *caller's* own current attach while failing.
+    if (data.device && this.opts.claim) {
+      const claimed = this.opts.claim(sessionId, data.device, msg.takeover === true);
+      if (!claimed.ok) {
+        // Not an error: it is the ordinary answer to "open this", and the client
+        // answers it by telling the user who has it and offering to take over.
+        this.sendJson(ws, { type: "owned", sessionId, owner: claimed.heldBy });
+        return;
+      }
+      if (claimed.displaced) this.notifyDisplaced(claimed.displaced.id, sessionId, data.device);
     }
     const gen = ++data.attachGen;
     this.cleanupSubscription(data);

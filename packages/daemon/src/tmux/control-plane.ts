@@ -365,6 +365,66 @@ export class TmuxControlPlane {
     return (await this.run(["has-session", "-t", name])).code === 0;
   }
 
+  /**
+   * The ttys of the clients attached to a session.
+   *
+   * This is how the daemon tells whether a desktop live window is still
+   * attached. A tmux client is identified by its tty because that is the only
+   * handle tmux offers that the *window itself* can write down: the live window
+   * records its own tty in a session option before attaching, and the daemon
+   * compares it against this list. Measured on tmux 3.7b: a client's
+   * `#{client_tty}` is its pty (`/dev/pts/5`) and `#{client_name}` equals it.
+   *
+   * A session with no clients yields `[]` — not an error.
+   */
+  async listClientTtys(session: string): Promise<string[]> {
+    const { code, out } = await this.run([
+      "list-clients", "-t", session, "-F", "#{client_tty}",
+    ]);
+    if (code !== 0) return [];
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  /**
+   * Detach one client by tty.
+   *
+   * Used to take a session back from a desktop window without killing anything:
+   * detaching makes the window's `tmux attach` *return*, which is what lets the
+   * window show "open on another device" instead of vanishing.
+   *
+   * Returns false when no such client is attached — the honest answer, and the
+   * one that stops a caller from believing it displaced somebody.
+   */
+  async detachClient(tty: string): Promise<boolean> {
+    const { code } = await this.run(["detach-client", "-t", tty]);
+    return code === 0;
+  }
+
+  /**
+   * Set a session-scoped user option (`@name`).
+   *
+   * `-q` suppresses the error when the option did not previously exist; tmux
+   * treats setting an unknown `@option` as an error without it.
+   */
+  async setSessionOption(session: string, key: string, value: string): Promise<void> {
+    await this.run(["set-option", "-t", session, "-q", key, value]);
+  }
+
+  /**
+   * Read a session-scoped user option, or null when it is not set.
+   *
+   * A missing option is **rc=1 with `invalid option` on stderr**, not an empty
+   * string (measured on 3.7b), so an unreadable option must map to `null` rather
+   * than to the empty string — the two mean different things when the value is a
+   * tty path that could plausibly be blank.
+   */
+  async getSessionOption(session: string, key: string): Promise<string | null> {
+    const { code, out } = await this.run(["show-option", "-t", session, "-v", key]);
+    if (code !== 0) return null;
+    const value = out.trim();
+    return value === "" ? null : value;
+  }
+
   async newSession(opts: NewSessionOptions): Promise<void> {
     const args = ["new-session", "-d", "-s", opts.name, "-c", opts.cwd];
     if (opts.cols && opts.rows) args.push("-x", String(opts.cols), "-y", String(opts.rows));
