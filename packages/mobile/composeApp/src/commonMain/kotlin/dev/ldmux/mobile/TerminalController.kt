@@ -103,6 +103,9 @@ class TerminalController(
             // it (this is also the recovery path after a mispredict).
             predictor.reset()
             staleJob?.cancel()
+            // A snapshot only ever follows a *successful* attach, so this is the
+            // one place that can prove the refusal no longer applies.
+            _ownedBy.value = null
             engine.close()
             engine = TerminalEngine(cols, rows)
             if (screen.isNotEmpty()) {
@@ -132,6 +135,13 @@ class TerminalController(
         }
         attach.onOutput = { bytes -> writeOutput(bytes) }
         attach.onError = { code -> onServerError(code) }
+        attach.onOwned = { holder ->
+            // The attach was refused because another device holds this shell,
+            // not because anything is broken (ADR-0010). Surfaced rather than
+            // retried: retrying on its own is exactly the silent steal the rule
+            // exists to prevent.
+            _ownedBy.value = holder ?: "another device"
+        }
         attach.onRtt = { sample ->
             pacing.onRttSample(sample)
             _link.value = linkStats()
@@ -349,6 +359,21 @@ class TerminalController(
             is TapAction.Keys -> sendKeyBatches(action.keys)
             TapAction.Ignore -> Unit
         }
+    }
+
+    private val _ownedBy = MutableStateFlow<String?>(null)
+
+    /**
+     * The shell is held by another device, named when known.
+     *
+     * Cleared by a snapshot, which arrives only when the attach succeeded — so
+     * this cannot get stuck showing a refusal after a successful takeover.
+     */
+    override val ownedBy: StateFlow<String?> = _ownedBy
+
+    /** The user confirmed: take the shell from whoever has it. */
+    override fun takeOver() {
+        attach.takeOver()
     }
 
     /**

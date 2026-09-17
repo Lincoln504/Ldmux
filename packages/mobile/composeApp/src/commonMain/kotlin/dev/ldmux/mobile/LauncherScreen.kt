@@ -152,6 +152,12 @@ fun LauncherScreen(
                     subtitle = buildString {
                         append(tildify(s.cwd))
                         s.workspaceOf(desktop)?.let { append(" · on desktop ").append(it) }
+                        // Who has it, when it is not us. A shell held elsewhere
+                        // is not refused — it is offered, and this is the sentence
+                        // that makes the offer make sense.
+                        if (s.heldElsewhere && s.ownerName != null) {
+                            append(" · open on ").append(s.ownerName)
+                        }
                     },
                     chosen = s.id in chosen,
                     onClick = { chosen = toggle(chosen, s.id) },
@@ -248,11 +254,14 @@ sealed interface LauncherChoice {
 /**
  * Which desktop a shell's live window is on, or null when it has none.
  *
- * Read from the window that *this session's class* names, so it is the window the
- * phone put there and not some other alacritty that happens to be open.
+ * The **server's** answer (ADR-0010), not a lookup in the window inventory. The
+ * inventory version was a guess, cached for a second, and wrong in both
+ * directions: a window that had just closed still looked open, and one that had
+ * just opened still looked absent — so the button offered to "bring back" a shell
+ * already on screen, or hid itself on one that was.
  */
-private fun Session.workspaceOf(desktop: DesktopInventory?): String? =
-    desktop?.windows?.firstOrNull { it.appClass == "ldmux-live-$id" }?.workspace?.ifEmpty { null }
+private fun Session.workspaceOf(@Suppress("UNUSED_PARAMETER") desktop: DesktopInventory?): String? =
+    liveWorkspace?.ifEmpty { null }
 
 private fun toggle(current: Set<String>, key: String): Set<String> =
     if (key in current) current - key else current + key

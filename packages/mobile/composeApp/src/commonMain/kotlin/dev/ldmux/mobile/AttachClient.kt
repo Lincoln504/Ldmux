@@ -5,6 +5,7 @@ import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
+import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -16,10 +17,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /** Terminal modes the server reports, which affect input encoding. */
 data class TerminalModes(
@@ -90,6 +94,46 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     var onRtt: ((Long) -> Unit)? = null
     /** The connection went away; the current round-trip estimate is worthless. */
     var onOffline: (() -> Unit)? = null
+    /**
+     * Another device holds this shell (ADR-0010).
+     *
+     * The attach was *refused*, not failed — nothing is wrong with the link. The
+     * UI answers this by naming the holder and offering to take over.
+     */
+    var onOwned: ((holder: String?) -> Unit)? = null
+
+    /**
+     * Take the shell from whoever has it.
+     *
+     * Only ever called after the user was told who has it: attachment is never a
+     * silent steal, and on the other side this makes a live window say "open on
+     * another device" rather than freeze.
+     */
+    fun takeOver() {
+        wantTakeover = true
+        reconnectNow()
+    }
+
+    /**
+     * Set once the user has consented, consumed by the next attach.
+     *
+     * Consumed rather than kept: if the shell is taken back by the other device a
+     * moment later, silently taking it again would be a tug of war nobody asked
+     * for. The second time, the user is asked again.
+     */
+    private var wantTakeover = false
+
+    /**
+     * End the current connection so the loop reconnects at once.
+     *
+     * Closing rather than waiting: the loop's own retry has a deliberate pause
+     * before it reconnects, and a user who just tapped "take it over" should not
+     * watch that pause.
+     */
+    private fun reconnectNow() {
+        val current = ws ?: return
+        scope?.launch { runCatching { current.close() } }
+    }
 
     private var pingSeq = 0
     private var pingSentAt: TimeMark? = null
@@ -114,10 +158,30 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             try {
                 httpClient().webSocket(config.wsUrl) {
                     ws = this
+                    // Say who we are first, exactly as the session-list client
+                    // does. A connection with no identity holds nothing, so the
+                    // daemon would have no claim to refuse a second device with.
+                    send(Frame.Text(
+                        buildJsonObject {
+                            put("type", "hello")
+                            putJsonObject("device") {
+                                put("id", config.deviceId)
+                                put("name", config.deviceLabel)
+                                put("kind", "phone")
+                            }
+                        }.toString(),
+                    ))
                     send(Frame.Text(
                         buildJsonObject {
                             put("type", "attach")
                             put("sessionId", sessionId)
+                            if (wantTakeover) {
+                                put("takeover", true)
+                                // Consumed here, before the answer is known: a
+                                // refusal must not leave the next attempt armed to
+                                // take over whatever it finds.
+                                wantTakeover = false
+                            }
                             if (wantCols > 0 && wantRows > 0) {
                                 put("cols", wantCols)
                                 put("rows", wantRows)
@@ -158,7 +222,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             }
             pingSentAt = null
             onOffline?.invoke()
-            delay(1500)
+            // No pause when a takeover is armed: that path is a user waiting on
+            // the result of a tap, not a link that needs a moment to recover.
+            if (!wantTakeover) delay(1500)
         }
     }
 
@@ -189,6 +255,14 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }
             "error" -> onError?.invoke(root["code"]?.jsonPrimitive?.content ?: "error")
+            "owned" -> {
+                // Refused, not broken: the shell is held by another device. Told
+                // as an ordinary outcome so the UI can offer to take it over
+                // rather than showing an error about the link.
+                val holder = (root["owner"] as? JsonObject)
+                    ?.get("name")?.let { (it as? JsonPrimitive)?.content }
+                onOwned?.invoke(holder)
+            }
         }
     }
 

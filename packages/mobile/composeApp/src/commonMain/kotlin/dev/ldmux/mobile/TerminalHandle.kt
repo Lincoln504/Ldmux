@@ -65,6 +65,19 @@ data class LinkStats(
     /** A tmux prefix action — split, new window, rename. */
     fun tmuxAction(action: String, name: String? = null) {}
 
+    /**
+     * Another device holds this shell, named when known (ADR-0010).
+     *
+     * A state rather than a one-shot event, because the screen it produces is
+     * *the page*: a refusal that only took effect if something happened to be
+     * listening at the right moment would leave a blank terminal and no reason.
+     */
+    val ownedBy: StateFlow<String?>
+        get() = EMPTY_OWNED
+
+    /** The user confirmed: take the shell from whoever has it. */
+    fun takeOver() {}
+
     /** Whether the pane is in a tmux mode right now, as last reported. */
     val inCopyMode: Boolean get() = false
 
@@ -79,6 +92,8 @@ data class LinkStats(
     companion object {
         /** For surfaces that do not report link state (the web view, tests). */
         val EMPTY_LINK: StateFlow<LinkStats> = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
+        /** For surfaces that do not report ownership (the web view, tests). */
+        val EMPTY_OWNED: StateFlow<String?> = MutableStateFlow(null)
     }
 }
 

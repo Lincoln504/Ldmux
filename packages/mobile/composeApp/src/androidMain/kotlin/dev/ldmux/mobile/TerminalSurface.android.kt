@@ -69,6 +69,18 @@ object AndroidApp {
     lateinit var context: Context
 }
 
+/**
+ * A random install id, generated once.
+ *
+ * `UUID.randomUUID` rather than a hardware identifier: this must not be a
+ * tracking id, and it must not be spoofable into someone else's — it only has to
+ * be unique among the handful of devices that share a daemon.
+ */
+actual fun newDeviceId(): String = java.util.UUID.randomUUID().toString()
+
+/** The model name, e.g. "Pixel 8" — what "open on …" should call this phone. */
+actual fun deviceLabel(): String = android.os.Build.MODEL.ifEmpty { "phone" }
+
 actual object AppPrefs {
     private const val FILE = "ldmux"
     private const val KEY_HOST = "host"
@@ -76,9 +88,20 @@ actual object AppPrefs {
     private const val KEY_SIDE = "side"
     private const val KEY_PREDICT = "predict"
     private const val KEY_FONT = "font_sp"
+    private const val KEY_DEVICE_ID = "device_id"
+    private const val KEY_DEVICE_LABEL = "device_label"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        // Generated on first load and written back immediately, so the identity
+        // is stable from the first connection onwards — including the very first
+        // one, which is the one that creates the claim this id is attributed to.
+        val deviceId = sp.getString(KEY_DEVICE_ID, null)
+            ?.takeIf { it.isNotEmpty() }
+            ?: newDeviceId().also { sp.edit().putString(KEY_DEVICE_ID, it).apply() }
+        val label = sp.getString(KEY_DEVICE_LABEL, null)
+            ?.takeIf { it.isNotEmpty() }
+            ?: deviceLabel().also { sp.edit().putString(KEY_DEVICE_LABEL, it).apply() }
         return LdmuxConfig(
             host = sp.getString(KEY_HOST, null) ?: LdmuxConfig.DEFAULT.host,
             token = sp.getString(KEY_TOKEN, null) ?: LdmuxConfig.DEFAULT.token,
@@ -86,6 +109,8 @@ actual object AppPrefs {
             predict = sp.getBoolean(KEY_PREDICT, LdmuxConfig.DEFAULT.predict),
             fontSp = sp.getFloat(KEY_FONT, LdmuxConfig.DEFAULT_FONT_SP)
                 .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
+            deviceId = deviceId,
+            deviceLabel = label,
         )
     }
 
@@ -97,6 +122,8 @@ actual object AppPrefs {
             .putString(KEY_SIDE, config.side)
             .putBoolean(KEY_PREDICT, config.predict)
             .putFloat(KEY_FONT, config.fontSp)
+            .putString(KEY_DEVICE_ID, config.deviceId)
+            .putString(KEY_DEVICE_LABEL, config.deviceLabel)
             .apply()
     }
 }

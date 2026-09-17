@@ -1,5 +1,7 @@
 package dev.ldmux.mobile
 
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -81,6 +83,16 @@ data class LdmuxConfig(
      * being scaled down to fit (ADR-0008).
      */
     val fontSp: Float = DEFAULT_FONT_SP,
+    /**
+     * This install's identity, announced with `hello` (ADR-0010).
+     *
+     * Stable for the life of the install, generated once and kept. It is **not**
+     * an account and not a credential: it exists so two devices can be told apart
+     * in a sentence about a shell they both want ("open on Pixel 8").
+     */
+    val deviceId: String = "",
+    /** What that sentence calls this device. */
+    val deviceLabel: String = "",
 ) {
     val baseUrl: String get() = if (host.startsWith("http")) host else "http://$host"
 
@@ -284,7 +296,7 @@ fun App() {
             onSettings = { showSettings = true },
         )
         }
-        killTarget?.let { ConfirmKill(it, onDismiss = { killTarget = null }) { client.kill(it.id); killTarget = null } }
+        killTarget?.let { ConfirmKill(it, onDismiss = { killTarget = null }) { client.close(it.id); killTarget = null } }
         if (showSettings) {
             SettingsDialog(
                 current = config,
@@ -327,7 +339,10 @@ fun App() {
 
     killTarget?.let { target ->
         ConfirmKill(target, onDismiss = { killTarget = null }) {
-            client.kill(target.id)
+            // `close`, not `kill`. Closing lets go of a shell; whether that ends
+            // it depends on whether a desktop window is holding it open, which
+            // only the daemon can see (ADR-0010).
+            client.close(target.id)
             killTarget = null
         }
     }
@@ -380,6 +395,26 @@ private fun TerminalArea(
                     Modifier.fillMaxSize(),
                 )
                 LaunchedEffect(handle, s.id) { handles[s.id] = handle }
+                // Who has this shell, when it is not us (ADR-0010). Drawn over
+                // the terminal rather than replacing the page: the page is still
+                // real, it is just somebody else's to type in right now — and a
+                // blank terminal with no reason on it is the failure this screen
+                // exists to prevent.
+                val madeVisitable by handle.ownedBy.collectAsState()
+                // Local, so each page has its own answer, and a swipe does not
+                // carry one page's decision to another.
+                var askTakeOver by remember(s.id) { mutableStateOf(false) }
+                if (madeVisitable != null) {
+                    HeldElsewhere(
+                        holder = madeVisitable!!,
+                        confirmed = askTakeOver,
+                        onAsk = { askTakeOver = true },
+                        onTakeOver = {
+                            askTakeOver = false
+                            handle.takeOver()
+                        },
+                    )
+                }
             }
         }
     }
@@ -773,4 +808,47 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
     )
+}
+
+/**
+ * "Another device is using this shell."
+ *
+ * Shown over the terminal when the daemon refuses an attach, because one device
+ * owns a shell at a time (ADR-0010). It is deliberately two steps: the first says
+ * who has it, and only the second takes it. Taking it makes the *other* device
+ * show the same kind of screen, so doing that on a single tap would let a pocket
+ * tap evict someone mid-command.
+ */
+@Composable
+private fun BoxScope.HeldElsewhere(
+    holder: String,
+    confirmed: Boolean,
+    onAsk: () -> Unit,
+    onTakeOver: () -> Unit,
+) {
+    Box(
+        Modifier.fillMaxSize().background(Bg.copy(alpha = 0.96f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("open on $holder", color = Fg, fontSize = 15.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (confirmed) {
+                    "Taking it will close $holder's view of this shell."
+                } else {
+                    "One device at a time, so this shell is not yours to type in\nwhile $holder has it."
+                },
+                color = Dim,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(14.dp))
+            if (confirmed) {
+                AccentBtn("take it over", Modifier.width(220.dp)) { onTakeOver() }
+            } else {
+                AccentBtn("take it over…", Modifier.width(220.dp)) { onAsk() }
+            }
+        }
+    }
 }

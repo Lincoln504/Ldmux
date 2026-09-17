@@ -26,6 +26,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /** One ldmux session, as the daemon reports it in a `sessions` message. */
 data class Session(
@@ -38,6 +39,25 @@ data class Session(
     val tmuxName: String,
     /** Who opened it: "phone", "local", "cli", "adopt". */
     val createdBy: String = "",
+    /**
+     * Whether a desktop window is holding this shell open, and where.
+     *
+     * The server's fact, not a window-manager probe: a client cannot see the
+     * desktop, so anything it inferred would be a guess — and it was, cached for
+     * a second, and wrong in both directions.
+     */
+    val liveWorkspace: String? = null,
+    /**
+     * The device holding this shell, when one does (ADR-0010).
+     *
+     * One device at a time. A shell someone else holds is not refused — it is
+     * offered, with who has it, and the user decides.
+     */
+    val ownerName: String? = null,
+    /** "phone" or "desktop". */
+    val ownerKind: String? = null,
+    /** True while the shell is held by some *other* device. */
+    val heldElsewhere: Boolean = false,
 ) {
     /**
      * Can this session be opened as a terminal page?
@@ -107,6 +127,14 @@ data class DesktopPiSession(
 /** The outcome of a make-live or close-live request. */
 data class LiveResult(val sessionId: String, val ok: Boolean, val detail: String?)
 
+/**
+ * A shell is held by another device (ADR-0010).
+ *
+ * [holder] is null when nobody holds it — the holder left while we were asking,
+ * which is not a failure, just a different sentence.
+ */
+data class OwnedNotice(val sessionId: String, val holder: String?)
+
 /** Everything the launcher shows before a terminal. */
 data class DesktopInventory(
     val wm: String,
@@ -129,6 +157,25 @@ data class DesktopInventory(
  */
 class LdmuxClient(private var config: LdmuxConfig) {
     private val http = HttpClient { install(WebSockets) }
+
+    /** The id this device announces itself as. Not an account, not a credential. */
+    private val deviceId: String get() = config.deviceId
+
+    /**
+     * Say who we are, before anything else.
+     *
+     * A client that never does holds nothing, so exclusivity silently stops
+     * applying to it: two devices could type into one shell and neither the
+     * server nor the user would know.
+     */
+    private fun helloMessage(): String = buildJsonObject {
+        put("type", "hello")
+        putJsonObject("device") {
+            put("id", config.deviceId)
+            put("name", config.deviceLabel)
+            put("kind", "phone")
+        }
+    }.toString()
     private val _sessions = MutableStateFlow<List<Session>>(emptyList())
     val sessions: StateFlow<List<Session>> = _sessions
 
@@ -174,6 +221,25 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private val _liveResult = MutableStateFlow<LiveResult?>(null)
     val liveResult: StateFlow<LiveResult?> = _liveResult
 
+    /**
+     * A shell was refused because another device holds it (ADR-0010).
+     *
+     * Held as a value plus a counter rather than as a flow of events: the state
+     * has to survive recomposition, and a dialog that appears only if it happens
+     * to be collected at the right moment is a dialog that silently does not
+     * appear.
+     */
+    private val _owned = MutableStateFlow<OwnedNotice?>(null)
+    val owned: StateFlow<OwnedNotice?> = _owned
+
+    private val _ownedTick = MutableStateFlow(0)
+    val ownedTick: StateFlow<Int> = _ownedTick
+
+    /** The user said take it over, so the notice has been dealt with. */
+    fun clearOwned() {
+        _owned.value = null
+    }
+
     fun clearLiveResult() {
         _liveResult.value = null
     }
@@ -218,7 +284,22 @@ class LdmuxClient(private var config: LdmuxConfig) {
         sendControl(msg)
     }
 
-    /** End a session. */
+    /**
+     * Close a shell the way the user means it.
+     *
+     * Deliberately not `kill`. Closing lets go of a shell, and whether that also
+     * ends it depends on whether a desktop window is holding it open — a fact the
+     * phone cannot see, so the daemon decides and answers (ADR-0010).
+     */
+    fun close(sessionId: String) {
+        val msg = buildJsonObject {
+            put("type", "close")
+            put("sessionId", sessionId)
+        }.toString()
+        sendControl(msg)
+    }
+
+    /** End a session outright. The unconditional form, kept for the CLI's sake. */
     fun kill(sessionId: String) {
         val msg = buildJsonObject {
             put("type", "kill")
@@ -298,6 +379,12 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     for (queued in pending) runCatching { send(Frame.Text(queued)) }
                     pending.clear()
                     _connected.value = true
+                    // Who we are, before anything else (ADR-0010). Ownership is
+                    // keyed on the connection plus this identity, and a device's
+                    // claims are dropped when the connection ends — so a client
+                    // that never says who it is holds nothing, and exclusivity
+                    // silently stops applying to it.
+                    send(Frame.Text(helloMessage()))
                     send(Frame.Text("""{"type":"list"}"""))
                     try {
                         for (frame in incoming) {
@@ -331,6 +418,17 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 ok = root["ok"]?.jsonPrimitive?.content == "true",
                 detail = root["detail"]?.jsonPrimitive?.content,
             )
+            "owned" -> {
+                // A shell is held by another device (ADR-0010). Ordinary, not an
+                // error: it is the answer to "open this", and the app answers it
+                // by telling the user who has it and offering to take over.
+                _owned.value = OwnedNotice(
+                    sessionId = root["sessionId"]?.jsonPrimitive?.content ?: "",
+                    holder = (root["owner"] as? JsonObject)
+                        ?.get("name")?.let { (it as? JsonPrimitive)?.content },
+                )
+                _ownedTick.value += 1
+            }
             "sessions" -> {
                 val arr = root["sessions"] as? JsonArray ?: return
                 _sessions.value = arr.mapNotNull { element ->
@@ -344,6 +442,15 @@ class LdmuxClient(private var config: LdmuxConfig) {
                         status = o["status"]?.jsonPrimitive?.content ?: "",
                         tmuxName = o["tmuxName"]?.jsonPrimitive?.content ?: "",
                         createdBy = o["createdBy"]?.jsonPrimitive?.content ?: "",
+                        liveWorkspace = o.optionalText("liveWorkspace"),
+                        ownerName = (o["owner"] as? JsonObject)
+                            ?.get("name")?.let { (it as? JsonPrimitive)?.content },
+                        ownerKind = (o["owner"] as? JsonObject)
+                            ?.get("kind")?.let { (it as? JsonPrimitive)?.content },
+                        heldElsewhere = (o["owner"] as? JsonObject)
+                            ?.get("id")?.let { (it as? JsonPrimitive)?.content } != null &&
+                            ((o["owner"] as? JsonObject)
+                                ?.get("id")?.let { (it as? JsonPrimitive)?.content }) != deviceId,
                     )
                 }
             }
