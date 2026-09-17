@@ -240,3 +240,23 @@ frame).
    Same shape as the password-prompt signal (`docs/PREDICTIVE-ECHO.md` §7):
    when the question is about the terminal's own state, the engine is both
    better informed and cheaper to ask than the protocol.
+
+## The capture is a screen to replay, not text to read
+
+`capture-pane -J` joins rows the terminal *wrapped*, so a long logical line comes
+back as one row. That is right for a person reading `ldmux capture` and **wrong
+for every client**, because a client does not read the rows — it replays them into
+an emulator of the pane's width, where the wrap is a consequence of that width and
+reproduces itself. Joining destroys that.
+
+Measured on a device: the pane held a 105-column line wrapped over two rows at 76
+columns. The capture returned it as **one** row. The client re-wrapped it into two,
+so the capture had one row more than the pane has, the emulator scrolled by one to
+fit it, and the top line was silently deleted. On a 20-row pane whose first row is
+the shell prompt, the prompt was simply gone — the screen showed a cursor and
+nothing else, which reads as a renderer bug and is not one.
+
+So `joinWrapped` is **off by default** and only `ldmux capture` (text being read)
+asks for it. This is the kind of option where the default is the whole bug: the
+wrong one fails silently, produces a plausible-looking screen, and looks like a
+problem somewhere else entirely.

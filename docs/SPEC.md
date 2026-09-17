@@ -560,10 +560,20 @@ server-side VT emulator seam would close it.
 
 ### 7.3 Input & keys
 
-- Extra-keys bar always visible (FR-15); **sticky modifiers** (Ctrl/Alt latch for
-  the next key). tmux prefix is a first-class button with a context menu
-  (split/window/rename/detach). **Copy-mode toggle** is required for scrolling
-  full-screen apps (`vim`, `htop`) whose history is not in the xterm.js buffer.
+- Extra-keys bar always visible (FR-15); **sticky modifiers** built — Ctrl/Alt
+  latch for exactly one following key. A modified *character* becomes literal
+  bytes (Ctrl-C is 0x03) because that is what a keyboard would have sent; a
+  modified *named* key stays a tmux key name, because that sequence is the
+  terminal's business.
+- **Copy-mode toggle** built, for scrolling full-screen apps (`vim`, `htop`) whose
+  history is not in any buffer — their screen is the alternate one, which has no
+  scrollback, so what scrolls is tmux's own view of the pane. The button shows the
+  *pane's* state, not the client's last request, because copy-mode also ends on
+  its own.
+- **The tmux prefix is a button with those actions** (split-right, split-down,
+  new-window, rename). The prefix keystroke itself cannot be sent: `send-keys C-b`
+  writes 0x02 into the pane, where the *program* reads it — a prefix is only a
+  prefix to a tmux client, and the client is the daemon.
 - Gestures: two-finger drag → scroll; pinch → font size (persisted); long-press →
   select/copy; double-tap empty area → `Tab` (optional).
 - IME-safe layout via `WindowInsets`; the control quarter does not jump when the
@@ -688,16 +698,29 @@ Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
 (backoff + `StateFlow`), `compose-webview-multiplatform`, foreground service +
 `ConnectivityManager`.
 
-**Android implementation requirements (v0.1 gap):**
-- Foreground service with a declared `android:foregroundServiceType` and a
-  notification channel; runtime **`POST_NOTIFICATIONS`** (Android 14+).
-- Partial wake lock during active sessions; network-change-triggered immediate
-  reconnect (`ConnectivityManager.NetworkCallback`).
-- OEM battery-exemption guidance (Samsung/Xiaomi/OnePlus) in onboarding.
-- Orientation lock + portrait fallback (large-screen caveat).
+**Android implementation (built):**
+- **Foreground service**, declared `specialUse` — a long-lived *interactive*
+  connection, where `dataSync` carries a 6h/24h cap (Android 15) that a shell left
+  open would exceed. Notification channel + `Disconnect` action; runtime
+  **`POST_NOTIFICATIONS`**, asked for at the first connection rather than at
+  launch, and denial is not fatal.
+- **Partial wake lock** while the service runs, released the moment it stops.
+- **`ConnectivityManager.NetworkCallback`** cuts the retry backoff short — only for
+  a *validated* network, because waking the loop during a handover is how an app
+  gets throttled.
+- Reconnect backoff is 400 ms doubling to 10 s. A fixed 2 s made a daemon that
+  restarted in a second feel broken and one down for an hour get asked 1800 times.
+- **Orientation is locked**, not sensor-driven: the manifest starts in `landscape`
+  and the app sets `requestedOrientation` for the explicit flip button.
+- **Remaining:** OEM battery-exemption guidance (Samsung/Xiaomi/OnePlus) in
+  onboarding; the tunnel/VPN path is manual.
 - **iOS is a target, not v1.** v1 ships Android. iOS constraints (no background
-  service model, ~3-min WS background, `WKWebView` input) are documented but
-  unimplemented.
+  service model, ~3-min WS background) are documented but unimplemented.
+
+The service is keyed on a terminal being **open**, not on being **connected**, and
+that distinction is the whole feature: backgrounding drops the socket, which would
+clear `connected`, which would stop the service that exists to keep the process
+alive to reconnect. Measured as a deadlock before it was fixed.
 
 ### 11.3 Rendering engine (client)
 
