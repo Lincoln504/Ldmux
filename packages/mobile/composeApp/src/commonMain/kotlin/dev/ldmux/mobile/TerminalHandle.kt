@@ -75,6 +75,16 @@ data class LinkStats(
     /** The user confirmed: take the shell from whoever has it. */
     fun takeOver() {}
 
+    /**
+     * Repaint from what the engine already holds.
+     *
+     * For the one case that would otherwise be invisible: a snapshot that arrived
+     * before this surface had been laid out, so it was rendered into nothing and
+     * never re-rendered — because nothing about the pane changed afterwards, so
+     * no new snapshot was ever sent.
+     */
+    fun repaint() {}
+
     /** Whether the pane is in a tmux mode right now, as last reported. */
     val inCopyMode: Boolean get() = false
 

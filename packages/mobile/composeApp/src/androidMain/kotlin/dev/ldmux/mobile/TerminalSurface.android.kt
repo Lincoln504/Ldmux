@@ -232,6 +232,15 @@ actual fun rememberTerminalSurface(
     // that is actually visible; nothing is scaled down to a postage stamp.
     // The short delay debounces the two or three intermediate sizes a rotation
     // and an IME animation produce, so the daemon is told once, not thrice.
+    // The first layout is the moment a frame that arrived early becomes
+    // drawable. Without this the surface can sit permanently blank: the snapshot
+    // was applied while the canvas had no size, and because the grid it computes
+    // turns out to be the grid the pane already had, `setGrid` sends nothing and
+    // no fresh snapshot follows.
+    LaunchedEffect(viewport) {
+        if (viewport.width > 0 && viewport.height > 0) controller.repaint()
+    }
+
     LaunchedEffect(viewport, metrics.width, metrics.height) {
         if (viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
         if (metrics.width <= 0f || metrics.height <= 0f) return@LaunchedEffect
@@ -256,14 +265,11 @@ actual fun rememberTerminalSurface(
         }
     }
 
-    // Portrait typing flips the activity to portrait, landscape typing back.
-    // Locked orientations, not sensor: the app never rotates itself.
+    // The orientation itself is not set here any more: `App` owns it, because
+    // this composable exists per *page* while the screen has one orientation, and
+    // the version that lived here was a second opinion that would have fought the
+    // launcher's. What remains is the keyboard, which is this surface's business.
     LaunchedEffect(typing) {
-        activity?.requestedOrientation = if (typing) {
-            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        }
         if (typing) {
             focusRequester.requestFocus()
         } else {

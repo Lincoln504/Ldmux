@@ -1,6 +1,14 @@
 package dev.ldmux.mobile
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.text.style.TextAlign
@@ -58,11 +66,19 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
 /** The whole palette. Minimal, dark, one accent — no decoration. */
-val Bg = Color(0xFF0B0E14)
-val Fg = Color(0xFFE6E6E6)
-val Dim = Color(0xFF8A8F98)
-val Accent = Color(0xFF4C8DFF)
-val Surface = Color(0xFF141822)
+// Greyscale, deliberately. There is no accent *colour*: the only thing a hue
+// could mean here is "this is the important one", and on a screen that is
+// otherwise a terminal's own output, that is a claim worth making in weight and
+// contrast instead. The one exception is the close confirmation, where the red is
+// a warning rather than decoration.
+val Bg = Color(0xFF0A0A0A)
+val Fg = Color(0xFFEDEDED)
+val Dim = Color(0xFF8C8C8C)
+/** Nothing is tinted; "accent" is simply the lightest thing on screen. */
+val Accent = Color(0xFFD0D0D0)
+val Surface = Color(0xFF1A1A1A)
+/** Rules and unselected outlines. */
+val Line = Color(0xFF2A2A2A)
 
 /** The landscape panel's width. The terminal gets everything else. */
 private val PANEL_WIDTH = 190.dp
@@ -202,6 +218,13 @@ fun App() {
     // Leaving the terminal (back to the launcher) stops it, because nothing is
     // being watched then — and the shells themselves are unharmed either way:
     // they live in tmux on the host, not in this process.
+    // The screen's shape, decided in one place and nowhere else: the menu is
+    // always portrait (a list is read the way you hold a phone), a terminal is
+    // landscape, and portrait-with-a-terminal means *typing* — the compact bar
+    // above the keyboard, never this panel.
+    val wantPortrait = showLauncher || mode == UiMode.Portrait
+    LaunchedEffect(wantPortrait) { lockOrientation(wantPortrait) }
+
     val terminalOpen = !showLauncher && pages.isNotEmpty()
     LaunchedEffect(terminalOpen, pages.size) {
         BackgroundSession.setActive(
@@ -252,7 +275,24 @@ fun App() {
             }
     }
 
-    if (showLauncher) {
+    // One screen or the other, with a slide between them. The rotation itself is
+    // the system's — Android gives an activity one orientation and a view cannot
+    // opt out of that — so this does not *replace* the rotation; it keeps the
+    // content moving through it, where a cut reads as a glitch.
+    AnimatedContent(
+        targetState = showLauncher,
+        transitionSpec = {
+            if (targetState) {
+                (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
+                    (slideOutHorizontally { it / 3 } + fadeOut())
+            } else {
+                (slideInHorizontally { it / 3 } + fadeIn()) togetherWith
+                    (slideOutHorizontally { -it / 3 } + fadeOut())
+            }
+        },
+        label = "menu or terminal",
+    ) { showingLauncher ->
+    if (showingLauncher) {
         var desktopLoading by remember { mutableStateOf(false) }
         // Cleared by the *arrival* of a reading, not by the value changing: two
         // readings a second apart are usually identical, and keying on the value
@@ -315,10 +355,7 @@ fun App() {
                 },
             )
         }
-        return
-    }
-
-    if (portrait) {
+    } else if (portrait) {
         Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
             TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth())
             PortraitBar(currentHandle, onLandscape = { mode = UiMode.Landscape })
@@ -341,6 +378,7 @@ fun App() {
             TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
             if (!config.panelLeft) panel()
         }
+    }
     }
 
     killTarget?.let { target ->
@@ -450,7 +488,7 @@ fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
         containerColor = Surface,
         text = { Text(target.label, color = Dim, fontSize = 12.sp) },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("close", color = Color(0xFFFF6B6B)) }
+            TextButton(onClick = onConfirm) { Text("close", color = Color(0xFFE08A8A)) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
     )
@@ -641,6 +679,18 @@ private fun SidePanel(
             // keys the panel exists for.
             Box {
                 IconBtn(onClick = { menuOpen = true }) { IconWaffle(Dim) }
+                // The menu is Material's, so it arrives wearing Material's default
+                // scheme — which is *light*, and this app is a dark one with its
+                // own palette. Wrapping it is how Material components anywhere in
+                // this app should be used, or they will each be a white rectangle.
+                MaterialTheme(
+                    colorScheme = darkColorScheme(
+                        surface = Surface,
+                        onSurface = Fg,
+                        onSurfaceVariant = Dim,
+                        primary = Accent,
+                    ),
+                ) {
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     // A way back to the menu. The terminal is somewhere you went,
                     // so leaving it has to be possible without ending anything.
@@ -658,6 +708,7 @@ private fun SidePanel(
                             onClick = { menuOpen = false; onKill(here) },
                         )
                     }
+                }
                 }
             }
         }

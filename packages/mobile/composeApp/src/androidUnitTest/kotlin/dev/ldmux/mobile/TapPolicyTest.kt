@@ -207,4 +207,30 @@ class TapPolicyTest {
         assertEquals(emptyList(), batchKeys(emptyList()))
         assertEquals(listOf(listOf("Home")), batchKeys(listOf("Home")))
     }
+
+    @Test
+    fun `a captured screen loses exactly one trailing newline before replay`() {
+        // A 20-row pane comes back with 20 newlines: capture-pane terminates every
+        // row, including the last. Replaying all of them moves the cursor past the
+        // bottom, the emulator scrolls, and every line shifts up by one — while the
+        // cursor is separately placed at the pane's real row, so it lands one row
+        // *below* the text it belongs to.
+        val twenty = List(20) { "row$it" }.joinToString("\n") + "\n"
+        val replayed = snapshotReplay(twenty)
+        assertEquals(19, Regex("\r\n").findAll(replayed).count())
+        assertTrue(!replayed.endsWith("\r\n"))
+    }
+
+    @Test
+    fun `rows are separated by CRLF, or the screen staircases`() {
+        // A bare LF preserves the column, so each row would start one cell further
+        // right than the last.
+        val replayed = snapshotReplay("a\nb\n")
+        assertEquals("a\r\nb", replayed)
+    }
+
+    @Test
+    fun `an empty capture stays empty`() {
+        assertEquals("", snapshotReplay(""))
+    }
 }

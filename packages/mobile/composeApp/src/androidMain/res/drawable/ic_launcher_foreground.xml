@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A shell prompt: a bar and a chevron, `|>` — the two characters every terminal
+  has said "ready" with. Drawn with strokes rather than filled paths so it stays
+  legible at launcher sizes, and inside the middle 66% so no shape of icon mask
+  can clip it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M40,36 L40,72"
+        android:strokeColor="#EDEDED"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,41 L68,54 L54,67"
+        android:strokeColor="#EDEDED"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -282,7 +282,7 @@ private fun WorkspaceChip(ws: DesktopWorkspace, targeted: Boolean, onTarget: () 
             .background(if (targeted) Accent.copy(alpha = 0.22f) else Surface)
             .border(
                 width = if (targeted) 1.5.dp else 1.dp,
-                color = if (targeted) Accent else Color(0xFF232838),
+                color = if (targeted) Accent else Line,
                 shape = RoundedCornerShape(14.dp),
             )
             .clickable(onClick = onTarget)

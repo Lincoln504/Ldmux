@@ -109,11 +109,7 @@ class TerminalController(
             engine.close()
             engine = TerminalEngine(cols, rows)
             if (screen.isNotEmpty()) {
-                // tmux capture-pane separates rows with a bare LF. A VT treats LF
-                // as a line feed only (column preserved), so a snapshot must be
-                // given CR+LF or the screen staircases. Live PTY output is fine.
-                val normalized = screen.replace("\r\n", "\n").replace("\n", "\r\n")
-                val bytes = normalized.encodeToByteArray()
+                val bytes = snapshotReplay(screen).encodeToByteArray()
                 engine.write(bytes, bytes.size)
             }
             // Then put the cursor where the pane actually has it. Replaying the
@@ -437,6 +433,28 @@ class TerminalController(
  * Written after a snapshot is replayed, because the replayed screen ends
  * wherever its last non-blank row ended. See [TerminalModes.cursorX].
  */
+/**
+ * A captured screen, as bytes safe to write into an emulator.
+ *
+ * Two things have to be right, and both are invisible until they are wrong.
+ *
+ * **The terminator.** `capture-pane` terminates *every* row, including the last,
+ * so a 20-row pane comes back with 20 newlines. Replaying all of them moves the
+ * cursor one row past the bottom, the emulator scrolls, and every line shifts up
+ * by one — while the cursor is then placed at the pane's real row, so it ends up
+ * sitting one row *below* the text it belongs to. Measured: 20 rows, 20 newlines,
+ * cursor reported at row 2. N rows want N-1 separators.
+ *
+ * **The line feed.** Rows are separated by a bare LF, and a VT treats LF as a
+ * line feed only — the column is preserved — so the screen staircases diagonally.
+ * It has to be CR+LF. Live pty output needs neither fix; this is only for
+ * replaying a capture.
+ */
+internal fun snapshotReplay(screen: String): String {
+    val rows = if (screen.endsWith("\n")) screen.dropLast(1) else screen
+    return rows.replace("\r\n", "\n").replace("\n", "\r\n")
+}
+
 internal fun cursorSequence(col: Int, row: Int, cols: Int, rows: Int): String {
     val c = col.coerceIn(0, maxOf(cols - 1, 0)) + 1
     val r = row.coerceIn(0, maxOf(rows - 1, 0)) + 1

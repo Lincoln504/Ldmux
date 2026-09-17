@@ -67,7 +67,7 @@ fun IconBtn(
 /** A one-pixel rule that separates control groups. */
 @Composable
 fun PanelDivider() {
-    Column(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF232838))) {}
+    Column(Modifier.fillMaxWidth().height(1.dp).background(Line)) {}
 }
 
 @Composable

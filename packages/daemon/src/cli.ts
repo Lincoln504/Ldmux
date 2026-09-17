@@ -17,11 +17,13 @@
  *   ldmux expose [--dry-run]
  */
 
+import { basename, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { daemonCall, defaultSocketPath } from "../../protocol/src/rpc.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { PingResult, SessionRecord } from "../../protocol/src/rpc.ts";
 import { DEFAULT_MIRROR_WORKSPACE, mirrorCommand, openMirror } from "./desktop.ts";
+import { resolveTmuxBin } from "./tmux/control-plane.ts";
 import { buildPairInfo, expose, tailnetHost } from "./pairing.ts";
 
 function flag(args: string[], name: string): string | undefined {
@@ -90,6 +92,54 @@ async function main() {
       });
       console.error(`ldmux: session ${session.id} (${session.tmuxName}) — detach with Ctrl-b d`);
       const proc = spawnSync("tmux", ["-L", ping.tmuxSocket, "attach", "-t", session.tmuxName], {
+        stdio: "inherit",
+      });
+      process.exit(proc.status ?? 0);
+    }
+
+    /**
+     * A shell in this terminal, that the phone can see and take over.
+     *
+     * This is the *tool*, not an installer: it changes nothing about your
+     * window manager or your shell. Run it where you would have run `tmux`, and
+     * the shell it starts is an ldmux session like any other.
+     */
+    case "shell": {
+      const ping = await call<PingResult>(sock, "ping");
+      const name = flag(rest, "--name");
+      const wantCwd = resolve(flag(rest, "--cwd") ?? process.cwd());
+      const { sessions } = await daemonCall(sock, "list", {});
+
+      // Reuse before creating. Running `ldmux shell` twice in one directory is
+      // almost always "get me back to it", not "give me a second one" — and a
+      // second one would be a second shell in the same place, which is exactly
+      // what the launcher's dedup-by-directory exists to prevent.
+      const wanted = name ?? basename(wantCwd);
+      const existing = sessions.find(
+        (s) =>
+          s.kind === "shell" &&
+          s.status !== "dead" &&
+          s.tmuxName !== "" &&
+          (name ? s.title === name : resolve(s.cwd) === wantCwd && s.title === wanted),
+      );
+
+      let target: string;
+      if (existing) {
+        target = existing.tmuxName;
+        console.error(`ldmux: reusing ${existing.id} (${target})`);
+      } else {
+        const { session } = await daemonCall(sock, "new", {
+          kind: "shell",
+          cwd: wantCwd,
+          title: wanted,
+          createdBy: "local",
+        });
+        target = session.tmuxName;
+        console.error(`ldmux: session ${session.id} (${target}) — detach with Ctrl-b d`);
+      }
+      const proc = // By absolute path: the daemon and this shell may not share a PATH, and
+      // two tmux versions cannot share a server.
+      spawnSync(resolveTmuxBin(), ["-L", ping.tmuxSocket, "attach", "-t", target], {
         stdio: "inherit",
       });
       process.exit(proc.status ?? 0);
@@ -254,7 +304,7 @@ async function main() {
 
     default:
       console.error(
-        "usage: ldmux <ping|list|desktop|new|run|send|key|capture|snapshot|kill|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
+        "usage: ldmux <ping|list|desktop|new|shell|run|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
       );
       process.exit(2);
   }
