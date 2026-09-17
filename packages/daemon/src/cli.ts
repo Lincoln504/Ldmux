@@ -148,6 +148,25 @@ async function main() {
       break;
     }
 
+    case "copy": {
+      const [id, which] = positional(rest, []);
+      const on = which !== "off";
+      await daemonCall(sock, "copyMode", { id: id ?? "", on });
+      console.log(on ? "copy-mode on" : "copy-mode off");
+      break;
+    }
+
+    case "tmux": {
+      const [id, action, ...nameParts] = positional(rest, []);
+      await daemonCall(sock, "tmuxAction", {
+        id: id ?? "",
+        action: action ?? "",
+        name: nameParts.join(" "),
+      });
+      console.log(`${action} done`);
+      break;
+    }
+
     case "capture": {
       const [id] = positional(rest, []);
       const { screen } = await daemonCall(sock, "capture", { id, history: rest.includes("--history") });

@@ -225,6 +225,44 @@ class TerminalController(
         attach.keys(listOf(name))
     }
 
+    /**
+     * Send one key with the sticky modifiers applied.
+     *
+     * A modified *character* becomes literal bytes (Ctrl-C is 0x03) — which is
+     * what a keyboard would have sent, and is what makes readline and vim inside
+     * the shell see the chord rather than a letter. A modified *named* key stays a
+     * tmux key name, because its sequence is the terminal's business, not ours.
+     */
+    override fun sendModifiedKey(key: String, modifiers: Modifiers) {
+        when (val k = modifiedKey(key, modifiers)) {
+            is ModifiedKey.None -> {}
+            is ModifiedKey.Literal -> sendText(k.bytes)
+            is ModifiedKey.Named -> {
+                if (k.name == "Enter") predictor.onLineSubmitted()
+                attach.keys(listOf(k.name))
+            }
+        }
+    }
+
+    override fun setCopyMode(on: Boolean) {
+        attach.copyMode(on)
+    }
+
+    override fun tmuxAction(action: String, name: String?) {
+        attach.tmuxAction(action, name)
+    }
+
+    /**
+     * Whether the pane is in a tmux mode.
+     *
+     * Both the server's reading and the engine's are consulted: the server knows
+     * for certain, but it only speaks on a state push, while the engine sees the
+     * screen change immediately. Taking either means the button reflects the
+     * terminal rather than the last thing we asked for.
+     */
+    override val inCopyMode: Boolean
+        get() = modes.paneInMode
+
     override fun sendText(text: String) {
         val bytes = text.encodeToByteArray()
         // Three gates, any one of which is enough to refuse: the setting; a

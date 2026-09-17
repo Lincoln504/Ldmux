@@ -31,6 +31,15 @@ data class TerminalModes(
     /** The program negotiated SGR mouse reporting, so a click can be synthesized. */
     val mouseSgr: Boolean = false,
     /**
+     * The pane is in a tmux mode — copy-mode, or a menu.
+     *
+     * Reported by the server rather than tracked locally from what we asked for,
+     * because the pane leaves copy-mode on its own too: `q`, or whatever the
+     * program binds. What the button shows has to be the terminal's state, not
+     * the client's intention.
+     */
+    val paneInMode: Boolean = false,
+    /**
      * Where the pane's cursor actually is, from tmux.
      *
      * This is not the same as where the emulator's cursor ends up after the
@@ -173,6 +182,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     bracketedPaste = bool(root, "bracketedPaste"),
                     alternateOn = bool(root, "alternateOn"),
                     mouseSgr = bool(root, "mouseSgr"),
+                    paneInMode = bool(root, "paneInMode"),
                     cursorX = root["cursorX"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                     cursorY = root["cursorY"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 )
@@ -231,6 +241,37 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     fun keys(keys: List<String>) {
         val array = keys.joinToString(",") { quote(it) }
         sendControl("""{"type":"key","keys":[$array]}""")
+    }
+
+    /**
+     * Enter or leave tmux copy-mode.
+     *
+     * The scrollback this app keeps is for the *normal* screen. A full-screen
+     * program draws on the alternate screen, which has no history to keep — there
+     * is nothing to scroll back through — so for vim, htop and less the only
+     * scrollable copy is tmux's own view of the pane, and this is how you reach
+     * it. Once in copy-mode the arrow keys scroll, because they are tmux's keys
+     * now, not the program's.
+     */
+    fun copyMode(on: Boolean) {
+        sendControl(buildJsonObject { put("type", "copymode"); put("on", on) }.toString())
+    }
+
+    /**
+     * A tmux prefix-key action.
+     *
+     * The prefix itself cannot be sent: a keystroke goes *into the pane*, where
+     * the running program reads it, and the prefix is only a prefix to a tmux
+     * client. The daemon is the client, so the action is named.
+     */
+    fun tmuxAction(action: String, name: String? = null) {
+        sendControl(
+            buildJsonObject {
+                put("type", "tmux")
+                put("action", action)
+                if (name != null) put("name", name)
+            }.toString(),
+        )
     }
 
     /**

@@ -10,10 +10,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -129,6 +132,24 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private val _sessions = MutableStateFlow<List<Session>>(emptyList())
     val sessions: StateFlow<List<Session>> = _sessions
 
+    /**
+     * Whether the socket is up right now.
+     *
+     * The app is a remote terminal: disconnected is a visible state, not a
+     * spinner. It also drives the foreground service — the daemon link is the
+     * only reason this process needs to stay alive while the screen is off.
+     */
+    private val _connected = MutableStateFlow(false)
+    val connected: StateFlow<Boolean> = _connected
+
+    /**
+     * Woken when something outside the retry loop knows the network just came
+     * back. The loop is usually asleep in its backoff, and waiting out the rest
+     * of a ten-second sleep after the phone has already rejoined the wifi is the
+     * difference between a terminal that feels live and one that feels broken.
+     */
+    private val wake = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
     private val _desktop = MutableStateFlow<DesktopInventory?>(null)
     val desktop: StateFlow<DesktopInventory?> = _desktop
 
@@ -228,14 +249,29 @@ class LdmuxClient(private var config: LdmuxConfig) {
         job?.cancel()
         job = null
         scope = null
+        _connected.value = false
         http.close()
     }
 
+    /**
+     * Retry right now instead of waiting out the backoff. Called when the OS says
+     * a usable network has appeared.
+     */
+    fun reconnectNow() {
+        wake.tryEmit(Unit)
+    }
+
     private suspend fun loop() {
+        // Backed off rather than fixed, and capped: a daemon that is down for an
+        // hour should not be asked twelve hundred times, and one that comes back
+        // ten seconds later should not make the user wait two seconds to notice.
+        var waitMs = 400L
         while (currentCoroutineContext().isActive) {
             try {
                 http.webSocket(config.wsUrl) {
                     ws = this
+                    waitMs = 400L
+                    _connected.value = true
                     send(Frame.Text("""{"type":"list"}"""))
                     try {
                         for (frame in incoming) {
@@ -248,7 +284,12 @@ class LdmuxClient(private var config: LdmuxConfig) {
             } catch (_: Throwable) {
                 /* offline / daemon restart: fall through to the retry delay */
             }
-            delay(2000)
+            _connected.value = false
+            // Either the timeout elapses, or the network coming back cuts it
+            // short. `withTimeoutOrNull` returning normally means the wake fired.
+            val woken = withTimeoutOrNull(waitMs) { wake.first() } != null
+            if (!woken) waitMs = (waitMs * 2).coerceAtMost(10_000L)
+            else waitMs = 400L
         }
     }
 

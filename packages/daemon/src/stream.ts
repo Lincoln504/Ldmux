@@ -15,7 +15,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { PaneState } from "../../protocol/src/rpc.ts";
 import { createSanitizer, sanitizeOnce } from "./sanitize.ts";
 import { TmuxControlClient } from "./tmux/control-client.ts";
-import type { TmuxControlPlane } from "./tmux/control-plane.ts";
+import type { TmuxAction, TmuxControlPlane } from "./tmux/control-plane.ts";
 import { screenUpdate } from "./tmux/screen-diff.ts";
 
 export interface StreamSubscriber {
@@ -166,6 +166,22 @@ export class PaneStream {
    * routed through the control connection: the window size is a server option
    * (`window-size manual`), and every subscriber must see the same geometry.
    */
+  /**
+   * Enter or leave copy-mode for this session's pane.
+   *
+   * Deliberately goes through tmux rather than the control client's `send-keys`:
+   * copy-mode is a tmux state, not bytes a program receives, so `send-keys` would
+   * type the arrow keys into whatever is drawing instead of scrolling anything.
+   */
+  async copyMode(on: boolean): Promise<void> {
+    await this.cp.copyMode(this.sessionName, on);
+  }
+
+  /** A prefix-key action, applied to this session. */
+  async tmuxAction(action: TmuxAction, name?: string): Promise<void> {
+    await this.cp.tmuxAction(this.sessionName, action, name);
+  }
+
   async resize(cols: number, rows: number): Promise<void> {
     await this.cp.resizeWindow(this.sessionName, cols, rows);
   }

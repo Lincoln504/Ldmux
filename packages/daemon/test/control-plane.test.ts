@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  tmuxActionArgs,
   isValidSessionName,
   resolveLoginShell,
   TmuxControlPlane,
@@ -186,4 +187,26 @@ test("sendBytes refuses to send nothing", async () => {
   const cp = new TmuxControlPlane("test-socket", 2000);
   await cp.sendBytes("sess", new Uint8Array(0));
   expect(existsSync(log)).toBe(false);
+});
+
+test("split-right halves the columns and split-down the rows", () => {
+  // tmux's `-h` is the *side by side* split, which reads backwards from the name
+  // and is invisible when wrong: both succeed and only the shape differs.
+  // Measured on 3.7b — plain `split-window` took a 120x40 pane to 120x19, and
+  // `split-window -h` took it to 59x40.
+  expect(tmuxActionArgs("split-right", "s")).toEqual(["split-window", "-h", "-t", "s"]);
+  expect(tmuxActionArgs("split-down", "s")).toEqual(["split-window", "-t", "s"]);
+  expect(tmuxActionArgs("new-window", "s")).toEqual(["new-window", "-t", "s"]);
+});
+
+test("tmuxActionArgs always targets the named session", () => {
+  // Every action goes to the session the client is on, never to whatever tmux
+  // considers current — the daemon is shared, and "current" belongs to nobody.
+  for (const action of ["split-right", "split-down", "new-window"] as const) {
+    const args = tmuxActionArgs(action, "ldmux-abc");
+    const at = args.indexOf("-t");
+    // `-t` immediately before the name, and the name last, whatever flags precede.
+    expect(args[at + 1]).toBe("ldmux-abc");
+    expect(args[args.length - 1]).toBe("ldmux-abc");
+  }
 });

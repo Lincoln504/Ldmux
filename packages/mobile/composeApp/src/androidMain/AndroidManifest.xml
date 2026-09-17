@@ -10,6 +10,18 @@
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!--
+      Keeping a session open while the app is not on screen. A remote terminal
+      that drops its link the moment you check a message is not a terminal, and
+      Android freezes and then reclaims a backgrounded process by default.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Android 13+. Denial is not fatal: the service runs, quietly. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Partial only, and released the moment the link drops. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <!-- Needed so the speech recognizer is discoverable on the device. -->
     <queries>
         <intent>
@@ -25,16 +37,40 @@
         android:theme="@style/Theme.Ldmux"
         android:usesCleartextTraffic="true">
 
+        <!--
+          Orientation is locked, not sensor-driven. Rotation is a button in the
+          app (TerminalSurface.android.kt sets requestedOrientation) because a
+          terminal that reflows when the phone tilts is worse than one that waits
+          to be told. This attribute is the starting point, before that runs:
+          `sensorLandscape` would let the sensor pick between the two landscapes
+          in the meantime, and would make the manifest say something the app does
+          not mean.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="landscape"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          specialUse rather than dataSync: this is a long-lived *interactive*
+          connection, and dataSync carries a runtime cap (6h/24h from Android 15)
+          that a shell someone left open would exceed. The subtype is required
+          for specialUse and is what a reviewer reads.
+        -->
+        <service
+            android:name=".LdmuxService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Maintains an interactive remote terminal connection to the user's own workstation while the app is not in the foreground, so an open shell is not dropped when the user switches apps." />
+        </service>
     </application>
 </manifest>

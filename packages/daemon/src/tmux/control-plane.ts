@@ -110,6 +110,34 @@ export interface TmuxPane {
   height: number;
 }
 
+/**
+ * The tmux argv for one prefix action.
+ *
+ * Pure and exported because the flag is easy to get backwards, and getting it
+ * backwards is invisible: both splits succeed, both report success, and only the
+ * *shape* of the result is wrong. Measured on tmux 3.7b — tmux's own default is a
+ * horizontal *divider*, so the new pane lands **below** and the rows halve;
+ * `-h` is what puts panes side by side and halves the columns. Hence the names
+ * here say where the pane goes, not which flag it is.
+ */
+export function tmuxActionArgs(action: Exclude<TmuxAction, "rename">, target: string): string[] {
+  switch (action) {
+    case "split-right":
+      return ["split-window", "-h", "-t", target];
+    case "split-down":
+      return ["split-window", "-t", target];
+    case "new-window":
+      return ["new-window", "-t", target];
+  }
+}
+
+/**
+ * The prefix-key actions the phone offers, named for what they do to the screen
+ * rather than for tmux's own flags (`split-down` reads better than `-h`, which in
+ * tmux means a horizontal split *line* and produces a stacked pair).
+ */
+export type TmuxAction = "split-right" | "split-down" | "new-window" | "rename";
+
 export interface NewSessionOptions {
   name: string;
   cwd: string;
@@ -355,6 +383,62 @@ export class TmuxControlPlane {
   async sendKey(target: string, ...keys: string[]): Promise<void> {
     const { code, err } = await this.run(["send-keys", "-t", target, "--", ...keys]);
     if (code !== 0) throw new Error(`tmux send-keys failed: ${err.trim() || code}`);
+  }
+
+  /**
+   * Enter or leave tmux copy-mode.
+   *
+   * This is the only way to look at the history of a **full-screen** program.
+   * ldmux keeps scrollback for the normal screen, but a program on the
+   * alternate screen (vim, htop, less) has no scrollback to keep: what it drew
+   * is not in the history at all. copy-mode asks tmux to scroll *its* view of the
+   * pane, which is the only copy that exists.
+   *
+   * Leaving is `send-keys -X cancel` rather than the `q` key, because `q` is
+   * copy-mode's emacs-mode binding and a user with vi-mode bindings would find
+   * it does something else.
+   */
+  async copyMode(target: string, on: boolean): Promise<void> {
+    const args = on
+      ? ["copy-mode", "-t", target]
+      : ["send-keys", "-t", target, "-X", "cancel"];
+    const { code, err } = await this.run(args);
+    if (code !== 0) {
+      // Leaving a copy-mode that was never entered is not a failure worth
+      // raising: it is the state the caller wanted, and it is reachable by
+      // pressing the toggle twice or by whatever the user typed in between.
+      if (!on && /not in a mode/i.test(err)) return;
+      throw new Error(`tmux copy-mode failed: ${err.trim() || code}`);
+    }
+  }
+
+  /**
+   * A session-level tmux action: the things the prefix key would do if the phone
+   * were a tmux client rather than a program inside a pane.
+   *
+   * The prefix key itself cannot be sent. `send-keys C-b` writes 0x02 into the
+   * pane's pty — it reaches the *program*, where it means readline's
+   * backward-char, not tmux. The prefix is interpreted by a tmux *client*, and
+   * the client here is the daemon, so these are the command directly.
+   */
+  async tmuxAction(target: string, action: TmuxAction, name?: string): Promise<void> {
+    if (action === "rename") return this.renameWindow(target, name ?? "");
+    const { code, err } = await this.run(tmuxActionArgs(action, target));
+    if (code !== 0) throw new Error(`tmux ${action} failed: ${err.trim() || code}`);
+  }
+
+  /**
+   * Rename the session's current window.
+   *
+   * The window, not the session: the phone shows a window, and a rename that
+   * changed the machine name of the session would break the thing the client is
+   * attached to.
+   */
+  async renameWindow(target: string, name: string): Promise<void> {
+    const clean = name.trim().slice(0, 64);
+    if (clean === "") throw new Error("window name is empty");
+    const { code, err } = await this.run(["rename-window", "-t", target, "--", clean]);
+    if (code !== 0) throw new Error(`tmux rename-window failed: ${err.trim() || code}`);
   }
 
   /**

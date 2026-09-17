@@ -30,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -141,6 +142,25 @@ fun App() {
     LaunchedEffect(Unit) { client.start(scope) }
     val sessions by client.sessions.collectAsState()
     val desktop by client.desktop.collectAsState()
+    val connected by client.connected.collectAsState()
+
+    // The link is the only reason to stay alive in the background, so the
+    // platform is told exactly when there is one and what it is holding. The
+    // count is in the text because a notification that says "1 shell" is
+    // information and one that says "connected" is decoration.
+    LaunchedEffect(connected, sessions) {
+        val open = sessions.count { it.attachable }
+        BackgroundSession.setActive(
+            connected,
+            if (open == 1) "1 shell open" else "$open shells open",
+        )
+    }
+    // A phone that has just rejoined the wifi should not wait out the retry
+    // backoff: the network callback cuts it short.
+    DisposableEffect(Unit) {
+        BackgroundSession.watchNetwork { client.reconnectNow() }
+        onDispose { BackgroundSession.stopWatchingNetwork() }
+    }
 
     // The launcher comes first: a terminal is somewhere you go, and which shell
     // you are going to is a question worth asking before you are in one.
@@ -419,6 +439,25 @@ private fun SidePanel(
     val handle = here?.id?.let { handles[it] }
     val total = pages.size.coerceAtLeast(1)
 
+    // Sticky modifiers. Armed here, consumed by the next key, and cleared on
+    // anything that ends the gesture — a page turn or a tap — because a latch
+    // that survives a glance at another shell is a latch that surprises you.
+    var modifiers by remember { mutableStateOf(Modifiers()) }
+    var menuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(current) { modifiers = modifiers.cleared() }
+
+    // One place a key is sent, so the latch cannot leak: every key in the panel
+    // goes through here, modified or not.
+    fun press(key: String) {
+        val armed = modifiers
+        if (armed.armed) {
+            handle?.sendModifiedKey(key, armed)
+            modifiers = modifiers.cleared()
+        } else {
+            handle?.sendKey(key)
+        }
+    }
+
     fun step(delta: Int) {
         val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
         if (target != current) scope.launch { pagerState.animateScrollToPage(target) }
@@ -483,12 +522,42 @@ private fun SidePanel(
             // group off the panel's edge; a single flow split the arrow cluster
             // across two lines. This keeps each group together and lets only the
             // one that needs to wrap do so.
+            // Modifiers first, because they change what every key below them
+            // means — reading order is the order they take effect in.
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                KeyBtn("Ctrl", active = modifiers.ctrl) { modifiers = modifiers.toggled(StickyKey.Ctrl) }
+                KeyBtn("Alt", active = modifiers.alt) { modifiers = modifiers.toggled(StickyKey.Alt) }
+                // copy-mode is where a full-screen program's history lives: its
+                // screen has no scrollback, so this is the only way to scroll vim
+                // or htop at all. Toggling it off is the same button, and the
+                // state shown is the pane's, not our last request.
+                KeyBtn("copy", active = handle?.inCopyMode == true) {
+                    handle?.setCopyMode(handle?.inCopyMode != true)
+                }
+                KeyBtn("tmux", active = menuOpen) { menuOpen = !menuOpen }
+            }
+            if (menuOpen) {
+                // The prefix key cannot be sent — it would land in the program in
+                // the pane, where it is just a control character — so the actions
+                // it would have started are named instead.
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    KeyBtn("│split") { handle?.tmuxAction("split-right") }
+                    KeyBtn("─split") { handle?.tmuxAction("split-down") }
+                    KeyBtn("+win") { handle?.tmuxAction("new-window") }
+                }
+            }
             SIDEBAR_KEYS.forEach { group ->
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    group.forEach { (label, key) -> KeyBtn(label) { handle?.sendKey(key) } }
+                    group.forEach { (label, key) -> KeyBtn(label) { press(key) } }
                 }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

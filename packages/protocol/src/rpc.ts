@@ -150,6 +150,11 @@ export interface DaemonMethods {
     result: { ok: boolean; detail?: string };
   };
   closeLive: { params: { id: string }; result: { ok: boolean; detail?: string } };
+  copyMode: { params: { id: string; on: boolean }; result: { ok: true } };
+  tmuxAction: {
+    params: { id: string; action: string; name?: string };
+    result: { ok: true };
+  };
   remote_info: {
     params: Record<string, never>;
     result: { hostname: string; port: number; path: string; token: string };

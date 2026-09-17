@@ -27,6 +27,14 @@ data class LinkStats(
     fun sendKey(name: String)
     fun sendText(text: String)
 
+    /**
+     * Send one key with the sticky modifiers applied (0x03 for Ctrl-C, ESC+x for
+     * Alt-x). Separate from [sendKey] because the *bytes* differ, not just the
+     * name: a modifier on a character is a control code, and the app has to be
+     * the one that works it out.
+     */
+    fun sendModifiedKey(key: String, modifiers: Modifiers)
+
     /** Page the session's history into the emulator and show its oldest row. */
     fun loadHistory()
 
@@ -44,6 +52,21 @@ data class LinkStats(
 
     /** Start dictation. The transcript is typed into the pane, keyboard or not. */
     fun startVoice() {}
+
+    /**
+     * Enter or leave tmux copy-mode.
+     *
+     * The only way to scroll a full-screen program: its output is on the
+     * alternate screen, which has no scrollback, so what you scroll is tmux's own
+     * view of the pane.
+     */
+    fun setCopyMode(on: Boolean) {}
+
+    /** A tmux prefix action — split, new window, rename. */
+    fun tmuxAction(action: String, name: String? = null) {}
+
+    /** Whether the pane is in a tmux mode right now, as last reported. */
+    val inCopyMode: Boolean get() = false
 
     /**
      * How the link is behaving, so the chrome can show it. The frame cadence is

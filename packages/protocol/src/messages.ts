@@ -86,6 +86,34 @@ export interface Input { type: "input"; data: string }
 /** Remote client → server: send named keys (Enter, C-c, Up, ...). */
 export interface KeyMessage { type: "key"; keys: string[] }
 
+/**
+ * Enter or leave tmux copy-mode for a session.
+ *
+ * Needed because scrollback only exists for the *normal* screen. A full-screen
+ * program draws on the alternate screen, which has no history to keep, so
+ * scrolling it means asking tmux to scroll its own view of the pane.
+ */
+export interface CopyModeMessage {
+  type: "copymode";
+  sessionId?: string;
+  on: boolean;
+}
+
+/**
+ * A tmux prefix-key action.
+ *
+ * The prefix key cannot be *sent* — `send-keys C-b` types 0x02 into the pane,
+ * where the program reads it, because the prefix is interpreted by a tmux client
+ * and the client is the daemon. So the action is named instead of the keystroke.
+ */
+export interface TmuxActionMessage {
+  type: "tmux";
+  sessionId?: string;
+  action: "split-right" | "split-down" | "new-window" | "rename";
+  /** Only for `rename`. */
+  name?: string;
+}
+
 /** Remote client → server: re-send the pane including paged scrollback. */
 export interface ScrollbackRequest {
   type: "scrollback";
@@ -179,6 +207,8 @@ export type ControlMessage =
   | MouseClick
   | Input
   | KeyMessage
+  | CopyModeMessage
+  | TmuxActionMessage
   | ScrollbackRequest
   | ListSessions
   | NewSessionMessage

@@ -53,6 +53,10 @@ export interface RemoteServerOptions {
   makeLive?(id: string, workspace: string): Promise<{ ok: boolean; detail?: string }>;
   /** Take a session's desktop window away. */
   closeLive?(id: string): Promise<{ ok: boolean; detail?: string }>;
+  /** Enter or leave tmux copy-mode for a session. */
+  copyMode?(id: string, on: boolean): Promise<void>;
+  /** A tmux prefix action (split, new window, rename). */
+  tmuxAction?(id: string, action: string, name?: string): Promise<void>;
   acquireStream(record: SessionRecord): PaneStream;
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
@@ -474,6 +478,24 @@ export class RemoteServer {
             await data.stream.sendKey(keys);
           }
           return;
+        case "copymode":
+          if (data.stream) await data.stream.copyMode(msg.on === true);
+          return;
+        case "tmux": {
+          if (!data.stream) return;
+          const action = msg.action;
+          if (
+            action !== "split-right" &&
+            action !== "split-down" &&
+            action !== "new-window" &&
+            action !== "rename"
+          ) {
+            this.sendError(ws, "bad_action", `unknown tmux action: ${String(action)}`);
+            return;
+          }
+          await data.stream.tmuxAction(action, typeof msg.name === "string" ? msg.name : undefined);
+          return;
+        }
         case "follow":
           return; // client-owned scroll (ADR-0004)
         case "scrollback": {
