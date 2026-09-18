@@ -41,22 +41,33 @@ Regulatory, and this is the number that decides the question:
 
 ## The arithmetic
 
-An ldmux frame is a 40-byte header plus 9–25 bytes per cell. An 80x24 grid is 1920
-cells, so roughly **17.3 KB per full frame**.
+**This section was wrong when it was written, and the measurements are what
+corrected it.** It assumed a frame carried a cell grid — 40-byte header plus 9-25
+bytes per cell, so ~17.3 KB per 80x24 screen, ~94 MeshCore packets, about 0.03 fps.
+That is the arithmetic for an *in-memory render structure*, not for traffic.
 
-- 17,280 B / 184 B = **94 packets** for one screen.
-- At ~0.08 s airtime each (the 5.5 kbps preset) that is ~25 s of airtime, and against
-  the 400 ms dwell limit ~38 s wall clock.
-- **So a full grid is about 0.03 fps.** It is not a frame rate problem to be tuned
-  away. It is off by two orders of magnitude.
+What actually goes on the wire is the pty byte stream. `frames.ts:15` says only
+`FrameType.Output` is emitted, and measurement agrees — see `WIRE-COST.md`:
 
-What does fit:
+| Workload | Frames | Bytes |
+|---|---|---|
+| one keystroke echo | 1 | **9** |
+| `ls -la` | 1 | 1,254 |
+| `seq 1 100` | 1 | 477 |
+| `ls -laR` | 32 | 514,758 |
+| attach (screen replay, escaped JSON) | text | 1,980 |
 
-- **A line of text**: 40–80 B with the 5 B text overhead — **one packet**, inside every
-  preset and inside the companion's 160 B cap.
-- **A keystroke echo**: a handful of bytes, one packet.
-- A 60 B line at 400 ms dwell gives **~2 lines/s** in the US. One line per second, on a
-  link whose latency a user would call usable, is real. It would read like a good BBS.
+So the mesh arithmetic changes completely:
+
+- A **keystroke echo is 9 bytes** — it fits MeshCore's 184-byte payload nine times
+  over. Interactive traffic is not the problem at all.
+- A `seq 1 100` frame is 477 bytes and does **not** fit; it would be split across
+  three packets. So a mesh transport needs the daemon's coalescing capped at the
+  MTU — `OUTPUT_FLUSH_BYTES` is 4 KiB today, which is 22 MeshCore packets' worth.
+- `ls -laR`'s 514,758 bytes are the real cost, and they are the *volume* of output
+  rather than the size of a frame. The lever is the one in `WIRE-COST.md`: when a
+  client is behind, send it a snapshot of now instead of the backlog. On a mesh that
+  is not an optimisation, it is the difference between usable and not.
 
 ## Why this is a different transport, not a lower frame rate
 

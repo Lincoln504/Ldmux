@@ -114,8 +114,12 @@ Tailscale only, and far less functionality than dooboxes.
    not a pi plugin (ADR-0009). What survives is the part that was never really
    about pi: the daemon is a long-lived process independent of any client, and
    `pi` can be run inside a session like any other program.
-3. **G3 — Mobile app, landscape-only.** Terminal ~3/4; configurable left/right
-   control quarter; horizontal swipe to switch sessions; stable scrolling.
+3. **G3 — Mobile app, two locked modes.** Landscape: terminal ~3/4 and a
+   configurable left/right control panel, keyboard never up. Portrait: terminal
+   with the keyboard always up and a compact two-row bar above it. The mode is
+   chosen by an explicit button, never by a sensor (ADR-0008, ADR-0011).
+   *(This goal read "landscape-only" until the two-mode design replaced it; the
+   line was left behind by ADR-0008.)*
 4. **G4 — Open shells/pi in any directory from the phone**, optionally mirrored
    live into a desktop `alacritty` window on a chosen i3 workspace.
 5. **G5 — Synchronized multi-view is a nice-to-have**, achieved via tmux
@@ -125,6 +129,21 @@ Tailscale only, and far less functionality than dooboxes.
 7. **G7 — Robust and simple.** Reconnect/resync, no scroll jumping, clean session
    lifecycle, no leaked processes, observable.
 8. **G8 — Best-engineered.** Typed contracts, tests, docs, reproducible builds.
+9. **G9 — Light on the network, always.** Stated as a standing ceiling rather
+   than an optimisation task: *"It should be light on the network like always.
+   That's our goal"* and *"we don't want it to go to like ever that high of a
+   frame rate"* (2026-09-14), and *"consistent throughout super light"*
+   (2026-09-17). Both directions bind — the frame-rate ceiling is 20 fps, and no
+   workload class is exempt, cellular and mesh least of all. Any change that
+   raises bytes or frame rate carries the burden of justifying it, not the
+   reverse. Measurements live in `docs/WIRE-COST.md`.
+10. **G10 — One shared core, two independent clients.** Kotlin Multiplatform with
+   Compose Multiplatform, Android and iOS as separate apps over one shared core,
+   never one codebase pretending to be two (ADR-0013). Every cross-platform
+   decision is made for *both* platforms at the time it is made. iOS is deferred
+   as a build, not as a design: the shared half must stay expressible without a
+   platform, and that is now enforced by a test rather than by intention
+   (`packages/mobile/test/architecture.test.ts`).
 
 ### 2.2 Non-goals
 
