@@ -2,7 +2,6 @@ package dev.ldmux.mobile
 
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
-import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
@@ -165,7 +164,7 @@ data class DesktopInventory(
  * connection so a terminal stream failing never blinds the session list.
  */
 class LdmuxClient(private var config: LdmuxConfig) {
-    private val http = HttpClient { install(WebSockets) }
+    private val http = HttpClient { ldmuxWebSockets() }
 
     /** The id this device announces itself as. Not an account, not a credential. */
     private val deviceId: String get() = config.deviceId

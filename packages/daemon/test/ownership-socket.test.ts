@@ -134,9 +134,30 @@ test("ownership: a disconnect frees the shell for anyone, with no takeover", { t
   a.send({ type: "attach", sessionId: id });
   expect(await waitFor(() => a.text.some((m) => m.type === "caps"))).toBe(true);
   a.close();
-  await sleep(300);
 
+  // Wait for the claim to actually be gone, instead of sleeping and hoping.
+  //
+  // This was `await sleep(300)`, and it failed roughly one run in five — always
+  // here, never on the `caps` wait above. The daemon releases on the socket's close
+  // event, which is prompt, so 300 ms was normally plenty; on a loaded machine
+  // running the whole suite it was not. The test then reported a Stale State bug
+  // that was not there, which is the worst thing a test can do.
+  //
+  // Polling for the condition removes the timing assumption without weakening the
+  // assertion: `list` carries the owner as a fact, so if a claim ever did outlive
+  // its connection this would spin out its timeout and fail — and it would fail on
+  // the real thing rather than on a race in the test.
   const b = await client(info, tablet);
+  const cleared = await waitFor(() => {
+    b.send({ type: "list" });
+    const row = b.sessions().find((s: any) => s.id === id);
+    return row !== undefined && row.owner == null;
+  });
+  if (!cleared) {
+    const row = b.sessions().find((s: any) => s.id === id);
+    throw new Error(`claim survived the disconnect: ${JSON.stringify(row)}`);
+  }
+
   b.send({ type: "attach", sessionId: id });
   expect(await waitFor(() => b.text.some((m) => m.type === "caps"))).toBe(true);
   expect(b.owned().length).toBe(0);

@@ -123,6 +123,14 @@ interface ConnData {
   outBytes: number;
   flushTimer: ReturnType<typeof setTimeout> | null;
   /**
+   * True once this connection has been told to resync and has not attached since.
+   *
+   * Without it the daemon would send a `resync` for every write while the link is
+   * behind, and a client that is already re-attaching would be told to do it again
+   * several hundred times a second.
+   */
+  resyncing: boolean;
+  /**
    * Serializes control-message handling for this connection.
    *
    * Handlers await tmux, so two messages that arrive in the same tick would
@@ -158,7 +166,34 @@ const MAX_PENDING_BYTES = 1024 * 1024;
  * and it must stay under the threshold where a keystroke echo feels delayed.
  */
 const OUTPUT_FLUSH_MS = 8;
-const OUTPUT_FLUSH_BYTES = 16 * 1024;
+/**
+ * How much coalesced output goes out as one frame.
+ *
+ * Was 16 KiB, which is sized for a link that loses nothing. A phone on a bad link
+ * does: a whole frame has to arrive before any of it can be drawn, so a large frame
+ * is a long time to first paint and a large amount to retransmit when one segment
+ * goes missing. 4 KiB costs 0.2% in extra 8-byte headers across a bulk transfer and
+ * is the difference between a stalled screen and a slow one.
+ */
+const OUTPUT_FLUSH_BYTES = 4 * 1024;
+/**
+ * How much unsent data on one socket means the link, rather than the terminal, is
+ * the thing that is behind.
+ *
+ * Node buffers what it cannot write, so a phone on a bad connection accumulates
+ * output here rather than losing it — which sounds kind and is not. The client is
+ * being handed a history it cannot display, and it will be far behind by the time
+ * the link recovers, having spent the whole recovery budget on output that has
+ * already scrolled past. Past this point the daemon stops forwarding and answers
+ * `resync`, which makes the client re-attach and take a snapshot of *now*.
+ *
+ * That is strictly less data and strictly more useful. Measured on a bulk workload
+ * (`ls -laR`, 80x24): 514,758 bytes on the wire, against about 2,000 for one attach
+ * snapshot. This is the same rule the attach path already applies to its own pending
+ * buffer (`MAX_PENDING_BYTES`) — it was simply never applied to a client that was
+ * live and slow.
+ */
+const WS_BACKLOG_BYTES = 64 * 1024;
 /**
  * Silence that means the other end has gone.
  *
@@ -226,12 +261,53 @@ export class RemoteServer {
     // The transport closes on an oversized frame (1009) before our handler can
     // answer; a 64 KiB limit leaves room for the JSON envelope around a 16 KiB
     // payload, which is where the graceful `input_too_large` check fires.
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_INPUT_BYTES * 4 });
+    this.wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: MAX_INPUT_BYTES * 4,
+      /**
+       * Compression, for the traffic that is worth compressing.
+       *
+       * Terminal output is enormously repetitive — the same prompt on every line,
+       * the same `-rw-r--r--` columns down a listing — so deflate should take a
+       * large multiple off anything bulk. It is **not** free and must not be
+       * unconditional: deflate has its own framing, a few bytes, so compressing a
+       * nine-byte keystroke echo would make it *larger*. Hence the threshold, which
+       * is why this is configured here rather than simply switched on.
+       *
+       * Context takeover is left on. The repetition is *across* messages — line two
+       * looks like line one — so a sliding window that resets every message would
+       * throw away exactly the matches this is for.
+       */
+      perMessageDeflate: {
+        threshold: 512,
+        serverNoContextTakeover: false,
+        clientNoContextTakeover: false,
+      },
+    });
     this.wss.on("connection", (socket: WebSocket) => {
       const data = this.connState.get(socket);
       if (!data) {
         socket.close();
         return;
+      }
+      // Whether compression was actually negotiated.
+      //
+      // permessage-deflate is agreed per connection and is silent when it fails: the
+      // client has to offer it, and the server accepts or does not. Both halves are
+      // configured in different languages on purpose (this server, and Ktor in
+      // `WebSockets.kt` on the device), so the only way to know the pair is working
+      // is a line that says so. Logged once per connection rather than per frame.
+      this.opts.log?.(`remote: compression ${socket.extensions ? "on" : "off"}`);
+      // Nagle off, explicitly. `ws` never touches it, so it is whatever the HTTP
+      // server left behind — and Nagle exists to merge small writes, which is
+      // exactly what must not happen here: frames are already coalesced on purpose
+      // (`OUTPUT_FLUSH_MS`), so all Nagle can add is up to 40 ms of delay on a
+      // keystroke echo. A terminal's frames are small and its entire value is
+      // latency.
+      try {
+        (socket as unknown as { _socket?: { setNoDelay?: (on: boolean) => void } })._socket?.setNoDelay?.(true);
+      } catch {
+        /* not fatal: the link is merely slower than it should be */
       }
       socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         data.lastSeen = Date.now();
@@ -308,6 +384,7 @@ export class RemoteServer {
         flushTimer: null,
         queue: Promise.resolve(),
         lastSeen: Date.now(),
+        resyncing: false,
       };
       this.wss!.handleUpgrade(req, socket, head, (client: WebSocket) => {
         this.connState.set(client, data);
@@ -787,6 +864,7 @@ export class RemoteServer {
     data.sessionId = sessionId;
     data.record = record;
     data.live = false;
+    data.resyncing = false;
     data.pending = [];
     data.pendingBytes = 0;
     const stream = this.opts.acquireStream(record);
@@ -903,6 +981,24 @@ export class RemoteServer {
    * ends and changes nothing a user can perceive (8 ms).
    */
   private queueOutput(ws: any, data: ConnData, text: string): void {
+    // The link is behind rather than the terminal. Stop building a history this
+    // client cannot display and tell it to take a snapshot of now instead — once
+    // per backlog, because a client that is already re-attaching must not be told
+    // again on every write.
+    if (ws.bufferedAmount > WS_BACKLOG_BYTES) {
+      if (!data.resyncing) {
+        data.resyncing = true;
+        data.outBuf = [];
+        data.outBytes = 0;
+        if (data.flushTimer) {
+          clearTimeout(data.flushTimer);
+          data.flushTimer = null;
+        }
+        this.opts.log?.(`remote: ${ws.bufferedAmount} bytes behind, asking the client to resync`);
+        this.sendError(ws, "resync", "client is behind the link");
+      }
+      return;
+    }
     data.outBuf.push(text);
     // Bytes, not characters, for the same reason as the pending buffer.
     data.outBytes += Buffer.byteLength(text);

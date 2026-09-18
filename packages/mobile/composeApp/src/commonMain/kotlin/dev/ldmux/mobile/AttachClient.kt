@@ -2,7 +2,6 @@ package dev.ldmux.mobile
 
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
-import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
@@ -74,7 +73,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     private var http: HttpClient? = null
 
     private fun httpClient(): HttpClient =
-        http ?: HttpClient { install(WebSockets) }.also { http = it }
+        http ?: HttpClient { ldmuxWebSockets() }.also { http = it }
 
     private val json = Json { ignoreUnknownKeys = true }
     private var ws: DefaultClientWebSocketSession? = null
