@@ -11,8 +11,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -142,4 +143,49 @@ test("no iosMain exists yet, so no expect is silently waiting on it", () => {
     [],
     "iosMain appeared — the cross-platform guard needs iOS rules now, not later",
   );
+});
+
+test("every Kotlin source on disk is tracked by git", () => {
+  // A file the build needs and git does not have is invisible until somebody else
+  // builds. That happened here: the voice seam's shared half sat untracked through a
+  // whole commit, because on this machine it compiled perfectly. Nothing checked for
+  // it, so nothing caught it.
+  //
+  // This covers every source set rather than the two that exist, so a future iosMain
+  // is covered the day it appears.
+  let repo = "";
+  let tracked: string[] = [];
+  try {
+    repo = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    tracked = execFileSync("git", ["ls-files", "-z", "--", "*.kt", "*.kts"], {
+      cwd: repo,
+      encoding: "utf8",
+    })
+      .split("\u0000")
+      .filter(Boolean);
+  } catch {
+    // No git, or not a repository: say so rather than passing silently, since a
+    // guard that cannot run is not a guard.
+    assert.fail("could not read the git index, so untracked sources cannot be checked");
+  }
+  const trackedSet = new Set(tracked);
+
+  const onDisk: string[] = [];
+  let sets: string[] = [];
+  try {
+    sets = readdirSync(SRC);
+  } catch {
+    assert.fail(`no source sets at ${SRC}`);
+  }
+  for (const s of sets) onDisk.push(...kotlinFiles(join(SRC, s)));
+
+  const untracked = onDisk
+    .map((f) => relative(repo, f))
+    .filter((p) => !trackedSet.has(p));
+  assert.deepEqual(
+    untracked,
+    [],
+    `the build needs these and git does not have them, so a clone would not compile:\n${untracked.join("\n")}`,
+  );
+  assert.ok(trackedSet.size > 0, "git reported no Kotlin files at all");
 });

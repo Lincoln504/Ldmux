@@ -55,18 +55,60 @@ can keep, the correct thing to send is **a snapshot, not the backlog**.
 **This is the answer to "how do we drastically lower it". Not smaller frames —
 fewer, and state instead of history.**
 
-### 2. The attach snapshot is hex-escaped, and that is a 6x tax
+### 2. The attach snapshot's envelope, corrected — the escaping is not the cost
 
-The snapshot is JSON text: `{"type":"snapshot",...,"screen":"\u001b[...]"}`. A single
-ESC byte becomes the six characters `\u001b`. Measured: **1980 bytes** to carry a
-screen whose raw bytes are about 330.
+**This section claimed a ~6x tax from hex-escaping. That was wrong, and it was never
+measured.** Measured now, by attaching a `ws` client to a real daemon and weighing the
+message at 120x40 with colour on screen:
 
-Sending it as a **binary frame** — an 8-byte header plus the raw stream — is about
-**340 bytes**. That is an ~83% saving, on every attach, for a new frame type. The
-unused `FrameType` members exist for exactly this.
+| Part | Bytes |
+|---|---|
+| the whole message on the wire | **1985** |
+| the `screen` field's own content | 1483 |
+| the envelope (cols, rows, cursor, modes, epoch) | 247 |
+| JSON quoting and escaping | 502 (**25%**) |
 
-It is a one-time cost per attach, so it is not the big number. It is the cheapest
-one, and on a slow link the attach is precisely where it hurts.
+The 1483 characters are **real screen content**. The pane is 120x40, so 4800 cells, and
+the daemon sends up to the last one with anything in it rather than padding out a grid.
+Of the 502 bytes of overhead, 43 ESC bytes account for about 215 — six characters each
+as `\u001b` — and JSON's own quoting accounts for the rest.
+
+So a binary snapshot saves about **500 bytes, 25%**, not 83%. It happens once per attach,
+and a phone resizes the pane to roughly 67x17 before snapshotting, which is a few hundred
+bytes of content to begin with. **The lever is small.** It is worth taking when a frame
+type is next added for another reason, and it is not worth a protocol change on its own.
+
+### 3. Compression, which needs no protocol change at all
+
+`permessage-deflate` is a WebSocket extension, so it needs no framing work at all. It is
+the biggest verified win in this document. Measured over loopback, `bytesRead` on the
+client for identical workloads:
+
+| Workload | deflate off | deflate on | |
+|---|---|---|---|
+| `ls -laR /usr/bin` (218 KB of listing) | 218,937 B | **14,762 B** | **14.8x** |
+| `seq 1 400` (2 KB, repetitive) | 1,968 B | **775 B** | **2.5x** |
+
+Terminal output compresses this well for a reason: the same `-rw-r--r-- 1 ldeen ldeen`
+columns down a page, the same prompt on every line. A directory listing is close to a
+worst case for a general compressor and close to a best case for this one.
+
+Three conditions, all real:
+
+- The **client must offer it**, and Ktor does not by default. Enabling it on the daemon
+  alone activates nothing. Both halves now do, and the server logs which way each
+  connection negotiated, because an optimisation that silently fails is worse than none.
+- It must be **threshold-gated** (`perMessageDeflate.threshold = 512`). Deflate has its
+  own framing, so compressing a nine-byte keystroke echo would make it larger. Below the
+  threshold nothing is compressed at all.
+- **Context takeover stays on.** The repetition is *across* messages, so a window that
+  reset every message would throw away exactly the matches this is for.
+
+**A measurement trap worth recording.** The first attempt at this showed a ratio of
+exactly 1.00x, with the daemon logging `compression on`. The daemon being probed was a
+long-running systemd unit started before the change, so it was the old code. Against a
+daemon started from the current source the same probe returned 14.8x. **Measure against
+the source you changed**, and prefer a freshly started instance to a running one.
 
 ### 3. Compression, which needs no protocol change at all
 
@@ -98,8 +140,8 @@ first paint. That is worth taking, and it is a constant, not an architecture.
 |---|---|---|---|
 | program output | 514 KB for `ls -laR` | send a snapshot instead of the backlog | **~250x** |
 | pty stream as delta | already minimal | nothing — a terminal stream *is* the delta of its own state | — |
-| snapshot encoding | 1980 B | binary frame instead of escaped JSON | **~6x** on attach |
-| compression | not enabled | `permessage-deflate`, threshold-gated | **~5-10x** on bulk |
+| snapshot envelope | 1985 B | binary frame instead of JSON | **25%** of one message per attach |
+| compression | **measured 14.8x on 218 KB** | done, threshold-gated on both sides | taken |
 | frame header | 8 B x 32 = 0.05% | nothing worth doing | — |
 | coalescing | 16 KB units | 4 KB units | costs 0.2%, buys loss behaviour |
 
