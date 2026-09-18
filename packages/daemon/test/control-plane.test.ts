@@ -73,6 +73,32 @@ test("hard deadline returns even if the pipes never close", async () => {
   expect(elapsed).toBeLessThan(2500);
 });
 
+test("the size belongs to the shell's owner, and can be handed over", async () => {
+  process.env.PATH = realPath;
+  const cp = new TmuxControlPlane(SOCKET);
+  await cp.ensureServer({ historyLimit: 1000 });
+  await cp.newSession({ name: "sz", cwd: tmpdir(), command: [], cols: 76, rows: 20 });
+
+  const { execFileSync } = await import("node:child_process");
+  const readSession = (name: string) =>
+    execFileSync("tmux", ["-L", SOCKET, "show-options", "-t", name, "window-size"], {
+      encoding: "utf8",
+    }).trim();
+
+  // Handed to a real window: `latest` is what lets the window you are typing in
+  // size the shell, and it is what stops tmux filling the rest of that window
+  // with `fill-character` — a 76-column session in an 83-column terminal came
+  // back as a strip of dots with a border down it.
+  await cp.setWindowSize("sz", "latest");
+  expect(readSession("sz")).toBe("window-size latest");
+
+  // ...and back, so a session nobody has a window on is driven by the daemon
+  // again rather than frozen at the size of a client that has gone.
+  await cp.setWindowSize("sz", "manual");
+  expect(readSession("sz")).toBe("window-size manual");
+  await cp.killSession("sz");
+});
+
 test("a normal tmux command is unaffected", async () => {
   process.env.PATH = realPath;
   const cp = new TmuxControlPlane(SOCKET);

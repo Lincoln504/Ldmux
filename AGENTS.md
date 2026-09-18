@@ -9,8 +9,9 @@ app, reachable only over Tailscale. See
 
 Phase 1 (local core) is implemented and tested; Phase 3 (remote transport) is
 implemented (loopback WebSocket + token auth — `docs/REMOTE.md`) along with the
-buildless web client served at `/` (installable PWA — `docs/WEB.md`), the desktop
-mirror, and tailnet pairing. The mobile client is a native KMP/Compose app
+desktop mirror, and tailnet pairing. The daemon serves no static files: the old
+buildless browser client (`packages/web`) is deleted, so native KMP/Compose is
+the client. The mobile app
 (`docs/NATIVE-TERMINAL.md`, `docs/adr/0007`, `docs/adr/0008`). Deliberate
 divergences from dooboxes/gmux are recorded in `docs/adr/0006-divergences.md`.
 The pi extension was removed (ADR-0009): ldmux is not a pi plugin. Keep building

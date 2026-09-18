@@ -1,7 +1,7 @@
 # Native terminal rendering (replacing the WebView)
 
 Status: **research / decision pending** (2026-09-14). The Android app currently
-renders each session with the shared web client (`packages/web/public`) inside a
+renders each session with the native emulator inside a
 `WebView` — one terminal engine, per ADR-0006. This note records what it would
 take to replace that with a native renderer, as requested.
 
@@ -180,7 +180,7 @@ The native shell currently gets its session list and `new`/`kill` over the
 daemon's WebSocket (`LdmuxClient`), but the **terminal itself** is the web client.
 A native renderer means the app also speaks the rest of the protocol directly:
 `attach` → `caps`/`snapshot`, binary `OUTPUT` frames, `input`/`key`, `follow`,
-`scrollback` — i.e. a native port of `packages/web/public/core.js` + `app.js`'s
+`scrollback` — i.e. a native port of the browser client's
 protocol half. That is the bulk of the work, and it is testable on the JVM
 without a device.
 

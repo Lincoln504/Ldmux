@@ -4,6 +4,13 @@
 optional swap" holding pattern in ADR-0006 §4 for the mobile apps. The web client
 (`packages/web`) is unaffected and keeps its own engine.
 
+> **Later (2026-09-18):** the second client this decision tolerated — the
+> buildless browser client in `packages/web` (`docs/WEB.md`) — has been
+> **deleted**. Native KMP/Compose is the only renderer, so "never split
+> engines" is no longer a rule about two live engines but a fact about one.
+> The references below are left as written: an ADR records what was decided
+> when it was decided.
+
 ## Context
 
 - The phone apps must be **native** — a `WebView` hosting the web client was

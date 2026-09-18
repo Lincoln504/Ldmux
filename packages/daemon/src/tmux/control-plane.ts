@@ -555,6 +555,34 @@ export class TmuxControlPlane {
    * at whatever size it was created with regardless of the screen showing it.
    * This is the mobile counterpart of a terminal's own TIOCSWINSZ.
    */
+  /**
+   * Who decides this session's size: a real terminal window, or us.
+   *
+   * `window-size` is set to `manual` globally because a phone is not a tmux
+   * client: nothing about an RPC client's grid reaches tmux on its own, so the
+   * daemon states it with `resize-window`. That is right for a session only a
+   * phone is looking at.
+   *
+   * It is wrong the moment a real window holds the shell, and visibly so. The
+   * window *is* a tmux client with a size of its own, `manual` forbids tmux from
+   * using it, and tmux then fills the part of the terminal it has no content for:
+   * `fill-character`, "the character used to fill areas of the terminal unused by
+   * a window". That is how a 76-column session inside an 83-column terminal came
+   * back as a strip of dots with a border down it.
+   *
+   * `latest` is the mode for that case, and it is the one tmux documents for it:
+   * "uses the size of the client that had the most recent activity". Which is the
+   * rule the rest of this daemon already follows — the size belongs to whoever
+   * owns the shell (ADR-0010) — so the window you are typing in is the window the
+   * shell is sized for.
+   */
+  async setWindowSize(name: string, mode: "manual" | "latest"): Promise<void> {
+    // Session-scoped, and so an override of the global `manual` that nothing else
+    // has to know about: a session that goes back to being phone-only needs no
+    // second write to go back.
+    await this.run(["set-option", "-t", name, "window-size", mode]);
+  }
+
   async resizeWindow(name: string, cols: number, rows: number): Promise<void> {
     const c = clampSize(cols, MIN_PANE_COLS, MAX_PANE_COLS);
     const r = clampSize(rows, MIN_PANE_ROWS, MAX_PANE_ROWS);

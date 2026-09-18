@@ -62,7 +62,6 @@ export interface LdmuxDaemonOptions {
   /** Set false to run without the remote transport (tests). */
   enableRemote?: boolean;
   /** Static web client root to serve at / (defaults to the bundled client). */
-  webRoot?: string;
 }
 
 interface RpcRequest {
@@ -118,13 +117,6 @@ function sessionTitle(record: SessionRecord): string {
 }
 
 /** The bundled web client ships beside the daemon package. */
-function defaultWebRoot(): string {
-  try {
-    return fileURLToPath(new URL("../../web/public", import.meta.url));
-  } catch {
-    return join(process.cwd(), "packages", "web", "public");
-  }
-}
 
 export class LdmuxDaemon {
   readonly socketPath: string;
@@ -283,7 +275,6 @@ export class LdmuxDaemon {
         desktopInventory: () => this.desktopInventory(),
         acquireStream: (record) => this.streamFor(record),
         releaseStream: (record) => this.releaseStreamIfIdle(record.tmuxName),
-        webRoot: this.opts.webRoot ?? defaultWebRoot(),
         log: (msg) => console.error(msg),
       });
       this.remoteInfo = await this.remote.start();
@@ -360,6 +351,17 @@ export class LdmuxDaemon {
   ): { ok: true; displaced?: DeviceInfo } | { ok: false; heldBy: SessionOwner } {
     const result = this.ownership.claim(sessionId, device, { takeover });
     if (!result.ok) return { ok: false, heldBy: { ...result.heldBy, since: 0 } };
+    // The size follows the shell's owner, the same way everything else does
+    // (ADR-0010). A device reached over the socket is not a tmux client, so it
+    // cannot size anything by being attached — the daemon states its grid with
+    // `resize-window`, and `manual` is what makes that statement stick. A real
+    // terminal window is a client, so it is told to size itself from whichever
+    // client was used last. See [ControlPlane.setWindowSize].
+    const record = this.registry.get(sessionId);
+    if (record) {
+      const mode = device.id === this.desktopDevice.id ? "latest" : "manual";
+      void this.cp.setWindowSize(record.tmuxName, mode).catch(() => {});
+    }
     if (result.previous && result.previous.id !== device.id) {
       // The window has to be told to step aside, or it keeps a live client on a
       // shell someone else is driving. Fire-and-forget: it is a tmux detach, and
@@ -756,7 +758,13 @@ export class LdmuxDaemon {
           // ...and the shell moves to the desktop. The window is writable, so
           // leaving the phone holding it would be two writers on one pty — the
           // split input the exclusive rule exists to prevent (ADR-0010).
-          this.ownership.claim(record.id, this.desktopDevice, { takeover: true });
+          //
+          // Through `claimSession` rather than the ownership map directly, because
+          // the claim is also what hands the *size* over: the shell now belongs to
+          // a real terminal window, which is a tmux client and can size itself.
+          // While this was a bare claim the window stayed pinned to the phone's
+          // grid, and tmux filled the rest of it with `fill-character`.
+          this.claimSession(record.id, this.desktopDevice, true);
           void this.remote?.broadcastSessions().catch(() => {});
         }
         return result;
@@ -770,6 +778,11 @@ export class LdmuxDaemon {
         // show a window it no longer has.
         this.liveWindows.delete(record.id);
         this.ownership.release(record.id, this.desktopDevice.id);
+        // Back to the daemon driving the size, because the window that was
+        // driving it is the thing that just went away. Left on `latest` this
+        // session would keep the size of a client that is no longer attached, and
+        // the next device to open it would have to resize to be believed.
+        void this.cp.setWindowSize(record.tmuxName, "manual").catch(() => {});
         void this.remote?.broadcastSessions().catch(() => {});
         return result;
       }

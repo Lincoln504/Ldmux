@@ -4,8 +4,9 @@ The native Android client. Landscape-only, minimal chrome, with the terminal
 rendered **natively**: `libghostty-vt` (the Ghostty terminal core) behind a
 Kotlin seam, painted by a Compose `Canvas`. No WebView, no WASM (ADR-0007).
 
-This is the app `docs/SPEC.md` calls for (§4.2, §7). The PWA in
-`packages/web/public` remains the daemon-served browser client; this package is
+This is the app `docs/SPEC.md` calls for (§4.2, §7). It is the only client: the
+daemon-served browser client (`packages/web`) was deleted, because two renderers
+meant two copies of the snapshot and mode-sequence logic. This package is
 the native app with its own engine.
 
 ## Stack

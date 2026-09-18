@@ -55,8 +55,14 @@ test("live: control mode errors are reported", async () => {
   client.close();
 });
 
-test("live: geometry is pinned with window-size manual (no per-viewer reflow)", async () => {
-  expect(tm("new-session", "-d", "-s", "s3", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile").status).toBe(0);
+// `manual` is the server-wide default: a device on the socket is not a tmux client,
+// so its grid only reaches tmux through an explicit `resize-window`, and that has
+// to stick rather than being re-derived from whoever is attached.
+//
+// One deliberate exception, which is not this: a session a real terminal window
+// holds is set to `latest` per session, because that window *is* a client and
+// should size the shell it is showing (see TmuxControlPlane.setWindowSize).
+test("live: geometry is pinned with window-size manual (no per-viewer reflow)", async () => {  expect(tm("new-session", "-d", "-s", "s3", "-x", "100", "-y", "30", "bash", "--norc", "--noprofile").status).toBe(0);
   tm("set-option", "-g", "window-size", "manual");
   const client = await TmuxControlClient.connect(SOCK, "s3");
   expect(await client.command("display-message -p -t s3:0 '#{window_width}x#{window_height}'")).toEqual(["100x30"]);

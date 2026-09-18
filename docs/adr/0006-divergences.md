@@ -60,7 +60,7 @@ incompatible formats.
 
 The installable web client (landscape-locked manifest + service worker) is the
 v1 Android experience. A native WebView shell is post-v1; nothing in
-`packages/web` assumes a browser-only host.
+`packages/web` (since deleted) assumed a browser-only host.
 
 ### 7. Child (fork/subagent) pi sessions are not ldmux sessions
 

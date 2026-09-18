@@ -25,8 +25,6 @@ import type { DeviceInfo, SessionOwner, SessionRecord } from "../../protocol/src
 import { tokenMatches } from "./auth.ts";
 import { isShellForeground } from "./desktop.ts";
 import type { PaneStream, StreamSnapshot } from "./stream.ts";
-import { extname, join, normalize } from "node:path";
-import { readFile, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
@@ -89,7 +87,6 @@ export interface RemoteServerOptions {
   /** Called when a stream is no longer used (failed attach / closed socket). */
   releaseStream?(record: SessionRecord): void;
   /** Directory of the static web client to serve at /. */
-  webRoot?: string;
   maxBufferedBytes?: number;
   log?: (msg: string) => void;
 }
@@ -337,32 +334,14 @@ export class RemoteServer {
       res.end("upgrade required\n");
       return;
     }
-    const staticRes = await this.serveStatic(url.pathname);
-    res.writeHead(staticRes.status, { "content-type": staticRes.headers.get("content-type") ?? "text/plain" });
-    res.end(Buffer.from(await staticRes.arrayBuffer()));
-  }
-
-  /** Serve the bundled web client (buildless static assets). */
-  private async serveStatic(pathname: string): Promise<Response> {
-    const text = (status: number, body: string) =>
-      new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
-    const root = this.opts.webRoot;
-    if (!root) return new Response("ldmux remote\n", { status: 200 });
-    const rel = pathname === "/" ? "/index.html" : pathname;
-    const full = normalize(join(root, rel));
-    // `normalize` strips a trailing slash from the root, so one comparison covers
-    // both `/srv/web` and `/srv/web/` (and a root of `/`).
-    const base = normalize(root);
-    if (full !== base && !full.startsWith(base + "/")) return text(403, "forbidden\n");
-    // Confine again after symlink resolution: a symlink inside the web root must
-    // not become a way to read the rest of the filesystem.
-    const realRoot = normalize(await realpath(base).catch(() => base));
-    const real = await realpath(full).catch(() => null);
-    if (!real) return text(404, "not found\n");
-    if (real !== realRoot && !real.startsWith(realRoot + "/")) return text(403, "forbidden\n");
-    const body = await readFile(real).catch(() => null);
-    if (!body) return text(404, "not found\n");
-    return new Response(body, { headers: { "content-type": contentType(real) } });
+    // Anything else is not a route. This server was also a static file server for
+    // a browser client that no longer exists, which is a second thing to keep
+    // correct — path confinement, symlink escapes, content types — for an
+    // endpoint whose only real traffic is a WebSocket upgrade. The one sentence
+    // stays, so a person who pastes the URL into a browser is told why they see
+    // nothing rather than getting an empty page.
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("ldmux remote: the endpoint is /ws\n");
   }
 
   private async onMessage(ws: any, raw: any): Promise<void> {
@@ -908,20 +887,6 @@ export class RemoteServer {
   }
 }
 
-const CONTENT_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-  ".txt": "text/plain; charset=utf-8",
-  ".webmanifest": "application/manifest+json; charset=utf-8",
-};
-
 /**
  * Normalise a `ws` message into the string-or-bytes the handler expects.
  *
@@ -936,8 +901,4 @@ function normaliseIncoming(raw: Buffer | ArrayBuffer | Buffer[], isBinary: boole
       ? new Uint8Array(raw)
       : raw;
   return isBinary ? new Uint8Array(bytes) : bytes.toString("utf8");
-}
-
-function contentType(path: string): string {
-  return CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
 }

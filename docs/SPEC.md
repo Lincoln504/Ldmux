@@ -45,7 +45,8 @@
 - A **native mobile client**: a KMP + Compose Multiplatform Android app
   (`packages/mobile`) that renders the terminal itself — libghostty-vt behind a
   JNI seam, painted on a Compose `Canvas` — and speaks the protocol directly.
-  The browser client (`docs/WEB.md`) is a separate, standalone renderer, and is
+  There is no browser client: it was deleted, so the native app is the only
+  renderer, and it is
   no longer what the app hosts (ADR-0007).
 - **No pi extension.** ldmux is not a pi plugin; `pi` is simply a program one can
   run in a session (see the status note above and ADR-0009).
@@ -604,7 +605,7 @@ server-facing integer line id has no stable meaning across snapshots/reflow/ED3)
   the anchor from the snapshot header; **if the anchored line is gone, stand down
   to `following` — never guess.**
 - Persistent **"↓ jump to bottom"** affordance while anchored (dooboxes requirement).
-- Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; `packages/web/public/app.js`)
+- Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; the browser client that measured it was deleted)
   with a configurable max; server-side tmux `history-limit` is **10,000** lines
   (~40 MB/pane) and the `scrollback` message serves older pages on demand.
 
@@ -692,7 +693,7 @@ libghostty (**not viable** — no mobile target, unstable ABI).
 
 **Recommendation (target, not built): KMP + Compose Multiplatform**, landscape-only,
 WebView/xterm.js `TerminalSurface` for v1. **What shipped instead** is the
-buildless PWA in `packages/web/public` (`docs/WEB.md`), because this machine has
+buildless PWA, because this machine has
 no gradle/kotlin toolchain; it is the renderer the WebView shell will host. Libraries: **Ktor** (`ktor-client-websockets`; OkHttp on
 Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
 (backoff + `StateFlow`), `compose-webview-multiplatform`, foreground service +

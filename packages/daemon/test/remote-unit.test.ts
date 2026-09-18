@@ -100,7 +100,6 @@ async function start(opts: Partial<RemoteServerOptions> = {}) {
     getSession: (id) => (id === "s1" ? session("s1") : undefined),
     listSessions: () => [],
     acquireStream: () => stream as unknown as PaneStream,
-    webRoot: undefined,
     ...opts,
   });
   const info = await server.start();
@@ -287,32 +286,21 @@ test("a token in the Authorization header is accepted (not just the query)", asy
   // being refused. (A handshake that cannot be completed is not a 401.)
   expect(status).not.toBe(401);
 });
-test("static serving confines paths lexically, follows no escaping symlink, and 404s", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ldmux-webroot-"));
-  const outside = mkdtempSync(join(tmpdir(), "ldmux-outside-"));
-  writeFileSync(join(root, "index.html"), "<h1>ok</h1>");
-  writeFileSync(join(outside, "secret.txt"), "SECRET");
-  symlinkSync(join(outside, "secret.txt"), join(root, "link.txt"));
-  const { server, info } = await start({ webRoot: root });
+test("the endpoint serves no files, and says so", async () => {
+  // This server used to be a static file server for a browser client. That client
+  // is gone (native KMP is the client), and with it a whole class of concern: path
+  // confinement, symlink escapes, content types. What must not go with it is the
+  // *answer* — a person who pastes the URL into a browser should be told what this
+  // port is, not handed an empty page or a directory listing.
+  const { info } = await start({});
   const base = `http://${info.hostname}:${info.port}`;
-
-  expect((await fetch(`${base}/`)).status).toBe(200);
-  expect((await fetch(`${base}/index.html`)).status).toBe(200);
-  // A raw traversal pathname is forbidden lexically (browser/fetch normalises the
-  // URL first, so this branch is exercised directly against serveStatic).
-  const lexical = await (server as unknown as { serveStatic(p: string): Promise<Response> }).serveStatic(
-    "/../../etc/passwd",
-  );
-  expect(lexical.status).toBe(403);
-  expect(await lexical.text()).not.toContain("root:");
-  // A symlink *inside* the root that points outside is re-confined after realpath.
-  const symlinked = await fetch(`${base}/link.txt`);
-  expect(symlinked.status).toBe(403);
-  expect(await symlinked.text()).not.toContain("SECRET");
-  // A genuinely missing file is a 404, not a 403.
-  expect((await fetch(`${base}/nope.js`)).status).toBe(404);
-  rmSync(root, { recursive: true, force: true });
-  rmSync(outside, { recursive: true, force: true });
+  for (const path of ["/", "/index.html", "/../etc/passwd", "/nope.js"]) {
+    const res = await fetch(`${base}${path}`);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain("/ws");
+    // Never a file, whatever was asked for.
+    expect(await (await fetch(`${base}${path}`)).text()).not.toContain("root:");
+  }
 });
 
 test("closing a socket releases the stream for the record it was attached to", async () => {
@@ -340,16 +328,6 @@ test("control messages before attach are silent no-ops; attach still works", asy
   ws.close();
 });
 
-test("an unknown content type is served as application/octet-stream", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ldmux-webroot-ct-"));
-  writeFileSync(join(root, "blob.bin"), new Uint8Array([1, 2, 3]));
-  const { info } = await start({ webRoot: root });
-  const res = await fetch(`http://${info.hostname}:${info.port}/blob.bin`);
-  expect(res.status).toBe(200);
-  expect(res.headers.get("content-type")).toBe("application/octet-stream");
-  rmSync(root, { recursive: true, force: true });
-});
-
 test("a malformed request target cannot take the daemon down", async () => {
   // `GET http:// HTTP/1.1` is accepted by Node's HTTP parser and reaches the
   // handler verbatim; `new URL("http://", base)` throws. That runs BEFORE the
@@ -369,8 +347,12 @@ test("a malformed request target cannot take the daemon down", async () => {
 
   const absolute = await raw("GET http:// HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
   expect(absolute).toContain("400");
-  // The daemon is still serving, not dead.
-  expect((await fetch(`http://${info.hostname}:${info.port}/`)).status).toBe(200);
+  // The daemon is still answering, not dead. A 404 is the right answer now — it
+  // serves no files — so the probe asserts that the request was *served*, not that
+  // it returned any particular page.
+  const after = await fetch(`http://${info.hostname}:${info.port}/`);
+  expect(after.status).toBe(404);
+  expect(await after.text()).toContain("/ws");
 });
 
 test("an unauthenticated absolute-form upgrade is refused, not fatal", async () => {
@@ -390,6 +372,6 @@ test("an unauthenticated absolute-form upgrade is refused, not fatal", async () 
     socket.on("error", reject);
   });
   expect(status).toContain("401");
-  // Still alive and serving.
-  expect((await fetch(`http://${info.hostname}:${info.port}/`)).status).toBe(200);
+  // Still alive and answering.
+  expect((await fetch(`http://${info.hostname}:${info.port}/`)).status).toBe(404);
 });

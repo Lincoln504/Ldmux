@@ -121,42 +121,21 @@ test("killing an attached session resyncs the client and evicts the stream", asy
   ws.close();
 });
 
-test("serves the bundled web client, its assets, and the session list", async () => {
+test("serves no files at all, and says what the endpoint is", async () => {
+  // This used to be "serves the bundled web client, its assets, and the session
+  // list". The client is deleted (native KMP is the client), and with it a second
+  // renderer, a second snapshot implementation and a static file server. What is
+  // left to check is the negative: nothing under any path is a file, and the one
+  // thing a person pasting this URL into a browser is told is where the socket is.
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
   const base = `http://${info.hostname}:${info.port}`;
-
-  const index = await fetch(`${base}/`);
-  expect(index.status).toBe(200);
-  expect(index.headers.get("content-type")).toContain("text/html");
-  const html = await index.text();
-  expect(html).toContain("app.js");
-  expect(html).toContain("core.js");
-  const core = await fetch(`${base}/core.js`);
-  expect(core.status).toBe(200);
-  expect(core.headers.get("content-type") || "").toContain("javascript");
-
-  const xterm = await fetch(`${base}/vendor/xterm.js`);
-  expect(xterm.status).toBe(200);
-  expect(xterm.headers.get("content-type")).toContain("javascript");
-
-  const missing = await fetch(`${base}/nope.js`);
-  expect(missing.status).toBe(404);
-
-  const manifest = await fetch(`${base}/manifest.webmanifest`);
-  expect(manifest.status).toBe(200);
-  expect(manifest.headers.get("content-type")).toContain("manifest+json");
-  expect(((await manifest.json()) as { orientation: string }).orientation).toBe("landscape");
-
-  for (const asset of ["/sw.js", "/icon.svg", "/app.css"]) {
-    expect((await fetch(`${base}${asset}`)).status).toBe(200);
+  for (const path of ["/", "/index.html", "/core.js", "/app.css", "/sw.js", "/nope.js"]) {
+    const res = await fetch(`${base}${path}`);
+    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body).toContain("/ws");
+    expect(body).not.toContain("<html");
   }
-
-  const { ws, text } = await connect(info, info.token);
-  ws.send(JSON.stringify({ type: "list" }));
-  expect(await waitFor(() => text.some((m) => m.type === "sessions"))).toBe(true);
-  const msg = text.find((m) => m.type === "sessions");
-  expect(Array.isArray(msg.sessions)).toBe(true);
-  ws.close();
 });
 test("attaching to a dead session is rejected with session_dead", async () => {
   const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");

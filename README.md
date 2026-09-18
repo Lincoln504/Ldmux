@@ -37,7 +37,6 @@ either. It is deliberately simpler and tmux-native:
 | [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification. |
 | [`docs/TRANSPORT.md`](docs/TRANSPORT.md) | Transport deep-dive + decision (control mode `-C` over pipes, no PTY). |
 | [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
-| [`docs/WEB.md`](docs/WEB.md) | The buildless web/terminal client served by the daemon. |
 | [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) | The native terminal engine (libghostty-vt) and the JNI seam. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
@@ -96,12 +95,11 @@ Implemented and tested (210 tests, typecheck clean):
   `capture`/`snapshot`/`kill`/`forget`/`adopt`/`mirror`/`remote`/`pair`/`expose`).
 - `packages/testing` — the assertion vocabulary (`test`/`expect`) the suite uses,
   over `node:test`.
-- `packages/web` — buildless xterm.js client served by the daemon at `/`
-  (canonical grid scaled to fit, ADR-0004 scroll state machine + jump-to-bottom,
-  non-destructive snapshot repaint, session drawer + edge-strip swipe, mobile key
-  bar, installable PWA, reconnect/resync). Its protocol-critical logic lives in
-  a DOM-free `public/core.js` covered by `packages/web/test/core.test.ts`. See
-  [`docs/WEB.md`](docs/WEB.md).
+- The daemon serves **no** static files. It used to ship a buildless xterm.js
+  browser client at `/`; that client has been deleted, because native KMP/Compose
+  is the client (ADR-0007) and a second renderer meant two copies of the snapshot
+  and mode-sequence logic to keep correct. `GET /` now answers 404 with
+  `ldmux remote: the endpoint is /ws`, so the port explains itself.
 - `packages/mobile` — native KMP + Compose Multiplatform client (Android first).
   A Compose `Canvas` renderer over a **libghostty-vt** emulator behind a narrow
   JNI seam; client-driven pane resize; two button-switched UI modes (landscape
