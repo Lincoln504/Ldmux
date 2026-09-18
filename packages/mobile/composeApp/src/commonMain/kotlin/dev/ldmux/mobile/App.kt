@@ -211,9 +211,13 @@ fun App() {
     val created by client.created.collectAsState()
     val createdTick by client.createdTick.collectAsState()
     LaunchedEffect(createdTick) {
-        val id = created ?: return@LaunchedEffect
-        pageSelection = (pageSelection ?: emptySet()) + id
-        pendingOpens = (pendingOpens - 1).coerceAtLeast(0)
+        val ids = created
+        if (ids.isEmpty()) return@LaunchedEffect
+        // Every id the gesture asked for, not only the last one: the daemon answers
+        // a create one at a time and one gesture can ask for several.
+        pageSelection = (pageSelection ?: emptySet()) + ids.toSet()
+        pendingOpens = (pendingOpens - ids.size).coerceAtLeast(0)
+        client.clearCreated()
     }
 
     // A refusal and a request cannot both be outstanding. The daemon answers a
@@ -413,9 +417,13 @@ fun App() {
                 // by directory and resolved when the list comes back.
                 val existing = picked.mapNotNull { it.sessionId }.toSet()
                 val fresh = picked.filter { it.sessionId == null }
-                for (e in fresh) client.create("shell", e.cwd, e.label)
-                pendingOpens = fresh.size
+                // The page set is set *before* the requests go out. A create can be
+                // answered before this loop finishes, and an answer that arrived
+                // first would then be overwritten by the line that sets the page
+                // set — the shell would exist with nothing pointing at it.
                 pageSelection = existing
+                pendingOpens = fresh.size
+                for (e in fresh) client.create("shell", e.cwd, e.label)
                 showLauncher = false
                 mode = UiMode.Landscape
             },

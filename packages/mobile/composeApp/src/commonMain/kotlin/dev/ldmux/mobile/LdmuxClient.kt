@@ -249,13 +249,26 @@ class LdmuxClient(private var config: LdmuxConfig) {
      * when the directory already has a shell (the guess finds that one). What
      * followed was a client that had just asked for a shell, standing on a terminal
      * screen that said "No sessions".
+     *
+     * It is a *list*, not a slot, because one gesture can ask for more than one
+     * shell: choosing two rows in the launcher and pressing open creates two, and
+     * they are created in a loop. With a single slot the second id overwrote the
+     * first before anything read it, so `open (2)` produced one page and the other
+     * shell existed with nothing pointing at it. The tick below was added to make
+     * "two in a row" visible and did not help on its own — it told the reader there
+     * was something new, while the value it read had already been replaced.
      */
-    private val _created = MutableStateFlow<String?>(null)
-    val created: StateFlow<String?> = _created
+    private val _created = MutableStateFlow<List<String>>(emptyList())
+    val created: StateFlow<List<String>> = _created
 
     /** Bumped for every creation, so two in a row are both seen. */
     private val _createdTick = MutableStateFlow(0)
     val createdTick: StateFlow<Int> = _createdTick
+
+    /** Called once the ids have been taken, so the next one is a new event. */
+    fun clearCreated() {
+        _created.value = emptyList()
+    }
 
     /**
      * The last thing that happened to a shell's desktop window.
@@ -476,7 +489,8 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 _errorTick.value += 1
             }
             "created" -> {
-                _created.value = root["sessionId"]?.jsonPrimitive?.content
+                val id = root["sessionId"]?.jsonPrimitive?.content
+                if (id != null) _created.value = _created.value + id
                 _createdTick.value += 1
             }
             "desktop" -> {
