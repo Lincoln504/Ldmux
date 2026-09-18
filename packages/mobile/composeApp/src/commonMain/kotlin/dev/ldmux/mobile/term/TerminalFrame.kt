@@ -11,7 +11,7 @@ package dev.ldmux.mobile.term
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
  *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7], u8 alternateOn, u8 reserved[7]
+ *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7]
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
