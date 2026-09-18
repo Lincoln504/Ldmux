@@ -129,7 +129,12 @@ fun LauncherScreen(
                         subtitle = listOfNotNull(tildify(e.cwd), e.note).joinToString(" · "),
                         chosen = e.key in chosen,
                         onClick = { chosen = toggle(chosen, e.key) },
-                        onKill = session?.let { s -> { onKill(s) } },
+                        // Closing is the launcher's alone, and it is offered only
+                        // for a shell this phone started: a shell opened at the
+                        // desk is the desk's, and the phone putting it down is not
+                        // the phone ending it. The daemon enforces the same rule —
+                        // this is the UI agreeing with it rather than guessing.
+                        onKill = session?.takeIf { e.openedByPhone }?.let { s -> { onKill(s) } },
                     ) {
                         // The per-shell menu belongs to shells this phone opened.
                         // A shell someone started at their desk is theirs to keep;
@@ -275,6 +280,12 @@ internal fun launcherEntries(
                     cwd = shell.cwd,
                     note = when {
                         shell.liveWorkspace != null -> "on desktop ${shell.liveWorkspace}"
+                        // The desktop's own shell, being looked at from here. Said
+                        // in the desktop's words rather than the protocol's: what
+                        // matters to the person holding the phone is that somebody
+                        // is at the computer with it and that touching that window
+                        // takes it back, which is what "in use" means.
+                        shell.heldElsewhere && shell.ownerKind == "desktop" -> "in use on desktop"
                         shell.heldElsewhere -> shell.ownerName?.let { "open on $it" }
                         else -> null
                     },

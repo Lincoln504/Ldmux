@@ -457,9 +457,15 @@ fun App() {
                 menuExpanded = portraitMenu,
                 onMenu = { portraitMenu = true },
                 onMenuDismiss = { portraitMenu = false },
-                onLauncher = { showLauncher = true },
+                onLauncher = {
+                    // The launcher is where you choose what to open, so going
+                        // back to it lets go of everything: a page is a *hold* on
+                        // a shell, and holding shells you are not looking at is how
+                        // the phone keeps a session someone else might want.
+                    pageSelection = emptySet()
+                    showLauncher = true
+                },
                 onSettings = { showSettings = true },
-                onClose = pages.getOrNull(pagerState.currentPage)?.let { s -> { killTarget = s } },
                 modifiers = modifiers,
                 onModifiers = { modifiers = it },
                 press = press,
@@ -476,7 +482,14 @@ fun App() {
                     handles,
                     onFlip = { mode = UiMode.Portrait },
                     onKill = { killTarget = it },
-                    onLauncher = { showLauncher = true },
+                    onLauncher = {
+                        // The launcher is where you choose what to open, so going
+                        // back to it lets go of everything: a page is a *hold* on
+                        // a shell, and holding shells you are not looking at is how
+                        // the phone keeps a session someone else might want.
+                    pageSelection = emptySet()
+                    showLauncher = true
+                },
                     // Named rather than trailing: `press` is a parameter now, and a
                     // trailing lambda would bind to it.
                     onSettings = { showSettings = true },
@@ -620,7 +633,6 @@ private fun PortraitBar(
     onMenuDismiss: () -> Unit,
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
-    onClose: (() -> Unit)?,
     modifiers: Modifiers,
     onModifiers: (Modifiers) -> Unit,
     press: (String) -> Unit,
@@ -668,7 +680,6 @@ private fun PortraitBar(
             onMenuDismiss = onMenuDismiss,
             onLauncher = onLauncher,
             onSettings = onSettings,
-            onClose = onClose,
         )
         // No microphone: the keyboard is always up in portrait and it has its own.
         // Two microphones is one too many.
@@ -685,7 +696,6 @@ private fun PortraitKeyRow(
     onMenuDismiss: () -> Unit = {},
     onLauncher: () -> Unit = {},
     onSettings: () -> Unit = {},
-    onClose: (() -> Unit)? = null,
     active: List<Boolean> = emptyList(),
 ) {
     Row(
@@ -706,7 +716,7 @@ private fun PortraitKeyRow(
                 IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth(), filled = true) {
                     IconLauncher(Bg, box = 18.dp)
                 }
-                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings, onClose)
+                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
             }
         }
     }
@@ -803,7 +813,6 @@ private fun SidePanel(
                     onDismiss = { menuOpen = false },
                     onLauncher = onLauncher,
                     onSettings = onSettings,
-                    onClose = here?.let { s -> { onKill(s) } },
                 )
             }
             NavArrow("◀", enabled = current > 0) { step(-1) }
@@ -1147,7 +1156,6 @@ fun AppMenu(
     onDismiss: () -> Unit,
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
-    onClose: (() -> Unit)?,
 ) {
     MaterialTheme(
         colorScheme = darkColorScheme(
@@ -1176,12 +1184,6 @@ fun AppMenu(
                 text = { Text("settings", color = Fg) },
                 onClick = { onDismiss(); onSettings() },
             )
-            if (onClose != null) {
-                DropdownMenuItem(
-                    text = { Text("close this shell", color = Fg) },
-                    onClick = { onDismiss(); onClose() },
-                )
-            }
         }
     }
 }
