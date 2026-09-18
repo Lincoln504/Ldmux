@@ -88,6 +88,13 @@ export interface RemoteServerOptions {
   releaseStream?(record: SessionRecord): void;
   /** Directory of the static web client to serve at /. */
   maxBufferedBytes?: number;
+  /**
+   * How long a connection may say nothing before it is presumed gone.
+   *
+   * An option rather than a constant only because a test cannot wait a minute to
+   * watch a socket die. Production always uses the default.
+   */
+  idleMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -126,6 +133,14 @@ interface ConnData {
    * works this way).
    */
   queue: Promise<void>;
+  /**
+   * When this connection last proved it exists.
+   *
+   * Any inbound message counts. That is the point: this is evidence, not a
+   * handshake, so a client does not have to be taught a mechanism to be measured
+   * by it — and the one thing the phone already does often is talk.
+   */
+  lastSeen: number;
 }
 
 const DEFAULT_MAX_BUFFERED = 4 * 1024 * 1024;
@@ -144,10 +159,31 @@ const MAX_PENDING_BYTES = 1024 * 1024;
  */
 const OUTPUT_FLUSH_MS = 8;
 const OUTPUT_FLUSH_BYTES = 16 * 1024;
+/**
+ * Silence that means the other end has gone.
+ *
+ * A phone that loses signal sends no FIN. The socket stays open, and the daemon
+ * goes on believing in it: the device keeps its entry in `byDevice`, and with it
+ * every claim it holds, for as long as the kernel takes to give up — which over a
+ * mobile network can be never. That is not merely untidy. A claim exists to
+ * refuse the *next* attach, so a phone that vanished would hold its own shell
+ * against itself, which is exactly the Stale State lockout `ownership.ts` exists
+ * to prevent, arriving from the direction it does not cover.
+ *
+ * The client has a watchdog (`AttachClient`, three missed pings, about 12.6 s) and
+ * reconnects. Nothing on this side did, so there was nothing to reconnect *to*:
+ * only a claim nobody could ask for. 60 s is seven times the client's 4 s ping
+ * interval, and past the 45 s a backgrounded phone is allowed before it is
+ * supposed to let go on purpose — so a socket reaped here is one that had already
+ * stopped being a client.
+ */
+const WS_IDLE_MS = 60_000;
 
 export class RemoteServer {
   private server: Server | undefined;
   private wss: WebSocketServer | undefined;
+  /** The liveness sweep. See [sweep]. */
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
   /**
    * Per-connection state. `ws` has no place to hang it on the socket, so it
    * lives here, keyed by the socket itself.
@@ -198,12 +234,22 @@ export class RemoteServer {
         return;
       }
       socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+        data.lastSeen = Date.now();
         const msg = normaliseIncoming(raw, isBinary);
         data.queue = data.queue
           .then(() => this.onMessage(socket, msg))
           .catch((err: Error) => {
             this.sendError(socket, "internal", err.message);
           });
+      });
+      // A WebSocket-level pong is the cheapest possible proof of life and it is
+      // answered by the transport, not by the application. Counted when it
+      // arrives, but deliberately not depended on: whether a given client library
+      // answers pings automatically is that library's business, and a liveness
+      // rule that fails for the one client that does not is not a rule. The
+      // message handler above is the one that has to hold.
+      socket.on("pong", () => {
+        data.lastSeen = Date.now();
       });
       socket.on("close", () => {
         const conn = this.connState.get(socket);
@@ -261,6 +307,7 @@ export class RemoteServer {
         outBytes: 0,
         flushTimer: null,
         queue: Promise.resolve(),
+        lastSeen: Date.now(),
       };
       this.wss!.handleUpgrade(req, socket, head, (client: WebSocket) => {
         this.connState.set(client, data);
@@ -279,10 +326,55 @@ export class RemoteServer {
       });
     });
     opts.log?.(`remote: ws://${opts.hostname}:${this.port}/ws`);
+    const idleMs = opts.idleMs ?? WS_IDLE_MS;
+    // Swept at a quarter of the deadline, so a silent socket is reaped soon after
+    // it stops qualifying rather than up to a whole deadline late.
+    this.heartbeat = setInterval(() => this.sweep(Date.now(), idleMs), Math.max(250, Math.floor(idleMs / 4)));
+    // The server must never be the reason the process stays alive, or a test that
+    // starts one and stops it would hang at exit instead of finishing.
+    this.heartbeat.unref?.();
     return { hostname: opts.hostname, port: this.port };
   }
 
+  /**
+   * Take away the connections that have stopped answering.
+   *
+   * The whole job is to make a dead socket *die*, because everything that should
+   * follow from a dead socket already follows from one: the close path drops the
+   * stream and frees the device's claims, and that reasoning lives in exactly one
+   * place. A sweep that reaped claims itself would be a second place that has to
+   * be right about which claim belonged to which connection.
+   *
+   * `terminate` rather than `close`, because a graceful close is a message to a
+   * peer that is by definition not listening; waiting for it would be a timer
+   * waiting for another timer.
+   */
+  private sweep(now: number, idleMs: number): void {
+    for (const client of this.wss?.clients ?? []) {
+      const data = this.connState.get(client as unknown as object);
+      if (!data) continue;
+      if (now - data.lastSeen > idleMs) {
+        this.opts.log?.(`remote: reaping a connection silent for ${now - data.lastSeen}ms`);
+        try {
+          (client as WebSocket).terminate();
+        } catch {
+          /* already gone */
+        }
+        continue;
+      }
+      try {
+        (client as WebSocket).ping();
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+
   stop(): void {
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
     try {
       for (const client of this.wss?.clients ?? []) client.terminate();
       this.wss?.close();
@@ -462,6 +554,10 @@ export class RemoteServer {
           const record = this.opts.getSession(id);
           if (data.device?.kind === "phone" && record && record.createdBy !== "phone") {
             if (data.device) this.opts.releaseClaim?.(id, data.device.id);
+            // ...and this connection stops streaming it. Putting a shell down and
+            // carrying on painting it are not the same act, and the paragraph
+            // above has been claiming this one without doing it.
+            if (data.sessionId === id) this.cleanupSubscription(data);
             if (data.disposed) return;
             await this.sendSessions(ws);
             return;
@@ -473,6 +569,9 @@ export class RemoteServer {
           // Let go even when the session survives: a shell held open by the
           // desktop is not one this connection should keep streaming.
           if (data.device && !result.ended) this.opts.releaseClaim?.(id, data.device.id);
+          // A shell the desk keeps is not one to go on painting on a phone that
+          // has just let it go.
+          if (data.sessionId === id) this.cleanupSubscription(data);
           if (data.disposed) return;
           await this.sendSessions(ws);
           return;
@@ -699,7 +798,12 @@ export class RemoteServer {
         onOutput: (text) => {
           if (data.live) this.queueOutput(ws, data, text);
           else {
-            data.pendingBytes += text.length;
+            // Bytes, not characters. This is the bound on the buffer we hold while
+            // snapshotting, and a character is not a unit of memory: a client that
+            // fell behind on multibyte output would have been allowed to grow to
+            // four times the limit this constant advertises, with the resync it was
+            // supposed to trigger arriving late.
+            data.pendingBytes += Buffer.byteLength(text);
             if (data.pendingBytes > MAX_PENDING_BYTES) {
               // Fell too far behind while snapshotting: resync instead of growing.
               data.pending = [];
@@ -716,6 +820,7 @@ export class RemoteServer {
       });
     } catch (err) {
       this.opts.releaseStream?.(record);
+      this.releaseFailedClaim(data, sessionId, gen);
       if (data.attachGen === gen && !data.disposed) {
         data.stream = undefined;
         this.sendError(ws, "attach_failed", (err as Error).message);
@@ -727,6 +832,7 @@ export class RemoteServer {
     if (data.disposed || data.attachGen !== gen) {
       unsubscribe();
       this.opts.releaseStream?.(record);
+      this.releaseFailedClaim(data, sessionId, gen);
       return;
     }
     data.unsubscribe = unsubscribe;
@@ -750,6 +856,7 @@ export class RemoteServer {
     // Re-check after the await: the socket may have gone or a newer attach won.
     if (data.disposed || data.attachGen !== gen) {
       this.opts.releaseStream?.(record);
+      this.releaseFailedClaim(data, sessionId, gen);
       return;
     }
     this.flushOutput(ws, data);
@@ -765,6 +872,29 @@ export class RemoteServer {
   }
 
   /**
+   * Give back a claim this attach took and then could not use.
+   *
+   * The claim is made before the stream is subscribed, deliberately: the refusal
+   * has to reach the client before anything is torn down, or a plain attach to
+   * somebody else's shell would displace the caller's own current attach while
+   * failing. The cost of that ordering is that every path which cannot finish the
+   * attach holds a claim it never used — and a device that keeps one holds a
+   * shell it is not looking at. The next attach to that shell is refused, and the
+   * phone is refused *by itself*, which the user reads as the app being broken
+   * rather than as a claim.
+   *
+   * Guarded on the attach generation, because a newer attach on the same
+   * connection has already claimed this shell for itself and releasing that would
+   * leave a shell streaming under nobody's claim. The two abandoned-attach paths
+   * below reach here with a mismatched generation and are refused by that guard;
+   * the failed-subscribe path reaches here still current and is not.
+   */
+  private releaseFailedClaim(data: ConnData, sessionId: string, gen: number): void {
+    if (!data.device || data.attachGen !== gen) return;
+    this.opts.releaseClaim?.(sessionId, data.device.id);
+  }
+
+  /**
    * Queue pane output, and flush it when the window closes or the buffer grows.
    *
    * Every message this replaces would otherwise have been its own WebSocket
@@ -774,7 +904,8 @@ export class RemoteServer {
    */
   private queueOutput(ws: any, data: ConnData, text: string): void {
     data.outBuf.push(text);
-    data.outBytes += text.length;
+    // Bytes, not characters, for the same reason as the pending buffer.
+    data.outBytes += Buffer.byteLength(text);
     if (data.outBytes >= OUTPUT_FLUSH_BYTES) {
       this.flushOutput(ws, data);
       return;

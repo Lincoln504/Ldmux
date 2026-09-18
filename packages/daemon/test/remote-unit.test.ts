@@ -7,6 +7,7 @@ import { HEADER_SIZE } from "../../protocol/src/frames.ts";
 import type { PaneStream, StreamSubscriber } from "../src/stream.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { setTimeout as sleep } from "node:timers/promises";
+import { WebSocket as WsLib } from "ws";
 import { request } from "node:http";
 import { connect as netConnect } from "node:net";
 
@@ -374,4 +375,86 @@ test("an unauthenticated absolute-form upgrade is refused, not fatal", async () 
   expect(status).toContain("401");
   // Still alive and answering.
   expect((await fetch(`http://${info.hostname}:${info.port}/`)).status).toBe(404);
+});
+
+test("a connection that has said nothing for too long is taken away, and its claim with it", async () => {
+  // The failure this exists for: a phone loses signal, no FIN is sent, the socket
+  // stays open — and the daemon goes on holding that device's claim, so the shell
+  // is refused to everyone, including the phone that vanished. Stale State,
+  // arriving from the direction `ownership.ts` does not cover.
+  const claims = new Map<string, string>();
+  const { info } = await start({
+    idleMs: 300,
+    claim: (sessionId, device) => {
+      const holder = claims.get(sessionId);
+      if (holder && holder !== device.id) {
+        return { ok: false as const, heldBy: { id: holder, name: holder } as unknown as never };
+      }
+      claims.set(sessionId, device.id);
+      return { ok: true as const };
+    },
+    releaseClaim: (sessionId, deviceId) =>
+      claims.get(sessionId) === deviceId && claims.delete(sessionId),
+    releaseDevice: (deviceId) =>
+      [...claims]
+        .filter(([, d]) => d === deviceId)
+        .map(([s]) => {
+          claims.delete(s);
+          return s;
+        }),
+  });
+  // `autoPong: false` is what makes this test mean anything. Node's built-in
+  // WebSocket, and the `ws` library by default, answer a ping in the transport
+  // without the application being involved — which is exactly the cooperation a
+  // liveness rule must not depend on, and which would leave this socket alive
+  // forever and this test green either way.
+  const client = new WsLib(`ws://${info.hostname}:${info.port}/ws?token=test-token`, {
+    autoPong: false,
+  });
+  await new Promise<void>((resolve, reject) => {
+    client.on("open", () => resolve());
+    client.on("error", (err) => reject(err));
+  });
+  const closed: number[] = [];
+  client.on("close", () => closed.push(1));
+  const hello = (id: string) =>
+    JSON.stringify({ type: "hello", device: { id, name: id, kind: "phone" } });
+  client.send(hello("phone-1"));
+  client.send(JSON.stringify({ type: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+  expect(await waitFor(() => claims.get("s1") === "phone-1")).toBe(true);
+
+  // ...and then it says nothing at all, and answers nothing.
+  expect(await waitFor(() => closed.length > 0, 5000)).toBe(true);
+  expect(claims.has("s1")).toBe(false);
+});
+
+test("an attach that fails to subscribe gives its claim back", async () => {
+  // The claim is taken before the stream is subscribed, deliberately: a refusal
+  // has to reach the client before anything is torn down. The price of that
+  // ordering is that any later failure holds a claim nobody is using — and a
+  // claim's whole purpose is to refuse the next attach, so the device would be
+  // refused by itself and read it as the app being broken.
+  const claims = new Map<string, string>();
+  const { info } = await start({
+    claim: (sessionId, device) => {
+      claims.set(sessionId, device.id);
+      return { ok: true as const };
+    },
+    releaseClaim: (sessionId, deviceId) =>
+      claims.get(sessionId) === deviceId && claims.delete(sessionId),
+    acquireStream: (() => ({
+      subscribe: async () => {
+        throw new Error("cannot subscribe");
+      },
+    })) as unknown as RemoteServerOptions["acquireStream"],
+  });
+  const c = await connect(info);
+  c.ws.send(JSON.stringify({ type: "hello", device: { id: "phone-2", name: "p", kind: "phone" } }));
+  c.ws.send(JSON.stringify({ type: "attach", sessionId: "s1", cols: 80, rows: 24 }));
+
+  // The code is carried in an `error` envelope, not as the message type.
+  expect(
+    await waitFor(() => c.text.some((m) => m.type === "error" && m.code === "attach_failed")),
+  ).toBe(true);
+  expect(claims.has("s1")).toBe(false);
 });
