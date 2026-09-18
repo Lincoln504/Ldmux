@@ -181,32 +181,40 @@ colours.
 
 Reproduction, on device: open two or more shells, tap `▶` until the header reads
 `n / n`, flip to portrait with the flip button. The header comes back as `1 / n`
-and the terminal behind it is the first shell. Verified three times, every time.
+and the terminal behind it is the first shell. Reproduced every time.
 
-The mechanism is understood and is not a race. `PagerState` holds its position as
-a **pixel offset into a measured page**, not as a page number. On landscape the
-terminal is `2400 - 636 = 1764` px wide, so page 2 is an offset of 1764 px into a
-1764 px page. Mid-rotation the terminal is briefly the full 2400 px of the
-still-landscape window, and `floor(1764 / 2400)` is `0`, which is page one. The
-re-measure rewrites the pager's position and the page is gone.
+**Root cause, measured.** An instrumented run printed the page, the pager's
+measured viewport width and the pager's *identity* at every change:
 
-What was tried, and why each failed — recorded so it is not re-tried:
+```
+page=1 viewportW=1764 state=@7374ab1   <- after tapping the next arrow
+page=1 viewportW=2294 state=@7374ab1   <- window mid-turn, page INTACT
+page=0 viewportW=1080 state=@7374ab1   <- same state object, same composition
+TerminalArea composed                  <- printed once, for the whole run
+```
 
-- Hoisting the page index into `App()` and restoring it. The new pager reports its
-  first page and the report overwrites the restore.
-- Reporting only on a settled swipe (`isScrollInProgress`, first value dropped).
-  Does not fire for `animateScrollToPage`, which is what the arrows use.
-- Having the arrows set the index directly. Correct in itself and kept, but it does
-  not survive the re-measure either.
-- Gating on the display's orientation (`LocalConfiguration`). The configuration is
-  delivered at the **start** of the rotation, not the end, so the gate never fired.
-- Capturing the page at the last composition before the mode change and restoring
-  it 820 ms later. Still wrong, so the re-measure lands after that too.
+The identical `PagerState` re-derives its page when it is re-measured at a new
+viewport width. It is not a rebuilt pager, not a new state object, and not which
+branch the terminal is drawn in.
 
-The live suspect is that a restore issued at any fixed delay is racing a re-measure
-with no known bound. The likely correct fix is structural: one `HorizontalPager`
-instance for both modes, with the chrome arranged around it, so the pager is never
-re-created and never re-measured against a different width.
+Two explanations were published here first and were **wrong**. They are recorded
+so they are not revived:
+
+- "Position is a pixel offset, so `floor(1764/2400)` is 0." Dead in both
+  directions: at 2294 px the pager still reported page 1, where that arithmetic
+  predicts 0, and at 1080 px it reported 0, where the arithmetic predicts 1.
+- "A new `HorizontalPager` at a new call site resets it." The terminal was
+  restructured to have exactly one call site and the reset still happened.
+
+What was tried and failed, so it is not re-tried: hoisting the page index and
+restoring it; reporting only on a settled swipe; having the arrows set the index
+directly; gating on `LocalConfiguration`; capturing the page and restoring it
+after a fixed delay. Every one of those varied the fix. None varied the
+observation, which is why five were guessed at a mechanism nobody had measured.
+
+The fix in the tree follows from the measurement: capture the page while the
+viewport is **stable**, and re-assert it on the viewport **change itself** — the
+event, rather than a timer, which is a bet on when re-measuring has finished.
 
 ### Rotation timings, measured
 

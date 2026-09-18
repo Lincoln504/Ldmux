@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -346,6 +347,35 @@ fun App() {
         }
     }
 
+    // **The page is the user's, and the pager loses it on a re-measure.**
+    //
+    // A `PagerState` re-derives its position when the viewport changes size rather
+    // than merely re-laying-out, and the viewport changes size on every flip, because
+    // `mode` changes the moment the flip button is pressed and the window follows.
+    // Measured on the device, with the pager's identity printed alongside it: at a
+    // viewport of 2294 px it still reported page 1, and the instant it was measured at
+    // 1080 px it reported page 0 — the same state object, the same composition, the
+    // terminal area composed exactly once for the whole run. So this is not a pager
+    // being rebuilt and not a new state, which is what five earlier attempts assumed.
+    //
+    // The page is therefore captured while the viewport is *stable* — when a report
+    // can only be the user, from the arrows or a swipe — and put back on the change
+    // itself. On the event, not on a timer: a timer is a bet on when re-measuring has
+    // finished, and every previous attempt lost that bet.
+    LaunchedEffect(pagerState) {
+        var keep = pagerState.currentPage
+        var width = pagerState.layoutInfo.viewportSize.width
+        snapshotFlow { pagerState.layoutInfo.viewportSize.width to pagerState.currentPage }
+            .collect { (w, p) ->
+                if (w == width) {
+                    keep = p
+                } else {
+                    width = w
+                    if (p != keep) pagerState.scrollToPage(keep)
+                }
+            }
+    }
+
     // A latch that survived a glance at another shell would be a latch that
     // surprises you, so anything that ends the gesture clears it.
     LaunchedEffect(pagerState.currentPage) { modifiers = modifiers.cleared() }
@@ -519,63 +549,87 @@ fun App() {
                 },
             )
         }
-    } else if (portrait && panelArrived) {
-        Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
-            TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth(), pendingOpen = pendingOpens > 0)
-            var portraitMenu by remember { mutableStateOf(false) }
-            PortraitBar(
-                handle = currentHandle,
-                pages = pages,
-                pagerState = pagerState,
-                scope = scope,
-                onLandscape = { mode = UiMode.Landscape },
-                menuExpanded = portraitMenu,
-                onMenu = { portraitMenu = true },
-                onMenuDismiss = { portraitMenu = false },
-                onLauncher = {
-                    // The launcher is where you choose what to open, so going
-                        // back to it lets go of everything: a page is a *hold* on
-                        // a shell, and holding shells you are not looking at is how
-                        // the phone keeps a session someone else might want.
-                    pageSelection = emptySet()
-                    showLauncher = true
-                },
-                onSettings = { showSettings = true },
-                modifiers = modifiers,
-                onModifiers = { modifiers = it },
-                press = press,
-            )
-        }
     } else {
-        Row(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
-            val panel: @Composable () -> Unit = {
-                SidePanel(
+        // **One terminal, in one place.** The two modes differ in what is arranged
+        // around it, not in the terminal itself, and that is load-bearing rather
+        // than tidy: a plain `if/else` builds a *new* `HorizontalPager` in each
+        // branch, and a new pager resets the shared `PagerState` to its first page.
+        // Measured, with the viewport width already final, on the frame the portrait
+        // branch was first composed: `page=1 viewportW=1080`, then `page=0
+        // viewportW=1080` 135 ms later. Every earlier attempt at this bug tried to
+        // put the page back afterwards. None asked why it had moved, and it had moved
+        // because the pager was thrown away.
+        var portraitMenu by remember { mutableStateOf(false) }
+        // Chrome waits for the window to finish turning over, and there is none
+        // before it has: a panel belongs to the shape it was drawn for.
+        val chrome = panelArrived
+        Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                val panel: @Composable () -> Unit = {
+                    SidePanel(
+                        pages,
+                        pagerState,
+                        scope,
+                        client,
+                        handles,
+                        onFlip = { mode = UiMode.Portrait },
+                        onKill = { killTarget = it },
+                        onLauncher = {
+                            // The launcher is where you choose what to open, so
+                            // going back to it lets go of everything: a page is a
+                            // *hold* on a shell, and holding shells you are not
+                            // looking at is how the phone keeps a session someone
+                            // else might want.
+                            pageSelection = emptySet()
+                            showLauncher = true
+                        },
+                        // Named rather than trailing: `press` is a parameter now, and
+                        // a trailing lambda would bind to it.
+                        onSettings = { showSettings = true },
+                        modifiers = modifiers,
+                        onModifiers = { modifiers = it },
+                        press = press,
+                    )
+                }
+                // The side panel is a landscape thing. Portrait's chrome is the bar
+                // *below* the terminal, and `panelLeft` decides which side the panel
+                // is on in the one mode that has one.
+                if (!portrait && chrome && config.panelLeft) panel()
+                TerminalArea(
+                    config,
                     pages,
                     pagerState,
-                    scope,
-                    client,
                     handles,
-                    onFlip = { mode = UiMode.Portrait },
-                    onKill = { killTarget = it },
+                    typing = portrait,
+                    Modifier.weight(1f).fillMaxHeight(),
+                    pendingOpen = pendingOpens > 0,
+                )
+                if (!portrait && chrome && !config.panelLeft) panel()
+            }
+            if (portrait && chrome) {
+                PortraitBar(
+                    handle = currentHandle,
+                    pages = pages,
+                    pagerState = pagerState,
+                    scope = scope,
+                    onLandscape = { mode = UiMode.Landscape },
+                    menuExpanded = portraitMenu,
+                    onMenu = { portraitMenu = true },
+                    onMenuDismiss = { portraitMenu = false },
                     onLauncher = {
                         // The launcher is where you choose what to open, so going
-                        // back to it lets go of everything: a page is a *hold* on
-                        // a shell, and holding shells you are not looking at is how
+                        // back to it lets go of everything: a page is a *hold* on a
+                        // shell, and holding shells you are not looking at is how
                         // the phone keeps a session someone else might want.
-                    pageSelection = emptySet()
-                    showLauncher = true
-                },
-                    // Named rather than trailing: `press` is a parameter now, and a
-                    // trailing lambda would bind to it.
+                        pageSelection = emptySet()
+                        showLauncher = true
+                    },
                     onSettings = { showSettings = true },
                     modifiers = modifiers,
                     onModifiers = { modifiers = it },
                     press = press,
                 )
             }
-            if (config.panelLeft && panelArrived) panel()
-            TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight(), pendingOpen = pendingOpens > 0)
-            if (!config.panelLeft && panelArrived) panel()
         }
     }
     }
@@ -736,14 +790,18 @@ private fun PortraitBar(
         // off the edge, which is the one thing a keyboard-adjacent strip must not
         // do: a key you cannot see is a key that does not exist.
         //
+        // The top row opens with the flip control and the menu and closes with the
+        // arrows. The menu used to close the row and Enter used to open it; both
+        // moved at the user's word, so that the two ways out sit together at the
+        // corner and Enter sits with the keys that feed a line.
+        //
         // Nothing here is a keyboard glyph, and nothing here is a shell button: a
         // new shell belongs to the menu, where you are choosing one, not to the
         // bar you type on.
         // The menu closes the top row and Enter closes the bottom one — swapped
-        // at the user's word. The menu is how you leave the keyboard, so it belongs
-        // at the far corner of the row above the typing keys rather than inside it,
-        // and Enter belongs with the keys that feed a line rather than alone at the
-        // top. The panel keeps the same arrangement.
+        // at the user's word, and the menu moved again to the leading end of that
+        // row. The menu is how you leave the keyboard, so it belongs beside the
+        // other way out rather than inside the typing keys.
         PortraitKeyRow(
             listOf(
                 "Esc" to { press("Escape") },
@@ -759,6 +817,7 @@ private fun PortraitBar(
             onMenuDismiss = onMenuDismiss,
             onLauncher = onLauncher,
             onSettings = onSettings,
+            menuLeading = true,
         )
         PortraitKeyRow(
             listOf(
@@ -793,6 +852,8 @@ private fun PortraitKeyRow(
     onLauncher: () -> Unit = {},
     onSettings: () -> Unit = {},
     active: List<Boolean> = emptyList(),
+    /** Put the menu at the leading end, beside the flip control, instead of the end. */
+    menuLeading: Boolean = false,
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -804,17 +865,25 @@ private fun PortraitKeyRow(
             // mode rather than one that types into it.
             IconBtn(onClick = flip, modifier = Modifier.weight(1f)) { IconFlip(Accent, box = 18.dp) }
         }
+        // One button, placed at one of two ends. In portrait it leads the top row,
+        // right beside the flip button: leaving the keyboard and changing the
+        // keyboard's shape are the two ways out of this strip, so they belong
+        // together at the corner you reach for rather than at opposite ends of it.
+        val menuBox: @Composable RowScope.() -> Unit = {
+            if (menu != null) {
+                Box(Modifier.weight(1f)) {
+                    IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth(), filled = true) {
+                        IconLauncher(Bg, box = 18.dp)
+                    }
+                    AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
+                }
+            }
+        }
+        if (menuLeading) menuBox()
         keys.forEachIndexed { i, (label, action) ->
             PortraitKey(label, Modifier.weight(1f), active.getOrElse(i) { false }, action)
         }
-        if (menu != null) {
-            Box(Modifier.weight(1f)) {
-                IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth(), filled = true) {
-                    IconLauncher(Bg, box = 18.dp)
-                }
-                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
-            }
-        }
+        if (!menuLeading) menuBox()
     }
 }
 
