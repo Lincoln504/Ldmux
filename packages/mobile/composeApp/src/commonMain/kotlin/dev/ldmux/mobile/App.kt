@@ -790,18 +790,33 @@ private fun PortraitBar(
         // off the edge, which is the one thing a keyboard-adjacent strip must not
         // do: a key you cannot see is a key that does not exist.
         //
-        // The top row opens with the flip control and the menu and closes with the
-        // arrows. The menu used to close the row and Enter used to open it; both
-        // moved at the user's word, so that the two ways out sit together at the
-        // corner and Enter sits with the keys that feed a line.
+        // Enter moved down to close the bottom row at the user's word, so that it
+        // sits with the keys that feed a line rather than alone at the top. The two
+        // controls that leave this strip are not part of either row: they stack at
+        // the leading edge, menu above flip, one per row.
         //
         // Nothing here is a keyboard glyph, and nothing here is a shell button: a
         // new shell belongs to the menu, where you are choosing one, not to the
         // bar you type on.
-        // The menu closes the top row and Enter closes the bottom one — swapped
-        // at the user's word, and the menu moved again to the leading end of that
-        // row. The menu is how you leave the keyboard, so it belongs beside the
-        // other way out rather than inside the typing keys.
+        // The two ways out of this strip, stacked at the leading edge: the menu on
+        // top and the flip directly below it, both flush left. They were strung
+        // along the top row, then re-placed beside each other, and the shape that
+        // survived is top-to-bottom in the corner — which is where a thumb rests,
+        // and the pair is a pair: leaving the keyboard and changing the keyboard's
+        // shape are the same decision made twice.
+        val menuHere: @Composable RowScope.() -> Unit = {
+            Box(Modifier.weight(1f)) {
+                IconBtn(onClick = onMenu, label = "menu", modifier = Modifier.fillMaxWidth(), filled = true) {
+                    IconLauncher(Bg, box = 18.dp)
+                }
+                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
+            }
+        }
+        val flipHere: @Composable RowScope.() -> Unit = {
+            IconBtn(onClick = onLandscape, label = "flip to landscape", modifier = Modifier.weight(1f)) {
+                IconFlip(Accent, box = 18.dp)
+            }
+        }
         PortraitKeyRow(
             listOf(
                 "Esc" to { press("Escape") },
@@ -811,13 +826,7 @@ private fun PortraitBar(
                 "\u2193" to { press("Down") },
                 "\u2192" to { press("Right") },
             ),
-            flip = onLandscape,
-            menu = onMenu,
-            menuExpanded = menuExpanded,
-            onMenuDismiss = onMenuDismiss,
-            onLauncher = onLauncher,
-            onSettings = onSettings,
-            menuLeading = true,
+            leading = menuHere,
         )
         PortraitKeyRow(
             listOf(
@@ -834,6 +843,7 @@ private fun PortraitBar(
                 "/" to { press("/") },
                 "\u23ce" to { press("Enter") },
             ),
+            leading = flipHere,
             active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false, false),
         )
         // No microphone: the keyboard is always up in portrait and it has its own.
@@ -841,49 +851,30 @@ private fun PortraitBar(
     }
 }
 
-/** One row of the portrait bar: the flip control, then keys sharing the width. */
+/**
+ * One row of the portrait bar: an optional leading control, then keys sharing the
+ * width.
+ *
+ * The leading slot exists so the two controls that *leave* this mode can stack in
+ * the corner a thumb rests on — the menu above, the flip below — instead of being
+ * strung along a row beside keys that type. A key you press mid-sentence and a
+ * button that ends the sentence should not be the same shape in the same place.
+ */
 @Composable
 private fun PortraitKeyRow(
     keys: List<Pair<String, () -> Unit>>,
-    flip: (() -> Unit)? = null,
-    menu: (() -> Unit)? = null,
-    menuExpanded: Boolean = false,
-    onMenuDismiss: () -> Unit = {},
-    onLauncher: () -> Unit = {},
-    onSettings: () -> Unit = {},
+    leading: (@Composable RowScope.() -> Unit)? = null,
     active: List<Boolean> = emptyList(),
-    /** Put the menu at the leading end, beside the flip control, instead of the end. */
-    menuLeading: Boolean = false,
 ) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (flip != null) {
-            // The way back to landscape, first: it is the control that leaves this
-            // mode rather than one that types into it.
-            IconBtn(onClick = flip, modifier = Modifier.weight(1f)) { IconFlip(Accent, box = 18.dp) }
-        }
-        // One button, placed at one of two ends. In portrait it leads the top row,
-        // right beside the flip button: leaving the keyboard and changing the
-        // keyboard's shape are the two ways out of this strip, so they belong
-        // together at the corner you reach for rather than at opposite ends of it.
-        val menuBox: @Composable RowScope.() -> Unit = {
-            if (menu != null) {
-                Box(Modifier.weight(1f)) {
-                    IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth(), filled = true) {
-                        IconLauncher(Bg, box = 18.dp)
-                    }
-                    AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
-                }
-            }
-        }
-        if (menuLeading) menuBox()
+        leading?.invoke(this)
         keys.forEachIndexed { i, (label, action) ->
             PortraitKey(label, Modifier.weight(1f), active.getOrElse(i) { false }, action)
         }
-        if (!menuLeading) menuBox()
     }
 }
 
@@ -964,7 +955,7 @@ private fun ShellHeader(
     ) {
         if (showMenu) {
             Box {
-                IconBtn(onClick = { menuOpen = true }, filled = true) {
+                IconBtn(onClick = { menuOpen = true }, label = "menu", filled = true) {
                     IconLauncher(Bg)
                 }
                 AppMenu(
@@ -1093,10 +1084,10 @@ private fun SidePanel(
             // One flip control, one meaning, in both orientations: portrait is
             // where the keyboard lives, so flipping to it *is* the keyboard
             // action, and a separate keyboard button only confuses it.
-            IconBtn(onClick = onFlip) { IconFlip(Accent) }
+            IconBtn(onClick = onFlip, label = "flip to portrait") { IconFlip(Accent) }
             // Landscape only: portrait always has the keyboard up and the IME
             // carries its own microphone. Two microphones is one too many.
-            IconBtn(onClick = { handle?.startVoice() }) { IconMic(tint = Fg) }
+            IconBtn(onClick = { handle?.startVoice() }, label = "voice input") { IconMic(tint = Fg) }
         }
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,

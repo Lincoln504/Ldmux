@@ -18,6 +18,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -48,6 +51,20 @@ import kotlin.math.sin
 @Composable
 fun IconBtn(
     onClick: () -> Unit,
+    /**
+     * What this button is, spoken.
+     *
+     * Required rather than defaulted, because these buttons are *drawn*: the glyph
+     * is a Canvas arc or a path and carries no text at all, so a control with no
+     * label here has no name anywhere. That is measured, not assumed — a
+     * `uiautomator` dump of the running app lists the text keys and the arrows
+     * (`\u2190`, `\u2191`, `\u2193`, `\u2192`, `\u23ce`, `\u25b6`) and reports every one of these
+     * buttons as an unlabelled square. Text keys read themselves; these cannot.
+     *
+     * A default would let the next button be added without one, which is exactly how
+     * this gap arises.
+     */
+    label: String,
     modifier: Modifier = Modifier,
     caption: String? = null,
     /**
@@ -65,7 +82,8 @@ fun IconBtn(
         modifier
             .clip(RoundedCornerShape(8.dp))
             .background(if (filled) Accent else Bg)
-            .clickable(onClick = onClick)
+            .clickable(onClick = onClick, role = Role.Button)
+            .semantics { contentDescription = label }
             .padding(horizontal = 9.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

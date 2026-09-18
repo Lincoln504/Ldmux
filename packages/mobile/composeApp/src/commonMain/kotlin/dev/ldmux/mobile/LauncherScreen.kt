@@ -95,7 +95,7 @@ fun LauncherScreen(
             }
             SmallAction(if (desktopLoading) "…" else "refresh", onRefresh)
             Spacer(Modifier.width(6.dp))
-            IconBtn(onClick = onSettings) { IconCog(Dim) }
+            IconBtn(onClick = onSettings, label = "settings") { IconCog(Dim) }
         }
 
         // Where a new shell goes is asked for in the dialogue that creates it, and
@@ -341,7 +341,7 @@ private fun ChoiceRow(
         trailing()
         if (onKill != null) {
             Spacer(Modifier.width(6.dp))
-            IconBtn(onClick = onKill) { IconClose(Dim) }
+            IconBtn(onClick = onKill, label = "close shell") { IconClose(Dim) }
         }
     }
 }
