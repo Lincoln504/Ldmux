@@ -258,3 +258,29 @@ screen that no longer exists.
 
 The user reported the arrows working before any of this was re-measured. They were right
 and the instrument was wrong.
+
+### An accessibility node's bounds are not the drawn bounds
+
+Twice in one session, geometry was read from a `uiautomator` dump and was wrong.
+
+- The menu button's node reports `x 114..228` while the square it draws is at
+  `x 128..233` — **14 px to the right** of what the node claims.
+- The same node reported a height of **133 px in both** the tall and the thin
+  densities, while the drawn square measured **134 px** and **95 px** respectively.
+  Believing the node meant concluding the new setting did not work, twice, and going
+  looking for a wiring bug that was not there.
+
+Node bounds are reliable for *what is on screen and what it is called*. They are not
+reliable for *where it is or how big it is*. For geometry, count pixels in the
+capture, and take the capture and the dump from the same moment.
+
+### A byte-identical debug APK is not a stale one
+
+`composeApp-debug.apk` has been **74070078 bytes** across every build for days,
+including builds that changed behaviour, and the number has been used here as evidence
+that a build was stale. It is not evidence either way: the zip is dominated by the
+native library and Compose assets, and a small code change does not move the total.
+
+To settle it, look inside: `unzip -Z1 …apk | grep '\.dex$'` and grep **every** dex for
+a string the change introduced. Checking only `classes.dex` returns 0 for a string that
+is present, because the app has seven of them and the value was in `classes5.dex`.

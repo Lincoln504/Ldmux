@@ -324,6 +324,32 @@ private fun DrawScope.drawFlip(tint: Color) {
 }
 
 
+/**
+ * A tick, drawn rather than typed.
+ *
+ * It was `Text("\u2713")` in an 18dp box, which is two problems in one line. A
+ * tick is a mark, and every other mark in this app is drawn — a font's tick is a
+ * different picture on every device, and this one also had to be trusted to fit
+ * inside a box with a 1.5dp border drawn by something else. It did not: the ink is
+ * the glyph's, at whatever size and baseline the font decides, so the box and the
+ * mark were sized by two different authorities and only one of them knew about the
+ * border.
+ *
+ * Drawn, the fit is arithmetic. The ink spans 0.20 to 0.80 of the box on one axis
+ * and 0.28 to 0.74 on the other, plus half a stroke all round, which inside a 12dp
+ * box leaves better than a dp of clear space inside the border at every edge.
+ */
+@Composable
+fun IconCheck(tint: Color, box: Dp = 12.dp) {
+    Canvas(Modifier.size(box)) {
+        val w = size.minDimension
+        val stroke = w * 0.16f
+        val elbow = Offset(w * 0.42f, w * 0.72f)
+        drawLine(tint, Offset(w * 0.21f, w * 0.52f), elbow, stroke, StrokeCap.Round)
+        drawLine(tint, elbow, Offset(w * 0.79f, w * 0.29f), stroke, StrokeCap.Round)
+    }
+}
+
 /** A keyboard: a rounded case, two rows of keys, and a space bar. */
 private fun DrawScope.drawKeyboard(tint: Color) {
     val w = size.minDimension

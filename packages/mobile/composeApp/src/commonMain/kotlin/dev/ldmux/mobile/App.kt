@@ -140,8 +140,11 @@ internal val DenseTouch = 34.dp
  */
 internal data class Touch(val min: Dp, val dense: Dp)
 
-internal fun touchFor(compact: Boolean): Touch =
-    if (compact) Touch(min = 34.dp, dense = 28.dp) else Touch(min = MinTouch, dense = DenseTouch)
+/** The two densities, named once so neither is a pair of literals in two places. */
+private val ThinTouch = Touch(min = 34.dp, dense = 28.dp)
+private val TallTouch = Touch(min = MinTouch, dense = DenseTouch)
+
+internal fun touchFor(compact: Boolean): Touch = if (compact) ThinTouch else TallTouch
 
 /**
  * The app's touch scale, installed once at the root and read by every control.
@@ -153,7 +156,7 @@ internal fun touchFor(compact: Boolean): Touch =
  * composing in a way that would need tracking, and the value changes about once a
  * year, so a full recomposition of the subtree on change is exactly right.
  */
-internal val LocalTouch = staticCompositionLocalOf { Touch(MinTouch, DenseTouch) }
+internal val LocalTouch = staticCompositionLocalOf { ThinTouch }
 /** Rules and unselected outlines. */
 val Line = Color(0xFF2A2A2A)
 
@@ -179,20 +182,19 @@ data class LdmuxConfig(
      */
     val fontSp: Float = DEFAULT_FONT_SP,
     /**
-     * Squeeze the chrome, keep the lines.
+     * Thin chrome, and this is the default.
      *
-     * Every control in the app has one height, and that height is a real decision
-     * with two defensible answers, so it is the user's rather than mine. `false`
-     * gives every control the platform's 48dp minimum target, which is what a
-     * thumb wants. `true` gives it back the density the app had before there was a
-     * minimum at all, when every control was 24-34dp: a terminal is a thing you
-     * read, and a row of chrome is a row of output you cannot see.
+     * Every control in the app has one height, and that height is a real decision with
+     * two defensible answers, so it is the user's rather than mine. Thin by default: a
+     * terminal is a thing you read, and a row of chrome is a row of output you cannot
+     * see. Set it false and every control gets the platform's 48dp minimum target,
+     * which is what a thumb wants.
      *
-     * It is a whole-app switch and not a per-control one, because the failure that
-     * made this a decision was exactly that: the same control came out a different
+     * One switch for the whole app rather than one per control, because the failure
+     * that made it a decision was exactly that: the same control came out a different
      * height in two places, and neither of them was chosen.
      */
-    val compact: Boolean = false,
+    val compact: Boolean = true,
     /**
      * This install's identity, announced with `hello` (ADR-0010).
      *
@@ -1437,11 +1439,11 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                         Text("tall", color = if (!compact) Accent else Dim)
                     }
                     TextButton(onClick = { compact = true }) {
-                        Text("compact", color = if (compact) Accent else Dim)
+                        Text("thin", color = if (compact) Accent else Dim)
                     }
                 }
                 Text(
-                    "tall is easier to hit; compact fits more lines",
+                    "tall is easier to hit; thin fits more lines",
                     color = Dim,
                     fontSize = 10.sp,
                 )

@@ -355,7 +355,7 @@ private fun ChoiceRow(
                 .border(1.5.dp, if (chosen) Accent else Dim, RoundedCornerShape(4.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            if (chosen) Text("✓", color = Bg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            if (chosen) IconCheck(Bg, box = 12.dp)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
