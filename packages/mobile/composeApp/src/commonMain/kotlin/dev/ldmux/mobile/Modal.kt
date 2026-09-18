@@ -117,50 +117,36 @@ private fun LabelledField(
 }
 
 /**
- * A new shell, asked for in two parts.
+ * A new shell, asked for one way: where.
  *
- * The path is where it runs and the command is what it is; both used to be
- * decided silently (the daemon's own directory, and a shell). A shell in the wrong
- * directory is not obviously wrong, which is what makes it worth asking.
- *
- * The command is a recommendation, not a form: touching `bash` or `pi` fills the
- * field, and the field is editable, because these are the two things that are
- * started in a terminal most and neither is a special case to the daemon. The
- * shell is the host's login shell either way (docs/SPEC.md §7), so `bash` here
- * means "a shell" and `pi` means "the agent", not two different shells.
+ * What runs there is not a choice — it is always the host's login shell
+ * (docs/SPEC.md §7), the same as `ldmux shell` and everything else that opens
+ * one. A command field here was a second way to start a shell that looked like
+ * a way to *choose the program*, and the daemon does not offer that: every
+ * shell is the login shell, full stop. Only the directory is worth asking for,
+ * because a shell in the wrong one is not obviously wrong.
  */
 @Composable
 fun NewShellModal(
     suggestedPath: String,
     onDismiss: () -> Unit,
-    onCreate: (path: String, command: String) -> Unit,
+    onCreate: (path: String) -> Unit,
 ) {
     var path by remember { mutableStateOf(suggestedPath) }
-    var command by remember { mutableStateOf("") }
 
     ModalCard("new shell", onDismiss) {
         LabelledField("path", path, { path = it }, "the host's working directory")
-        LabelledField("command", command, { command = it }, "bash")
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("recommended", color = Dim, fontSize = 10.sp)
-            for (rec in NEW_SHELL_COMMANDS) {
-                Chip(rec, selected = command == rec) { command = rec }
-            }
-        }
         Text(
-            "bash, or anything else on the host. The shell itself is always the host's login shell.",
+            "Opens the host's login shell there.",
             color = Dim.copy(alpha = 0.7f),
             fontSize = 10.sp,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedBtn("cancel", Modifier.weight(1f)) { onDismiss() }
-            AccentBtn("create", Modifier.weight(1f)) { onCreate(path.trim(), command.trim()) }
+            AccentBtn("create", Modifier.weight(1f)) { onCreate(path.trim()) }
         }
     }
 }
-
-/** The two things started in a terminal most often, offered rather than assumed. */
-val NEW_SHELL_COMMANDS = listOf("bash", "pi")
 
 /**
  * Choosing a desktop to put a shell on.
@@ -229,26 +215,6 @@ fun DesktopPickerModal(
             }
             OutlinedBtn("cancel", Modifier.weight(1f)) { onDismiss() }
         }
-    }
-}
-
-/** A small selectable chip. Greyscale: selected is the lighter one, not a hue. */
-@Composable
-fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (selected) Accent else Bg)
-            .border(1.dp, Line, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-    ) {
-        Text(
-            label,
-            color = if (selected) Bg else Fg,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-        )
     }
 }
 

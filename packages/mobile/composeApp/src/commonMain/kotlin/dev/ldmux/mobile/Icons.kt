@@ -23,6 +23,9 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 import androidx.compose.material3.Text
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
@@ -101,16 +104,37 @@ fun IconClose(tint: Color, box: Dp = 18.dp) {
 
 /** Settings: three sliders, which reads as "adjust" without a gear's detail. */
 @Composable
+/**
+ * Settings: a cog.
+ *
+ * A cog and not three sliders-with-knobs, which is what this used to be and what
+ * it looked like from across a room: three short horizontal strokes, each with a
+ * dot on it, is the *overflow* mark — a list of things — so the button read as
+ * "more options" and its being next to `refresh` made two buttons that both
+ * looked like something else. The teeth are what makes it a cog: a ring alone is
+ * a record, and a ring with eight radial strokes is unmistakably a gear.
+ */
 fun IconCog(tint: Color, box: Dp = 20.dp) {
     Canvas(Modifier.size(box)) {
         val w = size.minDimension
-        val stroke = w * 0.10f
-        val rows = listOf(0.26f to 0.66f, 0.50f to 0.34f, 0.74f to 0.58f)
-        for ((y, knob) in rows) {
-            drawLine(tint, Offset(w * 0.14f, w * y), Offset(w * 0.86f, w * y), stroke, StrokeCap.Round)
-            drawCircle(Bg, w * 0.14f, Offset(w * knob, w * y))
-            drawCircle(tint, w * 0.14f, Offset(w * knob, w * y), style = Stroke(stroke))
+        val c = Offset(w / 2f, w / 2f)
+        val stroke = w * 0.095f
+        // Eight teeth. Each starts inside the ring's outer edge so the whole thing
+        // reads as one object rather than a circle with spikes around it.
+        for (i in 0 until 8) {
+            val a = (i * 45.0) * PI / 180.0
+            val ux = cos(a).toFloat()
+            val uy = sin(a).toFloat()
+            drawLine(
+                tint,
+                Offset(c.x + ux * w * 0.21f, c.y + uy * w * 0.21f),
+                Offset(c.x + ux * w * 0.45f, c.y + uy * w * 0.45f),
+                stroke,
+                StrokeCap.Round,
+            )
         }
+        // The body, hollow: a filled disc would swallow the teeth's inner ends.
+        drawCircle(tint, w * 0.30f, c, style = Stroke(stroke))
     }
 }
 

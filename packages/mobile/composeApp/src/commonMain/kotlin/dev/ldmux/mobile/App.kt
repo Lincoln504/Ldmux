@@ -13,6 +13,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -62,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
@@ -173,6 +175,9 @@ fun App() {
     val sessions by client.sessions.collectAsState()
     val desktop by client.desktop.collectAsState()
     val connected by client.connected.collectAsState()
+    // Read here, not inside the launcher branch: a refusal releases a pending
+    // shell request, and that request is made from a screen the branch does not own.
+    val errorTick by client.errorTick.collectAsState()
 
     // A phone that has just rejoined the wifi should not wait out the retry
     // backoff: the network callback cuts it short.
@@ -187,24 +192,41 @@ fun App() {
     // Which shells the pager pages through. `null` means all of them; the
     // launcher sets a set when the user chooses, and that set is what ◀ ▶ walk.
     var pageSelection by remember { mutableStateOf<Set<String>?>(null) }
-    // Directories a shell has been asked for and not yet seen. A chosen pi session
-    // has no ldmux shell yet, so its page cannot be named by id until the daemon
-    // reports the new one; until then the pager is briefly empty rather than
-    // falling back to every shell on the host, which would ignore the choice.
-    var awaitingCwds by remember { mutableStateOf(setOf<String>()) }
+    // How many shells have been asked for and not yet answered. A chosen pi session
+    // has no ldmux shell yet, so there is no id to page to until the daemon says
+    // which one it made — and while that is outstanding the pager is legitimately
+    // empty, which is a *different* thing from "there is nothing to open" and must
+    // not be shown as the same sentence.
+    //
+    // Counted, not derived from the session list: the answer is the daemon's
+    // `created` message, and a list of sessions cannot say which row is new.
+    var pendingOpens by remember { mutableStateOf(0) }
 
     val attachable = sessions.filter { it.attachable }
     val pages = pageSelection?.let { chosen -> attachable.filter { it.id in chosen } } ?: attachable
 
     // A shell asked for in a directory joins the selection as soon as it exists.
-    LaunchedEffect(sessions, awaitingCwds) {
-        if (awaitingCwds.isEmpty()) return@LaunchedEffect
-        val arrived = attachable.filter { it.cwd in awaitingCwds }
-        if (arrived.isNotEmpty()) {
-            pageSelection = (pageSelection ?: emptySet()) + arrived.map { it.id }
-            awaitingCwds = awaitingCwds - arrived.map { it.cwd }.toSet()
-        }
+    // The shell the daemon made joins the pages. This is the whole reason it
+    // answers `created`: the client is told, and does not guess.
+    val created by client.created.collectAsState()
+    val createdTick by client.createdTick.collectAsState()
+    LaunchedEffect(createdTick) {
+        val id = created ?: return@LaunchedEffect
+        pageSelection = (pageSelection ?: emptySet()) + id
+        pendingOpens = (pendingOpens - 1).coerceAtLeast(0)
     }
+
+    // A refusal and a request cannot both be outstanding. The daemon answers a
+    // `new` with either `created` or `error`, so an error here is this request
+    // coming back empty — and without this the screen would sit on "Opening
+    // shell…" for a shell that is never coming.
+    LaunchedEffect(errorTick) {
+        if (errorTick > 0) pendingOpens = (pendingOpens - 1).coerceAtLeast(0)
+    }
+
+    // And a request cannot outlive the connection that carried it. Without this a
+    // drop mid-create leaves the count standing forever.
+    LaunchedEffect(connected) { if (!connected) pendingOpens = 0 }
 
     // Stay alive in the background while a terminal is OPEN — deliberately not
     // while *connected*.
@@ -329,6 +351,11 @@ fun App() {
         val desktopTick by client.desktopTick.collectAsState()
         LaunchedEffect(desktopTick) { if (desktopTick > 0) desktopLoading = false }
         val liveResult by client.liveResult.collectAsState()
+        // A refresh that fails still has to let go of "…" — otherwise a single
+        // rejected `desktop` request leaves that button stuck forever, which read
+        // as "the three-dot button next to settings that does nothing."
+        val serverError by client.serverError.collectAsState()
+        LaunchedEffect(errorTick) { if (errorTick > 0) desktopLoading = false }
 
         // Ask for the machine's desktop when the launcher appears, and again if
         // the link was not up yet when it did. Keyed on `connected` as well as the
@@ -358,7 +385,7 @@ fun App() {
                 val existing = picked.mapNotNull { it.sessionId }.toSet()
                 val fresh = picked.filter { it.sessionId == null }
                 for (e in fresh) client.create("shell", e.cwd, e.label)
-                awaitingCwds = fresh.map { it.cwd }.toSet()
+                pendingOpens = fresh.size
                 pageSelection = existing
                 showLauncher = false
                 mode = UiMode.Landscape
@@ -366,19 +393,46 @@ fun App() {
             onKill = { killTarget = it },
             onMakeLive = { session, workspace -> client.makeLive(session.id, workspace) },
             onCloseLive = { session -> client.closeLive(session.id) },
-            onNewShell = { path, command ->
-                // The command is what the user typed, and `bash` means a shell.
-                // Both are the same request to the daemon: the *shell* is the
-                // host's login shell, and the command is the program inside it.
-                // A blank path is not the empty string: it is "wherever the daemon
-                // is", which is the host's working directory — the same default
-                // every other caller gets.
-                client.create("shell", path.ifBlank { null }, null, command.ifBlank { null })
+            onNewShell = { path ->
+                // Always the host's login shell — there is no command to choose,
+                // here or anywhere else a shell is opened. A blank path is not the
+                // empty string: it is "wherever the daemon is", which is the
+                // host's working directory — the same default every other caller
+                // gets.
+                client.create("shell", path.ifBlank { null })
+                // ...and then *go to it*. Creating a shell and leaving the user on
+                // the screen that created it is a shell they cannot reach, which
+                // is what "opening a new shell is not working" was.
+                pendingOpens = 1
+                pageSelection = emptySet()
+                showLauncher = false
+                mode = UiMode.Landscape
             },
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
             onSettings = { showSettings = true },
         )
+        }
+        // What the daemon said, whenever it said no — a bad path in "+ shell",
+        // a session that vanished before a close landed, anything the daemon's
+        // own catch-all turns into an `error` reply. This used to have nowhere
+        // to go at all: the client dropped it on the floor, so a rejected
+        // request and an ignored one looked identical.
+        serverError?.let { err ->
+            LaunchedEffect(errorTick) { delay(4000); if (errorTick > 0) client.clearServerError() }
+            Box(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp), contentAlignment = Alignment.TopCenter) {
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Surface)
+                        .border(1.dp, Line, RoundedCornerShape(8.dp))
+                        .clickable { client.clearServerError() }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(err.message, color = Fg, fontSize = 12.sp)
+                }
+            }
         }
         killTarget?.let { ConfirmKill(it, onDismiss = { killTarget = null }) { client.close(it.id); killTarget = null } }
         if (showSettings) {
@@ -395,7 +449,7 @@ fun App() {
         }
     } else if (portrait) {
         Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
-            TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth())
+            TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth(), pendingOpen = pendingOpens > 0)
             var portraitMenu by remember { mutableStateOf(false) }
             PortraitBar(
                 handle = currentHandle,
@@ -432,7 +486,7 @@ fun App() {
                 )
             }
             if (config.panelLeft) panel()
-            TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight())
+            TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight(), pendingOpen = pendingOpens > 0)
             if (!config.panelLeft) panel()
         }
     }
@@ -474,11 +528,17 @@ private fun TerminalArea(
     handles: MutableMap<String, TerminalHandle>,
     typing: Boolean,
     modifier: Modifier,
+    // A shell just asked for has not arrived yet (see `pendingOpens` in App()) —
+    // that is not "no sessions", it is "one is on its way", and saying the wrong
+    // one of those is exactly what read as a bug: the launcher had three things
+    // on it, one was tapped, and the terminal screen it landed on flatly denied
+    // anything was open.
+    pendingOpen: Boolean = false,
 ) {
     Box(modifier.background(Bg)) {
         if (pages.isEmpty()) {
             Text(
-                "No sessions. Open a terminal with a tmux session, or tap +sh.",
+                if (pendingOpen) "Opening a shell…" else "No sessions yet. Tap + shell to start one.",
                 color = Dim,
                 fontSize = 13.sp,
                 modifier = Modifier.align(Alignment.Center).padding(16.dp),
@@ -644,7 +704,7 @@ private fun PortraitKeyRow(
         if (menu != null) {
             Box(Modifier.weight(1f)) {
                 IconBtn(onClick = menu, modifier = Modifier.fillMaxWidth(), filled = true) {
-                    IconWaffle(Bg, box = 18.dp)
+                    IconLauncher(Bg, box = 18.dp)
                 }
                 AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings, onClose)
             }
@@ -732,8 +792,8 @@ private fun SidePanel(
         // where three identical dark squares made it read as one more key in the
         // column of keys below it. It is not a key: it leaves this screen.
         Box {
-            IconBtn(onClick = { menuOpen = true }, filled = true, modifier = Modifier.fillMaxWidth()) {
-                IconWaffle(Bg)
+            IconBtn(onClick = { menuOpen = true }, filled = true) {
+                IconLauncher(Bg)
             }
             AppMenu(
                 expanded = menuOpen,
@@ -925,6 +985,9 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
         onDismissRequest = onDismiss,
         title = { Text("Connection", color = Fg) },
         containerColor = Surface,
+        // Material's dialogs mix their background from `primary` by default, which
+        // is how a pure grey card picked up a violet cast on a black screen.
+        tonalElevation = 0.dp,
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1089,7 +1152,17 @@ fun AppMenu(
             primary = Accent,
         ),
     ) {
-        DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismiss,
+            // Two Material defaults have to go, and both for the same reason: this
+            // app has no hue. The container is `surfaceContainer` (a purple-tinted
+            // grey), and Material then paints a *tonal* elevation over it, which in
+            // a dark scheme is an overlay mixed from `primary` — the menu came out
+            // faintly violet against a screen that is black and grey.
+            containerColor = Surface,
+            tonalElevation = 0.dp,
+        ) {
             DropdownMenuItem(
                 text = { Text("shells", color = Fg) },
                 onClick = { onDismiss(); onLauncher() },

@@ -60,8 +60,8 @@ fun LauncherScreen(
     onKill: (Session) -> Unit,
     onMakeLive: (Session, String) -> Unit,
     onCloseLive: (Session) -> Unit,
-    /** Start a shell, where the user said, running what the user said. */
-    onNewShell: (path: String, command: String) -> Unit,
+    /** Start a shell — the host's login shell — where the user said. */
+    onNewShell: (path: String) -> Unit,
     liveResult: LiveResult?,
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
@@ -181,9 +181,9 @@ fun LauncherScreen(
             // A suggestion that cannot be used is worse than an empty field.
             suggestedPath = entries.firstOrNull { it.key in chosen }?.cwd.orEmpty(),
             onDismiss = { newShellOpen = false },
-            onCreate = { path, command ->
+            onCreate = { path ->
                 newShellOpen = false
-                onNewShell(path, command)
+                onNewShell(path)
             },
         )
     }

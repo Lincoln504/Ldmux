@@ -254,14 +254,14 @@ export class LdmuxDaemon {
         token: this.token,
         getSession: (id) => this.registry.get(id),
         listSessions: () => this.describeSessions(),
-        createSession: async (kind, cwd, title, createdBy, command) => {
-          await this.handleNew({
+        createSession: async (kind, cwd, title, createdBy) => {
+          const { session } = await this.handleNew({
             kind,
             cwd: cwd ?? process.cwd(),
             title,
             createdBy,
-            command,
           } as unknown as NewParams);
+          return session;
         },
         makeLive: (id, workspace) => this.handle("makeLive", { id, workspace }) as Promise<{ ok: boolean; detail?: string }>,
         closeLive: (id) => this.handle("closeLive", { id }) as Promise<{ ok: boolean; detail?: string }>,
@@ -901,7 +901,11 @@ export class LdmuxDaemon {
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`not a directory: ${cwd}`);
     const id = shortId();
     const tmuxName = `ldmux-${id}`;
-    const command = kind === "pi" ? ["pi", ...(p.command ?? [])] : (p.command ?? []);
+    // A `pi` session is the one thing this daemon starts that is not a shell, and
+    // it is a *kind*, not a command line: nothing off the wire chooses a program.
+    // Every shell is the host's login shell (docs/SPEC.md §7), which is the only
+    // shell a user's rc files and aliases belong to.
+    const command = kind === "pi" ? ["pi"] : [];
     const now = Date.now();
     const record: SessionRecord = {
       id,

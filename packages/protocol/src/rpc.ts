@@ -139,7 +139,6 @@ export interface NewParams {
   kind?: SessionKind;
   cwd?: string;
   title?: string;
-  command?: string[];
   createdBy?: string;
   /**
    * Tie the session's life to its clients: it is destroyed when the last one

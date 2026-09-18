@@ -1,5 +1,6 @@
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { mkdtempSync, rmSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
@@ -330,6 +331,33 @@ test("rpc snapshot and history capture agree with the live pane", async () => {
   expect(snap.screen).toContain("60");
   expect(hist.screen).toContain("1\n");
   expect(hist.screen).toContain("60");
+});
+
+test("asking for a shell answers with which shell, and a bad path answers with why", async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { ws, text } = await connect(info, info.token);
+  const lastSessions = () => [...text].reverse().find((m) => m.type === "sessions")?.sessions ?? [];
+
+  // The id, not just the list. A list cannot say which row you asked for, so the
+  // client used to match on the directory it had requested — which fails for a
+  // blank path (the daemon chose the directory) and for a directory that already
+  // has a shell (the match finds the old one). What that produced was a client
+  // that had just asked for a shell, staring at "No sessions".
+  ws.send(JSON.stringify({ type: "new", kind: "shell", cwd: tmpdir() }));
+  expect(await waitFor(() => text.some((m) => m.type === "created"))).toBe(true);
+  const msg = [...text].reverse().find((m) => m.type === "created");
+  expect(typeof msg.sessionId).toBe("string");
+  // It is the session that exists, not an id invented for the reply.
+  expect(await waitFor(() => lastSessions().some((s: any) => s.id === msg.sessionId))).toBe(true);
+  expect(msg.cwd).toBe(await realpath(tmpdir()));
+
+  // A path that is not a directory is refused out loud, and refusing does not
+  // take the connection down.
+  ws.send(JSON.stringify({ type: "new", kind: "shell", cwd: "/definitely/not/here" }));
+  expect(
+    await waitFor(() => text.some((m) => m.type === "error" && /not a directory/.test(m.message))),
+  ).toBe(true);
+  ws.close();
 });
 
 test("a client opens and kills a session over the WebSocket (FR-10)", async () => {

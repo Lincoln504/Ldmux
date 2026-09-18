@@ -184,14 +184,23 @@ export interface NewSessionMessage {
   kind?: "shell" | "pi";
   cwd?: string;
   title?: string;
-  /**
-   * What to run in it, as argv.
-   *
-   * The shell is the *host's* login shell either way (docs/SPEC.md §7) — this is
-   * the program started inside it, so a new shell can be a shell or an editor or
-   * an agent without the client having to know how to spell any of them.
-   */
-  command?: string[];
+}
+
+/**
+ * The answer to `new`: which session was just made.
+ *
+ * The `sessions` message that follows is a *list*, and a list cannot say which
+ * row is the one you asked for. Without this the client had to guess — it matched
+ * on the directory it had requested — and a guess is wrong in the two cases that
+ * matter: a blank path (where the daemon chose the directory, so there was nothing
+ * to match on) and a directory that already has a shell (where the guess finds
+ * the old one). Guessing is what left a client that had just asked for a shell
+ * showing "No sessions".
+ */
+export interface CreatedMessage {
+  type: "created";
+  sessionId: string;
+  cwd: string;
 }
 
 /** Remote client → server: end a session. The server answers with a fresh list. */
@@ -297,6 +306,7 @@ export type ControlMessage =
   | ScrollbackRequest
   | ListSessions
   | NewSessionMessage
+  | CreatedMessage
   | KillSessionMessage
   | CloseSessionMessage
   | SessionsMessage

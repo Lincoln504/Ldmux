@@ -32,25 +32,6 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 
 
-/**
- * A `command` field off the wire, as argv.
- *
- * Untrusted, so it is filtered to strings and given no special treatment: the
- * array goes to `tmux new-session` as separate arguments, never through a shell,
- * so nothing in it can become a command of its own. An empty or unusable value is
- * no command at all, which is a shell — the host's login shell, as always.
- */
-export function commandArgv(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const argv = value
-    .filter((a): a is string => typeof a === "string" && a.length > 0)
-    .slice(0, MAX_COMMAND_ARGS);
-  return argv.length > 0 ? argv : undefined;
-}
-
-/** A command is started, not pasted: more than this is not a command line. */
-const MAX_COMMAND_ARGS = 32;
-
 export interface RemoteServerOptions {
   hostname: string;
   /** 0 = ephemeral (tests). */
@@ -58,14 +39,18 @@ export interface RemoteServerOptions {
   token: string;
   getSession(id: string): SessionRecord | undefined;
   listSessions(): SessionInfo[] | Promise<SessionInfo[]>;
-  /** Open a new session on the host (FR-10). */
+  /**
+   * Open a new session on the host (FR-10), and answer with what was opened.
+   *
+   * The record, not `void`: the transport has to tell the caller which session it
+   * got (see [CreatedMessage]), and a list cannot say.
+   */
   createSession?(
     kind: "shell" | "pi",
     cwd: string | undefined,
     title: string | undefined,
     createdBy: string,
-    command?: string[],
-  ): Promise<void>;
+  ): Promise<SessionRecord>;
   /** End a session by id. */
   killSession?(id: string): Promise<void>;
   /**
@@ -433,14 +418,18 @@ export class RemoteServer {
         case "new": {
           // `phone` is a fact about origin, not a label: the client shows a
           // per-shell menu only for shells it opened itself.
-          await this.opts.createSession?.(
+          const record = await this.opts.createSession?.(
             msg.kind === "pi" ? "pi" : "shell",
             msg.cwd,
             msg.title,
             "phone",
-            commandArgv(msg.command),
           );
           if (data.disposed) return;
+          // Before the list, so a client that opens what it asked for has the id
+          // by the time the list it may also page through arrives.
+          if (record) {
+            this.sendJson(ws, { type: "created", sessionId: record.id, cwd: record.cwd });
+          }
           await this.sendSessions(ws);
           return;
         }

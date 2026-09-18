@@ -23,7 +23,6 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -221,6 +220,44 @@ class LdmuxClient(private var config: LdmuxConfig) {
     val desktopTick: StateFlow<Int> = _desktopTick
 
     /**
+     * The daemon's answer to a control message that failed — `new`, `close`,
+     * `kill`, an unattached scrollback request, bad JSON, anything the `catch`
+     * around the daemon's message switch turns into `{type:"error"}`.
+     *
+     * This used to arrive and go straight in the bin: `onMessage` below had no
+     * `"error"` branch at all, so a rejected `new` (e.g. a path that is not a
+     * directory) looked identical to one that was silently ignored, and a
+     * refresh that failed left its "…" on screen forever with nothing to say
+     * why. One place to catch it, so every caller gets an answer instead of a
+     * guess.
+     */
+    data class ServerError(val code: String, val message: String)
+    private val _serverError = MutableStateFlow<ServerError?>(null)
+    val serverError: StateFlow<ServerError?> = _serverError
+
+    /** Bumped for every error, the same way [desktopTick] is: two identical
+     * errors in a row must still both be seen. */
+    private val _errorTick = MutableStateFlow(0)
+    val errorTick: StateFlow<Int> = _errorTick
+
+    /**
+     * The id of the shell the daemon just created, on request.
+     *
+     * A `sessions` list cannot say which row is the one you asked for, so the
+     * client used to match it by directory — a guess that fails when the path was
+     * blank (the daemon chose the directory, so there is nothing to match) and
+     * when the directory already has a shell (the guess finds that one). What
+     * followed was a client that had just asked for a shell, standing on a terminal
+     * screen that said "No sessions".
+     */
+    private val _created = MutableStateFlow<String?>(null)
+    val created: StateFlow<String?> = _created
+
+    /** Bumped for every creation, so two in a row are both seen. */
+    private val _createdTick = MutableStateFlow(0)
+    val createdTick: StateFlow<Int> = _createdTick
+
+    /**
      * The last thing that happened to a shell's desktop window.
      *
      * Reported rather than assumed: putting a window on the desktop is
@@ -254,6 +291,11 @@ class LdmuxClient(private var config: LdmuxConfig) {
         _liveResult.value = null
     }
 
+    /** The banner has been read (or timed out); nothing more to say. */
+    fun clearServerError() {
+        _serverError.value = null
+    }
+
     /**
      * Ask the host what is on its desktop.
      *
@@ -283,18 +325,20 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private var scope: CoroutineScope? = null
     private var ws: DefaultClientWebSocketSession? = null
 
-    /** Open a new session on the host (FR-10). The list refreshes from the reply. */
-    fun create(kind: String, cwd: String? = null, title: String? = null, command: String? = null) {
+    /**
+     * Open a new session on the host (FR-10). The list refreshes from the reply.
+     *
+     * There is no `command` here on purpose: every shell this client can ask for is
+     * the host's login shell (docs/SPEC.md §7), never a chosen program, so there is
+     * nothing for a caller to pass. `kind = "pi"` is the one exception the daemon
+     * still recognises, and it needs no argv either.
+     */
+    fun create(kind: String, cwd: String? = null, title: String? = null) {
         val msg = buildJsonObject {
             put("type", "new")
             put("kind", kind)
             if (cwd != null) put("cwd", cwd)
             if (title != null) put("title", title)
-            // argv, not a command line: nothing is left for a shell to re-split,
-            // and `bash` here is a program name rather than syntax.
-            if (!command.isNullOrBlank()) {
-                put("command", buildJsonArray { for (w in command.trim().split(Regex("\\s+"))) add(w) })
-            }
         }.toString()
         sendControl(msg)
     }
@@ -424,6 +468,17 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private fun onMessage(text: String) {
         val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         when (root["type"]?.jsonPrimitive?.content) {
+            "error" -> {
+                _serverError.value = ServerError(
+                    code = root["code"]?.jsonPrimitive?.content ?: "error",
+                    message = root["message"]?.jsonPrimitive?.content ?: "the daemon refused that",
+                )
+                _errorTick.value += 1
+            }
+            "created" -> {
+                _created.value = root["sessionId"]?.jsonPrimitive?.content
+                _createdTick.value += 1
+            }
             "desktop" -> {
                 _desktop.value = parseDesktop(root["inventory"]?.jsonObject)
                 _desktopTick.value += 1
