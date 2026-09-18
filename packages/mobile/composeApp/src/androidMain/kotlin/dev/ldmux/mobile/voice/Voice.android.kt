@@ -3,77 +3,72 @@ package dev.ldmux.mobile.voice
 import android.Manifest
 import android.app.Activity
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.os.Bundle
-
-/** What the voice button is doing, for the little on-screen indicator. */
-sealed interface VoiceState {
-    data object Idle : VoiceState
-    data object RequestingPermission : VoiceState
-    data object Listening : VoiceState
-    data class Partial(val text: String) : VoiceState
-    data object Denied : VoiceState
-    data object Unavailable : VoiceState
-    data class Failed(val reason: String) : VoiceState
-}
+import java.lang.ref.WeakReference
 
 /**
- * Headless dictation, so voice can be a first-class input without the on-screen
- * keyboard ever appearing.
- *
- * This deliberately does **not** go through the IME's voice-typing (the mic on
- * the keyboard): that path only exists while a soft keyboard is up and an
- * InputConnection is live, which is exactly what a terminal wants to avoid. The
- * platform's own [SpeechRecognizer] is a headless service — no keyboard, no
- * overlay — and results arrive through [RecognitionListener] callbacks we can
- * forward straight into the pane.
+ * Android's dictation: [SpeechRecognizer], headless.
  *
  * On-device recognition is preferred where the platform offers it (Android 12+),
- * because it keeps shell commands off the network and removes the round trip.
- * When only cloud recognition is available that is what we get; it still needs
- * no keyboard. The caller supplies the transcript sink.
+ * because it keeps shell commands off the network and removes the round trip. When
+ * only cloud recognition is available that is what we get; it still needs no
+ * keyboard. The transcript goes to the sink the caller supplied.
+ *
+ * The activity this needs is found here rather than passed in, which is the point
+ * of the seam: `SpeechRecognizer` wants a Context and a permission request wants an
+ * Activity, and neither is part of what dictation *is*. iOS supplies
+ * `SFSpeechRecognizer` and has nothing to pass. Held weakly, because this object
+ * outlives any activity that is recreated and a recogniser holding one is a leak.
  */
-object VoiceDictation {
+actual object Dictation {
     private const val REQUEST_CODE = 0x7D
 
-    private var activity: Activity? = null
+    private var host: WeakReference<Activity>? = null
     private var recognizer: SpeechRecognizer? = null
     private var onText: ((String) -> Unit)? = null
     private var onState: ((VoiceState) -> Unit)? = null
 
-    /** True while a recognition session is running (the button toggles it). */
-    val listening: Boolean get() = recognizer != null
+    actual val listening: Boolean get() = recognizer != null
+
+    /** Called once, by the activity, so this side can reach a Context of its own. */
+    fun attachHost(activity: Activity) {
+        host = WeakReference(activity)
+    }
 
     /**
-     * Start (or stop, if already listening) one dictation. Must be called from
-     * the main thread: SpeechRecognizer requires it.
+     * Start (or stop, if already listening) one dictation. Must be called from the
+     * main thread: `SpeechRecognizer` requires it.
      */
-    fun toggle(activity: Activity, onText: (String) -> Unit, onState: (VoiceState) -> Unit) {
-        this.activity = activity
+    actual fun toggle(onText: (String) -> Unit, onState: (VoiceState) -> Unit) {
         this.onText = onText
         this.onState = onState
         if (recognizer != null) {
             stop()
             return
         }
-        if (activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            onState(VoiceState.RequestingPermission)
-            activity.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_CODE)
+        val act = host?.get()
+        if (act == null) {
+            onState(VoiceState.Unavailable)
             return
         }
-        begin(activity)
+        if (act.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            onState(VoiceState.RequestingPermission)
+            act.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_CODE)
+            return
+        }
+        begin(act)
     }
 
     /** Forward the runtime permission result from the host activity. */
     fun onRequestPermissionsResult(requestCode: Int, granted: Boolean) {
         if (requestCode != REQUEST_CODE) return
-        val act = activity
+        val act = host?.get()
         if (!granted || act == null) {
             onState?.invoke(VoiceState.Denied)
             return
@@ -81,7 +76,7 @@ object VoiceDictation {
         begin(act)
     }
 
-    fun stop() {
+    actual fun stop() {
         recognizer?.let { sr ->
             runCatching { sr.stopListening() }
             runCatching { sr.cancel() }
@@ -135,8 +130,7 @@ object VoiceDictation {
      * punctuation the shell does not want. Trim it (and only it) so "list files"
      * becomes `ls`-able text rather than `ls .`.
      */
-    private fun normalize(text: String): String =
-        text.trim().removeSuffix(".").trim()
+    private fun normalize(text: String): String = text.trim().removeSuffix(".").trim()
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
@@ -176,14 +170,4 @@ object VoiceDictation {
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "timed out"
         else -> "error $error"
     }
-}
-
-/** The Activity behind a (possibly wrapped) Compose context. */
-fun Context.findActivity(): Activity? {
-    var ctx: Context? = this
-    while (ctx is ContextWrapper) {
-        if (ctx is Activity) return ctx
-        ctx = ctx.baseContext
-    }
-    return null
 }

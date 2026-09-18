@@ -57,9 +57,6 @@ import dev.ldmux.mobile.term.GridPlacement
 import dev.ldmux.mobile.term.TerminalFrame
 import dev.ldmux.mobile.term.TerminalPainter
 import dev.ldmux.mobile.term.placeGrid
-import dev.ldmux.mobile.voice.VoiceDictation
-import dev.ldmux.mobile.voice.VoiceState
-import dev.ldmux.mobile.voice.findActivity
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.floor
@@ -173,10 +170,8 @@ actual fun rememberTerminalSurface(
     val scope = rememberCoroutineScope()
 
     val context = LocalContext.current
-    val activity = remember(context) { context.findActivity() }
     val focusManager = LocalFocusManager.current
     val focusRequester = remember { FocusRequester() }
-    var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     /** Where the user last tapped, so the snap is visible before the server answers. */
     var tapAt by remember { mutableStateOf<Pair<Int, Int>?>(null) }
@@ -248,20 +243,11 @@ actual fun rememberTerminalSurface(
         controller.setGrid(cols, rows)
     }
 
-    SideEffect {
-        controller.onStartVoice = {
-            val act = activity
-            if (act == null) {
-                voice = VoiceState.Unavailable
-            } else {
-                VoiceDictation.toggle(
-                    act,
-                    onText = { controller.sendText(it) },
-                    onState = { voice = it },
-                )
-            }
-        }
-    }
+    // Dictation is not this composable's business any more. It is one microphone for
+    // the app, driven from the side panel, because this composable exists per *page*
+    // and the pager keeps a neighbour composed for an instant swipe — so stopping
+    // dictation on dispose stopped the dictation belonging to whichever page was
+    // being swiped away from, and two composed pages could each draw the banner.
 
     // The orientation itself is not set here any more: `App` owns it, because
     // this composable exists per *page* while the screen has one orientation, and
@@ -274,7 +260,6 @@ actual fun rememberTerminalSurface(
             focusManager.clearFocus()
         }
     }
-    DisposableEffect(Unit) { onDispose { VoiceDictation.stop() } }
 
     val termBg = frame?.defaultBg?.let { Color(0xFF000000.toInt() or (it and 0xFFFFFF)) } ?: TermBg
 
@@ -479,7 +464,6 @@ actual fun rememberTerminalSurface(
             )
         }
 
-        VoiceBanner(voice, Modifier.align(Alignment.TopStart))
     }
     return controller
 }
@@ -571,30 +555,4 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScrollbar(
         topLeft = Offset(x, top),
         size = androidx.compose.ui.geometry.Size(4f, barH),
     )
-}
-
-/** A small line of feedback while dictation is running. */
-@Composable
-private fun VoiceBanner(state: VoiceState, modifier: Modifier) {
-    val text = when (state) {
-        VoiceState.Idle -> return
-        VoiceState.RequestingPermission -> "microphone permission…"
-        VoiceState.Listening -> "listening…"
-        VoiceState.Denied -> "microphone permission denied"
-        VoiceState.Unavailable -> "no speech recognition on this device"
-        is VoiceState.Partial -> state.text
-        is VoiceState.Failed -> "voice: ${state.reason}"
-    }
-    val accent = when (state) {
-        is VoiceState.Failed, VoiceState.Denied, VoiceState.Unavailable -> Color(0xFFFF6B6B)
-        else -> Accent
-    }
-    Box(
-        modifier
-            .padding(8.dp)
-            .background(Surface)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-    ) {
-        Text(text, color = accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-    }
 }

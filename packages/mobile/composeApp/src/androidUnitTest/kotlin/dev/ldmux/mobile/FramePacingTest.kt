@@ -16,7 +16,7 @@ class FramePacingTest {
     fun `an unmeasured link assumes a middling mobile round trip`() {
         val p = FramePacing()
         assertFalse(p.measured)
-        // 40 ms assumed, halved, is under the 33 ms ceiling.
+        // 40 ms assumed, halved, is under the ceiling.
         assertEquals(FramePacing.MIN_INTERVAL_MS, p.intervalMs)
     }
 
@@ -49,11 +49,11 @@ class FramePacingTest {
         // restore it immediately.
         val p = FramePacing()
         p.onRttSample(40)
-        assertEquals(33L, p.intervalMs)
+        assertEquals(FramePacing.MIN_INTERVAL_MS, p.intervalMs)
         p.onRttSample(600)
-        assertTrue(p.intervalMs < 150L, "one slow pong should not go straight to the floor")
+        assertTrue(p.intervalMs < FramePacing.MAX_INTERVAL_MS, "one slow pong should not go straight to the floor")
         p.onRttSample(40)
-        assertEquals(33L, p.intervalMs, "a fast sample is adopted whole")
+        assertEquals(FramePacing.MIN_INTERVAL_MS, p.intervalMs, "a fast sample is adopted whole")
     }
 
     @Test

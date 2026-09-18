@@ -54,6 +54,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import dev.ldmux.mobile.voice.Dictation
+import dev.ldmux.mobile.voice.VoiceState
+import dev.ldmux.mobile.voice.VoiceBanner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -212,6 +215,14 @@ fun App() {
     // `created` message, and a list of sessions cannot say which row is new.
     var pendingOpens by remember { mutableStateOf(0) }
 
+    // The shell the user just asked for, until the pager has actually gone to it.
+    //
+    // A request rather than an assignment, because the page list is derived from the
+    // session list: between the daemon answering `created` and the session list
+    // carrying the new shell there is a moment when the id exists and has no index.
+    // Assigning then would scroll to a page that is not there yet.
+    var gotoSessionId by remember { mutableStateOf<String?>(null) }
+
     val attachable = sessions.filter { it.attachable }
     val pages = pageSelection?.let { chosen -> attachable.filter { it.id in chosen } } ?: attachable
 
@@ -225,8 +236,16 @@ fun App() {
         if (ids.isEmpty()) return@LaunchedEffect
         // Every id the gesture asked for, not only the last one: the daemon answers
         // a create one at a time and one gesture can ask for several.
-        pageSelection = (pageSelection ?: emptySet()) + ids.toSet()
+        // `plus` on a nullable set, not `(pageSelection ?: emptySet()) + ids`: `null`
+        // means "every shell is a page", and collapsing it to a set here would turn
+        // "all of them" into "only this one", which is the bug in the line below
+        // that used to clear the selection outright.
+        pageSelection = pageSelection?.plus(ids.toSet())
         pendingOpens = (pendingOpens - ids.size).coerceAtLeast(0)
+        // ...and go to it. Creating a shell and staying on the screen that created it
+        // is a shell the user cannot reach; this used to work only because the
+        // selection was cleared, which also silently closed every other shell.
+        gotoSessionId = ids.last()
         client.clearCreated()
     }
 
@@ -321,6 +340,17 @@ fun App() {
     // nor be forgotten: every key in either bar goes through here.
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
 
+    // Carries out the "go to the shell just created" request from above. It lives
+    // here because this is where the pager exists; the request is made there because
+    // that is where the daemon's answer arrives.
+    LaunchedEffect(gotoSessionId, pages) {
+        val want = gotoSessionId ?: return@LaunchedEffect
+        val at = pages.indexOfFirst { it.id == want }
+        if (at < 0) return@LaunchedEffect
+        pagerState.scrollToPage(at)
+        gotoSessionId = null
+    }
+
     // A mode change is accompanied by a rotation, and the rotation is Android's:
     // the app asks for an orientation and the window turns over on its own. What is
     // *not* available is the end of that turn. The configuration is delivered at
@@ -403,6 +433,47 @@ fun App() {
     var killTarget by remember { mutableStateOf<Session?>(null) }
     val portrait = mode == UiMode.Portrait
     val currentHandle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
+
+    // **One microphone, and it belongs to the app.** Dictation is bound to the shell
+    // that is on screen when it starts, because a transcript is for the shell you
+    // were looking at when you spoke. Switching shells *ends* it rather than
+    // redirecting the words into whatever slid under your thumb.
+    //
+    // This state is here rather than in a terminal surface for a measured reason:
+    // the pager keeps a neighbour composed for an instant swipe, so a per-surface
+    // owner stopped the wrong page's dictation when any page was disposed, and two
+    // composed pages could each draw the banner.
+    var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
+
+    // Switching shells ends dictation. Read through the remembered pager rather than
+    // through the page list, which a captured value would freeze at its first value.
+    LaunchedEffect(pagerState) {
+        var last = pagerState.currentPage
+        snapshotFlow { pagerState.currentPage }.collect { page ->
+            if (page != last) {
+                last = page
+                Dictation.stop()
+            }
+        }
+    }
+
+    // A microphone that outlives the screen is a microphone nobody asked for.
+    LaunchedEffect(AppLifecycle.foreground) {
+        if (!AppLifecycle.foreground) Dictation.stop()
+    }
+
+    // The banner is feedback rather than a notification. It is drawn over the
+    // terminal, so a line that stays is a row of the terminal that stays covered —
+    // and a failure that has been read, or never will be, is not worth that. Refused
+    // permission is the exception: it is the one voice state a user can act on, and
+    // hiding the only explanation of why the microphone does nothing would leave the
+    // button looking broken.
+    LaunchedEffect(voice) {
+        if (voice is VoiceState.Failed || voice == VoiceState.Unavailable) {
+            delay(4000)
+            voice = VoiceState.Idle
+        }
+    }
 
     // Portrait *means* typing, so the keyboard belongs to it: if the user
     // dismisses the keyboard we return to landscape rather than sitting in
@@ -502,11 +573,16 @@ fun App() {
                 // host's working directory — the same default every other caller
                 // gets.
                 client.create("shell", path.ifBlank { null })
-                // ...and then *go to it*. Creating a shell and leaving the user on
-                // the screen that created it is a shell they cannot reach, which
-                // is what "opening a new shell is not working" was.
+                // ...and *go to it*. Creating a shell and leaving the user on the
+                // screen that created it is a shell they cannot reach. The going is
+                // the `gotoSessionId` request above, made when the daemon answers.
+                //
+                // The selection is deliberately **not** cleared here. It used to be,
+                // and that silently closed every shell already open: the page set is
+                // what ◀ ▶ walk, so opening a second shell left one page and the
+                // arrows with nowhere to go. Creating a shell is not a reason to let
+                // go of the others.
                 pendingOpens = 1
-                pageSelection = emptySet()
                 showLauncher = false
                 mode = UiMode.Landscape
             },
@@ -574,6 +650,18 @@ fun App() {
                         handles,
                         onFlip = { mode = UiMode.Portrait },
                         onKill = { killTarget = it },
+                        onVoice = {
+                            // The sink is the handle that is on screen *now*, taken
+                            // once: a transcript cannot be retargeted afterwards,
+                            // because by then the user has been speaking. No handle
+                            // means no shell, which is not a failure to hide.
+                            val target = currentHandle
+                            if (target == null) {
+                                voice = VoiceState.Unavailable
+                            } else {
+                                Dictation.toggle(onText = { target.sendText(it) }, onState = { voice = it })
+                            }
+                        },
                         onLauncher = {
                             // The launcher is where you choose what to open, so
                             // going back to it lets go of everything: a page is a
@@ -595,15 +683,20 @@ fun App() {
                 // *below* the terminal, and `panelLeft` decides which side the panel
                 // is on in the one mode that has one.
                 if (!portrait && chrome && config.panelLeft) panel()
-                TerminalArea(
-                    config,
-                    pages,
-                    pagerState,
-                    handles,
-                    typing = portrait,
-                    Modifier.weight(1f).fillMaxHeight(),
-                    pendingOpen = pendingOpens > 0,
-                )
+                // The banner follows the app rather than the page, so it is drawn
+                // over whichever shell is on screen and there is exactly one of it.
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    TerminalArea(
+                        config,
+                        pages,
+                        pagerState,
+                        handles,
+                        typing = portrait,
+                        Modifier.fillMaxSize(),
+                        pendingOpen = pendingOpens > 0,
+                    )
+                    VoiceBanner(voice, Modifier.align(Alignment.TopStart))
+                }
                 if (!portrait && chrome && !config.panelLeft) panel()
             }
             if (portrait && chrome) {
@@ -1001,6 +1094,7 @@ private fun SidePanel(
     handles: Map<String, TerminalHandle>,
     onFlip: () -> Unit,
     onKill: (Session) -> Unit,
+    onVoice: () -> Unit,
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
     modifiers: Modifiers,
@@ -1087,7 +1181,7 @@ private fun SidePanel(
             IconBtn(onClick = onFlip, label = "flip to portrait") { IconFlip(Accent) }
             // Landscape only: portrait always has the keyboard up and the IME
             // carries its own microphone. Two microphones is one too many.
-            IconBtn(onClick = { handle?.startVoice() }, label = "voice input") { IconMic(tint = Fg) }
+            IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
         }
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,

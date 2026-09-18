@@ -44,9 +44,6 @@ data class LinkStats(
      */
     fun tapCell(col: Int, row: Int) {}
 
-    /** Start dictation. The transcript is typed into the pane, keyboard or not. */
-    fun startVoice() {}
-
     /**
      * Enter or leave tmux copy-mode.
      *

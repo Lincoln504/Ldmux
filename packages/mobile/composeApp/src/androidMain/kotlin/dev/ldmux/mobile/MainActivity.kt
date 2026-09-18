@@ -7,13 +7,16 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import dev.ldmux.mobile.voice.VoiceDictation
+import dev.ldmux.mobile.voice.Dictation
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AndroidApp.context = applicationContext
         LdmuxService.activity = this
+        // Dictation finds its own Activity rather than taking one through the
+        // shared seam, so this is where it is told which activity that is.
+        Dictation.attachHost(this)
         enableEdgeToEdge()
         setContent { App() }
     }
@@ -61,9 +64,9 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * The microphone permission is requested by [VoiceDictation] (the only thing
-     * that needs it), but only an Activity can receive the answer, so it has to
-     * be routed back by hand.
+     * The microphone permission is requested by [Dictation] (the only thing that
+     * needs it), but only an Activity can receive the answer, so it has to be
+     * routed back by hand.
      */
     override fun onRequestPermissionsResult(
         requestCode: Int,
@@ -72,7 +75,7 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_NOTIFICATIONS) return
-        VoiceDictation.onRequestPermissionsResult(
+        Dictation.onRequestPermissionsResult(
             requestCode,
             grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED,
         )

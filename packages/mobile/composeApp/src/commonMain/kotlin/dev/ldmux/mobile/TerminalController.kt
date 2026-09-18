@@ -68,8 +68,6 @@ class TerminalController(
      * Set by the platform surface: it owns the microphone, which the shared
      * sidebar can only ask for. Null until the surface is composed.
      */
-    var onStartVoice: (() -> Unit)? = null
-
     /**
      * A tap waiting on the server's verdict about whether this pane takes
      * clicks. Kept so a refused click can still move the cursor, which is what
@@ -207,11 +205,13 @@ class TerminalController(
      * this an MVP requirement for exactly this reason (see docs/PREDICTIVE-ECHO.md).
      */
     private fun scheduleRender() {
-        // The window is the link's, not a constant: half a round trip is roughly
-        // how long a keystroke's echo takes to come back, which is the cadence
-        // the user is watching. On a fast link this is the 33 ms floor (~30 Hz),
-        // on a slow one it stretches toward 150 ms so the client stops queuing
-        // frames nobody will see.
+        // The window is the link's, not a constant: half a round trip is the
+        // one-way delay, which is the fastest new content can have arrived —
+        // repainting sooner than that cannot show anything that is not already on
+        // screen. On a fast link this is the 50 ms floor (~20 Hz), on a slow one it
+        // stretches toward 200 ms so the client stops rendering frames nobody will
+        // read. It is a budget for the main thread, which input shares, and not a
+        // throttle on the wire: output is sent when the pane changes.
         val frameMs = pacing.intervalMs
         // Monotonic, not wall clock: this is a duration, and a common-code file
         // shared with iOS must not reach for `System.currentTimeMillis`.
@@ -425,9 +425,6 @@ class TerminalController(
         for (batch in batchKeys(keys)) attach.keys(batch)
     }
 
-    override fun startVoice() {
-        onStartVoice?.invoke()
-    }
 
     /**
      * The grid the surface can paint. This is the resize request: the daemon

@@ -11,13 +11,24 @@ package dev.ldmux.mobile
  * return, which is the cadence the user is actually watching.
  *
  * Clamped at both ends, and the clamps are the policy:
- *  * [minIntervalMs] is the ceiling on the frame rate (~30 Hz). Terminals
- *    stream text, not video, and the input path is protected separately — a
- *    saturated main thread delaying *typing* was the original reason to coalesce
- *    at all (docs/PREDICTIVE-ECHO.md), not a reason to paint at 60 Hz.
- *  * [maxIntervalMs] is the floor (~6.7 Hz). Past this the display stops
- *    looking live and starts looking broken, and a user trying to read a slow
- *    terminal is better served by the predictive echo than by more draws.
+ *  * [minIntervalMs] is the ceiling on the frame rate (~20 Hz). Terminals stream
+ *    text, not video, and what the ceiling actually buys is **main-thread
+ *    headroom** — a repaint walks the whole grid, and the main thread is the one
+ *    the input path runs on, so every render the user cannot perceive is a render
+ *    competing with their typing. The original reason to coalesce at all was a
+ *    saturated main thread delaying input (docs/PREDICTIVE-ECHO.md); this is that
+ *    argument carried to its conclusion rather than a new one.
+ *
+ *    Deliberately **not** a claim about the network. Output is event-driven on the
+ *    wire — a frame is sent when the pane changes — so this number moves no bytes.
+ *    What it moves is how often the CPU is asked to redraw what already arrived.
+ *  * [maxIntervalMs] is the floor (~5 Hz). Past this the display stops looking
+ *    live and starts looking broken, and a user reading a slow terminal is better
+ *    served by the predictive echo than by more draws.
+ *
+ * Both clamps were twice this eager, and were lowered on purpose: the cost of a
+ * repaint is paid on every frame, while the benefit of the 30th frame per second
+ * is not perceptible in a grid of text.
  *
  * The estimate is deliberately asymmetric. A *lower* sample is adopted at once,
  * because a single good round trip proves the link can do it and queueing behind
@@ -63,10 +74,10 @@ class FramePacing(
     }
 
     companion object {
-        /** ~30 Hz. */
-        const val MIN_INTERVAL_MS = 33L
-        /** ~6.7 Hz. */
-        const val MAX_INTERVAL_MS = 150L
+        /** ~20 Hz. */
+        const val MIN_INTERVAL_MS = 50L
+        /** ~5 Hz. */
+        const val MAX_INTERVAL_MS = 200L
         /** Until a measurement lands, assume a middling mobile link: 40 ms. */
         const val ASSUMED_RTT_MS = 40.0
         private const val NO_SAMPLE = -1.0
