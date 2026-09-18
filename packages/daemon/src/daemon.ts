@@ -701,8 +701,14 @@ export class LdmuxDaemon {
   private async closeDesktopWindow(sessionId: string): Promise<void> {
     const record = this.registry.get(sessionId);
     if (!record?.tmuxName) return;
-    await closeLive(sessionId);
+    // The daemon stops believing there is a window *before* it waits for the
+    // window manager, not after. `closeLive` awaits a subprocess, and the
+    // reconcile pass reads this map once a second and ends any session whose
+    // window it finds absent — so deleting the id afterwards leaves a window's
+    // worth of time in which the pass sees a shell with no window and kills it.
+    // The caller is fire-and-forget, which is what makes the gap reachable.
     this.liveWindows.delete(sessionId);
+    await closeLive(sessionId);
     void this.cp.setWindowSize(record.tmuxName, "manual").catch(() => {});
   }
 

@@ -234,3 +234,33 @@ test("adopt rejects a session name that could be read as argv", async () => {
     /invalid tmux session name/,
   );
 });
+
+// The daemon must stop counting a desktop window *before* it waits for the window
+// manager to close it. `closeLive` awaits a subprocess, and the reconcile pass
+// reads the live map once a second and ends any session whose window it finds
+// absent — so deleting the id afterwards leaves a window's worth of time in which
+// the pass sees a shell with no window and kills it. The seize path calls this
+// fire-and-forget, which is what makes that gap reachable: the phone takes a shell
+// back and the daemon then ends the shell it just handed back.
+//
+// Nothing is stubbed. `closeLive` is async, so at the moment of the first
+// assertion no await has resolved — which is exactly the state the reconcile pass
+// would see if it ran then.
+test("a window stops counting before the manager is asked to close it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ldmux-live-order-"));
+  const d = new LdmuxDaemon({ stateDir: dir }) as unknown as {
+    registry: { get(id: string): unknown };
+    liveWindows: Map<string, { workspace: string }>;
+    closeDesktopWindow(id: string): Promise<void>;
+  };
+  // A tmux name is all `closeDesktopWindow` needs from the record; the session
+  // itself is never touched, because nothing here starts a daemon.
+  d.registry.get = () => ({ tmuxName: "ldmux-order-test" });
+  d.liveWindows.set("s1", { workspace: "2" });
+
+  const closing = d.closeDesktopWindow("s1");
+  expect(d.liveWindows.has("s1")).toBe(false);
+  await closing;
+  expect(d.liveWindows.has("s1")).toBe(false);
+  rmSync(dir, { recursive: true, force: true });
+});
