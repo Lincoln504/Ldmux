@@ -1327,8 +1327,8 @@ private fun SidePanel(
                 listOf(
                     "Esc" to { press("Escape") },
                     "Tab" to { press("Tab") },
-                    "⏎" to { press("Enter") },
                     "del" to { press("BSpace") },
+                    "⏎" to { press("Enter") },
                 ),
             )
             PanelDivider()

@@ -197,10 +197,6 @@ fun LauncherScreen(
 
     if (newShellOpen) {
         NewShellModal(
-            // The real directory, never the `~` form: that is how a path is
-            // *shown*, and the daemon resolves a path by asking the filesystem.
-            // A suggestion that cannot be used is worse than an empty field.
-            suggestedPath = entries.firstOrNull { it.key in chosen }?.cwd.orEmpty(),
             onDismiss = { newShellOpen = false },
             onCreate = { path ->
                 newShellOpen = false

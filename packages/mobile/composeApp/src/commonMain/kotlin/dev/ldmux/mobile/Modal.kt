@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,7 +29,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +85,61 @@ private fun Field(
     placeholder: String,
     modifier: Modifier = Modifier,
 ) {
+    FieldBox(placeholder, value.isEmpty(), modifier) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = FieldText,
+            cursorBrush = SolidColor(Accent),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * The same field, holding a value that includes where the caret is.
+ *
+ * A plain `String` field cannot say where the caret should be, and the new-shell field
+ * has to: it opens holding `~/` with the caret after it, so the first character typed
+ * continues a path rather than landing in front of the tilde. Compose's `String`
+ * overload keeps its own caret and does not offer to move it, so the one field that
+ * needs to say gets to say.
+ */
+@Composable
+private fun FieldValue(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
+) {
+    FieldBox(placeholder, value.text.isEmpty(), modifier) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = FieldText,
+            cursorBrush = SolidColor(Accent),
+            // The caret is only real if the field has focus, and a field that opens
+            // unfocused shows a caret position that typing does not go to. Measured:
+            // with the value prefilled and nothing requesting focus, the field read
+            // `~/` and stayed `~/` through both `input text tmp` and two deletes.
+            modifier = Modifier.fillMaxWidth().then(
+                if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier,
+            ),
+        )
+    }
+}
+
+/**
+ * The box a field is drawn in, shared by both value types.
+ *
+ * Shared rather than written twice: two fields that are meant to look identical and are
+ * drawn in two places are two fields that stop looking identical.
+ */
+@Composable
+private fun FieldBox(placeholder: String, empty: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Box(
         modifier
             .fillMaxWidth()
@@ -88,19 +148,15 @@ private fun Field(
             .border(1.dp, Line, RoundedCornerShape(8.dp))
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
     ) {
-        if (value.isEmpty()) {
+        if (empty) {
             Text(placeholder, color = Dim.copy(alpha = 0.6f), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
         }
-        BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
-            singleLine = true,
-            textStyle = TextStyle(color = Fg, fontFamily = FontFamily.Monospace, fontSize = 13.sp),
-            cursorBrush = SolidColor(Accent),
-            modifier = Modifier.fillMaxWidth(),
-        )
+        content()
     }
 }
+
+/** One text style for every field, so the fields line up with each other. */
+private val FieldText = TextStyle(color = Fg, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
 
 /** A labelled field, because "which box is the path" is not a question to ask. */
 @Composable
@@ -128,22 +184,34 @@ private fun LabelledField(
  */
 @Composable
 fun NewShellModal(
-    suggestedPath: String,
     onDismiss: () -> Unit,
     onCreate: (path: String) -> Unit,
 ) {
-    var path by remember { mutableStateOf(suggestedPath) }
+    // It opens holding `~/` with the caret after it, and that is the whole design. The
+    // tilde is text the user can delete rather than a decoration: it is a real path the
+    // daemon understands, so leaving it alone means home and typing after it means a
+    // path inside home. Nothing is prefilled from the launcher's selection any more --
+    // a field that opens holding a path nobody typed, with nothing saying where it came
+    // from, is a field that gets appended to by mistake, which is exactly what happened.
+    var path by remember { mutableStateOf(TextFieldValue("~/", TextRange(2))) }
+    // Ask for focus once, when the modal appears, so the caret is live and the keyboard
+    // is up: the whole point of the prefill is that the next keystroke lands after it.
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
 
     ModalCard("new shell", onDismiss) {
-        LabelledField("path", path, { path = it }, "the host's working directory")
+        Column(verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad)) {
+            Text("path", color = Dim, fontSize = 10.sp)
+            FieldValue(path, { path = it }, "~", focusRequester = focus)
+        }
         Text(
-            "Opens the host's login shell there.",
+            "Opens the host's login shell there. Empty means your home directory.",
             color = Dim.copy(alpha = 0.7f),
             fontSize = 10.sp,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedBtn("cancel", Modifier.weight(1f)) { onDismiss() }
-            AccentBtn("create", Modifier.weight(1f)) { onCreate(path.trim()) }
+            AccentBtn("create", Modifier.weight(1f)) { onCreate(path.text.trim()) }
         }
     }
 }
