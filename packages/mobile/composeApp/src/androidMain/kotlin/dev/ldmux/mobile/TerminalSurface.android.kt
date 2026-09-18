@@ -1,5 +1,6 @@
 package dev.ldmux.mobile
 
+
 import android.content.Context
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
@@ -130,13 +131,6 @@ actual object AppPrefs {
 
 /** Fallback surface colour until the engine has told us its own background. */
 private val TermBg = Color(0xFF000000)
-
-/**
- * A zero-width character kept in the hidden input field so the IME always has
- * something to delete. See the field's comment: without it, backspace is
- * unreliable because the IME and the app disagree about the field's contents.
- */
-private const val SENTINEL = "\u200b"
 
 /**
  * The native terminal surface: a Compose Canvas painting the libghostty-vt cell
@@ -451,52 +445,27 @@ actual fun rememberTerminalSurface(
         // be focusable for the IME, and covering the grid with it would eat the
         // scroll gesture.
         //
-        // The field's value is a **sentinel**: a single zero-width character,
-        // restored after every change. That is what makes deletion reliable.
-        // With an accumulating buffer the IME's own idea of the text (composing
-        // regions, autocorrect, suggestions) drifts from ours, and a backspace
-        // can arrive as a change we cannot interpret — which is exactly the
-        // "delete randomly stops working" bug. With a sentinel there is always
-        // one character to delete, so the IME always reports the deletion.
+        // The field is the IME's own buffer and is treated as one: it is left
+        // holding what the IME says it holds, and the difference between two values
+        // is what gets sent. See `InputDelta.kt` for why — the short version is that
+        // resetting it to a sentinel after every change lost half of an injected
+        // burst, measured, because the write replaced the buffer the IME was midway
+        // through producing into. Keyed on the session, because a different shell is
+        // a different line, and cleared here rather than inside the callback, which
+        // is the whole point.
         if (typing) {
-            var field by remember { mutableStateOf(SENTINEL) }
-            val sentinelLen = SENTINEL.length
+            var field by remember(sessionId) { mutableStateOf("") }
             BasicTextField(
                 value = field,
                 onValueChange = { next ->
-                    // Reset first: no state may accumulate across changes.
-                    field = SENTINEL
-                    val content = next.replace(SENTINEL, "")
-                    if (content.isEmpty()) {
-                        // The only thing removed was the sentinel: a backspace
-                        // with nothing left on our side of the line.
-                        if (next.length < sentinelLen) controller.sendKey("BSpace")
-                        return@BasicTextField
-                    }
-                    val pending = StringBuilder()
-                    for (ch in content) {
-                        when (ch) {
-                            '\n', '\r' -> {
-                                if (pending.isNotEmpty()) {
-                                    controller.sendText(pending.toString())
-                                    pending.clear()
-                                }
-                                controller.sendKey("Enter")
-                            }
-                            // Tab is a named key, not text: it must reach tmux as
-                            // Tab so completion and tmux's own bindings see a
-                            // real TAB, and so it can never be predicted.
-                            '\t' -> {
-                                if (pending.isNotEmpty()) {
-                                    controller.sendText(pending.toString())
-                                    pending.clear()
-                                }
-                                controller.sendKey("Tab")
-                            }
-                            else -> pending.append(ch)
+                    for (op in inputOpsFor(field, next)) {
+                        when (op) {
+                            is InputOp.Keys -> for (name in op.names) controller.sendKey(name)
+                            is InputOp.Text -> controller.sendText(op.value)
                         }
                     }
-                    if (pending.isNotEmpty()) controller.sendText(pending.toString())
+                    // What the IME already reported, and not one character more.
+                    field = next
                 },
                 modifier = Modifier
                     .size(1.dp)
