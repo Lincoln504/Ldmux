@@ -179,4 +179,25 @@ class LauncherTest {
     fun `a missing inventory is null rather than an empty screen with no explanation`() {
         assertNull(parseDesktop(null))
     }
+
+    @Test
+    fun `the shell view names the folder, not the path to it`() {
+        // A title is not a location. The whole route from the root is worth the
+        // room when you are choosing a directory and worth none of it when you are
+        // already in one, and the shell view is the already-in-one case.
+        assertEquals("ldmux", folderName("/home/ldeen/Documents/ldmux"))
+        assertEquals("shelltest", folderName("/tmp/shelltest"))
+        assertEquals("src", folderName("/home/ldeen/proj/src/"))
+        // The home directory has no last segment worth showing, and the root has
+        // none at all.
+        assertEquals("~", folderName("/home/ldeen"))
+        assertEquals("~", folderName("/home/ldeen/"))
+        assertEquals("/", folderName("/"))
+        // Someone else's home is not "~" in principle, but the client has no way
+        // to know the local user, so any `/home/<name>` reads as one. That is the
+        // same convention `tildify` already uses, and it is only ever wrong about
+        // a directory that is not yours.
+        assertEquals("~", folderName("/home/bob"))
+        assertEquals("work", folderName("/home/bob/work"))
+    }
 }

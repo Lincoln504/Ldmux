@@ -309,6 +309,25 @@ private fun DrawScope.drawMic(tint: Color) {
  * session is the part below the user's home — a truncated prefix that reads
  * `/home/ldeen/Documents/` for every session is worse than useless.
  */
+/**
+ * The title of the shell view: the folder the shell is in, not the way to it.
+ *
+ * `/home/ldeen/Documents/ldmux` is a *path*: it says where a thing is by spelling
+ * the whole route from the root, which is worth the room when you are choosing a
+ * directory and worth none of it when you are already in one. The shell view is
+ * the already-in-one case, so it shows `ldmux`.
+ *
+ * Two `src` folders then look alike, which is the price and is payable: the
+ * launcher is the screen where you tell shells apart, and it shows the full path
+ * for exactly that reason.
+ */
+fun folderName(path: String): String {
+  val home = Regex("^/(home|Users)/[^/]+").find(path)?.value
+  if (home != null && path.trimEnd('/') == home) return "~"
+  val base = path.trimEnd('/').substringAfterLast('/')
+  return base.ifEmpty { if (home != null) "~" else "/" }
+}
+
 fun tildify(path: String): String {
     val m = Regex("^/(home|Users)/[^/]+").find(path) ?: return path
     return "~" + path.removePrefix(m.value)

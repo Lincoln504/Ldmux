@@ -408,20 +408,6 @@ export class TmuxControlPlane {
     return out.split("\n").map((l) => l.trim()).filter(Boolean);
   }
 
-  /**
-   * Detach one client by tty.
-   *
-   * Used to take a session back from a desktop window without killing anything:
-   * detaching makes the window's `tmux attach` *return*, which is what lets the
-   * window show "open on another device" instead of vanishing.
-   *
-   * Returns false when no such client is attached — the honest answer, and the
-   * one that stops a caller from believing it displaced somebody.
-   */
-  async detachClient(tty: string): Promise<boolean> {
-    const { code } = await this.run(["detach-client", "-t", tty]);
-    return code === 0;
-  }
 
   /**
    * Set a session-scoped user option (`@name`).

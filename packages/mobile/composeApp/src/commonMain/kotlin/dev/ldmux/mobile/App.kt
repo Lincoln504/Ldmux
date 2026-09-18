@@ -781,45 +781,47 @@ private fun SidePanel(
             .padding(horizontal = 8.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Where you are, and how to move. There is no session list by design, so
-        // this is the only navigation — which is why it gets the widest row and
-        // the biggest touch targets in the panel rather than being strung across
-        // a title. The path is tildified because the tail of it is the only part
-        // that tells two shells apart.
-        // The launcher, its own control at the top and wearing the accent.
+        // Where you are, and how to move — one row, starting with the control
+        // that leaves this screen.
         //
-        // It used to sit in the action row beside the flip and the microphone,
-        // where three identical dark squares made it read as one more key in the
-        // column of keys below it. It is not a key: it leaves this screen.
-        Box {
-            IconBtn(onClick = { menuOpen = true }, filled = true) {
-                IconLauncher(Bg)
+        // The launcher used to be on its own line above this, which made three
+        // rows of chrome before the first key and spent a whole row saying nothing
+        // but "menu". It is the same kind of thing as the arrows: a control that
+        // moves you somewhere. The title is the folder, not the path — see
+        // [folderName] — and the count is a subtitle rather than a second row,
+        // because "2 / 3" is not a heading.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Box {
+                IconBtn(onClick = { menuOpen = true }, filled = true) {
+                    IconLauncher(Bg)
+                }
+                AppMenu(
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false },
+                    onLauncher = onLauncher,
+                    onSettings = onSettings,
+                    onClose = here?.let { s -> { onKill(s) } },
+                )
             }
-            AppMenu(
-                expanded = menuOpen,
-                onDismiss = { menuOpen = false },
-                onLauncher = onLauncher,
-                onSettings = onSettings,
-                onClose = here?.let { s -> { onKill(s) } },
-            )
-        }
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
             NavArrow("◀", enabled = current > 0) { step(-1) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    tildify(here?.cwd ?: ""),
+                    folderName(here?.cwd ?: ""),
                     color = Fg,
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    "${current + 1} / $total",
+                    if (total > 1) "${current + 1} / $total shells" else "1 shell",
                     color = Dim,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp,
+                    maxLines = 1,
                 )
             }
             NavArrow("▶", enabled = current < total - 1) { step(1) }
@@ -983,7 +985,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Connection", color = Fg) },
+        title = { Text("Settings", color = Fg) },
         containerColor = Surface,
         // Material's dialogs mix their background from `primary` by default, which
         // is how a pure grey card picked up a violet cast on a black screen.
@@ -1022,8 +1024,10 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     }
                 }
                 Text(
-                    "on: typed text appears instantly, before the server echoes it. " +
-                        "A prompt that does not echo (a password) stops prediction until the next line.",
+                    // Said once, in the shortest form that is still true. A setting
+                    // is a thing you already decided to change; it does not need the
+                    // reasoning that made you open this.
+                    "text appears before the server echoes it",
                     color = Dim,
                     fontSize = 10.sp,
                 )
@@ -1039,8 +1043,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     }
                 }
                 Text(
-                    "a bigger font means fewer columns, and the shell is resized to match — " +
-                        "nothing is scaled down to fit. Pinch on the terminal to change it too.",
+                    "bigger text means fewer columns; the shell is resized to match",
                     color = Dim,
                     fontSize = 10.sp,
                 )
@@ -1090,9 +1093,11 @@ private fun BoxScope.HeldElsewhere(
             Spacer(Modifier.height(6.dp))
             Text(
                 if (confirmed) {
-                    "Taking it will close $holder's view of this shell."
+                    // True since ownership moves the shell rather than copying it:
+                    // taking it back closes the other device's view of it.
+                    "this closes $holder's view of it"
                 } else {
-                    "One device at a time, so this shell is not yours to type in\nwhile $holder has it."
+                    "one device at a time"
                 },
                 color = Dim,
                 fontSize = 12.sp,

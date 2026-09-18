@@ -441,6 +441,22 @@ export class RemoteServer {
           // it open (ADR-0010). Reusing `kill` for this would make the phone the
           // authority on a fact it cannot see, which is the bug being fixed.
           const id = String(msg.sessionId ?? "");
+
+          // A shell opened at the desk belongs to the desk. The phone can look at
+          // it and type in it, but closing it here is putting it down, not
+          // destroying it — only where a shell came from may end it. This lives
+          // here and not in the daemon's `close`, because the *caller* is what
+          // decides, and only the transport knows the caller: the same verb over
+          // the local socket is the desk's own CLI, where closing a shell it
+          // started must still mean ending it.
+          const record = this.opts.getSession(id);
+          if (data.device?.kind === "phone" && record && record.createdBy !== "phone") {
+            if (data.device) this.opts.releaseClaim?.(id, data.device.id);
+            if (data.disposed) return;
+            await this.sendSessions(ws);
+            return;
+          }
+
           const result = this.opts.closeSession
             ? await this.opts.closeSession(id)
             : { ok: true, ended: true };

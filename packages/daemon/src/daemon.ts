@@ -363,11 +363,17 @@ export class LdmuxDaemon {
       void this.cp.setWindowSize(record.tmuxName, mode).catch(() => {});
     }
     if (result.previous && result.previous.id !== device.id) {
-      // The window has to be told to step aside, or it keeps a live client on a
-      // shell someone else is driving. Fire-and-forget: it is a tmux detach, and
-      // the attach that displaced it must not wait on it.
+      // The window is *closed*, not left standing. It was a view of a shell that
+      // has moved, and a shell is open on one device at a time: taking a shell
+      // back to the phone ends the desktop's view of it the same way opening it on
+      // the desktop ended the phone's. What makes that safe is not a second copy
+      // of the shell — there is one tmux session either way — but that the window
+      // can be opened again from wherever the shell now is.
+      //
+      // Fire-and-forget: it kills a window, and the attach that displaced it must
+      // not wait on a window manager to finish.
       if (result.previous.id === this.desktopDevice.id) {
-        void this.detachLiveWindow(sessionId).catch(() => {});
+        void this.closeDesktopWindow(sessionId).catch(() => {});
       }
       return { ok: true, displaced: result.previous };
     }
@@ -651,11 +657,22 @@ export class LdmuxDaemon {
    * took the shell instead of disappearing — the reason the window runs a loop
    * rather than tmux directly.
    */
-  private async detachLiveWindow(sessionId: string): Promise<void> {
+
+  /**
+   * Take a shell's desktop window away, for good.
+   *
+   * One place, because two callers want the same three things and they are not
+   * separately correct: the window itself goes, the daemon stops believing there
+   * is one, and the size stops belonging to a client that is no longer attached.
+   * Leaving out the last of those leaves a session frozen at the size of a window
+   * that has gone — see [ControlPlane.setWindowSize].
+   */
+  private async closeDesktopWindow(sessionId: string): Promise<void> {
     const record = this.registry.get(sessionId);
     if (!record?.tmuxName) return;
-    const tty = await this.cp.getSessionOption(record.tmuxName, LIVE_TTY_OPTION);
-    if (tty) await this.cp.detachClient(tty);
+    await closeLive(sessionId);
+    this.liveWindows.delete(sessionId);
+    void this.cp.setWindowSize(record.tmuxName, "manual").catch(() => {});
   }
 
   /**
@@ -776,13 +793,8 @@ export class LdmuxDaemon {
         // Cleared whether or not a window was found: the caller asked for it to
         // be gone, and continuing to advertise a workspace would make the phone
         // show a window it no longer has.
-        this.liveWindows.delete(record.id);
+        this.closeDesktopWindow(record.id).catch(() => {});
         this.ownership.release(record.id, this.desktopDevice.id);
-        // Back to the daemon driving the size, because the window that was
-        // driving it is the thing that just went away. Left on `latest` this
-        // session would keep the size of a client that is no longer attached, and
-        // the next device to open it would have to resize to be believed.
-        void this.cp.setWindowSize(record.tmuxName, "manual").catch(() => {});
         void this.remote?.broadcastSessions().catch(() => {});
         return result;
       }
