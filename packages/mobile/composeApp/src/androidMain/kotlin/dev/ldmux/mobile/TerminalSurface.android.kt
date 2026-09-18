@@ -86,6 +86,7 @@ actual object AppPrefs {
     private const val KEY_SIDE = "side"
     private const val KEY_PREDICT = "predict"
     private const val KEY_FONT = "font_sp"
+    private const val KEY_COMPACT = "compact"
     private const val KEY_DEVICE_ID = "device_id"
     private const val KEY_DEVICE_LABEL = "device_label"
 
@@ -107,6 +108,7 @@ actual object AppPrefs {
             predict = sp.getBoolean(KEY_PREDICT, LdmuxConfig.DEFAULT.predict),
             fontSp = sp.getFloat(KEY_FONT, LdmuxConfig.DEFAULT_FONT_SP)
                 .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
+            compact = sp.getBoolean(KEY_COMPACT, LdmuxConfig.DEFAULT.compact),
             deviceId = deviceId,
             deviceLabel = label,
         )
@@ -120,6 +122,7 @@ actual object AppPrefs {
             .putString(KEY_SIDE, config.side)
             .putBoolean(KEY_PREDICT, config.predict)
             .putFloat(KEY_FONT, config.fontSp)
+            .putBoolean(KEY_COMPACT, config.compact)
             .putString(KEY_DEVICE_ID, config.deviceId)
             .putString(KEY_DEVICE_LABEL, config.deviceLabel)
             .apply()

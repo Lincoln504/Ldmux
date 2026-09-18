@@ -390,7 +390,7 @@ private fun SmallAction(label: String, onClick: () -> Unit) {
         Modifier
             .clip(RoundedCornerShape(6.dp))
             .background(Surface)
-            .heightIn(min = MinTouch)
+            .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp),
         contentAlignment = Alignment.Center,
@@ -417,7 +417,7 @@ fun OutlinedBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Uni
         modifier
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, Line, RoundedCornerShape(8.dp))
-            .heightIn(min = MinTouch)
+            .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,

@@ -28,9 +28,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.sin
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.Text
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
@@ -88,10 +86,17 @@ fun IconBtn(
             // These buttons came to about 30-34dp, which is small enough to miss —
             // including the close button, which is destructive and sits nested inside
             // a row that is itself tappable.
-            .heightIn(min = MinTouch)
+            .heightIn(min = LocalTouch.current.min)
             .clickable(onClick = onClick, role = Role.Button)
             .semantics { contentDescription = label }
             .padding(horizontal = 9.dp, vertical = 6.dp),
+        // A Column arranges from the top by default. While this box was exactly its
+        // content's height that was unobservable, and it stopped being unobservable
+        // the moment heightIn(min = MinTouch) made the box taller than the icon:
+        // every drawn control in the app quietly moved to the top of its own button.
+        // Measured on the landscape panel, the menu glyph's grid sat 22 px above the
+        // centre of the button it lives in. It is one line, it was every icon here.
+        verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         content()
@@ -291,6 +296,18 @@ fun IconLauncher(tint: Color, box: Dp = 20.dp) {
  * Drawn along the diagonal rather than drawn flat and rotated: the geometry is two
  * points either way, and a rotated canvas only adds a chance to get the two heads
  * mismatched.
+ *
+ * Each head carries **one** barb, not two. Two barbs per head is a full arrowhead,
+ * and a pair of full arrowheads facing away from each other is a *flip*: a bar with
+ * a head on each end, which is what a mirror does. Taking one barb off each turns
+ * the pair into two hooks leaning the same way round, which is what rotation looks
+ * like. There are only two ways to choose the remaining pair and they are mirror
+ * images of each other, so the choice is which way it reads as turning: the two kept
+ * here sit 45 degrees off the clockwise tangent at *both* ends, so the mark reads as
+ * a clockwise sweep. The other pair is the same drawing turning the other way.
+ *
+ * They are also the axis-aligned pair, which matters at 18-22dp: an axis-aligned
+ * stroke lands on whole pixels where a diagonal one is antialiased on both edges.
  */
 private fun DrawScope.drawFlip(tint: Color) {
     val w = size.minDimension
@@ -299,12 +316,10 @@ private fun DrawScope.drawFlip(tint: Color) {
     val a = Offset(w * 0.24f, w * 0.76f)
     val b = Offset(w * 0.76f, w * 0.24f)
     drawLine(tint, a, b, stroke, StrokeCap.Round)
-    // A head at each end. The shaft runs on the diagonal, so the two barbs that
-    // point back along it are exactly the horizontal one and the vertical one —
-    // which is why this needs no trigonometry at all.
-    drawLine(tint, b, Offset(b.x - barb, b.y), stroke, StrokeCap.Round)
+    // One barb per head, and they are the vertical pair. The shaft runs on the
+    // diagonal, so the barbs that point back along it are exactly the horizontal
+    // one and the vertical one — which is why this needs no trigonometry at all.
     drawLine(tint, b, Offset(b.x, b.y + barb), stroke, StrokeCap.Round)
-    drawLine(tint, a, Offset(a.x + barb, a.y), stroke, StrokeCap.Round)
     drawLine(tint, a, Offset(a.x, a.y - barb), stroke, StrokeCap.Round)
 }
 

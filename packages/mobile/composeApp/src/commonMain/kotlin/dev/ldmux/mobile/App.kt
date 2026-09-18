@@ -45,6 +45,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -55,6 +56,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
 import dev.ldmux.mobile.voice.Dictation
 import dev.ldmux.mobile.voice.VoiceState
 import dev.ldmux.mobile.voice.VoiceBanner
@@ -66,6 +68,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
@@ -113,6 +116,44 @@ internal val LdmuxColors = darkColorScheme(
  * did. Stated once, applied by every control in this file.
  */
 internal val MinTouch = 48.dp
+
+/**
+ * The one row that gets less than [MinTouch], and only in portrait.
+ *
+ * Portrait's header sits above two rows of keys that are themselves above the
+ * keyboard, so it is the only chrome in the app stacked three deep. It is also
+ * navigation rather than typing, and it is wide rather than tall: each arrow is
+ * about 44dp across, so the target stays comfortable while the row stops competing
+ * with the keys below it. Landscape keeps [MinTouch], where there is room and the
+ * same row sits at the top of a panel with nothing above it.
+ */
+internal val DenseTouch = 34.dp
+
+/**
+ * How tall a control is, decided once, for the whole app.
+ *
+ * Both settings are real. 48dp is the platform's minimum touch target and the app
+ * went a long time without one, at 24-34dp, which is small enough to miss; it is
+ * also a lot of a phone screen to spend on chrome. Only the person holding the
+ * phone knows which they would rather have, so it is a setting rather than a
+ * judgement call made in a commit.
+ */
+internal data class Touch(val min: Dp, val dense: Dp)
+
+internal fun touchFor(compact: Boolean): Touch =
+    if (compact) Touch(min = 34.dp, dense = 28.dp) else Touch(min = MinTouch, dense = DenseTouch)
+
+/**
+ * The app's touch scale, installed once at the root and read by every control.
+ *
+ * A composition local rather than a parameter because the alternative is threading
+ * a `Dp` through every composable between the setting and the button, and a
+ * parameter on thirty call sites is how a setting ends up reaching most of the
+ * controls and not all of them. `static` is deliberate: nothing reads this *while*
+ * composing in a way that would need tracking, and the value changes about once a
+ * year, so a full recomposition of the subtree on change is exactly right.
+ */
+internal val LocalTouch = staticCompositionLocalOf { Touch(MinTouch, DenseTouch) }
 /** Rules and unselected outlines. */
 val Line = Color(0xFF2A2A2A)
 
@@ -137,6 +178,21 @@ data class LdmuxConfig(
      * being scaled down to fit (ADR-0008).
      */
     val fontSp: Float = DEFAULT_FONT_SP,
+    /**
+     * Squeeze the chrome, keep the lines.
+     *
+     * Every control in the app has one height, and that height is a real decision
+     * with two defensible answers, so it is the user's rather than mine. `false`
+     * gives every control the platform's 48dp minimum target, which is what a
+     * thumb wants. `true` gives it back the density the app had before there was a
+     * minimum at all, when every control was 24-34dp: a terminal is a thing you
+     * read, and a row of chrome is a row of output you cannot see.
+     *
+     * It is a whole-app switch and not a per-control one, because the failure that
+     * made this a decision was exactly that: the same control came out a different
+     * height in two places, and neither of them was chosen.
+     */
+    val compact: Boolean = false,
     /**
      * This install's identity, announced with `hello` (ADR-0010).
      *
@@ -222,13 +278,21 @@ private const val PANEL_FLIP_MS = 200L
  */
 @Composable
 fun App() {
-    MaterialTheme(colorScheme = LdmuxColors) { AppContent() }
+    // The config lives above the theme and above the touch scale, because it decides
+    // both. A setting that reached only some of the controls would be worse than no
+    // setting: the whole reason this one exists is that the app disagreed with
+    // itself about the same control in two places.
+    var config by remember { mutableStateOf(AppPrefs.load()) }
+    MaterialTheme(colorScheme = LdmuxColors) {
+        CompositionLocalProvider(LocalTouch provides touchFor(config.compact)) {
+            AppContent(config, onConfig = { config = it })
+        }
+    }
 }
 
 /** The app itself. A separate function only so the theme can wrap all of it. */
 @Composable
-private fun AppContent() {
-    var config by remember { mutableStateOf(AppPrefs.load()) }
+private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(UiMode.Landscape) }
     val scope = rememberCoroutineScope()
@@ -668,7 +732,7 @@ private fun AppContent() {
                 current = config,
                 onDismiss = { showSettings = false },
                 onSave = {
-                    config = it
+                    onConfig(it)
                     AppPrefs.save(it)
                     client.reconfigure(it)
                     showSettings = false
@@ -724,8 +788,6 @@ private fun AppContent() {
                         // Named rather than trailing: `press` is a parameter now, and
                         // a trailing lambda would bind to it.
                         onSettings = { showSettings = true },
-                        modifiers = modifiers,
-                        onModifiers = { modifiers = it },
                         press = press,
                     )
                 }
@@ -792,7 +854,7 @@ private fun AppContent() {
             current = config,
             onDismiss = { showSettings = false },
             onSave = {
-                config = it
+                onConfig(it)
                 AppPrefs.save(it)
                 client.reconfigure(it)
                 showSettings = false
@@ -925,7 +987,7 @@ private fun PortraitBar(
         // Where you are, and how to move, at the top of the bar: the same row the
         // side panel shows, because moving between shells must not mean leaving
         // them. Navigation at one end, keys in the middle, actions at the other.
-        ShellHeader(pages, pagerState, scope, onLauncher, onSettings, showMenu = false)
+        ShellHeader(pages, pagerState, scope, onLauncher, onSettings, showMenu = false, dense = true)
 
         PanelDivider()
 
@@ -1058,11 +1120,14 @@ private fun ShellHeader(
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
     showMenu: Boolean = true,
+    dense: Boolean = false,
 ) {
     val current = pagerState.currentPage
     val total = pages.size.coerceAtLeast(1)
     val here = pages.getOrNull(current)
     var menuOpen by remember { mutableStateOf(false) }
+    // Density, not structure: this is the same row drawn by the same composable in
+    // both modes, and `dense` decides only how much height it is allowed.
 
     fun step(delta: Int) {
         val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
@@ -1086,7 +1151,7 @@ private fun ShellHeader(
                 )
             }
         }
-        NavArrow("\u25c0", enabled = current > 0) { step(-1) }
+        NavArrow("\u25c0", enabled = current > 0, dense = dense) { step(-1) }
         Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 folderName(here?.cwd ?: ""),
@@ -1104,7 +1169,7 @@ private fun ShellHeader(
                 maxLines = 1,
             )
         }
-        NavArrow("\u25b6", enabled = current < total - 1) { step(1) }
+        NavArrow("\u25b6", enabled = current < total - 1, dense = dense) { step(1) }
     }
 }
 
@@ -1124,8 +1189,6 @@ private fun SidePanel(
     onVoice: () -> Unit,
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
-    modifiers: Modifiers,
-    onModifiers: (Modifiers) -> Unit,
     press: (String) -> Unit,
 ) {
     val current = pagerState.currentPage
@@ -1152,13 +1215,25 @@ private fun SidePanel(
             // ragged column where "C-c" and "|" had the same weight and nothing
             // lined up with anything. A row that fills the width is easier to hit
             // and, more to the point, says how many keys are in it.
+            // Ctrl and Alt are not offered here. Landscape has no soft keyboard, so
+            // a latch has nothing to apply to: a modifier is armed to change the key
+            // that comes *next*, and every key a finger can reach in this mode is a
+            // panel key that can spell out what it wants. The only keyboard this mode
+            // has is a real one, plugged in, and it brings its own Ctrl and Alt —
+            // hardware key events are forwarded to the shell at
+            // TerminalSurface.android.kt:266. Portrait keeps both, because portrait is
+            // where typing happens.
+            //
+            // `C/c` survives below as a one-time key, so an interrupt is still one
+            // press away. The pair that leaves is the pair that needed a second press.
+            //
+            // `copy` keeps its own row, which also reads correctly: it is a mode, not
+            // a chord. It toggles tmux copy-mode, which is the only way to scroll the
+            // history of a full-screen program, because a program on the alternate
+            // screen has no local scrollback to page through.
             KeyRow(
-                listOf(
-                    "Ctrl" to { onModifiers(modifiers.toggled(StickyKey.Ctrl)) },
-                    "Alt" to { onModifiers(modifiers.toggled(StickyKey.Alt)) },
-                    "copy" to { handle?.setCopyMode(handle?.inCopyMode != true) },
-                ),
-                active = listOf(modifiers.ctrl, modifiers.alt, handle?.inCopyMode == true),
+                listOf("copy" to { handle?.setCopyMode(handle?.inCopyMode != true) }),
+                active = listOf(handle?.inCopyMode == true),
             )
             PanelDivider()
             KeyRow(
@@ -1236,7 +1311,7 @@ fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
         modifier
             .clip(RoundedCornerShape(8.dp))
             .background(Accent)
-            .heightIn(min = MinTouch)
+            .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
@@ -1246,14 +1321,14 @@ fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
 }
 
 @Composable
-private fun NavArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
+private fun NavArrow(glyph: String, enabled: Boolean, dense: Boolean = false, onClick: () -> Unit) {
     Box(
         Modifier
             .clip(RoundedCornerShape(6.dp))
             // The most-repeated action there is, and it was the smallest target in the
             // app at about 28dp. A control you press constantly is the last one that
             // should be hard to hit.
-            .heightIn(min = MinTouch)
+            .heightIn(min = if (dense) LocalTouch.current.dense else LocalTouch.current.min)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = 8.dp),
         contentAlignment = Alignment.Center,
@@ -1279,7 +1354,7 @@ private fun KeyBtn(
         modifier
             .clip(RoundedCornerShape(6.dp))
             .background(if (active) Accent else Bg)
-            .heightIn(min = MinTouch)
+            .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = pad, vertical = 9.dp),
         contentAlignment = Alignment.Center,
@@ -1305,6 +1380,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
     var side by remember { mutableStateOf(current.side) }
     var predict by remember { mutableStateOf(current.predict) }
     var fontSp by remember { mutableStateOf(current.fontSp) }
+    var compact by remember { mutableStateOf(current.compact) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1356,6 +1432,21 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                 )
                 Box(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("control size", color = Dim, fontSize = 12.sp)
+                    TextButton(onClick = { compact = false }) {
+                        Text("tall", color = if (!compact) Accent else Dim)
+                    }
+                    TextButton(onClick = { compact = true }) {
+                        Text("compact", color = if (compact) Accent else Dim)
+                    }
+                }
+                Text(
+                    "tall is easier to hit; compact fits more lines",
+                    color = Dim,
+                    fontSize = 10.sp,
+                )
+                Box(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("text size", color = Dim, fontSize = 12.sp)
                     // Disabled at the ends of the range rather than silently doing
                     // nothing. A live button that produces no visible change is the
@@ -1393,6 +1484,15 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                         side,
                         predict,
                         fontSp.coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
+                        compact,
+                        // Carried, not rebuilt. This call used to construct a
+                        // config without the identity fields, so every visit to
+                        // settings cleared the device id and the next load minted a
+                        // new one — silently, and against ADR-0010, which exists so
+                        // two devices can be told apart in a sentence about a shell
+                        // they both want.
+                        current.deviceId,
+                        current.deviceLabel,
                     ),
                 )
             }) {
