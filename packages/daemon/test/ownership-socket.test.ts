@@ -145,14 +145,23 @@ test("ownership: a disconnect frees the shell for anyone, with no takeover", { t
   //
   // Polling for the condition removes the timing assumption without weakening the
   // assertion: `list` carries the owner as a fact, so if a claim ever did outlive
-  // its connection this would spin out its timeout and fail — and it would fail on
-  // the real thing rather than on a race in the test.
+  // its connection this would give up and fail — on the real thing, not on a race
+  // in the test.
+  //
+  // The cadence matters and the first version got it wrong. It polled every 40 ms
+  // through `waitFor`, and each poll is a real request: the daemon queues messages
+  // per connection, so a slow release left a couple of hundred `list` calls ahead of
+  // the attach below, which then sat behind them until its own wait timed out. That
+  // is a second failure with the same cause as the first, which is why the delay is
+  // deliberate here and there is a ceiling on the number of attempts.
   const b = await client(info, tablet);
-  const cleared = await waitFor(() => {
+  let cleared = false;
+  for (let attempt = 0; attempt < 20 && !cleared; attempt++) {
     b.send({ type: "list" });
+    await sleep(250);
     const row = b.sessions().find((s: any) => s.id === id);
-    return row !== undefined && row.owner == null;
-  });
+    cleared = row !== undefined && row.owner == null;
+  }
   if (!cleared) {
     const row = b.sessions().find((s: any) => s.id === id);
     throw new Error(`claim survived the disconnect: ${JSON.stringify(row)}`);

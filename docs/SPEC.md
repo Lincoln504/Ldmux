@@ -453,24 +453,29 @@ helper suffices), and owner/families.
 - **Crash-only design:** restart rebuilds from tmux + registry JSON.
 - **Idempotent startup:** `flock`; refuse to run twice.
 - **Graceful shutdown:** stop pollers, flush registry, leave tmux alive.
-- **No blocking calls:** every tmux CLI call is async (`Bun.spawn`, both pipes
-  drained concurrently) so the daemon's single event loop is never stalled on a
-  child process, and each call is bounded: SIGTERM at 15 s, SIGKILL at +2 s, and
-  a hard deadline past both, so a wedged tmux cannot pin a request or the
-  per-connection handler queue. A bounded call returns exit code `-1`, which is
+- **No blocking calls:** every tmux CLI call is async (Node's `child_process`,
+  both pipes drained concurrently) so the daemon's single event loop is never
+  stalled on a child process, and each call is bounded: SIGTERM at 15 s, SIGKILL
+  at +2 s, and a hard deadline past both, so a wedged tmux cannot pin a request or
+  the per-connection handler queue. A bounded call returns exit code `-1`, which is
   reported as *unknown* liveness, never as "no sessions".
+- **The per-connection queue is unbounded, and a client can starve itself with it.**
+  Inbound messages run through `data.queue = data.queue.then(...)`, so ordering is
+  guaranteed and nothing is dropped. The consequence is that a client which asks
+  for more than the daemon can answer — spamming `list`, say — puts real work ahead
+  of its own *attach*, which then waits behind all of it. It was found that way: a
+  test polling `list` every 40 ms while waiting for a claim to be released left
+  roughly two hundred requests queued, and the attach that followed timed out.
+  Nothing here is broken by a slow client, and the fix is not a bigger queue: `list`
+  is a request for *current state*, so a queued one is worthless the moment a newer
+  one exists and should be dropped rather than served. Recorded, not yet changed.
 - **`remain-on-exit`** + `pane_died` detection: record `exit_code`/`exited_at`,
   keep scrollback, mark `dead`, notify clients, remove from the *live* list.
-- **Extension lifecycle (ADR-0003):** the pi extension branches on
-  `event.reason`:
-
-  | reason | action |
-  |--------|--------|
-  | `quit` | mark the pi session ended; never kill tmux; daemon stays. |
-  | `reload` | re-register on the next `session_start`; release per-session subscriptions. |
-  | `new` / `resume` / `fork` | release subscriptions; on the following `session_start` register the **new** pi session id (the pi→tmux mapping can change within one tmux session's life). |
-
-  The extension **never** stops the daemon or kills tmux from `session_shutdown`.
+- **The pi extension is gone (ADR-0009).** This section used to carry a table of
+  what the extension did on `quit`, `reload`, `new`, `resume` and `fork`. There is
+  no extension: ldmux is not a pi plugin, and `pi` runs inside a session like any
+  other program. Left as a note rather than deleted so the removed scope stays
+  visible.
 
 ---
 
