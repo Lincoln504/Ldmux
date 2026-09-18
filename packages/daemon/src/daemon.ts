@@ -698,18 +698,27 @@ export class LdmuxDaemon {
    * Leaving out the last of those leaves a session frozen at the size of a window
    * that has gone — see [ControlPlane.setWindowSize].
    */
-  private async closeDesktopWindow(sessionId: string): Promise<void> {
+  private async closeDesktopWindow(sessionId: string): Promise<{ ok: boolean; detail?: string }> {
     const record = this.registry.get(sessionId);
-    if (!record?.tmuxName) return;
     // The daemon stops believing there is a window *before* it waits for the
-    // window manager, not after. `closeLive` awaits a subprocess, and the
-    // reconcile pass reads this map once a second and ends any session whose
-    // window it finds absent — so deleting the id afterwards leaves a window's
-    // worth of time in which the pass sees a shell with no window and kills it.
-    // The caller is fire-and-forget, which is what makes the gap reachable.
+    // window manager, not after. `closeLive` awaits a subprocess that is allowed
+    // three seconds (`desktop.ts`), and the reconcile pass reads this map once a
+    // second and ends any session whose window it finds absent — so deleting the
+    // id afterwards leaves up to three seconds in which the pass sees a shell with
+    // no window and kills it. The callers are fire-and-forget, which is what makes
+    // the gap reachable.
+    //
+    // This is the **only** place a window is closed, and that is load-bearing: the
+    // `closeLive` request used to call `closeLive` itself and then come here, so a
+    // window was closed twice and the ordering below was bypassed for the whole of
+    // the first await. Fixing one call site and not the other is how a race comes
+    // back.
     this.liveWindows.delete(sessionId);
-    await closeLive(sessionId);
-    void this.cp.setWindowSize(record.tmuxName, "manual").catch(() => {});
+    const result = await closeLive(sessionId);
+    if (record?.tmuxName) {
+      void this.cp.setWindowSize(record.tmuxName, "manual").catch(() => {});
+    }
+    return result;
   }
 
   /**
@@ -826,11 +835,15 @@ export class LdmuxDaemon {
 
       case "closeLive": {
         const record = this.require(String((params as { id?: unknown }).id ?? ""));
-        const result = await closeLive(record.id);
+        // Through `closeDesktopWindow`, and *only* through it: it stops the daemon
+        // believing in the window before it waits for the window manager, and
+        // calling `closeLive` here as well closed the window twice and left the map
+        // saying there was one for the whole of the first await — long enough for
+        // the reconcile pass to end the shell this request was meant to spare.
+        const result = await this.closeDesktopWindow(record.id);
         // Cleared whether or not a window was found: the caller asked for it to
         // be gone, and continuing to advertise a workspace would make the phone
         // show a window it no longer has.
-        this.closeDesktopWindow(record.id).catch(() => {});
         this.ownership.release(record.id, this.desktopDevice.id);
         void this.remote?.broadcastSessions().catch(() => {});
         return result;

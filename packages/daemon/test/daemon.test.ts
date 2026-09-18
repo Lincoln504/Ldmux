@@ -1,6 +1,6 @@
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -251,7 +251,7 @@ test("a window stops counting before the manager is asked to close it", async ()
   const d = new LdmuxDaemon({ stateDir: dir }) as unknown as {
     registry: { get(id: string): unknown };
     liveWindows: Map<string, { workspace: string }>;
-    closeDesktopWindow(id: string): Promise<void>;
+    closeDesktopWindow(id: string): Promise<{ ok: boolean; detail?: string }>;
   };
   // A tmux name is all `closeDesktopWindow` needs from the record; the session
   // itself is never touched, because nothing here starts a daemon.
@@ -263,4 +263,18 @@ test("a window stops counting before the manager is asked to close it", async ()
   await closing;
   expect(d.liveWindows.has("s1")).toBe(false);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("a window is closed in exactly one place", () => {
+  // Structural, and deliberately so. The behaviour being guarded — the daemon stops
+  // believing in a window *before* it waits for the window manager — cannot be
+  // observed from a unit test without making the window manager slow, and the
+  // window manager is an `i3-msg` subprocess allowed three seconds. What can be
+  // checked is the property that made it a bug twice over: the `closeLive` request
+  // called `closeLive` itself and *then* delegated to the helper that guards the
+  // ordering, so the window was closed twice and the ordering was bypassed for the
+  // whole of the first await. One call site is the invariant.
+  const src = readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8");
+  const calls = src.match(/await closeLive\(/g) ?? [];
+  expect(calls.length).toBe(1);
 });
