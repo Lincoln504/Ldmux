@@ -115,3 +115,46 @@ second, which can be wrong in both directions.
   now out of scope by construction. It should be read as history.
 - A second session layer is still not introduced (ADR-0006 §2 holds): tmux stays
   the owner of session *content*, and this is a map of who is looking at it.
+
+## Amendment (2026-09-18): the shell's origin decides what seizing disturbs
+
+Exclusive ownership said a shell has one holder at a time. It did not say what
+happens to the *desk's view* of a shell when the holder changes, and the first
+answer — that a desktop window is detached whenever somebody seizes the shell,
+whoever made it — is wrong in one direction and destructive in the other.
+
+A shell has an **origin**, recorded when it is created (`createdBy`: `phone` for
+anything asked for over the socket, `local` for the desk's own CLI, `adopt` for a
+session ldmux found already running). The origin, and nothing about who is
+seizing it now, decides:
+
+- **A shell the phone started is the phone's.** A desktop window for it is the
+  phone's way of being at a desk — that is what "send to desktop" makes — so when
+  the shell goes back to the phone the window goes with it. There is nothing on
+  the desk that wanted the window.
+- **A shell the desk started is the desk's.** The phone borrows it: it may look
+  and type, and the window it lives in is none of the phone's business. The desk
+  keeps that window, and *using it again* is what takes the shell back — which
+  the reconcile pass already detects, because the window re-attaches. Closing it
+  on a seizure would destroy somebody's terminal on a fact they never agreed to.
+
+Stated once as `seizingClosesTheDeskWindow(createdBy)` in `packages/daemon/src/daemon.ts`,
+and tested as a rule rather than as a branch.
+
+Three consequences worth recording, because each is a place this could go wrong
+again:
+
+- **`close` is not `kill`, and the *caller* decides, not the session.** A phone
+  closing a shell it did not start is putting it down, not ending it. That check
+  lives in the transport, not in the daemon's `close`: the same verb over the
+  local socket is the desk's own CLI, where closing a shell it started must still
+  mean ending it. Putting it in the daemon broke `ldmux close` the first time it
+  was tried, and an existing test caught it.
+- **Every shell is closed from the launcher and from nowhere else.** A shell is a
+  thing chosen from a list, so ending one belongs in the list; the in-shell menu
+  moved the most destructive action in the app one tap inside the screen you are
+  typing into.
+- **Going to the launcher detaches from every open shell.** The launcher is where
+  you choose what to open, so arriving there lets go of everything. A page is a
+  hold on a shell, and holding shells you are not looking at is how the phone
+  keeps a session somebody else might want.

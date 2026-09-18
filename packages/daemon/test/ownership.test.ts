@@ -1,4 +1,5 @@
 import { test, expect } from "../../testing/src/expect.ts";
+import { seizingClosesTheDeskWindow } from "../src/daemon.ts";
 import { Ownership, type Device } from "../src/ownership.ts";
 
 /**
@@ -162,4 +163,15 @@ test("a session id reused after a kill is not inherited by the old holder", () =
   o.retain(new Set());
   expect(o.owner("s1")).toBeUndefined();
   expect(o.claim("s1", desktop).ok).toBe(true);
+});
+
+test("seizing a shell only disturbs the desk for a shell the phone started", () => {
+  // The whole difference between the two kinds of shell, in one sentence. A shell
+  // the phone started is followed by its window; a shell the desk started is the
+  // desk's and the phone is only borrowing it, so the desk keeps its window and
+  // using it again is what takes the shell back.
+  expect(seizingClosesTheDeskWindow("phone")).toBe(true);
+  for (const origin of ["local", "adopt", "", "desktop"]) {
+    expect(seizingClosesTheDeskWindow(origin)).toBe(false);
+  }
 });

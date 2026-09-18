@@ -33,6 +33,28 @@ import { DAEMON_PROTOCOL_VERSION } from "../../protocol/src/rpc.ts";
 import type { SessionInfo } from "../../protocol/src/messages.ts";
 
 /**
+ * Does taking this shell *from* the desktop end the desk's view of it?
+ *
+ * The answer is about where the shell came from, not about who is taking it now,
+ * and it is the whole of the difference between the two kinds of shell this
+ * project has:
+ *
+ *  - **A shell the phone started is the phone's.** A desktop window for it is the
+ *    phone's way of being at a desk, so when the shell goes back to the phone the
+ *    window goes with it. There is nothing on the desk that wanted it.
+ *  - **A shell the desk started is the desk's.** The phone borrows it, and the
+ *    window it is being used in is none of the phone's business: the desk keeps it
+ *    and touching it again takes the shell back. Closing it here would destroy
+ *    somebody's terminal on a fact they never agreed to.
+ *
+ * Named rather than inlined because it is a rule, not a condition: it belongs in
+ * one sentence that a test can read.
+ */
+export function seizingClosesTheDeskWindow(createdBy: string): boolean {
+  return createdBy === "phone";
+}
+
+/**
  * How often the desktop live windows are re-checked.
  *
  * They are reached from the session list, which clients ask for constantly, and
@@ -363,17 +385,26 @@ export class LdmuxDaemon {
       void this.cp.setWindowSize(record.tmuxName, mode).catch(() => {});
     }
     if (result.previous && result.previous.id !== device.id) {
-      // The window is *closed*, not left standing. It was a view of a shell that
-      // has moved, and a shell is open on one device at a time: taking a shell
-      // back to the phone ends the desktop's view of it the same way opening it on
-      // the desktop ended the phone's. What makes that safe is not a second copy
-      // of the shell — there is one tmux session either way — but that the window
-      // can be opened again from wherever the shell now is.
+      // Whether the desktop's view of this shell is affected depends on where the
+      // shell *came from*, and on nothing about who is taking it now.
       //
-      // Fire-and-forget: it kills a window, and the attach that displaced it must
-      // not wait on a window manager to finish.
+      // A shell the phone started is the phone's projection: the window is the
+      // phone's way of being at a desk, so taking the shell back takes the window
+      // with it.
+      //
+      // A shell the desk started is the desk's, and the phone is only ever
+      // borrowing it. The window it is being used in is not the phone's to
+      // disturb — the desk keeps it, and using it again is what takes the shell
+      // back, which the reconcile pass already notices ("the window has a client
+      // again"). Closing it here would destroy the desk's own terminal on a fact
+      // the desk did not know it had agreed to.
       if (result.previous.id === this.desktopDevice.id) {
-        void this.closeDesktopWindow(sessionId).catch(() => {});
+        const record = this.registry.get(sessionId);
+        if (seizingClosesTheDeskWindow(record?.createdBy ?? "")) {
+          // Fire-and-forget: it kills a window, and the attach that displaced it
+          // must not wait on a window manager to finish.
+          void this.closeDesktopWindow(sessionId).catch(() => {});
+        }
       }
       return { ok: true, displaced: result.previous };
     }
