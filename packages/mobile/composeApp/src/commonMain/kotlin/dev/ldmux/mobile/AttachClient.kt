@@ -417,8 +417,11 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
          * Every few seconds is plenty: the estimate only has to follow a real
          * change in link quality, and a phone on a metered connection should not
          * spend its budget on keep-alives. Each ping is a handful of bytes.
+         *
+         * Shared with the launcher socket, which has the same duty and no reason
+         * to hold a second opinion — see [CLIENT_PING_INTERVAL_MS].
          */
-        const val PING_INTERVAL_MS = 4_000L
+        const val PING_INTERVAL_MS = CLIENT_PING_INTERVAL_MS
 
         /** Unanswered pings before the link is declared dead. */
         const val MISSED_PONGS = 3

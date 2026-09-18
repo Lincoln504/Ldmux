@@ -458,11 +458,25 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     // silently stops applying to it.
                     send(Frame.Text(helloMessage()))
                     send(Frame.Text("""{"type":"list"}"""))
+                    // Say something, periodically. The daemon reaps a connection
+                    // that has said nothing for a minute — that is how a phone which
+                    // vanished without a FIN stops holding shells it is not looking
+                    // at — and a client that never speaks would be reaped while it
+                    // was perfectly healthy, leaving the launcher flickering offline
+                    // once a minute. A ping is the cheapest thing that can be said,
+                    // and the daemon already answers it.
+                    val beat = launch {
+                        while (isActive) {
+                            delay(CLIENT_PING_INTERVAL_MS)
+                            runCatching { send(Frame.Text("""{"type":"ping"}""")) }
+                        }
+                    }
                     try {
                         for (frame in incoming) {
                             if (frame is Frame.Text) onMessage(frame.readText())
                         }
                     } finally {
+                        beat.cancel()
                         ws = null
                     }
                 }
