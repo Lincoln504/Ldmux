@@ -58,7 +58,7 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
                 // scrim: a dialogue you dismiss by touching its own contents is a
                 // dialogue that cannot be filled in.
                 .clickable(enabled = false, onClick = {})
-                .padding(16.dp),
+                .padding(LocalTouch.current.rowPad * 2),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(title, color = Fg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -86,7 +86,7 @@ private fun Field(
             .clip(RoundedCornerShape(8.dp))
             .background(Bg)
             .border(1.dp, Line, RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
     ) {
         if (value.isEmpty()) {
             Text(placeholder, color = Dim.copy(alpha = 0.6f), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
@@ -193,7 +193,7 @@ fun DesktopPickerModal(
                             .clip(RoundedCornerShape(8.dp))
                             .background(if (here) Bg else Surface)
                             .clickable { onPick(ws.name) }
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Text(

@@ -70,6 +70,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -115,6 +119,35 @@ internal val LdmuxColors = darkColorScheme(
  * same control felt different in two places — the padding differed and nothing else
  * did. Stated once, applied by every control in this file.
  */
+/**
+ * The text style every `Text` in the app starts from, and the reason the app looked
+ * thick.
+ *
+ * This exists because of a measurement. A launcher row came out **71.7dp** tall for two
+ * lines of text, and the arithmetic says why. Material's `LocalTextStyle` is
+ * `bodyLarge`, whose line height is **24sp** -- and a `Text` that asks for `fontSize =
+ * 11.sp` overrides the size and not the line height. So an 11sp subtitle was reserving
+ * 24sp of vertical space, plus Android's font padding of about 4dp per line, which
+ * comes to 56dp for two lines before the row's own padding adds anything.
+ *
+ * That is the whole of it, and no control-height setting could have fixed it. A minimum
+ * height only binds when the content is *smaller* than it, and this content was larger.
+ * Every density control in the app was fighting a line height nobody chose, which is why
+ * turning the setting on moved six call sites and nothing you could see.
+ *
+ * Both halves are fixed here and nowhere else:
+ *
+ * - `lineHeight` in `em`, so it is proportional to the size actually asked for rather
+ *   than to a style nobody selected. `1.2` is above the ~1.17 a font's own ascent and
+ *   descent usually take, so nothing clips, and far below 24sp.
+ * - no font padding, which is a platform extra of a few dp per line that exists to
+ *   leave room for a font's ascent and descent rather than for text a person reads.
+ */
+internal val BodyStyle = TextStyle(
+    lineHeight = 1.2.em,
+    platformStyle = PlatformTextStyle(includeFontPadding = false),
+)
+
 internal val MinTouch = 48.dp
 
 /**
@@ -138,11 +171,35 @@ internal val DenseTouch = 34.dp
  * phone knows which they would rather have, so it is a setting rather than a
  * judgement call made in a commit.
  */
-internal data class Touch(val min: Dp, val dense: Dp)
+internal data class Touch(
+    /**
+     * Minimum height of a control.
+     *
+     * This only binds when a control's own content is smaller than it, and for a long
+     * time nothing was: every `Text` in the app reserved Material's 24sp line height
+     * whatever size it asked for, so every control was already taller than any floor
+     * and this number was decoration. With the line height fixed, the floor finally
+     * does the work it was written to do.
+     */
+    val min: Dp,
+    /** The one row that may be shorter than [min]. */
+    val dense: Dp,
+    /**
+     * Vertical padding inside a control.
+     *
+     * The second half of the same story. Padding generous enough to set the height by
+     * itself makes [min] irrelevant, so it has to move with the density too, or the
+     * thin setting is a setting that changes only the controls that did not need
+     * changing.
+     */
+    val pad: Dp,
+    /** Vertical padding inside a list row, which is where a row's thickness comes from. */
+    val rowPad: Dp,
+)
 
 /** The two densities, named once so neither is a pair of literals in two places. */
-private val ThinTouch = Touch(min = 34.dp, dense = 28.dp)
-private val TallTouch = Touch(min = MinTouch, dense = DenseTouch)
+private val ThinTouch = Touch(min = 34.dp, dense = 28.dp, pad = 5.dp, rowPad = 4.dp)
+private val TallTouch = Touch(min = MinTouch, dense = DenseTouch, pad = 8.dp, rowPad = 8.dp)
 
 internal fun touchFor(compact: Boolean): Touch = if (compact) ThinTouch else TallTouch
 
@@ -286,7 +343,10 @@ fun App() {
     // itself about the same control in two places.
     var config by remember { mutableStateOf(AppPrefs.load()) }
     MaterialTheme(colorScheme = LdmuxColors) {
-        CompositionLocalProvider(LocalTouch provides touchFor(config.compact)) {
+        CompositionLocalProvider(
+            LocalTextStyle provides BodyStyle,
+            LocalTouch provides touchFor(config.compact),
+        ) {
             AppContent(config, onConfig = { config = it })
         }
     }
@@ -1329,7 +1389,7 @@ fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
             .background(Accent)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = Bg, fontSize = 13.sp)
@@ -1372,7 +1432,7 @@ private fun KeyBtn(
             .background(if (active) Accent else Bg)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = pad, vertical = 9.dp),
+            .padding(horizontal = pad, vertical = LocalTouch.current.pad),
         contentAlignment = Alignment.Center,
     ) {
         Text(

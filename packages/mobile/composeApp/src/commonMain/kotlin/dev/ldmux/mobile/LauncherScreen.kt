@@ -342,7 +342,7 @@ private fun ChoiceRow(
                 shape = RoundedCornerShape(8.dp),
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // A tick box, because these *are* the multi-select: several become the set
@@ -419,7 +419,7 @@ fun OutlinedBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Uni
             .border(1.dp, Line, RoundedCornerShape(8.dp))
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = Fg, fontSize = 13.sp)

@@ -89,7 +89,7 @@ fun IconBtn(
             .heightIn(min = LocalTouch.current.min)
             .clickable(onClick = onClick, role = Role.Button)
             .semantics { contentDescription = label }
-            .padding(horizontal = 9.dp, vertical = 6.dp),
+            .padding(horizontal = 9.dp, vertical = LocalTouch.current.pad),
         // A Column arranges from the top by default. While this box was exactly its
         // content's height that was unobservable, and it stopped being unobservable
         // the moment heightIn(min = MinTouch) made the box taller than the icon:
