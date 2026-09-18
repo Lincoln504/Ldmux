@@ -13,6 +13,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isValidSessionName, TmuxControlPlane } from "./tmux/control-plane.ts";
+import { resolveCwd } from "./cwd.ts";
 import { Registry } from "./registry.ts";
 import { Ownership } from "./ownership.ts";
 import { hostname } from "node:os";
@@ -271,7 +272,7 @@ export class LdmuxDaemon {
         createSession: async (kind, cwd, title, createdBy) => {
           const { session } = await this.handleNew({
             kind,
-            cwd: cwd ?? process.cwd(),
+            cwd: resolveCwd(cwd),
             title,
             createdBy,
           } as unknown as NewParams);
@@ -972,7 +973,7 @@ export class LdmuxDaemon {
 
   private async handleNew(p: NewParams): Promise<{ session: SessionRecord }> {
     const kind = parseKind(p.kind);
-    const cwd = String(p.cwd ?? process.cwd());
+    const cwd = resolveCwd(p.cwd);
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`not a directory: ${cwd}`);
     const id = shortId();
     const tmuxName = `ldmux-${id}`;
