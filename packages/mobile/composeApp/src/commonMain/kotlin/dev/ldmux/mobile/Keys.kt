@@ -24,7 +24,6 @@ val SIDEBAR_KEYS = listOf(
     listOf("←" to "Left", "↑" to "Up", "↓" to "Down", "→" to "Right"),
     listOf(
         controlLabel("C-c") to "C-c",
-        controlLabel("C-d") to "C-d",
         "|" to "|",
         "-" to "-",
         "/" to "/",

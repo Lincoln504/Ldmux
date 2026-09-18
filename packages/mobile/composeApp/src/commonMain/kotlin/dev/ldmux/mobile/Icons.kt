@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -83,6 +84,11 @@ fun IconBtn(
         modifier
             .clip(RoundedCornerShape(8.dp))
             .background(if (filled) Accent else Bg)
+            // Android's minimum touch target, and nothing in this app specified one.
+            // These buttons came to about 30-34dp, which is small enough to miss —
+            // including the close button, which is destructive and sits nested inside
+            // a row that is itself tappable.
+            .heightIn(min = MinTouch)
             .clickable(onClick = onClick, role = Role.Button)
             .semantics { contentDescription = label }
             .padding(horizontal = 9.dp, vertical = 6.dp),
@@ -122,34 +128,67 @@ fun IconClose(tint: Color, box: Dp = 18.dp) {
 }
 
 /**
+ * A phone, for marking a shell that was opened from one.
+ *
+ * Drawn rather than typed, like every other icon here: a font's phone symbol is a
+ * different picture on every device, and at 12dp beside 14sp text it has to be the
+ * same picture everywhere. It takes a modifier so the caller can describe it — a
+ * picture is not a description, and this one carries information.
+ */
+@Composable
+fun IconPhone(tint: Color, box: Dp = 12.dp, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(box)) {
+        val w = size.minDimension
+        val stroke = w * 0.11f
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(w * 0.22f, w * 0.06f),
+            size = Size(w * 0.56f, w * 0.88f),
+            cornerRadius = CornerRadius(w * 0.16f, w * 0.16f),
+            style = Stroke(width = stroke),
+        )
+        // The speaker. A rounded slab is a slab; this is what makes it a phone.
+        drawLine(tint, Offset(w * 0.38f, w * 0.19f), Offset(w * 0.62f, w * 0.19f), stroke, StrokeCap.Round)
+    }
+}
+
+/**
  * "Open this somewhere else": a window with an arrow leaving its top-right corner.
  *
- * The idiom every desktop uses for "open in a new window", and it replaces five
- * words of text on every launcher row. The window is drawn as an open polyline so
- * that the arrow leaves through a gap rather than over a line — at this size a
- * closed square crossed by an arrow reads as a scribble.
+ * The idiom every desktop uses for "open in a new window", and it stands in for five
+ * words of text on every launcher row.
+ *
+ * Redrawn: the first version rounded one corner and put the arrow over the box's own
+ * lines, which at 18dp is a smudge. Every corner it has is now rounded by the same
+ * radius, the top-right corner is genuinely absent so the arrow leaves through a gap,
+ * and the arrow's shaft starts clear of the box rather than crossing it.
  */
 @Composable
 fun IconPopOut(tint: Color, box: Dp = 18.dp) {
     Canvas(Modifier.size(box)) {
         val w = size.minDimension
-        val stroke = w * 0.12f
-        val corner = w * 0.06f
+        val stroke = w * 0.13f
+        val r = w * 0.15f
+        // The window: three corners with the same radius, and the fourth simply not
+        // drawn, so the arrow has somewhere to go.
         drawPath(
             Path().apply {
-                moveTo(w * 0.60f, w * 0.20f + corner)
-                quadraticTo(w * 0.60f, w * 0.20f, w * 0.60f - corner, w * 0.20f)
-                lineTo(w * 0.26f, w * 0.20f)
-                lineTo(w * 0.26f, w * 0.76f)
-                lineTo(w * 0.80f, w * 0.76f)
-                lineTo(w * 0.80f, w * 0.42f)
+                moveTo(w * 0.82f, w * 0.36f)
+                lineTo(w * 0.82f, w * 0.82f - r)
+                quadraticTo(w * 0.82f, w * 0.82f, w * 0.82f - r, w * 0.82f)
+                lineTo(w * 0.18f + r, w * 0.82f)
+                quadraticTo(w * 0.18f, w * 0.82f, w * 0.18f, w * 0.82f - r)
+                lineTo(w * 0.18f, w * 0.18f + r)
+                quadraticTo(w * 0.18f, w * 0.18f, w * 0.18f + r, w * 0.18f)
+                lineTo(w * 0.56f, w * 0.18f)
             },
             tint,
             style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
         )
-        drawLine(tint, Offset(w * 0.44f, w * 0.56f), Offset(w * 0.82f, w * 0.18f), stroke, StrokeCap.Round)
-        drawLine(tint, Offset(w * 0.82f, w * 0.18f), Offset(w * 0.56f, w * 0.18f), stroke, StrokeCap.Round)
-        drawLine(tint, Offset(w * 0.82f, w * 0.18f), Offset(w * 0.82f, w * 0.44f), stroke, StrokeCap.Round)
+        // The arrow, entirely outside the box's ink.
+        drawLine(tint, Offset(w * 0.54f, w * 0.46f), Offset(w * 0.86f, w * 0.14f), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.86f, w * 0.14f), Offset(w * 0.60f, w * 0.14f), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.86f, w * 0.14f), Offset(w * 0.86f, w * 0.40f), stroke, StrokeCap.Round)
     }
 }
 

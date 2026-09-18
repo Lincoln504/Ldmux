@@ -121,6 +121,22 @@ class ModifiersTest {
      * the label is derived from the name in one place rather than typed beside it in
      * two — which is how the panel and the portrait bar came to disagree.
      */
+    /**
+     * Ctrl-D is not offered anywhere, on purpose.
+     *
+     * It was on both bars and it was asked for by name to be taken out. Ctrl-D sends
+     * end-of-file to the shell, which closes the pane: a key that ends a session is
+     * the last thing that should sit on a bar pressed without looking. The reason it
+     * is easy to leave in is that it looks like Ctrl-C, which is why this asserts the
+     * absence rather than trusting the list to stay right.
+     */
+    @Test
+    fun theKeyListOffersNoControlD() {
+        val labels = SIDEBAR_KEYS.flatten().map { it.first }
+        assertTrue(labels.contains("C/c"), "the panel should still offer C/c: $labels")
+        assertFalse(labels.contains("C/d"), "the panel offers C/d again: $labels")
+    }
+
     @Test
     fun controlKeysReadWithASlash() {
         assertEquals("C/c", controlLabel("C-c"))

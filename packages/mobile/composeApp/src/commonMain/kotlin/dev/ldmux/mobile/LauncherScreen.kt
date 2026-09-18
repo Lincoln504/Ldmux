@@ -7,6 +7,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -126,6 +130,7 @@ fun LauncherScreen(
                         // The folder is always shown, because it is what tells two
                         // shells of the same kind apart. The process is the name.
                         title = e.label,
+                        mobileShell = e.openedByPhone,
                         subtitle = listOfNotNull(
                             tildify(e.cwd),
                             e.note,
@@ -316,6 +321,14 @@ private fun ChoiceRow(
     chosen: Boolean,
     onClick: () -> Unit,
     onKill: (() -> Unit)? = null,
+    /**
+     * A shell this phone opened, marked beside its name.
+     *
+     * Which shells came from here matters on this screen and nowhere else: the
+     * launcher is where you decide what to do with them, and only a shell this
+     * phone started can be moved to the desktop or closed from it.
+     */
+    mobileShell: Boolean = false,
     trailing: @Composable () -> Unit = {},
 ) {
     Row(
@@ -346,7 +359,21 @@ private fun ChoiceRow(
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, color = Fg, fontSize = 14.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, color = Fg, fontSize = 14.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+                if (mobileShell) {
+                    // One space after the name, in the grey the line beneath it uses:
+                    // a fact about this row rather than a control, so it is not a
+                    // button and must not look like one. Described as well as drawn —
+                    // a picture is not a description.
+                    Spacer(Modifier.width(5.dp))
+                    IconPhone(
+                        tint = Dim,
+                        box = 12.dp,
+                        modifier = Modifier.semantics { contentDescription = "opened on this phone" },
+                    )
+                }
+            }
             Text(subtitle, color = Dim, fontSize = 11.sp, maxLines = 1, fontFamily = FontFamily.Monospace)
         }
         trailing()
@@ -363,8 +390,10 @@ private fun SmallAction(label: String, onClick: () -> Unit) {
         Modifier
             .clip(RoundedCornerShape(6.dp))
             .background(Surface)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .heightIn(min = MinTouch)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Text(label, color = Dim, fontSize = 11.sp)
     }
@@ -388,7 +417,8 @@ fun OutlinedBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Uni
         modifier
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, Line, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
+            .heightIn(min = MinTouch)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {

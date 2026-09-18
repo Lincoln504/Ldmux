@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -64,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
@@ -83,6 +85,34 @@ val Dim = Color(0xFF8C8C8C)
 /** Nothing is tinted; "accent" is simply the lightest thing on screen. */
 val Accent = Color(0xFFD0D0D0)
 val Surface = Color(0xFF1A1A1A)
+
+/**
+ * The palette, as Material sees it.
+ *
+ * A scheme existed before this, but it was built inline inside `AppMenu` and wrapped
+ * only that menu, so it was the single place in the app where Material's defaults
+ * applied and everywhere else took a platform fallback. The same scheme, named once
+ * and hoisted to the root.
+ */
+internal val LdmuxColors = darkColorScheme(
+    surface = Surface,
+    onSurface = Fg,
+    onSurfaceVariant = Dim,
+    background = Bg,
+    onBackground = Fg,
+    primary = Accent,
+)
+
+/**
+ * The smallest a control may be, in either direction.
+ *
+ * Android's minimum touch target is 48dp and nothing in this app specified one: every
+ * control's height was whatever its padding and its type happened to add up to, which
+ * came to 24-34dp. That is small enough to miss, and it is the other half of why the
+ * same control felt different in two places — the padding differed and nothing else
+ * did. Stated once, applied by every control in this file.
+ */
+internal val MinTouch = 48.dp
 /** Rules and unselected outlines. */
 val Line = Color(0xFF2A2A2A)
 
@@ -176,8 +206,28 @@ enum class UiMode { Landscape, Portrait }
  */
 private const val PANEL_FLIP_MS = 200L
 
+/**
+ * The app, inside one theme.
+ *
+ * It had no root theme at all. `MaterialTheme` appeared exactly once in this whole
+ * package, wrapped around the overflow menu's `DropdownMenu` — so that menu was the
+ * only place in the app where a Material default applied, and every other control
+ * took `LocalIndication` (and every other Material composition local) from a platform
+ * fallback that nothing here chose and nothing here could see. That is the real reason
+ * one control felt responsive and the next did not: it was not two treatments, it was
+ * one control with Material's ripple and the next with none of Material's anything.
+ *
+ * It is the same scheme the menu already used, so the menu is unchanged. What changes
+ * is that everything is now inside it.
+ */
 @Composable
 fun App() {
+    MaterialTheme(colorScheme = LdmuxColors) { AppContent() }
+}
+
+/** The app itself. A separate function only so the theme can wrap all of it. */
+@Composable
+private fun AppContent() {
     var config by remember { mutableStateOf(AppPrefs.load()) }
     var showSettings by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(UiMode.Landscape) }
@@ -930,14 +980,13 @@ private fun PortraitBar(
                 "Ctrl" to { onModifiers(modifiers.toggled(StickyKey.Ctrl)) },
                 "Alt" to { onModifiers(modifiers.toggled(StickyKey.Alt)) },
                 controlLabel("C-c") to { press("C-c") },
-                controlLabel("C-d") to { press("C-d") },
                 "|" to { press("|") },
                 "-" to { press("-") },
                 "/" to { press("/") },
                 "\u23ce" to { press("Enter") },
             ),
             leading = flipHere,
-            active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false, false),
+            active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
         )
         // No microphone: the keyboard is always up in portrait and it has its own.
         // Two microphones is one too many.
@@ -966,42 +1015,20 @@ private fun PortraitKeyRow(
     ) {
         leading?.invoke(this)
         keys.forEachIndexed { i, (label, action) ->
-            PortraitKey(label, Modifier.weight(1f), active.getOrElse(i) { false }, action)
+            KeyBtn(label, Modifier.weight(1f), active.getOrElse(i) { false }, action)
         }
     }
 }
 
-@Composable
-private fun PortraitKey(
-    label: String,
-    modifier: Modifier,
-    active: Boolean,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier
-            .clip(RoundedCornerShape(7.dp))
-            .background(if (active) Accent else Bg)
-            .clickable(onClick = onClick)
-            .padding(vertical = 9.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-    }
-}
+/**
+ * The portrait bar's keys used to be their own composable, a near-duplicate of the
+ * panel's [KeyBtn], and the copy had already drifted: both latched to the accent
+ * background, but only the panel's inverted its label, so the latched Ctrl and Alt in
+ * portrait were light grey on light grey — the hardest-to-read state in the app, and
+ * the same state the panel renders correctly. A key is one thing in both modes, so it
+ * is one composable in both modes. The drift is not fixed here; it is made impossible.
+ */
 
-@Composable
-private fun TinyBtn(label: String, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(Bg)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-    ) {
-        Text(label, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-    }
-}
 
 /**
  * Where you are, and how to move — one row, in both modes.
@@ -1122,7 +1149,7 @@ private fun SidePanel(
         ) {
             // One row per group, each row sharing the panel's width between its
             // keys. Keys used to be chips sized to their own text, which made a
-            // ragged column where "C-d" and "|" had the same weight and nothing
+            // ragged column where "C-c" and "|" had the same weight and nothing
             // lined up with anything. A row that fills the width is easier to hit
             // and, more to the point, says how many keys are in it.
             KeyRow(
@@ -1151,13 +1178,17 @@ private fun SidePanel(
                 ),
             )
             PanelDivider()
-            // The six things a soft keyboard cannot produce and a shell wants
-            // most: two control keys, and the four characters that are not on the
+            // The five things a soft keyboard cannot produce and a shell wants
+            // most: one control key, and the four characters that are not on the
             // number row where they can be reached.
+            //
+            // Ctrl-D is deliberately not among them. It was, and it was asked for
+            // by name to be taken out. It sends end-of-file, which closes the pane,
+            // and a key that ends a session has no business sitting on a bar that
+            // someone presses without looking while holding the phone one-handed.
             KeyRow(
                 listOf(
                     controlLabel("C-c") to { press("C-c") },
-                    controlLabel("C-d") to { press("C-d") },
                     "|" to { press("|") },
                     "-" to { press("-") },
                     "/" to { press("/") },
@@ -1205,7 +1236,8 @@ fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
         modifier
             .clip(RoundedCornerShape(8.dp))
             .background(Accent)
-            .clickable(onClick = onClick)
+            .heightIn(min = MinTouch)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -1215,15 +1247,19 @@ fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
 
 @Composable
 private fun NavArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
-    Text(
-        glyph,
-        color = if (enabled) Accent else Dim.copy(alpha = 0.4f),
-        fontSize = 18.sp,
-        modifier = Modifier
+    Box(
+        Modifier
             .clip(RoundedCornerShape(6.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-    )
+            // The most-repeated action there is, and it was the smallest target in the
+            // app at about 28dp. A control you press constantly is the last one that
+            // should be hard to hit.
+            .heightIn(min = MinTouch)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(glyph, color = if (enabled) Accent else Dim.copy(alpha = 0.4f), fontSize = 18.sp)
+    }
 }
 
 @Composable
@@ -1243,7 +1279,8 @@ private fun KeyBtn(
         modifier
             .clip(RoundedCornerShape(6.dp))
             .background(if (active) Accent else Bg)
-            .clickable(onClick = onClick)
+            .heightIn(min = MinTouch)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = pad, vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -1320,12 +1357,24 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                 Box(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("text size", color = Dim, fontSize = 12.sp)
-                    TextButton(onClick = { fontSp = (fontSp - 1f).coerceAtLeast(LdmuxConfig.MIN_FONT_SP) }) {
-                        Text("−", color = Accent, fontSize = 16.sp)
+                    // Disabled at the ends of the range rather than silently doing
+                    // nothing. A live button that produces no visible change is the
+                    // worst of both: it looks broken, and it hides the reason. The
+                    // terminal arrow already knew that.
+                    val smaller = fontSp > LdmuxConfig.MIN_FONT_SP
+                    val larger = fontSp < LdmuxConfig.MAX_FONT_SP
+                    TextButton(
+                        onClick = { fontSp = (fontSp - 1f).coerceAtLeast(LdmuxConfig.MIN_FONT_SP) },
+                        enabled = smaller,
+                    ) {
+                        Text("−", color = if (smaller) Accent else Dim.copy(alpha = 0.4f), fontSize = 16.sp)
                     }
                     Text("${fontSp.toInt()}", color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                    TextButton(onClick = { fontSp = (fontSp + 1f).coerceAtMost(LdmuxConfig.MAX_FONT_SP) }) {
-                        Text("+", color = Accent, fontSize = 16.sp)
+                    TextButton(
+                        onClick = { fontSp = (fontSp + 1f).coerceAtMost(LdmuxConfig.MAX_FONT_SP) },
+                        enabled = larger,
+                    ) {
+                        Text("+", color = if (larger) Accent else Dim.copy(alpha = 0.4f), fontSize = 16.sp)
                     }
                 }
                 Text(
@@ -1404,7 +1453,7 @@ private fun BoxScope.HeldElsewhere(
  *
  * `weight(1f)` each rather than sized to their own text: a row of equally wide
  * targets is easier to hit without looking, and it reads as a set — which is what
- * `C-c` and `C-d` are and what a ragged column of chips was not.
+ * `C-c`, `|`, `-` and `/` are, and what a ragged column of chips was not.
  */
 @Composable
 private fun KeyRow(keys: List<Pair<String, () -> Unit>>, active: List<Boolean> = emptyList()) {
@@ -1435,12 +1484,7 @@ fun AppMenu(
     onSettings: () -> Unit,
 ) {
     MaterialTheme(
-        colorScheme = darkColorScheme(
-            surface = Surface,
-            onSurface = Fg,
-            onSurfaceVariant = Dim,
-            primary = Accent,
-        ),
+        colorScheme = LdmuxColors,
     ) {
         DropdownMenu(
             expanded = expanded,
