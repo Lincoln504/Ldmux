@@ -22,6 +22,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
@@ -120,6 +121,38 @@ fun IconClose(tint: Color, box: Dp = 18.dp) {
     }
 }
 
+/**
+ * "Open this somewhere else": a window with an arrow leaving its top-right corner.
+ *
+ * The idiom every desktop uses for "open in a new window", and it replaces five
+ * words of text on every launcher row. The window is drawn as an open polyline so
+ * that the arrow leaves through a gap rather than over a line — at this size a
+ * closed square crossed by an arrow reads as a scribble.
+ */
+@Composable
+fun IconPopOut(tint: Color, box: Dp = 18.dp) {
+    Canvas(Modifier.size(box)) {
+        val w = size.minDimension
+        val stroke = w * 0.12f
+        val corner = w * 0.06f
+        drawPath(
+            Path().apply {
+                moveTo(w * 0.60f, w * 0.20f + corner)
+                quadraticTo(w * 0.60f, w * 0.20f, w * 0.60f - corner, w * 0.20f)
+                lineTo(w * 0.26f, w * 0.20f)
+                lineTo(w * 0.26f, w * 0.76f)
+                lineTo(w * 0.80f, w * 0.76f)
+                lineTo(w * 0.80f, w * 0.42f)
+            },
+            tint,
+            style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
+        )
+        drawLine(tint, Offset(w * 0.44f, w * 0.56f), Offset(w * 0.82f, w * 0.18f), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.82f, w * 0.18f), Offset(w * 0.56f, w * 0.18f), stroke, StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.82f, w * 0.18f), Offset(w * 0.82f, w * 0.44f), stroke, StrokeCap.Round)
+    }
+}
+
 /** Settings: three sliders, which reads as "adjust" without a gear's detail. */
 @Composable
 /**
@@ -209,68 +242,33 @@ fun IconLauncher(tint: Color, box: Dp = 20.dp) {
 }
 
 /**
- * Two arrows chasing each other round a circle — a refresh mark.
+ * The way out of this orientation: a double-headed arrow on the diagonal.
  *
- * The two arcs are equal and sit opposite each other, and each one carries a head
- * at its end, so the ring reads as a ring with two turns in it rather than as a
- * circle with a line sticking out of each side. The heads are **V**s: two strokes
- * set back from the tip at the same angle as the tangent, which is what an arrow
- * actually looks like. A single barb, or a triangle, reads as a spike.
+ * It was two arcs chasing each other round a circle, which is the **refresh** mark
+ * — and a refresh mark promises that something will be fetched again, which is not
+ * what this does. A plain left-right arrow tilted forty-five degrees says the one
+ * thing that is true: the screen is going to turn, and it comes back the same way.
+ *
+ * Drawn along the diagonal rather than drawn flat and rotated: the geometry is two
+ * points either way, and a rotated canvas only adds a chance to get the two heads
+ * mismatched.
  */
 private fun DrawScope.drawFlip(tint: Color) {
     val w = size.minDimension
-    val stroke = w * 0.115f
-    // Room for the heads to sit *outside* the arcs' radius without clipping.
-    val inset = w * 0.24f
-    val d = w - inset * 2f
-    val gate = 52f      // degrees of gap at each head, so the heads have air
-    val sweep = 180f - gate
-    val style = Stroke(stroke, cap = StrokeCap.Round)
-    for (start in listOf(-90f + gate / 2f, 90f + gate / 2f)) {
-        val topLeft = Offset(inset, inset)
-        drawArc(tint, start, sweep, false, topLeft, Size(d, d), style = style)
-        arrowHead(tint, inset, d, start + sweep, w, stroke)
-    }
+    val stroke = w * 0.13f
+    val barb = w * 0.23f
+    val a = Offset(w * 0.24f, w * 0.76f)
+    val b = Offset(w * 0.76f, w * 0.24f)
+    drawLine(tint, a, b, stroke, StrokeCap.Round)
+    // A head at each end. The shaft runs on the diagonal, so the two barbs that
+    // point back along it are exactly the horizontal one and the vertical one —
+    // which is why this needs no trigonometry at all.
+    drawLine(tint, b, Offset(b.x - barb, b.y), stroke, StrokeCap.Round)
+    drawLine(tint, b, Offset(b.x, b.y + barb), stroke, StrokeCap.Round)
+    drawLine(tint, a, Offset(a.x + barb, a.y), stroke, StrokeCap.Round)
+    drawLine(tint, a, Offset(a.x, a.y - barb), stroke, StrokeCap.Round)
 }
 
-/**
- * A V-shaped head at [angleDeg] on the circle, tangent to it, turning clockwise.
- *
- * Both barbs are swept back from the tip by the same angle, and both are shorter
- * than the gap between the two arcs — an arrow head wider than the gap it sits in
- * is what made the previous version look like a spike rather than an arrow.
- */
-private fun DrawScope.arrowHead(
-    tint: Color,
-    inset: Float,
-    d: Float,
-    angleDeg: Float,
-    w: Float,
-    stroke: Float,
-) {
-    val r = d / 2f
-    val cx = inset + r
-    val cy = inset + r
-    val a = angleDeg * (PI / 180.0)
-    val co = cos(a).toFloat()
-    val si = sin(a).toFloat()
-    val tip = Offset(cx + r * co, cy + r * si)
-    // Clockwise, with y growing downwards, the tangent is (-sin, cos).
-    val tx = -si
-    val ty = co
-    // Long enough to see, short enough to stay inside the gap between the arcs.
-    val len = w * 0.30f
-    val barb = 42.0 * (PI / 180.0)
-    val cs = cos(barb).toFloat()
-    val sn = sin(barb)
-    for (sign in listOf(1.0, -1.0)) {
-        // Sweep the *backwards* tangent by ±barb: the two sides of the V.
-        val s2 = (sn * sign).toFloat()
-        val rx = -tx * cs - -ty * s2
-        val ry = -tx * s2 + -ty * cs
-        drawLine(tint, tip, Offset(tip.x + rx * len, tip.y + ry * len), stroke, StrokeCap.Round)
-    }
-}
 
 /** A keyboard: a rounded case, two rows of keys, and a space bar. */
 private fun DrawScope.drawKeyboard(tint: Color) {

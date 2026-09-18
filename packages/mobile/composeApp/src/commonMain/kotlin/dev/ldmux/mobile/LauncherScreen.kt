@@ -126,7 +126,16 @@ fun LauncherScreen(
                         // The folder is always shown, because it is what tells two
                         // shells of the same kind apart. The process is the name.
                         title = e.label,
-                        subtitle = listOfNotNull(tildify(e.cwd), e.note).joinToString(" · "),
+                        subtitle = listOfNotNull(
+                            tildify(e.cwd),
+                            e.note,
+                            // The workspace a live window is on is *state*, and the
+                            // action's own words used to carry it ("on 9") — which
+                            // is the reason that action could not simply become an
+                            // icon without losing something. It belongs with the
+                            // other facts about this row.
+                            e.liveWorkspace?.let { "on ws $it" },
+                        ).joinToString("  ·  "),
                         chosen = e.key in chosen,
                         onClick = { chosen = toggle(chosen, e.key) },
                         // Closing is the launcher's alone, and it is offered only
@@ -141,20 +150,22 @@ fun LauncherScreen(
                         // the phone may look at it, but not move or end it.
                         if (e.openedByPhone && session != null) {
                             val live = e.liveWorkspace
-                            // Words, not a button. It said "pick a desktop" and
-                            // could not pick one — it acted on a target chosen
-                            // elsewhere, so on its own it did nothing, which is
-                            // what a button that does nothing teaches you about
-                            // the rest of them.
-                            Text(
-                                if (live != null) "on $live" else "send to desktop",
-                                color = if (live != null) Accent else Dim,
-                                fontSize = 11.sp,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable { pickerFor = session }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp),
-                            )
+                            // An icon instead of five words. A square with an arrow
+                            // leaving its top-right is what every desktop uses for
+                            // "open this somewhere else", and five words on every row
+                            // is five words too many.
+                            //
+                            // Its *state* is not lost in the exchange: the workspace
+                            // moved to the subtitle above, and the filled treatment
+                            // says at a glance that the window is out there. A bare
+                            // icon would have traded noise for a blind spot.
+                            IconBtn(
+                                onClick = { pickerFor = session },
+                                label = if (live != null) "on desktop $live" else "send to desktop",
+                                filled = live != null,
+                            ) {
+                                IconPopOut(if (live != null) Bg else Dim)
+                            }
                         }
                     }
                 }
