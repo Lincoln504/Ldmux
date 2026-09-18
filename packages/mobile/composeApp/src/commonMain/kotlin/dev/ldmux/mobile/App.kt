@@ -1238,11 +1238,25 @@ private fun SidePanel(
                 active = listOf(handle?.inCopyMode == true),
             )
             PanelDivider()
+            // Backspace joins the keys a soft keyboard cannot send. Landscape has no
+            // keyboard at all, so a dictated word that arrives wrong cannot be taken
+            // back: Esc, Tab and Enter were here, and the one key that undoes a
+            // character was not. `BSpace` is tmux's name for erase-to-the-left and it
+            // is what the hardware path already sends (TerminalSurface.android.kt:277),
+            // so there is one definition of this key rather than two.
+            //
+            // Labelled with a word, because the other three keys in this row are
+            // words and a lone glyph would be a picture among labels. Drawn marks are
+            // for the marks that have no word, not for words that have a mark.
+            //
+            // Portrait does not get one: the keyboard is up there and it carries its
+            // own backspace.
             KeyRow(
                 listOf(
                     "Esc" to { press("Escape") },
                     "Tab" to { press("Tab") },
                     "⏎" to { press("Enter") },
+                    "del" to { press("BSpace") },
                 ),
             )
             PanelDivider()
