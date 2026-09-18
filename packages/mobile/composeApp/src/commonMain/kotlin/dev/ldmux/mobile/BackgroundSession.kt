@@ -16,6 +16,18 @@ package dev.ldmux.mobile
  */
 expect object BackgroundSession {
     /**
+     * How long the app may be off screen before it lets go of its shells.
+     *
+     * **A platform number, not a shared one.** Android can hold a process alive
+     * and keep a link up, so a grace window is a real window during which nothing
+     * needs to happen. iOS cannot: the process is suspended within seconds and a
+     * task that outlives the background window is killed, so a coroutine delay
+     * there is a detach that never runs. iOS answers 0 and releases synchronously
+     * in `didEnterBackground`.
+     */
+    val releaseGraceMs: Long
+
+    /**
      * The link went up (with [text] describing what is open) or came down.
      *
      * Called on every change, and only on change — this starts and stops a

@@ -7,6 +7,7 @@ import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
+import kotlin.random.Random
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 import kotlinx.coroutines.CoroutineScope
@@ -146,6 +147,10 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
     private var pingSeq = 0
     private var pingSentAt: TimeMark? = null
+    /** Set by the pong handler, read once per ping interval by the pinger. */
+    private var pongSeen = false
+    /** Retry attempts since the last successful connection, for the backoff. */
+    private var attempt = 0
 
     fun start(scope: CoroutineScope) {
         if (job != null) return
@@ -203,10 +208,23 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     // handshake to settle.
                     val pinger = launch {
                         delay(FIRST_PING_MS)
+                        var outstanding = 0
                         while (isActive) {
                             val id = ++pingSeq
                             pingSentAt = TimeSource.Monotonic.markNow()
                             runCatching { send(Frame.Text("""{"type":"ping","id":$id}""")) }
+                            // A ping nobody answers does not detect anything: the
+                            // socket is only known to be dead when the OS says so,
+                            // and on a sleeping radio or a NAT that has forgotten
+                            // the flow, nothing says so for a long time — the
+                            // terminal just stops updating. Three unanswered pings
+                            // is a link that is not there, whatever it claims.
+                            outstanding = if (pongSeen) 0 else outstanding + 1
+                            pongSeen = false
+                            if (outstanding >= MISSED_PONGS) {
+                                runCatching { ws?.close() }
+                                break
+                            }
                             delay(PING_INTERVAL_MS)
                         }
                     }
@@ -230,18 +248,34 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 /* offline / daemon restart: retry below */
             }
             pingSentAt = null
+            pongSeen = false
             onOffline?.invoke()
             // No pause when a takeover is armed: that path is a user waiting on
             // the result of a tap, not a link that needs a moment to recover.
-            if (!wantTakeover) delay(1500)
+            //
+            // Backoff with jitter, capped, because this runs once per open page.
+            // A fixed 1.5 s retry meant a phone with no route asked again 40 times
+            // a minute per shell forever — the radio cost of a client that is not
+            // there — and a daemon restart had every page of every phone coming
+            // back in lockstep. The list client already backed off; two policies
+            // for one app is drift, so this is the same one.
+            if (!wantTakeover) {
+                val base = (RETRY_BASE_MS shl attempt.coerceAtMost(5)).coerceAtMost(RETRY_MAX_MS)
+                attempt++
+                delay(base + Random.nextLong(base / 2 + 1))
+            }
         }
     }
 
     private fun onControl(text: String) {
         val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         when (root["type"]?.jsonPrimitive?.content) {
-            "caps" -> Unit
+            // The daemon has answered, so the link works and the next failure is
+            // a new one: the backoff starts over rather than staying where the
+            // last outage left it.
+            "caps" -> attempt = 0
             "pong" -> {
+                pongSeen = true
                 val sent = pingSentAt ?: return
                 pingSentAt = null
                 onRtt?.invoke(sent.elapsedNow().inWholeMilliseconds)
@@ -385,5 +419,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
          * spend its budget on keep-alives. Each ping is a handful of bytes.
          */
         const val PING_INTERVAL_MS = 4_000L
+
+        /** Unanswered pings before the link is declared dead. */
+        const val MISSED_PONGS = 3
+
+        /** Retry floor, doubled per attempt up to [RETRY_MAX_MS], plus jitter. */
+        const val RETRY_BASE_MS = 400L
+        const val RETRY_MAX_MS = 10_000L
     }
 }

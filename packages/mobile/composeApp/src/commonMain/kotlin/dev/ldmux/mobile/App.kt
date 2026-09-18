@@ -83,15 +83,6 @@ val Surface = Color(0xFF1A1A1A)
 val Line = Color(0xFF2A2A2A)
 
 /** The landscape panel's width. The terminal gets everything else. */
-/**
- * How long the app may be off screen before it lets go of its shells.
- *
- * Long enough that switching apps, answering a message or looking at a
- * notification costs nothing; short enough that a phone in a pocket stops being a
- * terminal client within the minute.
- */
-private const val BACKGROUND_GRACE_MS = 45_000L
-
 private val PANEL_WIDTH = 190.dp
 
 /** Where the daemon is and how to authenticate. Persisted by the platform. */
@@ -281,7 +272,14 @@ fun App() {
     // *is* the detach, so there is one way for a shell to be let go of.
     LaunchedEffect(AppLifecycle.foreground) {
         if (AppLifecycle.foreground) return@LaunchedEffect
-        delay(BACKGROUND_GRACE_MS)
+        delay(BackgroundSession.releaseGraceMs)
+        pageSelection = emptySet()
+        showLauncher = true
+    }
+
+    // Back means the same thing as the launcher button: it leaves the terminal
+    // and lets go. It is not a second way to do it — it is the same call.
+    BackToLauncher(enabled = terminalOpen) {
         pageSelection = emptySet()
         showLauncher = true
     }

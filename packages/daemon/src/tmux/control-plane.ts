@@ -210,6 +210,18 @@ export function isValidSessionName(name: string): boolean {
   return SESSION_NAME_RE.test(name);
 }
 
+/**
+ * The environment a tmux child is spawned with.
+ *
+ * `process.env` minus the two variables that would make a shell ldmux created
+ * lie about where it is: `TMUX` (the server a client is attached to) and
+ * `TMUX_PANE`. See the call site for why this matters.
+ */
+export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = env;
+  return rest;
+}
+
 export class TmuxControlPlane {
   readonly socket: string;
   private readonly timeoutMs: number;
@@ -247,7 +259,16 @@ export class TmuxControlPlane {
       // Explicit env, not the default: a child must see the environment as it is
       // now, so a PATH changed at runtime (a stubbed `tmux` in tests, or a user's
       // PATH fix) is honoured rather than a snapshot from process start.
-      env: process.env,
+      //
+      // `TMUX` and `TMUX_PANE` are stripped, and that is not tidiness. This
+      // process inherits its environment from whoever started it, so a daemon
+      // started from inside the user's own tmux would pass *their* `TMUX` down to
+      // every shell ldmux creates — and `TMUX` names the server a client is
+      // attached to, so a program inside an ldmux shell would believe it is in
+      // the user's session and act on it (`tmux ls`, nvim's tmux navigation).
+      // ldmux drives its own server over its own socket; a child of it is
+      // attached to nothing and must not claim otherwise.
+      env: childEnv(),
     });
     const timeoutErr = `tmux timed out after ${this.timeoutMs}ms`;
     const kill = (signal?: number) => proc.kill(signal);
@@ -303,6 +324,22 @@ export class TmuxControlPlane {
       ["set-option", "-g", "window-size", "manual"],
       ["set-option", "-g", "set-clipboard", "on"],
       ["set-option", "-g", "focus-events", "on"],
+      // tmux is a terminal to the programs inside it, and it lies about what it
+      // can display unless told: `tmux-256color` says 256 colours, so a program
+      // that asks (or trusts $TERM) downgrades its own output, and the client's
+      // 24-bit renderer has nothing to draw. Measured on tmux 3.7b: with and
+      // without the override, `tput colors` says 256 and tmux *passes* a 24-bit
+      // SGR through either way — so the override alone is not enough. What
+      // programs actually read is COLORTERM, which is why both are set.
+      ["set-option", "-ga", "terminal-overrides", ",tmux-256color:Tc"],
+      ["set-option", "-ga", "terminal-overrides", ",xterm-256color:Tc"],
+      ["set-option", "-ga", "terminal-overrides", ",screen-256color:Tc"],
+      ["set-environment", "-g", "COLORTERM", "truecolor"],
+      // The default 500 ms is tmux waiting to see whether an ESC begins a
+      // sequence. A phone has no tmux client and sends bytes through the control
+      // plane, so this only ever delayed the desk's own window — and 500 ms of
+      // nothing after pressing Esc is the kind of lag that reads as a hang.
+      ["set-option", "-sg", "escape-time", "0"],
       ["set-option", "-g", "remain-on-exit", "on"],
     ]) {
       // Best-effort: some options may not exist on very old tmux.

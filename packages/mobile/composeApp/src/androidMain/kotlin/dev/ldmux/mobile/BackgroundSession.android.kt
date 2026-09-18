@@ -158,6 +158,8 @@ class LdmuxService : Service() {
  * that the only thing crossing the seam is a boolean: "the link is up".
  */
 actual object BackgroundSession {
+    actual val releaseGraceMs: Long = 45_000L
+
     private const val TAG = "ldmux"
     private var running = false
     private var lastText = ""

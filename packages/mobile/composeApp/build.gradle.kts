@@ -43,6 +43,11 @@ kotlin {
 android {
     namespace = "dev.ldmux.mobile"
     // Compile against the latest released platform (37.2), but TARGET 36 and
+    // MIN 28: Android 8.0 reached end of security support in January 2021, so a
+    // phone on 26 or 27 has had no security updates for five years and cannot
+    // run a terminal safely whatever it is a terminal to. Android 9 (API 28) is
+    // still the ~95th percentile of devices in use.
+    //
     // MIN 26: compileSdk only decides which APIs we may use, targetSdk opts into
     // new runtime behaviour (kept at the latest broadly-deployed level), and
     // minSdk 26 (Android 8, 2017) keeps broad device coverage.
@@ -51,7 +56,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.ldmux.mobile"
-        minSdk = 26
+        minSdk = 28
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
