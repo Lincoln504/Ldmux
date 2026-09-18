@@ -83,6 +83,15 @@ val Surface = Color(0xFF1A1A1A)
 val Line = Color(0xFF2A2A2A)
 
 /** The landscape panel's width. The terminal gets everything else. */
+/**
+ * How long the app may be off screen before it lets go of its shells.
+ *
+ * Long enough that switching apps, answering a message or looking at a
+ * notification costs nothing; short enough that a phone in a pocket stops being a
+ * terminal client within the minute.
+ */
+private const val BACKGROUND_GRACE_MS = 45_000L
+
 private val PANEL_WIDTH = 190.dp
 
 /** Where the daemon is and how to authenticate. Persisted by the platform. */
@@ -254,11 +263,33 @@ fun App() {
             if (pages.size == 1) "1 shell open" else "${pages.size} shells open",
         )
     }
-    // Backgrounding the app does NOT dispose this composition, so the service
-    // keeps running and the link survives — which is the whole point. Leaving the
-    // app entirely does dispose it, and then the service must go too: a
-    // notification saying a shell is open, with nothing behind it, is worse than
-    // no notification, and the process would stay alive for no reason.
+    // **Leaving the screen lets go of everything, after a grace window.**
+    //
+    // The alternative — holding the sockets, the wake lock and the claims for as
+    // long as the app is installed — costs a radio wakeup every four seconds per
+    // open shell and a CPU that never suspends, to keep a *view* of a shell alive.
+    // The view is the cheap part: the shell lives in tmux on the host, and a
+    // client that reconnects gets a full snapshot of the terminal state by
+    // construction. So there is nothing to preserve by staying awake.
+    //
+    // The grace window is what makes it not annoying: an app switch, a glance at
+    // a notification, or answering a message all come back inside it and find
+    // everything exactly as it was. Past it the user has gone somewhere, and the
+    // honest thing is to be a list of shells when they return.
+    //
+    // Deliberately the same mechanism as the launcher button: dropping the pages
+    // *is* the detach, so there is one way for a shell to be let go of.
+    LaunchedEffect(AppLifecycle.foreground) {
+        if (AppLifecycle.foreground) return@LaunchedEffect
+        delay(BACKGROUND_GRACE_MS)
+        pageSelection = emptySet()
+        showLauncher = true
+    }
+
+    // Leaving the app entirely disposes this composition, and then the service
+    // must go too: a notification saying a shell is open, with nothing behind it,
+    // is worse than no notification, and the process would stay alive for no
+    // reason.
     DisposableEffect(Unit) {
         onDispose { BackgroundSession.setActive(false, "") }
     }

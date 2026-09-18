@@ -180,3 +180,39 @@ test("kill: still an unconditional end, so the CLI is not negotiable", { timeout
   expect(r.ok).toBe(true);
   expect(daemon.registry.get(id)?.status).toBe("dead");
 });
+
+test("ownership: a device's claim survives the close of its other socket", { timeout: 30000 }, async () => {
+  // The reconnect overlap, which is the normal case rather than a corner one: a
+  // phone holds one socket for the session list and one per open shell, and a
+  // reconnect opens the new socket before the old one is reaped. Releasing the
+  // device's claims on *any* close let the dead socket free the claim its own
+  // replacement had just made — the shell went quietly claimable by anyone, with
+  // no takeover and no message, which is the same failure as the Stale State this
+  // release exists to prevent, pointing the other way.
+  const info = await remoteInfo();
+  const id = await newShell("overlap-shell");
+
+  const list = await client(info, phone);
+  const pane = await client(info, phone);
+  pane.send({ type: "attach", sessionId: id });
+  expect(await waitFor(() => pane.text.some((m) => m.type === "caps"))).toBe(true);
+
+  // The list socket goes. Same device, still here.
+  list.close();
+  await sleep(200);
+
+  const other = await client(info, tablet);
+  other.send({ type: "attach", sessionId: id });
+  expect(await waitFor(() => other.owned().length > 0)).toBe(true);
+  expect(other.text.some((m) => m.type === "caps")).toBe(false);
+
+  // ...and when the last one goes, the claim goes with it, which is the property
+  // the release was for in the first place.
+  pane.close();
+  expect(await waitFor(() => {
+    other.send({ type: "attach", sessionId: id, takeover: true });
+    return other.text.some((m) => m.type === "caps");
+  })).toBe(true);
+
+  other.close();
+});

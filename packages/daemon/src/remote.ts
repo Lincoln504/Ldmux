@@ -226,9 +226,19 @@ export class RemoteServer {
         // asks again.
         if (conn.device) {
           this.byDevice.get(conn.device.id)?.delete(socket);
-          if (this.byDevice.get(conn.device.id)?.size === 0) this.byDevice.delete(conn.device.id);
-          const freed = this.opts.releaseDevice?.(conn.device.id) ?? [];
-          if (freed.length > 0) void this.broadcastSessions().catch(() => {});
+          // Only when this was the device's LAST connection. A phone holds one
+          // socket for the session list and one per open shell, and a reconnect
+          // overlaps the old socket with the new one — so releasing on *any*
+          // close would let the socket that is already dead free the claim its
+          // own replacement has just made. The shell would go quietly claimable
+          // by anyone, with no takeover and no message, which is the same class
+          // of failure as the *Stale State* this release exists to prevent,
+          // pointing the other way.
+          if (this.byDevice.get(conn.device.id)?.size === 0) {
+            this.byDevice.delete(conn.device.id);
+            const freed = this.opts.releaseDevice?.(conn.device.id) ?? [];
+            if (freed.length > 0) void this.broadcastSessions().catch(() => {});
+          }
         }
       });
       socket.on("error", () => {

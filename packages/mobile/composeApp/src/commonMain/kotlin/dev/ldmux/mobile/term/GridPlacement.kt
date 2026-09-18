@@ -72,7 +72,13 @@ fun placeGrid(
 ): GridPlacement {
     val gridW = cellWidth * cols
     val gridH = cellHeight * rows
-    val dx = if (gridW <= viewportWidth) (viewportWidth - gridW) / 2f else 0f
-    val dy = if (gridH <= viewportHeight) (viewportHeight - gridH) / 2f else viewportHeight - gridH
+    // Flush to the top-left. Centring was inherited from a general-purpose placer
+    // and it is wrong for a terminal in a way that is measurable: the leftover is
+    // under one cell, but splitting it in two puts a black band on *both* edges
+    // instead of one, and the text no longer starts where the corner is. When the
+    // grid is larger than the viewport it is pinned to the bottom, because that is
+    // where the prompt and the cursor are and they are what you cannot lose.
+    val dx = 0f
+    val dy = if (gridH <= viewportHeight) 0f else viewportHeight - gridH
     return GridPlacement(dx, dy, cellWidth, cellHeight, cols, rows)
 }

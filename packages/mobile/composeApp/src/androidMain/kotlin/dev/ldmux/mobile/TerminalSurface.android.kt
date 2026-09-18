@@ -170,6 +170,10 @@ actual fun rememberTerminalSurface(
     // ever shrunk to fit a fixed grid (ADR-0008), which is also what keeps the
     // touch mapping honest — there is no scale to divide by.
     var fontSp by remember { mutableStateOf(config.fontSp) }
+    // A keyless `remember` never re-initialises, so a page opened before the
+    // setting changed kept the old size and the Settings buttons looked broken.
+    // The surface is the one composable that outlives a settings change.
+    LaunchedEffect(config.fontSp) { fontSp = config.fontSp }
     val fontSizePx = with(density) { fontSp.sp.toPx() }
     val painter = remember(fontSizePx) { TerminalPainter(fontSizePx) }
     val scope = rememberCoroutineScope()

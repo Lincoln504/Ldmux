@@ -22,12 +22,17 @@ class GridPlacementTest {
     ) = placeGrid(cell, cell * 2f, cols, rows, vw, vh)
 
     @Test
-    fun `a grid that does not fill the viewport is centred`() {
-        // 10 cols x 10px = 100 wide in a 120 viewport: 10px margin each side.
-        // 5 rows x 20px = 100 tall in a 140 viewport: 20px margin each side.
+    fun `a grid that does not fill the viewport is flush to the top-left`() {
+        // Centring split the leftover into a band on *both* edges — a measurable
+        // black strip beside the first column and above the first row — for a
+        // leftover that is under one cell. A terminal's text starts where its box
+        // starts. The leftover goes to the right and the bottom, which is where
+        // nothing is reading.
         val p = place(cols = 10, rows = 5, vw = 120f, vh = 140f)
-        assertEquals(10f, p.dx)
-        assertEquals(20f, p.dy)
+        assertEquals(0f, p.dx, "no band on the left")
+        assertEquals(0f, p.dy, "no band on the top")
+        assertEquals(100f, p.gridWidth, "the leftover is on the right")
+        assertEquals(100f, p.gridHeight, "the leftover is on the bottom")
     }
 
     @Test
@@ -36,7 +41,7 @@ class GridPlacementTest {
         // cells stay 20px and the overflow goes off the *top*, so the bottom row
         // (the prompt) stays visible.
         val p = place(cols = 10, rows = 20, vw = 120f, vh = 300f)
-        assertEquals(10f, p.dx, "still centred, because it is narrow enough")
+        assertEquals(0f, p.dx, "flush left, and narrow enough not to clip")
         assertEquals(-100f, p.dy, "the overflow goes off the top")
         assertEquals(20f, p.cellHeight, "cells are never resampled to fit")
     }
@@ -62,12 +67,16 @@ class GridPlacementTest {
     }
 
     @Test
-    fun `a tap in the margin beside the grid is not a cell`() {
+    fun `a tap in the leftover beside the grid is not a cell`() {
+        // Flush to the top-left means the only leftover is on the right and the
+        // bottom. Tapping it must not invent a cell: the cursor would land in a
+        // column the shell does not have.
         val p = place(cols = 10, rows = 5, vw = 120f, vh = 140f)
-        assertNull(p.cellAt(0f, 0f), "left of the 10px margin")
-        assertNull(p.cellAt(119f, 139f), "right margin is 10px wide")
-        assertNull(p.cellAt(-1f, 70f))
-        assertNull(p.cellAt(60f, -1f))
+        assertNull(p.cellAt(119f, 139f), "right of the last column")
+        assertNull(p.cellAt(5f, 139f), "below the last row")
+        assertNull(p.cellAt(-1f, 70f), "before the first column")
+        assertNull(p.cellAt(60f, -1f), "above the first row")
+        assertEquals(0, p.cellAt(0f, 0f), "the corner *is* the first cell")
     }
 
     @Test
@@ -75,11 +84,11 @@ class GridPlacementTest {
         // 20 rows in a 300px viewport, so the top 5 rows are off-screen.
         val p = place(cols = 10, rows = 20, vw = 120f, vh = 300f)
         // The top edge of the viewport is inside row 5 (rows -100..0 are rows 0-4).
-        assertEquals(5 * 10 + 0, p.cellAt(10f, 0f))
+        assertEquals(5 * 10 + 0, p.cellAt(5f, 0f))
         // Above the grid's own top edge (dy = -100) there is no cell at all.
-        assertNull(p.cellAt(10f, -100.5f))
+        assertNull(p.cellAt(5f, -100.5f))
         // The bottom of the viewport is the bottom of row 19.
-        assertEquals(19 * 10 + 9, p.cellAt(105f, 299f))
+        assertEquals(19 * 10 + 9, p.cellAt(95f, 299f))
     }
 
     @Test

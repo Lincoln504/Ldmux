@@ -18,6 +18,23 @@ class MainActivity : ComponentActivity() {
         setContent { App() }
     }
 
+    override fun onStart() {
+        super.onStart()
+        AppLifecycle.set(true)
+    }
+
+    /**
+     * The app left the screen.
+     *
+     * Deliberately `onStop` and not `onPause`: `onPause` fires for a dialog, a
+     * permission prompt and the soft keyboard in some builds, and none of those
+     * mean the user has gone anywhere.
+     */
+    override fun onStop() {
+        AppLifecycle.set(false)
+        super.onStop()
+    }
+
     override fun onDestroy() {
         // Cleared rather than leaked: the service asks this for the notification
         // permission, and asking a destroyed activity is a crash, not a no-op.
