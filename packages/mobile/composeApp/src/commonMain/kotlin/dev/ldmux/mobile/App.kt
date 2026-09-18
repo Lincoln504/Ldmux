@@ -70,6 +70,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -195,11 +196,22 @@ internal data class Touch(
     val pad: Dp,
     /** Vertical padding inside a list row, which is where a row's thickness comes from. */
     val rowPad: Dp,
+    /**
+     * The drawn size of a glyph inside a control.
+     *
+     * A floor cannot shrink content that is already bigger than it, so the one way to
+     * get a control below its floor is for the mark inside it to be smaller. This is
+     * that lever, and it is why the portrait menu and flip buttons -- the two that
+     * carry a 18dp mark rather than the 20-22dp defaults -- are the ones that move.
+     */
+    val icon: Dp,
+    /** The launcher's checkbox. Its tick is drawn from it, so the two move together. */
+    val check: Dp,
 )
 
 /** The two densities, named once so neither is a pair of literals in two places. */
-private val ThinTouch = Touch(min = 34.dp, dense = 28.dp, pad = 5.dp, rowPad = 4.dp)
-private val TallTouch = Touch(min = MinTouch, dense = DenseTouch, pad = 8.dp, rowPad = 8.dp)
+private val ThinTouch = Touch(min = 34.dp, dense = 28.dp, pad = 5.dp, rowPad = 4.dp, icon = 18.dp, check = 16.dp)
+private val TallTouch = Touch(min = MinTouch, dense = DenseTouch, pad = 8.dp, rowPad = 8.dp, icon = 22.dp, check = 18.dp)
 
 internal fun touchFor(compact: Boolean): Touch = if (compact) ThinTouch else TallTouch
 
@@ -781,7 +793,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                         .background(Surface)
                         .border(1.dp, Line, RoundedCornerShape(8.dp))
                         .clickable { client.clearServerError() }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = LocalTouch.current.pad),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(err.message, color = Fg, fontSize = 12.sp)
@@ -1020,9 +1032,9 @@ fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
         containerColor = Surface,
         text = { Text(target.label, color = Dim, fontSize = 12.sp) },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("close", color = Color(0xFFE08A8A)) }
+            MiniTextButton(onClick = onConfirm) { Text("close", color = Color(0xFFE08A8A)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
+        dismissButton = { MiniTextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
     )
 }
 
@@ -1043,8 +1055,8 @@ private fun PortraitBar(
     press: (String) -> Unit,
 ) {
     Column(
-        Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 5.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = LocalTouch.current.pad),
+        verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
     ) {
         // Where you are, and how to move, at the top of the bar: the same row the
         // side panel shows, because moving between shells must not mean leaving
@@ -1074,14 +1086,14 @@ private fun PortraitBar(
         val menuHere: @Composable RowScope.() -> Unit = {
             Box(Modifier.weight(1f)) {
                 IconBtn(onClick = onMenu, label = "menu", modifier = Modifier.fillMaxWidth(), filled = true) {
-                    IconLauncher(Bg, box = 18.dp)
+                    IconLauncher(Bg, box = LocalTouch.current.icon)
                 }
                 AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
             }
         }
         val flipHere: @Composable RowScope.() -> Unit = {
             IconBtn(onClick = onLandscape, label = "flip to landscape", modifier = Modifier.weight(1f)) {
-                IconFlip(Accent, box = 18.dp)
+                IconFlip(Accent, box = LocalTouch.current.icon)
             }
         }
         PortraitKeyRow(
@@ -1260,8 +1272,8 @@ private fun SidePanel(
 
     Column(
         Modifier.width(PANEL_WIDTH).fillMaxHeight().background(Surface)
-            .padding(horizontal = 8.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = 8.dp, vertical = LocalTouch.current.rowPad * 2),
+        verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
     ) {
         ShellHeader(pages, pagerState, scope, onLauncher, onSettings)
 
@@ -1270,7 +1282,7 @@ private fun SidePanel(
         @OptIn(ExperimentalLayoutApi::class)
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
         ) {
             // One row per group, each row sharing the panel's width between its
             // keys. Keys used to be chips sized to their own text, which made a
@@ -1469,10 +1481,10 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("panel", color = Dim, fontSize = 12.sp)
-                    TextButton(onClick = { side = "left" }) { Text("left", color = if (side == "left") Accent else Dim) }
-                    TextButton(onClick = { side = "right" }) { Text("right", color = if (side == "right") Accent else Dim) }
+                    MiniTextButton(onClick = { side = "left" }) { Text("left", color = if (side == "left") Accent else Dim) }
+                    MiniTextButton(onClick = { side = "right" }) { Text("right", color = if (side == "right") Accent else Dim) }
                 }
-                Box(Modifier.height(4.dp))
+                Box(Modifier.height(LocalTouch.current.rowPad))
                 OutlinedTextField(
                     value = host,
                     onValueChange = { host = it },
@@ -1480,7 +1492,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Box(Modifier.height(6.dp))
+                Box(Modifier.height(LocalTouch.current.rowPad))
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
@@ -1488,13 +1500,13 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Box(Modifier.height(6.dp))
+                Box(Modifier.height(LocalTouch.current.rowPad))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("predictive echo", color = Dim, fontSize = 12.sp)
-                    TextButton(onClick = { predict = false }) {
+                    MiniTextButton(onClick = { predict = false }) {
                         Text("off", color = if (!predict) Accent else Dim)
                     }
-                    TextButton(onClick = { predict = true }) {
+                    MiniTextButton(onClick = { predict = true }) {
                         Text("on", color = if (predict) Accent else Dim)
                     }
                 }
@@ -1506,13 +1518,13 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     color = Dim,
                     fontSize = 10.sp,
                 )
-                Box(Modifier.height(10.dp))
+                Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("control size", color = Dim, fontSize = 12.sp)
-                    TextButton(onClick = { compact = false }) {
+                    MiniTextButton(onClick = { compact = false }) {
                         Text("tall", color = if (!compact) Accent else Dim)
                     }
-                    TextButton(onClick = { compact = true }) {
+                    MiniTextButton(onClick = { compact = true }) {
                         Text("thin", color = if (compact) Accent else Dim)
                     }
                 }
@@ -1521,7 +1533,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     color = Dim,
                     fontSize = 10.sp,
                 )
-                Box(Modifier.height(10.dp))
+                Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("text size", color = Dim, fontSize = 12.sp)
                     // Disabled at the ends of the range rather than silently doing
@@ -1530,14 +1542,14 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                     // terminal arrow already knew that.
                     val smaller = fontSp > LdmuxConfig.MIN_FONT_SP
                     val larger = fontSp < LdmuxConfig.MAX_FONT_SP
-                    TextButton(
+                    MiniTextButton(
                         onClick = { fontSp = (fontSp - 1f).coerceAtLeast(LdmuxConfig.MIN_FONT_SP) },
                         enabled = smaller,
                     ) {
                         Text("−", color = if (smaller) Accent else Dim.copy(alpha = 0.4f), fontSize = 16.sp)
                     }
                     Text("${fontSp.toInt()}", color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                    TextButton(
+                    MiniTextButton(
                         onClick = { fontSp = (fontSp + 1f).coerceAtMost(LdmuxConfig.MAX_FONT_SP) },
                         enabled = larger,
                     ) {
@@ -1552,7 +1564,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
             }
         },
         confirmButton = {
-            TextButton(onClick = {
+            MiniTextButton(onClick = {
                 onSave(
                     LdmuxConfig(
                         host.trim(),
@@ -1575,7 +1587,7 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                 Text("save", color = Accent)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
+        dismissButton = { MiniTextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
     )
 }
 
@@ -1601,7 +1613,7 @@ private fun BoxScope.HeldElsewhere(
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("open on $holder", color = Fg, fontSize = 15.sp)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(LocalTouch.current.rowPad))
             Text(
                 if (confirmed) {
                     // True since ownership moves the shell rather than copying it:
@@ -1614,7 +1626,7 @@ private fun BoxScope.HeldElsewhere(
                 fontSize = 12.sp,
                 textAlign = TextAlign.Center,
             )
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
             if (confirmed) {
                 AccentBtn("take it over", Modifier.width(220.dp)) { onTakeOver() }
             } else {
@@ -1676,12 +1688,46 @@ fun AppMenu(
             DropdownMenuItem(
                 text = { Text("shells", color = Fg) },
                 onClick = { onDismiss(); onLauncher() },
+                // Material's menu item is 48dp and no CompositionLocal reaches it,
+                // which is why the app's own menu stayed thick at every density.
+                modifier = Modifier.height(LocalTouch.current.min),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             )
             DropdownMenuItem(
                 text = { Text("settings", color = Fg) },
                 onClick = { onDismiss(); onSettings() },
+                modifier = Modifier.height(LocalTouch.current.min),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             )
         }
     }
 }
 
+
+/**
+ * A Material text button at this app's own control height.
+ *
+ * Material's buttons carry a minimum height of their own and no `CompositionLocal`
+ * can reach it, so every `TextButton` in the app was 48dp in both densities. That is
+ * why the settings dialog -- the one screen a person opens to check the density
+ * setting -- was the one screen the setting could not thin. `Modifier.height`
+ * overrides Material's `defaultMinSize`, which is what set the 48dp.
+ *
+ * One wrapper rather than a modifier repeated at eleven call sites, because eleven
+ * call sites is how a setting ends up reaching most of the controls and not all of
+ * them, which is the failure this app already had once.
+ */
+@Composable
+private fun MiniTextButton(
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.height(LocalTouch.current.min),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        content = content,
+    )
+}

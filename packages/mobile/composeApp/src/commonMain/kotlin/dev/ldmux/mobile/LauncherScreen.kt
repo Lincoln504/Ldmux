@@ -85,7 +85,7 @@ fun LauncherScreen(
     val entries = launcherEntries(desktop?.piSessions.orEmpty(), openShells)
 
     Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize().background(Bg).padding(12.dp)) {
+    Column(Modifier.fillMaxSize().background(Bg).padding(LocalTouch.current.rowPad * 3)) {
         // ── header ───────────────────────────────────────────────────────────
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -108,11 +108,11 @@ fun LauncherScreen(
         // choice made in one place and spent in another — and the button that spent
         // it did nothing at all until a chip had been pressed.
         if (desktop?.detail != null) {
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(LocalTouch.current.rowPad))
             Text(desktop.detail, color = Dim, fontSize = 10.sp, maxLines = 2)
         }
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
 
         // ── one list ─────────────────────────────────────────────────────────
         if (entries.isEmpty()) {
@@ -122,7 +122,7 @@ fun LauncherScreen(
         } else {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
             ) {
                 items(entries, key = { it.key }) { e ->
                     val session = e.sessionId?.let { id -> openShells.firstOrNull { it.id == id } }
@@ -177,7 +177,7 @@ fun LauncherScreen(
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(LocalTouch.current.rowPad))
         // Two actions, sharing the width: opening what is chosen, and starting
         // something new. A new shell lives *here*, where you are choosing what to
         // work in — not in the sidebar, which is for typing into what you already
@@ -349,13 +349,13 @@ private fun ChoiceRow(
         // you page through.
         Box(
             Modifier
-                .size(18.dp)
+                .size(LocalTouch.current.check)
                 .clip(RoundedCornerShape(4.dp))
                 .background(if (chosen) Accent else Color.Transparent)
                 .border(1.5.dp, if (chosen) Accent else Dim, RoundedCornerShape(4.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            if (chosen) IconCheck(Bg, box = 12.dp)
+            if (chosen) IconCheck(Bg, box = LocalTouch.current.check - 6.dp)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {

@@ -59,7 +59,7 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
                 // dialogue that cannot be filled in.
                 .clickable(enabled = false, onClick = {})
                 .padding(LocalTouch.current.rowPad * 2),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
         ) {
             Text(title, color = Fg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             content()
@@ -110,7 +110,7 @@ private fun LabelledField(
     onValueChange: (String) -> Unit,
     placeholder: String,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad)) {
         Text(label, color = Dim, fontSize = 10.sp)
         Field(value, onValueChange, placeholder)
     }
@@ -181,7 +181,7 @@ fun DesktopPickerModal(
         } else {
             Column(
                 Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
             ) {
                 for (ws in occupied) {
                     val titles = windows.filter { it.workspace == ws.name }
@@ -194,7 +194,7 @@ fun DesktopPickerModal(
                             .background(if (here) Bg else Surface)
                             .clickable { onPick(ws.name) }
                             .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad / 2),
                     ) {
                         Text(
                             ws.name,

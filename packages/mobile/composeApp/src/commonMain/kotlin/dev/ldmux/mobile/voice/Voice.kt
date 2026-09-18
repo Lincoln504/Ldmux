@@ -1,5 +1,7 @@
 package dev.ldmux.mobile.voice
 
+import dev.ldmux.mobile.LocalTouch
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
@@ -85,7 +87,7 @@ internal fun VoiceBanner(state: VoiceState, modifier: Modifier) {
         modifier
             .padding(8.dp)
             .background(Surface)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
     ) {
         Text(text, color = accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
     }
