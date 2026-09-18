@@ -335,6 +335,31 @@ export class TmuxControlPlane {
       ["set-option", "-ga", "terminal-overrides", ",xterm-256color:Tc"],
       ["set-option", "-ga", "terminal-overrides", ",screen-256color:Tc"],
       ["set-environment", "-g", "COLORTERM", "truecolor"],
+      // **A pane's environment is the daemon's environment, unless it is refused.**
+      // tmux hands every pane the environment its *server* was started with, so
+      // whatever the daemon was launched from leaks into every shell the user opens,
+      // and this has already bitten once: the test daemon came up from a nix
+      // devShell whose `$SHELL` was a store bash with no readline, and a shell with
+      // no line editing is what that produced. `default-shell` settles which binary
+      // runs. These settle the rest of it.
+      //
+      // The point is that the prompt must come from the user's own startup files and
+      // from nothing this daemon happened to inherit. `BASH_ENV` and `ENV` make a
+      // shell read a foreign file before anything else; `PS1`, `PROMPT_COMMAND` and
+      // `ZDOTDIR` let an inherited value pre-empt the user's own. A verified real
+      // case: the prompt in a ldmux pane is `[ ldeen@debian:~/Documents/nocira$ ]`,
+      // which is `~/.bashrc:63` reached through `~/.profile:14` because the shell
+      // runs as a login shell (`argv[0]` is `-bash`) — the user's prompt, arrived at
+      // by the user's own path, which is the only acceptable way for it to arrive.
+      ["set-environment", "-gu", "BASH_ENV"],
+      ["set-environment", "-gu", "ENV"],
+      ["set-environment", "-gu", "PS1"],
+      ["set-environment", "-gu", "PROMPT_COMMAND"],
+      ["set-environment", "-gu", "ZDOTDIR"],
+      // ...and `$SHELL` is put back to the same login shell the pane runs, so that a
+      // program reading it (`bash -l`, `less`, a nested shell) agrees with what tmux
+      // actually started instead of with the daemon's ancestry.
+      ...(loginShell ? [["set-environment", "-g", "SHELL", loginShell]] : []),
       // The default 500 ms is tmux waiting to see whether an ESC begins a
       // sequence. A phone has no tmux client and sends bytes through the control
       // plane, so this only ever delayed the desk's own window — and 500 ms of
