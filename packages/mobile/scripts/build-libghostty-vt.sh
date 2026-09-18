@@ -76,6 +76,7 @@ for ABI in "${ABIS[@]}"; do
     -I"$OUT/include" -I"$JNI_INC" -I"$JNI_INC_LINUX" \
     -o "$JNI_DIR/libldmux_terminal.so" \
     "$MOBILE/native/ldmux_terminal.c" \
+    "$MOBILE/native/ldmux_jni.c" \
     "$OUT/lib/libghostty-vt.a" \
     -llog -lm
   echo "    $(stat -c%s "$JNI_DIR/libldmux_terminal.so") bytes -> $JNI_DIR"

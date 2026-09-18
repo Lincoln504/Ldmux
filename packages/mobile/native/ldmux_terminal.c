@@ -1,56 +1,25 @@
 /*
- * ldmux_terminal.c — JNI bridge from Kotlin to libghostty-vt (the Ghostty
- * terminal core). One narrow seam: Kotlin creates a terminal, feeds it the
- * remote PTY's bytes, and reads back a self-describing frame of styled cells.
+ * ldmux_terminal.c — the terminal core: drives libghostty-vt and encodes frames.
  *
- * libghostty-vt's C API is marked unstable (0.1.0-dev); every symbol we use is
- * confined to this file, so an upstream change breaks one translation unit, not
- * the whole app.
- *
- * Frame format returned by nativeRender (little-endian):
- *   header (40 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
- *                      u8 cursorVisible, u8 cursorStyle,
- *                      u8 defFgR, u8 defFgG, u8 defFgB,
- *                      u8 defBgR, u8 defBgG, u8 defBgB,
- *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
- *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7]
- *                      (the terminal's default colours so the client can paint
- *                      the whole surface in the same background; whether the
- *                      cursor is at a password prompt, which decides whether
- *                      input may be echoed before the server confirms it; the
- *                      scrollbar geometry so the client can show position
- *                      without a second call; and the mouse modes, so a tap can
- *                      be sent as a click the moment a program asks for the
- *                      mouse rather than when the next server snapshot happens
- *                      to arrive)
- *   then cols*rows cell records, row-major:
- *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
- *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
- *                      u8 utf8[utf8Len]
- *   flags: bit0 bold, bit1 italic, bit2 underline, bit3 faint, bit4 blink,
- *          bit5 inverse, bit6 invisible, bit7 strikethrough, bit8 overline
+ * No platform belongs in this file. It does not include `jni.h` and does not
+ * know it is on Android, which is the point: `ldmux_jni.c` is one binding over
+ * this, and the frame format is described in `ldmux_terminal.h`.
  */
-#include <jni.h>
-#include <stdbool.h>
-#include <stdint.h>
+#include "ldmux_terminal.h"
+
 #include <stdlib.h>
 #include <string.h>
 
 #include <ghostty/vt.h>
 
-#define CELL_MAX_UTF8 16
-#define CELL_RECORD_MAX (9 + CELL_MAX_UTF8)
-#define FRAME_HEADER 40
-
-typedef struct {
+struct LdmuxTerminal {
   GhosttyTerminal terminal;
   GhosttyRenderState render_state;
   GhosttyRenderStateRowIterator row_iter;
   GhosttyRenderStateRowCells cells;
-  uint8_t *frame; /* growable output buffer */
+  uint8_t *frame; /* growable output buffer, owned by this struct */
   size_t frame_cap;
-} LdmuxTerminal;
+};
 
 static GhosttyColorRgb resolve_color(GhosttyStyleColor color,
                                      const GhosttyRenderStateColors *colors,
@@ -110,14 +79,10 @@ static size_t utf8_encode(uint32_t cp, uint8_t *out) {
   return 4;
 }
 
-JNIEXPORT jlong JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_create(JNIEnv *env, jclass cls,
-                                                 jint cols, jint rows) {
-  (void)env; (void)cls;
+LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows) {
   LdmuxTerminal *t = (LdmuxTerminal *)calloc(1, sizeof(LdmuxTerminal));
-  if (!t) return 0;
-  bool ok = ghostty_terminal_new(NULL, &t->terminal, (uint16_t)cols,
-                                 (uint16_t)rows) == GHOSTTY_SUCCESS &&
+  if (!t) return NULL;
+  bool ok = ghostty_terminal_new(NULL, &t->terminal, cols, rows) == GHOSTTY_SUCCESS &&
             ghostty_render_state_new(NULL, &t->render_state) == GHOSTTY_SUCCESS &&
             ghostty_render_state_row_iterator_new(NULL, &t->row_iter) == GHOSTTY_SUCCESS &&
             ghostty_render_state_row_cells_new(NULL, &t->cells) == GHOSTTY_SUCCESS;
@@ -127,16 +92,12 @@ Java_dev_ldmux_mobile_term_NativeTerminal_create(JNIEnv *env, jclass cls,
     if (t->render_state) ghostty_render_state_free(t->render_state);
     if (t->terminal) ghostty_terminal_free(t->terminal);
     free(t);
-    return 0;
+    return NULL;
   }
-  return (jlong)(intptr_t)t;
+  return t;
 }
 
-JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_destroy(JNIEnv *env, jclass cls,
-                                                  jlong handle) {
-  (void)env; (void)cls;
-  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
+void ldmux_terminal_free(LdmuxTerminal *t) {
   if (!t) return;
   if (t->cells) ghostty_render_state_row_cells_free(t->cells);
   if (t->row_iter) ghostty_render_state_row_iterator_free(t->row_iter);
@@ -146,45 +107,17 @@ Java_dev_ldmux_mobile_term_NativeTerminal_destroy(JNIEnv *env, jclass cls,
   free(t);
 }
 
-JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_write(JNIEnv *env, jclass cls,
-                                                jlong handle, jbyteArray data,
-                                                jint len) {
-  (void)cls;
-  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
-  if (!t || !data || len <= 0) return;
-  jbyte *buf = (*env)->GetByteArrayElements(env, data, NULL);
-  if (!buf) return;
-  ghostty_terminal_vt_write(t->terminal, (const uint8_t *)buf, (size_t)len);
-  (*env)->ReleaseByteArrayElements(env, data, buf, JNI_ABORT);
+void ldmux_terminal_write(LdmuxTerminal *t, const uint8_t *bytes, size_t len) {
+  if (!t || !bytes || len == 0) return;
+  ghostty_terminal_vt_write(t->terminal, bytes, len);
 }
 
-JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_resize(JNIEnv *env, jclass cls,
-                                                 jlong handle, jint cols,
-                                                 jint rows) {
-  (void)env; (void)cls;
-  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
+void ldmux_terminal_resize(LdmuxTerminal *t, uint16_t cols, uint16_t rows) {
   if (!t) return;
-  ghostty_terminal_resize(t->terminal, (uint16_t)cols, (uint16_t)rows, 0, 0);
+  ghostty_terminal_resize(t->terminal, cols, rows, 0, 0);
 }
 
-/**
- * Scroll the viewport. `delta` is in rows and follows the emulator's
- * convention (negative is up); the special values below mean top/bottom.
- *
- * This is the emulator's own scrollback, not a client-side one, so the render
- * state simply reflects the new position on the next frame — no separate
- * history buffer to keep in sync.
- */
-#define LDMUX_SCROLL_TOP INT32_MIN
-#define LDMUX_SCROLL_BOTTOM INT32_MAX
-
-JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_scroll(JNIEnv *env, jclass cls,
-                                                 jlong handle, jint delta) {
-  (void)env; (void)cls;
-  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
+void ldmux_terminal_scroll(LdmuxTerminal *t, int32_t delta) {
   if (!t) return;
   GhosttyTerminalScrollViewport behavior;
   if (delta == LDMUX_SCROLL_TOP) {
@@ -202,21 +135,17 @@ Java_dev_ldmux_mobile_term_NativeTerminal_scroll(JNIEnv *env, jclass cls,
   ghostty_terminal_scroll_viewport(t->terminal, behavior);
 }
 
-JNIEXPORT jbyteArray JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
-                                                 jlong handle) {
-  (void)cls;
-  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
-  if (!t) return NULL;
+bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
+  if (!t || !out || !len) return false;
   if (ghostty_render_state_update(t->render_state, t->terminal) != GHOSTTY_SUCCESS)
-    return NULL;
+    return false;
 
   /* Row data lives inside the render state; the iterator is populated from it
    * and is only valid until the next update (see render.h). */
   if (ghostty_render_state_get(t->render_state,
                                GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
                                &t->row_iter) != GHOSTTY_SUCCESS)
-    return NULL;
+    return false;
 
   uint16_t cols = 0, rows = 0;
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &cols);
@@ -230,21 +159,21 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
                            &cursor);
 
   size_t need = FRAME_HEADER + (size_t)cols * (size_t)rows * CELL_RECORD_MAX;
-  if (!ensure_frame(t, need)) return NULL;
+  if (!ensure_frame(t, need)) return false;
 
-  uint8_t *out = t->frame;
-  wr16(out + 0, cols);
-  wr16(out + 2, rows);
-  wr16(out + 4, cursor.viewport_has_value ? cursor.viewport_x : 0);
-  wr16(out + 6, cursor.viewport_has_value ? cursor.viewport_y : 0);
-  out[8] = (uint8_t)(cursor.visible ? 1 : 0);
-  out[9] = (uint8_t)cursor.visual_style;
+  uint8_t *buf = t->frame;
+  wr16(buf + 0, cols);
+  wr16(buf + 2, rows);
+  wr16(buf + 4, cursor.viewport_has_value ? cursor.viewport_x : 0);
+  wr16(buf + 6, cursor.viewport_has_value ? cursor.viewport_y : 0);
+  buf[8] = (uint8_t)(cursor.visible ? 1 : 0);
+  buf[9] = (uint8_t)cursor.visual_style;
 
   size_t p = FRAME_HEADER;
   uint8_t def_fg[3] = {colors.foreground.r, colors.foreground.g, colors.foreground.b};
   uint8_t def_bg[3] = {colors.background.r, colors.background.g, colors.background.b};
-  out[10] = def_fg[0]; out[11] = def_fg[1]; out[12] = def_fg[2];
-  out[13] = def_bg[0]; out[14] = def_bg[1]; out[15] = def_bg[2];
+  buf[10] = def_fg[0]; buf[11] = def_fg[1]; buf[12] = def_fg[2];
+  buf[13] = def_bg[0]; buf[14] = def_bg[1]; buf[15] = def_bg[2];
 
   /* Whether the cursor sits at a password prompt. This is the signal that lets
    * a client decide it must NOT echo input locally: the emulator already knows,
@@ -253,7 +182,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   ghostty_render_state_get(t->render_state,
                            GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT,
                            &password_input);
-  out[16] = (uint8_t)(password_input ? 1 : 0);
+  buf[16] = (uint8_t)(password_input ? 1 : 0);
 
   /* Scroll position. There is deliberately no change notification for this
    * (the header says to poll and diff per frame), which is exactly what a
@@ -263,7 +192,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   bool viewport_active = false;
   ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_VIEWPORT_ACTIVE,
                        &viewport_active);
-  out[17] = (uint8_t)(viewport_active ? 1 : 0);
+  buf[17] = (uint8_t)(viewport_active ? 1 : 0);
 
   /* Mouse modes, read from the emulator rather than from a server-side poll.
    *
@@ -276,11 +205,11 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   bool mouse_tracking = false;
   ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
                        &mouse_tracking);
-  out[18] = (uint8_t)(mouse_tracking ? 1 : 0);
+  buf[18] = (uint8_t)(mouse_tracking ? 1 : 0);
 
-  wr32(out + 19, (uint32_t)sb.total);
-  wr32(out + 23, (uint32_t)sb.offset);
-  wr32(out + 27, (uint32_t)sb.len);
+  wr32(buf + 19, (uint32_t)sb.total);
+  wr32(buf + 23, (uint32_t)sb.offset);
+  wr32(buf + 27, (uint32_t)sb.len);
 
   /* The alternate screen, read from the emulator for the same reason as the
    * mouse modes above: it changes the instant a program starts, and the client
@@ -292,7 +221,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   GhosttyTerminalScreen active_screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
   ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
                        &active_screen);
-  out[32] = (uint8_t)(active_screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE ? 1 : 0);
+  buf[32] = (uint8_t)(active_screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE ? 1 : 0);
 
   /* SGR encoding (1006) specifically: it is the only encoding we synthesize,
    * because the older forms cap coordinates at 223 columns. */
@@ -303,7 +232,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
       GHOSTTY_SUCCESS) {
     sgr_mouse_on = sgr_mouse.value;
   }
-  out[31] = (uint8_t)(sgr_mouse_on ? 1 : 0);
+  buf[31] = (uint8_t)(sgr_mouse_on ? 1 : 0);
   /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
    * encoder is mandatory: pad every missing cell with a blank. */
   bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);
@@ -317,9 +246,9 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
     for (int col = 0; col < cols; col++) {
       if (p + CELL_RECORD_MAX > t->frame_cap) break;
       if (!have_cells || !ghostty_render_state_row_cells_next(t->cells)) {
-        out[p++] = 0; out[p++] = 0; out[p++] = 0;
-        out[p++] = def_fg[0]; out[p++] = def_fg[1]; out[p++] = def_fg[2];
-        out[p++] = def_bg[0]; out[p++] = def_bg[1]; out[p++] = def_bg[2];
+        buf[p++] = 0; buf[p++] = 0; buf[p++] = 0;
+        buf[p++] = def_fg[0]; buf[p++] = def_fg[1]; buf[p++] = def_fg[2];
+        buf[p++] = def_bg[0]; buf[p++] = def_bg[1]; buf[p++] = def_bg[2];
         continue;
       }
 
@@ -361,27 +290,22 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
       if (style.strikethrough) flags |= 1u << 7;
       if (style.overline) flags |= 1u << 8;
 
-      out[p++] = (uint8_t)n;
-      out[p++] = (uint8_t)(flags & 0xff);
-      out[p++] = (uint8_t)((flags >> 8) & 0xff);
-      out[p++] = fg.r; out[p++] = fg.g; out[p++] = fg.b;
-      out[p++] = bg.r; out[p++] = bg.g; out[p++] = bg.b;
-      if (n) { memcpy(out + p, utf8, n); p += n; }
+      buf[p++] = (uint8_t)n;
+      buf[p++] = (uint8_t)(flags & 0xff);
+      buf[p++] = (uint8_t)((flags >> 8) & 0xff);
+      buf[p++] = fg.r; buf[p++] = fg.g; buf[p++] = fg.b;
+      buf[p++] = bg.r; buf[p++] = bg.g; buf[p++] = bg.b;
+      if (n) { memcpy(buf + p, utf8, n); p += n; }
     }
     have_row = ghostty_render_state_row_iterator_next(t->row_iter);
   }
 
-  jbyteArray result = (*env)->NewByteArray(env, (jsize)p);
-  if (!result) return NULL;
-  (*env)->SetByteArrayRegion(env, result, 0, (jsize)p, (const jbyte *)out);
-  return result;
+  *out = t->frame;
+  *len = p;
+  return true;
 }
 
-JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_clean(JNIEnv *env, jclass cls,
-                                                jlong handle) {
-  (void)env; (void)cls;
-  LdmuxTerminal *t = (LdmuxTerminal *)(intptr_t)handle;
+void ldmux_terminal_clean(LdmuxTerminal *t) {
   if (!t) return;
   ghostty_render_state_clean(t->render_state);
 }
