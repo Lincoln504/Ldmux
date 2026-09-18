@@ -81,7 +81,7 @@ fun IconBtn(
     Column(
         modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(if (filled) Accent else Bg)
+            .background(if (filled) Raised else Bg)
             // Android's minimum touch target, and nothing in this app specified one.
             // These buttons came to about 30-34dp, which is small enough to miss —
             // including the close button, which is destructive and sits nested inside

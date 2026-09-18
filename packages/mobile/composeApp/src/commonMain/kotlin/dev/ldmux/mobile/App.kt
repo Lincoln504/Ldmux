@@ -92,6 +92,22 @@ val Fg = Color(0xFFEDEDED)
 val Dim = Color(0xFF8C8C8C)
 /** Nothing is tinted; "accent" is simply the lightest thing on screen. */
 val Accent = Color(0xFFD0D0D0)
+
+/**
+ * The fill for a control that is *on*: the menu button that says you are in a shell, and
+ * the mark that says a window is out on the desktop.
+ *
+ * It used to be [Accent], the brightest value in the palette, so the menu button was a
+ * near-white block in an app whose whole idea is that importance lives in weight and
+ * contrast rather than in a hue. That reads as a light rather than as a state, and it
+ * put the brightest thing in sight in the corner of every screen.
+ *
+ * A raised tone says the same thing without shouting. Deliberately not *barely* a
+ * difference: `Bg` is #0A0A0A and this is #2E2E2E, which is better than four times the
+ * luminance of the button beside it, so it reads as raised at a glance and still leaves
+ * [Accent] meaning the one primary action on a screen.
+ */
+val Raised = Color(0xFF2E2E2E)
 val Surface = Color(0xFF1A1A1A)
 
 /**
@@ -1086,7 +1102,7 @@ private fun PortraitBar(
         val menuHere: @Composable RowScope.() -> Unit = {
             Box(Modifier.weight(1f)) {
                 IconBtn(onClick = onMenu, label = "menu", modifier = Modifier.fillMaxWidth(), filled = true) {
-                    IconLauncher(Bg, box = LocalTouch.current.icon)
+                    IconLauncher(Fg, box = LocalTouch.current.icon)
                 }
                 AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
             }
@@ -1215,7 +1231,7 @@ private fun ShellHeader(
         if (showMenu) {
             Box {
                 IconBtn(onClick = { menuOpen = true }, label = "menu", filled = true) {
-                    IconLauncher(Bg)
+                    IconLauncher(Fg)
                 }
                 AppMenu(
                     expanded = menuOpen,

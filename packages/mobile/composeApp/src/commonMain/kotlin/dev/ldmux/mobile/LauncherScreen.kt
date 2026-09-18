@@ -169,7 +169,7 @@ fun LauncherScreen(
                                 label = if (live != null) "on desktop $live" else "send to desktop",
                                 filled = live != null,
                             ) {
-                                IconPopOut(if (live != null) Bg else Dim)
+                                IconPopOut(if (live != null) Fg else Dim)
                             }
                         }
                     }
