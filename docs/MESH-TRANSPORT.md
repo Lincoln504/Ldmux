@@ -104,3 +104,66 @@ would turn on:
   36 s and this document's verdict changes to "no".
 - Whether the MeshCore companion API carries arbitrary binary for a custom application,
   or only the message types it defines.
+
+
+---
+
+## 9. Two profiles, because a mesh is not a slow network
+
+The question this answers: should ldmux have a separate mode for LoRa, or should the
+fastest possible tailnet mode simply be made as light as it can be? Both, and they are
+different things.
+
+### 9.1 What a LoRa link actually costs
+
+A summary of this kind is worth correcting before it shapes a design, because three of
+its claims are LoRaWAN-isms that would rule out work that is legal where this is going.
+
+- **"1% duty cycle, so one packet every 50 seconds."** That is the **EU868** rule.
+  **US915 has no duty cycle at all**, only a 400 ms dwell limit and a frequency-hopping
+  requirement — and US915 is what this document already targets, at MeshCore's **184-byte
+  payload ceiling**. Adopting the EU figure would abandon a design that is legal here.
+- **"Tokenise commands with a shared dictionary, so `systemctl restart nginx` becomes
+  three bytes."** Rejected, and this is the important one. A measured keystroke echo on
+  this protocol is **9 bytes** (§4). The command text is not the cost and never was. A
+  static dictionary cannot cover an arbitrary shell, and it would be a large amount of
+  machinery aimed at the one part of the traffic that is already small.
+- **"Strip ANSI and return a status code instead of strings."** Half right and unusable
+  as stated. You cannot change what a program prints, and a status code is not a
+  terminal. The true version of that instinct is already the rule here: cap the backlog
+  and send **now** instead of replaying history.
+
+What is right in it: block-based rather than character-at-a-time, raw P2P with a small
+ARQ rather than LoRaWAN, and that SSH or telnet over LoRa is not a thing.
+
+### 9.2 The two profiles
+
+Not a build variant. One client binary, one daemon, a profile announced in `caps`.
+
+| | `direct` (tailnet, LAN, cellular) | `mesh` |
+|---|---|---|
+| payload | raw pty stream, client emulates | plain lines the daemon renders |
+| frame | 8-byte header + bytes | one line, capped to the payload MTU |
+| keystrokes | per key | **one uplink per command** |
+| backlog | full, coalesced at 4 KB | never replayed; state of now only |
+| compression | permessage-deflate, measured 14.8x | not worth it at these sizes |
+| client engine | libghostty-vt | **not used at all** |
+| ownership, `new`, `close`, `list`, security | shared | shared |
+
+The reason `mesh` is a mode and not a flag on the existing path is the last row of the
+second column: in mesh mode the client's terminal engine is not merely slower, it is
+**unused**, because there is no byte stream for it to emulate. The daemon has to be the
+one that owns the screen.
+
+### 9.3 What does not change
+
+Session model, registry, ownership and claims, the launcher, `new`/`close`/`list`, and
+the entire security model. The profile changes the payload's shape and nothing about
+what the payload means.
+
+### 9.4 What this asks of the direct path
+
+Nothing, and that is the point of separating them. `direct` keeps getting the treatments
+that its own measurements justify — 4 KB coalescing, threshold-gated deflate, backlog to
+snapshot on a stalled client, Nagle off. The mesh profile is not allowed to justify
+making `direct` worse, and `direct` is not allowed to justify making mesh mode heavier.

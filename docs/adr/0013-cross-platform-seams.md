@@ -68,48 +68,38 @@ Three tests, in order:
 3. **Does the platform half decide anything?** If it does, the decision is in the
    wrong place. A platform half should be able to be a five-line delegation.
 
-## 4. Where the rule is not yet true
+## 4. Where the rule was not yet true — both done
 
-Two places. Both are real, both are known, neither is done.
+This section used to open "Two places. Both are real, both are known, neither is
+done." Both are done. It is kept in this form because an ADR that lists outstanding
+work and is then quietly edited reads as though the work was never there, and the next
+person then derives it again.
 
-### 4.1 The native shim is a JNI file, not a portable core
+### 4.1 The native shim is a portable core, not a JNI file — DONE
 
-`packages/mobile/native/ldmux_terminal.c` holds three things in one file: the
-libghostty-vt driving code, **the frame encoder**, and the `JNIEXPORT` entry
-points. The encoder is written inline inside `Java_dev_ldmux_mobile_term_NativeTerminal_render`
-(`ldmux_terminal.c:205-380`), which means the one piece of logic iOS actually
-needs is welded to the one platform Android uses.
+`packages/mobile/native/` is three files plus a build file: `ldmux_terminal.h`,
+`ldmux_terminal.c` (portable, **no `jni.h`**), `ldmux_jni.c`, `CMakeLists.txt`. The
+encoder was extracted and the JNI entry points moved out. Measured after the split: 7
+JNI symbols, 7 core symbols, and **0 JNI references inside `ldmux_terminal_render`** —
+which is the check this section asked for, since the wire format did not change and the
+Android renderer still draws.
 
-This is the only place where "one shared engine" is not yet true, and it is the
-cheapest of the remaining work because it is mechanical:
+### 4.2 Voice dictation has a seam — DONE
 
-1. Extract the encoder into `size_t ldmux_render_frame(LdmuxTerminal *t, uint8_t **out)`
-   returning a byte length, with the `ensure_frame` growth staying inside it.
-2. Move the JNI entry points to `ldmux_jni.c`; it allocates a `jbyteArray` and
-   copies. Nothing else.
-3. Add `ldmux_terminal.h` declaring the core, and list both files in
-   `CMakeLists.txt`.
+`commonMain/.../voice/Voice.kt` holds `VoiceState`, `expect object Dictation` and the
+banner, and `androidMain/.../voice/Voice.android.kt` is the `actual`, holding only the
+recogniser. The seam takes **no `Activity`**: the Android half attaches its own host,
+because an `Activity` in the common declaration would be the first platform's API
+wearing the shared concept's name, which is the failure this ADR exists to prevent.
 
-The wire format does not change, so `TerminalFrame.HEADER_SIZE` and the Kotlin
-side are untouched, and the check that the work is correct is that the Android
-renderer still draws.
+The shared half was written but **not committed** in the same change as the Android
+half, so for one commit a fresh clone would not have compiled. A guard now requires
+every Kotlin source on disk to be tracked.
 
-### 4.2 Voice dictation has no seam at all
-
-`androidMain/.../voice/VoiceDictation.kt` is Android-only and is called from
-`TerminalSurface.android.kt` — an Android file. So the mic button is drawn by
-platform code, which means shared code cannot ask for dictation, and iOS would
-have to duplicate the button.
-
-This one is not purely mechanical, because the fix is to move the *button* into
-`commonMain` and leave only the recogniser behind an `expect`. That is a change
-to a composable's source set, so it carries UX risk and needs device
-verification, which is why it is not bundled with 4.1.
-
-The seam, when made, is small: `expect object Dictation { fun toggle(onText: (String) -> Unit, onState: (VoiceState) -> Unit); fun stop() }`
-with `VoiceState` shared. Android's actual delegates to the existing
-implementation unchanged. iOS's is `SFSpeechRecognizer`, and the headless
-requirement (dictate without the keyboard appearing) holds on both.
+One correction to the plan as written here: the button was moved into `commonMain`
+without the device verification this section said it needed, and it was then verified on
+the device by use rather than by test. That is weaker evidence than a test and should be
+treated as such.
 
 ## Consequences
 
@@ -117,5 +107,7 @@ requirement (dictate without the keyboard appearing) holds on both.
   whole of what a second platform has to supply.
 - A change to anything not in that list is automatically both platforms, and no
   one has to remember to make it twice.
-- The two deferred items are the exceptions, and they are recorded here so that
-  "Android-first" cannot quietly become "Android-shaped".
+- The two items that were deferred in §4 are now done, and re-checking them found
+  that both had been finished for some time while the ADR still presented them as
+  outstanding. A stale todo list in a design document is a claim about the code, and
+  it was false.

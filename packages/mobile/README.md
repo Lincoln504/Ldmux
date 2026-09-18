@@ -229,32 +229,32 @@ was mistaken for an app crash during development. Check
 `adb shell dumpsys activity exit-info dev.ldmux.mobile` before believing a crash
 report: `reason=16 (PACKAGE UPDATED)` is a reinstall, `reason=5/6 (CRASH)` is not.
 
-### Two of the four arrow keys draw nothing, and one arrow was measured wrong first
+### The four arrow keys draw nothing — RETRACTED. All four render.
 
-On the landscape panel, `←` and `↑` render and `↓` and `→` do not. All four are
-present in the accessibility tree with their text and bounds, so this is a drawing
-problem, not a wiring one, and it is the kind of thing a screenshot is bad at
-judging.
+This section used to claim that `↓` and `→` did not draw, with a table of bright-pixel
+counts per key of 462, 496, 1 and 0. **That was wrong.** Every one of the four renders.
 
-Measured, by counting pixels brighter than 100 in each key's bounds on a 2400x1080
-capture:
+Measured again, on a fresh capture, inside each glyph's own reported bounds:
 
-| key | glyph | pixels brighter than 100 |
-|---|---|---|
-| 1 | `←` | 462 |
-| 2 | `↑` | 496 |
-| 3 | `↓` | 1 |
-| 4 | `→` | 0 |
+| key | ink pixels brighter than 110 |
+|---|---|
+| `←` | 63 |
+| `↑` | 46 |
+| `↓` | 47 |
+| `→` | 63 |
 
-The `Esc`/`Tab`/`⏎` row above it measures 433, 164, 316 and 109, so the row itself
-renders normally.
+The mistake was mechanical, and it is worth more than the correction. The landscape
+panel's middle section is a `verticalScroll`, so those rows *move* as history is added.
+The y-band being measured was taken from an earlier `uiautomator` dump, by which time it
+had drifted down onto the flip and microphone row. So "462 and 496" were the rotate icon
+and the microphone, and the four glyphs were somewhere else on the screen the whole time.
 
-**Do not trust a screenshot for this.** The first read of this screenshot said all
-four arrows were missing, which is wrong, and the first sample of `←` returned pure
-background because the accessibility bounds are not where the ink lands. Measure the
-pixels, in the whole key, and count rather than eyeball.
+The lesson is not "measure rather than eyeball". That lesson had already been learned
+here and it was obeyed — this was a measurement, not a guess. The lesson is that **a
+measurement is only as good as the coordinates it is anchored to**, and coordinates read
+from an accessibility tree are true for the frame they were dumped from and for no
+other. Take the bounds and the pixels from the same capture, or the number describes a
+screen that no longer exists.
 
-Likely cause, not yet confirmed: glyph coverage in the font Compose resolves for
-`FontFamily.Monospace`. The fix consistent with this app's own rule is to draw the
-four arrows in canvas the way every other mark in the UI is drawn, rather than
-depending on four codepoints being present.
+The user reported the arrows working before any of this was re-measured. They were right
+and the instrument was wrong.
