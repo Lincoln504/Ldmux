@@ -482,6 +482,9 @@ fun App() {
             var portraitMenu by remember { mutableStateOf(false) }
             PortraitBar(
                 handle = currentHandle,
+                pages = pages,
+                pagerState = pagerState,
+                scope = scope,
                 onLandscape = { mode = UiMode.Landscape },
                 menuExpanded = portraitMenu,
                 onMenu = { portraitMenu = true },
@@ -656,6 +659,9 @@ fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
 @Composable
 private fun PortraitBar(
     handle: TerminalHandle?,
+    pages: List<Session>,
+    pagerState: PagerState,
+    scope: CoroutineScope,
     onLandscape: () -> Unit,
     onMenu: () -> Unit,
     menuExpanded: Boolean,
@@ -670,6 +676,13 @@ private fun PortraitBar(
         Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = 5.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
+        // Where you are, and how to move, at the top of the bar: the same row the
+        // side panel shows, because moving between shells must not mean leaving
+        // them. Navigation at one end, keys in the middle, actions at the other.
+        ShellHeader(pages, pagerState, scope, onLauncher, onSettings, showMenu = false)
+
+        PanelDivider()
+
         // Two rows, each sharing the width. One scrolling row hid half its keys
         // off the edge, which is the one thing a keyboard-adjacent strip must not
         // do: a key you cannot see is a key that does not exist.
@@ -784,6 +797,84 @@ private fun TinyBtn(label: String, onClick: () -> Unit) {
 }
 
 /**
+ * Where you are, and how to move — one row, in both modes.
+ *
+ * Landscape puts it at the top of the side panel and portrait puts it at the top
+ * of the bar above the keyboard. It is the same control doing the same thing:
+ * leave this screen, then back and forward between the shells you are holding,
+ * then the title.
+ *
+ * Portrait had no such row at all, so the only way to change shells was the
+ * launcher — and the launcher lets go of everything, because it is where you
+ * choose what to open. So changing shells in portrait was detach-everything and
+ * attach-one, which is not a way to move between two shells you are holding. The
+ * two modes cannot disagree about this.
+ *
+ * The title is the folder, not the path — see [folderName] — and the count is a
+ * subtitle rather than a second row, because "2 / 3" is not a heading.
+ *
+ * [showMenu] is false in portrait, where the bar's own row already ends in the
+ * same menu button. The menu behind it is the same [AppMenu] either way.
+ */
+@Composable
+private fun ShellHeader(
+    pages: List<Session>,
+    pagerState: PagerState,
+    scope: CoroutineScope,
+    onLauncher: () -> Unit,
+    onSettings: () -> Unit,
+    showMenu: Boolean = true,
+) {
+    val current = pagerState.currentPage
+    val total = pages.size.coerceAtLeast(1)
+    val here = pages.getOrNull(current)
+    var menuOpen by remember { mutableStateOf(false) }
+
+    fun step(delta: Int) {
+        val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
+        if (target != current) scope.launch { pagerState.animateScrollToPage(target) }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (showMenu) {
+            Box {
+                IconBtn(onClick = { menuOpen = true }, filled = true) {
+                    IconLauncher(Bg)
+                }
+                AppMenu(
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false },
+                    onLauncher = onLauncher,
+                    onSettings = onSettings,
+                )
+            }
+        }
+        NavArrow("\u25c0", enabled = current > 0) { step(-1) }
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                folderName(here?.cwd ?: ""),
+                color = Fg,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                if (total > 1) "${current + 1} / $total shells" else "1 shell",
+                color = Dim,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+                maxLines = 1,
+            )
+        }
+        NavArrow("\u25b6", enabled = current < total - 1) { step(1) }
+    }
+}
+
+/**
  * The side panel (landscape only). No session list: just back/forward between
  * the open shells, the title of the current one, the keys, and the few actions.
  */
@@ -807,63 +898,12 @@ private fun SidePanel(
     val handle = here?.id?.let { handles[it] }
     val total = pages.size.coerceAtLeast(1)
 
-    /** The overflow menu, which owns every action that is not a key. */
-    var menuOpen by remember { mutableStateOf(false) }
-
-    fun step(delta: Int) {
-        val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
-        if (target != current) scope.launch { pagerState.animateScrollToPage(target) }
-    }
-
     Column(
         Modifier.width(PANEL_WIDTH).fillMaxHeight().background(Surface)
             .padding(horizontal = 8.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Where you are, and how to move — one row, starting with the control
-        // that leaves this screen.
-        //
-        // The launcher used to be on its own line above this, which made three
-        // rows of chrome before the first key and spent a whole row saying nothing
-        // but "menu". It is the same kind of thing as the arrows: a control that
-        // moves you somewhere. The title is the folder, not the path — see
-        // [folderName] — and the count is a subtitle rather than a second row,
-        // because "2 / 3" is not a heading.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Box {
-                IconBtn(onClick = { menuOpen = true }, filled = true) {
-                    IconLauncher(Bg)
-                }
-                AppMenu(
-                    expanded = menuOpen,
-                    onDismiss = { menuOpen = false },
-                    onLauncher = onLauncher,
-                    onSettings = onSettings,
-                )
-            }
-            NavArrow("◀", enabled = current > 0) { step(-1) }
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    folderName(here?.cwd ?: ""),
-                    color = Fg,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    if (total > 1) "${current + 1} / $total shells" else "1 shell",
-                    color = Dim,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.sp,
-                    maxLines = 1,
-                )
-            }
-            NavArrow("▶", enabled = current < total - 1) { step(1) }
-        }
+        ShellHeader(pages, pagerState, scope, onLauncher, onSettings)
 
         PanelDivider()
 
