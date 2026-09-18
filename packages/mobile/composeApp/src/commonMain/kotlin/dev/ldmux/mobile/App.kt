@@ -163,6 +163,15 @@ expect object AppPrefs {
  */
 enum class UiMode { Landscape, Portrait }
 
+/**
+ * How long a panel waits for the window to finish turning over before it appears.
+ *
+ * The rotation is Android's and it has already begun by the time the app can ask
+ * about it — see the note in `App` — so this is a beat out of the turn itself
+ * rather than a wait on a signal that does not exist.
+ */
+private const val PANEL_FLIP_MS = 200L
+
 @Composable
 fun App() {
     var config by remember { mutableStateOf(AppPrefs.load()) }
@@ -310,6 +319,32 @@ fun App() {
     // The one place a key is sent, for both modes, so the latch can neither leak
     // nor be forgotten: every key in either bar goes through here.
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
+
+    // A mode change is accompanied by a rotation, and the rotation is Android's:
+    // the app asks for an orientation and the window turns over on its own. What is
+    // *not* available is the end of that turn. The configuration is delivered at
+    // the start, so reading the display's own orientation back already answers
+    // "portrait" while the user is still watching the flip — which is why a panel
+    // gated on that signal appeared mid-turn anyway, and why a signal is the wrong
+    // instrument here at all. A beat out of the turn is the honest one: the panel
+    // belongs to the new shape, so it waits the turn out and then appears, upright,
+    // in place, instead of being drawn into the old window and carried round with
+    // it.
+    var panelArrived by remember { mutableStateOf(true) }
+    var lastWanted by remember { mutableStateOf(wantPortrait) }
+    if (lastWanted != wantPortrait) {
+        // Written during composition deliberately: an effect would run *after* the
+        // frame this is for. Converges — the next pass finds them equal and writes
+        // nothing.
+        lastWanted = wantPortrait
+        panelArrived = false
+    }
+    LaunchedEffect(wantPortrait) {
+        if (!panelArrived) {
+            delay(PANEL_FLIP_MS)
+            panelArrived = true
+        }
+    }
 
     // A latch that survived a glance at another shell would be a latch that
     // surprises you, so anything that ends the gesture clears it.
@@ -484,7 +519,7 @@ fun App() {
                 },
             )
         }
-    } else if (portrait) {
+    } else if (portrait && panelArrived) {
         Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
             TerminalArea(config, pages, pagerState, handles, typing = true, Modifier.weight(1f).fillMaxWidth(), pendingOpen = pendingOpens > 0)
             var portraitMenu by remember { mutableStateOf(false) }
@@ -538,9 +573,9 @@ fun App() {
                     press = press,
                 )
             }
-            if (config.panelLeft) panel()
+            if (config.panelLeft && panelArrived) panel()
             TerminalArea(config, pages, pagerState, handles, typing = false, Modifier.weight(1f).fillMaxHeight(), pendingOpen = pendingOpens > 0)
-            if (!config.panelLeft) panel()
+            if (!config.panelLeft && panelArrived) panel()
         }
     }
     }
@@ -604,7 +639,13 @@ private fun TerminalArea(
               // bottom of the screen — so a refused attach showed a blank terminal
               // and no explanation, which is exactly what it was built to prevent.
               Box(Modifier.fillMaxSize()) {
-                val s = pages[page]
+              // A page index and a list that can change size are two independent
+              // things, and the daemon broadcasts the session list on every change:
+              // a shell dying can shrink `pages` between the pager deciding to
+              // compose a page and this line being read, which is an index out of
+              // bounds and a crash on a screen the user did nothing wrong on. A
+              // shell going away is a page that stops being drawn.
+                val s = pages.getOrNull(page) ?: return@HorizontalPager
                 // Composed if it is within a swipe, connected only if it is the
                 // one on screen (see TerminalHandle.rememberTerminalSurface).
                 val handle = rememberTerminalSurface(
@@ -698,6 +739,11 @@ private fun PortraitBar(
         // Nothing here is a keyboard glyph, and nothing here is a shell button: a
         // new shell belongs to the menu, where you are choosing one, not to the
         // bar you type on.
+        // The menu closes the top row and Enter closes the bottom one — swapped
+        // at the user's word. The menu is how you leave the keyboard, so it belongs
+        // at the far corner of the row above the typing keys rather than inside it,
+        // and Enter belongs with the keys that feed a line rather than alone at the
+        // top. The panel keeps the same arrangement.
         PortraitKeyRow(
             listOf(
                 "Esc" to { press("Escape") },
@@ -706,9 +752,13 @@ private fun PortraitBar(
                 "\u2191" to { press("Up") },
                 "\u2193" to { press("Down") },
                 "\u2192" to { press("Right") },
-                "\u23ce" to { press("Enter") },
             ),
             flip = onLandscape,
+            menu = onMenu,
+            menuExpanded = menuExpanded,
+            onMenuDismiss = onMenuDismiss,
+            onLauncher = onLauncher,
+            onSettings = onSettings,
         )
         PortraitKeyRow(
             listOf(
@@ -723,13 +773,9 @@ private fun PortraitBar(
                 "|" to { press("|") },
                 "-" to { press("-") },
                 "/" to { press("/") },
+                "\u23ce" to { press("Enter") },
             ),
-            active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
-            menu = onMenu,
-            menuExpanded = menuExpanded,
-            onMenuDismiss = onMenuDismiss,
-            onLauncher = onLauncher,
-            onSettings = onSettings,
+            active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false, false),
         )
         // No microphone: the keyboard is always up in portrait and it has its own.
         // Two microphones is one too many.

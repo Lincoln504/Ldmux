@@ -174,3 +174,49 @@ panel; `⌨` flips to portrait with the keyboard up and the key bar above it;
 typing reaches the pane; `⟳` returns to landscape; the pane resizes per mode
 (76x20 landscape, 46x29 portrait) and the grid draws 1:1 in the terminal's own
 colours.
+
+## Known issues
+
+### The page you are on is lost when the mode flips
+
+Reproduction, on device: open two or more shells, tap `▶` until the header reads
+`n / n`, flip to portrait with the flip button. The header comes back as `1 / n`
+and the terminal behind it is the first shell. Verified three times, every time.
+
+The mechanism is understood and is not a race. `PagerState` holds its position as
+a **pixel offset into a measured page**, not as a page number. On landscape the
+terminal is `2400 - 636 = 1764` px wide, so page 2 is an offset of 1764 px into a
+1764 px page. Mid-rotation the terminal is briefly the full 2400 px of the
+still-landscape window, and `floor(1764 / 2400)` is `0`, which is page one. The
+re-measure rewrites the pager's position and the page is gone.
+
+What was tried, and why each failed — recorded so it is not re-tried:
+
+- Hoisting the page index into `App()` and restoring it. The new pager reports its
+  first page and the report overwrites the restore.
+- Reporting only on a settled swipe (`isScrollInProgress`, first value dropped).
+  Does not fire for `animateScrollToPage`, which is what the arrows use.
+- Having the arrows set the index directly. Correct in itself and kept, but it does
+  not survive the re-measure either.
+- Gating on the display's orientation (`LocalConfiguration`). The configuration is
+  delivered at the **start** of the rotation, not the end, so the gate never fired.
+- Capturing the page at the last composition before the mode change and restoring
+  it 820 ms later. Still wrong, so the re-measure lands after that too.
+
+The live suspect is that a restore issued at any fixed delay is racing a re-measure
+with no known bound. The likely correct fix is structural: one `HorizontalPager`
+instance for both modes, with the chrome arranged around it, so the pager is never
+re-created and never re-measured against a different width.
+
+### Rotation timings, measured
+
+`WindowManager: finishDrawing of orientation change` on the test device reports
+58 ms, 125 ms and 168 ms. `PANEL_FLIP_MS` is set from that: the panel waits out the
+turn rather than being drawn into the old window and carried round with it.
+
+### `adb install -r` looks like a crash
+
+`am force-stop` followed by an install kills the process with no crash record. It
+was mistaken for an app crash during development. Check
+`adb shell dumpsys activity exit-info dev.ldmux.mobile` before believing a crash
+report: `reason=16 (PACKAGE UPDATED)` is a reinstall, `reason=5/6 (CRASH)` is not.
