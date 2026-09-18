@@ -228,3 +228,33 @@ turn rather than being drawn into the old window and carried round with it.
 was mistaken for an app crash during development. Check
 `adb shell dumpsys activity exit-info dev.ldmux.mobile` before believing a crash
 report: `reason=16 (PACKAGE UPDATED)` is a reinstall, `reason=5/6 (CRASH)` is not.
+
+### Two of the four arrow keys draw nothing, and one arrow was measured wrong first
+
+On the landscape panel, `←` and `↑` render and `↓` and `→` do not. All four are
+present in the accessibility tree with their text and bounds, so this is a drawing
+problem, not a wiring one, and it is the kind of thing a screenshot is bad at
+judging.
+
+Measured, by counting pixels brighter than 100 in each key's bounds on a 2400x1080
+capture:
+
+| key | glyph | pixels brighter than 100 |
+|---|---|---|
+| 1 | `←` | 462 |
+| 2 | `↑` | 496 |
+| 3 | `↓` | 1 |
+| 4 | `→` | 0 |
+
+The `Esc`/`Tab`/`⏎` row above it measures 433, 164, 316 and 109, so the row itself
+renders normally.
+
+**Do not trust a screenshot for this.** The first read of this screenshot said all
+four arrows were missing, which is wrong, and the first sample of `←` returned pure
+background because the accessibility bounds are not where the ink lands. Measure the
+pixels, in the whole key, and count rather than eyeball.
+
+Likely cause, not yet confirmed: glyph coverage in the font Compose resolves for
+`FontFamily.Monospace`. The fix consistent with this app's own rule is to draw the
+four arrows in canvas the way every other mark in the UI is drawn, rather than
+depending on four codepoints being present.
