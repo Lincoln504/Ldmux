@@ -125,4 +125,81 @@ void ldmux_terminal_clean(LdmuxTerminal *t);
 int ldmux_terminal_take_clipboard(LdmuxTerminal *t, const uint8_t **out,
                                   size_t *len);
 
+/* ---------------------------------------------------------------------------
+ * Selection
+ *
+ * The gesture state machine belongs to the engine, not to this file and not to
+ * the client: click counting, the cell/word/line behaviours, the anchor and the
+ * soft-wrap arithmetic are all terminal semantics, and the engine already
+ * implements them. What the client actually has is three pointer events and a
+ * cell size, so that is the whole interface below.
+ *
+ * Coordinates are 0-based VIEWPORT cells, which is what a tap resolves to: the
+ * anchor must be a cell on the screen the user is looking at, not a row index
+ * into scrollback that shifts when the pane scrolls.
+ *
+ * Every call that can change the selection returns 1 when it did and 0 when it
+ * did not, so the caller repaints only when there is something new to draw.
+ * (The geometry call below returns whether the geometry changed, which is the
+ * same kind of answer for the same reason.)
+ */
+
+/**
+ * Tell the core how the grid is drawn, in surface pixels.
+ *
+ * The engine needs this to reason about pointer distance (the slop that decides
+ * whether two taps are a double-tap, and where a word boundary is under the
+ * finger). It is geometry, not state: a font-size change or a rotation changes
+ * it and nothing else does, so callers set it whenever those change rather than
+ * per event.
+ */
+int ldmux_terminal_set_geometry(LdmuxTerminal *t, uint32_t columns,
+                                uint32_t cell_w, uint32_t cell_h,
+                                uint32_t pad_left, uint32_t screen_h);
+
+/** Pointer down on a cell. `time_ms` is a monotonic clock: the engine compares
+ *  it with the previous press to decide whether this is a second click of the
+ *  same word or the start of a new selection. */
+int ldmux_terminal_select_press(LdmuxTerminal *t, uint32_t col, uint32_t row,
+                                uint64_t time_ms);
+
+/** Pointer held still on the same cell long enough to mean "this word".
+ *  Without it a long press is just a press that has not moved yet. */
+int ldmux_terminal_select_deep_press(LdmuxTerminal *t, uint64_t time_ms);
+
+/** Pointer moved while down. `col`/`row` are clamped to the grid by the core. */
+int ldmux_terminal_select_drag(LdmuxTerminal *t, uint32_t col, uint32_t row,
+                               uint64_t time_ms);
+
+/** Pointer up. `valid_cell` is 0 when the pointer left the grid entirely, which
+ *  the engine records as "released off the terminal" rather than guessing.
+ *
+ *  Every one of these takes the time, not just the press: the engine measures the
+ *  gap between events, and a sequence whose clock goes backwards at release is a
+ *  sequence it is right to distrust. (Learned by getting it wrong: a release
+ *  timestamped 0 silently discarded the click count, so a double-tap selected
+ *  nothing at all.) */
+int ldmux_terminal_select_release(LdmuxTerminal *t, uint32_t col, uint32_t row,
+                                  int valid_cell, uint64_t time_ms);
+
+/** Drop the selection and any in-flight gesture. */
+int ldmux_terminal_select_clear(LdmuxTerminal *t);
+
+/** Select the whole screen. */
+int ldmux_terminal_select_all(LdmuxTerminal *t);
+
+/**
+ * The selection as text, ready for the clipboard.
+ *
+ * Soft-wrapped lines are unwrapped and trailing whitespace is trimmed, which is
+ * what copying a paragraph out of a terminal is expected to do: the wrap is a
+ * property of the window, not of the text. Returns NULL when nothing is
+ * selected. The bytes are borrowed and valid until the next call or
+ * [ldmux_terminal_free].
+ */
+const uint8_t *ldmux_terminal_selection_text(LdmuxTerminal *t, size_t *len);
+
+/** Set on a cell whose style flags put it inside the selection (bit 9). */
+#define LDMUX_FLAG_SELECTED (1u << 9)
+
 #endif /* LDMUX_TERMINAL_H */

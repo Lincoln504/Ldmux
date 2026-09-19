@@ -23,6 +23,17 @@ struct LdmuxTerminal {
   size_t clip_cap;
   size_t clip_len;
   int clip_kind; /* one of the LDMUX_CLIPBOARD_* values */
+  GhosttySelectionGesture gesture;
+  uint8_t *sel; /* last formatted selection, owned by this struct */
+  size_t sel_cap;
+  size_t sel_len;
+  /* Geometry, in surface pixels. Zero until the client says otherwise, which
+   * makes every pointer-distance decision degenerate but never wrong. */
+  uint32_t geo_columns;
+  uint32_t geo_cell_w;
+  uint32_t geo_cell_h;
+  uint32_t geo_pad_left;
+  uint32_t geo_screen_h;
 };
 
 static GhosttyColorRgb resolve_color(GhosttyStyleColor color,
@@ -171,6 +182,9 @@ LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows) {
     free(t);
     return NULL;
   }
+  if (ghostty_selection_gesture_new(NULL, &t->gesture) != GHOSTTY_SUCCESS) {
+    t->gesture = NULL; /* selection stays unavailable; nothing else is affected */
+  }
 
   /* The engine has to be able to find this struct from inside the callback, and
    * the callback is the only way a clipboard write becomes anything at all.
@@ -199,14 +213,221 @@ int ldmux_terminal_take_clipboard(LdmuxTerminal *t, const uint8_t **out,
   return kind;
 }
 
+static bool ensure_sel(LdmuxTerminal *t, size_t need) {
+  if (t->sel_cap >= need) return true;
+  size_t cap = t->sel_cap ? t->sel_cap : 4096;
+  while (cap < need) cap *= 2;
+  uint8_t *next = (uint8_t *)realloc(t->sel, cap);
+  if (!next) return false;
+  t->sel = next;
+  t->sel_cap = cap;
+  return true;
+}
+
+/*
+ * Install a selection the gesture produced. The engine copies it immediately and
+ * converts it to terminal-owned tracked state, so the snapshot's grid
+ * references only have to be valid for the duration of this call — which they
+ * are, because the gesture produced them from the current grid in the same
+ * breath.
+ */
+static int install_selection(LdmuxTerminal *t, const GhosttySelection *sel) {
+  if (!t || !t->terminal || !sel) return 0;
+  GhosttySelection copy = *sel;
+  copy.size = sizeof(GhosttySelection);
+  return ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_SELECTION,
+                              &copy) == GHOSTTY_SUCCESS;
+}
+
+static GhosttyPoint viewport_point(uint32_t col, uint32_t row) {
+  GhosttyPoint p;
+  memset(&p, 0, sizeof(p));
+  p.tag = GHOSTTY_POINT_TAG_VIEWPORT;
+  p.value.coordinate.x = (uint16_t)col;
+  p.value.coordinate.y = row;
+  return p;
+}
+
+/*
+ * The one path every selection event takes. `have_cell` is what separates "the
+ * pointer is on this cell" from "the pointer is off the grid", which the engine
+ * records rather than guessing: a drag that leaves the terminal and comes back
+ * must not silently re-anchor somewhere else.
+ */
+static int selection_event(LdmuxTerminal *t, GhosttySelectionGestureEventType type,
+                           int have_cell, uint32_t col, uint32_t row,
+                           uint64_t time_ns) {
+  if (!t || !t->gesture || !t->terminal) return 0;
+
+  GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  if (have_cell) {
+    if (ghostty_terminal_grid_ref(t->terminal, viewport_point(col, row), &ref) !=
+        GHOSTTY_SUCCESS) {
+      have_cell = 0;
+    }
+  }
+
+  GhosttySelectionGestureEvent ev = NULL;
+  if (ghostty_selection_gesture_event_new(NULL, &ev, type) != GHOSTTY_SUCCESS) {
+    return 0;
+  }
+
+  /* Options persist on a reused event, so every one that matters is set (or
+   * deliberately cleared) on every call. The slop that decides whether two taps
+   * are one word is generous on purpose: a finger is not a mouse, and a
+   * double-tap that misses by a few pixels should still select the word. */
+  ghostty_selection_gesture_event_set(
+      ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, have_cell ? (const void *)&ref : NULL);
+  if (have_cell) {
+    GhosttySurfacePosition pos;
+    pos.x = (double)(t->geo_pad_left + col * t->geo_cell_w) + (double)t->geo_cell_w / 2.0;
+    pos.y = (double)(row * t->geo_cell_h) + (double)t->geo_cell_h / 2.0;
+    ghostty_selection_gesture_event_set(
+        ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, &pos);
+  } else {
+    ghostty_selection_gesture_event_set(
+        ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, NULL);
+  }
+  ghostty_selection_gesture_event_set(ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS,
+                                      &time_ns);
+  double slop = (double)(t->geo_cell_w ? t->geo_cell_w : 24u) * 2.0;
+  ghostty_selection_gesture_event_set(
+      ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE, &slop);
+
+  if (type == GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG ||
+      type == GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_AUTOSCROLL_TICK) {
+    GhosttySelectionGestureGeometry geo;
+    memset(&geo, 0, sizeof(geo));
+    geo.columns = t->geo_columns ? t->geo_columns : 1;
+    geo.cell_width = t->geo_cell_w ? t->geo_cell_w : 1;
+    geo.padding_left = t->geo_pad_left;
+    geo.screen_height = t->geo_screen_h ? t->geo_screen_h : 1;
+    ghostty_selection_gesture_event_set(
+        ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY, &geo);
+  }
+
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  GhosttyResult r = ghostty_selection_gesture_event(t->gesture, t->terminal, ev, &sel);
+  ghostty_selection_gesture_event_free(ev);
+
+  /* A release updates the gesture but produces no selection, and a press whose
+   * click count is still being decided can do the same. Both are successes, so
+   * only a real failure is reported as one. */
+  if (r == GHOSTTY_SUCCESS) return install_selection(t, &sel);
+  if (r == GHOSTTY_NO_VALUE) return 0;
+  return 0;
+}
+
+int ldmux_terminal_set_geometry(LdmuxTerminal *t, uint32_t columns, uint32_t cell_w,
+                                uint32_t cell_h, uint32_t pad_left,
+                                uint32_t screen_h) {
+  if (!t) return 0;
+  int changed = t->geo_columns != columns || t->geo_cell_w != cell_w ||
+                t->geo_cell_h != cell_h || t->geo_pad_left != pad_left ||
+                t->geo_screen_h != screen_h;
+  t->geo_columns = columns;
+  t->geo_cell_w = cell_w;
+  t->geo_cell_h = cell_h;
+  t->geo_pad_left = pad_left;
+  t->geo_screen_h = screen_h;
+  return changed;
+}
+
+int ldmux_terminal_select_press(LdmuxTerminal *t, uint32_t col, uint32_t row,
+                                uint64_t time_ms) {
+  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS, 1, col, row,
+                         time_ms * 1000000ull);
+}
+
+int ldmux_terminal_select_deep_press(LdmuxTerminal *t, uint64_t time_ms) {
+  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DEEP_PRESS, 0, 0, 0,
+                         time_ms * 1000000ull);
+}
+
+int ldmux_terminal_select_drag(LdmuxTerminal *t, uint32_t col, uint32_t row,
+                               uint64_t time_ms) {
+  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG, 1, col, row,
+                         time_ms * 1000000ull);
+}
+
+int ldmux_terminal_select_release(LdmuxTerminal *t, uint32_t col, uint32_t row,
+                                  int valid_cell, uint64_t time_ms) {
+  /* The release carries the cell it happened on, like every other event. It is
+   * the last position the engine hears about, so reporting (0,0) here tells it
+   * the finger travelled back to the first cell of the screen and the click it
+   * was counting never happened. */
+  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE,
+                         valid_cell != 0, col, row, time_ms * 1000000ull);
+}
+
+int ldmux_terminal_select_clear(LdmuxTerminal *t) {
+  if (!t || !t->terminal) return 0;
+  if (t->gesture) ghostty_selection_gesture_reset(t->gesture, t->terminal);
+  ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+  return 1;
+}
+
+int ldmux_terminal_select_all(LdmuxTerminal *t) {
+  if (!t || !t->terminal) return 0;
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  if (ghostty_terminal_select_all(t->terminal, &sel) != GHOSTTY_SUCCESS) {
+    /* An empty screen has nothing to select, which is not a failure. */
+    return ldmux_terminal_select_clear(t);
+  }
+  return install_selection(t, &sel);
+}
+
+const uint8_t *ldmux_terminal_selection_text(LdmuxTerminal *t, size_t *len) {
+  if (len) *len = 0;
+  if (!t || !t->terminal) return NULL;
+
+  GhosttyTerminalSelectionFormatOptions opts =
+      GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
+  opts.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+  /* Unwrap and trim is what Ghostty's own Screen.selectionString() does, and it
+   * is what copying out of a terminal should do: the wrap belongs to the window,
+   * not to the text. */
+  opts.unwrap = true;
+  opts.trim = true;
+  opts.selection = NULL; /* the terminal's current selection */
+
+  /* The buffer contract for a short buffer is not documented tightly enough to
+   * rely on, so this grows and retries instead of trusting a return code to
+   * report a size: at worst the first attempt teaches us the size, and the loop
+   * is bounded so a misbehaving engine cannot spin here. */
+  for (int attempt = 0; attempt < 4; attempt++) {
+    if (!t->sel && !ensure_sel(t, 4096)) return NULL;
+    size_t written = 0;
+    GhosttyResult r = ghostty_terminal_selection_format_buf(
+        t->terminal, opts, t->sel, t->sel_cap, &written);
+    if (r == GHOSTTY_SUCCESS) {
+      /* An empty range formats to an empty string rather than to nothing, and
+       * an empty string is not a selection: the caller would put "" on the
+       * clipboard and call it a copy. */
+      if (written == 0) return NULL;
+      t->sel_len = written;
+      if (len) *len = written;
+      return t->sel;
+    }
+    if (r == GHOSTTY_NO_VALUE) return NULL; /* nothing selected */
+    if (!ensure_sel(t, written > t->sel_cap ? written + 1 : t->sel_cap * 2)) return NULL;
+  }
+  return NULL;
+}
+
 void ldmux_terminal_free(LdmuxTerminal *t) {
   if (!t) return;
+  /* Free the gesture against the living terminal so it can release the tracked
+   * grid references it holds. Doing it after ghostty_terminal_free would leave
+   * the gesture pointing at freed pages. */
+  if (t->gesture) ghostty_selection_gesture_free(t->gesture, t->terminal);
   if (t->cells) ghostty_render_state_row_cells_free(t->cells);
   if (t->row_iter) ghostty_render_state_row_iterator_free(t->row_iter);
   if (t->render_state) ghostty_render_state_free(t->render_state);
   if (t->terminal) ghostty_terminal_free(t->terminal);
   free(t->frame);
   free(t->clip);
+  free(t->sel);
   free(t);
 }
 
@@ -392,6 +613,18 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
       if (style.invisible) flags |= 1u << 6;
       if (style.strikethrough) flags |= 1u << 7;
       if (style.overline) flags |= 1u << 8;
+
+      /* Selection rides in the cell's own flag word rather than a new header
+       * field. Bit 9 was the first free bit, the client already decodes this
+       * word for every cell it draws, and a selection is a property of cells
+       * rather than of the frame — so the wire format does not change at all
+       * for this feature, and an older client simply ignores the bit. */
+      bool selected = false;
+      if (ghostty_render_state_row_cells_get(
+              t->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED,
+              &selected) == GHOSTTY_SUCCESS && selected) {
+        flags |= 1u << 9;
+      }
 
       buf[p++] = (uint8_t)n;
       buf[p++] = (uint8_t)(flags & 0xff);

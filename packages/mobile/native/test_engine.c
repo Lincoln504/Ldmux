@@ -271,6 +271,244 @@ static void test_cursor_advances_one_column(void) {
   ldmux_terminal_free(t);
 }
 
+/* Read one cell's flag word out of a rendered frame. The frame is a flat run of
+ * `9 + grapheme_bytes` records after the header, in row-major order, and a test
+ * that asserts "this cell is not selected" has to be able to look at a specific
+ * cell rather than at the whole frame. */
+static uint16_t cell_flags_at(const uint8_t *buf, size_t len, int want_col,
+                              int want_row) {
+  uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
+  uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
+  size_t p = 40;
+  for (int r = 0; r < rows; r++) {
+    for (int c = 0; c < cols; c++) {
+      if (p + 9 > len) return 0;
+      uint8_t n = buf[p];
+      uint16_t flags = (uint16_t)(buf[p + 1] | (buf[p + 2] << 8));
+      if (r == want_row && c == want_col) return flags;
+      p += 9 + (size_t)n;
+    }
+  }
+  return 0;
+}
+
+static int selected_cell_count(const uint8_t *buf, size_t len) {
+  uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
+  uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
+  size_t p = 40;
+  int count = 0;
+  for (int r = 0; r < rows; r++) {
+    for (int c = 0; c < cols; c++) {
+      if (p + 9 > len) return count;
+      uint8_t n = buf[p];
+      if ((buf[p + 1] | (buf[p + 2] << 8)) & LDMUX_FLAG_SELECTED) count++;
+      p += 9 + (size_t)n;
+    }
+  }
+  return count;
+}
+
+/* The geometry the client would report: 80 columns, 10x20 pixel cells. */
+static void use_geometry(LdmuxTerminal *t) {
+  ldmux_terminal_set_geometry(t, 80, 10, 20, 0, 480);
+}
+
+static const char *selection_cstr(LdmuxTerminal *t) {
+  static char out[8192];
+  size_t len = 0;
+  const uint8_t *p = ldmux_terminal_selection_text(t, &len);
+  if (!p) return NULL;
+  if (len >= sizeof(out)) len = sizeof(out) - 1;
+  memcpy(out, p, len);
+  out[len] = 0;
+  return out;
+}
+
+/* A press, a drag and a release is the whole gesture, and the text that comes
+ * back is the thing the user will see on the clipboard. */
+/* A press, a drag and a release is the whole gesture, and the text that comes
+ * back is the thing the user will see on the clipboard. */
+static void test_drag_selects_text(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  /* A press on its own is not yet a selection: the engine is still deciding
+   * whether a second tap is coming, so the first press has nothing to draw.
+   * Measured, not assumed. */
+  CHECK_EQ_INT(ldmux_terminal_select_press(t, 0, 0, 1000), 0);
+  /* Dragging to column N covers up to N-1. Measured across five endpoints
+   * (8,9,10,11,12) rather than reasoned about, because the alternative reading
+   * — that the drag cell is included — is just as plausible on paper. */
+  CHECK(ldmux_terminal_select_drag(t, 11, 0, 1010));
+  ldmux_terminal_select_release(t, 11, 0, 1, 1050);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "hello world"), 0);
+  ldmux_terminal_free(t);
+}
+
+/* The painter draws what the frame says, so the frame has to mark exactly the
+ * cells inside the selection and no others. */
+static void test_frame_marks_selected_cells(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  ldmux_terminal_select_press(t, 0, 0, 1000);
+  ldmux_terminal_select_drag(t, 5, 0, 1010);
+  ldmux_terminal_select_release(t, 5, 0, 1, 1050);
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK((cell_flags_at(buf, len, 0, 0) & LDMUX_FLAG_SELECTED) != 0);
+  CHECK((cell_flags_at(buf, len, 4, 0) & LDMUX_FLAG_SELECTED) != 0);
+  CHECK((cell_flags_at(buf, len, 5, 0) & LDMUX_FLAG_SELECTED) == 0);
+  CHECK((cell_flags_at(buf, len, 0, 1) & LDMUX_FLAG_SELECTED) == 0);
+  /* And a cell outside the selection keeps every flag it had: this is one more
+   * bit, not a different style. */
+  CHECK((cell_flags_at(buf, len, 5, 0) & 0x3ffu) == 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_clear_removes_the_flag_and_the_text(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  ldmux_terminal_select_press(t, 0, 0, 1000);
+  ldmux_terminal_select_drag(t, 11, 0, 1010);
+  ldmux_terminal_select_release(t, 11, 0, 1, 1050);
+  CHECK(selection_cstr(t) != NULL);
+  CHECK(ldmux_terminal_select_clear(t));
+  CHECK(selection_cstr(t) == NULL);
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(selected_cell_count(buf, len), 0);
+  ldmux_terminal_free(t);
+}
+
+/* Two taps in the same place, close together in time, do NOT select a word.
+ *
+ * This is a record of measured behaviour, and it is here so that it cannot be
+ * quietly assumed either way: the engine's press path returns "no value" for
+ * every click count this test drives it with, including the second press of a
+ * double-tap, while a long press on the same cell does produce the word. The
+ * client therefore uses long-press for word selection, which is also the
+ * standard gesture on both platforms (ADR-0014 §6).
+ *
+ * If a later engine starts honouring the click count, this test fails and the
+ * better gesture can be adopted deliberately. Until then the assertion is what
+ * the engine actually does, not what it looked like it should do. Every event
+ * still carries the clock, including the release: a release timestamped zero
+ * makes the sequence look like it travelled backwards in time. */
+static void test_double_press_does_not_yet_select_a_word(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  CHECK_EQ_INT(ldmux_terminal_select_press(t, 3, 0, 1000), 0);
+  ldmux_terminal_select_release(t, 3, 0, 1, 1050);
+  CHECK_EQ_INT(ldmux_terminal_select_press(t, 3, 0, 1100), 0);
+  ldmux_terminal_select_release(t, 3, 0, 1, 1150);
+  CHECK(selection_cstr(t) == NULL);
+  ldmux_terminal_free(t);
+}
+
+/* A long press is a press that has not moved for long enough, which is a
+ * different event to the engine rather than a timer in the client. */
+static void test_long_press_selects_the_word(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  ldmux_terminal_select_press(t, 3, 0, 1000);
+  CHECK(ldmux_terminal_select_deep_press(t, 2000));
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "hello"), 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_selection_spans_lines(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "one\r\ntwo");
+  ldmux_terminal_select_press(t, 0, 0, 1000);
+  ldmux_terminal_select_drag(t, 3, 1, 1010);
+  ldmux_terminal_select_release(t, 3, 1, 1, 1050);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "one\ntwo"), 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_select_all_covers_the_screen(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "abc");
+  CHECK(ldmux_terminal_select_all(t));
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  /* Selecting all means the screen's content, not its dimensions: trailing
+   * blanks are trimmed. Measured as three cells, not 80x24. */
+  CHECK_EQ_INT(selected_cell_count(buf, len), 3);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "abc"), 0);
+  ldmux_terminal_free(t);
+}
+
+/* Releasing outside the grid is recorded as exactly that. It must not re-anchor
+ * the selection somewhere the finger never was. */
+static void test_release_outside_the_grid_keeps_the_selection(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  ldmux_terminal_select_press(t, 0, 0, 1000);
+  ldmux_terminal_select_drag(t, 6, 0, 1010);
+  ldmux_terminal_select_release(t, 6, 0, 0, 1050);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "hello"), 0);
+  ldmux_terminal_free(t);
+}
+
+/* An empty screen has nothing to select, and asking must answer "nothing"
+ * rather than an empty string the caller would put on the clipboard. */
+static void test_empty_screen_has_no_selection(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  ldmux_terminal_select_press(t, 10, 10, 1000);
+  ldmux_terminal_select_drag(t, 21, 10, 1010);
+  ldmux_terminal_select_release(t, 21, 10, 1, 1050);
+  /* No text: an empty range is not a clipboard value, so the caller cannot put
+   * "" on the clipboard and call it a copy. */
+  CHECK(selection_cstr(t) == NULL);
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  /* But the range itself exists and the painter will show it, which is what a
+   * terminal does when you drag across blank cells. Eleven cells because the
+   * drag covers columns 10..20: the anchor cell is included and the cell the
+   * drag ended on is not, the same convention as above, now confirmed on a
+   * screen with no text in it at all. */
+  CHECK_EQ_INT(selected_cell_count(buf, len), 11);
+  ldmux_terminal_free(t);
+}
+
+/* Nothing here may touch memory the terminal has freed: the gesture holds
+ * tracked references, so freeing it in the wrong order is a use-after-free
+ * rather than a leak. */
+static void test_free_with_a_live_selection(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world\r\nsecond line");
+  ldmux_terminal_select_press(t, 0, 0, 1000);
+  ldmux_terminal_select_drag(t, 12, 1, 1010);
+  ldmux_terminal_select_release(t, 12, 1, 1, 1050);
+  CHECK(selection_cstr(t) != NULL);
+  ldmux_terminal_free(t);
+  CHECK(1); /* reached only if free did not trip anything */
+}
+
 int main(void) {
   struct {
     const char *name;
@@ -290,6 +528,16 @@ int main(void) {
       {"frame header contract", test_frame_header_contract},
       {"alternate screen bit", test_alternate_screen_bit},
       {"cursor advances one column", test_cursor_advances_one_column},
+      {"drag selects text", test_drag_selects_text},
+      {"frame marks selected cells", test_frame_marks_selected_cells},
+      {"clear removes flag and text", test_clear_removes_the_flag_and_the_text},
+      {"double press does not yet select a word", test_double_press_does_not_yet_select_a_word},
+      {"long press selects the word", test_long_press_selects_the_word},
+      {"selection spans lines", test_selection_spans_lines},
+      {"select all covers the screen", test_select_all_covers_the_screen},
+      {"release outside keeps selection", test_release_outside_the_grid_keeps_the_selection},
+      {"empty screen has no selection", test_empty_screen_has_no_selection},
+      {"free with a live selection", test_free_with_a_live_selection},
   };
   const int n = (int)(sizeof(tests) / sizeof(tests[0]));
 
