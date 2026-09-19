@@ -185,17 +185,42 @@ cancelled run), so the following are **not** answered here. Each has the questio
 precisely enough to be answered cheaply, and none of them needs to be answered before
 option (b) or (a) can proceed.
 
-### 6.1 The `pipe-pane` questions — the ones that decide option (a)
+### 6.1 The `pipe-pane` questions — **ANSWERED by measurement (2026-09-19)**
 
-1. Does `pipe-pane -o 'cat >> file'` deliver the pane's bytes **verbatim**, including
-   escape sequences, OSC 52, OSC 8 and multi-byte characters? *Method:* scratch socket,
-   `printf` a known sequence into a pane, diff the captured bytes.
-2. What does tmux do when the reader is slow — block the pane, buffer, or drop?
-   *Method:* a reader that sleeps, a producer that floods, count the bytes.
-3. Does `pipe-pane` output carry ordering or sequence numbers relative to
-   `capture-pane` snapshots? *Method:* interleave a capture and a stream and look.
-4. Is there any ordinary-command substitute for `pause-after`? *Method:* read the tmux
-   manual's `refresh-client` and `pipe-pane` sections rather than guessing.
+All four were measured on an isolated scratch server (`tmux -L ldmux-pp`, never the
+user's). The methods and the numbers are in **§8**. The answers:
+
+1. **Verbatim? Yes, completely.** Real ESC bytes (`0x1b`), `ESC[31m`, `ESC[0m`,
+   `ESC]52;c;…BEL`, `ESC]8;;…BEL`, `é` and an emoji all arrived byte-for-byte. **No
+   octal escaping is applied** — that is control mode's doing, not tmux's, and it is the
+   one thing `pipe-pane` does better.
+2. **Slow reader: bounded buffering, no loss, backpressure to the pane.** A reader that
+   stalled 12 s while 400,000 numbered lines (~18 MB) were produced received **all
+   400,000 lines with zero missing**. Server RSS rose 8.4 MB → ~26 MB and **stopped** —
+   the buffer is bounded. Once it fills, the pane's own process blocks on writing to its
+   pty, which is exactly what a local terminal does.
+3. **Ordering is strict and there are no sequence numbers.** `MARK_1 … MARK_5` arrived in
+   order. `capture-pane` keeps working while a pipe is live, so the two can be mixed —
+   but nothing correlates them, so a client must treat the stream and the snapshot as
+   two views with no shared clock (which is what we already do).
+4. **There is no substitute for `pause-after`, and this is the real cost.**
+   `pause-after=seconds` is documented as *"output is paused once the pane is seconds
+   behind **in control mode**"*. It does not apply to a pipe. **`pipe-pane` has no flow
+   control at all** — no pause, no resume, no notification that a consumer is behind.
+   This is confirmed by the wider ecosystem: `pipe-pane`'s documented limitations are
+   precisely "no back-pressure, no structured events, no pane lifecycle notifications".
+
+### 6.1.1 Two further measured facts that change the shape of option (a)
+
+- **`pipe-pane` is per-pane.** A pane-level pipe sees only that pane; a window-level
+  pipe (`-t session:window`) saw **neither** pane. tmux already keeps one control client
+  per session and demultiplexes `%output` by pane id, so option (a) would mean **one pipe
+  and one reader process per pane** instead of one connection per session.
+- **A dead reader does not take the pane with it.** The pane survived, and tmux's
+  `#{pane_pipe}` still reported `1` — **tmux does not notice its reader died**, so a
+  supervisor has to poll for it (the `tmux-pane-control` project polls `list-panes` every
+  200 ms for exactly this reason). Control mode gets this for free: `%exit` is the
+  client's death notice.
 
 ### 6.2 The keeper questions — the ones that decide option (c)
 
@@ -218,36 +243,136 @@ option (b) or (a) can proceed.
 
 ## 7. Recommendation
 
-**Option (a): keep tmux as the PTY keeper, and stop depending on control mode — but only
-after §6.1 is answered.** In order:
+**The measurements changed the answer, and not in the direction the options implied.**
 
-1. **Answer the four `pipe-pane` questions by measurement.** They are cheap, they are
-   local, and they decide whether (a) is a good idea or a trap.
-2. **If `pipe-pane` carries bytes verbatim and degrades safely**, build the streaming path
-   on it and keep control mode as the fallback (the polling fallback already exists, so a
-   third mode is not a new concept in this codebase).
-3. **Do not build (c) until the keeper design is written down and reviewed on its own.**
-   The plan comes first — a separate process that owns the PTYs, what happens to buffered
-   output while nobody is attached, how a shell's scrollback survives, and how a restart
-   is made safe — and it gets its own ADR before any code.
-4. **Keep the profile file regardless of the outcome.** It is correct under every option
-   that involves tmux, and it is the fix for a defect that was losing the entire
-   configuration.
+### What they settled
 
-**Why not (c) yet**: §3 is a real ledger, and the one line that matters most — sessions
-outliving the daemon — is currently free and measured. The VT engine being available
-makes (c) *feasible*; it does not make it *cheap*, because the engine was never the hard
-part of this layer. The hard part is supervision, and a mistake there costs the user
-their work rather than a test failure.
+- **`pipe-pane` is byte-verbatim and lossless under a stalled reader**, with a *bounded*
+  buffer that applies backpressure to the pane instead of dropping. That is a better
+  streaming primitive than control mode's octal-escaped `%output`.
+- **Flow control is reproducible without control mode**: control mode's `pause-after`
+  stops the pane when a client is behind, and *not reading the pipe* stops it in exactly
+  the same place. The measured block is the pty write in the pane's own process — which
+  is what a local terminal does. So the one capability I expected option (a) to lose,
+  it does not actually lose.
+- **The costs of (a) are smaller than feared and are all supervision, not protocol**: one
+  pipe per pane (we view one pane at a time, so this is fine), a poll to notice a dead
+  reader (tmux does not tell us), and no `%exit`. Everything else we need — `list-panes`,
+  `capture-pane`, `send-keys`, `resize-window` — is an ordinary command that does not
+  change.
+- **Control mode is not deprecated** and is the primary integration mechanism for iTerm2
+  and Ghostty. So this is a choice between two working mechanisms, not a migration off
+  something dying.
 
-**Why not (b)**: the control-mode protocol is the part of tmux with no specification and
-no version contract, it is the part we parse by hand, and it is the part whose failure
-modes are least likely to announce themselves. It is also, per §6.1, potentially the
-easiest to replace.
+### What it would delete
+
+`control-parser.ts` (160), `control-client.ts` (401), `octal.ts` (34) — **595 lines of the
+most fragile code in the daemon**, plus 235 lines of tests. Replaced by a pipe reader and
+a small supervisor. That is the strongest argument for (a): the parser is hand-written
+against a protocol with **no specification and no version contract**, and a parser for an
+unspecified format is where a terminal client breaks in ways nobody can predict.
+
+### The recommendation
+
+**Build the `pipe-pane` path as a third `StreamMode` behind the abstraction that already
+exists, measure both on the real phone, and then delete whichever loses.**
+
+1. `stream.ts` already models this: `type StreamMode = "control" | "polling"`. Add
+   `"pipe"`. The switch is already a config decision, not a rewrite.
+2. Run control mode and the pipe against the same session on the tailnet and on a
+   throttled link. Compare latency, link cost and behaviour when the phone goes away.
+3. **Delete the loser.** If the pipe wins, the 595 lines and their 235 lines of tests go.
+
+**Why not decide now**: the two mechanisms are close enough that the decision should be
+made on the phone's numbers rather than on this document's argument, and the abstraction
+that makes the comparison cheap already exists. Guessing between two working options is
+how a project acquires a rewrite it did not need.
+
+**Why not (b)**: 595 lines of hand-written parsing of an unspecified protocol, in the one
+component whose failure is least likely to announce itself, is the largest maintainability
+liability in the codebase. The measurements show there is a simpler primitive that does
+the same job.
+
+**Why not (c) yet**: the keeper pattern is now well understood from the research (§9) and
+none of the six systems surveyed use SCM_RIGHTS — they all keep the PTY in a long-lived
+supervisor process and reattach over a socket. That is a design we could follow, but it
+costs the measured, free survival we already have, and it is a separate decision that
+deserves its own plan. **Nothing about (a) blocks (c)** — a pipe reader is a smaller thing
+to replace than a protocol client.
 
 ### The question for the user
 
-> Do you want (a) — tmux keeps the PTYs, we replace control mode with `pipe-pane` and
-> ordinary commands, starting by measuring what `pipe-pane` actually does — or should I
-> write the keeper-process plan for (c) so you can judge it before either is built?
-> Either way nothing gets started until you say so.
+> I measured it, and the answer is not what either option assumed: `pipe-pane` is
+> byte-verbatim, lossless under a stalled reader, and its backpressure is equivalent to
+> `pause-after`. It would delete 595 lines of hand-written protocol parsing. Do you want
+> me to **build it as a third stream mode and A/B it against control mode on the phone**,
+> or would you rather I **keep control mode and harden the parser** — and either way, do
+> you want the keeper-process plan for (c) written up as its own ADR first?
+
+---
+
+## 8. The measurements, in full
+
+Every one ran on an **isolated scratch server** (`tmux -L ldmux-pp`), never the user's
+sessions, and each ended with `kill-server`. Reproduce with the method column.
+
+| # | Question | Method | Result |
+|---|---|---|---|
+| 1 | Byte-verbatim? | `pipe-pane -o 'cat >> raw.bin'`, then `printf` known sequences into the pane | `ESC[31m`, `ESC[0m`, `ESC]52;c;TERDTElQMTIzBEL`, `ESC]8;;…BEL`, `é`, 😀 — **all present as real bytes**. 9 `0x1b` bytes. **No `\033` octal escaping** (the two literal `\033` occurrences were the shell echoing the command that printed them, confirmed by position). |
+| 2a | Slow reader — loss? | Reader sleeps 12 s, then drains. 400,000 numbered lines produced | **400,000 distinct line numbers, 0 missing.** `FINISHED_400K` present. |
+| 2b | Slow reader — unbounded buffer? | Reader never reads; watch the server's RSS | 8,428 KB → 26,716 KB, then **flat**. Bounded. |
+| 2c | Slow reader — block or drop? | Same as 2a, poll the pane for the producer's finishing marker | Producer **blocked at t=2 s, finished at t=4 s** — backpressure reached the pane, no data lost. |
+| 3 | Ordering? | `MARK_1…MARK_5`, compare the pipe stream against `capture-pane` | Stream strictly ordered. `capture-pane` works concurrently. No sequence numbers, no shared clock. |
+| 4 | Flow control? | Read the manual for `pause-after` | **"output is paused once the pane is seconds behind in control mode"** — control mode only. No substitute for a pipe. |
+| 5 | Per-pane or per-window? | Pipe on `m:0.0` and `m:0.1`, then on `m` | Pane pipes are isolated and correct. **A window-level pipe captured neither pane.** |
+| 6 | Dead reader? | `pkill` the reader, then `#{pane_pipe}` | Pane **survived** and stayed responsive; `#{pane_pipe}` still reported `1`. **tmux does not notice.** |
+
+**Server responsiveness during a stalled reader**: `list-sessions` answered in 7–10 ms and
+an unrelated pane ran a command normally throughout. A stalled reader does not wedge tmux.
+
+---
+
+## 9. The keeper pattern — what the research found
+
+Surveyed: dtach, abduco, mosh, Zellij, VS Code's pty host, WezTerm's mux server.
+
+**Every one of the six keeps the PTY in a long-lived supervisor process and reattaches
+over a Unix socket. None uses SCM_RIGHTS descriptor passing.** That is a clear answer to
+the question of how to build (c), and it is simpler than it looked.
+
+| System | PTY owner | Reattach | Output while detached | SCM_RIGHTS |
+|---|---|---|---|---|
+| **dtach** | The `dtach` master process, `forkpty()`, fd in a static struct | New client connects to the socket, `MSG_ATTACH` | **Discarded** — the pty fd is not in the `select()` set with no clients, so it is never read | No |
+| **abduco** | Server process, `forkpty()` | New client connects to the session socket | Same pattern (not buffered) | No |
+| **mosh** | `mosh-server`, tied to the SSH session that launched it | UDP re-sync with the session key | Processed through the terminal emulator, **dropped** at the UDP layer | No |
+| **Zellij** | Server process, `ActiveDetached` state | `zellij attach`, protobuf handshake | **Held in the in-memory pane grid** — reconnecting client gets current state | No |
+| **VS Code** | A dedicated pty host process | Reattach **by process id** after a window reload | **Buffered in the host**, with **ack-based flow control** (`AckDataBufferer`) | No |
+| **WezTerm** | Mux server process | Connect to the domain socket | Held in the emulator's `Surface`; reattach sends **only changed lines** (dirty tracking) | No |
+
+Three findings worth carrying:
+
+1. **WezTerm's dirty tracking is the same idea as our snapshot-plus-delta**, arrived at
+   independently: the server diffs its current state against what the client last saw and
+   sends only the changed lines.
+2. **VS Code's flow control is an explicit ack** — the renderer acknowledges bytes
+   processed and the host pauses past a threshold. That is a third way to do what
+   `pause-after` does, and it is the one that works over an arbitrary transport rather
+   than inside tmux.
+3. **A crash of the supervisor loses everything in every one of these systems.** VS Code
+   restarts its host up to five times and loses the sessions each time; WezTerm has no
+   persistence at all. tmux's own model — a server that outlives every client — is not
+   beaten by any of them. That is the strongest argument for keeping the PTYs where they
+   are.
+
+**On the tooling side**, if (c) were ever built: `portable-pty` is the ergonomic
+cross-platform Rust crate (it is what WezTerm uses), `nix::pty` is the raw POSIX
+primitive, `node-pty` is the incumbent for Node but **ships no prebuilt binaries
+upstream** and must be rebuilt per Node major because it is NAN/node-gyp based.
+`napi-rs` gives **Node-API ABI stability** (build once against a level, load on later
+Node majors), a real prebuilt distribution pipeline via `@napi-rs/cli`, and cross
+compilation — at the cost of writing the PTY layer in Rust. The known trap for a
+long-lived fd-holding addon is a **strong `ThreadsafeFunction` keeping the event loop
+alive** (the "Node does not exit" failure) and blocking reads on the pty master inside a
+synchronous function freezing the whole event loop.
+
+**None of this needs deciding to proceed with option (a).**
