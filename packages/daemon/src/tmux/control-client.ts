@@ -12,6 +12,8 @@ import { killTree } from "../proc.ts";
 import { ControlParser } from "./control-parser.ts";
 
 export interface TmuxControlClientOptions {
+  /** The server profile to read, so a server this client starts is not on defaults. */
+  profilePath?: string;
   onOutput?: (pane: string, text: string) => void;
   onNotification?: (line: string) => void;
   /** tmux paused a pane because this client fell behind (`%pause`). */
@@ -118,8 +120,17 @@ export interface ControlProc {
  * control stream is a command/response protocol, so losing a command silently
  * would desynchronise the response FIFO.
  */
-function spawnTmuxControl(socket: string, session: string): ControlProc {
-  const child = spawn("tmux", ["-L", socket, "-C", "attach", "-t", session], {
+function spawnTmuxControl(
+  socket: string,
+  session: string,
+  profilePath?: string,
+): ControlProc {
+  // `-f` too: a control client can be what starts the server, and a server started
+  // without the profile is a server on tmux's defaults.
+  const child = spawn(
+    "tmux",
+    ["-L", socket, ...(profilePath ? ["-f", profilePath] : []), "-C", "attach", "-t", session],
+    {
     stdio: ["pipe", "pipe", "pipe"],
     // Its own process group: closing a control client must not leave tmux's
     // helpers behind holding our pipes open.
@@ -228,7 +239,7 @@ export class TmuxControlClient {
     session: string,
     opts: TmuxControlClientOptions = {},
   ): Promise<TmuxControlClient> {
-    const proc = spawnTmuxControl(socket, session);
+    const proc = spawnTmuxControl(socket, session, opts.profilePath);
     const client = new TmuxControlClient(proc, opts);
     // tmux emits an unsolicited empty `%begin/%end` block on attach; wait for
     // `%session-changed` (which follows it) before issuing commands so the

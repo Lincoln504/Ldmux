@@ -196,7 +196,14 @@ export class LdmuxDaemon {
     mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
     this.socketPath = join(this.stateDir, "ldmuxd.sock");
     this.lockPath = join(this.stateDir, "ldmuxd.lock");
-    this.cp = new TmuxControlPlane(opts.tmuxSocket ?? "ldmux");
+    this.cp = new TmuxControlPlane(
+      opts.tmuxSocket ?? "ldmux",
+      undefined,
+      undefined,
+      // The profile lives with the daemon's other state, and every tmux this daemon
+      // runs is pointed at it. See `writeServerProfile` for why it is a file.
+      join(this.stateDir, "tmux-server.conf"),
+    );
     this.registry = new Registry(join(this.stateDir, "registry.json"));
     this.canonical = opts.canonical ?? { cols: 120, rows: 40 };
     // 50k lines costs ~200 MB/pane (dooboxes' measurement); 10k is ~40 MB.
@@ -430,6 +437,7 @@ export class LdmuxDaemon {
       // sessions the user is working in.
       stream = new PaneStream(this.cp.socket, record.tmuxName, this.cp, {
         clipboardWrite: readClipboardWritePolicy(this.stateDir),
+        profilePath: this.cp.profilePath,
       });
       this.streams.set(record.tmuxName, stream);
     }

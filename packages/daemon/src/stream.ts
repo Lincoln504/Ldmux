@@ -43,6 +43,21 @@ export const MAX_HISTORY_LINES = 5000;
 /** A pause storm must not spam every subscriber with resyncs. */
 const PAUSE_RESET_MIN_MS = 1000;
 
+/**
+ * What a pane stream is configured with.
+ *
+ * Named rather than inline, and that is not style: the field and the constructor both
+ * carried a copy of this type, so adding an option to one left the other rejecting it —
+ * which is exactly what happened when the server profile was threaded through.
+ */
+export interface PaneStreamOptions {
+  pollMs?: number;
+  pauseAfter?: number;
+  clipboardWrite?: boolean;
+  /** The tmux server profile, so an attach cannot start a server without it. */
+  profilePath?: string;
+}
+
 export class PaneStream {
   private client: TmuxControlClient | null = null;
   private connecting: Promise<void> | null = null;
@@ -61,13 +76,13 @@ export class PaneStream {
   private readonly tmuxSocket: string;
   readonly sessionName: string;
   private readonly cp: TmuxControlPlane;
-  private readonly opts: { pollMs?: number; pauseAfter?: number; clipboardWrite?: boolean };
+  private readonly opts: PaneStreamOptions;
 
   constructor(
     tmuxSocket: string,
     sessionName: string,
     cp: TmuxControlPlane,
-    opts: { pollMs?: number; pauseAfter?: number; clipboardWrite?: boolean } = {},
+    opts: PaneStreamOptions = {},
   ) {
     this.tmuxSocket = tmuxSocket;
     this.sessionName = sessionName;
@@ -268,6 +283,8 @@ export class PaneStream {
     const client = await TmuxControlClient.connect(this.tmuxSocket, this.sessionName, {
       onOutput: (_pane, text) => this.fanout(text),
       pauseAfter: this.opts.pauseAfter,
+      // So a server this attach starts is not started on tmux's defaults.
+      profilePath: this.opts.profilePath,
       // A paused pane has stopped streaming and its queued output is gone, so
       // subscribers must resync from a snapshot (the client resumes the pane).
       onPaused: () => this.onPaused(),

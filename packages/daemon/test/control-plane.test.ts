@@ -99,6 +99,58 @@ test("the size belongs to the shell's owner, and can be handed over", async () =
   await cp.killSession("sz");
 });
 
+test("the server profile is written, and every server we start reads it", async () => {
+  // **The case that was broken.** `set-option` does not start a tmux server: against
+  // one that does not exist it fails with "error connecting ... (No such file or
+  // directory)" and exit 1. The batch ignored non-zero exits on purpose, so on a cold
+  // daemon the entire profile was skipped in silence. Starting a server first fixes
+  // half of it and not the other half, because a tmux server with no sessions *exits* —
+  // options set on an empty server are gone before the first session exists, and that
+  // session comes up on the defaults. Which is how the phone came to be told by pi that
+  // extended keys were off, with none of `history-limit`, `mouse`, `set-clipboard`,
+  // `escape-time` or `COLORTERM` in force either.
+  //
+  // So the profile is a file, and this test is in two halves: what we write, and that a
+  // server we start actually reads it.
+  process.env.PATH = realPath;
+  const dir = mkdtempSync(join(tmpdir(), "ldmux-profile-"));
+  const profilePath = join(dir, "tmux-server.conf");
+  const fresh = `${SOCKET}-cold`;
+  const { execFileSync } = await import("node:child_process");
+  try {
+    execFileSync("tmux", ["-L", fresh, "kill-server"], { stdio: "ignore" });
+  } catch {
+    /* no server to kill, which is the point */
+  }
+
+  const cold = new TmuxControlPlane(fresh, undefined, undefined, profilePath);
+  await cold.ensureServer({ historyLimit: 1234 });
+
+  // What we write. Read as text rather than executed, because the file *is* the
+  // mechanism: if a line is wrong here it is wrong on every cold start.
+  const written = readFileSync(profilePath, "utf8");
+  expect(written).toContain("set-option -g history-limit 1234");
+  // The line the phone reported: pi warns in a pane without it.
+  expect(written).toContain("set-option -g extended-keys on");
+  // The modern encoding, because the client understands it and `xterm` is ambiguous.
+  expect(written).toContain("set-option -g extended-keys-format csi-u");
+  // Sequences tmux does not model reach a client that can render them.
+  expect(written).toContain("set-option -g allow-passthrough on");
+  // And a couple of the older ones, because the whole profile was being skipped.
+  expect(written).toContain("set-option -g set-clipboard on");
+  expect(written).toContain("set-option -sg escape-time 0");
+
+  // And that the server reads it: a cold socket, no server ever run, started by this
+  // plane — which passes `-f` on every spawn precisely so this cannot be forgotten.
+  await cold.newSession({ name: "cold", cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const read = (name: string) =>
+    execFileSync("tmux", ["-L", fresh, "show-options", "-g", name], { encoding: "utf8" }).trim();
+  expect(read("history-limit")).toBe("history-limit 1234");
+  expect(read("extended-keys")).toBe("extended-keys on");
+  expect(read("allow-passthrough")).toBe("allow-passthrough on");
+  await cold.killSession("cold");
+});
+
 test("a normal tmux command is unaffected", async () => {
   process.env.PATH = realPath;
   const cp = new TmuxControlPlane(SOCKET);

@@ -8,8 +8,8 @@
  * (see control-client.ts).
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { basename, delimiter, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, delimiter, dirname, join } from "node:path";
 import { spawnCaptured } from "../proc.ts";
 
 /**
@@ -238,12 +238,32 @@ export class TmuxControlPlane {
    * with a protocol mismatch, so a live window would flash and vanish.
    */
   readonly bin: string;
+  /** Where the server profile is written, or null for a server without one. */
+  readonly profilePath?: string;
 
-  constructor(socket: string, timeoutMs = TMUX_COMMAND_TIMEOUT_MS, bin?: string) {
+  constructor(
+    socket: string,
+    timeoutMs = TMUX_COMMAND_TIMEOUT_MS,
+    bin?: string,
+    profilePath?: string,
+  ) {
     this.socket = socket;
+    this.profilePath = profilePath;
     this.timeoutMs = timeoutMs;
     this.bin = bin ?? resolveTmuxBin();
     this.graceMs = Math.min(TMUX_KILL_GRACE_MS, Math.max(50, Math.floor(timeoutMs / 2)));
+  }
+
+  /**
+   * `-f <profile>`, when there is one.
+   *
+   * Every spawn carries it, so there is no path that starts a server without the
+   * profile — including the ones that start one by accident, like a command against a
+   * cold socket.
+   */
+  profileArgs(): string[] {
+    if (!this.profilePath || !existsSync(this.profilePath)) return [];
+    return ["-f", this.profilePath];
   }
 
   /**
@@ -255,7 +275,7 @@ export class TmuxControlPlane {
    * wedge that connection for good).
    */
   private async run(args: string[]): Promise<{ code: number; out: string; err: string }> {
-    const proc = spawnCaptured([this.bin, "-L", this.socket, ...args], {
+    const proc = spawnCaptured([this.bin, "-L", this.socket, ...this.profileArgs(), ...args], {
       // Explicit env, not the default: a child must see the environment as it is
       // now, so a PATH changed at runtime (a stubbed `tmux` in tests, or a user's
       // PATH fix) is honoured rather than a snapshot from process start.
@@ -311,10 +331,18 @@ export class TmuxControlPlane {
   }
 
   /** Apply the canonical server option profile (docs/SPEC.md §5.2). */
-  async ensureServer(opts: { historyLimit?: number } = {}): Promise<void> {
+  /**
+   * The canonical server option profile (docs/SPEC.md §5.2), as argv arrays.
+   *
+   * One list, serialised into the config file the server reads. It stays argv rather
+   * than config text so the values remain expressions until they are evaluated: the
+   * login shell is looked up from /etc/passwd, and two entries are conditional on
+   * having found one.
+   */
+  serverOptionArgs(opts: { historyLimit?: number } = {}): string[][] {
     const history = opts.historyLimit ?? 10000;
     const loginShell = resolveLoginShell(typeof process.getuid === "function" ? process.getuid() : 0);
-    for (const args of [
+    return [
       ["set-option", "-g", "history-limit", String(history)],
       ...(loginShell ? [["set-option", "-g", "default-shell", loginShell]] : []),
       ["set-option", "-g", "default-terminal", "tmux-256color"],
@@ -324,6 +352,29 @@ export class TmuxControlPlane {
       ["set-option", "-g", "window-size", "manual"],
       ["set-option", "-g", "set-clipboard", "on"],
       ["set-option", "-g", "focus-events", "on"],
+      // **Extended keys, because a program inside a pane can tell.**
+      //
+      // pi prints "tmux extended keys is off, modified keys may not work" in a pane
+      // whose server has this unset, and it is right: without it a modified key —
+      // Shift+Enter, Ctrl+Enter, a Ctrl chord the terminal encodes — reaches the
+      // application as a plain key or not at all, so a composer that wants
+      // Shift+Enter for a newline gets nothing. The option asks the outer terminal
+      // for the extended form and forwards it.
+      //
+      // `csi-u` rather than the default `xterm`: it is the unambiguous modern
+      // encoding, and the client on the other end is a real terminal emulator that
+      // already understands it. Left at `xterm`, applications that ask for CSI-u
+      // keep warning.
+      ["set-option", "-g", "extended-keys", "on"],
+      ["set-option", "-g", "extended-keys-format", "csi-u"],
+      // **And passthrough, so a sequence tmux does not model still arrives.**
+      //
+      // tmux drops escape sequences it does not understand. The client renders with
+      // libghostty-vt, which understands more than tmux does — so without this, a
+      // program using graphics or a modern OSC offers output that is thrown away on
+      // the way rather than by a renderer that cannot draw it. Both ends here are
+      // ours, which is what makes this safe to leave on.
+      ["set-option", "-g", "allow-passthrough", "on"],
       // tmux is a terminal to the programs inside it, and it lies about what it
       // can display unless told: `tmux-256color` says 256 colours, so a program
       // that asks (or trusts $TERM) downgrades its own output, and the client's
@@ -366,10 +417,74 @@ export class TmuxControlPlane {
       // nothing after pressing Esc is the kind of lag that reads as a hang.
       ["set-option", "-sg", "escape-time", "0"],
       ["set-option", "-g", "remain-on-exit", "on"],
-    ]) {
-      // Best-effort: some options may not exist on very old tmux.
-      await this.run(args);
+    ];
+  }
+
+  /**
+   * Write the server profile where tmux will read it, and answer the path.
+   *
+   * **Not a batch of `set-option` commands, and the reason is measured.** `set-option`
+   * does not start a tmux server: against one that does not exist it fails with
+   * `error connecting to ... (No such file or directory)`, exit 1. The batch ignored
+   * non-zero exits on purpose — so that an option an older tmux lacks cannot break
+   * startup — which meant that on a cold daemon the entire profile was skipped in
+   * silence. Starting the server first fixes half of it and not the other half: a tmux
+   * server with no sessions *exits*, so options set on an empty server are gone before
+   * the first session exists, and that session comes up on tmux's defaults. That is
+   * how the phone ended up being told by pi that extended keys were off, with none of
+   * `history-limit`, `mouse`, `set-clipboard`, `escape-time`, `focus-events` or
+   * `COLORTERM` in force either.
+   *
+   * A file is the mechanism tmux provides for exactly this: the server reads it
+   * whenever it starts, however it starts, so the profile cannot be outrun by the
+   * server's own lifetime.
+   *
+   * It also means the user's `~/.tmux.conf` is deliberately not read. This is ldmux's
+   * own server on its own socket, and a shell that behaves differently depending on
+   * whose dotfiles are on the machine is not a shell this app can support. Their tmux
+   * is untouched and still theirs.
+   */
+  writeServerProfile(opts: { historyLimit?: number } = {}): string | null {
+    if (!this.profilePath) return null;
+    const lines = this.serverOptionArgs(opts).map((argv) => {
+      // Values are quoted defensively: a login shell path with a space in it is
+      // absurd, and if it ever happens it should still be one value.
+      const [cmd, ...rest] = argv;
+      const value = rest
+        .map((a) => (a.includes(" ") ? `'${a.replaceAll("'", "")}'` : a))
+        .join(" ");
+      return `${cmd} ${value}`;
+    });
+    const body = `${lines.join("\n")}\n`;
+    try {
+      mkdirSync(dirname(this.profilePath), { recursive: true, mode: 0o700 });
+      // Only when it differs: an unchanged file must not be rewritten, or every daemon
+      // start would leave a new mtime for no reason.
+      //
+      // The read has its own try, and that is the whole bug this line used to be: a
+      // file that does not exist yet throws ENOENT from `readFileSync`, the outer
+      // catch treated that as "cannot write the profile", and the profile was
+      // therefore never written on the one occasion it mattered — the first run.
+      let existing: string | null = null;
+      try {
+        existing = readFileSync(this.profilePath, "utf8");
+      } catch {
+        existing = null;
+      }
+      if (existing !== body) {
+        writeFileSync(this.profilePath, body, { mode: 0o600 });
+      }
+    } catch (e) {
+      // A profile we cannot write is a server on defaults, which is what this whole
+      // mechanism exists to avoid — but it must not stop the daemon from starting.
+      return null;
     }
+    return this.profilePath;
+  }
+
+  /** Keep the old name: writing the profile is what ensuring the server means now. */
+  async ensureServer(opts: { historyLimit?: number } = {}): Promise<void> {
+    this.writeServerProfile(opts);
   }
 
   /**
