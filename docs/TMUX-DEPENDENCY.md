@@ -376,3 +376,59 @@ alive** (the "Node does not exit" failure) and blocking reads on the pty master 
 synchronous function freezing the whole event loop.
 
 **None of this needs deciding to proceed with option (a).**
+
+---
+
+## 10. The A/B, measured
+
+`scripts/ab-transport.ts` drives both transports identically — same session, same
+workload, same scratch tmux server per run — and reports what a client would pay.
+Two consecutive runs, host loopback:
+
+| | control | pipe |
+|---|---|---|
+| attach snapshot | 1,077 B | 1,077 B |
+| echo p50 | **0–1 ms** | **7–8 ms** |
+| echo min | 0 ms | 6–7 ms |
+| burst delivered | **79,042 B** | **79,030 B** |
+| burst chunks | 160–195 | 124–183 |
+| bytes per chunk | 405–494 | 432–637 |
+| burst wall time | 22–43 ms | 34–35 ms |
+
+Payload with no framing at all: **78,893 B**.
+
+### What this says
+
+1. **The transports are equivalent on the wire.** 79,042 against 79,030 is a
+   **0.015 %** difference, and it is the pipe that is *smaller* — that is control
+   mode's octal escaping, and it costs about twelve bytes in seventy-nine thousand.
+   Any argument that escaping is expensive is now settled: it is not.
+2. **The pipe costs about 7 ms of local echo latency**, consistently, because a
+   keystroke's echo travels one hop further: tmux → its `cat` job → the FIFO → our
+   reader, instead of tmux → the control client directly. On a tailnet round trip
+   (~50 ms) that is roughly 14 % of one RTT. On 3G (~200 ms) it is noise.
+3. **The pipe chunks better** — larger messages, fewer of them — which is marginally
+   less per-message framing on the WebSocket.
+4. **Neither is decisively faster.** The choice is therefore not a performance one,
+   which means it should be made on the two things that do differ: **control mode has
+   flow control** (`pause-after`, `%pause`/`%continue`) and **the pipe has no protocol
+   to parse at all** (595 lines of hand-written parsing of an unspecified format).
+
+### The harness got it wrong twice, and both are recorded
+
+The first version reported **447 B** for a 79 KB burst, identically for both
+transports. Identical numbers from two different mechanisms is the shape of a broken
+measurement, not a result. Two causes, both the same mistake in different clothes:
+the shell had not drawn its prompt when the burst was typed, and the echo-latency
+samples were never cleared from the input line, so the burst command was typed onto
+the end of `E0_E1_…_seq` and the shell ran a command that did not exist. Both are now
+fixed in the script and commented there.
+
+### Still to measure on the device
+
+These numbers are host loopback. The two things that would decide it on a phone are
+**echo latency over the tailnet** (where the pipe's 7 ms is a smaller fraction) and
+**what each does when the phone stops keeping up** — control mode pauses the pane and
+resyncs from a snapshot, and the pipe blocks the pane's own process, which is
+lossless but stalls the user's shell. That difference does not appear on loopback and
+is the one worth a device run.
