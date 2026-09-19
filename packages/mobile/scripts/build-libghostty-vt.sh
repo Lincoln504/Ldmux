@@ -82,4 +82,13 @@ for ABI in "${ABIS[@]}"; do
   echo "    $(stat -c%s "$JNI_DIR/libldmux_terminal.so") bytes -> $JNI_DIR"
 done
 
+# A stamp of the shim sources this build compiled, so the freshness guard can ask
+# "is the packaged library built from this source" instead of "is it newer than it".
+# Timestamps answer the second question and it is the wrong one: re-saving a file
+# without changing it makes every packaged library look stale, and a checkout
+# rewrites them all.
+STAMP="$MOBILE/native/prebuilt/sources.sha256"
+( cd "$MOBILE/native" && sha256sum *.c *.h | LC_ALL=C sort -k2 ) > "$STAMP"
+echo "==> source stamp: $STAMP"
+
 echo "==> done"

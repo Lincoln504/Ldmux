@@ -21,10 +21,11 @@
 // Skips cleanly when the library has not been built (a clone has no `.so`, since
 // it is a derived artifact and is not committed).
 import { test } from "node:test";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -56,6 +57,34 @@ const LIBS = packagedLibs();
 test("every packaged .so was built from the current shim sources", () => {
   if (LIBS.length === 0) return; // nothing built yet; nothing to be stale
 
+  // Content first. The stamp is what the build actually compiled, so an edit that
+  // changes nothing, or a fresh checkout that rewrites every file's timestamp,
+  // cannot make a correct library look stale — and a real source change cannot
+  // hide behind a timestamp that happens to be older.
+  const stampPath = join(dirname(SOURCES[0]!), "prebuilt", "sources.sha256");
+  if (existsSync(stampPath)) {
+    // Names are normalised so the comparison is between bytes and not between
+    // one side's idea of how to spell a path.
+    const recorded = readFileSync(stampPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.replace(/  \.\//, "  "));
+    const current = SOURCES.map((s) => {
+      const sum = createHash("sha256").update(readFileSync(s)).digest("hex");
+      return `${sum}  ${basename(s)}`;
+    }).sort((a, b) => (a.slice(66) < b.slice(66) ? -1 : 1));
+    assert.deepEqual(
+      current,
+      recorded,
+      "the packaged .so was built from different shim sources than the ones on disk. " +
+        "Rebuild with: just native-android",
+    );
+    return;
+  }
+
+  // No stamp (an older tree): fall back to timestamps, which is weaker but still
+  // catches the thing this exists for — a library that predates its source.
   const newest = SOURCES.map((s) => ({ s, t: statSync(s).mtimeMs })).sort(
     (a, b) => b.t - a.t,
   )[0];
