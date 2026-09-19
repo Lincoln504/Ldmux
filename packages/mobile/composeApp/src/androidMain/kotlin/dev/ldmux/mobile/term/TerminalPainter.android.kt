@@ -1,10 +1,20 @@
 package dev.ldmux.mobile.term
 
+
 import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
+/**
+ * The selection wash.
+ *
+ * The system's own selection is its accent colour at partial alpha over the text; this
+ * is the same idea with no hue, because the app has none. Deliberately light enough
+ * that a glyph on top of it keeps its contrast, and light enough to read as "these
+ * cells" rather than as a block of colour.
+ */
+private const val SELECTION_WASH = 0x44EDEDED
 
 /** Android renderer: draws the grid straight onto the Compose canvas. */
 actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
@@ -14,6 +24,7 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
         textSize = fontSizePx
     }
     private val bgPaint = Paint()
+    private val selPaint = Paint()
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val fgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
@@ -40,14 +51,23 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 val cell = frame.cells[i]
                 val x = (i % cols) * m.width
                 val y = (i / cols) * m.height
-                // A selected cell inverts its own background rather than being
-                // painted a fixed colour: the terminal has light-on-dark and
-                // dark-on-light cells in the same frame (an inverse cell, a
-                // reversed status line), and one fixed highlight disappears on
-                // half of them. Inverting is always visible and needs no palette.
                 val bg = argb(cell.bg)
-                bgPaint.color = if (cell.selected) bg xor 0x00FFFFFF else bg
+                // The cell's own background first, then the selection over it.
+                //
+                // This was an inversion, and an inversion of an *empty* cell's
+                // background is opaque white: selecting a line of padding painted a
+                // solid white bar across the terminal, which is what the phone showed.
+                // A translucent wash is also what the platform does — the system's own
+                // selection is its accent colour at partial alpha over the text, not a
+                // reversal — so this looks like a selection instead of like damage. The
+                // text keeps its own colour, which is the property that makes a
+                // selection readable.
+                bgPaint.color = bg
                 nc.drawRect(x, y, x + m.width, y + m.height, bgPaint)
+                if (cell.selected) {
+                    selPaint.color = SELECTION_WASH
+                    nc.drawRect(x, y, x + m.width, y + m.height, selPaint)
+                }
                 if (cell.text.isBlank()) continue
                 fgPaint.color = argb(cell.fg)
                 fgPaint.isFakeBoldText = cell.bold

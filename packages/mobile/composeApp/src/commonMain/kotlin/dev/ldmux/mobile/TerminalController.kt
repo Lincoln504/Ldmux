@@ -474,6 +474,14 @@ class TerminalController(
      * repaints. Long-press is the word gesture on both platforms, which is why
      * there is no platform seam here (ADR-0013, ADR-0014 §6).
      */
+    /**
+     * How long a finger has been down when the platform calls it a long press.
+     *
+     * Android's own `ViewConfiguration.getLongPressTimeout()` is 500 ms, and the
+     * gesture that reaches here has already waited it out.
+     */
+    private val LONG_PRESS_MS = 500L
+
     override var hasSelection by mutableStateOf(false)
         private set
 
@@ -515,6 +523,26 @@ class TerminalController(
         refreshSelection()
         return engine.selectionText()
     }
+
+    /**
+     * Move one end of the selection to a cell, for a dragged handle.
+     *
+     * This is why the handles do not go through the gesture engine's drag: that drag
+     * always moves the *end* endpoint, and a handle round the other end is the
+     * whole point. Here the two ends are simply two coordinates.
+     */
+    override fun selectionSet(
+        startCol: Int,
+        startRow: Int,
+        endCol: Int,
+        endRow: Int,
+    ): Boolean {
+        val changed = engine.selectionSet(startCol, startRow, endCol, endRow)
+        refreshSelection()
+        return changed
+    }
+
+    override fun selectionBounds(): IntArray? = engine.selectionBounds()
 
     override fun selectionText(): String? = engine.selectionText()
 

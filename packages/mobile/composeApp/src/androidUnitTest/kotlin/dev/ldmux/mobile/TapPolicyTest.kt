@@ -37,6 +37,7 @@ class TapPolicyTest {
         mouseTracking = mouseTracking,
         mouseSgr = mouseSgr,
         alternateOn = alternateOn,
+        selection = null,
         scrollTotal = 0,
         scrollOffset = 0,
         scrollLen = 0,

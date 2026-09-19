@@ -63,6 +63,18 @@ actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
     actual fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean =
         handle != 0L && NativeTerminal.selectionRelease(handle, col, row, valid, timeMs)
 
+    actual fun selectionSet(
+        startCol: Int,
+        startRow: Int,
+        endCol: Int,
+        endRow: Int,
+    ): Boolean =
+        handle != 0L &&
+            NativeTerminal.selectionSet(handle, startCol, startRow, endCol, endRow)
+
+    actual fun selectionBounds(): IntArray? =
+        if (handle == 0L) null else NativeTerminal.selectionBounds(handle)
+
     actual fun selectionClear(): Boolean = handle != 0L && NativeTerminal.selectionClear(handle)
 
     actual fun selectionSelectAll(): Boolean =

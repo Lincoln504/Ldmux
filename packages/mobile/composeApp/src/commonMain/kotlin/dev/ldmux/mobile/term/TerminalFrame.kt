@@ -97,6 +97,17 @@ object TerminalFrame {
          * handling is a separate, still-open question from what this field reports.
          */
         val alternateOn: Boolean,
+        /**
+         * Where the selection is, in viewport cells, inclusive on both ends — or
+         * null when nothing is selected.
+         *
+         * It rides in bytes that were reserved, so a client that does not know
+         * about it reads a zero flag and draws no handles rather than misreading the
+         * frame. The engine reports the rows, rather than the client remembering
+         * what it asked for, because a long press turns a touch into a *word* and
+         * only the engine knows where that word ended.
+         */
+        val selection: SelectionBounds?,
         /** Scrollable area in rows: total, the viewport's offset, and its size. */
         val scrollTotal: Long,
         val scrollOffset: Long,
@@ -104,6 +115,18 @@ object TerminalFrame {
         /** Row-major, [rows] * [cols] cells. */
         val cells: List<Cell>,
     )
+
+    /** The two ends of a selection, inclusive, in viewport cells. */
+    data class SelectionBounds(
+        val startCol: Int,
+        val startRow: Int,
+        val endCol: Int,
+        val endRow: Int,
+    ) {
+        /** True when the range covers nothing, which is not a selection. */
+        val isEmpty: Boolean
+            get() = startRow == endRow && startCol == endCol
+    }
 
     private fun u16(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xff) or ((b[o + 1].toInt() and 0xff) shl 8)
@@ -134,6 +157,17 @@ object TerminalFrame {
         val mouseTracking = b[18].toInt() != 0
         val mouseSgr = b[31].toInt() != 0
         val alternateOn = b[32].toInt() != 0
+        // Bytes 33..39: the selection flag, then the two ends. Reserved until now.
+        val selection = if (b[33].toInt() != 0) {
+            SelectionBounds(
+                startCol = u16(b, 34),
+                startRow = b[36].toInt() and 0xff,
+                endCol = u16(b, 37),
+                endRow = b[39].toInt() and 0xff,
+            )
+        } else {
+            null
+        }
         val scrollTotal = u32(b, 19)
         val scrollOffset = u32(b, 23)
         val scrollLen = u32(b, 27)
@@ -169,6 +203,7 @@ object TerminalFrame {
             mouseTracking,
             mouseSgr,
             alternateOn,
+            selection,
             scrollTotal,
             scrollOffset,
             scrollLen,

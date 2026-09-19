@@ -1,75 +1,66 @@
-# ADR-0011: One orientation per screen, decided in one place
+# ADR-0011: The device rotates, the keyboard does not
 
 **Status:** Accepted
+**Supersedes:** the locked-orientation decision this file used to record.
 
 ## Context
 
-The app has two shapes and they are not the same shape:
+The app used to own the screen's orientation. A flip button locked the activity to
+portrait or landscape, and the keyboard was welded to that: portrait *meant* the
+keyboard was up, and putting the keyboard away was implemented as the platform
+telling us the IME inset had gone to zero, which we answered by rotating.
 
-- the **menu** is a list, and a list is read the way you hold a phone — portrait;
-- a **terminal** is a grid, and a grid wants width — landscape.
+That coupling made both halves worse.
 
-A phone cannot show both at once as two differently-shaped regions, and it is
-worth writing down why, because "just slide between them with the other one
-rotated" is the obvious idea and it will be proposed again.
+- **The keyboard could not be dismissed without moving the screen.** Closing it and
+  changing the shape were one action, so the user could have both or neither.
+- **The orientation disagreed with the device.** A phone half-tilted on a desk, a
+  foldable, a tablet in a stand, split screen — the app had one opinion and the
+  hardware had another, and the app's won.
+- **The lock had to be written from exactly one place to be sane.** It was, but the
+  rule only existed because two components would otherwise have fought over one
+  activity's orientation.
+- **The IME watcher that detected a dismissal could not tell why the keyboard went
+  away.** Our own focusable popups (the menu, the settings dialog) hide the IME too,
+  so opening the menu read as "the user dismissed the keyboard" and flipped the
+  screen 600 ms later. Distinguishing the two needed a debounce, and the debounce was
+  a workaround for a rule that should not have existed.
 
 ## Decision
 
-**The screen's orientation is decided in exactly one place**, from what is on
-screen:
+**The device owns the orientation. The app owns the keyboard. They are not the same
+decision and they no longer share a variable.**
 
-| On screen | Orientation |
-|---|---|
-| the menu | portrait, always |
-| a terminal | landscape |
-| a terminal, used as a *keyboard* | portrait, with the compact bar above the keyboard |
-
-`lockOrientation` is called once, from `App`, keyed on that single derived value.
-The previous arrangement had the orientation written per *terminal surface* — of
-which several exist at once, because the pager keeps neighbours composed — so N
-components were writing one activity's orientation. Harmless only while they all
-happened to agree.
-
-## Why not the other two
-
-**Two orientations on screen at once is not possible.** Android gives an
-*activity* one orientation; `screenOrientation` and `requestedOrientation` are
-whole-window properties. Jetpack WindowManager's activity embedding does put two
-activities side by side — but both are multi-window, and multi-window activities
-have had their orientation requests **ignored since Android 12**, so it cannot
-produce two orientations either. (The same rule is why this app should expect its
-orientation lock to be ignored on large screens and foldables regardless of what
-we ask for.)
-
-**Rotating the content 90° inside a portrait activity is possible and is a trap.**
-It is the only way to fake it, and it does make a true slide possible — but the
-system bars and the soft keyboard both follow the *activity*, not the content. A
-keyboard would come up as a strip across a sideways screen, and the status bar
-would run down one edge. The terminal would have to be full-screen-immersive and
-keyboard-less to hide both, which is a large amount of the app's behaviour given
-up to make one transition prettier.
-
-## What the rotation costs, and how it is paid
-
-A configuration change recreates an activity by default, which would lose the open
-pages on every flip. `MainActivity` therefore declares
-`configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"`,
-so a flip is a **relayout, not a relaunch**: no state is lost and there is no
-black frame.
-
-The transition is a slide of the content (`AnimatedContent`), on top of the
-system's own rotation. It does not replace the rotation — nothing in the app can —
-but it keeps the two screens moving through it, where a cut reads as a glitch.
+- The manifest declares no `screenOrientation`, and declares `configChanges` for
+  orientation, screen size, density, keyboard and uiMode, so the activity is not
+  recreated when the device turns. `termux-app` does exactly this, and it is the
+  precedent for a terminal app.
+- The shape is read, not decided: `LocalWindowInfo.current.containerSize` compared on
+  its two axes. That answers auto-rotate-off, a foldable's inner screen, split screen
+  and a floating window correctly and without a second opinion. `LocalConfiguration`
+  and sensor readings were both rejected as instruments — one reports the display
+  rather than the window, the other reports the hardware rather than the pixels we
+  are about to draw into.
+- **The keyboard exists only in portrait.** In landscape there is no text field, so
+  `typing` is false there by construction rather than by a rule someone has to
+  remember.
+- **Closing the keyboard does not rotate anything.** A control in the portrait bar
+  clears the keyboard request and nothing else; the screen stays exactly where it is.
+  Rotating out to landscape and back re-arms it, which is the only way back and is
+  the platform's own gesture for "show the keyboard" on a device with no keyboard.
+- **Opening a shell does not rotate the device either.** It used to force landscape,
+  which is the app asserting an opinion about hardware again.
+- The IME watcher is deleted. Nothing needs to know *why* the keyboard closed.
 
 ## Consequences
 
-- A second writer for the orientation is a bug, not a feature. If a future screen
-  needs its own orientation, it adds a case to the one derivation in `App`.
-- The manifest's `android:screenOrientation` is only the cold-start default; the
-  app overrides it on the first composition. It must not contradict this table.
-- Portrait-with-a-terminal *means* typing, so it is the only portrait terminal
-  state and it always carries the keyboard. There is no portrait terminal without
-  one, because a portrait grid that is not being typed into has no reason to be
-  portrait.
-- Orientation is the app's decision, not the sensor's: a phone set down at an
-  angle must not reflow a terminal with a command half-typed into it.
+- No flip control exists anywhere: not in the menu, not in the portrait bar, not in
+  the landscape panel. The landscape panel's bottom row is now the microphone alone.
+- `Orientation.kt` and its Android actual are deleted. There is no seam, because
+  there is nothing to write. If iOS needs a shape source that is not the window size,
+  that is a seam with a reason and can be added then (ADR-0013).
+- Auto-rotate-off now means the app is stuck in one shape, which is what the user
+  asked for by turning auto-rotate off.
+- A user who closes the keyboard in portrait gets a portrait terminal with no
+  keyboard. That is a legitimate state, and it is the one the user asked for: the bar
+  still sends keys, so the shell is still usable.

@@ -99,6 +99,24 @@ object NativeTerminal {
         timeMs: Long,
     ): Boolean
 
+    /**
+     * Set the selection to an explicit inclusive range of viewport cells.
+     *
+     * The handle path, as opposed to the gesture path: two ends that are dragged
+     * independently, and a range that may be inverted by dragging one past the
+     * other.
+     */
+    external fun selectionSet(
+        handle: Long,
+        startCol: Int,
+        startRow: Int,
+        endCol: Int,
+        endRow: Int,
+    ): Boolean
+
+    /** {startCol, startRow, endCol, endRow}, or null when nothing is selected. */
+    external fun selectionBounds(handle: Long): IntArray?
+
     external fun selectionClear(handle: Long): Boolean
 
     external fun selectionSelectAll(handle: Long): Boolean

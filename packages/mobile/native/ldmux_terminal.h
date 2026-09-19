@@ -15,7 +15,9 @@
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
  *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7]
+ *                      u8 mouseSgr, u8 alternateOn,
+ *                      u8 selectionOn, u16 selStartCol, u8 selStartRow,
+ *                      u16 selEndCol, u8 selEndRow)
  *                      (the terminal's default colours so the client can paint
  *                      the whole surface in the same background; whether the
  *                      cursor is at a password prompt, which decides whether
@@ -198,6 +200,28 @@ int ldmux_terminal_select_all(LdmuxTerminal *t);
  * [ldmux_terminal_free].
  */
 const uint8_t *ldmux_terminal_selection_text(LdmuxTerminal *t, size_t *len);
+
+/*
+ * Set the selection to an explicit range of viewport cells, inclusive on both
+ * ends, and answer whether it changed.
+ *
+ * The gesture entry points above are for a *finger*: they carry a clock, they
+ * decide for themselves whether two taps are a word, and their drag always moves
+ * the end endpoint. This is for the *handles* the user drags afterwards, where the
+ * two ends are independent, the range may be inverted by dragging one past the
+ * other, and there is no gesture left to interpret. A negative column or row is
+ * clamped to zero; the engine is asked for the reference and a refusal is a
+ * refusal, not a crash.
+ */
+int ldmux_terminal_selection_set(LdmuxTerminal *t, int start_col, int start_row,
+                                 int end_col, int end_row);
+
+/*
+ * Where the selection currently is, in viewport cells, inclusive. Answers 0 when
+ * nothing is selected, in which case the out-parameters are untouched.
+ */
+int ldmux_terminal_selection_bounds(LdmuxTerminal *t, int *start_col, int *start_row,
+                                    int *end_col, int *end_row);
 
 /** Set on a cell whose style flags put it inside the selection (bit 9). */
 #define LDMUX_FLAG_SELECTED (1u << 9)

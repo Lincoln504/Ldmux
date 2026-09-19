@@ -340,12 +340,12 @@ private fun ChoiceRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RadiusMedium)
             .background(if (chosen) Accent.copy(alpha = 0.18f) else Surface)
             .border(
                 width = if (chosen) 1.5.dp else 0.dp,
                 color = if (chosen) Accent else Color.Transparent,
-                shape = RoundedCornerShape(8.dp),
+                shape = RadiusMedium,
             )
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
@@ -356,9 +356,9 @@ private fun ChoiceRow(
         Box(
             Modifier
                 .size(LocalTouch.current.check)
-                .clip(RoundedCornerShape(4.dp))
+                .clip(RadiusSmall)
                 .background(if (chosen) Accent else Color.Transparent)
-                .border(1.5.dp, if (chosen) Accent else Dim, RoundedCornerShape(4.dp)),
+                .border(1.5.dp, if (chosen) Chosen else Dim, RadiusSmall),
             contentAlignment = Alignment.Center,
         ) {
             if (chosen) IconCheck(Bg, box = LocalTouch.current.check - 6.dp)
@@ -394,7 +394,7 @@ private fun ChoiceRow(
 private fun SmallAction(label: String, onClick: () -> Unit) {
     Box(
         Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RadiusMedium)
             .background(Surface)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
@@ -421,8 +421,8 @@ private fun toggle(current: Set<String>, key: String): Set<String> =
 fun OutlinedBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, Line, RoundedCornerShape(8.dp))
+            .clip(RadiusMedium)
+            .border(1.dp, Line, RadiusMedium)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),

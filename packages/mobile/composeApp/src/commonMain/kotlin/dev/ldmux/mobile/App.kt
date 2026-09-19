@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,11 +50,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
 import dev.ldmux.mobile.voice.Dictation
 import dev.ldmux.mobile.voice.VoiceState
@@ -66,6 +65,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.Role
@@ -93,6 +93,16 @@ val Fg = Color(0xFFEDEDED)
 val Dim = Color(0xFF8C8C8C)
 /** Nothing is tinted; "accent" is simply the lightest thing on screen. */
 val Accent = Color(0xFFD0D0D0)
+
+/**
+ * The outline of a control that is *chosen*.
+ *
+ * Deliberately not [Accent]. A checkmark outline is a state, not an action, and at
+ * `#D0D0D0` it read as the brightest thing on the launcher — brighter than the rows
+ * it was describing. This is one clear step down: still unambiguous, no longer
+ * competing with the one primary action on the screen.
+ */
+val Chosen = Color(0xFF9A9A9A)
 
 /**
  * The fill for a control that is *on*: the menu button that says you are in a shell, and
@@ -233,6 +243,18 @@ private val TallTouch = Touch(min = MinTouch, dense = DenseTouch, pad = 8.dp, ro
 internal fun touchFor(compact: Boolean): Touch = if (compact) ThinTouch else TallTouch
 
 /**
+ * Corner radii, in dp, named once.
+ *
+ * Small on purpose. A 2–3 dp radius reads as a crisp edge with the corner taken off,
+ * which is what a dense terminal UI wants; the 8 and 12 dp corners it replaces read as
+ * soft buttons, and at these sizes the curve is a bigger visual event than the border
+ * it belongs to. Anything larger than these is a modal, and says so by name.
+ */
+internal val RadiusSmall = RoundedCornerShape(2.dp)
+internal val RadiusMedium = RoundedCornerShape(3.dp)
+internal val RadiusLarge = RoundedCornerShape(4.dp)
+
+/**
  * The app's touch scale, installed once at the root and read by every control.
  *
  * A composition local rather than a parameter because the alternative is threading
@@ -339,7 +361,6 @@ expect object AppPrefs {
  * rotates us, because a terminal that reflows under a table is worse than one
  * that stays put until you say so.
  */
-enum class UiMode { Landscape, Portrait }
 
 /**
  * How long a panel waits for the window to finish turning over before it appears.
@@ -385,7 +406,6 @@ fun App() {
 @Composable
 private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
-    var mode by remember { mutableStateOf(UiMode.Landscape) }
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
 
@@ -484,17 +504,33 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     // Leaving the terminal (back to the launcher) stops it, because nothing is
     // being watched then — and the shells themselves are unharmed either way:
     // they live in tmux on the host, not in this process.
-    // The screen's shape, decided in one place and nowhere else: the menu is
-    // always portrait (a list is read the way you hold a phone), a terminal is
-    // landscape, and portrait-with-a-terminal means *typing* — the compact bar
-    // above the keyboard, never this panel.
-    val wantPortrait = showLauncher || mode == UiMode.Portrait
-    LaunchedEffect(wantPortrait) { lockOrientation(wantPortrait) }
+    // **The shape of the screen is the window's, not ours.**
+    //
+    // The device rotates, the platform reports the new size, and this reads it. No
+    // button locks anything: the OS auto-rotate setting, a foldable's inner screen,
+    // split screen and a floating window all arrive here already answered, and there
+    // is no second opinion to disagree with. `containerSize` rather than a
+    // configuration or a sensor reading because the size is the thing that is
+    // actually true about the pixels we are about to draw into.
+    val windowSize = LocalWindowInfo.current.containerSize
+    val portrait = windowSize.height >= windowSize.width
+    val wantPortrait = showLauncher || portrait
+
+    // **The keyboard is portrait-only, and it is not the orientation.**
+    //
+    // These were one variable, so putting the keyboard away *was* rotating, and the
+    // user could only have both or neither: dismissing the keypad threw them into
+    // landscape. Now the shape follows the device and this follows the user. Closing
+    // the keyboard leaves the screen exactly where it is; the way back is to rotate
+    // through portrait, which is what re-arms it.
+    var keyboardWanted by remember { mutableStateOf(true) }
+    LaunchedEffect(portrait) { if (portrait) keyboardWanted = true }
+    val typing = portrait && keyboardWanted
 
     // A popup belongs to the screen it was opened on. The portrait bar leaves the
     // composition when the mode flips, and a `remember`ed flag inside it survives
     // that: the menu was found already open on the next flip back to portrait.
-    LaunchedEffect(mode) { portraitMenu = false }
+    LaunchedEffect(portrait) { portraitMenu = false }
 
     val terminalOpen = !showLauncher && pages.isNotEmpty()
     LaunchedEffect(terminalOpen, pages.size) {
@@ -650,7 +686,6 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
 
 
     var killTarget by remember { mutableStateOf<Session?>(null) }
-    val portrait = mode == UiMode.Portrait
     val currentHandle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
 
     // **One microphone, and it belongs to the app.** Dictation is bound to the shell
@@ -697,31 +732,14 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     // Portrait *means* typing, so the keyboard belongs to it: if the user
     // dismisses the keyboard we return to landscape rather than sitting in
     // portrait with none. Debounced, because the inset also passes through zero
-    // while the activity rotates.
+    // The IME watcher that used to live here is gone, and its absence is the point.
     //
-    // What this is about is the *user* dismissing the keypad, and an IME inset
-    // cannot see who closed it. A focusable popup of ours — the portrait menu,
-    // the settings dialog — hides the keypad too, so tapping the menu read as
-    // "the user dismissed the keyboard" and flipped the screen to landscape
-    // 600 ms later. The popup state therefore travels in the same flow as the
-    // inset instead of being read beside it: a `State` read inside a
-    // `snapshotFlow` is tracked and cannot go stale, where a value captured from
-    // the composition is whatever it was when the effect started.
-    val density = LocalDensity.current
-    val imeInsets = WindowInsets.ime
-    var sawIme by remember { mutableStateOf(false) }
-    LaunchedEffect(density) {
-        snapshotFlow { Triple(imeInsets.getBottom(density), portraitMenu, showSettings) }
-            .debounce(600)
-            .collect { (bottom, menuOpen, dialogOpen) ->
-                if (bottom > 0) {
-                    sawIme = true
-                } else if (sawIme && mode == UiMode.Portrait && !menuOpen && !dialogOpen) {
-                    sawIme = false
-                    mode = UiMode.Landscape
-                }
-            }
-    }
+    // It existed to notice the *user* dismissing the keypad and to answer that by
+    // flipping the screen — which meant every other way the keyboard could go away
+    // (a focusable popup of ours, the menu, the settings dialog) had to be
+    // distinguished from it, and the distinguishing was done with a 600 ms debounce
+    // on the IME inset. That is now unnecessary: closing the keyboard closes the
+    // keyboard. There is no rotation to trigger and so nothing to tell apart.
 
     // One screen or the other, with a slide between them. The rotation itself is
     // the system's — Android gives an activity one orientation and a view cannot
@@ -789,7 +807,6 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                 pendingOpens = fresh.size
                 for (e in fresh) client.create("shell", e.cwd, e.label)
                 showLauncher = false
-                mode = UiMode.Landscape
             },
             onKill = { killTarget = it },
             onMakeLive = { session, workspace -> client.makeLive(session.id, workspace) },
@@ -812,7 +829,6 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                 // go of the others.
                 pendingOpens = 1
                 showLauncher = false
-                mode = UiMode.Landscape
             },
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
@@ -829,9 +845,9 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
             Box(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp), contentAlignment = Alignment.TopCenter) {
                 Row(
                     Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RadiusMedium)
                         .background(Surface)
-                        .border(1.dp, Line, RoundedCornerShape(8.dp))
+                        .border(1.dp, Line, RadiusMedium)
                         .clickable { client.clearServerError() }
                         .padding(horizontal = 12.dp, vertical = LocalTouch.current.pad),
                     verticalAlignment = Alignment.CenterVertically,
@@ -878,7 +894,6 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                         scope,
                         client,
                         handles,
-                        onFlip = { mode = UiMode.Portrait },
                         onKill = { killTarget = it },
                         onVoice = {
                             // The sink is the handle that is on screen *now*, taken
@@ -919,7 +934,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                         pages,
                         pagerState,
                         handles,
-                        typing = portrait,
+                        typing = typing,
                         Modifier.fillMaxSize(),
                         pendingOpen = pendingOpens > 0,
                     )
@@ -933,7 +948,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                     pages = pages,
                     pagerState = pagerState,
                     scope = scope,
-                    onLandscape = { mode = UiMode.Landscape },
+                    onHideKeyboard = { keyboardWanted = false },
                     menuExpanded = portraitMenu,
                     onMenu = { portraitMenu = true },
                     onMenuDismiss = { portraitMenu = false },
@@ -1086,7 +1101,7 @@ private fun PortraitBar(
     pages: List<Session>,
     pagerState: PagerState,
     scope: CoroutineScope,
-    onLandscape: () -> Unit,
+    onHideKeyboard: () -> Unit,
     onMenu: () -> Unit,
     menuExpanded: Boolean,
     onMenuDismiss: () -> Unit,
@@ -1133,9 +1148,15 @@ private fun PortraitBar(
                 AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
             }
         }
-        val flipHere: @Composable RowScope.() -> Unit = {
-            IconBtn(onClick = onLandscape, label = "flip to landscape", modifier = Modifier.weight(1f)) {
-                IconFlip(Accent, box = LocalTouch.current.icon)
+        // Putting the keyboard away. It is not a rotation any more: the screen stays
+        // exactly where it is, and the keypad is the only thing that leaves.
+        val keyboardHere: @Composable RowScope.() -> Unit = {
+            IconBtn(
+                onClick = onHideKeyboard,
+                label = "hide keyboard",
+                modifier = Modifier.weight(1f),
+            ) {
+                IconKeyboardHide(Accent, box = LocalTouch.current.icon)
             }
         }
         PortraitKeyRow(
@@ -1163,7 +1184,7 @@ private fun PortraitBar(
                 "/" to { press("/") },
                 "\u23ce" to { press("Enter") },
             ),
-            leading = flipHere,
+            leading = keyboardHere,
             active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
         )
         // No microphone: the keyboard is always up in portrait and it has its own.
@@ -1300,7 +1321,6 @@ private fun SidePanel(
     scope: CoroutineScope,
     client: LdmuxClient,
     handles: Map<String, TerminalHandle>,
-    onFlip: () -> Unit,
     onKill: (Session) -> Unit,
     onVoice: () -> Unit,
     onLauncher: () -> Unit,
@@ -1425,12 +1445,11 @@ private fun SidePanel(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // One flip control, one meaning, in both orientations: portrait is
-            // where the keyboard lives, so flipping to it *is* the keyboard
-            // action, and a separate keyboard button only confuses it.
-            IconBtn(onClick = onFlip, label = "flip to portrait") { IconFlip(Accent) }
-            // Landscape only: portrait always has the keyboard up and the IME
-            // carries its own microphone. Two microphones is one too many.
+            // No flip control here. The screen's shape is the device's now, so there
+            // is nothing to flip to, and landscape has no keyboard to put away —
+            // which is why the only control left in this row is the microphone.
+            // Portrait's bar carries its own, because the IME has one there anyway:
+            // two microphones is one too many.
             IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
         }
 
@@ -1453,7 +1472,7 @@ private fun SidePanel(
 fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RadiusMedium)
             .background(Accent)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
@@ -1468,7 +1487,7 @@ fun AccentBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
 private fun NavArrow(glyph: String, enabled: Boolean, dense: Boolean = false, onClick: () -> Unit) {
     Box(
         Modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RadiusMedium)
             // The most-repeated action there is, and it was the smallest target in the
             // app at about 28dp. A control you press constantly is the last one that
             // should be hard to hit.
@@ -1496,7 +1515,7 @@ private fun KeyBtn(
     val pad = 3.dp
     Box(
         modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RadiusMedium)
             .background(if (active) Accent else Bg)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)

@@ -197,3 +197,68 @@ anything received the write) is saying what it sent, not what arrived.
 - `TerminalFrame.kt`'s header comment duplicates a `reserved[7]` fragment and does not
   match the 40-byte layout in `ldmux_terminal.h`. The decoder is correct; the comment
   is wrong.
+
+## 9. The handles are the platform's — and the loupe is not there on purpose
+
+**Status:** Accepted. This replaces the "drawn by the app" plan in §1 for the handle
+*art*.
+
+### The handles
+
+The app draws every pixel of its terminal, so it has no `TextView` and none of the
+selection furniture that comes with one. The framework's handles live inside
+`android.widget.Editor`, which is `@hide` and unreachable from the SDK. What *is*
+public is the art:
+
+- `android.R.attr.textSelectHandle`, `textSelectHandleLeft`, `textSelectHandleRight`
+  are theme attributes. Resolving them yields the same drawables the system's own text
+  fields show, at the platform's own shape.
+
+Three things about using them were wrong first, and each is worth recording:
+
+1. **The aspect ratio is the asset's.** They were drawn at a fixed 48x32 dp, which
+   squashed a roughly 2:1 teardrop into 3:2 and read as a fat blob. The height is now
+   chosen (24 dp, the framework's own design height) and the width is derived from the
+   drawable.
+2. **A modern theme has no separate left and right asset.** It ships one teardrop and
+   `Editor` mirrors it for the start. Drawing it twice unmirrored produced two handles
+   leaning the same way. So: use the left/right pair when the theme has them, and
+   otherwise mirror one for the start handle.
+3. **The hotspots are the framework's convention, not ours to improve on.** The left
+   handle's hotspot is three quarters of its width and the right handle's a quarter, so
+   each teardrop leans inwards with its tip on the corner of the selection and its body
+   hanging below the line. `selectionHandleTopLeft` is used by the drawing *and* the hit
+   test, so what is visible and what is grabbable cannot drift apart.
+
+The tint is ours: the framework assets arrive tinted with `?attr/colorControlActivated`,
+which is blue. The shape is the platform's and the colour is the app's, which is the one
+arrangement that gives a native handle in a greyscale UI.
+
+### The handles are dragged immediately
+
+A handle is a grab affordance: the finger lands on it and moves, with no hold first. It
+required a long press at first, because one detector was serving both "choose a range"
+and "adjust one end", and the practical result was handles that could not be dragged at
+all. There is now a gesture that consumes the pointer *only* when the touch begins on a
+handle, and it is innermost in the modifier chain so it sees the event before the tap
+and scroll gestures — a finger that misses a handle falls straight through and behaves
+exactly as before.
+
+### No magnifier. Deliberately.
+
+A loupe was built and then removed, and the reasons are worth keeping:
+
+- Compose's `Modifier.magnifier` magnifies a *surface*. There is no surface here, only a
+  canvas inside a Compose layer, so what it magnified was a slab of nothing much, and it
+  ignored the size and corner radius it was given.
+- Drawing our own lens from the frame works (the grid repainted scaled about the finger
+  and clipped to a circle), and it was correct — it magnified real glyphs, flipped below
+  the finger when there was no room above, and clamped to the surface. It was removed on
+  the user's instruction: **no magnification area of any kind.**
+- The precedent is not a gap in the platform. `termux-app` — the reference terminal for
+  Android, and the implementation this project read for selection — has no magnifier at
+  all: a search of its tree for `Magnifier` returns nothing.
+
+So the absence is a decision, not an omission. Should it ever come back, the machinery
+is one function long (`loupeCentre`, deleted with its tests) and the drawing is ten
+lines inside the existing canvas.

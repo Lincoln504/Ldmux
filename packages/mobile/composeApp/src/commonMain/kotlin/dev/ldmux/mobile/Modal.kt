@@ -54,7 +54,7 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
         Column(
             Modifier
                 .fillMaxWidth(0.92f)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RadiusLarge)
                 .background(Surface)
                 // The click below stops a tap inside the card from reaching the
                 // scrim: a dialogue you dismiss by touching its own contents is a
@@ -140,9 +140,9 @@ private fun FieldBox(placeholder: String, empty: Boolean, modifier: Modifier = M
     Box(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RadiusMedium)
             .background(Bg)
-            .border(1.dp, Line, RoundedCornerShape(8.dp))
+            .border(1.dp, Line, RadiusMedium)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
     ) {
         if (empty) {
@@ -255,7 +255,7 @@ fun DesktopPickerModal(
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RadiusMedium)
                             .background(if (here) Bg else Surface)
                             .clickable { onPick(ws.name) }
                             .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),

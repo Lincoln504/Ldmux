@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -56,6 +57,13 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
+import dev.ldmux.mobile.term.handleHit
+import dev.ldmux.mobile.term.selectionHandleAnchors
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.toArgb
+import dev.ldmux.mobile.term.SystemSelectionHandles
+import dev.ldmux.mobile.term.selectionHandleTopLeft
 import dev.ldmux.mobile.term.GridPlacement
 import dev.ldmux.mobile.term.TerminalFrame
 import dev.ldmux.mobile.term.TerminalPainter
@@ -201,6 +209,19 @@ actual fun rememberTerminalSurface(
         }
     }
     val focusManager = LocalFocusManager.current
+    // How far a finger may be from a handle's ball and still have grabbed it. The
+    // app's one minimum touch size, so a handle is as reachable as a button is.
+    val minTouchPx = with(density) { LocalTouch.current.min.toPx() }
+    var grabOffset by remember { mutableStateOf(Offset.Zero) }
+    // The platform's own selection handles, resolved from the theme once. Their shape
+    // is the system's; their colour is this app's (see SystemSelectionHandles).
+    // The framework's own design height; the width follows the asset's aspect ratio.
+    val handleH = with(density) { 24.dp.roundToPx() }
+    val systemHandles = remember(context, handleH) {
+        SystemSelectionHandles.load(context, Fg.toArgb(), handleH)
+    }
+    // The platform handles' own size, or a sensible box while the drawables resolve.
+    val handlesPx = systemHandles?.sizePx ?: IntSize(96, 48)
     val focusRequester = remember { FocusRequester() }
     // The surface's own focus target, which is what landscape types into. See the
     // LaunchedEffect below for why a terminal with no text field still needs it.
@@ -376,6 +397,23 @@ actual fun rememberTerminalSurface(
                             }
                             currentFrame ?: return@detectTapGestures
                             val p = currentPlacement
+                            // **A tap in a selection ends the selection.**
+                            //
+                            // Before anything else, and before the cursor moves: the
+                            // user's thumb is on the highlight they just made and a
+                            // tap is how they let go of it. Moving the remote cursor
+                            // here would be a command they did not give, in a shell
+                            // they were not editing. The one exception is a tap on a
+                            // handle, which is how a handle is grabbed, so that must
+                            // not be read as letting go.
+                            val liveBounds = currentFrame?.selection
+                            if (liveBounds != null) {
+                                val onHandle = handleHit(pos, liveBounds, p, handlesPx, minTouchPx)
+                                if (onHandle == null) {
+                                    controller.clearSelection()
+                                    return@detectTapGestures
+                                }
+                            }
                             // cellAt answers with a row-major index, so the column
                             // comes back out of the same arithmetic that put it in.
                             val index = p.cellAt(pos.x, pos.y) ?: return@detectTapGestures
@@ -387,25 +425,24 @@ actual fun rememberTerminalSurface(
                     )
                 }
                 .pointerInput(Unit) {
-                    // Selection. Long-press then drag is the gesture, on purpose:
+                    // **Selection: a long press chooses, a drag extends, a handle
+                    // moves its own end.**
                     //
-                    //   * a long press with no movement is "this word", which is
-                    //     the standard gesture on both platforms and keeps this
-                    //     out of cross-platform seams (ADR-0013, ADR-0014 §6);
-                    //   * the drag that follows extends it, so nothing has to
-                    //     decide between "select" and "scroll" up front;
-                    //   * release copies, which is the behaviour that needs no
-                    //     button. The `copy` control stays for copying again.
-                    //
-                    // It cannot fight the tap handler above: a press that becomes
-                    // a long press is not a tap, so only one of the two ever fires.
+                    // One detector for all three, because a finger does one thing at a
+                    // time. A long press that lands on a handle grabs it; anywhere
+                    // else it chooses the word under it. The drag that follows always
+                    // ends up as two coordinates — never as "the engine's drag", whose
+                    // semantics are whatever the gesture decided — which is what lets
+                    // a selection grow past the word it started on.
+                    var fixedStart = false
+                    var fixedCol = 0
+                    var fixedRow = 0
+
                     detectDragGesturesAfterLongPress(
                         onDragStart = { pos ->
                             val p = currentPlacement
-                            val index = p.cellAt(pos.x, pos.y) ?: return@detectDragGesturesAfterLongPress
-                            // The engine needs the cell size to reason about
-                            // distance, and it is cheapest to keep it fresh here
-                            // rather than to invalidate it from elsewhere.
+                            // The engine needs the cell size to reason about distance,
+                            // and it is cheapest to keep it fresh here.
                             controller.selectionGeometry(
                                 p.cols,
                                 p.cellWidth.toInt(),
@@ -413,38 +450,104 @@ actual fun rememberTerminalSurface(
                                 p.dx.toInt(),
                                 viewport.height,
                             )
-                            val row = index / p.cols
-                            val col = index % p.cols
-                            tapAt = col to row
-                            controller.selectWordAt(col, row, SystemClock.elapsedRealtime())
+                            // Read from the frame that is *drawn*, not asked of the
+                            // engine again: the handles the user can see are the ones
+                            // the frame describes, and a fresh query could disagree
+                            // with them by a frame.
+                            val bounds = currentFrame?.selection
+                            val onHandle = bounds?.let {
+                                handleHit(pos, it, p, handlesPx, minTouchPx)
+                            }
+                            if (bounds != null && onHandle != null) {
+                                // Grabbing an end. Remember where inside the handle the
+                                // finger landed, so the end does not jump to the finger
+                                // the moment the drag starts.
+                                if (onHandle.start) {
+                                    fixedCol = bounds.endCol
+                                    fixedRow = bounds.endRow
+                                    fixedStart = false
+                                } else {
+                                    fixedCol = bounds.startCol
+                                    fixedRow = bounds.startRow
+                                    fixedStart = true
+                                }
+                                grabOffset = onHandle.offset
+                                tapAt = null
+                            } else {
+                                // Picking an end. The finger chooses a cell and the
+                                // drag grows a range from it, which is the mechanic the
+                                // user asked for: hold, then slide, and the two ends
+                                // separate as you go.
+                                //
+                                // Not the engine's word gesture, and that is a
+                                // measured decision rather than a preference: its deep
+                                // press produces a word in the host tests and produces
+                                // nothing at all on the phone (`bounds=null
+                                // frameSel=null text=null` after one), and a gesture
+                                // that silently does nothing is worse than one that does
+                                // exactly what it says. Everything here goes through
+                                // `selectionSet`, which is proven on the device.
+                                val index = p.cellAt(pos.x, pos.y)
+                                    ?: return@detectDragGesturesAfterLongPress
+                                val row = index / p.cols
+                                val col = index % p.cols
+                                tapAt = col to row
+                                controller.selectionSet(col, row, col, row)
+                                fixedStart = true
+                                fixedCol = col
+                                fixedRow = row
+                            }
                         },
                         onDrag = { change, _ ->
                             change.consume()
                             val p = currentPlacement
-                            val index = p.cellAt(change.position.x, change.position.y)
+                            val at = change.position + grabOffset
+                            val index = p.cellAt(at.x, at.y)
                             if (index != null) {
-                                controller.extendSelection(
-                                    index % p.cols,
-                                    index / p.cols,
-                                    SystemClock.elapsedRealtime(),
-                                )
+                                val col = index % p.cols
+                                val row = index / p.cols
+                                val ok = if (fixedStart) {
+                                    controller.selectionSet(fixedCol, fixedRow, col, row)
+                                } else {
+                                    controller.selectionSet(col, row, fixedCol, fixedRow)
+                                }
+                            } else {
+                                // Off the grid: the only useful thing a finger out here
+                                // can mean is "more history", and a handle dragged past
+                                // the top edge is how a selection reaches back into the
+                                // scrollback. One row per move, and the end that is not
+                                // being dragged rides along with the viewport, because
+                                // it is anchored to text and the text has moved.
+                                val up = at.y < p.dy
+                                val down = at.y > p.dy + p.gridHeight
+                                if (up || down) {
+                                    val step = if (up) -1 else 1
+                                    controller.scrollBy(step)
+                                    // The end that is not being dragged is anchored to
+                                    // text, and the text has just moved a row, so its
+                                    // viewport row moves with it. Re-sending the range
+                                    // is what keeps the two ends describing the same
+                                    // characters while the viewport slides.
+                                    fixedRow += step
+                                }
                             }
                         },
                         onDragEnd = {
-                            // Copy on release. The selection is already what the
-                            // user can see, so this is the one moment where the
-                            // text and the highlight provably agree.
+                            // Copy on release. The selection is what the user can see,
+                            // so this is the one moment where the text and the
+                            // highlight provably agree.
                             val text = controller.selectionText()
                             if (!text.isNullOrEmpty()) {
-                                // The same clipboard the shell writes to via OSC 52,
-                                // deliberately: one slot, one owner, so "what did I
-                                // just copy" has one answer.
                                 androidClipboard?.setPrimaryClip(
                                     android.content.ClipData.newPlainText("ldmux", text),
                                 )
                             }
+                            grabOffset = Offset.Zero
                         },
-                        onDragCancel = { controller.clearSelection() },
+                        onDragCancel = {
+                            controller.clearSelection()
+                            grabOffset = Offset.Zero
+                        },
                     )
                 }
                 .pointerInput(Unit) {
@@ -497,6 +600,63 @@ actual fun rememberTerminalSurface(
                         // up to a line.
                         onDragCancel = { carry = 0f },
                     )
+                }
+                // **Handles are dragged immediately, with no hold first.**
+                //
+                // A handle is a grab affordance: the finger lands on it and moves. It
+                // required a long press before, because one detector was serving both
+                // "choose a range" and "adjust one", and the practical result was
+                // handles that could not be dragged at all.
+                //
+                // This is innermost in the chain on purpose. Compose delivers the
+                // pointer *main* pass from the inside out, so being last means seeing
+                // the event first and being able to consume it before the tap and
+                // scroll gestures below — and it consumes *only* when the touch begins
+                // on a handle, so a finger that misses one falls straight through and
+                // behaves exactly as it did before.
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val bounds = currentFrame?.selection ?: return@awaitEachGesture
+                        val p = currentPlacement
+                        val grab = handleHit(down.position, bounds, p, handlesPx, minTouchPx)
+                            ?: return@awaitEachGesture
+                        down.consume()
+                        // The end that is not being dragged stays where it is, and it is
+                        // taken from the frame the user is looking at rather than
+                        // remembered from an earlier gesture.
+                        val fixedStart = !grab.start
+                        val fixedCol = if (grab.start) bounds.endCol else bounds.startCol
+                        val fixedRow = if (grab.start) bounds.endRow else bounds.startRow
+                        val anchor = down.position + grab.offset
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            change.consume()
+                            if (!change.pressed) break
+                            // The finger is on the handle's ball, and the cell the user
+                            // means is under the handle's *tip*: the grab offset carries
+                            // the difference, so the end does not jump on the first move.
+                            val at = change.position + grab.offset
+                            val index = p.cellAt(at.x, at.y)
+                            if (index != null) {
+                                val col = index % p.cols
+                                val row = index / p.cols
+                                if (fixedStart) {
+                                    controller.selectionSet(fixedCol, fixedRow, col, row)
+                                } else {
+                                    controller.selectionSet(col, row, fixedCol, fixedRow)
+                                }
+                            }
+                        }
+                        // Letting go copies, exactly as letting go of a selection does.
+                        val text = controller.selectionText()
+                        if (!text.isNullOrEmpty()) {
+                            androidClipboard?.setPrimaryClip(
+                                android.content.ClipData.newPlainText("ldmux", text),
+                            )
+                        }
+                    }
                 },
         ) {
             val f = frame ?: return@Canvas
@@ -510,6 +670,31 @@ actual fun rememberTerminalSurface(
                 painter.paint(this, f)
             }
             drawScrollbar(f, placement, size.width, size.height)
+            // **The two handles.** Drawn by us on both platforms (ADR-0014), because
+            // a Compose canvas owns every pixel and the platform's own handles come
+            // with a TextView this app does not have. Positioned from the geometry
+            // the hit test uses, so what is drawn and what is grabbable are one
+            // thing. They sit *below* the range's corners and splay outward, which is
+            // what makes it obvious which end is which without a label.
+            f.selection?.let { bounds ->
+                systemHandles?.let { handles ->
+                    val (startAnchor, endAnchor) = selectionHandleAnchors(bounds, placement)
+                    drawSelectionHandle(
+                        handles.start,
+                        startAnchor,
+                        handles.sizePx,
+                        start = true,
+                        mirror = handles.mirrorStart,
+                    )
+                    drawSelectionHandle(
+                        handles.end,
+                        endAnchor,
+                        handles.sizePx,
+                        start = false,
+                        mirror = false,
+                    )
+                }
+            }
             tapAt?.let { (col, row) ->
                 val (x, y) = placement.cellOrigin(col, row)
                 drawRect(
@@ -632,6 +817,38 @@ private suspend fun PointerInputScope.detectPinch(
 }
 
 private const val PINCH_SLOP = 0.03f
+
+/**
+ * Draw one of the platform's handles at its anchor.
+ *
+ * The anchor is the handle's *tip* — the corner of the selected cell — and the
+ * framework's hotspots put the tip at three quarters of the left handle's width and a
+ * quarter of the right handle's, so each teardrop leans inwards at the text it belongs
+ * to. That convention lives in `selectionHandleTopLeft`, which the hit test uses too,
+ * so what is drawn and what is grabbable cannot drift apart.
+ */
+private fun DrawScope.drawSelectionHandle(
+    image: ImageBitmap,
+    anchor: Offset,
+    size: IntSize,
+    start: Boolean,
+    mirror: Boolean,
+) {
+    val topLeft = selectionHandleTopLeft(anchor, size, start)
+    if (!mirror) {
+        drawImage(image = image, topLeft = topLeft)
+        return
+    }
+    // A theme with one teardrop instead of a left/right pair: the start handle is the
+    // same art flipped, which is exactly what the framework's own Editor does. The flip
+    // is about the *handle's box*, not the anchor, so the hotspot stays where the hit
+    // test expects it.
+    withTransform({
+        scale(-1f, 1f, pivot = Offset(topLeft.x + size.width / 2f, topLeft.y + size.height / 2f))
+    }) {
+        drawImage(image = image, topLeft = topLeft)
+    }
+}
 
 /**
  * How far a finger may wander and still count as a tap, in px.

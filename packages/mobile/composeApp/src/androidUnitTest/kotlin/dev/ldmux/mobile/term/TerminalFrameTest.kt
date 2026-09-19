@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -222,6 +224,41 @@ class TerminalFrameTest {
         assertTrue(f.cells[1].bold)
         assertFalse(f.cells[2].selected)
         assertTrue(f.cells[2].bold)
+    }
+
+    @Test
+    fun `decodes the selection endpoints from the bytes that were reserved`() {
+        val bytes = Builder().apply {
+            u16(1); u16(1); u16(0); u16(0)
+            byte(1); byte(1)
+            rgb(0); rgb(0)
+            byte(0); byte(1); byte(0)
+            u32(0); u32(0); u32(0)
+            byte(0)
+            byte(0)
+            byte(1) // selection on
+            u16(3); byte(1) // start col 3, row 1
+            u16(9); byte(2) // end col 9, row 2
+            cell("x", 1, 2)
+        }.build()
+        val f = TerminalFrame.decode(bytes)
+        val sel = f.selection
+        assertNotNull(sel)
+        assertEquals(3, sel.startCol)
+        assertEquals(1, sel.startRow)
+        assertEquals(9, sel.endCol)
+        assertEquals(2, sel.endRow)
+        // Cells still decode correctly past the new bytes: the endpoints ride in the
+        // header and nothing after it moved.
+        assertEquals("x", f.cells[0].text)
+    }
+
+    @Test
+    fun `no selection is null and not an empty range`() {
+        // The difference matters: an empty range would draw two handles on top of each
+        // other at (0,0), and a tap there would have to be distinguished from a tap
+        // anywhere else on the screen.
+        assertNull(TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)))).selection)
     }
 
     @Test

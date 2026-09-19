@@ -75,6 +75,15 @@ interface TerminalHandle {
 
     fun endSelection(col: Int, row: Int, valid: Boolean, atMs: Long): String? = null
 
+    /**
+     * Set the selection to an explicit inclusive range of viewport cells, for the
+     * handles.
+     */
+    fun selectionSet(startCol: Int, startRow: Int, endCol: Int, endRow: Int): Boolean = false
+
+    /** Where the selection is, or null when there is none. */
+    fun selectionBounds(): IntArray? = null
+
     fun selectionText(): String? = null
 
     fun clearSelection() {}

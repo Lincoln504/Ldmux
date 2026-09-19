@@ -195,3 +195,37 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionText(JNIEnv *env, jclass cls,
   (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (const jbyte*)buf);
   return result;
 }
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionSet(JNIEnv *env, jclass cls,
+                                                       jlong handle, jint startCol,
+                                                       jint startRow, jint endCol,
+                                                       jint endRow) {
+  (void)env; (void)cls;
+  return ldmux_terminal_selection_set(handle_of(handle), startCol, startRow, endCol,
+                                      endRow)
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+/*
+ * The selection's two ends as {startCol, startRow, endCol, endRow}, or null when
+ * there is nothing selected.
+ *
+ * Four ints in one array rather than four calls: the endpoints are read together by
+ * definition — half a selection is not a thing — and a caller that had to make four
+ * calls could interleave them with a frame and draw a handle in the wrong place.
+ */
+JNIEXPORT jintArray JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionBounds(JNIEnv *env, jclass cls,
+                                                          jlong handle) {
+  (void)cls;
+  int sc = 0, sr = 0, ec = 0, er = 0;
+  if (!ldmux_terminal_selection_bounds(handle_of(handle), &sc, &sr, &ec, &er))
+    return NULL;
+  jintArray out = (*env)->NewIntArray(env, 4);
+  if (!out) return NULL;
+  jint values[4] = {sc, sr, ec, er};
+  (*env)->SetIntArrayRegion(env, out, 0, 4, values);
+  return out;
+}

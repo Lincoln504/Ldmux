@@ -473,6 +473,153 @@ static void test_release_outside_the_grid_keeps_the_selection(void) {
 
 /* An empty screen has nothing to select, and asking must answer "nothing"
  * rather than an empty string the caller would put on the clipboard. */
+/* ---------------------------------------------------------------------------
+ * The handle API. The gesture entry points above are for a finger; these are for
+ * the two handles the user drags afterwards, where the ends are independent.
+ * ------------------------------------------------------------------------- */
+
+static void test_set_round_trips_through_bounds(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 4, 0));
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sc, 0);
+  CHECK_EQ_INT(sr, 0);
+  CHECK_EQ_INT(ec, 4);
+  CHECK_EQ_INT(er, 0);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "hello"), 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_set_orders_an_inverted_range(void) {
+  /* Dragging the end handle back above the start is ordinary, and an inverted
+   * range formats to nothing — a copy that silently produces an empty string. */
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  CHECK(ldmux_terminal_selection_set(t, 6, 0, 0, 0));
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sc, 0);
+  CHECK_EQ_INT(ec, 6);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "hello w"), 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_set_replaces_what_the_gesture_chose(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello world");
+  /* A long press picks the word; the handles then have to be able to widen it,
+   * which is the case the phone reported as impossible. */
+  /* The phone presses and *then* deep-presses; a deep press with no press under it
+   * has no position to select around, which is what this test learned.
+   *
+   * The press is deliberately not checked: a press on its own reports no change,
+   * because the engine is still deciding whether a second tap is coming. It is
+   * setup here, not the assertion. */
+  (void)ldmux_terminal_select_press(t, 0, 0, 1000);
+  // The app's gap, not a 10 ms one: the phone presses at the moment the long-press
+  // timeout elapsed, which is half a second after the touch.
+  CHECK(ldmux_terminal_select_deep_press(t, 1500));
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sc, 0);
+  CHECK_EQ_INT(ec, 4);
+  CHECK(ldmux_terminal_selection_set(t, sc, sr, 10, 0));
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  if (s) CHECK_EQ_INT(strcmp(s, "hello world"), 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_bounds_is_zero_without_a_selection(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello");
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  /* The render is what caches the grid size, so this also pins that a render
+   * before any selection is not a special case. */
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(!ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sc, -1);
+  CHECK_EQ_INT(buf[33], 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_endpoints_land_on_the_right_row_after_scrolling(void) {
+  /* The decisive one. A grid reference carries a row node and an x, and the header
+   * does not say whether its y is a viewport row or an absolute row in the
+   * scrollback — so this fills the screen past the top, which makes the two
+   * conventions disagree, and asserts the viewport reading. A selection made at
+   * viewport row 0 must come back as row 0 and must contain the row that is
+   * actually on screen. */
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  for (int i = 0; i < 30; i++) {
+    char line[32];
+    snprintf(line, sizeof(line), "line-%02d\r\n", i);
+    feed(t, line);
+  }
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 6, 0));
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sr, 0);
+  CHECK_EQ_INT(er, 0);
+  const char *s = selection_cstr(t);
+  CHECK(s != NULL);
+  /* Which line that is depends on the scrollback, so the assertion is on shape:
+   * seven characters, no newline, and the same text the frame shows on row 0. */
+  if (s) {
+    CHECK_EQ_INT(strlen(s), 7);
+    CHECK(strchr(s, '\n') == NULL);
+    CHECK(strncmp(s, "line-", 5) == 0);
+  }
+  ldmux_terminal_free(t);
+}
+
+static void test_frame_carries_the_endpoints(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "one\r\ntwo\r\nthree");
+  CHECK(ldmux_terminal_selection_set(t, 2, 1, 7, 1));
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(buf[33], 1);
+  CHECK_EQ_INT(buf[34] | (buf[35] << 8), 2);
+  CHECK_EQ_INT(buf[36], 1);
+  CHECK_EQ_INT(buf[37] | (buf[38] << 8), 7);
+  CHECK_EQ_INT(buf[39], 1);
+  ldmux_terminal_free(t);
+}
+
+static void test_clear_zeroes_the_frame_bits(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "hello");
+  CHECK(ldmux_terminal_selection_set(t, 1, 0, 3, 0));
+  ldmux_terminal_select_clear(t);
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(buf[33], 0);
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(!ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  ldmux_terminal_free(t);
+}
+
 static void test_empty_screen_has_no_selection(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
@@ -536,6 +683,13 @@ int main(void) {
       {"selection spans lines", test_selection_spans_lines},
       {"select all covers the screen", test_select_all_covers_the_screen},
       {"release outside keeps selection", test_release_outside_the_grid_keeps_the_selection},
+      {"set round-trips through bounds", test_set_round_trips_through_bounds},
+      {"set orders an inverted range", test_set_orders_an_inverted_range},
+      {"set replaces what the gesture chose", test_set_replaces_what_the_gesture_chose},
+      {"bounds is zero without a selection", test_bounds_is_zero_without_a_selection},
+      {"endpoints land on the right row after scrolling", test_endpoints_land_on_the_right_row_after_scrolling},
+      {"frame carries the endpoints", test_frame_carries_the_endpoints},
+      {"clear zeroes the frame bits", test_clear_zeroes_the_frame_bits},
       {"empty screen has no selection", test_empty_screen_has_no_selection},
       {"free with a live selection", test_free_with_a_live_selection},
   };

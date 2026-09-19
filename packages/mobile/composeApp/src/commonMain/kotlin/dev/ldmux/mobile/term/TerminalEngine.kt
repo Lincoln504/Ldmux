@@ -47,6 +47,15 @@ expect class TerminalEngine(cols: Int, rows: Int) {
 
     fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean
 
+    /**
+     * Set the selection to an explicit inclusive range of viewport cells, for the
+     * handles the user drags rather than for a finger.
+     */
+    fun selectionSet(startCol: Int, startRow: Int, endCol: Int, endRow: Int): Boolean
+
+    /** The selection's ends, or null when nothing is selected. */
+    fun selectionBounds(): IntArray?
+
     fun selectionClear(): Boolean
 
     fun selectionSelectAll(): Boolean

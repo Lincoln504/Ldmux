@@ -34,6 +34,10 @@ struct LdmuxTerminal {
   uint32_t geo_cell_h;
   uint32_t geo_pad_left;
   uint32_t geo_screen_h;
+  /* The grid as last rendered. A viewport coordinate is only meaningful against
+   * a size, and this is the one the client is looking at. */
+  uint16_t grid_cols;
+  uint16_t grid_rows;
 };
 
 static GhosttyColorRgb resolve_color(GhosttyStyleColor color,
@@ -224,6 +228,93 @@ static bool ensure_sel(LdmuxTerminal *t, size_t need) {
   return true;
 }
 
+static GhosttyPoint viewport_point(uint32_t col, uint32_t row);
+static void ensure_screen(LdmuxTerminal *t);
+
+/*
+ * Render once if there is no screen yet.
+ *
+ * A viewport coordinate is resolved by the engine against the screen as last
+ * rendered, so a selection set before the first render resolves against nothing and
+ * comes back empty — silently, which is the worst way for it to come back. Every
+ * caller in the app has just drawn a frame, so in practice this never fires; it
+ * exists so that "it did nothing" can never be the answer to a well-formed call.
+ */
+static void ensure_screen(LdmuxTerminal *t) {
+  if (!t || !t->terminal || t->grid_rows) return;
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  ldmux_terminal_render(t, &buf, &len);
+}
+
+/*
+ * A grid reference for a viewport cell.
+ *
+ * The tag is VIEWPORT, not ACTIVE, and that is the whole point: everything the
+ * client sends down and everything it draws is in the cells the user can see, so
+ * the one place the two coordinate systems meet is here.
+ */
+static bool viewport_ref(LdmuxTerminal *t, int col, int row, GhosttyGridRef *out) {
+  if (!t || !t->terminal || !out) return false;
+  if (col < 0) col = 0;
+  if (row < 0) row = 0;
+  GhosttyPoint p = viewport_point((uint32_t)col, (uint32_t)row);
+  return ghostty_terminal_grid_ref(t->terminal, p, out) == GHOSTTY_SUCCESS;
+}
+
+/*
+ * Where a selection is, in viewport cells.
+ *
+ * A GhosttyGridRef carries a grid row *node* and an x, and the header does not
+ * say whether its y is a viewport row or an absolute one in the scrollback. Rather
+ * than guess, this finds the row by identity: a reference to column 0 of each
+ * visible row is built and its node compared. That is exact under either
+ * convention, costs one reference per visible row, and only runs when something is
+ * actually selected.
+ *
+ * Answers false when there is nothing selected.
+ */
+static bool selection_endpoints(LdmuxTerminal *t, int *sc, int *sr, int *ec,
+                                int *er) {
+  if (!t || !t->terminal || !t->grid_rows) return false;
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  if (ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &sel) !=
+      GHOSTTY_SUCCESS)
+    return false;
+  if (!sel.start.node || !sel.end.node) return false;
+
+  /* Which visible row is the selection on?
+   *
+   * A GhosttyGridRef carries a y that is measured from the top of the *grid*, not
+   * from the top of the viewport — plain to see once rows exist above the viewport
+   * and the same row answers 0 when it is on screen and 7 when seven rows of
+   * scrollback sit above it. So subtracting is not needed and guessing is not
+   * allowed: this asks the engine for the y of each visible row and compares the
+   * engine's answer with the engine's answer. Both sides come from the same
+   * projection, so the conversion cannot be wrong in either direction.
+   *
+   * The row's `node` looked like a cheaper identity to match on, and is not: it is
+   * shared by whole runs of rows, so every endpoint matched the first row.
+   */
+  bool have_start = false, have_end = false;
+  for (uint16_t row = 0; row < t->grid_rows; row++) {
+    GhosttyGridRef probe = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+    if (!viewport_ref(t, 0, row, &probe)) continue;
+    if (!have_start && probe.y == sel.start.y) {
+      *sc = sel.start.x;
+      *sr = row;
+      have_start = true;
+    }
+    if (!have_end && probe.y == sel.end.y) {
+      *ec = sel.end.x;
+      *er = row;
+      have_end = true;
+    }
+    if (have_start && have_end) break;
+  }
+  return have_start && have_end;
+}
+
 /*
  * Install a selection the gesture produced. The engine copies it immediately and
  * converts it to terminal-owned tracked state, so the snapshot's grid
@@ -258,6 +349,7 @@ static int selection_event(LdmuxTerminal *t, GhosttySelectionGestureEventType ty
                            int have_cell, uint32_t col, uint32_t row,
                            uint64_t time_ns) {
   if (!t || !t->gesture || !t->terminal) return 0;
+  ensure_screen(t);
 
   GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
   if (have_cell) {
@@ -337,6 +429,38 @@ int ldmux_terminal_select_press(LdmuxTerminal *t, uint32_t col, uint32_t row,
                                 uint64_t time_ms) {
   return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS, 1, col, row,
                          time_ms * 1000000ull);
+}
+
+int ldmux_terminal_selection_set(LdmuxTerminal *t, int start_col, int start_row,
+                                  int end_col, int end_row) {
+  if (!t || !t->terminal) return 0;
+  ensure_screen(t);
+  /* The engine wants an ordered range; a finger does not know about order. This is
+   * the one place that has to be true, because dragging the end handle back above
+   * the start is an ordinary thing to do and an inverted selection formats to
+   * nothing at all — a copy that silently produces an empty string. */
+  if (start_row > end_row || (start_row == end_row && start_col > end_col)) {
+    int c = start_col, r = start_row;
+    start_col = end_col; start_row = end_row;
+    end_col = c; end_row = r;
+  }
+  GhosttyGridRef a = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  GhosttyGridRef b = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  if (!viewport_ref(t, start_col, start_row, &a)) return 0;
+  if (!viewport_ref(t, end_col, end_row, &b)) return 0;
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  sel.start = a;
+  sel.end = b;
+  sel.rectangle = false;
+  return install_selection(t, &sel);
+}
+
+int ldmux_terminal_selection_bounds(LdmuxTerminal *t, int *start_col, int *start_row,
+                                    int *end_col, int *end_row) {
+  if (!t || !t->terminal || !start_col || !start_row || !end_col || !end_row)
+    return 0;
+  ensure_screen(t);
+  return selection_endpoints(t, start_col, start_row, end_col, end_row) ? 1 : 0;
 }
 
 int ldmux_terminal_select_deep_press(LdmuxTerminal *t, uint64_t time_ms) {
@@ -475,6 +599,9 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &cols);
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows);
 
+  t->grid_cols = cols;
+  t->grid_rows = rows;
+
   GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_COLORS,
                            &colors);
@@ -546,6 +673,25 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
   ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
                        &active_screen);
   buf[32] = (uint8_t)(active_screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE ? 1 : 0);
+
+  /* Bytes 33..39 were reserved and now carry the selection, so the client can draw
+   * a handle at each end without asking a second time and without a second
+   * coordinate system of its own. The flag comes first: a client that predates
+   * this reads a zero and draws nothing, which is the whole reason for spending
+   * reserved bytes instead of a version bump. */
+  buf[33] = 0;
+  buf[34] = 0; buf[35] = 0; buf[36] = 0;
+  buf[37] = 0; buf[38] = 0; buf[39] = 0;
+  {
+    int sc = 0, sr = 0, ec = 0, er = 0;
+    if (selection_endpoints(t, &sc, &sr, &ec, &er)) {
+      buf[33] = 1;
+      buf[34] = (uint8_t)(sc & 0xFF); buf[35] = (uint8_t)((sc >> 8) & 0xFF);
+      buf[36] = (uint8_t)(sr & 0xFF);
+      buf[37] = (uint8_t)(ec & 0xFF); buf[38] = (uint8_t)((ec >> 8) & 0xFF);
+      buf[39] = (uint8_t)(er & 0xFF);
+    }
+  }
 
   /* SGR encoding (1006) specifically: it is the only encoding we synthesize,
    * because the older forms cap coordinates at 223 columns. */
