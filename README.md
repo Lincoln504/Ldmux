@@ -30,10 +30,14 @@ either. It is deliberately simpler and tmux-native:
 > the runtime is **Node 26**, not Bun, and the **pi extension has been removed**
 > ([ADR-0009](docs/adr/0009-node-runtime-and-no-pi-extension.md)).
 
+**Current position, open work and known unknowns: [`docs/STATE.md`](docs/STATE.md).**
+
 ## Documents
 
 | Doc | Purpose |
 |-----|---------|
+| [`docs/STATE.md`](docs/STATE.md) | **Where everything stands**: what is verified and how, what is open, what is not known. Start here. |
+| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | The open decision about how much of the session layer should be tmux's. |
 | [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification. |
 | [`docs/TRANSPORT.md`](docs/TRANSPORT.md) | Transport deep-dive + decision (control mode `-C` over pipes, no PTY). |
 | [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
@@ -80,7 +84,7 @@ devShell).
 
 ## Status
 
-Implemented and tested (210 tests, typecheck clean):
+Implemented and tested (288 tests, 117 native checks, typecheck clean):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by

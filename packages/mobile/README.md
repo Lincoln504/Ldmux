@@ -122,19 +122,71 @@ adb reverse tcp:7629 tcp:7629
 
 ## Modes
 
-Two explicit modes, switched by a button — the sensor never rotates the app
-(ADR-0008):
+**The device owns the orientation. The app owns the keyboard.** They are separate
+decisions and they no longer share a variable (ADR-0011).
 
-- **Landscape** — side panel (side is a setting), key matrix, `+sh`, settings;
-  the keyboard is never up.
-- **Portrait (typing)** — no panel, terminal fills the width, keyboard always
-  up, and a thin bar rides directly above the keyboard with `⟳` (back to
-  landscape) plus Esc, Tab, arrows, C-c. No microphone here: the keyboard is
-  always up in portrait and has its own mic.
+- The manifest declares no `screenOrientation` and does declare `configChanges`, so the
+  activity is not recreated when the device turns. Whether the app is portrait or
+  landscape is read from `LocalWindowInfo.current.containerSize` — the window, not the
+  sensor and not the display — so auto-rotate-off, a foldable, split screen and a
+  floating window are all answered correctly with no second opinion.
+- **There is no flip control anywhere.** Not in the menu, not in the bar, not in the
+  panel.
+- **The keyboard exists only in portrait.** In landscape there is no text field at all,
+  so typing there is a key-event path (see below), not an IME.
+- **Closing the keyboard does not rotate anything.** The portrait bar's second row leads
+  with *hide keyboard*; the screen stays exactly where it is. Rotating out to landscape
+  and back is the only way to bring the keyboard back, which is the platform's own
+  gesture for it.
 
-The terminal is resized to the viewport in both modes: the daemon sizes the tmux
-pane to the grid the surface can actually paint, so the shell is always the
-right size for the screen showing it.
+### Two shapes, one terminal
+
+- **Landscape** — side panel (side is a setting), key matrix, `+ shell`, settings; the
+  keyboard is never up. The panel's bottom row is the microphone alone.
+- **Portrait** — no panel, terminal fills the width, thin bar above the keyboard with
+  `[menu]` on the first row and `[hide keyboard]` on the second, one row per key group.
+
+The terminal is resized to the viewport in both shapes: the client owns the geometry and
+the daemon sizes the tmux pane to the grid the surface can actually paint (ADR-0008).
+
+### Typing
+
+Two paths, and which one runs depends on the shape.
+
+- **Portrait** has a text field that exists only to be focusable for the IME. Text
+  arrives through it, and the delta between two field values is the input.
+- **Landscape** has no text field, so characters arrive as key events and are turned into
+  input directly. This was missing for a long time: the key handler mapped terminal
+  *keys* (Enter, Tab, Escape, arrows) and let every other key fall through, which is right
+  in portrait and meant letters typed in landscape reached nothing at all. Characters are
+  handled on the same path now, skipped while the soft keyboard is up so they are not sent
+  twice, and skipped under Ctrl/Alt/Meta so a chord cannot become its letter.
+- **`onPreviewKeyEvent` is delivered from the root down to the focused node**, so the
+  surface holds focus whenever the text field does not. Clearing focus hides the keyboard;
+  it must not also be the thing that mutes it.
+
+## Behaviour contract
+
+Rules that came from a decision and are not preferences. Breaking one of these is a
+regression even if it looks like an improvement.
+
+| Rule | Why |
+|---|---|
+| No blue, no accent hue, anywhere | Greyscale only; importance lives in weight and contrast. The one exception is the desaturated red of the close confirmation. |
+| The menu/home button is a raised tone, not the brightest thing | A token must not be both the emphasis and the primary fill; `Accent` is reserved for the one primary action. |
+| A key is **one** composable in both shapes | Two copies of a control drift. |
+| `del` sits to the left of `⏎`, `⏎` rightmost | Thumb reach. |
+| Navigation at one end, keys in the middle, actions at the other | The panel's middle scrolls and holds keys; both ends are fixed. |
+| A shell is closed only from the launcher | Never from the shell it belongs to. A desk-started shell keeps its window, always. |
+| Only a phone-opened shell has a per-shell menu | Origin is a fact about the shell, not a label. |
+| `+ shell` asks for a **path only** | No command, no taxonomy, no capability probing. Pre-filled with `~/`, caret after it, and empty means the home directory — never the launcher row's cwd. |
+| Opening a shell never rotates the device | The app does not hold opinions about hardware. |
+| `thin` is the default density | `Touch(min, dense, pad, rowPad, icon, check)` in one place; a minimum height only binds when the content is smaller than it. |
+| Every drawn control has a label | A mark with no label has no name anywhere for a screen reader. |
+| A control that can produce no visible change is disabled, not silent | Includes the settings steppers at their ends. |
+| One microphone for the app, bound to the shell on screen | Dictation is for the shell you were looking at when you spoke. |
+| A dead session is never a page | It is removed from the pager. |
+| No magnifier, and no selection handles drawn from scratch | Handles are the platform's own drawables; a magnifier was built, worked, and was removed by decision (ADR-0014 §9). |
 
 ## Rendering
 
@@ -166,9 +218,9 @@ pointed.
       renderer, live attach stream, 1:1 with the pane. Verified on device.
 - [x] **Client-driven pane resize**: the phone's viewport is the authority;
       the daemon clamps and runs `tmux resize-window`.
-- [x] **Landscape/portrait modes** with a thin bar above the keyboard.
-- [x] Sidebar keys drive the native terminal directly; on-screen keyboard is
-      opt-in through the `⌨` button (a tap on the grid never raises it).
+- [x] **Landscape/portrait by device rotation** (ADR-0011), keyboard portrait-only and
+      dismissable without moving the screen.
+- [x] Panel and bar keys drive the native terminal directly.
 - [x] **Headless dictation** (Android `SpeechRecognizer`) — no keyboard needed.
 - [x] **Scrollback**: the emulator's own viewport is scrolled (drag, or `⤒`/
       `⤓`), with a scrollbar and the frame carrying total/offset. History is
@@ -184,14 +236,19 @@ pointed.
 - [x] **Tap-to-cursor**, in two regimes chosen from the pane's own state — a real
       synthesized SGR click for a mouse-aware program, relative cursor motion for
       a plain shell.
+- [ ] Selection polish: auto-scroll while dragging past an edge, a selection surviving
+      new output, double-tap for a word (`docs/STATE.md` §5.1).
+- [ ] `planTap` corrections for tap-to-cursor (`docs/STATE.md` §5.2).
+- [ ] Clipboard-write policy verified end to end on the device (`docs/STATE.md` §5.3).
 - [ ] Foreground service so the heartbeat survives Doze (SPEC §6.3).
 - [ ] iOS (needs a macOS host for the xcframework).
 
-Verified on a real Motorola Edge 2024 (2026-09-14): landscape with the side
-panel; `⌨` flips to portrait with the keyboard up and the key bar above it;
-typing reaches the pane; `⟳` returns to landscape; the pane resizes per mode
-(76x20 landscape, 46x29 portrait) and the grid draws 1:1 in the terminal's own
-colours.
+Verified on a real Motorola Edge 2024 (2026-09-19): rotating the device flips the app
+with no control involved; closing the keyboard leaves the screen in portrait; the
+keyboard returns by rotating through portrait; typing reaches the pane in **both**
+shapes; a long-press drag selects past the cell it started on; dragging a handle moves
+its own end and leaves the other; the pane resizes per shape and the grid draws 1:1 in
+the terminal's own colours. See `docs/STATE.md` §4 for the full ledger.
 
 ## Known issues
 
