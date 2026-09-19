@@ -47,6 +47,34 @@ actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
         }
     }
 
+    actual fun setGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int) {
+        if (handle != 0L) NativeTerminal.setGeometry(handle, columns, cellW, cellH, padLeft, screenH)
+    }
+
+    actual fun selectionPress(col: Int, row: Int, timeMs: Long): Boolean =
+        handle != 0L && NativeTerminal.selectionPress(handle, col, row, timeMs)
+
+    actual fun selectionDeepPress(timeMs: Long): Boolean =
+        handle != 0L && NativeTerminal.selectionDeepPress(handle, timeMs)
+
+    actual fun selectionDrag(col: Int, row: Int, timeMs: Long): Boolean =
+        handle != 0L && NativeTerminal.selectionDrag(handle, col, row, timeMs)
+
+    actual fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean =
+        handle != 0L && NativeTerminal.selectionRelease(handle, col, row, valid, timeMs)
+
+    actual fun selectionClear(): Boolean = handle != 0L && NativeTerminal.selectionClear(handle)
+
+    actual fun selectionSelectAll(): Boolean =
+        handle != 0L && NativeTerminal.selectionSelectAll(handle)
+
+    actual fun selectionText(): String? {
+        if (handle == 0L) return null
+        // Plain UTF-8 again, for the same reason as the clipboard: a JNI string
+        // would have to be modified UTF-8 and would mangle anything off the BMP.
+        return NativeTerminal.selectionText(handle)?.decodeToString()
+    }
+
     actual fun close() {
         if (handle != 0L) {
             NativeTerminal.destroy(handle)

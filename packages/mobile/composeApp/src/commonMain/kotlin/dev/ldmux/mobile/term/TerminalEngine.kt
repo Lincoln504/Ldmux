@@ -31,5 +31,28 @@ expect class TerminalEngine(cols: Int, rows: Int) {
      */
     fun takeClipboardRequest(): ClipboardRequest?
 
+    /**
+     * How the grid is drawn, in surface pixels. Only the selection gesture uses
+     * this; it is what makes "the same word" and "the same cell" answerable.
+     */
+    fun setGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int)
+
+    /** Pointer down on a viewport cell. Answers whether the selection changed. */
+    fun selectionPress(col: Int, row: Int, timeMs: Long): Boolean
+
+    /** Long press, which the engine turns into "the word under the finger". */
+    fun selectionDeepPress(timeMs: Long): Boolean
+
+    fun selectionDrag(col: Int, row: Int, timeMs: Long): Boolean
+
+    fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean
+
+    fun selectionClear(): Boolean
+
+    fun selectionSelectAll(): Boolean
+
+    /** The selected text, or null when there is nothing selected. */
+    fun selectionText(): String?
+
     fun close()
 }

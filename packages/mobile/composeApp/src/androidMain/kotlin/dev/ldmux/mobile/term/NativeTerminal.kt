@@ -65,6 +65,47 @@ object NativeTerminal {
      */
     external fun takeClipboard(handle: Long): ByteArray?
 
+    /**
+     * How the grid is drawn, in surface pixels, for the selection gesture only.
+     *
+     * The engine needs this to reason about pointer distance: the slop that makes
+     * two taps one word, and where a word boundary sits under the finger. It is
+     * geometry rather than state, so it is set when the font size or the rotation
+     * changes, not per event.
+     */
+    external fun setGeometry(
+        handle: Long,
+        columns: Int,
+        cellW: Int,
+        cellH: Int,
+        padLeft: Int,
+        screenH: Int,
+    )
+
+    /** Pointer down on a viewport cell. Returns whether the selection changed. */
+    external fun selectionPress(handle: Long, col: Int, row: Int, timeMs: Long): Boolean
+
+    /** Long press: the word under the finger. */
+    external fun selectionDeepPress(handle: Long, timeMs: Long): Boolean
+
+    external fun selectionDrag(handle: Long, col: Int, row: Int, timeMs: Long): Boolean
+
+    /** `valid` is false when the pointer left the grid entirely. */
+    external fun selectionRelease(
+        handle: Long,
+        col: Int,
+        row: Int,
+        valid: Boolean,
+        timeMs: Long,
+    ): Boolean
+
+    external fun selectionClear(handle: Long): Boolean
+
+    external fun selectionSelectAll(handle: Long): Boolean
+
+    /** Selected text as UTF-8 bytes, or null when nothing is selected. */
+    external fun selectionText(handle: Long): ByteArray?
+
     /** Kinds in byte 0 of a [takeClipboard] answer. */
     const val CLIPBOARD_NONE: Int = 0
     const val CLIPBOARD_SET: Int = 1

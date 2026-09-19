@@ -40,7 +40,13 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 val cell = frame.cells[i]
                 val x = (i % cols) * m.width
                 val y = (i / cols) * m.height
-                bgPaint.color = argb(cell.bg)
+                // A selected cell inverts its own background rather than being
+                // painted a fixed colour: the terminal has light-on-dark and
+                // dark-on-light cells in the same frame (an inverse cell, a
+                // reversed status line), and one fixed highlight disappears on
+                // half of them. Inverting is always visible and needs no palette.
+                val bg = argb(cell.bg)
+                bgPaint.color = if (cell.selected) bg xor 0x00FFFFFF else bg
                 nc.drawRect(x, y, x + m.width, y + m.height, bgPaint)
                 if (cell.text.isBlank()) continue
                 fgPaint.color = argb(cell.fg)

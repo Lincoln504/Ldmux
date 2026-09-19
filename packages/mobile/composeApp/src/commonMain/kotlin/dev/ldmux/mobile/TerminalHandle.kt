@@ -59,6 +59,29 @@ interface TerminalHandle {
     fun paste(text: String) = sendText(text)
 
     /**
+     * Selection. Defaults make every one of these a no-op, so a handle that
+     * cannot select (a platform without the engine, a test double) still composes
+     * and still taps to move the cursor.
+     */
+    val hasSelection: Boolean get() = false
+
+    fun selectionGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int) {}
+
+    fun beginSelection(col: Int, row: Int, atMs: Long) {}
+
+    fun selectWordAt(col: Int, row: Int, atMs: Long) {}
+
+    fun extendSelection(col: Int, row: Int, atMs: Long) {}
+
+    fun endSelection(col: Int, row: Int, valid: Boolean, atMs: Long): String? = null
+
+    fun selectionText(): String? = null
+
+    fun clearSelection() {}
+
+    fun selectAll() {}
+
+    /**
      * Send one key with the sticky modifiers applied (0x03 for Ctrl-C, ESC+x for
      * Alt-x). Separate from [sendKey] because the *bytes* differ, not just the
      * name: a modifier on a character is a control code, and the app has to be

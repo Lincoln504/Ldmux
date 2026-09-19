@@ -2,10 +2,12 @@ package dev.ldmux.mobile
 
 
 import android.content.Context
+import android.os.SystemClock
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
@@ -353,6 +355,67 @@ actual fun rememberTerminalSurface(
                             tapAt = col to row
                             controller.tapCell(col, row)
                         },
+                    )
+                }
+                .pointerInput(Unit) {
+                    // Selection. Long-press then drag is the gesture, on purpose:
+                    //
+                    //   * a long press with no movement is "this word", which is
+                    //     the standard gesture on both platforms and keeps this
+                    //     out of cross-platform seams (ADR-0013, ADR-0014 §6);
+                    //   * the drag that follows extends it, so nothing has to
+                    //     decide between "select" and "scroll" up front;
+                    //   * release copies, which is the behaviour that needs no
+                    //     button. The `copy` control stays for copying again.
+                    //
+                    // It cannot fight the tap handler above: a press that becomes
+                    // a long press is not a tap, so only one of the two ever fires.
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { pos ->
+                            val p = currentPlacement
+                            val index = p.cellAt(pos.x, pos.y) ?: return@detectDragGesturesAfterLongPress
+                            // The engine needs the cell size to reason about
+                            // distance, and it is cheapest to keep it fresh here
+                            // rather than to invalidate it from elsewhere.
+                            controller.selectionGeometry(
+                                p.cols,
+                                p.cellWidth.toInt(),
+                                p.cellHeight.toInt(),
+                                p.dx.toInt(),
+                                viewport.height,
+                            )
+                            val row = index / p.cols
+                            val col = index % p.cols
+                            tapAt = col to row
+                            controller.selectWordAt(col, row, SystemClock.elapsedRealtime())
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val p = currentPlacement
+                            val index = p.cellAt(change.position.x, change.position.y)
+                            if (index != null) {
+                                controller.extendSelection(
+                                    index % p.cols,
+                                    index / p.cols,
+                                    SystemClock.elapsedRealtime(),
+                                )
+                            }
+                        },
+                        onDragEnd = {
+                            // Copy on release. The selection is already what the
+                            // user can see, so this is the one moment where the
+                            // text and the highlight provably agree.
+                            val text = controller.selectionText()
+                            if (!text.isNullOrEmpty()) {
+                                // The same clipboard the shell writes to via OSC 52,
+                                // deliberately: one slot, one owner, so "what did I
+                                // just copy" has one answer.
+                                androidClipboard?.setPrimaryClip(
+                                    android.content.ClipData.newPlainText("ldmux", text),
+                                )
+                            }
+                        },
+                        onDragCancel = { controller.clearSelection() },
                     )
                 }
                 .pointerInput(Unit) {

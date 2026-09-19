@@ -105,3 +105,93 @@ Java_dev_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
   }
   return result;
 }
+
+/*
+ * Selection. The core owns the gesture semantics, so these are thin: they hand a
+ * cell and a clock down and answer whether anything changed, which is all the
+ * client needs to decide to redraw.
+ *
+ * The text comes back as bytes rather than as a JNI string for the same reason
+ * the clipboard does: a JNI string built from UTF-8 has to be *modified* UTF-8,
+ * and anything outside the BMP would come back mangled.
+ */
+JNIEXPORT void JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_setGeometry(JNIEnv *env, jclass cls,
+                                                      jlong handle, jint columns,
+                                                      jint cell_w, jint cell_h,
+                                                      jint pad_left,
+                                                      jint screen_h) {
+  (void)env; (void)cls;
+  ldmux_terminal_set_geometry(handle_of(handle), (uint32_t)columns, (uint32_t)cell_w,
+                              (uint32_t)cell_h, (uint32_t)pad_left,
+                              (uint32_t)screen_h);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionPress(JNIEnv *env, jclass cls,
+                                                         jlong handle, jint col,
+                                                         jint row, jlong time_ms) {
+  (void)env; (void)cls;
+  return ldmux_terminal_select_press(handle_of(handle), (uint32_t)col, (uint32_t)row,
+                                     (uint64_t)time_ms) ? JNI_TRUE
+                                                        : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionDeepPress(JNIEnv *env, jclass cls,
+                                                             jlong handle,
+                                                             jlong time_ms) {
+  (void)env; (void)cls;
+  return ldmux_terminal_select_deep_press(handle_of(handle), (uint64_t)time_ms)
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionDrag(JNIEnv *env, jclass cls,
+                                                        jlong handle, jint col,
+                                                        jint row, jlong time_ms) {
+  (void)env; (void)cls;
+  return ldmux_terminal_select_drag(handle_of(handle), (uint32_t)col, (uint32_t)row,
+                                    (uint64_t)time_ms) ? JNI_TRUE
+                                                       : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionRelease(JNIEnv *env, jclass cls,
+                                                            jlong handle, jint col,
+                                                            jint row, jboolean valid,
+                                                            jlong time_ms) {
+  (void)env; (void)cls;
+  return ldmux_terminal_select_release(handle_of(handle), (uint32_t)col, (uint32_t)row,
+                                       valid == JNI_TRUE ? 1 : 0, (uint64_t)time_ms)
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionClear(JNIEnv *env, jclass cls,
+                                                          jlong handle) {
+  (void)env; (void)cls;
+  return ldmux_terminal_select_clear(handle_of(handle)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionSelectAll(JNIEnv *env, jclass cls,
+                                                              jlong handle) {
+  (void)env; (void)cls;
+  return ldmux_terminal_select_all(handle_of(handle)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_selectionText(JNIEnv *env, jclass cls,
+                                                        jlong handle) {
+  (void)cls;
+  size_t len = 0;
+  const uint8_t *buf = ldmux_terminal_selection_text(handle_of(handle), &len);
+  if (!buf || len == 0) return NULL;
+  jbyteArray result = (*env)->NewByteArray(env, (jsize)len);
+  if (!result) return NULL;
+  (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (const jbyte*)buf);
+  return result;
+}

@@ -30,6 +30,16 @@ object TerminalFrame {
     const val FLAG_STRIKETHROUGH = 1 shl 7
     const val FLAG_OVERLINE = 1 shl 8
 
+    /**
+     * The cell is inside the selection.
+     *
+     * The ninth flag bit, which was free, rather than a new header field: a
+     * selection is a property of cells, the client already decodes this word for
+     * every cell it draws, and an older client ignores the bit instead of
+     * misreading the frame. No version bump and nothing on the wire.
+     */
+    const val FLAG_SELECTED = 1 shl 9
+
     class Cell(
         /** The cell's text (a grapheme, may be empty for a blank cell). */
         val text: String,
@@ -37,6 +47,7 @@ object TerminalFrame {
         val bg: Int,
         val flags: Int,
     ) {
+        val selected get() = flags and FLAG_SELECTED != 0
         val bold get() = flags and FLAG_BOLD != 0
         val italic get() = flags and FLAG_ITALIC != 0
         val underline get() = flags and FLAG_UNDERLINE != 0

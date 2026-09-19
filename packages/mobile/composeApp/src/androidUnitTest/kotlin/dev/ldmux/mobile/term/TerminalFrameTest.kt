@@ -201,6 +201,30 @@ class TerminalFrameTest {
     }
 
     @Test
+    fun `a selected cell is selected and not silently something else`() {
+        val bytes = Builder().apply {
+            u16(3); u16(1); u16(0); u16(0)
+            byte(1); byte(1)
+            rgb(0); rgb(0)
+            byte(0); byte(1); byte(0)
+            u32(0); u32(0); u32(0)
+            byte(0)
+            byte(0)
+            repeat(7) { byte(0) }
+            cell("x", 1, 2, TerminalFrame.FLAG_SELECTED)
+            cell("y", 1, 2, TerminalFrame.FLAG_SELECTED or TerminalFrame.FLAG_BOLD)
+            cell("z", 1, 2, TerminalFrame.FLAG_BOLD)
+        }.build()
+        val f = TerminalFrame.decode(bytes)
+        assertTrue(f.cells[0].selected)
+        assertFalse(f.cells[0].bold)
+        assertTrue(f.cells[1].selected)
+        assertTrue(f.cells[1].bold)
+        assertFalse(f.cells[2].selected)
+        assertTrue(f.cells[2].bold)
+    }
+
+    @Test
     fun `decodes the alternate-screen flag, which is what keeps taps out of vim`() {
         assertTrue(TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)), alternateOn = true)).alternateOn)
         assertFalse(TerminalFrame.decode(frame(1, 1, listOf(Triple("x", 1, 2)))).alternateOn)

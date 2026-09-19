@@ -467,6 +467,72 @@ class TerminalController(
     private var historyRequested = false
     private var restoreOffset: Long? = null
 
+    /**
+     * A local selection gesture is in progress.
+     *
+     * The gesture lives in the engine, so this only carries touch events down and
+     * repaints. Long-press is the word gesture on both platforms, which is why
+     * there is no platform seam here (ADR-0013, ADR-0014 §6).
+     */
+    override var hasSelection by mutableStateOf(false)
+        private set
+
+    /** Tell the engine how the grid is drawn, so it can reason about distance. */
+    override fun selectionGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int) {
+        engine.setGeometry(columns, cellW, cellH, padLeft, screenH)
+    }
+
+    /** Pointer down, or the start of a drag. */
+    override fun beginSelection(col: Int, row: Int, atMs: Long) {
+        engine.selectionPress(col, row, atMs)
+        refreshSelection()
+    }
+
+    /**
+     * Long press: the word under the finger.
+     *
+     * The engine's click-count path does not produce a word from two taps (see
+     * `test_engine.c`), and long-press is the standard gesture on both platforms
+     * anyway, so this is the gesture that gets it.
+     */
+    override fun selectWordAt(col: Int, row: Int, atMs: Long) {
+        engine.selectionPress(col, row, atMs)
+        engine.selectionDeepPress(atMs)
+        refreshSelection()
+    }
+
+    override fun extendSelection(col: Int, row: Int, atMs: Long) {
+        if (engine.selectionDrag(col, row, atMs)) refreshSelection()
+    }
+
+    /**
+     * Pointer up. Returns the text so the caller can put it on the clipboard:
+     * copy-on-release is the behaviour that needs no button, and the `copy`
+     * control stays for copying again later.
+     */
+    override fun endSelection(col: Int, row: Int, valid: Boolean, atMs: Long): String? {
+        engine.selectionRelease(col, row, valid, atMs)
+        refreshSelection()
+        return engine.selectionText()
+    }
+
+    override fun selectionText(): String? = engine.selectionText()
+
+    override fun clearSelection() {
+        if (engine.selectionClear()) refreshSelection()
+    }
+
+    override fun selectAll() {
+        engine.selectionSelectAll()
+        refreshSelection()
+    }
+
+    /** The engine is the source of truth for whether anything is selected. */
+    private fun refreshSelection() {
+        hasSelection = engine.selectionText() != null
+        renderNow()
+    }
+
     /** Scrolling is a local view change: paint it immediately, never coalesced. */
     private fun renderNow() {
         lastRenderAt = TimeSource.Monotonic.markNow()
