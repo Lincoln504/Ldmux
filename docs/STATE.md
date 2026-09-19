@@ -58,7 +58,11 @@ The wire carries **raw pty bytes**, not a grid.
   socket); `PaneStream` fan-out with coalescing; loopback WebSocket remote transport
   with bearer-token auth.
 - Stream modes: `control` (raw `%output`) with automatic fallback to `capture-pane`
-  **polling** at ~4/s (`stream.ts:35`, `:39`, `:234`).
+  **polling** at ~4/s (`stream.ts:35`, `:39`, `:234`), and **`pipe`** — `pipe-pane`
+  into a FIFO, read with no protocol at all (`tmux/pipe-client.ts`). Selected at
+  runtime with `LDMUX_STREAM_TRANSPORT=pipe`; `control` is the default.
+  Measured A/B in `docs/TMUX-DEPENDENCY.md` §10: the two carry the same bytes to
+  within **0.015 %**, and the pipe costs ~7 ms of local echo latency.
 - CLI verbs: `ping list desktop new shell run send key capture snapshot kill close
   forget adopt mirror live unlive remote pair expose clipboard-write`.
 - **The tmux surface, enumerated from the code** (this is the dependency in full):
@@ -98,6 +102,12 @@ The wire carries **raw pty bytes**, not a grid.
 
 - The buildless xterm.js browser client is gone. Native is the client (ADR-0007).
 
+### 3.6 `scripts/ab-transport.ts` — the transport A/B harness
+
+- Drives both live transports identically and reports attach size, echo latency, burst
+  bytes and chunking. Its own scratch tmux server per run, killed afterwards. Results
+  in `docs/TMUX-DEPENDENCY.md` §10.
+
 ---
 
 ## 4. Verification ledger
@@ -122,7 +132,7 @@ The wire carries **raw pty bytes**, not a grid.
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **288 tests, 288 pass** | `node --test "packages/*/test/*.test.ts"` (30 files) |
+| JS/TS | **295 tests, 295 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
 | Native C (host) | **117 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
 | Kotlin (Android unit) | **127 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
@@ -162,6 +172,9 @@ Each item says what it is, why it matters, and what the next concrete step is.
 
 ### 5.1 Selection: fine-tuning (the feature works; these are the rough edges)
 
+**Double-tap-for-a-word is dropped** — the user does not want it, and it is
+unnecessary given long press already selects. The remaining four:
+
 1. **Auto-scroll while dragging a handle past an edge.** The gesture path has it
    (`TerminalSurface.android.kt`, the `onDrag` branch that calls `controller.scrollBy`);
    the *handle* gesture does not. Next step: extract the "one row per move, clamped to
@@ -180,21 +193,24 @@ Each item says what it is, why it matters, and what the next concrete step is.
    the touched cell and the drag extends. Next step: either the engine gains it, or the
    client expands the range using the engine's word table.
 
-### 5.2 Tap-to-cursor: the `planTap` corrections (not started)
+### 5.2 Tap-to-cursor — **the Home shortcut is fixed; the verdict is not**
 
-Blocked on correcting `TapPolicyTest.kt` first, or the fix fails a stale green test.
+The `Home` shortcut is gone (it was wrong for a wrapped input, which is the case this
+app exists for) and `cursorVisible` is now read as a negative signal. Both are done and
+tested.
 
-- Read byte 8 (`cursorVisible`) as a *negative* signal — it is already decoded and
-  `planTap` never reads it.
-- Fix the `TapPolicy.kt:88` `Home` shortcut using `CURSOR_PENDING_WRAP`; today it
-  pre-empts the strip arithmetic and is only correct when the cursor is on the input's
-  first row.
-- Add the cursor-did-not-move verdict: after a click, if the next frame shows the cursor
+Still open:
+- **The cursor-did-not-move verdict.** After a click, if the next frame shows the cursor
   unmoved, fall back to keys. The delivery acknowledgement (`mousedelivered`) means
-  "written to the pane", not "the cursor moved".
+  "written to the pane", not "the cursor moved". This is the honest general mechanism,
+  and it is the remaining half of the device report about taps.
+- **`CURSOR_PENDING_WRAP` does not solve the Home threshold** — it reports that the
+  cursor sits at a wrap boundary, which says nothing about how many rows the input
+  spans, and byte 9 is the cursor's visual style so it would need a new wire field.
+  That is why the shortcut was removed instead. Recorded so it is not re-attempted.
 - Known and unavoidable: `micro` and `pi` are indistinguishable by every signal the
-  client has, so any rule that clicks for one clicks for the other. `docs/NATIVE-TERMINAL.md`
-  has the measured table.
+  client has, so any rule that clicks for one clicks for the other.
+  `docs/NATIVE-TERMINAL.md` has the measured table.
 
 ### 5.3 Clipboard write policy: device end-to-end not done
 
@@ -228,7 +244,7 @@ Blocked on correcting `TapPolicyTest.kt` first, or the fix fails a stale green t
   their internals clip when forced shorter. Open question: whether to restyle them.
 - Commit `0851333`'s message describes one of its three changes. It is already pushed, so
   correcting it means `--amend` plus `--force-with-lease`.
-- **Ahead of `origin/main` by 32 commits at the time of writing** (`git log --oneline origin/main..HEAD` is the current answer). The push is held for the user's word.
+- **Ahead of `origin/main`** (`git log --oneline origin/main..HEAD` is the current answer). The push is held for the user's word.
 
 ---
 
@@ -236,7 +252,7 @@ Blocked on correcting `TapPolicyTest.kt` first, or the fix fails a stale green t
 
 | Decision | Options | Where the evidence is |
 |---|---|---|
-| **The tmux dependency** | (a) keep tmux as the PTY keeper, replace control mode with ordinary commands; (b) keep everything as it is; (c) build the session layer ourselves, planning the keeper process first | **`docs/TMUX-DEPENDENCY.md`** |
+| **The tmux dependency** | (a) keep tmux as the PTY keeper, replace control mode with `pipe-pane`; (b) keep everything as it is; (c) build the session layer ourselves. **(c) is decided: not built** (ADR-0015). **(a) is built and measured but not switched to** — the default is still `control` | **`docs/TMUX-DEPENDENCY.md`** §7 and §10, **ADR-0015** |
 | Whether to bring up the macOS VM for iOS | now / after Android is finished | §5.4, `docs/IOS-DEVELOPMENT.md` |
 | Whether the login shell's own PS1 should be honoured or overridden | honoured today; `set-environment -gu PS1` ensures the value is the user's | `packages/daemon/src/tmux/control-plane.ts`, the `serverOptionArgs` block |
 | Whether `~/.tmux.conf` should be read | **Decided: no.** ldmux drives its own server, and a shell whose behaviour depends on whose dotfiles are on the machine is not supportable | `writeServerProfile` |
@@ -248,7 +264,14 @@ Blocked on correcting `TapPolicyTest.kt` first, or the fix fails a stale green t
 Things we do not know, each with the way to find out. Some of these are here because a
 web-research pass failed mid-session and the question was never answered.
 
-### 7.1 The tmux replacement questions (research incomplete)
+### 7.1 The tmux replacement questions — **answered by measurement (§8, §10)**
+
+The four `pipe-pane` questions are settled: verbatim, lossless, bounded, ordered, and
+with no flow control. The keeper-pattern research is complete and written up in
+ADR-0015. **Nothing here is still unknown.** The one thing outstanding is the **device
+A/B**: the numbers in §10 are host loopback, and the two behaviours that would decide
+it — echo latency over the tailnet, and what each transport does when the phone stops
+keeping up — need the phone.
 
 - **Does `pipe-pane` deliver raw bytes equivalent to control mode's `%output`,
   including escape sequences and OSC?** Not verified. `pipe-pane -o 'cat >> file'` is the
@@ -318,6 +341,18 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
 - **"A magnifier."** Built, worked, removed by instruction. Recorded as a decision.
 - **"The wrapped-line test is a flake."** It was deterministic: a 40-character line on a
   40-column pane does not wrap, and the test asserted it must.
+- **"Raising the burst makes the pause test reliable."** It does the opposite. A bigger
+  burst starves the producing process under load, so it writes slower, so the client
+  keeps up, so tmux correctly never pauses. Measured: 8 MB failed more often than 300 KB.
+  The real cause was suite parallelism.
+- **Two tests were passing on their own echo.** The shell echoes the command it was
+  given, so a sentinel word and the literal text `\033` are both in the stream before
+  any of it runs. A wait on a sentinel passed instantly and a negative assertion about
+  escaping failed on the echo. Escaping is now asserted positively, which cannot be
+  fooled.
+- **`waitFor` in this suite takes a synchronous predicate.** An `async` one returns a
+  Promise, a Promise is truthy, and the wait passes instantly without checking anything.
+  A test that always passes is worse than a failing one.
 - **The 2026-09-19 restart.** Moving the tail tmux server out of the dying unit's cgroup
   saved the server and not the panes, so the sessions died. The lesson is that a process
   tree has to move, not a parent.
