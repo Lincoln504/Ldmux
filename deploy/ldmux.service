@@ -43,6 +43,18 @@ Environment=XAUTHORITY=%h/.Xauthority
 # Environment=LDMUX_TMUX_BIN=/usr/bin/tmux
 
 Environment=LDMUX_STATE_DIR=%t/ldmux
+
+# The daemon the phone talks to. Without these it answers on an unix socket only,
+# which is fine for the CLI and useless for a device.
+#
+# Environment=LDMUX_REMOTE_HOST=100.127.119.54
+# Environment=LDMUX_REMOTE_PORT=7625
+
+# This unit runs TypeScript through Node with no build step (ADR-0009), so node has
+# to be findable by a service whose PATH is not a login shell's. A system install
+# can leave this out and put ldmuxd on the system PATH instead.
+#
+# Environment=PATH=%h/.config/nvm/versions/node/v25.8.2/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/ldmuxd
 
 [Install]

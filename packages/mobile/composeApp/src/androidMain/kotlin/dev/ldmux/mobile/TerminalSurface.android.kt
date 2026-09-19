@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -201,6 +202,9 @@ actual fun rememberTerminalSurface(
     }
     val focusManager = LocalFocusManager.current
     val focusRequester = remember { FocusRequester() }
+    // The surface's own focus target, which is what landscape types into. See the
+    // LaunchedEffect below for why a terminal with no text field still needs it.
+    val surfaceFocus = remember { FocusRequester() }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     /** Where the user last tapped, so the snap is visible before the server answers. */
     var tapAt by remember { mutableStateOf<Pair<Int, Int>?>(null) }
@@ -286,7 +290,14 @@ actual fun rememberTerminalSurface(
         if (typing) {
             focusRequester.requestFocus()
         } else {
+            // Landscape has no text field, and it still has to hold focus.
+            // `onPreviewKeyEvent` is delivered from the root down to the focused
+            // node, so with nothing focused the box that maps key codes to
+            // terminal keys is never asked at all and every hardware key is
+            // dropped silently. Clearing focus is how the keyboard is hidden; it
+            // must not also be how the keyboard is muted.
             focusManager.clearFocus()
+            surfaceFocus.requestFocus()
         }
     }
 
@@ -315,10 +326,28 @@ actual fun rememberTerminalSurface(
             Key.Delete -> "DC"
             else -> null
         }
+        // Characters. The table above maps terminal *keys*, and everything else
+        // used to fall on the floor: in landscape there is no text field, so a
+        // letter arrives as a key event and nothing ever turned it into input.
+        // Named keys worked and letters did not, which is exactly what the phone
+        // showed.
+        //
+        // Skipped while the soft keyboard is up, because there the text field owns
+        // text: handling it here too would send every character a second time.
+        // Skipped under Ctrl or Alt, which are keys in their own right — a ctrl
+        // chord on a hardware keyboard must not become its letter.
+        val native = event.nativeKeyEvent
+        if (!typing && !native.isCtrlPressed && !native.isAltPressed && !native.isMetaPressed) {
+            val cp = native.unicodeChar
+            if (cp >= 0x20 && cp != 0x7F) {
+                controller.sendText(cp.toChar().toString())
+                return@onPreviewKeyEvent true
+            }
+        }
         if (key == null) return@onPreviewKeyEvent false
         controller.sendKey(key)
         true
-    }) {
+    }.focusRequester(surfaceFocus).focusable()) {
         Canvas(
             Modifier
                 .fillMaxSize()
