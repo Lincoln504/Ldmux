@@ -12,6 +12,23 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const tmuxSocket = `ldmux-remotetest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const stateDir = mkdtempSync(join(tmpdir(), "ldmux-remote-"));
+
+// **Start from a server that does not exist.**
+//
+// The daemon writes its option profile and every tmux it runs passes `-f`, but tmux
+// reads `-f` only when a server *starts* — so a server left over from a previous run of
+// this file keeps whatever options it had, and the profile silently does not apply.
+//
+// That is not a test artefact, it is how the product behaves too: a long-lived server
+// keeps the profile it was born with, which is why the phone's own server had to have
+// the new options applied to it by hand rather than by restarting the daemon. A test
+// that depends on machine state is not a test, and the failure it produced was the one
+// this suite has been carrying for a while: `window-size manual` missing means the pane
+// follows the attached client's width, so a line that is supposed to *wrap* fits on one
+// row, and a test about wrapped lines fails for a reason that has nothing to do with
+// wrapping.
+killTmuxServer(tmuxSocket);
+
 const daemon = new LdmuxDaemon({ stateDir, tmuxSocket, remotePort: 0 });
 await daemon.start();
 
@@ -461,7 +478,14 @@ test("a wrapped line comes back as the screen has it, so replaying it does not s
   ws.send(JSON.stringify({ type: "attach", sessionId: session.id, cols: 40, rows: 24 }));
   expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
 
-  const long = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD";
+  // 50 characters on a 40-column pane, and the exact length matters.
+  //
+  // This was 40 characters, which is precisely one row wide: `capture-pane` returned
+  // it joined into a single row because it *was* a single row, and the assertion below
+  // — that the logical line must not come back joined — failed on a line that never
+  // wrapped in the first place. The test had been failing for that reason rather than
+  // for the one it is about.
+  const long = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEEEEEEEEE";
   ws.send(JSON.stringify({ type: "input", data: `echo ${long}` }));
   ws.send(JSON.stringify({ type: "key", keys: ["Enter"] }));
   expect(await waitFor(() => output.join("").includes("DDDDDDDDDD"))).toBe(true);
@@ -474,6 +498,7 @@ test("a wrapped line comes back as the screen has it, so replaying it does not s
   const screen = snap.screen as string;
   // The logical line must come back the way the pane holds it: wrapped at the
   // pane's width, so the client's emulator reproduces the same screen.
+  expect(long.length).toBeGreaterThan(40);
   expect(screen).not.toContain(long);
   expect(screen).toContain("AAAAAAAAA");
   // And the screen must not have grown a row — that is the scroll which deletes
