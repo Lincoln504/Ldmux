@@ -198,7 +198,7 @@ test("snapshot state reflects the pane's terminal modes, not hardcoded false", a
   stream.close();
 });
 
-test("a real tmux %pause resyncs subscribers and then resumes the pane", { timeout: 30000 }, async () => {
+test("a real tmux %pause resyncs subscribers and then resumes the pane", { timeout: 60000 }, async () => {
   // pause-after=0 makes tmux pause the pane as soon as this client lags at all,
   // so the whole path can be exercised for real: tmux pauses -> the client
   // reports it -> the stream tells subscribers to resync -> the pane is resumed.
@@ -210,16 +210,24 @@ test("a real tmux %pause resyncs subscribers and then resumes the pane", { timeo
   const resets: string[] = [];
   await stream.subscribe({ onOutput: (t) => chunks.push(t), onReset: (r) => resets.push(r) });
 
+  // Whether tmux pauses is a race: `pause-after=0` means "pause as soon as this
+  // client is behind", and a client that keeps up is never behind. Raising the
+  // burst does NOT make this more reliable, which is worth recording because it is
+  // the obvious thing to try — a bigger burst starves the producing process under
+  // load, so it writes slower, so the client keeps up and the pause never happens.
+  // Measured: 8 MB made this test fail more often than 300 KB, not less. The
+  // original size is kept, and the suite's parallelism is bounded instead
+  // (`--test-concurrency=4` in package.json), which addresses the actual cause.
   await stream.inputText("yes PAUSE_TEST | head -c 300000; printf 'PAUSE_DONE\\n'");
   await stream.sendKey(["Enter"]);
 
-  // With pause-after=0 and a burst this size tmux does pause us; if it ever
-  // stops doing so the assertion below fails loudly rather than passing vacuously.
-  expect(await waitFor(() => resets.length > 0, 15000)).toBe(true);
+  // If tmux ever stops pausing us the assertion below fails loudly rather than
+  // passing vacuously.
+  expect(await waitFor(() => resets.length > 0, 25000)).toBe(true);
   expect(resets[0]).toBe("pane paused");
   // And the pane must resume: a dropped resume leaves it frozen until tmux's own
   // timeout, so seeing the tail of the burst is the real assertion.
-  expect(await waitFor(() => chunks.join("").includes("PAUSE_DONE"), 15000)).toBe(true);
+  expect(await waitFor(() => chunks.join("").includes("PAUSE_DONE"), 25000)).toBe(true);
   expect(stream.mode).toBe("control");
   stream.close();
 });

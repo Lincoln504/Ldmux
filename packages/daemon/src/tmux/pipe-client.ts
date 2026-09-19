@@ -38,6 +38,14 @@ import { StringDecoder } from "node:string_decoder";
 
 /** A pipe that dies this often is not worth restarting. */
 export const PIPE_READER_POLL_MS = 500;
+/**
+ * Consecutive negative liveness samples before the reader is called dead.
+ *
+ * One is not enough: `pipe-pane -o` returns before tmux has necessarily
+ * registered the pipe, so an immediate first sample can read `#{pane_pipe}` as 0
+ * on a perfectly healthy pipe and tear the stream down at birth.
+ */
+const PIPE_DEAD_SAMPLES = 2;
 
 export interface TmuxPipeClientOptions {
   tmuxSocket: string;
@@ -75,6 +83,7 @@ export class TmuxPipeClient {
   private closed = false;
   private started = false;
   private readerAlive = false;
+  private deadSamples = 0;
   private watchTimer: ReturnType<typeof setInterval> | null = null;
 
   /** Bytes handed to `onOutput`. Lets a caller drop a pre-snapshot prefix. */
@@ -182,7 +191,25 @@ export class TmuxPipeClient {
       throw new Error("pipe-pane could not be started");
     }
     this.started = true;
+    // Confirm tmux actually took the pipe before declaring the client live.
+    // `pipe-pane` returning success means the command was accepted, which is not
+    // the same as the pipe being registered — and everything downstream assumes a
+    // live stream. Bounded, so a pane that will not take a pipe fails loudly here
+    // rather than looking like a terminal that has gone silent.
+    let registered = false;
+    for (let i = 0; i < 20; i++) {
+      if (await this.pipeReported()) {
+        registered = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (!registered) {
+      await this.teardown();
+      throw new Error("pipe-pane was accepted but never registered");
+    }
     this.readerAlive = true;
+    this.deadSamples = 0;
     // tmux does not report a dead reader, so this is how we find out.
     this.watchTimer = setInterval(() => this.checkReader(), PIPE_READER_POLL_MS);
     this.watchTimer.unref?.();
@@ -203,8 +230,13 @@ export class TmuxPipeClient {
   private checkReader(): void {
     if (this.closed || !this.started) return;
     void this.pipeReported().then((alive) => {
-      if (this.closed) return;
-      if (this.readerAlive && !alive) {
+      if (this.closed || !this.started) return;
+      if (alive) {
+        this.deadSamples = 0;
+        return;
+      }
+      this.deadSamples++;
+      if (this.readerAlive && this.deadSamples >= PIPE_DEAD_SAMPLES) {
         this.readerAlive = false;
         this.opts.onExit(this);
       }

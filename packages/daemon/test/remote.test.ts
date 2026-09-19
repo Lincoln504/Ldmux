@@ -7,6 +7,7 @@ import { LdmuxDaemon } from "../src/daemon.ts";
 import { killTmuxServer } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import { daemonCall } from "../../protocol/src/rpc.ts";
+
 import { decodeFrames, FrameType, type Frame } from "../../protocol/src/frames.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -399,7 +400,14 @@ test("attach carries the client's grid, and resize re-sizes the pane", async () 
   expect(
     await waitFor(() => text.some((m) => m.type === "caps" && m.cols === 88 && m.rows === 26)),
   ).toBe(true);
-  expect(text.filter((m) => m.type === "snapshot").length).toBeGreaterThan(before);
+  // Wait for the SNAPSHOT, not just for the `caps` that precedes it. The two
+  // arrive as separate messages and the snapshot is the slower one (it needs a
+  // capture), so asserting on the count the instant `caps` lands is a race the
+  // test created for itself. It failed under parallel load and looked like a
+  // resize bug.
+  expect(
+    await waitFor(() => text.filter((m) => m.type === "snapshot").length > before),
+  ).toBe(true);
   ws.close();
 });
 
@@ -601,7 +609,22 @@ test("a click a mouse-aware program can take is answered", { timeout: 30000 }, a
     text: "printf '\\033[?1000h\\033[?1006h'; cat",
   });
   await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
-  await sleep(700);
+  // Wait for the pane to actually BE in SGR mouse mode rather than sleeping a
+  // fixed 700 ms. The click is refused with `no_mouse` when the mode is not on
+  // yet, so a fixed sleep turns a slow shell start into a failed test that looks
+  // like a mouse-reporting bug. Same trap as the fixed sleeps elsewhere: wait for
+  // the state, not for a duration.
+  //
+  // Polled explicitly rather than through `waitFor`, which in this file takes a
+  // synchronous predicate: an `async` one returns a Promise, a Promise is truthy,
+  // and the wait passes instantly without ever having checked anything.
+  let mouseReady = false;
+  for (let i = 0; i < 150 && !mouseReady; i++) {
+    const st = await daemonCall(daemon.socketPath, "snapshot", { id: session.id });
+    mouseReady = st.state.mouse === true && st.state.mouseSgr === true;
+    if (!mouseReady) await sleep(100);
+  }
+  expect(mouseReady).toBe(true);
 
   const { ws, text } = await connect(info, info.token);
   ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));

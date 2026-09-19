@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test \"packages/*/test/*.test.ts\"",
+    "test": "node --test --test-concurrency=4 \"packages/*/test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "daemon": "node packages/daemon/src/main.ts",
     "cli": "node packages/daemon/src/cli.ts",
