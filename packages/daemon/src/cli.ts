@@ -198,6 +198,21 @@ async function main() {
       break;
     }
 
+    case "clipboard-write": {
+      // The off default is not a joke: honouring OSC 52 lets a program inside a
+      // shell overwrite what the user copies anywhere on the device.
+      const [arg] = positional(rest, []);
+      if (arg !== "on" && arg !== "off" && arg !== undefined) {
+        console.error("usage: ldmux clipboard-write on|off");
+        process.exit(2);
+      }
+      const { on } = await daemonCall(sock, "clipboardWrite", {
+        on: arg === "on",
+      });
+      console.log(`clipboard-write ${on ? "on" : "off"}`);
+      break;
+    }
+
     case "copy": {
       const [id, which] = positional(rest, []);
       const on = which !== "off";

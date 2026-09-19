@@ -191,6 +191,14 @@ export interface DaemonMethods {
   };
   closeLive: { params: { id: string }; result: { ok: boolean; detail?: string } };
   copyMode: { params: { id: string; on: boolean }; result: { ok: true } };
+  /**
+   * May a program inside a shell put text on the phone's clipboard?
+   *
+   * A host policy, not a session one, and closed unless it is asked for: the pane
+   * is arbitrary code and the clipboard is shared with every other app on the
+   * device. See docs/SECURITY-CONTROL-REGISTER.md.
+   */
+  clipboardWrite: { params: { on: boolean }; result: { on: boolean } };
   remote_info: {
     params: Record<string, never>;
     result: { hostname: string; port: number; path: string; token: string };

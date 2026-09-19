@@ -106,4 +106,32 @@ class PredictorTest {
         assertTrue(c is Predictor.Consumption.Mispredict)
         assertFalse(p.hasPending, "the whole prediction is dropped, not left half-consumed")
     }
+
+    @Test
+    fun `a mispredict hands back every byte it was given`() {
+        // This is the one branch where output is neither written through nor
+        // partially consumed, so it is the one branch that can lose a frame. It
+        // did: the controller repainted from a snapshot and dropped the bytes, and
+        // a snapshot is a rendered screen that cannot carry an escape sequence —
+        // so a program's clipboard write vanished while the program was told it
+        // had succeeded. The bytes travel in the verdict now, and this pins the
+        // exact bytes: a frame ending mid-escape is still delivered whole.
+        val p = Predictor()
+        p.predict(bytes("abc"))
+        val frame = bytes("abZ\u001b]52;c;aGVsbG8=\u0007tail")
+        val c = p.reconcile(frame)
+        assertTrue(c is Predictor.Consumption.Mispredict)
+        val verdict = c as Predictor.Consumption.Mispredict
+        assertContentEquals(frame, verdict.feed, "a mispredict must not swallow the frame")
+    }
+
+    @Test
+    fun `a mispredict with no prediction at all never happens`() {
+        // Guards the empty case: with nothing outstanding, reconcile is a
+        // pass-through, so an escape sequence is written straight through.
+        val p = Predictor()
+        val frame = bytes("\u001b]52;c;aGVsbG8=\u0007")
+        val c = p.reconcile(frame)
+        assertTrue(c is Predictor.Consumption.Passthrough)
+    }
 }

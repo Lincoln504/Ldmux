@@ -206,7 +206,15 @@ class TerminalController(
      */
     private fun feed(bytes: ByteArray, length: Int = bytes.size) {
         engine.write(bytes, length)
-        engine.takeClipboardRequest()?.let { onClipboardRequest?.invoke(it) }
+        // Read the clipboard slot only when someone can take it. The read both
+        // answers and *consumes*, so draining it with no handler installed would
+        // discard the user's copy — a recomposition gap is enough to lose it, and
+        // the loss is invisible because the program was told the write succeeded.
+        if (onClipboardRequest != null) {
+            engine.takeClipboardRequest()?.let { request ->
+                onClipboardRequest?.invoke(request)
+            }
+        }
     }
 
     /**
@@ -250,10 +258,14 @@ class TerminalController(
                 feed(bytes)
                 scheduleRender()
             }
-            Predictor.Consumption.Mispredict -> {
+            is Predictor.Consumption.Mispredict -> {
                 // The prediction was wrong and a VT cannot un-apply it, so the
-                // screen is rebuilt from the server instead.
+                // screen is rebuilt from the server instead. The frame is fed
+                // first all the same: the snapshot restores the screen, but only
+                // bytes can carry a control sequence, and dropping them here
+                // silently eats a program's clipboard write or window title.
                 staleJob?.cancel()
+                feed(c.feed)
                 attach.snapshotNow()
             }
         }

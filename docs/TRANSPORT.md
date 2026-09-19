@@ -101,7 +101,9 @@ From `apps/session-bridge/src/` and docs:
 - **Copy:** `compute_diff` (`bridge/streaming.rs` L114–140) — if `new` starts with
   `last`, emit the UTF-8-boundary-walked suffix; else emit the full capture so the
   client resyncs. Copy the **stateful sanitizer** policy (one instance per stream;
-  drop OSC 52 / DCS / device-status).
+  drop OSC 52 / DCS / device-status). OSC 52 is the one sequence a host may
+  deliberately re-enable (`ldmux clipboard-write on`, default off); everything else
+  is unconditional.
 - **Avoid:** their control-mode client (`tmux/control.rs`) is **dead code** — grep
   finds no consumer; the shipped path is capture-pane diffs. Its parser has real
   bugs: drops whole reads on split UTF-8 (L241–269), `unescape_octal` does

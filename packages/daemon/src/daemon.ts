@@ -23,6 +23,7 @@ import { readDesktop } from "./desktop-inventory.ts";
 import { closeLive, liveWindowState, openLive } from "./desktop.ts";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 import { loadOrCreateToken } from "./auth.ts";
+import { readClipboardWritePolicy, writeClipboardWritePolicy } from "./clipboard-policy.ts";
 import type {
   NewParams,
   SendParams,
@@ -421,7 +422,15 @@ export class LdmuxDaemon {
   private streamFor(record: SessionRecord): PaneStream {
     let stream = this.streams.get(record.tmuxName);
     if (!stream) {
-      stream = new PaneStream(this.cp.socket, record.tmuxName, this.cp);
+      // The clipboard policy is read when the stream is made, not at startup, so
+      // allowing a program to write the clipboard does not require restarting a
+      // daemon that is holding the user's live shells. A stream outlives an idle
+      // client by WS_IDLE_MS, so a change lands within a minute of the next
+      // attach rather than instantly — which is the price of not dropping
+      // sessions the user is working in.
+      stream = new PaneStream(this.cp.socket, record.tmuxName, this.cp, {
+        clipboardWrite: readClipboardWritePolicy(this.stateDir),
+      });
       this.streams.set(record.tmuxName, stream);
     }
     return stream;
@@ -897,6 +906,17 @@ export class LdmuxDaemon {
             joinWrapped: true,
           }),
         };
+
+      case "clipboardWrite": {
+        // A host policy, not a session one: it decides whether *any* program in
+        // *any* shell may put text on the phone's clipboard. Written to the state
+        // dir rather than held in memory so that the running daemon — which is
+        // holding the user's live shells — picks it up without a restart, and so
+        // that a daemon started later agrees with the one that set it.
+        const on = params.on === true;
+        writeClipboardWritePolicy(this.stateDir, on);
+        return { on };
+      }
 
       case "copyMode": {
         // Straight at the pane, not through the stream: copy-mode is a tmux

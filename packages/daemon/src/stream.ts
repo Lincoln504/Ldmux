@@ -14,6 +14,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { PaneState } from "../../protocol/src/rpc.ts";
 import { createSanitizer, sanitizeOnce } from "./sanitize.ts";
+import type { Sanitizer } from "./sanitize.ts";
 import { TmuxControlClient } from "./tmux/control-client.ts";
 import type { TmuxControlPlane } from "./tmux/control-plane.ts";
 import { screenUpdate } from "./tmux/screen-diff.ts";
@@ -46,7 +47,7 @@ export class PaneStream {
   private client: TmuxControlClient | null = null;
   private connecting: Promise<void> | null = null;
   private readonly subs = new Set<StreamSubscriber>();
-  private readonly sanitizer = createSanitizer();
+  private readonly sanitizer: Sanitizer;
   private lingerTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private epoch = 0;
@@ -60,18 +61,22 @@ export class PaneStream {
   private readonly tmuxSocket: string;
   readonly sessionName: string;
   private readonly cp: TmuxControlPlane;
-  private readonly opts: { pollMs?: number; pauseAfter?: number };
+  private readonly opts: { pollMs?: number; pauseAfter?: number; clipboardWrite?: boolean };
 
   constructor(
     tmuxSocket: string,
     sessionName: string,
     cp: TmuxControlPlane,
-    opts: { pollMs?: number; pauseAfter?: number } = {},
+    opts: { pollMs?: number; pauseAfter?: number; clipboardWrite?: boolean } = {},
   ) {
     this.tmuxSocket = tmuxSocket;
     this.sessionName = sessionName;
     this.cp = cp;
     this.opts = opts;
+    // Built here, from the option, because an OSC 52 sequence can straddle two
+    // output chunks: whether it is dropped has to be decided by the same state
+    // machine that is tracking the partial sequence. It defaults to closed.
+    this.sanitizer = createSanitizer({ clipboardWrite: opts.clipboardWrite === true });
   }
 
   get subscriberCount(): number {

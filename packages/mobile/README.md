@@ -47,7 +47,10 @@ Two things worth knowing (both live gotchas):
 The JDK + Gradle live in a dedicated devShell so the main shell stays lean:
 
 ```bash
-nix develop .#mobile --command gradle -p packages/mobile :composeApp:assembleDebug
+# `just android` rebuilds the native core first. Gradle alone does not: it
+# packages whatever .so is already in jniLibs/, so invoking gradle directly can
+# ship a stale library. See "The native library is a build output" below.
+just android
 # APK: packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
 adb install -r packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
 ```
@@ -63,6 +66,21 @@ machine the SDK is `/home/ldeen/Android/Sdk`. `ANDROID_HOME` is exported by the
 git-ignored. The build script resolves the NDK by each directory's
 `Pkg.Revision`, never by sorting names — `sort -V` orders `30.0.16248370` before
 `android-ndk-r27c`, which silently picks the *older* toolkit.
+
+**Gradle does not compile C and does not know the shim changed.** It packages
+whatever `.so` is already sitting in `jniLibs/`, so `gradle :composeApp:assembleDebug`
+on its own ships the last library that was built, however old — which is how a
+day-stale `.so` once reached a phone, where the only symptom was a program's copy
+going nowhere and the device reporting silence rather than an error. `just android`
+solves it by depending on `native-android`. `test/native-freshness.test.ts`
+enforces it: a packaged `.so` older than any shim source fails the suite, and so
+does a `.so` missing a JNI symbol Kotlin declares.
+
+The portable half of the shim has its own tests, which need no device at all:
+
+```bash
+just native-test   # builds a host libghostty-vt once, then runs native/test_engine.c
+```
 
 ## A test daemon, and the two ways it lies
 

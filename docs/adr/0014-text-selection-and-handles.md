@@ -149,16 +149,33 @@ than what it does to the clipboard, since "copy" now names the gesture.
 
 ## 8. Clipboard, and a bug next to it
 
-The app has **no clipboard code at all** — `grep -i clipboard` over the whole source
-tree returns nothing.
+The app had **no clipboard code at all** — `grep -i clipboard` over the whole source
+tree returned nothing.
 
-Separately: tmux is configured `set-clipboard on`, and the engine parses OSC 52 / 5522 /
-1337 and will invoke a clipboard-write callback. **No callback is installed in
-`ldmux_jni.c`**, so a copy performed *inside* tmux or vim is silently discarded today.
-Same seam, different bug, and worth fixing in the same change.
+CORRECTION (2026-09-19). The paragraph that used to be here said the missing callback
+was "a bug" and that "a copy performed inside tmux or vim is silently discarded today".
+The first half was right and the second was wrong, and the difference matters: the
+discard is not an accident, it is `packages/daemon/src/sanitize.ts` doing its job. The
+daemon drops OSC 52 from pane output **deliberately**, because the pane is arbitrary
+code and the clipboard is shared with every other app on the device — a program inside
+a shell silently replacing what the user copies elsewhere is a real attack, not a
+feature. The client-side callback was genuinely missing, but it was unreachable by
+design, so installing it changed nothing while the policy stood.
+
+Both halves exist now:
+
+- The shim installs `OPT_CLIPBOARD_WRITE` and hands the value across the seam
+  (ADR-0013 §2). `OPT_CLIPBOARD_READ` stays **unset**: a program may not ask what is
+  on the clipboard even when writes are allowed, because exfiltrating the user's
+  clipboard is worse than a copy that does not arrive.
+- The daemon keeps dropping OSC 52 unless the host says otherwise. `ldmux
+  clipboard-write on|off` writes a policy file in the state directory, read when a
+  stream is created, so it can be opened without restarting a daemon that is holding
+  live shells. Default: **off**.
 
 On Android 13+ the platform shows its own "copied" confirmation; the app must not add a
-second one.
+second one. A program that reports its own success (pi prints "Copied!" whether or not
+anything received the write) is saying what it sent, not what arrived.
 
 ## 9. Order of work
 
@@ -167,7 +184,9 @@ second one.
 2. `FLAG_SELECTED` bit, decoder, painter.
 3. Double-tap, drag, autoscroll timer.
 4. Handle mode, including the reversed-endpoint trick (§4.1).
-5. Clipboard seam and OSC 52 callback.
+5. Clipboard seam and OSC 52 callback. **Done** (`ldmux_jni.c` +
+   `OPT_CLIPBOARD_WRITE`, and paste via `TerminalHandle.paste`). Note the policy: the
+   daemon drops OSC 52 unless `ldmux clipboard-write on` (§8).
 6. Tests, including the scrolled-screen one (§4.2).
 
 ## 10. Known limits

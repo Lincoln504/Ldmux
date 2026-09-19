@@ -10,6 +10,45 @@ test("drops OSC 52 clipboard writes (BEL and ST terminated)", () => {
   expect(sanitizeOnce("a\x1b]52;c;SGVsbG8=\x1b\\b")).toBe("ab");
 });
 
+test("OSC 52 passes only when the host asked for it", () => {
+  // The default is the security control, so it is asserted first and separately:
+  // a change that silently flips the default has to fail a test, not a review.
+  const off = createSanitizer();
+  expect(off.push("a\x1b]52;c;SGVsbG8=\x07b")).toBe("ab");
+
+  const on = createSanitizer({ clipboardWrite: true });
+  expect(on.push("a\x1b]52;c;SGVsbG8=\x07b")).toBe("a\x1b]52;c;SGVsbG8=\x07b");
+  expect(on.push("a\x1b]52;c;SGVsbG8=\x1b\\b")).toBe("a\x1b]52;c;SGVsbG8=\x1b\\b");
+});
+
+test("allowing a clipboard write relaxes nothing else", () => {
+  // The boundary is one sequence wide. Everything else the sanitizer drops — the
+  // device queries a client would answer, and the DCS/APC strings — stays dropped,
+  // because the option says what it says and nothing more.
+  const on = createSanitizer({ clipboardWrite: true });
+  expect(on.push("a\x1bPq#0;2;0;0;0\x1b\\b")).toBe("ab");
+  expect(on.push("a\x1b_Ga=T\x1b\\b")).toBe("ab");
+  for (const query of ["\x1b[c", "\x1b[>c", "\x1b[5n", "\x1b[6n", "\x1b[?0n"]) {
+    expect(on.push(`a${query}b`)).toBe("ab");
+  }
+  // Other OSC still pass, which is what makes the exception narrow rather than a
+  // general loosening of the escape-sequence policy.
+  expect(on.push("\x1b]0;title\x07")).toBe("\x1b]0;title\x07");
+});
+
+test("an OSC 52 split across chunks is still one write", () => {
+  // The sequence can straddle two output chunks, so the decision has to be made by
+  // the same state machine that tracks the partial sequence. Checking the option
+  // only on the first chunk would let the tail of a sequence through unexamined.
+  const off = createSanitizer();
+  expect(off.push("a\x1b]52;c;SGVs")).toBe("a");
+  expect(off.push("bG8=\x07b")).toBe("b");
+
+  const on = createSanitizer({ clipboardWrite: true });
+  expect(on.push("a\x1b]52;c;SGVs")).toBe("a");
+  expect(on.push("bG8=\x07b")).toBe("\x1b]52;c;SGVsbG8=\x07b");
+});
+
 test("keeps other OSC: titles and hyperlinks", () => {
   expect(sanitizeOnce("\x1b]0;title\x07")).toBe("\x1b]0;title\x07");
   expect(sanitizeOnce("x\x1b]8;;https://e\x1b\\link\x1b]8;;\x1b\\y")).toBe("x\x1b]8;;https://e\x1b\\link\x1b]8;;\x1b\\y");

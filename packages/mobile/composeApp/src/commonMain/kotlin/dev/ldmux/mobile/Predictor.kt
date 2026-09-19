@@ -37,8 +37,24 @@ class Predictor {
         /** The echo was confirmed; write whatever is left after the match. */
         data class Consume(val remaining: ByteArray) : Consumption
 
-        /** The prediction was wrong: repaint from a snapshot instead. */
-        data object Mispredict : Consumption
+        /**
+         * The prediction was wrong: repaint from a snapshot instead.
+         *
+         * The bytes still have to be written. A snapshot is a *rendered screen*,
+         * so it can convey characters and nothing else — every escape sequence in
+         * the discarded frame is lost, and a program's clipboard write, window
+         * title or hyperlink goes with it. This carried no payload once, and the
+         * symptom was a copy that reported success and put nothing on the
+         * clipboard, because a program is told the write succeeded long before
+         * anyone could notice it went nowhere.
+         *
+         * Feeding before the snapshot is safe: the snapshot is captured after the
+         * output reached the pty, so it lands last and the screen converges on the
+         * truth either way. The type carries the bytes rather than leaving it to
+         * the caller to remember, because a caller that forgets is a silent drop
+         * of everything the frame was carrying.
+         */
+        data class Mispredict(val feed: ByteArray) : Consumption
     }
 
     private val pending = ArrayDeque<Byte>()
@@ -108,7 +124,7 @@ class Predictor {
             else -> {
                 pending.clear()
                 echoing = false
-                Consumption.Mispredict
+                Consumption.Mispredict(output)
             }
         }
     }

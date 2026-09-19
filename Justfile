@@ -1,7 +1,8 @@
 # ldmux dev tasks — run inside `nix develop`.
 
-# Unit + live tests (live tests spawn a scratch tmux server).
-test:
+# Unit + live tests (live tests spawn a scratch tmux server), plus the portable
+# shim's own tests (which need a host libghostty-vt: built once, then seconds).
+test: native-test
     node --test "packages/*/test/*.test.ts"
 
 # Strict typecheck (no build step).
@@ -64,6 +65,11 @@ native-android *abis:
 # Build and install the debug APK on the attached phone.
 android-install: android
     adb install -r packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
+
+# The shim's own tests, on the host: no device, no daemon, no emulator. Covers the
+# portable core (clipboard writes, the frame header contract, cursor movement).
+native-test:
+    nix develop .#mobile --command packages/mobile/scripts/test-native.sh
 
 # JVM unit tests for the shared logic (the frame decoder is the wire contract
 # with the JNI shim, so it is pinned without needing a device).

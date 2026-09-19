@@ -12,7 +12,29 @@
  *         queries (DA/DSR: CSI c, CSI >c, CSI 5n, CSI 6n, CSI ?0n).
  *   keep  everything else, including SGR, cursor movement, OSC 8 hyperlinks,
  *         OSC 0/2 titles.
+ *
+ * OSC 52 is the one exception that can be asked for, and it is asked for in
+ * `clipboardWrite` rather than assumed. Dropping it is a security decision with a
+ * real cost — a program inside the shell cannot put anything on the phone's
+ * clipboard, so `pi`'s copy reports success and does nothing — but honouring it
+ * load-bearing: the pane is arbitrary code, and a clipboard is shared with every
+ * other app on the device. A terminal that silently lets any program overwrite
+ * what the user copies elsewhere is a terminal nobody asked for. So the default
+ * stays closed, and the user may open it deliberately.
+ *
+ * The read direction has no exception at all. `GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ`
+ * is deliberately unset in the shim, so a program cannot ask what is on the
+ * clipboard even when writes are allowed: pasting your passwords somewhere else is
+ * a far worse outcome than a copy that does not arrive.
  */
+export interface SanitizerOptions {
+  /**
+   * Pass OSC 52 through instead of dropping it. Off unless the host says
+   * otherwise (see `ldmux clipboard-write`), because it widens a security
+   * boundary to a program the user did not write.
+   */
+  clipboardWrite?: boolean;
+}
 
 export interface Sanitizer {
   /** Feed a chunk of decoded pane text; returns the chunk with policy applied. */
@@ -39,7 +61,8 @@ type State = "ground" | "esc" | "csi" | "osc" | "oscEsc" | "string" | "stringEsc
  */
 const DROPPED_CSI_FINALS = new Set(["c", "n"]);
 
-export function createSanitizer(): Sanitizer {
+export function createSanitizer(opts: SanitizerOptions = {}): Sanitizer {
+  const clipboardWrite = opts.clipboardWrite === true;
   let state: State = "ground";
   let pending = "";
 
@@ -61,7 +84,7 @@ export function createSanitizer(): Sanitizer {
     // OSC 52 = clipboard write/read. Everything else passes.
     const body = pending.slice(2);
     const num = body.split(";", 1)[0];
-    if (num !== "52") out += pending;
+    if (num !== "52" || clipboardWrite) out += pending;
     reset();
     return out;
   }
@@ -153,7 +176,12 @@ export function createSanitizer(): Sanitizer {
   };
 }
 
-/** One-shot sanitization (for snapshot replays, which are standalone renders). */
+/** One-shot sanitization (for snapshot replays, which are standalone renders).
+ *
+ * Snapshots never need the clipboard exception: a snapshot is a rendered capture,
+ * which carries characters and no escape sequences at all. Passing the option
+ * through here would be a lie about what it governs.
+ */
 export function sanitizeOnce(text: string): string {
   return createSanitizer().push(text);
 }

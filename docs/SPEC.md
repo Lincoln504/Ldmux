@@ -383,7 +383,8 @@ See [`TRANSPORT.md`](TRANSPORT.md) for the experiments and the parser spec.
 `\n` (never `readline`; U+2028/9 must not split); octal → **bytes** then a
 **per-pane incremental UTF-8 decoder** (never `byte as char` or per-chunk
 `from_utf8`); correlate `%begin/%end/%error <seq>`; tolerate unknown `%…` lines;
-stateful per-stream sanitizer (OSC 52 / DCS / device-status) on by default.
+stateful per-stream sanitizer (OSC 52 / DCS / device-status) on by default; OSC 52 only
+may be re-enabled by the host (`ldmux clipboard-write on`, off by default).
 
 **Multi-pane scope (v1):** one window, one pane per session. The mobile context
 menu can split/create windows via `send-keys`/tmux commands, but the client tracks
