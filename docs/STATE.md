@@ -228,7 +228,7 @@ Blocked on correcting `TapPolicyTest.kt` first, or the fix fails a stale green t
   their internals clip when forced shorter. Open question: whether to restyle them.
 - Commit `0851333`'s message describes one of its three changes. It is already pushed, so
   correcting it means `--amend` plus `--force-with-lease`.
-- **31 commits are ahead of `origin/main`.** The push is held for the user's word.
+- **Ahead of `origin/main` by 32 commits at the time of writing** (`git log --oneline origin/main..HEAD` is the current answer). The push is held for the user's word.
 
 ---
 
