@@ -6,25 +6,48 @@
   the real DejaVu Sans Mono Bold `l`, and it was wrong on two counts: that glyph has
   a curved tail and a flag at the top, which at icon size reads as a smudge, and a
   filled glyph beside a stroked one does not render the same weight even when the
-  numbers match. Both letters are now single-weight strokes and both are straight.
-  This is a terminal's letterform, which is what the app is.
+  numbers match. Both letters are single-weight strokes and both are straight. This
+  is a terminal's letterform, which is what the app is.
 
-  The pair still obeys the font's proportions, which is what stops it looking like two
-  drawings: the stroke is the font's stem width (293 units) with a ~10% optical
-  correction for being a stroke rather than a fill, both letters share the font's
-  baseline (0) and ascender (1556), and the second letter's bowl top is the font's
-  x-height (1120 units) — measured off the `x` glyph, because `o` overshoots and this
-  font's `OS/2` table is version 1 with no x-height field in it at all.
+  CORRECTED 2026-09-18. The previous revision had two defects, both arithmetic
+  rather than taste, and both fixed here.
 
-  The `d` is deliberately sharp: a chevron opening left for the bowl, with a bar
-  running from the ascender down to the baseline for the stem. It is drawn as a
-  chevron on purpose and should not be rounded or squared off.
+  (1) The letters did not share a baseline. The `d`'s bowl ended in a 51.4-degree
+  miter whose outer point reached 10.8 units below the `l`'s foot, and that spike
+  was the lowest ink in the mark. The comment claimed "both letters share the
+  font's baseline (0)" while the drawing did not, and it was also what dragged the
+  ink's centre off the icon's centre. Both letters now end their ink on y=85.
 
-  Everything sits inside the middle 66% so no shape of icon mask can clip it. The
-  group scale is what keeps it there: the letters' own ink came to 71.3 x 49.8 in a
-  108 viewport, which is the safe zone exactly, so the mark filled the icon edge to
-  edge and read as too heavy. Scaling the group rather than re-deriving coordinates
-  means the strokes scale with the geometry and the proportions cannot drift.
+  (2) The `d` had NO COUNTER, and that is why the mark read as runes rather than
+  letters. At a stroked corner the inner boundary is set back along the bisector by
+  halfWidth/sin(theta/2), not by the half-width. The old bowl was a triangle of
+  inradius 8.616 units; its apex (77.3 degrees) set back 8.325 and its bottom join
+  (51.4 degrees) set back 12.001, which is larger than the inradius, so the hole
+  closed to about 0.29 units — 0.37 px of radius on a 192 px icon. A `d` with no
+  hole is a bar with a wedge, which is a rune. The bowl is now squared, with 90-degree
+  corners where it meets the stem, and chamfered 45 degrees at its two outer corners.
+
+  The chamfer is the "fancy" dial and it has a hard stop: the counter's left edge is
+  exactly 31.6 - 2*chamfer units long, so a chamfer at or above 15.8 closes the
+  aperture again and the rune comes back. 8 leaves 15.6 units, half the bowl's height.
+
+  Geometry, all pre-transform in the 108 viewport: ink spans x 23..85 and y 23..85,
+  so it is 62 x 62 and its centre is exactly (54,54). Centring had to be fixed BEFORE
+  the group scale, because scaling about a pivot maps the ink centre c to 54 + s(c-54)
+  and therefore preserves a centring error rather than removing it — the old mark was
+  drawn 5.2% right and 5.9% low because of this. Both letters share one baseline at 85
+  and one ascender at 23, so nothing hangs below anything.
+
+  The stroke is 13.0 over an ink height of 62, a ratio of 0.2097 — the same weight
+  ratio the previous revision used (10.4/49.82 = 0.2087), which is the font's own stem
+  ratio (293/1556 = 0.188) with the ~10% optical correction for a stroke rather than a
+  fill. Keeping the ratio is what stops the pair looking like two drawings.
+
+  Everything sits inside the middle 66%: post-scale the ink spans 31.7..76.3 against a
+  safe zone of 21..87 and a visible zone of 18..90, and its furthest point is 22.3 from
+  the centre against a 33-unit safe radius, so no mask shape clips it — square, round,
+  or the monochrome silhouette, where a real counter matters most because that mode
+  discards the colour and renders alpha only.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -36,28 +59,35 @@
         android:pivotY="54"
         android:scaleX="0.72"
         android:scaleY="0.72">
-        <!-- the l: one straight stem, ascender to baseline, no tail and no flag -->
+        <!-- the l: one straight stem, ascender to baseline, no tail and no flag.
+             Its ink is 13 wide; butt caps give it a flat face at each end. -->
         <path
-            android:pathData="M32.56,29.09 L32.56,78.91"
+            android:pathData="M29.5,23 L29.5,85"
             android:strokeColor="#EDEDED"
-            android:strokeWidth="10.4"
+            android:strokeWidth="13"
             android:strokeLineCap="butt"
             android:strokeLineJoin="miter" />
-        <!-- the sharp d: the ascender, the bowl, and back up the stem, as ONE path.
+        <!-- the d: the stem, then a squared bowl chamfered 45 degrees at its two outer
+             corners. One path, no cancelling strokes, so every join is a real miter.
 
-             It was two strokes, a stem and a chevron, and their endpoints coincided
-             at the stem's tip (84.95, 78.91). Two butt-capped strokes ending at the
-             same point do not make a corner: each stops in a square face
-             perpendicular to its own direction, so the join leaves a notch. Drawing
-             it as a single path makes that corner a real miter join, which is the
-             only way this can be right.
+             It is squared rather than chevroned because a chevron's two acute corners
+             each set their inner boundary back further than the counter's own
+             inradius, which closes the hole. The 90-degree corners where the bowl's
+             runs meet the stem set back only halfWidth (6.5), and the 135-degree
+             chamfers set back 1.082 x halfWidth, so the counter survives with an area
+             of about 221 units pre-scale — roughly 15 x 24 px on a 192 px icon.
 
-             The path closes back at the ascender's top, where the two segments are
-             collinear and the join degenerates to a clean square end. -->
+             The bottom-right corner is 90 degrees, so its miter's outer point is
+             exactly (85,85): the ink bottom is the baseline with no spike below it.
+
+             Left open on purpose. Closing it with Z gives the identical silhouette,
+             because the top run's butt face is vertical at x=85, flush with the stem's
+             right edge, but a Z would create a 180-degree direction reversal at the
+             stem's tip, which is a degenerate join. -->
         <path
-            android:pathData="M84.95,29.09 L84.95,43.05 L62.53,60.98 L84.95,78.91 L84.95,29.09"
+            android:pathData="M78.5,23 L78.5,78.5 L61.5,78.5 L53.5,70.5 L53.5,54.9 L61.5,46.9 L78.5,46.9"
             android:strokeColor="#EDEDED"
-            android:strokeWidth="10.4"
+            android:strokeWidth="13"
             android:strokeLineCap="butt"
             android:strokeLineJoin="miter"
             android:strokeMiterLimit="3" />

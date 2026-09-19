@@ -279,7 +279,17 @@ internal fun launcherEntries(
                     // offering, and it is the one thing the row can honestly say.
                     process = "pi",
                     cwd = pi.cwd,
-                    note = pi.workspace?.let { "ws $it" },
+                    // This row is not a shell, and it cannot be: a desk `pi` runs in
+                    // a bare window with no tmux server behind it, so there is
+                    // nothing to attach to and nothing to take. The row is a
+                    // *directory intention* — tapping it opens a NEW shell here,
+                    // owned by this phone. The data model has always said so
+                    // (`LauncherEntry.sessionId` is null for exactly these rows) and
+                    // the pixels did not, so the row read as "my session on the
+                    // computer" and produced a phone-owned shell instead. Saying what
+                    // it does is the whole fix; there is no seize path missing.
+                    note = listOfNotNull(pi.workspace?.let { "ws $it" }, "starts a new shell")
+                        .joinToString("  ·  "),
                 ),
             )
         }

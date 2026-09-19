@@ -89,6 +89,30 @@ class TerminalController(
     /** What the link is doing, for the chrome to show. */
     override val link: StateFlow<LinkStats> = _link
 
+    /**
+     * The sticky modifiers this session has armed.
+     *
+     * Owned by the session, not by the chrome, because a latch has to be spent by
+     * whatever sends the *next* command, and exactly one object sees every path
+     * that sends one. Kept in the composition it was reachable only from the two
+     * key bars: a typed character goes straight to [sendText] and never touched it,
+     * so arming Ctrl and then typing `q` sent a plain `q` and left Ctrl armed for
+     * the next bar key — which is both halves of the reported bug at once.
+     *
+     * Same shape as [inCopyMode]: input state the session owns and the chrome reads
+     * back. `modes` above is the same pattern.
+     */
+    override var modifiers by mutableStateOf(Modifiers())
+        private set
+
+    override fun toggleModifier(which: StickyKey) {
+        modifiers = modifiers.toggled(which)
+    }
+
+    override fun clearModifiers() {
+        modifiers = Modifiers()
+    }
+
     private fun linkStats() = LinkStats(
         rttMs = pacing.rttMs,
         frameIntervalMs = pacing.intervalMs,
@@ -242,6 +266,14 @@ class TerminalController(
         // Submitting a line re-arms prediction: a fresh line is expected to echo
         // again, even if the previous one did not (a password prompt).
         if (name == "Enter") predictor.onLineSubmitted()
+        val armed = modifiers
+        if (armed.armed) {
+            // One Ctrl arms one key. Spending it here rather than in the chrome is
+            // what makes a hardware key and a bar key behave the same.
+            modifiers = Modifiers()
+            sendModifiedKey(name, armed)
+            return
+        }
         attach.keys(listOf(name))
     }
 
@@ -256,7 +288,7 @@ class TerminalController(
     override fun sendModifiedKey(key: String, modifiers: Modifiers) {
         when (val k = modifiedKey(key, modifiers)) {
             is ModifiedKey.None -> {}
-            is ModifiedKey.Literal -> sendText(k.bytes)
+            is ModifiedKey.Literal -> sendTextRaw(k.bytes)
             is ModifiedKey.Named -> {
                 if (k.name == "Enter") predictor.onLineSubmitted()
                 attach.keys(listOf(k.name))
@@ -280,6 +312,34 @@ class TerminalController(
         get() = modes.paneInMode
 
     override fun sendText(text: String) {
+        if (text.isEmpty()) return
+        val armed = modifiers
+        if (!armed.armed) {
+            sendTextRaw(text)
+            return
+        }
+        // The first keystroke spends the latch. The decision itself is a pure
+        // function beside the modifier semantics, so it can be tested without a
+        // socket — which is the only reason the old rule could rot unnoticed here
+        // while every test passed.
+        val typed = spendLatchOnFirst(text, armed)
+        modifiers = typed.latchAfter
+        if (typed.head.isEmpty()) {
+            sendTextRaw(typed.rest)
+        } else {
+            sendModifiedKey(typed.head, typed.headModifiers)
+            if (typed.rest.isNotEmpty()) sendTextRaw(typed.rest)
+        }
+    }
+
+    /**
+     * Send text with the modifiers already applied.
+     *
+     * Deliberately separate from [sendText]: the public one *spends the latch*, and
+     * [sendModifiedKey] resolves a chord by calling back into this, so a single
+     * slash through [sendText] would apply the modifier twice.
+     */
+    private fun sendTextRaw(text: String) {
         val bytes = text.encodeToByteArray()
         // Three gates, any one of which is enough to refuse: the setting; a
         // full-screen app (alternate screen, which does not echo the way a

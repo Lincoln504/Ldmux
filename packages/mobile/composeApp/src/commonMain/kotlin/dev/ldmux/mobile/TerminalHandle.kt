@@ -35,6 +35,25 @@ data class LinkStats(
      */
     fun sendModifiedKey(key: String, modifiers: Modifiers)
 
+    /**
+     * The sticky modifiers this session has armed, if any.
+     *
+     * The session owns the latch because only it sees every path that sends a
+     * command — a bar key, a hardware key, a typed character, and dictation all
+     * arrive here, where they used not to. The chrome reads this back to draw its
+     * Ctrl and Alt keys as latched.
+     */
+    val modifiers: Modifiers get() = Modifiers()
+
+    /**
+     * Arm or clear one sticky modifier. It applies to the next command and is spent
+     * by it, so there is no way to stack two of them.
+     */
+    fun toggleModifier(which: StickyKey) {}
+
+    /** Forget any armed modifier. Used when the user moves to a different shell. */
+    fun clearModifiers() {}
+
     /** Scroll the emulator's viewport by [rows] (negative is up). */
     fun scrollBy(rows: Int) {}
 

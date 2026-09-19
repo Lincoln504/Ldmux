@@ -134,3 +134,41 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
     if (mods.ctrl) prefix += "C-"
     return ModifiedKey.Named(if (prefix.isEmpty()) base else prefix + base)
 }
+
+/**
+ * What one typed keystroke does to a latched modifier, as data.
+ *
+ * The rule is that the **first** character carries the modifier and is what spends
+ * it, and that the rule applies to whatever that character turns out to be: a latch
+ * that waited for a keystroke it approved of would surprise you on the one after it.
+ *
+ * This is a pure function, in the file that owns modifier semantics, because the bug
+ * it fixes was a rule that lived in the chrome and was therefore unreachable from the
+ * one path that types. A rule nobody can call is a rule that only holds where
+ * somebody remembered it, and the soft keyboard did not.
+ */
+data class TypedKey(
+    /** The first character, to be sent with [headModifiers] applied. Empty when there is none to chord. */
+    val head: String,
+    /** The rest of the text. Always sent plainly. */
+    val rest: String,
+    /** The modifiers [head] carries, or none when [head] carries none. */
+    val headModifiers: Modifiers,
+    /**
+     * What remains latched after this keystroke. Empty in every case except two:
+     * no text at all, and nothing armed to begin with — because in both of those
+     * no keystroke happened to spend it.
+     */
+    val latchAfter: Modifiers,
+)
+
+fun spendLatchOnFirst(text: String, armed: Modifiers): TypedKey {
+    if (text.isEmpty()) return TypedKey("", "", Modifiers(), armed)
+    // Nothing is latched: the whole thing is ordinary text.
+    if (!armed.armed) return TypedKey("", text, Modifiers(), armed)
+    // A modified *character* is a control code, and control codes only exist for
+    // ASCII. Anything else goes out plainly — and the latch is still spent, because
+    // the keystroke happened and a modifier that outlives a keystroke is the bug.
+    if (text[0].code > 127) return TypedKey("", text, Modifiers(), Modifiers())
+    return TypedKey(text.substring(0, 1), text.substring(1), armed, Modifiers())
+}

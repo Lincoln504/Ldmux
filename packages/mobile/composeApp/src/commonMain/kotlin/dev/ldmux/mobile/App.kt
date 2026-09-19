@@ -409,6 +409,12 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     // Which shells the pager pages through. `null` means all of them; the
     // launcher sets a set when the user chooses, and that set is what ◀ ▶ walk.
     var pageSelection by remember { mutableStateOf<Set<String>?>(null) }
+    // Whether the portrait bar's menu is open. It lives here, at App()'s top
+    // level, rather than beside the bar that draws it, because the IME watcher
+    // below has to be able to tell a keypad the *user* dismissed from one we
+    // dismissed ourselves by opening a focusable menu. It is the same value
+    // either way, so it has one owner and not two.
+    var portraitMenu by remember { mutableStateOf(false) }
     // How many shells have been asked for and not yet answered. A chosen pi session
     // has no ldmux shell yet, so there is no id to page to until the daemon says
     // which one it made — and while that is outstanding the pager is legitimately
@@ -484,6 +490,11 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     val wantPortrait = showLauncher || mode == UiMode.Portrait
     LaunchedEffect(wantPortrait) { lockOrientation(wantPortrait) }
 
+    // A popup belongs to the screen it was opened on. The portrait bar leaves the
+    // composition when the mode flips, and a `remember`ed flag inside it survives
+    // that: the menu was found already open on the next flip back to portrait.
+    LaunchedEffect(mode) { portraitMenu = false }
+
     val terminalOpen = !showLauncher && pages.isNotEmpty()
     LaunchedEffect(terminalOpen, pages.size) {
         BackgroundSession.setActive(
@@ -529,12 +540,18 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         onDispose { BackgroundSession.setActive(false, "") }
     }
 
-    // The sticky modifiers live here, not in the panel, because **both** bars send
-    // keys and a latch belongs to the session rather than to the chrome that armed
-    // it. Kept in the panel it existed twice — and the portrait bar, having no
-    // latch of its own, had its Ctrl key wired straight to `C-c`, which is not a
-    // modifier at all: pressing Ctrl and then `d` there sent C-c, then a d.
-    var modifiers by remember { mutableStateOf(Modifiers()) }
+    // The sticky modifiers used to live here, in the composition, and that was the
+    // bug: a latch reachable only from the two key bars meant a *typed* character
+    // never spent it, so arming Ctrl and then typing `q` sent a plain `q` and left
+    // Ctrl armed for whatever key came next. It belongs to the session now
+    // (TerminalHandle.modifiers), so every path that sends a command — bar key,
+    // hardware key, typed character, dictation — arrives at the one place that can
+    // spend it.
+    //
+    // The earlier move, from the panel to here, fixed the same class of fault one
+    // level up: the portrait bar had no latch of its own and its Ctrl key was wired
+    // straight to `C-c`, so Ctrl-then-`d` there sent C-c and then a d. Both times
+    // the fault was a latch with more than one possible reader. There is one now.
 
     // One handle per session, so the chrome's keys reach the visible terminal.
     // A snapshot state map, so the panel recomposes once a surface registers.
@@ -611,20 +628,17 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     }
 
     // A latch that survived a glance at another shell would be a latch that
-    // surprises you, so anything that ends the gesture clears it.
-    LaunchedEffect(pagerState.currentPage) { modifiers = modifiers.cleared() }
+    // surprises you, so anything that ends the gesture clears it — and it is cleared
+    // on the session, because that is where it lives.
+    LaunchedEffect(pagerState.currentPage) {
+        pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }?.clearModifiers()
+    }
 
-    // The one place a key is sent, for both modes, so the latch cannot leak or be
-    // forgotten: every key in either bar goes through here, modified or not.
+    // Every key in either bar goes through here. There is nothing to consult: the
+    // latch belongs to the session and the session spends it inside sendKey, so a
+    // typed character and a bar key are one mechanism rather than two.
     val press: (String) -> Unit = { key ->
-        val handle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
-        val armed = modifiers
-        if (armed.armed) {
-            handle?.sendModifiedKey(key, armed)
-            modifiers = modifiers.cleared()
-        } else {
-            handle?.sendKey(key)
-        }
+        pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }?.sendKey(key)
     }
     LaunchedEffect(pages.size) {
         if (pages.isNotEmpty() && pagerState.currentPage >= pages.size) {
@@ -683,16 +697,25 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     // dismisses the keyboard we return to landscape rather than sitting in
     // portrait with none. Debounced, because the inset also passes through zero
     // while the activity rotates.
+    //
+    // What this is about is the *user* dismissing the keypad, and an IME inset
+    // cannot see who closed it. A focusable popup of ours — the portrait menu,
+    // the settings dialog — hides the keypad too, so tapping the menu read as
+    // "the user dismissed the keyboard" and flipped the screen to landscape
+    // 600 ms later. The popup state therefore travels in the same flow as the
+    // inset instead of being read beside it: a `State` read inside a
+    // `snapshotFlow` is tracked and cannot go stale, where a value captured from
+    // the composition is whatever it was when the effect started.
     val density = LocalDensity.current
     val imeInsets = WindowInsets.ime
     var sawIme by remember { mutableStateOf(false) }
     LaunchedEffect(density) {
-        snapshotFlow { imeInsets.getBottom(density) }
+        snapshotFlow { Triple(imeInsets.getBottom(density), portraitMenu, showSettings) }
             .debounce(600)
-            .collect { bottom ->
+            .collect { (bottom, menuOpen, dialogOpen) ->
                 if (bottom > 0) {
                     sawIme = true
-                } else if (sawIme && mode == UiMode.Portrait) {
+                } else if (sawIme && mode == UiMode.Portrait && !menuOpen && !dialogOpen) {
                     sawIme = false
                     mode = UiMode.Landscape
                 }
@@ -839,7 +862,9 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         // viewportW=1080` 135 ms later. Every earlier attempt at this bug tried to
         // put the page back afterwards. None asked why it had moved, and it had moved
         // because the pager was thrown away.
-        var portraitMenu by remember { mutableStateOf(false) }
+        // (portraitMenu is declared in App()'s top-level state rather than here,
+        // because the IME watcher has to be able to tell a keypad the user
+        // dismissed from one we dismissed ourselves by opening a focusable menu.)
         // Chrome waits for the window to finish turning over, and there is none
         // before it has: a panel belongs to the shape it was drawn for.
         val chrome = panelArrived
@@ -920,8 +945,8 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                         showLauncher = true
                     },
                     onSettings = { showSettings = true },
-                    modifiers = modifiers,
-                    onModifiers = { modifiers = it },
+                    modifiers = currentHandle?.modifiers ?: Modifiers(),
+                    onSticky = { which -> currentHandle?.toggleModifier(which) },
                     press = press,
                 )
             }
@@ -1067,7 +1092,7 @@ private fun PortraitBar(
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
     modifiers: Modifiers,
-    onModifiers: (Modifiers) -> Unit,
+    onSticky: (StickyKey) -> Unit,
     press: (String) -> Unit,
 ) {
     Column(
@@ -1129,8 +1154,8 @@ private fun PortraitBar(
                 // then press any key, and Ctrl applies to that key. It used to be
                 // wired straight to `C-c` here, which sent an interrupt instead of
                 // arming anything — so Ctrl-then-`d` sent C-c and then a d.
-                "Ctrl" to { onModifiers(modifiers.toggled(StickyKey.Ctrl)) },
-                "Alt" to { onModifiers(modifiers.toggled(StickyKey.Alt)) },
+                "Ctrl" to { onSticky(StickyKey.Ctrl) },
+                "Alt" to { onSticky(StickyKey.Alt) },
                 controlLabel("C-c") to { press("C-c") },
                 "|" to { press("|") },
                 "-" to { press("-") },
