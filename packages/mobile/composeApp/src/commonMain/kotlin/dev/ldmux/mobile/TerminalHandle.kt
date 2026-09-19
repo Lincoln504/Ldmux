@@ -23,9 +23,40 @@ data class LinkStats(
 /**
  * A handle to one terminal surface. The native sidebar drives the terminal
  * through this, so controls live in native chrome rather than inside a WebView.
- */interface TerminalHandle {
+ *//**
+ * What a program running in the shell asked the *system* clipboard to do.
+ *
+ * This is the shell driving the phone, not the phone driving the shell. A program
+ * copies with OSC 52 (or OSC 1337, or Kitty's OSC 5522) and the value belongs in
+ * the clipboard the user's other apps read. Until this existed the sequence
+ * parsed, was discarded in silence, and the program was told nothing had gone
+ * wrong — libghostty-vt's own header names the unset callback as the reason
+ * ("Set to NULL to ignore clipboard writes").
+ */
+sealed interface ClipboardRequest {
+    /** The program asked for the clipboard to be emptied. */
+    data object Clear : ClipboardRequest
+
+    /** The program copied [text]. */
+    data class Set(val text: String) : ClipboardRequest
+}
+
+interface TerminalHandle {
     fun sendKey(name: String)
     fun sendText(text: String)
+
+    /**
+     * Paste [text] the way the *program* expects to receive a paste.
+     *
+     * Not the same thing as [sendText]. A program that turned on bracketed paste
+     * (mode 2004) has been promised the text will arrive wrapped in the markers,
+     * and that promise is the whole point of the mode: unwrapped, every newline
+     * in the paste is a keypress, so a paragraph pasted into a shell runs its
+     * first line before the user has seen the rest. The default here is the plain
+     * path, so an implementation that cannot know the program's mode is at least
+     * never wrong about the bytes it is asked to send.
+     */
+    fun paste(text: String) = sendText(text)
 
     /**
      * Send one key with the sticky modifiers applied (0x03 for Ctrl-C, ESC+x for

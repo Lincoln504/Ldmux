@@ -177,7 +177,13 @@ colours.
 
 ## Known issues
 
-### The page you are on is lost when the mode flips
+### The page you are on is lost when the mode flips — FIXED
+
+This heading did not say "FIXED" even though the fix is described below and is
+in the tree (see "The fix in the tree follows from the measurement"); the
+sibling entry below (`### The four arrow keys draw nothing`) uses the
+"— RETRACTED"/"— FIXED" convention and this one should have too. Kept as a
+postmortem, not an open issue.
 
 Reproduction, on device: open two or more shells, tap `▶` until the header reads
 `n / n`, flip to portrait with the flip button. The header comes back as `1 / n`

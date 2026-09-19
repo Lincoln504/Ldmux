@@ -221,14 +221,21 @@ frame).
    header carries both (byte 18 and byte 31), so a tap is a click on the very
    frame after the program asks for one.
 
-   The same argument would have made a blocklist of full-screen programs stale
-   and wrong, so it is the alternate screen that is read from the engine
-   (`GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN`, byte 32 — the header grew from 32 to
-   40 bytes) rather than a list of program names being kept by hand. Measured on
-   this box, that one flag separates the two cases exactly: `pi` and `claude`
-   draw a composer of their own on the **primary** screen (`alternate_on=0`,
-   no mouse) where arrows are ordinary cursor keys, while `vim`, `less`, `htop`
-   and `nano` take the **alternate** screen where an arrow is a command.
+   This paragraph used to claim that one flag, alone, separates the two cases:
+   "`pi` and `claude` draw a composer of their own on the **primary** screen
+   (`alternate_on=0`, no mouse)... while `vim`, `less`, `htop` and `nano` take
+   the **alternate** screen." That is false. Measured directly: `pi` emits
+   `ESC[?1000h ?1002h ?1003h ?1004h ?1006h ?1049h` — mode `1049` is the
+   alternate screen, and `1000`/`1002`/`1003`/`1006` are mouse tracking with
+   SGR encoding. So `pi` (and by extension Claude Code and Codex, the same
+   class of program) sets **both** flags, exactly like `vim`/`less`/`htop`/
+   `nano` — `alternate_on` does not separate them at all, and there is no mode
+   anywhere meaning "a click should place the cursor". The engine is still the
+   right and cheaper place to ask (`GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN`, byte
+   32 — the header grew from 32 to 40 bytes for it) rather than a hand-kept
+   list of program names, but telling a TUI composer from a full-screen program
+   by this flag is not possible; whatever mechanism actually decides tap
+   behaviour has to be something other than "alternate screen on/off".
 
    The daemon still re-checks before writing anything to the pty, where its view
    is fresh because it polls at click time — and it refuses a click outright when

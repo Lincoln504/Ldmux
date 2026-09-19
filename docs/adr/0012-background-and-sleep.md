@@ -54,7 +54,12 @@ that reconnects is given a full snapshot of the terminal *state* by construction
   so releasing on any close let a dead socket free the claim its own replacement
   had just made. The shell went quietly claimable by anyone, with no takeover and
   no message. Fixed, and the regression test fails without the fix.
-- **Not yet done:** `AttachClient` retries every 1.5 s with no cap and no network
-  wake, while `LdmuxClient` uses bounded exponential backoff plus a
-  validated-network wake. Two retry policies for one app is drift waiting to
-  happen, and the attach client is the one that runs per page.
+- **Done:** `AttachClient` now uses the same bounded exponential backoff with
+  jitter as `LdmuxClient` (`AttachClient.kt`, `RETRY_BASE_MS shl attempt`
+  capped at `RETRY_MAX_MS`, reset to 0 on `caps`) — this line used to say it
+  "retries every 1.5 s with no cap", which the code no longer does. Whether it
+  also gained `LdmuxClient`'s validated-network wake was not confirmed while
+  correcting this line — only `BackgroundSession.android.kt` was seen
+  registering a `ConnectivityManager.NetworkCallback`, not `AttachClient`
+  itself — so that half of the original claim may still hold and needs its
+  own check.

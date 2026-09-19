@@ -19,6 +19,10 @@ struct LdmuxTerminal {
   GhosttyRenderStateRowCells cells;
   uint8_t *frame; /* growable output buffer, owned by this struct */
   size_t frame_cap;
+  uint8_t *clip; /* last clipboard write, owned by this struct */
+  size_t clip_cap;
+  size_t clip_len;
+  int clip_kind; /* one of the LDMUX_CLIPBOARD_* values */
 };
 
 static GhosttyColorRgb resolve_color(GhosttyStyleColor color,
@@ -55,6 +59,79 @@ static bool ensure_frame(LdmuxTerminal *t, size_t need) {
   t->frame = grown;
   t->frame_cap = cap;
   return true;
+}
+
+static bool ensure_clip(LdmuxTerminal *t, size_t need) {
+  if (t->clip_cap >= need) return true;
+  size_t cap = t->clip_cap ? t->clip_cap : 256;
+  while (cap < need) cap *= 2;
+  uint8_t *grown = (uint8_t *)realloc(t->clip, cap);
+  if (!grown) return false;
+  t->clip = grown;
+  t->clip_cap = cap;
+  return true;
+}
+
+/*
+ * Clipboard writes.
+ *
+ * The engine hands us a *request* rather than performing the write, because it
+ * cannot know what the platform's clipboard is. Answering it is not optional:
+ * calling `reply` is what tells the engine the write happened, and returning
+ * without replying denies it. So this takes the text, keeps it, and replies from
+ * inside itself, which is the only place the contract allows.
+ *
+ * The text is kept here rather than passed straight on to Java because this file
+ * is the portable half and has no JNI by design, and because the engine's
+ * contract is synchronous while an Android clipboard write cannot be assumed to
+ * be. "Taken" is the honest answer to the engine's question — the value is in our
+ * hands, and the drain happens on the same thread that fed the bytes, which is
+ * the very next thing either way.
+ */
+static void on_clipboard_write(GhosttyTerminal terminal, void *userdata,
+                               const GhosttyClipboardWrite *write) {
+  (void)terminal;
+  LdmuxTerminal *t = (LdmuxTerminal *)userdata;
+  int result = GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR;
+
+  if (t && write) {
+    if (write->contents_len == 0) {
+      /* The protocol's way of saying "clear the clipboard". A representation
+       * whose data is empty is a different thing: it sets an empty value. */
+      t->clip_kind = LDMUX_CLIPBOARD_CLEAR;
+      t->clip_len = 0;
+      result = GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+    } else {
+      /* Every entry is a representation of the same value. Prefer plain text,
+       * because that is all this platform's clipboard holds: a program offering
+       * HTML, an image and text wants whichever we can actually honour, not
+       * necessarily the first one it listed. */
+      const GhosttyClipboardContent *pick = NULL;
+      for (size_t i = 0; i < write->contents_len; i++) {
+        const GhosttyClipboardContent *c = &write->contents[i];
+        if (pick == NULL) pick = c;
+        if (c->mime.len >= 10 && memcmp(c->mime.ptr, "text/plain", 10) == 0) {
+          pick = c;
+          break;
+        }
+      }
+      if (pick && (pick->data.len == 0 || ensure_clip(t, pick->data.len))) {
+        if (pick->data.len > 0) memcpy(t->clip, pick->data.ptr, pick->data.len);
+        t->clip_len = pick->data.len;
+        t->clip_kind = LDMUX_CLIPBOARD_SET;
+        result = GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS;
+      }
+    }
+  }
+
+  GhosttyClipboardWriteReply reply;
+  memset(&reply, 0, sizeof(reply));
+  reply.size = sizeof(reply);
+  reply.result = (GhosttyClipboardWriteResult)result;
+  reply.remember = false;
+  /* Unconditional: the engine ignores a second reply, and a request that arrived
+   * with no reply function is nothing to crash over. */
+  if (write && write->reply) write->reply(write, &reply);
 }
 
 /* Encode one Unicode codepoint as UTF-8. Returns the byte count. */
@@ -94,7 +171,32 @@ LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows) {
     free(t);
     return NULL;
   }
+
+  /* The engine has to be able to find this struct from inside the callback, and
+   * the callback is the only way a clipboard write becomes anything at all.
+   * Without these, OSC 52 parses and is then discarded in silence: nothing
+   * receives the value and the program is told nothing went wrong. */
+  ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, t);
+  ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
+                       (const void *)on_clipboard_write);
+  /* GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ is deliberately left unset: enabling it
+   * would let any program running in the shell read the user's clipboard, which
+   * is a capability this app was never asked for. */
   return t;
+}
+
+int ldmux_terminal_take_clipboard(LdmuxTerminal *t, const uint8_t **out,
+                                  size_t *len) {
+  if (out) *out = NULL;
+  if (len) *len = 0;
+  if (!t || t->clip_kind == LDMUX_CLIPBOARD_NONE) return LDMUX_CLIPBOARD_NONE;
+  int kind = t->clip_kind;
+  t->clip_kind = LDMUX_CLIPBOARD_NONE;
+  if (kind == LDMUX_CLIPBOARD_SET) {
+    if (out) *out = t->clip;
+    if (len) *len = t->clip_len;
+  }
+  return kind;
 }
 
 void ldmux_terminal_free(LdmuxTerminal *t) {
@@ -104,6 +206,7 @@ void ldmux_terminal_free(LdmuxTerminal *t) {
   if (t->render_state) ghostty_render_state_free(t->render_state);
   if (t->terminal) ghostty_terminal_free(t->terminal);
   free(t->frame);
+  free(t->clip);
   free(t);
 }
 

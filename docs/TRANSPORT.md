@@ -175,9 +175,18 @@ behind `PaneStream` if throughput ever demands it.
 
 ## 8. Remaining Phase-1 spike items
 
-- Sustained backpressure: force a slow reader and confirm `%pause` fires and the
-  pane is protected (only a short burst was measured).
-- Many concurrent control clients (scaling test).
-- `pipe-pane` FIFO restart/continuity (only if revisited).
+- ~~Sustained backpressure: force a slow reader and confirm `%pause` fires and
+  the pane is protected (only a short burst was measured).~~ Done:
+  `packages/daemon/test/stream.test.ts` ("a real tmux %pause resyncs
+  subscribers and then resumes the pane") sets `pauseAfter: 0` and drives a
+  300KB burst through a real tmux, so `%pause` firing and the pane resuming
+  are both exercised for real now, not just measured on a short burst.
+- Many concurrent control clients (scaling test) — still open; no test found
+  for this.
+- `pipe-pane` FIFO restart/continuity (only if revisited) — still open; no
+  test found for this.
 - Confirm `%extended-output` vs `%output` switching is handled across
-  `pause-after` enable/disable.
+  `pause-after` enable/disable — partially covered:
+  `packages/daemon/test/control-parser.test.ts` tests `%extended-output`
+  decoding (including a malformed one) but the switching-across-`pause-after`
+  case specifically was not found.

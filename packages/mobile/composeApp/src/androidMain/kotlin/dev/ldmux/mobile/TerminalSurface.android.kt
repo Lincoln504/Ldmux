@@ -173,6 +173,30 @@ actual fun rememberTerminalSurface(
     val scope = rememberCoroutineScope()
 
     val context = LocalContext.current
+
+    // The shell drives the phone's clipboard, not the other way round. Android's
+    // own clipboard is used rather than Compose's wrapper because a *clear* is a
+    // real operation here (clearPrimaryClip) and the wrapper cannot express it,
+    // only an empty string — which is a different thing on every platform that
+    // distinguishes the two, and is what a program asking to clear the clipboard
+    // actually meant.
+    //
+    // Assigned in an effect keyed on the controller rather than on every
+    // recomposition, so a frame arriving mid-recomposition cannot find a
+    // half-updated callback.
+    val androidClipboard = remember(context) {
+        context.getSystemService(android.content.ClipboardManager::class.java)
+    }
+    LaunchedEffect(controller, androidClipboard) {
+        controller.onClipboardRequest = { request ->
+            when (request) {
+                ClipboardRequest.Clear -> androidClipboard?.clearPrimaryClip()
+                is ClipboardRequest.Set -> androidClipboard?.setPrimaryClip(
+                    android.content.ClipData.newPlainText("ldmux", request.text),
+                )
+            }
+        }
+    }
     val focusManager = LocalFocusManager.current
     val focusRequester = remember { FocusRequester() }
     var viewport by remember { mutableStateOf(IntSize.Zero) }

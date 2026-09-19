@@ -43,11 +43,17 @@ ldmux binds to loopback and is exposed by the **system** `tailscale serve`
 ### 4. No native renderer churn (vs dooboxes Flutter / libghostty)
 
 dooboxes' renderer direction moved KMP → Flutter + `flutter_rust_bridge` →
-`libghostty` with little shipped. ldmux ships **xterm.js in a WebView behind a
-`TerminalSurface` seam** — a seam that exists today only as the client's own
-module boundary (`core.js` is DOM-free and unit-tested; `app.js` is the host
-glue), with a native renderer as a later, optional swap behind it. Predictive echo and adaptive frame rate (mosh-derived, unimplemented
-in dooboxes) are rejected until a measured problem exists.
+`libghostty` with little shipped. This section used to say ldmux ships "xterm.js
+in a WebView behind a `TerminalSurface` seam... with a native renderer as a
+later, optional swap behind it" — that was true when written, but ldmux has
+since shipped the native path itself: `packages/mobile` is a Kotlin
+Multiplatform/Compose app rendering via libghostty-vt behind JNI
+(`packages/mobile/native/`, ADR-0007), and `packages/web` (the xterm.js/WebView
+client, `core.js`/`app.js`) was deleted entirely. The point being made against
+dooboxes still holds — one renderer, shipped once, not three — it is just the
+native one now, not xterm.js. Predictive echo and adaptive frame rate
+(mosh-derived, unimplemented in dooboxes) are rejected until a measured
+problem exists.
 
 ### 5. No 16-byte magic/version/sequence frame (vs dooboxes)
 
@@ -56,11 +62,15 @@ on a stream we own; the version is negotiated once in `caps`. Extra framing
 fields and a second wire format are how dooboxes ended up with three
 incompatible formats.
 
-### 6. PWA is the v1 mobile client
+### 6. Native KMP/Compose is the v1 mobile client
 
-The installable web client (landscape-locked manifest + service worker) is the
-v1 Android experience. A native WebView shell is post-v1; nothing in
-`packages/web` (since deleted) assumed a browser-only host.
+This section used to say the installable web client (landscape-locked manifest
++ service worker) "is the v1 Android experience" and that "a native WebView
+shell is post-v1" — that has since been superseded: the shipped v1 Android
+client is the native Kotlin Multiplatform/Compose app in `packages/mobile`
+(ADR-0007), there is no WebView in it, and `packages/web` was deleted rather
+than kept as a fallback. The PWA was real and shipped first; it is not what
+ships now.
 
 ### 7. Child (fork/subagent) pi sessions are not ldmux sessions
 

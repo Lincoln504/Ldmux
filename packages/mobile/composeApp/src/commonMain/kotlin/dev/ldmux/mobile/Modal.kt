@@ -8,13 +8,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -285,11 +282,3 @@ fun DesktopPickerModal(
         }
     }
 }
-
-/** Spacing helper: a named gap, so the layout reads as groups. */
-@Composable
-fun Gap(dp: Int) = Spacer(Modifier.height(dp.dp))
-
-/** A fixed-width gap, for a row. */
-@Composable
-fun HGap(dp: Int) = Spacer(Modifier.width(dp.dp))

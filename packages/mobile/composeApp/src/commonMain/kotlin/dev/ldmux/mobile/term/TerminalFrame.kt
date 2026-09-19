@@ -75,13 +75,15 @@ object TerminalFrame {
         /**
          * The alternate screen is active — `vim`, `less`, `htop`, `nano`, `top`.
          *
-         * This is what separates them from `pi`, Claude Code and Codex, which
-         * draw a composer of their own on the *primary* screen: in those, an
-         * arrow key means "move the cursor", which is what a tap is asking for,
-         * while on the alternate screen it is a command to the program (scroll
-         * the view, move the selection, move the vim cursor) — the user's own
-         * words were that vim "would probably be a bad thing". Read from the
-         * emulator for the same freshness reason as [mouseTracking].
+         * This doc used to claim this flag also separates those from `pi`, Claude
+         * Code and Codex, on the theory that the latter stay on the *primary*
+         * screen. That is false, measured: `pi` emits
+         * `ESC[?1000h ?1002h ?1003h ?1004h ?1006h ?1049h`, i.e. it turns the
+         * alternate screen on too (`1049`), along with SGR mouse tracking
+         * (`1000`/`1002`/`1003`/`1006`) — so this flag alone does not tell a TUI
+         * composer apart from `vim`/`less`/`htop`/`nano`. Read from the emulator
+         * for the same freshness reason as [mouseTracking]; what it means for tap
+         * handling is a separate, still-open question from what this field reports.
          */
         val alternateOn: Boolean,
         /** Scrollable area in rows: total, the viewport's offset, and its size. */

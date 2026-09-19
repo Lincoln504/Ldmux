@@ -58,6 +58,16 @@ class TerminalController(
 
     private val predictor = Predictor()
     private var staleJob: Job? = null
+
+    /**
+     * Where a clipboard write from the program goes, if anyone is listening.
+     *
+     * A program in the shell can ask to put something on the phone's clipboard,
+     * and until this was wired the request parsed and then vanished. The surface
+     * owns the actual clipboard and sets this; nothing here knows what a clipboard
+     * is, which is what keeps this file testable without a device.
+     */
+    var onClipboardRequest: ((ClipboardRequest) -> Unit)? = null
     /** Set once the whole scrollback has been asked for, so it is asked once. */
 
     /** Server-reported terminal modes (affects input encoding later). */
@@ -143,7 +153,7 @@ class TerminalController(
                 // not know. See [modeSequence].
                 modes = m,
             )
-            engine.write(bytes, bytes.size)
+            feed(bytes)
             // A history page rebuilds the engine, so the view has to be put back
             // where it was: the same offset from the live bottom is the same
             // content, because what arrived is above it.
@@ -186,6 +196,39 @@ class TerminalController(
     }
 
     /**
+     * Feed the engine, then take whatever clipboard write arrived inside those
+     * bytes.
+     *
+     * Every path that feeds bytes comes through here rather than calling the
+     * engine directly, because the request travels *inside* the byte stream: a
+     * path that fed the engine and skipped the drain would swallow a copy with
+     * nothing to show for it, and it would be a path nobody thought to check.
+     */
+    private fun feed(bytes: ByteArray, length: Int = bytes.size) {
+        engine.write(bytes, length)
+        engine.takeClipboardRequest()?.let { onClipboardRequest?.invoke(it) }
+    }
+
+    /**
+     * Paste text the way the program expects to receive a paste.
+     *
+     * A paste is not a keystroke, so it must not spend the sticky-modifier latch:
+     * that latch belongs to what the user types next, and routing a paste through
+     * [sendText] would quietly eat it. A program that turned bracketed paste on is
+     * owed the markers, because without them every newline in the paste is a
+     * keypress and a pasted paragraph runs its first line before the rest is even
+     * visible.
+     */
+    override fun paste(text: String) {
+        if (text.isEmpty()) return
+        if (modes.bracketedPaste) {
+            sendTextRaw("\u001b[200~" + text + "\u001b[201~")
+        } else {
+            sendTextRaw(text)
+        }
+    }
+
+    /**
      * Apply one output frame, first reconciling it against any prediction.
      *
      * Feeding output before reconciling would paint the echo twice (once from
@@ -193,18 +236,18 @@ class TerminalController(
      */
     private fun writeOutput(bytes: ByteArray) {
         if (!config.predict) {
-            engine.write(bytes, bytes.size)
+            feed(bytes)
             scheduleRender()
             return
         }
         when (val c = predictor.reconcile(bytes)) {
             is Predictor.Consumption.Consume -> {
                 staleJob?.cancel()
-                if (c.remaining.isNotEmpty()) engine.write(c.remaining, c.remaining.size)
+                if (c.remaining.isNotEmpty()) feed(c.remaining)
                 scheduleRender()
             }
             Predictor.Consumption.Passthrough -> {
-                engine.write(bytes, bytes.size)
+                feed(bytes)
                 scheduleRender()
             }
             Predictor.Consumption.Mispredict -> {
@@ -352,7 +395,7 @@ class TerminalController(
         if (canShowNow) {
             // Paint it before the server is even asked. If the echo disagrees,
             // writeOutput() throws this away and repaints from a snapshot.
-            engine.write(bytes, bytes.size)
+            feed(bytes)
             predictor.predict(bytes)
             armStaleCheck()
             _frame.value = engine.render()

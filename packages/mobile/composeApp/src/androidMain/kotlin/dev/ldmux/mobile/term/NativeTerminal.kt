@@ -47,4 +47,26 @@ object NativeTerminal {
 
     /** Acknowledge a rendered frame so the core can reset its dirty state. */
     external fun clean(handle: Long)
+
+    /**
+     * Take the clipboard write the remote program last asked for, as one array:
+     * the kind in byte 0 ([CLIPBOARD_SET] or [CLIPBOARD_CLEAR]) followed by the
+     * UTF-8 payload. Null means the program asked for nothing.
+     *
+     * One call rather than a kind call and then a bytes call, because the value
+     * is consumed by reading it: two reads of a consumed value is exactly how one
+     * of them gets lost, which is a bug this project has already paid for.
+     *
+     * The payload is bytes and not a String on purpose. A JNI string built from
+     * UTF-8 has to be *modified* UTF-8, which differs for anything outside the
+     * BMP — an emoji in a copied path would come back as mojibake — whereas
+     * Kotlin's own decoder handles plain UTF-8 correctly and lives on the side of
+     * the seam that speaks Kotlin.
+     */
+    external fun takeClipboard(handle: Long): ByteArray?
+
+    /** Kinds in byte 0 of a [takeClipboard] answer. */
+    const val CLIPBOARD_NONE: Int = 0
+    const val CLIPBOARD_SET: Int = 1
+    const val CLIPBOARD_CLEAR: Int = 2
 }

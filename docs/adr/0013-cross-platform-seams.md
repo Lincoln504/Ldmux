@@ -1,7 +1,10 @@
 # ADR-0013 — Cross-platform seams
 
 Date: 2026-09-18
-Status: Accepted (two refactors deferred, see §4)
+Status: Accepted. (This line used to read "two refactors deferred, see §4"; §4
+itself now records that both are done — the Status line was left unedited when
+that section was updated, which is exactly the kind of stale claim this ADR
+warns about in its own Consequences.)
 
 ## Context
 
@@ -17,7 +20,8 @@ set. A seam is justified only when a platform cannot express the shared concept 
 not because a platform has a nicer API for it.
 
 This ADR records that rule, the seams that exist today, and the two places where
-the rule is not yet true.
+the rule was not yet true (§4 — both are now done; this sentence originally said
+"is not yet true", present tense, which §4 below contradicts).
 
 ## 1. The rule
 

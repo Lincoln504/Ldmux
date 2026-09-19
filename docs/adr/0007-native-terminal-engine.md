@@ -77,10 +77,12 @@ Multiplatform module, rendered with Compose Multiplatform `Canvas`.**
   isolate the C surface in one module, and cover it with a JVM/device test that
   feeds bytes and asserts the cell grid, so an upstream API change fails one test
   rather than the app.
-- `packages/mobile`'s current `WebView`/`TerminalSurface` shell is the interim
-  implementation of the renderer seam and is replaced by the Compose Canvas
-  renderer; the `TerminalHandle` idea (a renderer-agnostic control surface) is
-  preserved by the shared core.
+- `packages/mobile`'s `WebView`/`TerminalSurface` shell was the interim
+  implementation of the renderer seam; it has since been replaced by the
+  Compose Canvas renderer over libghostty-vt (this bullet used to describe the
+  replacement as pending — it has shipped, and the WebView path is gone). The
+  `TerminalHandle` idea (a renderer-agnostic control surface) is preserved by
+  the shared core.
 - If the Zig/native path stalls, the seam is core-agnostic: `alacritty_terminal`
   (Rust) can be linked behind the same `actual`, which is the fallback recorded in
   `docs/NATIVE-TERMINAL.md`.

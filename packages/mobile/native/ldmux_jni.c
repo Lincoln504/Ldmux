@@ -79,3 +79,29 @@ Java_dev_ldmux_mobile_term_NativeTerminal_clean(JNIEnv *env, jclass cls,
   (void)env; (void)cls;
   ldmux_terminal_clean(handle_of(handle));
 }
+
+/*
+ * One call, not two. A `kind` call followed by a `bytes` call would be two reads
+ * of a value that is consumed by reading it, which is the shape of bug this
+ * project has already paid for once (a `created` slot that was written more than
+ * once before anyone read it). So the answer is one array: the kind in byte 0,
+ * then the payload. An empty payload is legal and distinct from no answer at all,
+ * which is what NULL means.
+ */
+JNIEXPORT jbyteArray JNICALL
+Java_dev_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
+                                                        jlong handle) {
+  (void)cls;
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  int kind = ldmux_terminal_take_clipboard(handle_of(handle), &buf, &len);
+  if (kind == LDMUX_CLIPBOARD_NONE) return NULL;
+  jbyte kind_byte = (jbyte)kind;
+  jbyteArray result = (*env)->NewByteArray(env, (jsize)(len + 1));
+  if (!result) return NULL;
+  (*env)->SetByteArrayRegion(env, result, 0, 1, &kind_byte);
+  if (len > 0) {
+    (*env)->SetByteArrayRegion(env, result, 1, (jsize)len, (const jbyte *)buf);
+  }
+  return result;
+}

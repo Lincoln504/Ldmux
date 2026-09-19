@@ -197,7 +197,6 @@ fun IconPopOut(tint: Color, box: Dp = 18.dp) {
     }
 }
 
-/** Settings: three sliders, which reads as "adjust" without a gear's detail. */
 @Composable
 /**
  * Settings: a cog.
@@ -398,13 +397,6 @@ private fun DrawScope.drawMic(tint: Color) {
     drawLine(tint, Offset(w * 0.5f, w * 0.76f), Offset(w * 0.5f, w * 0.93f), stroke, StrokeCap.Round)
 }
 
-/**
- * `/home/someone/a/b` -> `~/a/b`.
- *
- * The panel has room for one line, and the part of a path that identifies a
- * session is the part below the user's home — a truncated prefix that reads
- * `/home/ldeen/Documents/` for every session is worse than useless.
- */
 /**
  * The title of the shell view: the folder the shell is in, not the way to it.
  *

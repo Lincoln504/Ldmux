@@ -91,4 +91,38 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len);
 /** Clear the render state's dirty tracking. */
 void ldmux_terminal_clean(LdmuxTerminal *t);
 
+/**
+ * What the remote program asked of the system clipboard, if anything.
+ *
+ * The clipboard is a single slot by definition — a later write replaces an
+ * earlier one — so this is deliberately a slot and not a queue. If a program
+ * writes twice before the embedder drains, the newer value is the correct final
+ * state and the older one has nowhere legitimate to go. (The rule elsewhere is
+ * the opposite: a value written more than once before it is read must be a
+ * queue. This is the case where the thing being modelled really is one cell.)
+ */
+#define LDMUX_CLIPBOARD_NONE 0
+#define LDMUX_CLIPBOARD_SET 1
+#define LDMUX_CLIPBOARD_CLEAR 2
+
+/**
+ * Take the clipboard write the remote program last requested, if any.
+ *
+ * Returns one of the LDMUX_CLIPBOARD_* values and clears the request, so a
+ * second call answers NONE until the program writes again. On LDMUX_CLIPBOARD_SET,
+ * `*out` and `*len` describe the text: borrowed, and valid until the next call to
+ * this function or to [ldmux_terminal_free]. The bytes are UTF-8 and are copied
+ * out rather than converted here, because this file is the portable half and a
+ * binding already has a correct decoder for its own string type.
+ *
+ * The write arrived as OSC 52, OSC 1337 or OSC 5522 — libghostty-vt normalises
+ * and decodes all three, so what comes out is the value rather than whatever
+ * spelling the program used. A program can also ask to *read* the clipboard;
+ * that request is deliberately not answered (see ldmux_terminal.c), because
+ * answering it would let anything running in the shell read whatever the user
+ * has copied anywhere else.
+ */
+int ldmux_terminal_take_clipboard(LdmuxTerminal *t, const uint8_t **out,
+                                  size_t *len);
+
 #endif /* LDMUX_TERMINAL_H */

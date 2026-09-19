@@ -64,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -1346,9 +1347,23 @@ private fun SidePanel(
             // a chord. It toggles tmux copy-mode, which is the only way to scroll the
             // history of a full-screen program, because a program on the alternate
             // screen has no local scrollback to page through.
+            val clipboard = LocalClipboardManager.current
+            // `paste` joins `copy` because it is the same kind of thing: a control
+            // for the shell's clipboard rather than a chord, so it belongs in a
+            // row that fills the width like every other row. It is needed in this
+            // mode in particular because landscape has no soft keyboard, which
+            // means no paste gesture at all — and the clipboard is where a
+            // program's own OSC 52 copy lands, so without this a program's copy
+            // would have nowhere to be seen.
             KeyRow(
-                listOf("copy" to { handle?.setCopyMode(handle?.inCopyMode != true) }),
-                active = listOf(handle?.inCopyMode == true),
+                listOf(
+                    "copy" to { handle?.setCopyMode(handle?.inCopyMode != true) },
+                    "paste" to {
+                        val text = clipboard.getText()?.text
+                        if (!text.isNullOrEmpty()) handle?.paste(text)
+                    },
+                ),
+                active = listOf(handle?.inCopyMode == true, false),
             )
             PanelDivider()
             // Backspace joins the keys a soft keyboard cannot send. Landscape has no

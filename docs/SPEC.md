@@ -749,11 +749,14 @@ alive to reconnect. Measured as a deadlock before it was fixed.
 
 ### 11.3 Rendering engine (client)
 
-- **v1:** xterm.js in a WebView (no fit addon: the canonical grid is
-  CSS-scaled, never reflowed — ADR-0002), optional
-  `@xterm/addon-webgl` (canvas/DOM fallback). Scroll-anchor implemented as a small
-  client addon around the xterm.js viewport.
-- **Future:** native renderer behind the same `TerminalSurface` seam.
+- **Shipped (v1):** native libghostty-vt behind JNI, rendered on a Compose
+  Canvas (ADR-0007, `packages/mobile/native/`). This section used to list "v1:
+  xterm.js in a WebView... Future: native renderer" — the native renderer is
+  what shipped, and `packages/web` (the xterm.js/WebView client) was deleted.
+- **Superseded:** xterm.js in a WebView (no fit addon: the canonical grid was
+  CSS-scaled, never reflowed — ADR-0002), optional `@xterm/addon-webgl`
+  (canvas/DOM fallback), with a scroll-anchor addon around the xterm.js
+  viewport. Kept here as a record of the v0 design, not as current behavior.
 
 ---
 
@@ -773,10 +776,12 @@ ldmux/
 │  ├─ protocol/       # frames, messages, rpc, socket client, paths
 │  ├─ daemon/         # ldmuxd + cli + probe + tmux/, stream.ts, remote.ts
 │  ├─ testing/        # the test/expect vocabulary over node:test
-│  ├─ web/public/     # buildless web client (core.js + app.js + vendor/)
 │  └─ mobile/         # native KMP + Compose Multiplatform client (Android
 │                     # first), with the libghostty-vt core behind JNI
-└─ (the web client is served by the daemon; the mobile app is native)
+└─ (packages/web, the buildless xterm.js/WebView client, has been deleted —
+   this tree used to list it under packages/ and said "the web client is
+   served by the daemon"; the mobile app is the only client now, and it is
+   native, not served)
 ```
 
 Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
@@ -815,10 +820,16 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 **Phase 4 — mobile client (Android v1).**
 - **Shipped:** the PWA — canonical-grid scaling, extra-keys bar, session drawer +
   edge-strip paging, client-owned scroll state machine + `follow`, `scrollback`
-  paging, unread markers, offline app shell.
-- **Remaining (target):** KMP scaffold, Ktor WS, foreground service,
-  `TerminalSurface` WebView host, copy-mode.
-- New-session dialog + directory browser. E2E over Tailscale from the phone.
+  paging, unread markers, offline app shell. Since superseded by the native
+  KMP/Compose client (ADR-0007): KMP scaffold, `AttachClient`, the
+  libghostty-vt/Compose Canvas renderer (not a `TerminalSurface` WebView host —
+  that plan changed, see ADR-0007), copy-mode, and the new-shell dialog
+  (`NewShellModal`, `Modal.kt`) are all in place. This section used to list
+  these under "Remaining (target)".
+- **Still open, as far as this correction pass checked:** foreground service
+  so the heartbeat survives Doze (`packages/mobile/README.md` still lists this
+  unchecked), and a directory browser was not confirmed either way and needs
+  its own check. E2E over Tailscale from the phone was not re-verified here.
 
 **Phase 5 — desktop mirror + polish.**
 - i3 + alacritty mirror (read-only default), focus/close helper.
@@ -834,7 +845,7 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 | R2 | Snapshot fidelity (cursor/modes/alt-screen/soft-wrap). | v1: `capture-pane -e` + state fields; document limits; phase-3 optional server-side VT emulator. |
 | R3 | tmux version differences (3.5a here). | Conformance tests; feature-detect; probe before freezing ADRs. |
 | R4 | Android background kill severs the WS. | Foreground service, wake lock, backoff + jitter, tmux persistence, resync on resume. |
-| R5 | WebView WebGL2 availability. | Fallback to canvas/DOM; test on the real device. |
+| R5 | ~~WebView WebGL2 availability.~~ Moot: the shipped renderer is native Compose Canvas over libghostty-vt, not a WebView (ADR-0007) — this row is kept to record that the risk was real for the design it was written against, not because it still applies. | ~~Fallback to canvas/DOM; test on the real device.~~ |
 | R6 | tmux socket under `/tmp` / `TMUX_TMPDIR` nesting. | A bare `-L ldmux` name (no `TMUX_TMPDIR` override); unique per-run socket names in tests, and `killTmuxServer` also unlinks the socket file, which `kill-server` leaves behind when the server already exited. |
 | R7 | Split input with a desktop mirror. | Mirror read-only by default; explicit "take control". |
 | R8 | i3 placement races. | `for_window` rule keyed by `ldmux-mirror`. |
