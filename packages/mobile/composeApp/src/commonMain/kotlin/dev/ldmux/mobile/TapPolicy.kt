@@ -68,6 +68,12 @@ fun planTap(
     // A grid: rows are rows. Up/Down first, so the horizontal part clamps on the
     // line that was actually tapped rather than on the one we started from.
     if (frame.alternateOn) {
+        // A hidden cursor cannot be walked to: every delta below is measured FROM
+        // the cursor, and a program that has hidden it is not showing the user
+        // where it is. Moving it somewhere invisible is not "the cursor goes where
+        // you tapped", it is a guess with no feedback. This is byte 8 of the
+        // frame, which was decoded from the first version and never read.
+        if (!frame.cursorVisible) return TapAction.Ignore
         val rows = row - frame.cursorY
         val cols = col - frame.cursorX
         val keys = ArrayList<String>(abs(rows) + abs(cols))
@@ -76,11 +82,26 @@ fun planTap(
         return if (keys.isEmpty()) TapAction.Ignore else TapAction.Keys(keys.take(MAX_TAP_KEYS))
     }
 
-    // Wanting a cell above the input line means "the beginning". One Home is both
-    // exact and cheap, where walking there would be dozens of keys and dozens of
-    // readline redraws — on a metered link that matters.
-    if (row < frame.cursorY - 1) return TapAction.Keys(listOf("Home"))
+    if (!frame.cursorVisible) return TapAction.Ignore
 
+    // The screen is a continuous strip, and the strip arithmetic is exact for a
+    // WRAPPED input line: an input spanning three rows is reached by walking the
+    // strip, not by guessing which row the input starts on.
+    //
+    // There used to be a `Home` shortcut here for a tap more than one row above
+    // the cursor — one key instead of up to 120, which is a real cost on a metered
+    // link. It was removed because it is only correct when the input is a single
+    // line, and it is wrong in exactly the case this app is for: the composers in
+    // `pi`, Claude Code and Codex wrap, and a tap on the second row of a wrapped
+    // command was being turned into "jump to the start" instead of "go to the cell
+    // that was tapped". A shortcut that silently lands somewhere else is worse than
+    // the bytes it saves.
+    //
+    // Nothing is lost by relying on the strip: readline clamps Left at the line
+    // start, so on a single-line input this still lands at the beginning — it just
+    // is not free. The bound below is what keeps the cost finite, and the honest
+    // fix if that cost ever proves too high on a real link is a server-side
+    // "put the cursor on this cell" primitive, not another client-side heuristic.
     val delta = (row - frame.cursorY) * frame.cols + (col - frame.cursorX)
     if (delta == 0) return TapAction.Ignore
     val key = if (delta < 0) "Left" else "Right"

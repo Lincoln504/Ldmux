@@ -23,12 +23,13 @@ class TapPolicyTest {
         alternateOn: Boolean = false,
         viewportActive: Boolean = true,
         passwordInput: Boolean = false,
+        cursorVisible: Boolean = true,
     ) = TerminalFrame.Frame(
         cols = cols,
         rows = rows,
         cursorX = cursorX,
         cursorY = cursorY,
-        cursorVisible = true,
+        cursorVisible = cursorVisible,
         cursorStyle = 1,
         defaultFg = 0,
         defaultBg = 0,
@@ -140,20 +141,49 @@ class TapPolicyTest {
     }
 
     @Test
-    fun `a tap well above the input line is a single Home`() {
-        // Walking there would be dozens of keys and dozens of readline redraws.
-        val a = planTap(3, 1, frame(cursorX = 40, cursorY = 10))
-        assertEquals(TapAction.Keys(listOf("Home")), a)
+    fun `a tap well above the input line is relative motion, and readline clamps it`() {
+        // RETRACTION. This used to assert a single `Home`.
+        //
+        // The shortcut was "a tap more than one row above the cursor means the
+        // beginning of the line", which is only true when the input is a single
+        // line. It is wrong for a WRAPPED input, which is the case this app exists
+        // for: the composers in pi, Claude Code and Codex wrap, and a tap on the
+        // second row of a wrapped command was being turned into "jump to the
+        // start" instead of "go to the cell that was tapped".
+        //
+        // The strip arithmetic is exact for a wrapped line, and on a single-line
+        // input readline clamps Left at the line start so it lands at the beginning
+        // anyway. The cost is the keys, and the cap is what bounds them: 757 cells
+        // becomes MAX_TAP_KEYS Lefts, not 757.
+        val a = planTap(3, 1, frame(cursorX = 40, cursorY = 10)) as TapAction.Keys
+        assertEquals(MAX_TAP_KEYS, a.keys.size)
+        assertTrue(a.keys.all { it == "Left" })
     }
 
     @Test
-    fun `one row above is still relative motion, not Home`() {
-        // readline only offers Home at the line start, so the threshold for the
-        // one-key shortcut is "strictly more than one row up" — a wrapped input
-        // can be reached by arrows. The screen is a continuous strip, so one row
-        // up at 80 columns is 80 cells plus the 37 leftwards: 117 keys. On a
-        // short single-line input readline clamps at the line start, so this
-        // still lands at the beginning, just not for free.
+    fun `a hidden cursor is not walked to`() {
+        // Every delta is measured FROM the cursor. A program that has hidden it is
+        // not showing the user where it is, so moving it is a guess with no
+        // feedback — byte 8 of the frame, decoded since the first version and
+        // never read until now.
+        assertEquals(TapAction.Ignore, planTap(20, 5, frame(cursorVisible = false)))
+        assertEquals(
+            TapAction.Ignore,
+            planTap(20, 5, frame(cursorVisible = false, alternateOn = true)),
+        )
+        // A mouse click still goes through: it does not depend on the cursor.
+        assertEquals(
+            TapAction.Click(20, 5),
+            planTap(20, 5, frame(cursorVisible = false, mouseTracking = true, mouseSgr = true)),
+        )
+    }
+
+    @Test
+    fun `one row above is still relative motion`() {
+        // The screen is a continuous strip, so one row up at 80 columns is 80
+        // cells plus the 37 leftwards: 117 keys. On a short single-line input
+        // readline clamps at the line start, so this still lands at the beginning,
+        // just not for free.
         val a = planTap(3, 9, frame(cursorX = 40, cursorY = 10)) as TapAction.Keys
         assertEquals(117, a.keys.size)
         assertTrue(a.keys.all { it == "Left" })
