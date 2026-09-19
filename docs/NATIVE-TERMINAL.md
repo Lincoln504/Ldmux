@@ -248,6 +248,36 @@ frame).
    when the question is about the terminal's own state, the engine is both
    better informed and cheaper to ask than the protocol.
 
+   **Measured 2026-09-19, and the measurement itself was wrong once.** The claim
+   "`micro` and `pi` are indistinguishable by every signal the client has or could
+   cheaply get" is the conclusion this document already carried, and it holds — but
+   an attempt to re-verify it first produced the opposite answer, because the probe
+   started `micro -config-dir /tmp/none` and micro **disables mouse reporting when
+   its config directory does not exist**. That run reported `alt=0 mouse_any=0
+   mouse_sgr=0`, which looked like a genuine separation between micro and pi. With
+   micro's normal configuration the answer is `alt=1 mouse_any=1 mouse_sgr=1
+   mouse_button=1`, i.e. the same class as pi. The exact invocation is part of the
+   measurement; a program's behaviour under a broken invocation is not evidence
+   about its behaviour.
+
+   Where the flags do differ, and why it does not help:
+
+   | program | alt | mouse_any | mouse_sgr | mouse_button (1002) |
+   |---|---|---|---|---|
+   | shell (`bash --norc`) | 0 | 0 | 0 | 0 |
+   | pi's own mode set (`?1000h ?1002h ?1003h ?1004h ?1006h ?1049h`) | 1 | 1 | 1 | 1 |
+   | `micro` (normal config) | 1 | 1 | 1 | 1 |
+   | `htop` | 1 | 1 | 0 | 0 |
+   | `less` | 1 | 0 | 0 | 0 |
+
+   `mouse_sgr_flag` (1006) separates the encodings, and byte 31 already carries it,
+   which is what lets the client refuse to synthesize a click a pre-SGR program could
+   not decode. Nothing separates *what the click will mean* — that is a property of
+   the application's own event handling, not of the terminal protocol, and no mode
+   bit in `ghostty/vt/modes.h` means "a click places the cursor". Verdict by
+   observation is therefore the only mechanism, and it costs the thing it costs: the
+   click has already been delivered by the time the answer arrives.
+
 ## The capture is a screen to replay, not text to read
 
 `capture-pane -J` joins rows the terminal *wrapped*, so a long logical line comes
