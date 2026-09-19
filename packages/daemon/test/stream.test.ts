@@ -223,3 +223,54 @@ test("a real tmux %pause resyncs subscribers and then resumes the pane", { timeo
   expect(stream.mode).toBe("control");
   stream.close();
 });
+
+/**
+ * The pipe transport, through the same PaneStream API.
+ *
+ * This is the A/B's other half: `PaneStream` must not care which transport is
+ * underneath, so everything above it — subscribe, fan-out, snapshot, reset —
+ * behaves identically. If these two tests ever diverge, the abstraction has
+ * leaked and the comparison is no longer a comparison.
+ */
+test("PaneStream over the pipe transport fans out and snapshots the same way", { timeout: 20000 }, async () => {
+  const name = "ldmux-stream-pipe";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const pipeDir = join(stateDir, "pipes");
+  const stream = new PaneStream(tmuxSocket, name, cp, { transport: "pipe", pipeDir });
+  const chunks: string[] = [];
+  const resets: string[] = [];
+  const unsub = await stream.subscribe({
+    onOutput: (t) => chunks.push(t),
+    onReset: (r) => resets.push(r),
+  });
+  expect(stream.mode).toBe("pipe");
+  expect(stream.subscriberCount).toBe(1);
+
+  // Input goes through the CLI in this mode: the pipe carries output only.
+  await stream.inputText("printf 'PIPE_MARKER\\n'");
+  await stream.sendKey(["Enter"]);
+  expect(await waitFor(() => chunks.join("").includes("PIPE_MARKER"))).toBe(true);
+  expect(await waitFor(async () => (await stream.snapshot()).screen.includes("PIPE_MARKER"))).toBe(true);
+
+  unsub();
+  stream.close();
+});
+
+test("closing a pipe stream stops the pipe and leaves the session alone", { timeout: 20000 }, async () => {
+  const name = "ldmux-stream-pipe-close";
+  await cp.ensureServer();
+  await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
+  const stream = new PaneStream(tmuxSocket, name, cp, {
+    transport: "pipe",
+    pipeDir: join(stateDir, "pipes"),
+  });
+  const unsub = await stream.subscribe({ onOutput: () => {}, onReset: () => {} });
+  await cp.sendText(name, "echo BEFORE_CLOSE");
+  await cp.sendKey(name, "Enter");
+  unsub();
+  stream.close();
+  // The session is tmux's, not the stream's: closing the pipe must not end it.
+  const sessions = (await cp.listSessions()) ?? [];
+  expect(sessions.some((s) => s.name === name)).toBe(true);
+});

@@ -75,6 +75,13 @@ export interface LdmuxDaemonOptions {
   tmuxSocket?: string;
   canonical?: { cols: number; rows: number };
   historyLimit?: number;
+  /**
+   * Which live transport to prefer: `control` (tmux control mode, the shipped
+   * default) or `pipe` (`pipe-pane` into a FIFO). Selectable at runtime so the
+   * two can be measured against each other on a real device. See
+   * `docs/TMUX-DEPENDENCY.md` §7.
+   */
+  streamTransport?: "control" | "pipe";
   /** Dead records older than this are pruned (default 24h). */
   deadRecordTtlMs?: number;
   /** Hard cap on registry size before oldest records are pruned (default 500). */
@@ -150,6 +157,7 @@ export class LdmuxDaemon {
   private readonly lockPath: string;
   private readonly canonical: { cols: number; rows: number };
   private readonly historyLimit: number;
+  private readonly streamTransport: "control" | "pipe";
   private readonly deadRecordTtlMs: number;
   private readonly maxRecords: number;
   private ownsLock = false;
@@ -208,6 +216,7 @@ export class LdmuxDaemon {
     this.canonical = opts.canonical ?? { cols: 120, rows: 40 };
     // 50k lines costs ~200 MB/pane (dooboxes' measurement); 10k is ~40 MB.
     this.historyLimit = opts.historyLimit ?? 10000;
+    this.streamTransport = opts.streamTransport ?? "control";
     this.deadRecordTtlMs = opts.deadRecordTtlMs ?? 24 * 60 * 60 * 1000;
     this.maxRecords = opts.maxRecords ?? 500;
   }
@@ -438,6 +447,11 @@ export class LdmuxDaemon {
       stream = new PaneStream(this.cp.socket, record.tmuxName, this.cp, {
         clipboardWrite: readClipboardWritePolicy(this.stateDir),
         profilePath: this.cp.profilePath,
+        // The live transport is a runtime choice so the pipe path can be
+        // measured against control mode on the phone rather than argued about
+        // (docs/TMUX-DEPENDENCY.md §7). Default is the shipped one, `control`.
+        transport: this.streamTransport,
+        pipeDir: join(this.stateDir, "pipes"),
       });
       this.streams.set(record.tmuxName, stream);
     }

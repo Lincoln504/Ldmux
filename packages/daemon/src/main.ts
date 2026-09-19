@@ -36,6 +36,9 @@ const daemon = new LdmuxDaemon({
   tmuxSocket: resolveTmuxSocket(),
   remoteHost: process.env.LDMUX_REMOTE_HOST ?? "127.0.0.1",
   remotePort: Number(process.env.LDMUX_REMOTE_PORT ?? 7623),
+  // `control` (default) or `pipe`. Runtime-selectable so the two transports can
+  // be compared on a real device without a rebuild (docs/TMUX-DEPENDENCY.md §7).
+  streamTransport: process.env.LDMUX_STREAM_TRANSPORT === "pipe" ? "pipe" : "control",
 });
 
 try {

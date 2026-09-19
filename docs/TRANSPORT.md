@@ -170,10 +170,11 @@ not push duplicate screens into the client's scrollback.
 
 ## 7. Stack decision
 
-**Bun + TypeScript.** No native modules are required (control mode over pipes,
-`bun:sqlite` if/persisted state is added, native WebSocket/Unix sockets,
-single-binary via `bun build --target bun`). Rust/tokio remains an escape hatch
-behind `PaneStream` if throughput ever demands it.
+**Node + TypeScript, no build step** (ADR-0009). The runtime is the host's
+Node with type-stripping, so `.ts` files execute directly and there is nothing
+to compile. No native modules are required (control mode over pipes, WebSocket
+and Unix sockets from the standard library). A Rust keeper behind `PaneStream`
+remains an option, and is costed in `docs/TMUX-DEPENDENCY.md` §3 and §9.
 
 ## 8. Remaining Phase-1 spike items
 
