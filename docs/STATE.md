@@ -130,6 +130,7 @@ The wire carries **raw pty bytes**, not a grid.
 | A row that cannot be opened says so | The desktop `pi` row reads `~/Documents/ldmux · not in ldmux`, and selecting it turns the bottom button into `new shell (1)` rather than `open` |
 | A phone-opened shell wears the phone glyph | `RCNT` and `nocira` show it and their per-shell menu; the desk shells show neither |
 | The launcher needs the tailnet, and says why when it has none | Wi-Fi off and Tailscale down: `connect failed: SocketTimeoutException … after 10000ms` in logcat. Tailscale up: connected in 305 ms, 6 sessions parsed, 5 attachable |
+| A selection survives a new snapshot | Selected rows `34`/`35` of `seq 1 40`, pressed HOME, came back: the same two rows were still selected, both handles and the platform Copy toolbar intact. Every snapshot replaces the engine, so before this the selection was discarded outright |
 
 ### 4.2 Suites (2026-09-20, all green)
 
@@ -385,6 +386,13 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
 - **"The daemon was stale"** — wrong (2026-09-20). `ldmux list` and the phone disagreed
   about a session's own name because `list` returned raw records while the push path
   applied `sessionTitle`; two answers to one question, not an old process.
+- **"The debug APK is stale because its size never changes"** (2026-09-20). The size did
+- **"Restoring a selection at its own viewport rows keeps it across new output"** — my own
+  first fix, and wrong (2026-09-20). New output moves content up the screen, so those rows
+  hold different text and the text check would have cleared the selection in the common
+  case while looking like it worked. The rows have to be **re-projected** by the change in
+  the viewport's scroll offset, which is the same rule the drag already uses. Caught by
+  asking what the code actually delivers rather than what the comment said.
 - **`waitFor` in this suite takes a synchronous predicate.** An `async` one returns a
   Promise, a Promise is truthy, and the wait passes instantly without checking anything.
   A test that always passes is worse than a failing one.

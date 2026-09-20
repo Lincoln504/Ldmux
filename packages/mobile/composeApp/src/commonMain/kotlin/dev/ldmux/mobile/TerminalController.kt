@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.ldmux.mobile.term.TerminalEngine
 import dev.ldmux.mobile.term.TerminalFrame
+import dev.ldmux.mobile.term.rowAfterScroll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -139,13 +140,22 @@ class TerminalController(
             // one place that can prove the refusal no longer applies.
             _ownedBy.value = null
             // The engine is about to be thrown away, and the selection lives in the
-            // engine (ADR-0014). What is kept is what the selection *meant*, not just
-            // where it was: its endpoints are viewport coordinates, and a snapshot
-            // normally arrives because new output did, so re-applying the same cells
-            // can land on different words. A restored selection covering text the
-            // user did not choose is worse than none, because they will copy it.
+            // engine (ADR-0014). Two things are kept, and both are needed.
+            //
+            // The *text* is what the user chose, and it is the only honest test of
+            // whether a restored range still means what they selected: a snapshot
+            // normally arrives because new output did, so the same cells can hold
+            // different words, and a restored selection covering text nobody chose is
+            // worse than none because they will copy it.
+            //
+            // The *offset* is where the selected text now sits, because content moves
+            // up the screen as output arrives. The viewport's offset into the
+            // scrollback is exactly how much, so the rows are re-projected by it — the
+            // same rule the drag uses, for the same reason. Restoring at the same rows
+            // instead would be a positional guess that is wrong in the common case.
+            val offsetBefore = _frame.value?.scrollOffset
             val keptSelection = selectionBounds()?.let { b ->
-                selectionText()?.takeIf { it.isNotEmpty() }?.let { b to it }
+                selectionText()?.takeIf { it.isNotEmpty() }?.let { Triple(b, it, offsetBefore) }
             }
             engine.close()
             engine = TerminalEngine(cols, rows)
@@ -171,15 +181,24 @@ class TerminalController(
             historyLoading = false
             historyRequested = true
             if (restore != null && restore > 0) engine.scrollBy(restore.toInt())
-            // Put the selection back only if the screen still says the same thing.
-            // The selected *text* is the test, because that is what the user chose:
-            // if it survives the rebuild at those cells then the selection is still
-            // about it, and if it does not then the screen it was made on is gone.
-            // Output arriving during a copy used to discard the selection outright,
-            // which on an active shell is most of the time.
+            // Put the selection back where its text now is. The text is then the
+            // test: if the shifted range holds what the user chose, the selection is
+            // still about it, and if it does not then the screen it was made on is
+            // gone. Output arriving during a copy used to discard the selection
+            // outright, which on an active shell is most of the time.
             if (keptSelection != null) {
-                val (bounds, text) = keptSelection
-                if (!selectionSet(bounds[0], bounds[1], bounds[2], bounds[3]) || selectionText() != text) {
+                val (bounds, text, before) = keptSelection
+                val after = _frame.value?.scrollOffset
+                // Content rises as output arrives, so a row index falls: the delta is
+                // subtracted, which is what `rowAfterScroll` does with the offset's own
+                // change. No measurement means no shift, rather than a guess.
+                val shift = if (before == null || after == null) 0 else (after - before).toInt()
+                val top = rowAfterScroll(bounds[1], shift)
+                val bottom = rowAfterScroll(bounds[3], shift)
+                // Off the grid means the selection has scrolled away entirely, and a
+                // clipped range would copy the wrong thing.
+                val onScreen = top >= 0 && bottom >= 0 && top < rows && bottom < rows
+                if (!onScreen || !selectionSet(bounds[0], top, bounds[2], bottom) || selectionText() != text) {
                     clearSelection()
                 }
             } else {
