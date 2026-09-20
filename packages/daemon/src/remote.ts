@@ -545,6 +545,18 @@ export class RemoteServer {
           // enough to tell two devices apart in a message about a shell.
           const device = msg.device;
           if (device && typeof device.id === "string" && device.id !== "") {
+            // A second `hello` on one connection must not leave the socket in the
+            // previous device's set. Nothing removed it there, and the close path only
+            // cleans the id that is current *at close*, so the old entry held this
+            // socket forever and `byDevice` grew without bound from a client-supplied
+            // string. It is identity, not authentication, so a client is free to
+            // change its mind — it just has to stop counting as the device it was.
+            const previous = data.device?.id;
+            if (previous !== undefined && previous !== device.id.slice(0, 64)) {
+              const old = this.byDevice.get(previous);
+              old?.delete(ws);
+              if (old && old.size === 0) this.byDevice.delete(previous);
+            }
             data.device = {
               id: device.id.slice(0, 64),
               name: String(device.name ?? "device").slice(0, 32),
@@ -1044,7 +1056,18 @@ export class RemoteServer {
     const msg = JSON.stringify({ type: "sessions", sessions: await this.opts.listSessions() });
     for (const client of this.wss.clients) {
       // 1 === OPEN: a socket mid-handshake or closing is not worth waiting for.
-      if (client.readyState === 1) client.send(msg);
+      //
+      // Guarded like every other send in this file. `ws.send` on a socket that fails
+      // that check routes to `sendAfterClose`, which emits `'error'` rather than
+      // throwing, so this is not reachable today — but an unguarded throw here would
+      // abort the loop and leave every client after this one without a session list,
+      // which on the phone looks exactly like a daemon that has no sessions.
+      if (client.readyState !== 1) continue;
+      try {
+        client.send(msg);
+      } catch {
+        /* client gone */
+      }
     }
   }
 

@@ -1,12 +1,24 @@
 /**
- * Desktop mirror (ADR/SPEC §desktop mirror): open a *read-only by default*
- * terminal view of an ldmux session on the machine's own screen.
+ * Desktop windows (ADR-0010, `docs/DESKTOP-INTEGRATION.md`).
  *
- * Read-only matters: input is owned by the phone, and a second writable client
- * would produce split input (`tmux attach -r` is the read-only client).
+ * Two different things, and the difference is the whole point:
  *
- * The command construction is pure and unit-tested; the side effect (i3-msg +
- * alacritty) is isolated in `openMirror` so it can be skipped headlessly.
+ * - `openMirror` puts a **read-only** view of a session on the machine's own screen
+ *   (`tmux attach -r`). Input stays with whoever owns the shell, so a second viewer
+ *   cannot produce split input.
+ * - `openLive` puts the phone's shell **writable** on the desktop and hands the shell
+ *   over: the window becomes the tmux client, the phone lets go, and the phone shows
+ *   "in use on desktop". ADR-0010 is explicit that this is a handover, not a second
+ *   view.
+ *
+ * This header used to describe only the first, as "read-only by default", while the
+ * path the phone actually takes is the second. A reader would infer the opposite of
+ * the truth about the one thing that must not be got wrong here — whether a window on
+ * the desktop can type into the user's shell.
+ *
+ * The command construction is pure and unit-tested; the side effects (i3-msg,
+ * alacritty) are isolated in `openMirror` and `openLive` so they can be skipped
+ * headlessly.
  */
 
 import { run } from "./exec.ts";

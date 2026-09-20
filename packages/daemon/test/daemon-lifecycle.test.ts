@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
@@ -146,4 +146,27 @@ test("a remote bind failure only disables remote; local control keeps working", 
   // …and remote_info reports that remote is unavailable rather than a lie.
   const info = await call<{ port: number }>(blocked.socketPath, "remote_info");
   expect(info.port).toBe(0);
+});
+
+test("a state directory that already exists is tightened, not trusted", async () => {
+  // `mkdirSync` with `recursive` applies `mode` only when it *creates* the directory.
+  // A directory that already existed kept whatever the umask gave it, so that line was
+  // not the guarantee it looked like — the running daemon's own `/run/user/1000/ldmux`
+  // was 0775, and `resolveStateDir()` falls back to `/tmp/ldmux` when `XDG_RUNTIME_DIR`
+  // is unset. The token, the registry and the socket path all live here.
+  //
+  // The assertion in the test above could never have caught this: `mkdtempSync` hands
+  // back 0700, so it passed for the wrong reason. This fixture is deliberately loose
+  // first, and says so, so a failure here is about the code and not about the fixture.
+  const dir = join(root, "loose-state");
+  mkdirSync(dir, { recursive: true, mode: 0o775 });
+  chmodSync(dir, 0o775);
+  expect(statSync(dir).mode & 0o077).toBe(0o075);
+
+  const daemon = freshDaemon({ stateDir: dir });
+  await daemon.start();
+  expect(statSync(daemon.stateDir).mode & 0o777).toBe(0o700);
+  // And it is still usable afterwards, which is the point of tightening rather than
+  // refusing: the shell did not stop being the owner's because a mode was wrong.
+  expect(existsSync(daemon.socketPath)).toBe(true);
 });

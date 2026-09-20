@@ -32,6 +32,7 @@ import type {
 } from "../../protocol/src/rpc.ts";
 import type { DeviceInfo, SessionOwner } from "../../protocol/src/rpc.ts";
 import { DAEMON_PROTOCOL_VERSION } from "../../protocol/src/rpc.ts";
+import { MAX_FRAME_PAYLOAD } from "../../protocol/src/frames.ts";
 import type { SessionInfo } from "../../protocol/src/messages.ts";
 
 /**
@@ -201,7 +202,30 @@ export class LdmuxDaemon {
   constructor(opts: LdmuxDaemonOptions) {
     this.opts = opts;
     this.stateDir = opts.stateDir;
+    // `mkdirSync` with `recursive` succeeds on a directory that already exists and
+    // applies `mode` only when it *creates* one, so this line is not the guarantee it
+    // looks like. `resolveStateDir()` falls back to `/tmp/ldmux` when `XDG_RUNTIME_DIR`
+    // is unset, and a directory another local user made first would be adopted as the
+    // daemon's — taking the token file, the registry and the socket path with it. The
+    // 0600 socket and token still hold (they are chmodded below and owned by this
+    // uid), which is why this is a hardening step and not a hole; but a state
+    // directory that says it is private should be private.
     mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    const st = statSync(this.stateDir);
+    // `process.getuid` is POSIX-only, so where it does not exist there is nothing to
+    // compare the owner against. Using `st.uid` as the fallback makes the owner clause
+    // vacuous rather than failing wrongly.
+    const owner = typeof process.getuid === "function" ? process.getuid() : st.uid;
+    if (owner !== st.uid) {
+      throw new Error(`${this.stateDir} is owned by uid ${st.uid}, not ${owner}`);
+    }
+    // Ours, so tighten it rather than refusing. `mkdirSync` applies `mode` only when it
+    // *creates* the directory, so a directory that already existed kept whatever the
+    // umask gave it — the running daemon's own `/run/user/1000/ldmux` was 0775. The
+    // token, the registry and the socket path all live here, so 0700 is what this
+    // directory is supposed to be, and refusing to start over a mode we can simply
+    // fix would have been the wrong answer to the wrong question.
+    if ((st.mode & 0o077) !== 0) chmodSync(this.stateDir, 0o700);
     this.socketPath = join(this.stateDir, "ldmuxd.sock");
     this.lockPath = join(this.stateDir, "ldmuxd.lock");
     this.cp = new TmuxControlPlane(
@@ -537,6 +561,18 @@ export class LdmuxDaemon {
     const conn = this.conns.get(socket);
     if (!conn) return;
     conn.buf += conn.decoder.decode(data, { stream: true });
+    // A socket that never sends a newline grew this string without limit. The
+    // WebSocket transport bounds the same input four ways (`maxPayload`,
+    // `MAX_INPUT_BYTES`, `MAX_KEYS`, `WS_BACKLOG_BYTES`); this one, being owner-only
+    // at 0600, bounds none of them — so this is a way to take the daemon's memory
+    // down from a shell that already has the owner's uid, which is why it was minor
+    // rather than a boundary crossing. The bound is for consistency with the format
+    // the daemon itself defines, not because the socket is untrusted.
+    if (conn.buf.length > MAX_FRAME_PAYLOAD) {
+      conn.buf = "";
+      socket.destroy();
+      return;
+    }
     let nl: number;
     while ((nl = conn.buf.indexOf("\n")) >= 0) {
       const line = conn.buf.slice(0, nl);
