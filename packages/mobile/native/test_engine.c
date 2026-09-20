@@ -589,6 +589,61 @@ static void test_endpoints_land_on_the_right_row_after_scrolling(void) {
   ldmux_terminal_free(t);
 }
 
+static void test_a_selection_follows_its_text_when_the_viewport_moves(void) {
+  /* The two halves of the auto-scroll a drag-past-the-edge depends on, asserted
+   * positively rather than assumed.
+   *
+   * The gesture carries the end that is not being dragged by adding the scroll
+   * delta to its row. For that to be right, two things must hold: a selection has
+   * to be anchored to TEXT and not to the viewport, and the sign of ghostty's
+   * delta — its header says "up is negative" — has to move a text-anchored
+   * endpoint's viewport row the way the arithmetic assumes.
+   *
+   * Scrolling the viewport up shows older lines, so content moves DOWN the
+   * screen: the characters at row 0 are at row 1 afterwards. The same seven
+   * characters must come back, one row lower. That is the fact the gesture
+   * relies on, and it is the one that was inverted. */
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  for (int i = 0; i < 30; i++) {
+    char line[32];
+    snprintf(line, sizeof(line), "line-%02d\r\n", i);
+    feed(t, line);
+  }
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 6, 0));
+  int sc = -1, sr = -1, ec = -1, er = -1;
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sr, 0);
+  char first[64];
+  const char *s0 = selection_cstr(t);
+  CHECK(s0 != NULL);
+  snprintf(first, sizeof(first), "%s", s0 ? s0 : "");
+
+  /* Up one row. */
+  ldmux_terminal_scroll(t, -1);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sr, 1);
+  CHECK_EQ_INT(er, 1);
+  const char *s1 = selection_cstr(t);
+  CHECK(s1 != NULL);
+  if (s1) CHECK(strcmp(first, s1) == 0);
+
+  /* And back down, which must return it exactly. */
+  ldmux_terminal_scroll(t, 1);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
+  CHECK_EQ_INT(sr, 0);
+  const char *s2 = selection_cstr(t);
+  if (s2) CHECK(strcmp(first, s2) == 0);
+
+  ldmux_terminal_free(t);
+}
+
 static void test_frame_carries_the_endpoints(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
@@ -688,6 +743,8 @@ int main(void) {
       {"set replaces what the gesture chose", test_set_replaces_what_the_gesture_chose},
       {"bounds is zero without a selection", test_bounds_is_zero_without_a_selection},
       {"endpoints land on the right row after scrolling", test_endpoints_land_on_the_right_row_after_scrolling},
+      {"a selection follows its text when the viewport moves",
+       test_a_selection_follows_its_text_when_the_viewport_moves},
       {"frame carries the endpoints", test_frame_carries_the_endpoints},
       {"clear zeroes the frame bits", test_clear_zeroes_the_frame_bits},
       {"empty screen has no selection", test_empty_screen_has_no_selection},

@@ -112,4 +112,74 @@ class GridPlacementTest {
             assertEquals(1f, p.cellWidth / cell)
         }
     }
+
+    // ── dragging past an edge ───────────────────────────────────────────────
+    //
+    // A selection reaches into the scrollback by dragging past the top of the
+    // grid. Three facts decide whether that works, and all three were wrong or
+    // missing: which cell a finger outside the grid means, which way the viewport
+    // should move, and where a text-anchored endpoint ends up when it does.
+
+    private fun grid() = placeGrid(8f, 16f, 80, 24, 640f, 384f)
+
+    @Test
+    fun `a finger above the grid means the cell at the top edge`() {
+        val p = grid()
+        // Column comes from where the finger actually is, so dragging diagonally
+        // out of the top-left corner still selects to column 1, not column 0.
+        val idx = p.dragCell(p.dx + p.cellWidth * 1.5f, p.dy - 200f)!!
+        assertEquals(0, idx / p.cols)
+        assertEquals(1, idx % p.cols)
+    }
+
+    @Test
+    fun `a finger below the grid means the cell at the bottom edge`() {
+        val p = grid()
+        val idx = p.dragCell(p.dx + p.cellWidth * 3.5f, p.dy + p.gridHeight + 500f)!!
+        assertEquals(p.rows - 1, idx / p.cols)
+        assertEquals(3, idx % p.cols)
+    }
+
+    @Test
+    fun `a finger inside the grid is its own cell`() {
+        val p = grid()
+        val idx = p.dragCell(p.dx + p.cellWidth * 2.5f, p.dy + p.cellHeight * 4.5f)!!
+        assertEquals(4, idx / p.cols)
+        assertEquals(2, idx % p.cols)
+    }
+
+    @Test
+    fun `a finger far past the far corner is still on the grid`() {
+        val p = grid()
+        // The boundary case `cellAt` gets wrong on its own: an x exactly on the
+        // right edge floors to column `cols`, which is outside. dragCell clamps to
+        // the last cell's centre instead, so it is never null.
+        val idx = p.dragCell(p.dx + p.gridWidth * 4f, p.dy + p.gridHeight * 4f)!!
+        assertEquals(p.rows - 1, idx / p.cols)
+        assertEquals(p.cols - 1, idx % p.cols)
+    }
+
+    @Test
+    fun `the viewport follows a finger that leaves the grid`() {
+        val p = grid()
+        assertEquals(0, p.scrollFor(p.dy + p.cellHeight))
+        // The edge itself is inside. Only strictly past it asks for history —
+        // otherwise a finger resting on the top row would scroll forever.
+        assertEquals(0, p.scrollFor(p.dy))
+        assertEquals(0, p.scrollFor(p.dy + p.gridHeight))
+        assertEquals(-1, p.scrollFor(p.dy - 1f))
+        assertEquals(1, p.scrollFor(p.dy + p.gridHeight + 1f))
+    }
+
+    @Test
+    fun `scrolling up moves a text-anchored row down the screen`() {
+        // THE sign, in one assertion. Ghostty's delta is "up is negative", and
+        // scrolling up shows older lines, so content moves DOWN and a row grows.
+        // The gesture used to add the delta, which slid the anchor by two rows per
+        // row scrolled. Backed by the engine itself in test_engine.c's "a selection
+        // follows its text when the viewport moves".
+        assertEquals(1, rowAfterScroll(0, -1))
+        assertEquals(0, rowAfterScroll(1, 1))
+        assertEquals(5, rowAfterScroll(3, -2))
+    }
 }

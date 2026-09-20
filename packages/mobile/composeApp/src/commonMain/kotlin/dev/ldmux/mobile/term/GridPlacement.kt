@@ -51,7 +51,55 @@ data class GridPlacement(
         if (col < 0 || row < 0 || col >= cols || row >= rows) return null
         return row * cols + col
     }
+
+    /**
+     * The cell a drag is pointing at, clamped into the grid, so it is never null.
+     *
+     * A finger that has left the grid still points at a cell: the one on the edge
+     * it went past. Clamping is what lets one drag past the top edge both extend
+     * the selection to row 0 and ask for more history, without the caller having
+     * to decide which of the two it was.
+     *
+     * The maximum is the *centre* of the last cell and not its right edge, because
+     * [cellAt] floors: an x exactly on the boundary is column `cols`, which is
+     * outside.
+     */
+    fun dragCell(x: Float, y: Float): Int? {
+        if (cellWidth <= 0f || cellHeight <= 0f || cols <= 0 || rows <= 0) return null
+        val cx = x.coerceIn(dx, dx + gridWidth - cellWidth * 0.5f)
+        val cy = y.coerceIn(dy, dy + gridHeight - cellHeight * 0.5f)
+        return cellAt(cx, cy)
+    }
+
+    /**
+     * Which way the viewport should follow a finger at [y]: -1 up, 0 inside, 1 down.
+     *
+     * Already in the units the engine takes — ghostty's viewport delta is "up is
+     * negative" — so a caller can hand this straight to `scrollBy`.
+     */
+    fun scrollFor(y: Float): Int = when {
+        y < dy -> -1
+        y > dy + gridHeight -> 1
+        else -> 0
+    }
 }
+
+/**
+ * Where a text-anchored endpoint's viewport row goes when the viewport scrolls by
+ * [step].
+ *
+ * **The sign is not obvious and was wrong.** Scrolling up ([step] = -1) shows
+ * *older* lines, so the content on screen moves *down*, so the row of a cell that
+ * is anchored to text goes **up**. The arithmetic is therefore `row - step`, and it
+ * lives here, in one place, because it is used by both drags and getting it
+ * backwards is invisible until someone drags a selection off the top of the screen.
+ *
+ * Proven, not assumed: `test_engine.c`'s "a selection follows its text when the
+ * viewport moves" captures seven characters at viewport row 0, scrolls up one row,
+ * and requires the *same seven characters* back at row 1, then the reverse. That is
+ * the fact, in the host suite, with the engine and no device in the loop.
+ */
+internal fun rowAfterScroll(row: Int, step: Int): Int = row - step
 
 /**
  * Place a [cols]x[rows] grid of [cellWidth]x[cellHeight] cells inside a viewport.

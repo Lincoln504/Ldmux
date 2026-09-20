@@ -68,6 +68,7 @@ import dev.ldmux.mobile.term.GridPlacement
 import dev.ldmux.mobile.term.TerminalFrame
 import dev.ldmux.mobile.term.TerminalPainter
 import dev.ldmux.mobile.term.placeGrid
+import dev.ldmux.mobile.term.rowAfterScroll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.floor
@@ -502,33 +503,30 @@ actual fun rememberTerminalSurface(
                             change.consume()
                             val p = currentPlacement
                             val at = change.position + grabOffset
-                            val index = p.cellAt(at.x, at.y)
+                            // A finger past an edge means two things at once, and the
+                            // grid settles it: the viewport follows by one row, and
+                            // the dragged end goes to the cell on the edge it passed.
+                            // Both used to be conditional on the finger being inside
+                            // the grid, so a drag into the scrollback stopped
+                            // updating the highlight entirely.
+                            val step = p.scrollFor(at.y)
+                            if (step != 0) {
+                                controller.scrollBy(step)
+                                // The end that is not being dragged is anchored to
+                                // *text*, and scrolling up moves the text down, so its
+                                // viewport row rises. This added the delta instead of
+                                // subtracting it, which slid the anchor by two rows
+                                // for every row scrolled.
+                                fixedRow = rowAfterScroll(fixedRow, step)
+                            }
+                            val index = p.dragCell(at.x, at.y)
                             if (index != null) {
                                 val col = index % p.cols
                                 val row = index / p.cols
-                                val ok = if (fixedStart) {
+                                if (fixedStart) {
                                     controller.selectionSet(fixedCol, fixedRow, col, row)
                                 } else {
                                     controller.selectionSet(col, row, fixedCol, fixedRow)
-                                }
-                            } else {
-                                // Off the grid: the only useful thing a finger out here
-                                // can mean is "more history", and a handle dragged past
-                                // the top edge is how a selection reaches back into the
-                                // scrollback. One row per move, and the end that is not
-                                // being dragged rides along with the viewport, because
-                                // it is anchored to text and the text has moved.
-                                val up = at.y < p.dy
-                                val down = at.y > p.dy + p.gridHeight
-                                if (up || down) {
-                                    val step = if (up) -1 else 1
-                                    controller.scrollBy(step)
-                                    // The end that is not being dragged is anchored to
-                                    // text, and the text has just moved a row, so its
-                                    // viewport row moves with it. Re-sending the range
-                                    // is what keeps the two ends describing the same
-                                    // characters while the viewport slides.
-                                    fixedRow += step
                                 }
                             }
                         },
@@ -626,9 +624,8 @@ actual fun rememberTerminalSurface(
                         // taken from the frame the user is looking at rather than
                         // remembered from an earlier gesture.
                         val fixedStart = !grab.start
-                        val fixedCol = if (grab.start) bounds.endCol else bounds.startCol
-                        val fixedRow = if (grab.start) bounds.endRow else bounds.startRow
-                        val anchor = down.position + grab.offset
+                        var fixedCol = if (grab.start) bounds.endCol else bounds.startCol
+                        var fixedRow = if (grab.start) bounds.endRow else bounds.startRow
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -638,7 +635,19 @@ actual fun rememberTerminalSurface(
                             // means is under the handle's *tip*: the grab offset carries
                             // the difference, so the end does not jump on the first move.
                             val at = change.position + grab.offset
-                            val index = p.cellAt(at.x, at.y)
+                            // Dragging a *handle* past an edge now reaches into the
+                            // scrollback exactly as dragging the selection does. It did
+                            // not, and that was the asymmetry: the body gesture could
+                            // extend a selection into history and the handles could
+                            // not, so the same intent worked or did nothing depending
+                            // on whether the finger had landed on a handle. One rule,
+                            // one helper, two callers.
+                            val step = p.scrollFor(at.y)
+                            if (step != 0) {
+                                controller.scrollBy(step)
+                                fixedRow = rowAfterScroll(fixedRow, step)
+                            }
+                            val index = p.dragCell(at.x, at.y)
                             if (index != null) {
                                 val col = index % p.cols
                                 val row = index / p.cols
