@@ -117,8 +117,17 @@ interface TerminalHandle {
     /** Forget any armed modifier. Used when the user moves to a different shell. */
     fun clearModifiers() {}
 
-    /** Scroll the emulator's viewport by [rows] (negative is up). */
-    fun scrollBy(rows: Int) {}
+    /**
+     * Scroll the emulator's viewport by [rows] (negative is up), and answer with the
+     * rows it *actually* moved.
+     *
+     * Zero means the engine refused: either end of the history, or the alternate
+     * screen, which keeps no scrollback to scroll. It answers rather than just
+     * acting because a caller dragging a selection has to move its anchored end by
+     * what happened rather than by what it asked for, and a `Unit` return left it no
+     * way to tell those two apart.
+     */
+    fun scrollBy(rows: Int): Int = 0
 
     /**
      * The user tapped a cell. Whether that moves the shell's cursor, clicks for a

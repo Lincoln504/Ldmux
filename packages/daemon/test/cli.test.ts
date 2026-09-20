@@ -137,3 +137,39 @@ test("send -- types a leading-dash string instead of swallowing it as a flag", a
   expect(screen).toContain("--dash-cli-marker");
   await cli("kill", id);
 });
+
+test("an unknown flag is refused instead of silently ignored", { timeout: 20000 }, async () => {
+  // `flag()` finds a name and returns the next argv element, and ignores every option
+  // it does not recognise. So `ldmux shell --nam foo` used the default name and the
+  // command's own output said nothing about the flag having been dropped. That is not
+  // one bad case — it is every mistyped flag in every command — so the check is one
+  // place, before the switch and before any socket is opened.
+  const before = (await cli("list")).out;
+  const bad = await cli("shell", "--nam", "typo");
+  expect(bad.code).toBe(2);
+  expect(bad.err).toContain("unknown option --nam");
+  // The point of the check: no session appeared.
+  expect((await cli("list")).out).toBe(before);
+});
+
+test("--help explains the tool and starts nothing", { timeout: 20000 }, async () => {
+  // `ldmux shell --help` used to **create a session**, which then had to be killed by
+  // id — the session was the only evidence the flag had been dropped anywhere.
+  const before = (await cli("list")).out;
+
+  const verb = await cli("shell", "--help");
+  expect(verb.code).toBe(0);
+  expect(verb.err).toContain("usage: ldmux");
+  expect((await cli("list")).out).toBe(before);
+
+  const whole = await cli("--help");
+  expect(whole.code).toBe(0);
+  expect(whole.err).toContain("usage: ldmux");
+  expect((await cli("list")).out).toBe(before);
+
+  // `--` still ends option scanning, so a leading-dash *argument* is still typeable.
+  const created = await cli("new", "shell", tmpdir());
+  const id = created.out.trim();
+  expect((await cli("send", id, "--", "--not-a-flag")).code).toBe(0);
+  await cli("kill", id);
+});

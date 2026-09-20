@@ -189,3 +189,26 @@ test("every Kotlin source on disk is tracked by git", () => {
   );
   assert.ok(trackedSet.size > 0, "git reported no Kotlin files at all");
 });
+
+// The frame format and the daemon's pane limits are one number seen from two
+// sides, and neither package can see the other's copy. A frame carries a
+// selection's rows in ONE BYTE each while its columns already get two, so a pane
+// taller than 255 wraps its selection rows modulo 256: row 256 draws as row 0, the
+// handles jump to the top of the screen, and the highlighted range is silently
+// wrong. Nothing errors, because nothing is inconsistent — the number is simply
+// truncated. Checked here rather than in either package, because this is the seam.
+test("the daemon's pane ceiling fits in the frame's one-byte selection rows", () => {
+  const plane = readFileSync(
+    join(ROOT, "..", "daemon", "src", "tmux", "control-plane.ts"),
+    "utf8",
+  );
+  const m = /export const MAX_PANE_ROWS = (\d+);/.exec(plane);
+  assert.ok(m, "MAX_PANE_ROWS is no longer a literal this test can read");
+  const rows = Number(m[1]);
+  assert.ok(
+    rows <= 255,
+    `MAX_PANE_ROWS is ${rows}, and a selection's rows are one byte on the wire ` +
+      `(ldmux_terminal.c header bytes 36 and 39), so rows above 255 wrap and move ` +
+      `the handles to the top of the screen with no error`,
+  );
+});

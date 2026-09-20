@@ -54,9 +54,77 @@ function positional(args: string[], skip: string[]): string[] {
   return out;
 }
 
+/** Every long option the CLI understands, across all commands. */
+const KNOWN_FLAGS = new Set([
+  "--cwd",
+  "--dry-run",
+  "--history",
+  "--json",
+  "--name",
+  "--rw",
+  "--terminal",
+  "--title",
+  "--workspace",
+]);
+
+/**
+ * The one usage string.
+ *
+ * It used to be an argument to `console.error` inside the switch's `default:` arm,
+ * so nothing else could print it and a `--help` had nowhere to go but into the
+ * command it was meant to explain.
+ */
+function printUsage(): void {
+  console.error(
+    "usage: ldmux <ping|list|desktop|new|shell|run|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
+  );
+}
+
+/**
+ * The first option no command knows, or null.
+ *
+ * `flag()` finds a name and returns the next argv element, and silently ignores
+ * every option it does not recognise — so `ldmux shell --nam foo` used the default
+ * name, and `ldmux shell --help` **built a session**, which then had to be killed by
+ * id, because the session was the only evidence the flag had been dropped. That is
+ * not one bad case, it is every mistyped flag in every command, so the check belongs
+ * here: once, before any command runs, before any socket is opened, and before
+ * anything with a side effect can happen.
+ *
+ * `--` still ends option scanning, so `ldmux send <id> -- --help` types the text.
+ */
+function rejectUnknownFlag(rest: string[]): string | null {
+  for (const arg of rest) {
+    if (arg === "--") return null;
+    if (!arg.startsWith("-") || arg === "-") continue;
+    const name = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (KNOWN_FLAGS.has(name)) continue;
+    return name;
+  }
+  return null;
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const sock = defaultSocketPath();
+
+  // `--help` is a request about the tool, not a flag for a command, so it is
+  // answered before the command is looked up and never reaches one.
+  if (cmd === "--help" || cmd === "-h") {
+    printUsage();
+    process.exit(0);
+  }
+  const bad = rejectUnknownFlag(rest);
+  if (bad === "--help" || bad === "-h") {
+    printUsage();
+    process.exit(0);
+  }
+  if (bad) {
+    console.error(`ldmux ${cmd ?? ""}: unknown option ${bad}`);
+    printUsage();
+    process.exit(2);
+  }
+
   switch (cmd) {
     case "ping":
       console.log(JSON.stringify(await daemonCall(sock, "ping", {})));
@@ -91,7 +159,7 @@ async function main() {
         cwd: cwd ?? process.cwd(),
       });
       console.error(`ldmux: session ${session.id} (${session.tmuxName}) — detach with Ctrl-b d`);
-      const proc = spawnSync("tmux", ["-L", ping.tmuxSocket, "attach", "-t", session.tmuxName], {
+      const proc = spawnSync(resolveTmuxBin(), ["-L", ping.tmuxSocket, "attach", "-t", session.tmuxName], {
         stdio: "inherit",
       });
       process.exit(proc.status ?? 0);
@@ -327,9 +395,7 @@ async function main() {
     }
 
     default:
-      console.error(
-        "usage: ldmux <ping|list|desktop|new|shell|run|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
-      );
+      printUsage();
       process.exit(2);
   }
 }

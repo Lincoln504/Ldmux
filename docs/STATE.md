@@ -127,16 +127,23 @@ The wire carries **raw pty bytes**, not a grid.
 | Closing the keyboard does not rotate | `mInputShown=false`, `cur=1080x2400` unchanged |
 | The keyboard returns by rotating through portrait | landscape → portrait → `mInputShown=true` |
 | A desk shell has no per-shell menu | The launcher shows the phone glyph and actions only on the phone-opened row |
+| A row that cannot be opened says so | The desktop `pi` row reads `~/Documents/ldmux · not in ldmux`, and selecting it turns the bottom button into `new shell (1)` rather than `open` |
+| A phone-opened shell wears the phone glyph | `RCNT` and `nocira` show it and their per-shell menu; the desk shells show neither |
+| The launcher needs the tailnet, and says why when it has none | Wi-Fi off and Tailscale down: `connect failed: SocketTimeoutException … after 10000ms` in logcat. Tailscale up: connected in 305 ms, 6 sessions parsed, 5 attachable |
 
-### 4.2 Suites (2026-09-19, all green)
+### 4.2 Suites (2026-09-20, all green)
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **295 tests, 295 pass** | `node --run test` (`--test-concurrency=4`) |
+| JS/TS | **300 tests, 300 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
-| Native C (host) | **117 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
-| Kotlin (Android unit) | **127 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
-| Architecture guard | 6 tests, part of the 288 | `packages/mobile/test/architecture.test.ts` |
+| Native C (host) | **147 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
+| Kotlin (Android unit) | **143 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
+| Architecture guard | 7 tests, part of the 300 | `packages/mobile/test/architecture.test.ts` |
+
+Counts move; the commands do not. Re-run them rather than trusting this table's numbers,
+and note that a green suite is only evidence of what it asserts — several of the tests in
+this project were once green while asserting nothing, which is why §8 exists.
 
 ### 4.3 Measured, with conditions
 
@@ -172,26 +179,29 @@ Each item says what it is, why it matters, and what the next concrete step is.
 
 ### 5.1 Selection: fine-tuning (the feature works; these are the rough edges)
 
-**Double-tap-for-a-word is dropped** — the user does not want it, and it is
-unnecessary given long press already selects. The remaining four:
+**Double-tap-for-a-word is dropped** — the user does not want it, and long press already
+selects. Two items were open here and both are now closed:
 
-1. **Auto-scroll while dragging a handle past an edge.** The gesture path has it
-   (`TerminalSurface.android.kt`, the `onDrag` branch that calls `controller.scrollBy`);
-   the *handle* gesture does not. Next step: extract the "one row per move, clamped to
-   the history depth, skipped on the alternate screen" behaviour into one place used by
-   both, with the fixed endpoint shifting with the viewport.
-2. **A selection is lost when the engine is rebuilt.** The engine is rebuilt on every
-   snapshot (ADR-0014 §4 trap 4), so output arriving during a copy discards the
-   selection. `termux-app` does the opposite: the view scrolls with the text and both
-   endpoints shift by the scroll counter, and the selection is dropped only when it would
-   leave the transcript. The frame carries `scrollTotal`/`scrollOffset`, so the delta is
-   available. Next step: re-apply the selection in the controller after a snapshot,
-   shifted by the delta, with a test.
-3. **Double-tap for a word.** The engine's click-count path does not produce a word from
-   two taps — pinned as a tripwire test in `test_engine.c`, so a future engine that
-   honours it fails loudly rather than being assumed either way. Today long press picks
-   the touched cell and the drag extends. Next step: either the engine gains it, or the
-   client expands the range using the engine's word table.
+1. **Auto-scroll while dragging past an edge — done, both paths.** The handle drag had no
+auto-scroll at all (`40d1d9e`), and the sign was inverted in both. The remaining half was
+that neither path was *skipped on the alternate screen*, which §5.1 used to state as
+already implemented: `scrollBy` was a `Unit` return, so the callers moved the anchored end
+whenever they asked for a scroll rather than when one happened — and on the alternate
+screen, where there is no scrollback, the engine refuses while the request is still
+non-zero. In `vim`, in `htop`, in `less`, a drag past an edge walked the selection away
+from its text while the content stood still. `scrollBy` now returns the rows the viewport
+**actually moved**, read from the frame's own `scrollOffset`, so a refused scroll moves
+nothing and the rule holds by construction rather than by a flag that can disagree with
+the viewport. No protocol change: `scrollOffset` already rides every frame. Proved in
+`test_engine.c` ("the scroll offset is what actually moved").
+2. **A selection is lost when the engine is rebuilt — done.** The engine is replaced on
+every snapshot (ADR-0014 §4 trap 4), so output arriving during a copy discarded the
+selection, which on an active shell is most of the time. The controller now keeps what
+the selection *meant* — its endpoints and its text — and re-applies it after the rebuild
+**only if the cells still hold exactly that text**. A positional restore alone would be
+worse than nothing: a snapshot normally arrives because new output did, so the same cells
+can hold different words, and the user would copy what they did not choose.
+3. **Snapping out of the middle of a wide glyph** — still open, and small.
 
 ### 5.2 Tap-to-cursor — **the Home shortcut is fixed; the verdict is not**
 
@@ -350,6 +360,31 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
   any of it runs. A wait on a sentinel passed instantly and a negative assertion about
   escaping failed on the echo. Escaping is now asserted positively, which cannot be
   fooled.
+- **A third test was passing on its own echo** (2026-09-20). Fixing the alternate-screen
+  flake by waiting on the marker `ALTERNATE-MARKER` failed in 187 ms, because the shell
+  *echoes the command* and the marker is on screen before `tput` has run. An echo trap is
+  not a one-off in this project; it has now been sprung three times.
+- **`waitFor` could not see an async predicate** (2026-09-20). It took `() => boolean`, so
+  an `async` predicate returned a Promise, a Promise is truthy, and the first check passed
+  and the wait did nothing. It bit twice before it was fixed at the helper.
+- **"The process death that freezes the terminal is reachable by killing the tmux
+  server"** — wrong, and the test that encoded it proved nothing (2026-09-20). A control
+  client that loses its *server* prints `%exit` on the way out, so the graceful path covers
+  it; the test passed with the fix removed. The reachable case is the client's own process
+  being destroyed — an OOM kill or a crash — which is what the test now does. **A test that
+  passes with the fix removed is not evidence, and this one shipped that way for one run
+  before the probe caught it.**
+- **"Auto-scroll is skipped on the alternate screen"** (2026-09-20). §5.1 stated it as
+  implemented and it was not implemented at all. A status document's next-step text is a
+  description of the *plan*; it is not evidence about the code.
+- **"Extracting `parseSessions` fixed the empty launcher"** — it fixed nothing
+  (2026-09-20). The daemon's payload has no nulls and no objects, so the old code parsed it
+  correctly. The extraction and its test are right on their own terms; the cause was that
+  the phone had no route to the tailnet. A tidy story about a tidy fix is how a project
+  lies to itself, which is why this is written down.
+- **"The daemon was stale"** — wrong (2026-09-20). `ldmux list` and the phone disagreed
+  about a session's own name because `list` returned raw records while the push path
+  applied `sessionTitle`; two answers to one question, not an old process.
 - **`waitFor` in this suite takes a synchronous predicate.** An `async` one returns a
   Promise, a Promise is truthy, and the wait passes instantly without checking anything.
   A test that always passes is worse than a failing one.

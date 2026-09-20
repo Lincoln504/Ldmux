@@ -176,7 +176,12 @@ export class TmuxPipeClient {
       if (this.closed) return;
       const text = this.decoder.write(chunk);
       if (!text) return;
-      this.bytesOut += text.length;
+      // `text` is `StringDecoder` output, so `.length` counts UTF-16 code units,
+      // not bytes. The field is named for bytes and its doc comment says bytes, and
+      // the same accounting in `remote.ts` uses `Buffer.byteLength` for exactly this
+      // reason. Nothing reads this field yet, which is why it is a trap for the next
+      // reader rather than a live defect.
+      this.bytesOut += Buffer.byteLength(text);
       this.opts.onOutput(text);
     });
     // EOF on a FIFO read end also happens when no writer is attached, so it is

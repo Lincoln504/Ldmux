@@ -138,6 +138,15 @@ class TerminalController(
             // A snapshot only ever follows a *successful* attach, so this is the
             // one place that can prove the refusal no longer applies.
             _ownedBy.value = null
+            // The engine is about to be thrown away, and the selection lives in the
+            // engine (ADR-0014). What is kept is what the selection *meant*, not just
+            // where it was: its endpoints are viewport coordinates, and a snapshot
+            // normally arrives because new output did, so re-applying the same cells
+            // can land on different words. A restored selection covering text the
+            // user did not choose is worse than none, because they will copy it.
+            val keptSelection = selectionBounds()?.let { b ->
+                selectionText()?.takeIf { it.isNotEmpty() }?.let { b to it }
+            }
             engine.close()
             engine = TerminalEngine(cols, rows)
             // State, then content, then cursor — see [snapshotBytes], which is the
@@ -162,6 +171,22 @@ class TerminalController(
             historyLoading = false
             historyRequested = true
             if (restore != null && restore > 0) engine.scrollBy(restore.toInt())
+            // Put the selection back only if the screen still says the same thing.
+            // The selected *text* is the test, because that is what the user chose:
+            // if it survives the rebuild at those cells then the selection is still
+            // about it, and if it does not then the screen it was made on is gone.
+            // Output arriving during a copy used to discard the selection outright,
+            // which on an active shell is most of the time.
+            if (keptSelection != null) {
+                val (bounds, text) = keptSelection
+                if (!selectionSet(bounds[0], bounds[1], bounds[2], bounds[3]) || selectionText() != text) {
+                    clearSelection()
+                }
+            } else {
+                // A freshly built engine has no selection, so the flag must not claim
+                // one — it would offer the user a copy of nothing.
+                hasSelection = false
+            }
             modes = m
             // A fresh snapshot is the only thing that knows the foreground
             // program again, so it is also what re-arms the click path.
@@ -430,16 +455,30 @@ class TerminalController(
             }
         }
     }
-    override fun scrollBy(rows: Int) {
-        if (rows == 0) return
+    override fun scrollBy(rows: Int): Int {
+        if (rows == 0) return 0
+        // What the viewport *did*, not what it was asked to do. The emulator's own
+        // scrollbar is the only thing that knows: its offset counts into the
+        // scrollback from the top, so scrolling up decreases it, and a request the
+        // engine declines — the alternate screen, or an end of the history — leaves
+        // it exactly where it was. Reading it is what makes "one row per move,
+        // skipped on the alternate screen" true by construction instead of by a
+        // flag that can disagree with the viewport.
+        val before = _frame.value?.scrollOffset
         engine.scrollBy(rows)
         renderNow()
+        val after = _frame.value?.scrollOffset
+        // No frame on either side means there is no viewport to have moved and
+        // nothing anchored to it, so nothing shifts. That is the honest answer; the
+        // alternative is asserting a frame exists on a path where it may not.
+        val moved = if (before == null || after == null) 0 else (after - before).toInt()
         // History arrives when it is asked for by the act of scrolling to the end
         // of what is already here. It used to be a button, which is the machine
         // showing its working: two controls whose difference ("show me history"
         // vs "go back to now") is a distinction the user should never have had to
         // hold, because the gesture already means both.
         if (rows < 0) maybeExtendHistory()
+        return moved
     }
 
     /**

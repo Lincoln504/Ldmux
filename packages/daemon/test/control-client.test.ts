@@ -99,3 +99,39 @@ test("live: the resume command used on %pause is accepted by tmux", async () => 
   client.close();
   tm("kill-session", "-t", "s3");
 });
+
+test("a control client destroyed without %exit is still reported dead", { timeout: 20000 }, async () => {
+  // Every recovery path hangs off the parser's `%exit`: `PaneStream` learns its
+  // client died from `onExit` and from nowhere else. tmux writes `%exit` when it
+  // detaches cleanly and NOT when the process is destroyed, and the process handle
+  // that would have said so was computed on construction and never read. So a killed
+  // client left the stream believing it was alive — no `onReset`, no reconnect, no
+  // resync, and a terminal frozen forever, which is exactly the failure
+  // snapshot-on-connect exists to recover from.
+  const sock = `ldmux-test-exit-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const tm2 = (...args: string[]) => spawnSync("tmux", ["-L", sock, ...args]);
+  try {
+    expect(
+      tm2("new-session", "-d", "-s", "gone", "-x", "80", "-y", "24", "bash", "--norc", "--noprofile").status,
+    ).toBe(0);
+    let exits = 0;
+    const client = await TmuxControlClient.connect(sock, "gone", { onExit: () => exits++ });
+
+    // **Kill the client, not the server.** The first version of this test
+    // SIGKILLed the *server* and passed with the fix removed, which means it was
+    // testing nothing: a control client that loses its server prints `%exit` on the
+    // way out, so the graceful path covered it. The unrecoverable case — and the one
+    // a supervisor actually meets — is the client's own process being destroyed, an
+    // OOM kill or a crash, where nothing gets to write anything.
+    const pid = client.pid;
+    expect(pid).toBeGreaterThan(0);
+    process.kill(pid!, "SIGKILL");
+
+    await waitFor(() => exits > 0);
+    // Exactly one: the parser and the process handle race, and two `onExit`s for one
+    // death would make `PaneStream` reconnect twice and reset every subscriber twice.
+    expect(exits).toBe(1);
+  } finally {
+    killTmuxServer(sock);
+  }
+});

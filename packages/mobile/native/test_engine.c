@@ -644,6 +644,73 @@ static void test_a_selection_follows_its_text_when_the_viewport_moves(void) {
   ldmux_terminal_free(t);
 }
 
+/* A u32 from the frame header at [off], little-endian, exactly as the client reads it. */
+static uint32_t frame_u32(const uint8_t *buf, size_t off) {
+  return (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) |
+         ((uint32_t)buf[off + 2] << 16) | ((uint32_t)buf[off + 3] << 24);
+}
+
+static void test_the_scroll_offset_is_what_actually_moved(void) {
+  /* The premise the drag's auto-scroll now rests on, asserted rather than assumed.
+   *
+   * `scrollBy` reports the rows the viewport moved instead of assuming it moved by
+   * what was asked, and it reads that from the header's `scrollOffset`. For the
+   * report to be sound two things have to hold: a scroll that happens changes the
+   * offset by exactly the amount requested, and a scroll the engine refuses changes
+   * it by nothing. The second is what makes "one row per move, skipped on the
+   * alternate screen" true by construction, with no flag that can disagree with the
+   * viewport it describes. On the alternate screen a drag used to walk the anchored
+   * end away from its text while the content stood still — in vim, in htop, in less.
+   */
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  for (int i = 0; i < 30; i++) {
+    char line[32];
+    snprintf(line, sizeof(line), "line-%02d\r\n", i);
+    feed(t, line);
+  }
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  const int base = (int)frame_u32(buf, 23);
+
+  /* The offset counts into the scrollback from the top, so going back in history
+   * moves it *down* the number line. */
+  ldmux_terminal_scroll(t, -1);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT((int)frame_u32(buf, 23) - base, -1);
+
+  ldmux_terminal_scroll(t, -3);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT((int)frame_u32(buf, 23) - base, -4);
+
+  /* An end of the history is a refusal in the same sense: the request is larger
+   * than what is there, the viewport pins, and the report must be a small number
+   * rather than the one asked for. That is why the caller cannot use its own step. */
+  const int pinned = (int)frame_u32(buf, 23);
+  ldmux_terminal_scroll(t, -9999);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  const int at_top = (int)frame_u32(buf, 23);
+  CHECK(at_top <= 0);
+  CHECK(at_top < pinned);
+  ldmux_terminal_scroll(t, -5);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT((int)frame_u32(buf, 23), at_top); /* already at the top: no move */
+
+  /* And the alternate screen, which keeps no scrollback at all. */
+  feed(t, "\x1b[?1049h");
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  const int alt = (int)frame_u32(buf, 23);
+  ldmux_terminal_scroll(t, -1);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT((int)frame_u32(buf, 23), alt);
+  ldmux_terminal_scroll(t, -10);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT((int)frame_u32(buf, 23), alt);
+
+  ldmux_terminal_free(t);
+}
+
 static void test_frame_carries_the_endpoints(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
@@ -743,6 +810,7 @@ int main(void) {
       {"set replaces what the gesture chose", test_set_replaces_what_the_gesture_chose},
       {"bounds is zero without a selection", test_bounds_is_zero_without_a_selection},
       {"endpoints land on the right row after scrolling", test_endpoints_land_on_the_right_row_after_scrolling},
+    {"the scroll offset is what actually moved", test_the_scroll_offset_is_what_actually_moved},
       {"a selection follows its text when the viewport moves",
        test_a_selection_follows_its_text_when_the_viewport_moves},
       {"frame carries the endpoints", test_frame_carries_the_endpoints},

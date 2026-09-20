@@ -111,6 +111,8 @@ export interface ControlProc {
   stdin: { write(data: string): Promise<void>; end(): void };
   exited: Promise<number>;
   kill(): void;
+  /** The child's own pid, for logs and for a supervisor that has to end it. */
+  pid?: number;
 }
 
 /**
@@ -143,6 +145,7 @@ function spawnTmuxControl(
   return {
     stdout: child.stdout!,
     stderr: child.stderr!,
+    pid: child.pid,
     stdin: {
       write: (data: string) =>
         new Promise<void>((resolve, reject) => {
@@ -205,6 +208,8 @@ export class TmuxControlClient {
   });
   private readonly noteWaiters: Array<{ pred: (line: string) => boolean; resolve: () => void; timer: any }> = [];
   private closed = false;
+  /** Guards [fireExit]: two independent signals can announce one death. */
+  private exitFired = false;
   readonly exited: Promise<number>;
 
   private readonly proc: ControlProc;
@@ -216,10 +221,7 @@ export class TmuxControlClient {
     this.parser = new ControlParser({
       onOutput: opts.onOutput,
       onNotification: (line) => this.handleNotification(line),
-      onExit: () => {
-        this.rejectAll(new Error("control client exited"));
-        opts.onExit?.(this);
-      },
+      onExit: () => this.fireExit(),
       onResponse: (seq, ok, lines) => {
         const waiter = this.takeWaiter(seq);
         if (!waiter) return;
@@ -232,6 +234,33 @@ export class TmuxControlClient {
     void this.readLoop();
     void this.stderrLoop();
     this.exited = proc.exited;
+    // The process handle is computed on the line above and, until now, nothing read
+    // it. Recovery hung entirely on the parser's `%exit`, which tmux writes when it
+    // detaches cleanly and NOT when the process is killed, OOM-killed, or crashes.
+    // A client that died that way left `PaneStream` believing it was alive: no
+    // `onReset`, no reconnect, no resync, and a terminal frozen forever. That is
+    // precisely the failure snapshot-on-connect exists to recover from, and it was
+    // unreachable from here.
+    void proc.exited.then(() => this.fireExit());
+  }
+
+  /**
+   * Announce the control client's death exactly once.
+   *
+   * Two signals can report it and they race: the parser seeing `%exit`, and the
+   * process handle resolving. Firing twice would make `PaneStream` reconnect twice
+   * and hand every subscriber two resets for one death.
+   */
+  private fireExit(): void {
+    if (this.exitFired) return;
+    this.exitFired = true;
+    this.rejectAll(new Error("control client exited"));
+    this.opts.onExit?.(this);
+  }
+
+  /** The control client's own pid, for logs and for a supervisor that must end it. */
+  get pid(): number | undefined {
+    return this.proc.pid;
   }
 
   static async connect(

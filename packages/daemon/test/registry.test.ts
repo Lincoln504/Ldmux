@@ -1,7 +1,7 @@
 import { test, expect } from "../../testing/src/expect.ts";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Registry } from "../src/registry.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 
@@ -122,4 +122,34 @@ test("reconcile revives a dead record tmux still has, and reports orphans", () =
   const revived = r.list().find((s) => s.id === "revive")!;
   expect(revived.status).toBe("running");
   expect(revived.exitedAt).toBeNull();
+});
+
+test("a malformed record does not take the whole list down", async () => {
+  // `registry.json` is loaded without validation — a boundary the daemon's own
+  // comment already admits. `sessionTitle` calls `basename(record.cwd)`, and
+  // `basename(undefined)` throws `ERR_INVALID_ARG_TYPE`. The throw escaped
+  // `describeSessions`, so `list` and every pushed session update failed together:
+  // the launcher showed nothing, and every call site ends in `.catch(() => {})`, so
+  // nothing anywhere said why. A record that cannot be named is not one that can be
+  // shown, so it is dropped where the untrusted bytes arrive.
+  const path = join(dir, "malformed-records.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      sessions: [
+        record({ id: "good", cwd: "/home/me/proj" }),
+        { kind: "shell", cwd: "/x" }, // no id
+        { id: "no-cwd", kind: "shell", title: "t" }, // id but no cwd
+        { id: "", kind: "shell", cwd: "/y" }, // empty id
+        null,
+      ],
+    }),
+  );
+  const reg = new Registry(path);
+  reg.load();
+  expect(reg.list().map((r) => r.id)).toEqual(["good", "no-cwd"]);
+  // And the one that survived without a cwd is *loadable*, not merely present:
+  // this is the call that used to throw.
+  expect(basename(reg.get("no-cwd")!.cwd)).toBe("");
 });

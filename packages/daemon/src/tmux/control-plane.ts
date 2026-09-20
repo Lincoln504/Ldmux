@@ -196,7 +196,21 @@ export const TMUX_KILL_GRACE_MS = 2000;
 export const MIN_PANE_COLS = 20;
 export const MAX_PANE_COLS = 500;
 export const MIN_PANE_ROWS = 5;
-export const MAX_PANE_ROWS = 300;
+/**
+ * 255, not 300, because the client's wire format is the binding constraint.
+ *
+ * A frame carries a selection's rows in **one byte each** (header bytes 36 and 39
+ * — see `ldmux_terminal.c`), while its columns already get two. Above 255 a pane
+ * wraps its selection rows modulo 256: row 256 draws as row 0, row 300 as row 44,
+ * so both handles jump to the top of the screen and the highlighted range is wrong.
+ * Nothing reports it, because nothing is inconsistent — the number is simply
+ * truncated. Bytes 33–39 are exactly full (a flag, then two columns and a row per
+ * endpoint), so raising this means a frame version bump, and no real terminal is
+ * 255 rows tall: the phone reaches roughly 100 at its smallest font.
+ * `packages/mobile/test/architecture.test.ts` asserts the two ends agree, because
+ * this is a number that only makes sense next to the format that reads it.
+ */
+export const MAX_PANE_ROWS = 255;
 
 function clampSize(value: number, min: number, max: number): number {
   const n = Math.trunc(value);
@@ -768,8 +782,13 @@ export class TmuxControlPlane {
     // `-J` needs tmux 3.2+. A build without it still has to produce a screen,
     // so fall back once rather than failing every snapshot on an old host. The
     // same goes for `-N`: an older tmux gives the trimmed rows it always did.
+    //
+    // Both flags have to be dropped together for that promise to be true. This
+    // passed `opts` straight through, so `pad: true` still pushed `-N` and a tmux
+    // new enough for `-J` but not `-N` failed *both* attempts and threw — the
+    // opposite of what the sentence above says happens.
     if (withJoined || opts.pad === true) {
-      const fallback = await this.runCapture(target, opts, false);
+      const fallback = await this.runCapture(target, { ...opts, pad: false }, false);
       if (fallback.code === 0) return fallback.out;
     }
     throw new Error(`tmux capture-pane failed: ${res.err.trim() || res.code}`);
@@ -834,8 +853,20 @@ export class TmuxControlPlane {
       // so the flags alone would have us writing click bytes to a shell.
       "#{pane_current_command}";
     const line = await this.displayMessage(target, fmt);
-    const [cursorX, cursorY, alt, mode, history, width, height, dead, mouse, appCursor, bracketedPaste, mouseSgr, foreground] =
-      line.split(",");
+    const f = line.split(",");
+    // A failed `display-message` returns the empty string, and `Number(undefined)` is
+    // `NaN`. `JSON.stringify` writes `NaN` as `null`, so every numeric field of the
+    // state crossed the wire as `null` against a `number` type, and the client built a
+    // grid from it — a snapshot that silently said "no size" and drew nothing, with no
+    // error to explain it. There is no sensible default for a pane's size, so this says
+    // so instead, and the caller's error path answers the client.
+    const width = Number(f[5]);
+    const height = Number(f[6]);
+    if (f.length < 13 || !(width > 0) || !(height > 0)) {
+      throw new Error(`tmux display-message gave no usable state for ${target}`);
+    }
+    const [cursorX, cursorY, alt, mode, history, , , dead, mouse, appCursor, bracketedPaste, mouseSgr, foreground] =
+      f;
     return {
       cursorX: Number(cursorX),
       cursorY: Number(cursorY),
@@ -846,8 +877,8 @@ export class TmuxControlPlane {
       appCursor: appCursor === "1",
       bracketedPaste: bracketedPaste === "1",
       historySize: Number(history),
-      cols: Number(width),
-      rows: Number(height),
+      cols: Math.trunc(width),
+      rows: Math.trunc(height),
       dead: dead === "1",
       foreground: String(foreground ?? ""),
     };

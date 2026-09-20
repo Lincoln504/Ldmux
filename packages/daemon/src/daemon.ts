@@ -696,7 +696,13 @@ export class LdmuxDaemon {
         // it back by hand.
         const owner = this.ownership.owner(id);
         if (owner && owner.device.id !== this.desktopDevice.id) {
-          this.ownership.claim(id, this.desktopDevice, { takeover: true });
+          // Through `claimSession`, like every other claim, because the claim is
+          // also what hands the *size* over. The window has a client again, so it
+          // is a tmux client again, and it must stop being pinned to the phone's
+          // grid — otherwise tmux fills it to the pane's width with
+          // `fill-character`. This is the same omission `claimSession`'s note
+          // describes, reached from the reconcile pass instead of from makeLive.
+          this.claimSession(id, this.desktopDevice, true);
           changed = true;
         }
         continue;
@@ -889,7 +895,7 @@ export class LdmuxDaemon {
         const record = this.require(String(p.id ?? ""));
         const device = p.device as DeviceInfo | undefined;
         if (!device?.id) return { ok: false, detail: "no device given" };
-        const result = this.ownership.claim(record.id, device, { takeover: true });
+        const result = this.claimSession(record.id, device, true);
         if (!result.ok) return { ok: false, detail: "could not claim" };
         void this.remote?.broadcastSessions().catch(() => {});
         return { ok: true };

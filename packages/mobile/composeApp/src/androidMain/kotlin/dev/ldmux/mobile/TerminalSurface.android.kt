@@ -511,13 +511,23 @@ actual fun rememberTerminalSurface(
                             // updating the highlight entirely.
                             val step = p.scrollFor(at.y)
                             if (step != 0) {
-                                controller.scrollBy(step)
+                                // Shift the anchor by what the viewport ACTUALLY did,
+                                // not by what it was asked. On the alternate screen
+                                // there is no scrollback, so the engine declines and
+                                // the answer is zero — while `step` is not, and the
+                                // anchor used to walk a row per drag event away from
+                                // its text while the content stood still. In vim, in
+                                // htop, in `less`. That is the "skipped on the
+                                // alternate screen" rule, expressed as a measurement
+                                // instead of a flag, so it cannot disagree with the
+                                // viewport it is describing.
+                                val moved = controller.scrollBy(step)
                                 // The end that is not being dragged is anchored to
                                 // *text*, and scrolling up moves the text down, so its
                                 // viewport row rises. This added the delta instead of
                                 // subtracting it, which slid the anchor by two rows
                                 // for every row scrolled.
-                                fixedRow = rowAfterScroll(fixedRow, step)
+                                if (moved != 0) fixedRow = rowAfterScroll(fixedRow, moved)
                             }
                             val index = p.dragCell(at.x, at.y)
                             if (index != null) {
@@ -644,8 +654,12 @@ actual fun rememberTerminalSurface(
                             // one helper, two callers.
                             val step = p.scrollFor(at.y)
                             if (step != 0) {
-                                controller.scrollBy(step)
-                                fixedRow = rowAfterScroll(fixedRow, step)
+                                // The same rule as the body gesture above: shift by
+                                // what the viewport did, so a refused scroll — the
+                                // alternate screen, or an end of the history — moves
+                                // the anchor by nothing at all.
+                                val moved = controller.scrollBy(step)
+                                if (moved != 0) fixedRow = rowAfterScroll(fixedRow, moved)
                             }
                             val index = p.dragCell(at.x, at.y)
                             if (index != null) {

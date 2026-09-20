@@ -9,7 +9,16 @@
 import { call } from "./socket-client.ts";
 import { resolveSocketPath } from "./paths.ts";
 
-export const DAEMON_PROTOCOL_VERSION = 1;
+/**
+ * One version, two names.
+ *
+ * `Caps.protocolVersion` and `PingResult.version` are different fields on the wire,
+ * and two independent `= 1`s meant a future bump could update one and not the other —
+ * so a client got a different answer depending on which one it happened to check. The
+ * number lives in `messages.ts`, beside the messages that carry it; this is the name
+ * the socket contract has always exposed it under.
+ */
+export { PROTOCOL_VERSION as DAEMON_PROTOCOL_VERSION } from "./messages.ts";
 
 export type SessionKind = "shell" | "pi";
 export type SessionStatus = "starting" | "running" | "dead";

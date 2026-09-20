@@ -33,7 +33,25 @@ export class Registry {
     try {
       const raw = readFileSync(this.path, "utf8");
       const data = JSON.parse(raw) as RegistryFile;
-      for (const record of data.sessions ?? []) this.sessions.set(record.id, record);
+      for (const record of data.sessions ?? []) {
+        // `registry.json` is loaded without validation — a boundary this file's
+        // own comment already admits. One record missing `cwd` took the whole list
+        // down: `sessionTitle` calls `basename(record.cwd)`, which throws
+        // `ERR_INVALID_ARG_TYPE`, and the throw escaped `describeSessions`, so
+        // `list` and every pushed session update failed together. The launcher
+        // showed nothing and nothing anywhere said why, because each call site
+        // ends in `.catch(() => {})`. A record with no id cannot be addressed and
+        // a record with no cwd cannot be named, so they are dropped here, where the
+        // untrusted bytes actually arrive.
+        if (typeof record?.id !== "string" || record.id === "") continue;
+        // `cwd` is the field that actually throws. `sessionTitle` calls
+        // `basename(record.cwd)`, and `basename(undefined)` is an
+        // `ERR_INVALID_ARG_TYPE` — so dropping only the untitled records would have
+        // left the same failure reachable one field over. An empty string cannot
+        // throw and falls through to the title or the id.
+        if (typeof record.cwd !== "string") record.cwd = "";
+        this.sessions.set(record.id, record);
+      }
     } catch {
       // Missing/corrupt registry: start empty (tmux will be re-adopted).
     }

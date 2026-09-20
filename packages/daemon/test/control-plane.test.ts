@@ -228,7 +228,13 @@ test("resizeWindow asks tmux for an exact size, clamped to sane bounds", async (
   // nobody can recover); the ceiling stops a runaway request from demanding a
   // window whose capture would blow the stream's byte budget.
   expect(lines[1]).toContain("-x 20 -y 5");
-  expect(lines[2]).toContain("-x 500 -y 300");
+  // 255 rows, and the number is not arbitrary: the client's frame carries a
+  // selection's rows in one byte each while its columns get two, so a taller pane
+  // wraps its selection rows modulo 256 and draws the handles at the top of the
+  // screen. `architecture.test.ts` in the mobile package asserts the two ends of
+  // that agree, because a limit defined by another package's byte layout needs a
+  // test that fails when one side moves.
+  expect(lines[2]).toContain("-x 500 -y 255");
 });
 
 test("sendMouseClick writes a real SGR click straight to the pty", async () => {

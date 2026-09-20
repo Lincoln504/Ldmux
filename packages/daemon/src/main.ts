@@ -31,11 +31,27 @@ function format(value: unknown): string {
   return String(value);
 }
 
+// A port that is not a number used to disable the remote transport *silently*.
+// `Number("abc")` is NaN, `listen(NaN)` throws, `startRemote`'s catch logs one line
+// to stderr and carries on — which is right for EADDRINUSE and wrong for a typo — and
+// this file then printed "listening on …" and exited 0. Under systemd the unit was
+// `active (running)` with no WebSocket at all, and every phone simply could not
+// connect, with nothing anywhere saying why. A port that is not a port is
+// unambiguously a mistake, so it fails here, loudly, the way `resolveTmuxSocket()`
+// already refuses a socket path it does not recognise.
+const remotePort = Number(process.env.LDMUX_REMOTE_PORT ?? 7623);
+if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) {
+  console.error(
+    `ldmuxd: LDMUX_REMOTE_PORT must be a port number, got ${JSON.stringify(process.env.LDMUX_REMOTE_PORT ?? "")}`,
+  );
+  process.exit(1);
+}
+
 const daemon = new LdmuxDaemon({
   stateDir: resolveStateDir(),
   tmuxSocket: resolveTmuxSocket(),
   remoteHost: process.env.LDMUX_REMOTE_HOST ?? "127.0.0.1",
-  remotePort: Number(process.env.LDMUX_REMOTE_PORT ?? 7623),
+  remotePort,
   // `control` (default) or `pipe`. Runtime-selectable so the two transports can
   // be compared on a real device without a rebuild (docs/TMUX-DEPENDENCY.md §7).
   streamTransport: process.env.LDMUX_STREAM_TRANSPORT === "pipe" ? "pipe" : "control",
