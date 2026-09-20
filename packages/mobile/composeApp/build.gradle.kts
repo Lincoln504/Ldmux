@@ -47,10 +47,9 @@ android {
     // phone on 26 or 27 has had no security updates for five years and cannot
     // run a terminal safely whatever it is a terminal to. Android 9 (API 28) is
     // still the ~95th percentile of devices in use.
-    //
-    // MIN 26: compileSdk only decides which APIs we may use, targetSdk opts into
-    // new runtime behaviour (kept at the latest broadly-deployed level), and
-    // minSdk 26 (Android 8, 2017) keeps broad device coverage.
+    // MIN 28, and 26 was considered and rejected — the reasoning above is the whole
+    // of it. (This block used to argue for MIN 26, three lines above the `minSdk = 28`
+    // below it, so the comment nearest the value contradicted it.)
     compileSdk = 37
     compileSdkMinor = 2
 

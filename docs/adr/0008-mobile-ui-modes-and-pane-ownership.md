@@ -1,6 +1,8 @@
 # ADR-0008 — Mobile UI modes, and who owns the pane's geometry
 
-**Status:** Accepted (2026-09-14).
+**Status:** Accepted (2026-09-14). **§1 is superseded by
+[ADR-0011](0011-screen-orientation.md)** — read that instead, and read §1 below only as
+the reasoning that was later rejected. §2 and §3 still hold.
 
 ## Context
 
@@ -40,6 +42,16 @@ orientation or scale-vs-resize policy, so that part is a new decision.
   cannot produce (Esc, Tab, arrows, C-c) and the microphone.
   `requestedOrientation = SCREEN_ORIENTATION_PORTRAIT`.
 
+### 1. ~~Rotation.~~ **Superseded by ADR-0011.**
+
+> **Do not implement this.** Both orientations were locked and the IME was watched with a
+> 600 ms debounce. ADR-0011 deleted all of it: the device owns the rotation, the app owns
+> the keyboard, and there is no flip button — `grep -rn 'requestedOrientation\|SCREEN_ORIENTATION'`
+> over `packages/mobile/composeApp/src` returns nothing. The paragraph is kept because the
+> reasoning ("a terminal that reflows because the phone tilted is worse than one that
+> stays put") is a real tension that ADR-0011 resolves the other way, by noticing that the
+> user can simply not tilt it.
+
 Both orientations are **locked** (`SCREEN_ORIENTATION_LANDSCAPE` /
 `SCREEN_ORIENTATION_PORTRAIT`, not the `sensor*` variants). A terminal that
 reflows because the phone tilted is worse than one that stays put: the user
@@ -54,8 +66,10 @@ itself) rather than assumed.
 
 The client measures its own viewport, computes the grid that fits, and tells the
 daemon (`Resize`, or `cols`/`rows` on `Attach`). The daemon clamps into
-`MIN/MAX_PANE_COLS` (20–500) and `MIN/MAX_PANE_ROWS` (5–300) — the same interval
-`dooboxes` recorded — and runs `tmux resize-window -x -y`. The daemon still
+`MIN/MAX_PANE_COLS` (20–500) and `MIN/MAX_PANE_ROWS` (5–255) — the same interval
+`dooboxes` recorded. (It was 300 until 2026-09-20 — a frame carries a selection's rows in
+one byte each while its columns get two, so a taller pane wrapped its selection rows
+modulo 256 — and runs `tmux resize-window -x -y`.) The daemon still
 enforces the bound, so a buggy or hostile client cannot ask tmux for a window
 whose capture would blow the stream's byte budget.
 

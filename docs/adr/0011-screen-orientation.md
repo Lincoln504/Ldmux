@@ -1,7 +1,8 @@
 # ADR-0011: The device rotates, the keyboard does not
 
 **Status:** Accepted
-**Supersedes:** the locked-orientation decision this file used to record.
+**Supersedes:** [ADR-0008](0008-mobile-ui-modes-and-pane-ownership.md) §1 — the
+locked-orientation decision.
 
 ## Context
 

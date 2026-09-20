@@ -1,6 +1,6 @@
 # ldmux — State of the project
 
-**As of 2026-09-19.** This file answers one question: *where does everything stand
+**As of 2026-09-20.** This file answers one question: *where does everything stand
 right now?* It is the register, not the specification. `docs/SPEC.md` says what the
 product is meant to be, the ADRs say why the decisions were made, and
 `docs/INVESTIGATION.md` is the historical research log. This is the current position.
@@ -63,8 +63,9 @@ The wire carries **raw pty bytes**, not a grid.
   runtime with `LDMUX_STREAM_TRANSPORT=pipe`; `control` is the default.
   Measured A/B in `docs/TMUX-DEPENDENCY.md` §10: the two carry the same bytes to
   within **0.015 %**, and the pipe costs ~7 ms of local echo latency.
-- CLI verbs: `ping list desktop new shell run send key capture snapshot kill close
-  forget adopt mirror live unlive remote pair expose clipboard-write`.
+- CLI verbs: `ping list new run shell send key desktop live unlive clipboard-write
+  copy capture snapshot kill forget adopt remote mirror pair expose` — and `ldmux
+  --help` prints the same list, so it cannot drift from this one.
 - **The tmux surface, enumerated from the code** (this is the dependency in full):
   - *Commands*: `set-option` (20 sites), `set-environment` (7), `send-keys` (6),
     `attach` (5), `refresh-client` (2), `list-panes` (2), and one each of
@@ -136,7 +137,7 @@ The wire carries **raw pty bytes**, not a grid.
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **300 tests, 300 pass** | `node --run test` (`--test-concurrency=4`) |
+| JS/TS | **301 tests, 301 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
 | Native C (host) | **147 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
 | Kotlin (Android unit) | **143 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
@@ -181,7 +182,7 @@ Each item says what it is, why it matters, and what the next concrete step is.
 ### 5.1 Selection: fine-tuning (the feature works; these are the rough edges)
 
 **Double-tap-for-a-word is dropped** — the user does not want it, and long press already
-selects. Two items were open here and both are now closed:
+selects. Three items were open here. Two are closed and one remains:
 
 1. **Auto-scroll while dragging past an edge — done, both paths.** The handle drag had no
 auto-scroll at all (`40d1d9e`), and the sign was inverted in both. The remaining half was
@@ -197,11 +198,14 @@ the viewport. No protocol change: `scrollOffset` already rides every frame. Prov
 `test_engine.c` ("the scroll offset is what actually moved").
 2. **A selection is lost when the engine is rebuilt — done.** The engine is replaced on
 every snapshot (ADR-0014 §4 trap 4), so output arriving during a copy discarded the
-selection, which on an active shell is most of the time. The controller now keeps what
-the selection *meant* — its endpoints and its text — and re-applies it after the rebuild
-**only if the cells still hold exactly that text**. A positional restore alone would be
-worse than nothing: a snapshot normally arrives because new output did, so the same cells
-can hold different words, and the user would copy what they did not choose.
+selection, which on an active shell is most of the time. The controller now **re-projects**
+the selection's rows by the change in the viewport's scroll offset — the same rule the drag
+uses, and the reason is the same: a selection is anchored to text and its viewport rows are
+a projection of that, so new output moves the text up the screen and the rows have to
+follow. The selected text is then the test: if the shifted range holds what the user chose,
+the selection is still about it. Restoring at the same rows looks like it works and is
+wrong in the common case; §8 records that mistake. Device-verified: `seq 1 40`, select
+34/35, HOME, return — the selection is still there.
 3. **Snapping out of the middle of a wide glyph** — still open, and small.
 
 ### 5.2 Tap-to-cursor — **the Home shortcut is fixed; the verdict is not**
@@ -275,7 +279,13 @@ Still open:
 Things we do not know, each with the way to find out. Some of these are here because a
 web-research pass failed mid-session and the question was never answered.
 
-### 7.1 The tmux replacement questions — **answered by measurement (§8, §10)**
+### 7.1 The tmux replacement questions — **answered by measurement**
+
+The answers are not in this file: they are in `docs/TMUX-DEPENDENCY.md` **§6**
+(the questions and their resolutions), **§8** (the measurements in full), **§9** (the
+keeper-pattern survey) and **§10** (the transport A/B). The recommendation that follows
+is ADR-0015. This section used to cite "§8, §10" of *this* document, where §8 is the
+corrections log — a pointer a reader could follow and land somewhere unrelated.
 
 The four `pipe-pane` questions are settled: verbatim, lossless, bounded, ordered, and
 with no flow control. The keeper-pattern research is complete and written up in
@@ -285,26 +295,24 @@ it — echo latency over the tailnet, and what each transport does when the phon
 keeping up — need the phone.
 
 - **Does `pipe-pane` deliver raw bytes equivalent to control mode's `%output`,
-  including escape sequences and OSC?** Not verified. `pipe-pane -o 'cat >> file'` is the
-  obvious mechanism and it is not documented well enough from memory. *How to find out:*
-  run it on a scratch socket, write a known sequence containing OSC 52 and a multi-byte
-  character, compare the bytes.
-- **What happens when a `pipe-pane` reader is slow?** Whether tmux blocks, drops, or
-  buffers the pane's output, and therefore whether flow control can be built on it. Not
-  known. The control-mode equivalent is `refresh-client -f pause-after` plus
-  `%pause`/`%continue`, which we already use.
+  including escape sequences and OSC?** Yes, completely, byte-for-byte, with no octal
+  escaping. `docs/TMUX-DEPENDENCY.md` §6.1 and the numbers in §8.
+- **What happens when a `pipe-pane` reader is slow?** Measured: lossless under a stalled
+  reader, with a bounded buffer (RSS 8.4 → 26 MB then flat) and backpressure through to
+  the pane. There is no flow-control substitute — `pause-after` is control mode only.
+  Same section.
 - **Whether control mode's `%output` ordering guarantee has an ordinary-command
-  substitute.** Control mode uses a dual queue (`control_block`/`control_pane`) so a
-  notification cannot overtake output. Unknown whether that is reproducible without it.
-- **napi-rs in practice**: prebuilt binaries, N-API ABI stability across Node versions,
-  async and threads, packaging. Not investigated.
-- **`node-pty` versus a Rust PTY crate** (`portable-pty`, `nix::pty`): maturity, failure
-  modes, who maintains them. Not investigated. The specific failure to look for is why a
-  pty host fails with `openpty failed` on some hosts.
-- **The keeper-process pattern**: how VS Code's pty host, WezTerm's mux server, Zellij's
-  server, `abduco` and `dtach` keep ptys alive across a client-facing restart, whether
-  output is buffered while nobody is attached, and whether SCM_RIGHTS descriptor passing
-  is used. Not investigated.
+  substitute.** Measured: the pipe is strictly ordered.
+- **napi-rs, `node-pty` versus a Rust pty crate, and the keeper-process pattern.** All
+  answered by the survey in §9: every one of dtach, abduco, mosh, Zellij, VS Code's pty
+  host and WezTerm's mux server keeps the PTY in a long-lived supervisor and reattaches
+  over a Unix socket, and **none uses SCM_RIGHTS descriptor passing**.
+
+These were six open questions here until 2026-09-19 and were answered by measurement.
+Leaving the questions in place under a paragraph saying nothing was unknown made the
+section contradict itself, which is how a reader learns to stop trusting it. The full
+answers are in `docs/TMUX-DEPENDENCY.md` §6 and §9, and the recommendation that follows
+from them is ADR-0015.
 
 ### 7.2 Product unknowns
 
@@ -387,6 +395,13 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
   about a session's own name because `list` returned raw records while the push path
   applied `sessionTitle`; two answers to one question, not an old process.
 - **"The debug APK is stale because its size never changes"** (2026-09-20). The size did
+  not move across a real source edit, and neither did the dex hash I was comparing —
+  because I hashed `classes.dex`, and **this app's code is in `classes5.dex`**.
+  `classes.dex` holds the Kotlin runtime and does not mention `TerminalController` at all.
+  The build was fresh the whole time, and I nearly recorded a false alarm as a defect. The
+  check that works: put a distinctive string literal in a source file, rebuild, and
+  `unzip -p <apk> classes5.dex | grep` for it — probed both ways, present when it is in
+  the source and absent when reverted, before believing a build is either fresh or stale.
 - **"Restoring a selection at its own viewport rows keeps it across new output"** — my own
   first fix, and wrong (2026-09-20). New output moves content up the screen, so those rows
   hold different text and the text check would have cleared the selection in the common

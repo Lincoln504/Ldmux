@@ -3,7 +3,7 @@
 # Unit + live tests (live tests spawn a scratch tmux server), plus the portable
 # shim's own tests (which need a host libghostty-vt: built once, then seconds).
 test: native-test
-    node --test "packages/*/test/*.test.ts"
+    node --test --test-concurrency=4 "packages/*/test/*.test.ts"
 
 # Strict typecheck (no build step).
 typecheck:

@@ -1,6 +1,6 @@
 # ldmux — Software Specification
 
-> **Status note (2026-09-14) — two decisions post-date this document.**
+> **Status note (2026-09-20) — three decisions post-date this document.**
 >
 > - **Runtime: Node 26, not Bun.** The daemon/CLI/protocol run on Node 26 with
 >   TypeScript stripped by Node itself (no build step, erasable syntax only).
@@ -10,10 +10,15 @@
 >   `packages/extension` package, the `install-extension` CLI command, and the
 >   `register`/`session_end` RPC methods are gone, along with the RPC-only session
 >   expiry that existed to serve them. Sessions are created with `new`/`adopt`.
+> - **The orientation is the device's** (§7.1 below is wrong). There is no locked
+>   orientation and no flip button; the device rotates and the app only decides whether
+>   the keyboard is up. See [ADR-0011](adr/0011-screen-orientation.md). Any claim in this
+>   document that Android is landscape-locked, or that `requestedOrientation` is set, is
+>   historical.
 >
 > The rest of this document is still the design of record for the transport,
-> geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime" and
-> any extension reference as historical.
+> geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime", any
+> extension reference as historical, and the orientation sections as superseded.
 
 **Version:** 0.3 (design; transport decision finalized)
 **Date:** 2026-09-13
@@ -215,7 +220,7 @@ Tailscale only, and far less functionality than dooboxes.
 |-----------|----------|------|
 | **`ldmuxd`** (daemon) | TypeScript on Node 26 (types stripped, no build step) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
 | **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`. Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
-| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Landscape (side panel) and portrait (typing) modes; native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
+| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the device owns the rotation and the app owns the keyboard — no locked orientation and no flip button (ADR-0011); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
 | **Desktop mirror / live window** | shell + WM | `i3-msg exec -- alacritty --class ldmux-live-<id> -e <abs tmux> -L ldmux attach -t <name>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. See docs/DESKTOP-INTEGRATION.md. |
 
 ### 4.3 Why the daemon is a separate process
@@ -569,7 +574,12 @@ server-side VT emulator seam would close it.
 
 ### 7.1 Orientation & layout
 
-- **Landscape-locked** (FR-6). Caveat: Android large-screen APIs may ignore
+> **Superseded by [ADR-0011](adr/0011-screen-orientation.md).** The device owns the
+> rotation and the app owns the keyboard: portrait is typing with a two-row bar,
+> landscape is the side panel, and there is no locked orientation and no flip button.
+> Android never ignores it, because nothing is being requested.
+
+- ~~**Landscape-locked** (FR-6).~~ Caveat: Android large-screen APIs may ignore
   `screenOrientation` ≥600 dp (foldables); provide a graceful portrait
   "please rotate" state and still function if the system forces portrait.
 - **Control quarter** (FR-7): `controlsSide = left | right`, width 20–35%.

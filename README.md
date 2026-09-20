@@ -19,9 +19,11 @@ either. It is deliberately simpler and tmux-native:
   client repaints on its own clock rather than per packet, and predictive local
   echo is available (off by default) — `docs/PREDICTIVE-ECHO.md`.
 
-> **Status: Phase 1 (local core) + Phase 3 (remote transport) done; the native
-> mobile client is in progress.** 210 tests pass
-> (`node --test "packages/*/test/*.test.ts"`), typecheck clean. The authoritative
+> **Status: Phase 1 (local core) + Phase 3 (remote transport) done; the native mobile
+> client is done and device-verified for Android, with iOS deferred as a build.**
+> `node --run test` passes, typecheck clean — for the counts, read
+> [`docs/STATE.md`](docs/STATE.md) §4.2, which is the register; this file states them in
+> three places and they drift. The authoritative
 > design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision is
 > [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
 > [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
@@ -42,6 +44,10 @@ either. It is deliberately simpler and tmux-native:
 | [`docs/TRANSPORT.md`](docs/TRANSPORT.md) | Transport deep-dive + decision (control mode `-C` over pipes, no PTY). |
 | [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
 | [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) | The native terminal engine (libghostty-vt) and the JNI seam. |
+| [`docs/WIRE-COST.md`](docs/WIRE-COST.md) | What each interaction actually costs on the wire, measured. |
+| [`docs/MESH-TRANSPORT.md`](docs/MESH-TRANSPORT.md) | The LoRa/mesh transport profile — design only. |
+| [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
+| [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
@@ -84,7 +90,8 @@ devShell).
 
 ## Status
 
-Implemented and tested (288 tests, 117 native checks, typecheck clean):
+Implemented and tested (see [`docs/STATE.md`](docs/STATE.md) §4.2 for the counts and
+the commands that produce them):
 
 - `packages/protocol` — one canonical frame codec, control message types, runtime
   path resolution, and the typed daemon RPC contract + socket client (shared by
@@ -95,8 +102,9 @@ Implemented and tested (288 tests, 117 native checks, typecheck clean):
   JSON daemon (pid-lockfile single-instance, owner-only 0600 socket); **live
   `PaneStream` fan-out** with per-subscriber output coalescing; **loopback
   WebSocket remote transport with bearer-token auth** (`docs/REMOTE.md`);
-  desktop mirror + tailnet pairing; CLI (`ping`/`list`/`new`/`run`/`send`/`key`/
-  `capture`/`snapshot`/`kill`/`forget`/`adopt`/`mirror`/`remote`/`pair`/`expose`).
+  desktop mirror + tailnet pairing; CLI — run `ldmux --help` for the list rather than
+  reading it here, where it went stale twice (`shell`, `live`, `unlive`,
+  `clipboard-write` and `copy` were all missing).
 - `packages/testing` — the assertion vocabulary (`test`/`expect`) the suite uses,
   over `node:test`.
 - The daemon serves **no** static files. It used to ship a buildless xterm.js
@@ -106,8 +114,9 @@ Implemented and tested (288 tests, 117 native checks, typecheck clean):
   `ldmux remote: the endpoint is /ws`, so the port explains itself.
 - `packages/mobile` — native KMP + Compose Multiplatform client (Android first).
   A Compose `Canvas` renderer over a **libghostty-vt** emulator behind a narrow
-  JNI seam; client-driven pane resize; two button-switched UI modes (landscape
-  side panel / portrait typing) with locked orientations; scrollback, cursor
+  JNI seam; client-driven pane resize; **the device owns the rotation and the app owns
+  the keyboard** — portrait is typing with a two-row bar, landscape is the side panel,
+  and there is no locked orientation and no flip button (ADR-0011); scrollback, cursor
   rendering, tap-to-position, and predictive local echo at a low, adaptive frame
   rate. See [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) and
   [`packages/mobile/README.md`](packages/mobile/README.md).

@@ -191,8 +191,24 @@ test("a superseded attach does not leak a subscription or mix panes", async () =
   expect(await waitFor(() => text.some((m) => m.type === "snapshot" && m.sessionId === b.id))).toBe(true);
 
   // Drive A (the superseded session) and confirm none of its output arrives.
+  //
+  // **Prove the send took effect before asserting what did not arrive.** An
+  // assertion that something *did not* arrive passes for any reason at all — a slow
+  // machine, a wedged socket, a send that never happened — so it gets greener as
+  // conditions get worse and can never fail to reveal the problem. This used to sleep
+  // 600 ms and assert absence, with the only positive check coming afterwards.
+  //
+  // So the fact is established directly: `capture` reads A's own pane through the
+  // daemon, independently of the client, and the sentinel appearing there **twice**
+  // (the shell's echo of the command, then its output) proves the command really ran.
+  // Only then does the absence mean something: those bytes existed and did not reach
+  // this client.
   await call(daemon.socketPath, "send", { id: a.id, text: "printf 'SUPERSEDED_A\\n'", keys: ["Enter"] });
-  await sleep(600);
+  const ranInPane = await waitFor(async () => {
+    const { screen } = await call<{ screen: string }>(daemon.socketPath, "capture", { id: a.id });
+    return screen.split("SUPERSEDED_A").length - 1 >= 2;
+  });
+  expect(ranInPane).toBe(true);
   expect(output.join("").includes("SUPERSEDED_A")).toBe(false);
 
   // B still streams.
