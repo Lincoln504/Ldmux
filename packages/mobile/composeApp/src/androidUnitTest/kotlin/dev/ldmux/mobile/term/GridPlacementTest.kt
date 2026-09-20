@@ -109,8 +109,31 @@ class GridPlacementTest {
             val rows = (vh / (cell * 2f)).toInt()
             val p = placeGrid(cell, cell * 2f, cols, rows, vw, vh)
             assertTrue(p.gridWidth <= vw && p.gridHeight <= vh, "grid must fit for $vw x $vh")
-            assertEquals(1f, p.cellWidth / cell)
+            // Flush to the top-left, which is the rule and not centring: the leftover is
+            // under one cell, and splitting it in two puts a black band on *both* edges
+            // instead of one and moves the text off the corner it starts at.
+            //
+            // This line used to read `assertEquals(1f, p.cellWidth / cell)` — a fact the
+            // assertion above already implied, because `gridWidth` is `cellWidth * cols`
+            // and the grid was built from the cell just handed in. It could never be the
+            // thing that failed.
+            assertEquals(0f, p.dx, "the grid must start at the left edge for $vw x $vh")
+            assertEquals(0f, p.dy, "the grid must start at the top edge for $vw x $vh")
         }
+    }
+
+    @Test
+    fun `a grid larger than the viewport is pinned to the bottom, not the top`() {
+        // The overflow case is a font change or a rotation whose resize has not landed
+        // yet, and the row you cannot afford to lose is the one with the cursor in it.
+        // Pinning to the top would scroll the prompt off the bottom of the screen.
+        val p = placeGrid(10f, 20f, 200, 100, 100f, 100f)
+        assertEquals(100f - 20f * 100f, p.dy)
+        assertEquals(0f, p.dx, "overflow is still flush to the left; only the vertical moves")
+        // The last row's bottom edge is the bottom of the viewport, so the prompt is on
+        // screen, and the first row is off the top where it can be scrolled back to.
+        assertEquals(100f, p.dy + p.gridHeight)
+        assertTrue(p.dy < 0f)
     }
 
     // ── dragging past an edge ───────────────────────────────────────────────

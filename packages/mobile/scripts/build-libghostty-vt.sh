@@ -54,10 +54,16 @@ abi_to_target() {
   esac
 }
 
+# The API level is a build input, so it is named once and recorded. It is deliberately
+# below `minSdk` (28 in build.gradle.kts): compiling against an older API is safe, and it
+# keeps the library loadable on anything the app can install on. It was the literal `26`
+# in two places here and in no stamp, so it would silently stay at 26 if minSdk moved.
+ANDROID_API="${ANDROID_API:-26}"
+
 abi_to_clang() {
   case "$1" in
-    arm64-v8a) echo "aarch64-linux-android26-clang" ;;
-    x86_64)    echo "x86_64-linux-android26-clang" ;;
+    arm64-v8a) echo "aarch64-linux-android${ANDROID_API}-clang" ;;
+    x86_64)    echo "x86_64-linux-android${ANDROID_API}-clang" ;;
     *) echo "unknown ABI: $1" >&2; exit 1 ;;
   esac
 }
@@ -117,5 +123,17 @@ STAMP="$MOBILE/native/prebuilt/sources.sha256"
 SHIM_SOURCES="ldmux_terminal.h ldmux_terminal.c ldmux_jni.c"
 ( cd "$MOBILE/native" && sha256sum $SHIM_SOURCES | LC_ALL=C sort -k2 ) > "$STAMP"
 echo "==> source stamp: $STAMP"
+
+# The *other* two build inputs, and the reason this file exists separately: changing
+# `GHOSTTY_COMMIT` swaps the entire emulator the library wraps, and changing the API level
+# changes the compiled-in platform, and neither was recorded anywhere — so the freshness
+# guard reported a library built from the old engine as fresh. It cannot go in
+# `sources.sha256`, which is a list of file hashes and is read as one.
+BUILD_INPUTS="$MOBILE/native/prebuilt/build-inputs.txt"
+{
+  printf 'engine-commit %s\n' "$GHOSTTY_COMMIT"
+  printf 'api-level %s\n' "$ANDROID_API"
+} > "$BUILD_INPUTS"
+echo "==> build inputs: $BUILD_INPUTS"
 
 echo "==> done"

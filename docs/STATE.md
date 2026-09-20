@@ -431,5 +431,14 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
   `ldmux-terminal`, which falls back to a plain shell when no daemon answers.
 - **dooboxes is uninstalled** (move-not-delete): unit renamed `.uninstalled`, PATH
   wrappers moved to `~/.config/ldmux-uninstalled-dooboxes/`, project untouched.
+- **gmux is still installed, still enabled, and still bound to the tailnet** — measured
+  2026-09-20: `gmux.service` `active`+`enabled`, `gmux-prune.timer` `active`+`enabled`,
+  and a `gmux.service.d/listen.conf` drop-in setting `GMUXD_LISTEN=100.127.119.54`.
+  **Not a defect, and deliberately not removed yet:** the session this work was done in
+  was running inside it, and it is `Restart=on-failure`, so stopping it would drop the
+  working terminal. Recording it here because the dooboxes entry above is detailed
+  enough to read as "the migration is done" — a place-holder for a second predecessor
+  that is still running is exactly what that impression hides. ldmux's unit is gmux's
+  shape with `KillMode=process` added, so the successor was written against it.
 - **`docs/SECURITY-CONTROL-REGISTER.md` does not exist in this repo.** It was the RCNT
   project. The clipboard policy is documented in `docs/adr/0014` §8 and `docs/TRANSPORT.md`.

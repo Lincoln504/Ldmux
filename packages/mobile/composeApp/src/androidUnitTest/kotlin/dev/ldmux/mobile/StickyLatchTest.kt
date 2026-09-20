@@ -30,8 +30,12 @@ class StickyLatchTest {
 
     @Test
     fun `arming ctrl then typing q sends 0x11, not a q`() {
+        // The name of this test is the assertion: 0x11 is Ctrl-Q, and it is emphatically
+        // not the character `q`. There was a second line here asserting `"q" != ...`,
+        // which the `assertEquals` above already entails and which therefore could never
+        // be the thing that failed. A redundant assertion is not extra safety; it is a
+        // number in the count that means nothing.
         assertEquals("\u0011", firstBytes("q", Modifiers(ctrl = true)))
-        assertTrue("q" != firstBytes("q", Modifiers(ctrl = true)))
     }
 
     @Test

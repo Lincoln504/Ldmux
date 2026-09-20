@@ -140,6 +140,43 @@ test("every packaged .so was built from the current shim sources", () => {
   }
 });
 
+// The stamp above covers the shim sources. Two other things go into the build command
+// and were recorded nowhere: the commit of the engine the library wraps, and the API
+// level it was compiled against. Changing either rebuilds a materially different library
+// while leaving the freshness check above perfectly green — which is the one thing this
+// file exists to prevent.
+test("the packaged .so records the engine pin and API level it was built from", () => {
+  if (LIBS.length === 0) return; // nothing built yet; nothing to be wrong
+
+  const inputsPath = join(NATIVE, "prebuilt", "build-inputs.txt");
+  assert.ok(
+    existsSync(inputsPath),
+    "the packaged .so predates the record of what it was built from, so a change to the " +
+      "engine pin or the API level would leave it looking fresh. Rebuild: just native-android",
+  );
+  const fields = Object.fromEntries(
+    readFileSync(inputsPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)]),
+  );
+
+  // The pin is read out of the build script rather than restated here. Restating it is
+  // how the two came to disagree: the script would build one engine and this would
+  // compare against another, and both would look correct in isolation.
+  const script = readFileSync(join(ROOT, "scripts", "build-libghostty-vt.sh"), "utf8");
+  const pin = /GHOSTTY_COMMIT="\$\{GHOSTTY_COMMIT:-([^}]+)\}/.exec(script)?.[1];
+  assert.ok(pin, "could not read GHOSTTY_COMMIT out of scripts/build-libghostty-vt.sh");
+  assert.equal(
+    fields["engine-commit"],
+    pin,
+    `the packaged .so wraps engine ${fields["engine-commit"]} but the build script pins ` +
+      `${pin}. Rebuild with: just native-android`,
+  );
+  assert.ok(fields["api-level"], "no api-level was recorded by the build");
+});
+
 test("every native method Kotlin declares is defined in the packaged .so", () => {
   if (LIBS.length === 0) return;
 
