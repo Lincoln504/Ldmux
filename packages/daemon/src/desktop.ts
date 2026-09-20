@@ -350,7 +350,7 @@ export async function openLive(
   workspace: string,
   tmuxBin = "tmux",
   stateDir?: string,
-): Promise<{ ok: boolean; detail?: string; windowId?: string }> {
+): Promise<{ ok: boolean; placed?: boolean; detail?: string; windowId?: string }> {
   const target = safeWorkspace(workspace);
   if (target === null) return { ok: false, detail: "invalid workspace name" };
   if (!process.env.DISPLAY) return { ok: false, detail: "no DISPLAY (not an X11 session)" };
@@ -359,7 +359,17 @@ export async function openLive(
   const spec = await prepareLive(stateDir, tmuxSocket, tmuxName, sessionId, tmuxBin);
   const exec = await run(liveExecArgv(spec.argv), { timeoutMs: 3000 });
   if (exec.code !== 0) return { ok: false, detail: "i3-msg not available" };
-  return placeLive(sessionId, target);
+  // The exec succeeded, so **a window exists** — and that is the fact the caller has to
+  // record, because recording it is the only thing that can ever close the window again.
+  //
+  // Returning `placeLive`'s failure wholesale made the two questions one. `placeLive`
+  // polls for the window with a five-second timeout, so it fails whenever i3 is slow,
+  // and the caller recorded nothing on failure: the daemon could not close the window,
+  // the reconcile pass never saw it, and it sat on the desktop as a terminal nobody
+  // owned. `placed` says *where* it went, not whether it is there, and the caller records
+  // it either way.
+  const placed = await placeLive(sessionId, target);
+  return { ok: true, placed: placed.ok, windowId: placed.windowId, detail: placed.detail };
 }
 
 /**

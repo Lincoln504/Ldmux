@@ -184,8 +184,23 @@ export class TmuxPipeClient {
       this.bytesOut += Buffer.byteLength(text);
       this.opts.onOutput(text);
     });
-    // EOF on a FIFO read end also happens when no writer is attached, so it is
-    // not proof of death. Liveness is decided by asking tmux (see below).
+    // EOF, and why this handler is not the liveness signal it looks like.
+    //
+    // The comment here used to say that EOF "also happens when no writer is attached, so it
+    // is not proof of death". That is true of the *first* EOF and misleading about the rest:
+    // **measured 2026-09-20, a FIFO read end does not report EOF when its last writer is
+    // killed.** With the `cat` reader SIGKILLed, `#{pane_pipe}` went on reporting `1` *and*
+    // the socket stayed quiet for 15 seconds without an `end` — so neither available signal
+    // notices, and the client goes on believing it is streaming while nothing arrives. A
+    // frozen terminal with no resync, which is the same failure the control transport had
+    // and reachable the same way.
+    //
+    // The handler stays because it costs nothing and covers a socket closed some other way.
+    // Liveness is still read from tmux, and tmux cannot see this one. A first attempt at
+    // closing it combined EOF with the tmux poll and did not fire, so it was reverted rather
+    // than shipped: docs/STATE.md §7.3 records the gap, the measurement, and the one
+    // mechanism that would actually answer it (asking whether the reader process exists,
+    // which is what the test for this does).
     this.sock.on("end", () => this.checkReader());
     this.sock.on("error", () => this.checkReader());
 

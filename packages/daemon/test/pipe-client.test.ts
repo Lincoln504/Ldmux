@@ -11,8 +11,9 @@
 
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TmuxControlPlane } from "../src/tmux/control-plane.ts";
 import { TmuxPipeClient, pipeFifoPath } from "../src/tmux/pipe-client.ts";
@@ -167,4 +168,64 @@ test("the pane outlives the pipe, and the FIFO is cleaned up", { timeout: 20000 
   expect(await waitFor(() => !existsSync(fifo), 6000)).toBe(true);
   const sessions = (await cp.listSessions()) ?? [];
   expect(sessions.some((s) => s.name === name)).toBe(true);
+});
+/**
+ * A tripwire on a **known gap**, not a passing guarantee.
+ *
+ * The pipe transport's liveness is read from `#{pane_pipe}`, and this module's own
+ * docstring says tmux cannot answer that question: it does not notice a dead reader. This
+ * test measures what actually happens when the reader is killed, and it asserts the gap so
+ * that the day tmux starts reporting it — or the day someone teaches the client to — this
+ * fails loudly and the comment above `checkReader` gets corrected instead of going on
+ * claiming something untrue.
+ *
+ * Measured 2026-09-20: `#{pane_pipe}` still reports `1`, and the FIFO's read end does not
+ * report EOF, so nothing tells the client. A frozen terminal with no resync.
+ *
+ * A first attempt closed it by combining socket EOF with the tmux poll. It never fired,
+ * because of the fact above, and it was reverted rather than shipped. The mechanism that
+ * *would* work is asking whether the reader process still exists — which is what the
+ * `pgrep` below does, and it is why the kill is possible at all.
+ */
+test("GAP: a killed pipe reader is not noticed by tmux or by the socket", { timeout: 30000 }, async () => {
+  const name = await newPipeSession();
+  const fifo = pipeFifoPath(pipeDir, name);
+  let exits = 0;
+  const client = await TmuxPipeClient.connect({
+    sessionName: name,
+    tmuxSocket,
+    pipeDir,
+    onOutput: () => {},
+    onExit: () => exits++,
+  });
+
+  // Prove it is live and delivering first, so what follows is about the kill and not about
+  // a client that never worked.
+  await cp.sendText(name, "printf 'PIPE_ALIVE\\n'");
+  await cp.sendKey(name, "Enter");
+  expect(await waitFor(() => client.bytesOut > 0)).toBe(true);
+
+  // Matched on the FIFO's *filename*: tmux runs the command through a shell and the path
+  // arrives single-quoted (`shQuote`), so `cat > <path>` matches nothing.
+  let readers: string[] = [];
+  try {
+    readers = execFileSync("pgrep", ["-f", basename(fifo)], { encoding: "utf8" })
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    // pgrep exits 1 when nothing matches; asserted below rather than left as a stack trace.
+  }
+  expect(readers.length).toBeGreaterThan(0);
+  for (const pid of readers) process.kill(Number(pid), "SIGKILL");
+
+  // The reader is gone, and tmux does not know. If this ever becomes "0", the gap is
+  // closed and the comment in pipe-client.ts needs rewriting.
+  const reported = await cp.displayMessage(name, "#{pane_pipe}");
+  expect(reported.trim()).toBe("1");
+
+  // And the socket does not say either. Long enough that a resync would have happened.
+  await sleep(3000);
+  expect(exits).toBe(0);
+  client.close();
 });

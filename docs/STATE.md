@@ -137,7 +137,7 @@ The wire carries **raw pty bytes**, not a grid.
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **301 tests, 301 pass** | `node --run test` (`--test-concurrency=4`) |
+| JS/TS | **303 tests, 303 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
 | Native C (host) | **147 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
 | Kotlin (Android unit) | **143 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
@@ -341,6 +341,38 @@ from them is ADR-0015.
   long-press-drag.
 
 ---
+
+### 7.3 A pipe reader that dies is not noticed — **measured, open, and recorded here**
+
+The pipe transport's liveness is read from `#{pane_pipe}`, and
+`packages/daemon/src/tmux/pipe-client.ts` says in its own docstring that tmux cannot answer
+that question. Measured 2026-09-20 on a scratch server:
+
+| Step | Result |
+|---|---|
+| Kill the `cat` reader that tmux spawned for the pane's FIFO | `pgrep -f <fifo>` found it and `SIGKILL` was delivered |
+| Ask tmux whether the pipe is still registered | `#{pane_pipe}` still reports **`1`** |
+| Watch the FIFO's read end for EOF | **no `end` within 15 s** — the socket stays quiet |
+| Watch for the client reporting death | **no `onExit`** |
+
+Neither available signal notices. The client goes on believing it is streaming while nothing
+arrives: a frozen terminal with no resync, which is the same failure the control transport
+had, reached the same way — liveness read from a source that cannot report it.
+
+**A fix was attempted and reverted.** It combined socket EOF with the tmux poll, on the
+assumption that EOF fires when the last writer dies. It does not, so the code never fired
+and would have shipped as machinery that looks like a guard and is not. What stands in its
+place is the corrected comment and a **tripwire test** (`pipe-client.test.ts`, the one named
+`GAP:`), which asserts `#{pane_pipe}` still says `1` and no exit is reported. The day either
+changes, that test fails and the comment gets corrected rather than going on claiming
+something untrue.
+
+**Exposure is bounded, and that is the only reason this is not being built now.** The pipe
+is opt-in (`LDMUX_STREAM_TRANSPORT=pipe`); the default is `control`, whose equivalent bug
+was fixed. The mechanism that would actually answer the question is asking whether the
+reader *process* still exists — direct, and already demonstrated by the tripwire's `pgrep` —
+at the cost of one process check per pane per poll interval. Worth doing before the pipe
+transport could ever become the default, and not worth doing speculatively before then.
 
 ## 8. Corrections log — kept visible
 

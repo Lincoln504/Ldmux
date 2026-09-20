@@ -889,9 +889,12 @@ export class LdmuxDaemon {
           this.stateDir,
         );
         if (result.ok) {
-          // Recorded only on success, so the fact the client is told cannot
-          // claim a window that was never opened.
-          this.liveWindows.set(record.id, { workspace });
+          // Recorded whenever a window exists, which is what `ok` now means — the exec
+          // succeeded. It used to mean "and i3 placed it", and an unplaced window was
+          // therefore recorded nowhere: the daemon could not close it, the reconcile
+          // pass never saw it, and it stayed on the desktop for good. The workspace is
+          // what may be wrong here, not the window.
+          this.liveWindows.set(record.id, { workspace: result.placed ? workspace : "" });
           // ...and the shell moves to the desktop. The window is writable, so
           // leaving the phone holding it would be two writers on one pty — the
           // split input the exclusive rule exists to prevent (ADR-0010).
