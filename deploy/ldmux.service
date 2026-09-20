@@ -2,11 +2,32 @@
 #
 # The daemon must outlive every session (docs/SPEC.md §4.3): a phone that puts
 # its phone down, or a laptop that reboots the daemon, must not lose the shells
-# that are running. That requires two things of this unit, neither of which is
-# the default.
+# that are running. That requires three things, and none is the default:
+#
+#   1. `KillMode=process` — see the note on it below. Without it a restart kills
+#      every session on the tmux server.
+#   2. `loginctl enable-linger $USER` — **not a setting in this file, and the one
+#      that is easiest to miss.** `WantedBy=default.target` starts the unit with the
+#      user manager, and the user manager *stops on the last logout* unless linger is
+#      on. Stopping it signals the whole user slice, which contains the tmux server,
+#      so every session dies, and `KillMode=process` does not help because the signal
+#      does not come from this unit. Measured on this machine: `Linger=yes`.
+#   3. Nothing else may stop the user manager: check `KillUserProcesses` in
+#      `/etc/systemd/logind.conf` is not enabled.
+#
+# **THIS FILE IS THE DEPLOYED CONFIGURATION**, and it is machine-specific in three
+# lines, each marked below. It used to be a template with those three commented out,
+# which was worse than useless: installing it gave a loopback-only daemon that
+# reported success and exited 0, so the phone could not connect and nothing said why.
+# There is no installer for this repo — copy the file to
+# `~/.config/systemd/user/ldmux.service`, then `systemctl --user daemon-reload` and
+# `systemctl --user enable --now ldmux`.
 [Unit]
 Description=ldmux daemon — remote terminal sessions over tmux
-Documentation=file:///usr/local/share/doc/ldmux/docs/SPEC.md
+# A real path, rather than one an installer that does not exist would have created.
+# `install.sh` is unbuilt Phase-5 work (docs/SPEC.md §Phase 5) and this file used to
+# cite both it and a `/usr/local/share` path as though they were done.
+Documentation=file://%h/Documents/ldmux/docs/SPEC.md
 After=default.target
 
 [Service]
@@ -33,7 +54,13 @@ RestartSec=2
 # daemon launches a window through i3, and without DISPLAY and XAUTHORITY it can
 # only report "no DISPLAY (not an X11 session)".
 #
-# User-specific: install.sh rewrites these for the installing user.
+# User-specific, and an **override rather than a fallback**: a unit-level
+# `Environment=` wins over `systemctl --user import-environment`, and
+# `~/.config/i3/config` already imports the live DISPLAY/XAUTHORITY (docs/SPEC.md names
+# that import as the mechanism). So on a session that is not `:0` the live-window path
+# targets the wrong display and can only report the failure. It is kept because the
+# unit starts with the user manager, which can precede i3's import, and `:0` is correct
+# on this machine — measured: the session's DISPLAY is `:0.0`.
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=%h/.Xauthority
 # The tmux binary the daemon owns. A live window is launched through the window
@@ -47,15 +74,20 @@ Environment=LDMUX_STATE_DIR=%t/ldmux
 # The daemon the phone talks to. Without these it answers on an unix socket only,
 # which is fine for the CLI and useless for a device.
 #
-# Environment=LDMUX_REMOTE_HOST=100.127.119.54
-# Environment=LDMUX_REMOTE_PORT=7625
+# Machine-specific: the tailnet address the phone reaches and the port the app is
+# configured with. `ldmux remote` prints what this machine should use.
+Environment=LDMUX_REMOTE_HOST=100.127.119.54
+Environment=LDMUX_REMOTE_PORT=7625
 
 # This unit runs TypeScript through Node with no build step (ADR-0009), so node has
-# to be findable by a service whose PATH is not a login shell's. A system install
-# can leave this out and put ldmuxd on the system PATH instead.
+# to be findable by a service whose PATH is not a login shell's.
 #
-# Environment=PATH=%h/.config/nvm/versions/node/v25.8.2/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/ldmuxd
+# Machine-specific: the node version directory, which changes on an nvm upgrade — and
+# the unit is then what breaks, because `node` is not on the default PATH here. A
+# system install can leave this out and put ldmuxd on the system PATH instead.
+Environment=PATH=%h/.config/nvm/versions/node/v25.8.2/bin:/usr/local/bin:/usr/bin:/bin
+# `%h/.local/bin/ldmuxd` is the wrapper (exec node …/packages/daemon/src/main.ts).
+ExecStart=%h/.local/bin/ldmuxd
 
 [Install]
 WantedBy=default.target

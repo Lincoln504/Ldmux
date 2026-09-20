@@ -24,10 +24,23 @@ ZIG="${ZIG:-$(command -v zig || true)}"
 [[ -d "$GHOSTTY_SRC/.git" ]] || { echo "ghostty source not found at $GHOSTTY_SRC" >&2; exit 1; }
 
 OUT="$MOBILE/native/prebuilt/host"
-if [[ ! -f "$OUT/lib/libghostty-vt.a" ]]; then
-  echo "==> building libghostty-vt for the host (once)"
+# The pin is part of the cache key. It used to be read *inside* the cache test, so after
+# the first build `GHOSTTY_COMMIT` was never consulted again: changing the engine pin did
+# not rebuild the host library, and the native suite went on testing the old engine while
+# reporting on the new one. `just native-test` is the path that uses this.
+STAMP="$OUT/engine.stamp"
+if [[ ! -f "$OUT/lib/libghostty-vt.a" || "$(cat "$STAMP" 2>/dev/null || true)" != "$GHOSTTY_COMMIT" ]]; then
+  echo "==> building libghostty-vt for the host (pin $GHOSTTY_COMMIT)"
+  # `$GHOSTTY_SRC` is outside this repo and is the developer's own checkout, so the
+  # revision that was there is put back afterwards. This silently moved it before.
+  PREV="$(git -C "$GHOSTTY_SRC" rev-parse HEAD 2>/dev/null || true)"
   git -C "$GHOSTTY_SRC" checkout --quiet "$GHOSTTY_COMMIT"
   ( cd "$GHOSTTY_SRC" && "$ZIG" build -Demit-lib-vt -Doptimize=ReleaseSafe --prefix "$OUT" )
+  printf '%s' "$GHOSTTY_COMMIT" > "$STAMP"
+  if [[ -n "$PREV" && "$PREV" != "$(git -C "$GHOSTTY_SRC" rev-parse HEAD 2>/dev/null || true)" ]]; then
+    git -C "$GHOSTTY_SRC" checkout --quiet "$PREV"
+    echo "==> restored $GHOSTTY_SRC to $PREV"
+  fi
 fi
 
 BIN="$MOBILE/native/build/test_engine"

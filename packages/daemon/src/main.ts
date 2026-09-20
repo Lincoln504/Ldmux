@@ -31,6 +31,22 @@ function format(value: unknown): string {
   return String(value);
 }
 
+/**
+ * Stop the daemon and exit, tolerating a signal that arrives mid-startup.
+ *
+ * `daemon.stop()` on a partially-started daemon can throw — there may be no socket to
+ * unlink and no remote listener to close yet — and an exception inside a signal handler
+ * is an uncaught exception at the worst possible moment.
+ */
+function stopAndExit(): void {
+  try {
+    daemon.stop();
+  } catch {
+    /* a signal during startup can arrive before there is anything to stop */
+  }
+  process.exit(0);
+}
+
 // A port that is not a number used to disable the remote transport *silently*.
 // `Number("abc")` is NaN, `listen(NaN)` throws, `startRemote`'s catch logs one line
 // to stderr and carries on — which is right for EADDRINUSE and wrong for a typo — and
@@ -57,6 +73,18 @@ const daemon = new LdmuxDaemon({
   streamTransport: process.env.LDMUX_STREAM_TRANSPORT === "pipe" ? "pipe" : "control",
 });
 
+process.on("SIGINT", stopAndExit);
+process.on("SIGTERM", stopAndExit);
+
+// The handlers are registered **before the first await**, and that ordering is the
+// point. `daemon.start()` spawns tmux, loads the registry, creates the socket and starts
+// the remote listener, and a `systemctl restart` arriving in that window used to hit
+// Node's default disposition instead: immediate death, `daemon.stop()` never called, and
+// so no `releaseLock()`. The stale lock normally self-heals (a dead pid is stolen), which
+// is why this was invisible — unless the pid had been recycled by an unrelated process, in
+// which case the next start finds it "alive", refuses, prints one line, and exits **0**,
+// and `Restart=on-failure` does not restart a zero exit. Two individually-correct pieces
+// composing into a service that is silently dead and says almost nothing.
 try {
   await daemon.start();
   console.log(`ldmuxd listening on ${daemon.socketPath} (tmux -L ${daemon.cp.socket})`);
@@ -70,12 +98,3 @@ try {
   console.error(`ldmuxd: ${message}`);
   process.exit(1);
 }
-
-process.on("SIGINT", () => {
-  daemon.stop();
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  daemon.stop();
-  process.exit(0);
-});

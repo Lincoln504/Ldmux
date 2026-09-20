@@ -129,12 +129,30 @@ class ModifiersTest {
      * the last thing that should sit on a bar pressed without looking. The reason it
      * is easy to leave in is that it looks like Ctrl-C, which is why this asserts the
      * absence rather than trusting the list to stay right.
+     *
+     * **It reads the functions `App.kt` renders from, and that is the whole point.**
+     * It used to read `SIDEBAR_KEYS`, a constant that had exactly two references in
+     * the repository — its own definition and this test — because both bars had grown
+     * their own inline literals. Adding `C/d` to either bar therefore left this green.
+     * A guard on a list nothing draws reads as protection and is not.
      */
     @Test
     fun theKeyListOffersNoControlD() {
-        val labels = SIDEBAR_KEYS.flatten().map { it.first }
-        assertTrue(labels.contains("C/c"), "the panel should still offer C/c: $labels")
-        assertFalse(labels.contains("C/d"), "the panel offers C/d again: $labels")
+        val press: (String) -> Unit = {}
+        val portrait = portraitControlKeys({}, press).map { it.first }
+        val panel = panelControlKeys(press).map { it.first }
+
+        // The two bars are checked separately, because they are two lists and the
+        // failure this guards against is one of them being fixed and the other not.
+        for ((where, labels) in listOf("portrait" to portrait, "panel" to panel)) {
+            assertTrue(labels.contains("C/c"), "the $where bar should still offer C/c: $labels")
+            assertFalse(labels.contains("C/d"), "the $where bar offers C/d again: $labels")
+        }
+        // And the lists are not empty, so a `contains` on an empty list cannot be
+        // what makes the assertions above pass. A guard that passes because it is
+        // looking at nothing is the failure mode this test was written while having.
+        assertEquals(7, portrait.size)
+        assertEquals(4, panel.size)
     }
 
     @Test

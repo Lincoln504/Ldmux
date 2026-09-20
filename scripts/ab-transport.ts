@@ -39,11 +39,19 @@ async function run(transport: StreamTransport): Promise<Result> {
   const socket = `ldmux-ab-${transport}-${process.pid}`;
   const stateDir = mkdtempSync(join(tmpdir(), `ldmux-ab-${transport}-`));
   const daemon = new LdmuxDaemon({ stateDir, tmuxSocket: socket, remotePort: 0, streamTransport: transport });
+  // Everything past this point runs inside `try`, because the cleanup at the bottom is
+  // not cleanup if a `throw` can jump over it. This script has already been wrong twice,
+  // the burst timeout is a real branch, and the docstring at the top promises both the
+  // scratch server and the state directory are killed — so a *failed* measurement, which
+  // is the likely one, left a live tmux server and a temp directory behind every time.
+  let stream: PaneStream | undefined;
+  let unsub: (() => void) | undefined;
+  try {
   await daemon.start();
   const cp = new TmuxControlPlane(socket);
   const name = `ab-${transport}`;
   await cp.newSession({ name, cwd: tmpdir(), command: [], cols: 80, rows: 24 });
-  const stream = new PaneStream(socket, name, cp, {
+  stream = new PaneStream(socket, name, cp, {
     transport,
     pipeDir: join(stateDir, "pipes"),
   });
@@ -51,7 +59,7 @@ async function run(transport: StreamTransport): Promise<Result> {
   let bytes = 0;
   let chunks = 0;
   const chunksSeen: { at: number; text: string }[] = [];
-  const unsub = await stream.subscribe({
+  unsub = await stream.subscribe({
     onOutput: (t) => {
       bytes += Buffer.byteLength(t, "utf8");
       chunks++;
@@ -104,12 +112,6 @@ async function run(transport: StreamTransport): Promise<Result> {
   const burstChunks = chunks - chunksBefore;
   if (!done) throw new Error(`${transport}: burst never completed`);
 
-  unsub();
-  stream.close();
-  daemon.stop();
-  killTmuxServer(socket);
-  rmSync(stateDir, { recursive: true, force: true });
-
   // What the payload would be with no framing: 5000 lines of "BURSTLINE_<n>".
   void rawPayloadOf();
 
@@ -121,6 +123,20 @@ async function run(transport: StreamTransport): Promise<Result> {
     burstMs,
     burstChunks,
   };
+  } finally {
+    // In a `finally`, and each step guarded, so one failure cannot skip the rest: a
+    // leaked tmux server outlives the test run, and the socket name is derived from this
+    // process's pid, so the next run does not reuse it.
+    try {
+      unsub?.();
+      stream?.close();
+    } catch {
+      /* already gone */
+    }
+    daemon.stop();
+    killTmuxServer(socket);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 }
 
 /** The payload the burst would produce with no framing at all, for reference. */

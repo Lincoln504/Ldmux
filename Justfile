@@ -44,10 +44,17 @@ mirror id:
 clean-tmux:
     #!/usr/bin/env bash
     set -euo pipefail
-    dir="/tmp/tmux-$(id -u)"
-    for sock in $(ls "$dir" 2>/dev/null | grep -E '^(ldmux|poll-debug)' || true); do
-      tmux -L "$sock" kill-server 2>/dev/null || true
-      rm -f "$dir/$sock"
+    # tmux resolves a socket under ${TMUX_TMPDIR:-${TMPDIR:-/tmp}}/tmux-<uid>, and
+    # `nix develop` sets TMPDIR to a nix-shell directory — which is where the suite's
+    # sockets actually land, because `just test` runs inside it. This looked only at
+    # /tmp, so it reaped nothing in the one environment the tests run in.
+    for base in "${TMUX_TMPDIR:-}" "${TMPDIR:-}" "/tmp"; do
+      [ -n "$base" ] || continue
+      dir="$base/tmux-$(id -u)"
+      for sock in $(ls "$dir" 2>/dev/null | grep -E '^(ldmux|poll-debug)' || true); do
+        tmux -L "$sock" kill-server 2>/dev/null || true
+        rm -f "$dir/$sock"
+      done
     done
     echo "reaped stray ldmux tmux servers"
 

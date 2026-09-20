@@ -23,7 +23,26 @@ ZIG="${ZIG:-$(command -v zig || true)}"
 : "${JAVA_HOME:?set JAVA_HOME (the mobile devShell does this)}"
 
 [[ -n "$ZIG" ]] || { echo "zig not found" >&2; exit 1; }
-HOST_TAG="linux-x86_64"
+# Derived, not hardcoded. The flake advertises x86_64-linux, aarch64-linux and
+# aarch64-darwin, and the NDK names its toolchain directory per host — so the old
+# `HOST_TAG="linux-x86_64"` built on exactly one of the three and failed with a
+# missing $NDK_BIN on the other two, including the darwin one the flake is kept for.
+case "$(uname -s)" in
+  Linux)  HOST_OS="linux" ;;
+  Darwin) HOST_OS="darwin" ;;
+  *) echo "unsupported build host: $(uname -s)" >&2; exit 1 ;;
+ esac
+case "$(uname -m)" in
+  x86_64)        HOST_ARCH="x86_64" ;;
+  arm64|aarch64) HOST_ARCH="aarch64" ;;
+  *) echo "unsupported build host arch: $(uname -m)" >&2; exit 1 ;;
+ esac
+HOST_TAG="$HOST_OS-$HOST_ARCH"
+[[ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG" ]] || {
+  echo "no NDK toolchain for this host ($HOST_TAG) under $ANDROID_NDK_HOME" >&2
+  echo "available: $(ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" 2>/dev/null | tr '\n' ' ')" >&2
+  exit 1
+}
 NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG/bin"
 
 abi_to_target() {

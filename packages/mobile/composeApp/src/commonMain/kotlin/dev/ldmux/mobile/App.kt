@@ -1171,19 +1171,10 @@ private fun PortraitBar(
             leading = menuHere,
         )
         PortraitKeyRow(
-            listOf(
-                // The same latch as the panel's, from the same state: arm Ctrl,
-                // then press any key, and Ctrl applies to that key. It used to be
-                // wired straight to `C-c` here, which sent an interrupt instead of
-                // arming anything — so Ctrl-then-`d` sent C-c and then a d.
-                "Ctrl" to { onSticky(StickyKey.Ctrl) },
-                "Alt" to { onSticky(StickyKey.Alt) },
-                controlLabel("C-c") to { press("C-c") },
-                "|" to { press("|") },
-                "-" to { press("-") },
-                "/" to { press("/") },
-                "\u23ce" to { press("Enter") },
-            ),
+            // From `Keys.kt`, so the list the user sees is the list the C/d guard
+            // checks. It used to be written here, and the guard read a constant this
+            // call site had stopped using.
+            portraitControlKeys(onSticky, press),
             leading = keyboardHere,
             active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
         )
@@ -1417,22 +1408,10 @@ private fun SidePanel(
                 ),
             )
             PanelDivider()
-            // The five things a soft keyboard cannot produce and a shell wants
-            // most: one control key, and the four characters that are not on the
-            // number row where they can be reached.
-            //
-            // Ctrl-D is deliberately not among them. It was, and it was asked for
-            // by name to be taken out. It sends end-of-file, which closes the pane,
-            // and a key that ends a session has no business sitting on a bar that
-            // someone presses without looking while holding the phone one-handed.
-            KeyRow(
-                listOf(
-                    controlLabel("C-c") to { press("C-c") },
-                    "|" to { press("|") },
-                    "-" to { press("-") },
-                    "/" to { press("/") },
-                ),
-            )
+            // Ctrl-D is deliberately not among these, and it was asked for by name to
+            // be taken out. The list lives in `Keys.kt` so the guard that keeps it out
+            // is checking the list this row renders. See [panelControlKeys].
+            KeyRow(panelControlKeys(press))
         }
 
         // Everything that acts on the *app* lives in this one bar, and nothing
