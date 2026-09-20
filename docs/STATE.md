@@ -463,14 +463,23 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
   `ldmux-terminal`, which falls back to a plain shell when no daemon answers.
 - **dooboxes is uninstalled** (move-not-delete): unit renamed `.uninstalled`, PATH
   wrappers moved to `~/.config/ldmux-uninstalled-dooboxes/`, project untouched.
-- **gmux is still installed, still enabled, and still bound to the tailnet** — measured
-  2026-09-20: `gmux.service` `active`+`enabled`, `gmux-prune.timer` `active`+`enabled`,
-  and a `gmux.service.d/listen.conf` drop-in setting `GMUXD_LISTEN=100.127.119.54`.
-  **Not a defect, and deliberately not removed yet:** the session this work was done in
-  was running inside it, and it is `Restart=on-failure`, so stopping it would drop the
-  working terminal. Recording it here because the dooboxes entry above is detailed
-  enough to read as "the migration is done" — a place-holder for a second predecessor
-  that is still running is exactly what that impression hides. ldmux's unit is gmux's
-  shape with `KillMode=process` added, so the successor was written against it.
+- **gmux is uninstalled** (2026-09-20), not merely unwrapped. The 2026-09-15 pass removed
+  only the `pi()` wrapper in `~/.bashrc`, which left the daemon installed, enabled and
+  bound to the tailnet for five more days. Removed now, verified: no unit, no timer,
+  nothing on PATH, no process, port 8790 released. Gone: `~/.local/bin/{gmux,gmuxd,gmux-prune-dead}`,
+  `~/.config/gmux`, `~/.cache/gmux`, `~/.local/state/gmux` (169 MB, 158 sessions),
+  `gmux.service` + its `listen.conf` drop-in, `gmux-prune.{service,timer}`, `gmux.desktop`,
+  and its icon. Full archive and `gmuxd`'s own DB backup are in
+  `~/Documents/ldmux/.gmux-removal-backup/`, extraction verified.
+- **Two things gmux was entangled with, both handled.** (1) `pi-fork-guard` documented
+  itself as running "from the gmux-prune timer". It did not — that timer runs
+  `gmux-prune-dead`, and no unit anywhere referenced it, so **a live maintenance job that
+  re-applies an uncommitted pi-fork patch had never run**. It owns its units now
+  (`pi-fork-guard.{service,timer}`), and it was proved by replacing the patched function
+  with the pristine upstream text — as `git reset --hard` does — and confirming a
+  byte-identical restore. (2) gmux registered a **tailnet node**, `gmux-debian`
+  (`100.127.73.74`, id `nbVm1CvKRU11CNTRL`), which is still listed because an offline node
+  cannot remove itself and no API key is on this box. **It needs deleting in the Tailscale
+  admin console** — the one part of this that cannot be finished from the machine.
 - **`docs/SECURITY-CONTROL-REGISTER.md` does not exist in this repo.** It was the RCNT
   project. The clipboard policy is documented in `docs/adr/0014` §8 and `docs/TRANSPORT.md`.
