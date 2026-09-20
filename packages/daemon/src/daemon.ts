@@ -905,7 +905,16 @@ export class LdmuxDaemon {
 
       case "list": {
         await this.reconcile();
-        return { sessions: this.registry.list() };
+        // The *described* view, not the raw registry. There used to be two
+        // answers to "what are the sessions": this one handed back the stored
+        // records, while the launcher and the phone got `describeSessions()`.
+        // The two disagreed about a session's own name — a shell opened in
+        // `~/Documents/RCNT` is stored with the title `pi`, and only
+        // `sessionTitle` turns that into `RCNT` — so `ldmux list` showed one name
+        // and the phone showed another. Two views of one fact is how a project
+        // lies to itself in small ways. There is one view now, and it is the
+        // richer one.
+        return { sessions: await this.describeSessions() };
       }
 
       case "new":
