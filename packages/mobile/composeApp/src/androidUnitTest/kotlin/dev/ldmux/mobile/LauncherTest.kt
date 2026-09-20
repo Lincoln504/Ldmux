@@ -200,4 +200,53 @@ class LauncherTest {
         assertEquals("~", folderName("/home/bob"))
         assertEquals("work", folderName("/home/bob/work"))
     }
+
+    // ── the button's verb ───────────────────────────────────────────────────
+    //
+    // The launcher said `open` over a row that could not be opened. A desktop
+    // `pi` with no tmux behind it is a *directory intention* — `sessionId` is
+    // null for exactly those rows — and tapping `open` on one started a
+    // phone-owned shell while reading as "go to my session on the computer".
+    // The word now follows what was actually chosen.
+
+    private fun row(key: String, session: String?) =
+        LauncherEntry(key = key, sessionId = session, process = "pi", cwd = "/tmp/$key")
+
+    @Test
+    fun `an empty selection says open`() {
+        assertEquals("open", openButtonLabel(emptyList()))
+    }
+
+    @Test
+    fun `a selection of sessions says open`() {
+        assertEquals("open (2)", openButtonLabel(listOf(row("a", "s1"), row("b", "s2"))))
+    }
+
+    @Test
+    fun `a selection of directories does not say open`() {
+        // This is the whole fix. There is nothing to open.
+        assertEquals("new shell (1)", openButtonLabel(listOf(row("a", null))))
+        assertEquals("new shell (2)", openButtonLabel(listOf(row("a", null), row("b", null))))
+    }
+
+    @Test
+    fun `a mixed selection says both`() {
+        assertEquals("open + new (3)", openButtonLabel(listOf(row("a", "s1"), row("b", null), row("c", null))))
+    }
+
+    @Test
+    fun `a directory row is never a session`() {
+        // The row that caused the report: a desktop pi whose cwd has no ldmux
+        // session. `sessionId` is what `onOpen` branches on, so null is the
+        // promise that opening it can only ever start something new.
+        val entries = launcherEntries(
+            piSessions = listOf(pi(1, "/home/ldeen/Documents/ldmux", "pi", ws = "9")),
+            openShells = emptyList(),
+        )
+        assertEquals(1, entries.size)
+        assertNull(entries[0].sessionId)
+        assertEquals("new shell (1)", openButtonLabel(entries))
+        assertTrue(entries[0].note!!.contains("not in ldmux"), "note must say it is not in ldmux: ${entries[0].note}")
+    }
 }
+

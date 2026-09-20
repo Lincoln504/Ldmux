@@ -114,13 +114,22 @@ async function main() {
       // almost always "get me back to it", not "give me a second one" — and a
       // second one would be a second shell in the same place, which is exactly
       // what the launcher's dedup-by-directory exists to prevent.
+      //
+      // This matched on `s.title === wanted` as well, and that made the whole rule
+      // dead: a title is not stable. The phone used to open a directory row with
+      // the *process name* as the title, so a shell in `~/Documents/RCNT` was
+      // titled `pi`, and `wanted` is `basename(cwd)` — `RCNT`. The two never
+      // agreed again, and `ldmux shell` in a directory that already had one grew a
+      // second session beside it. A rule that depends on a value the thing itself
+      // rewrites is not a rule. The directory is the identity; `--name` is the
+      // escape hatch for wanting a second one on purpose.
       const wanted = name ?? basename(wantCwd);
       const existing = sessions.find(
         (s) =>
           s.kind === "shell" &&
           s.status !== "dead" &&
           s.tmuxName !== "" &&
-          (name ? s.title === name : resolve(s.cwd) === wantCwd && s.title === wanted),
+          (name ? s.title === name : resolve(s.cwd) === wantCwd),
       );
 
       let target: string;

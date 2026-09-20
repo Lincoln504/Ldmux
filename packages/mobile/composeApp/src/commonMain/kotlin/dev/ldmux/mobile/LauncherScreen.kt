@@ -184,12 +184,16 @@ fun LauncherScreen(
         // opened. Neither is full width: a full-width bar reads as a page's whole
         // purpose, and this is one of two things you might do next.
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // The verb is the truth of the selection. Every row that is a session
+            // opens one; every row that is only a directory starts a shell in it.
+            // A button that says `open` over a row that cannot be opened is where
+            // this went wrong, so the word follows what was actually chosen.
+            val pickedNow = entries.filter { it.key in chosen }
             AccentBtn(
-                if (chosen.isEmpty()) "open" else "open (${chosen.size})",
+                openButtonLabel(pickedNow),
                 Modifier.weight(1.6f),
             ) {
-                val picked = entries.filter { it.key in chosen }
-                if (picked.isNotEmpty()) onOpen(picked)
+                if (pickedNow.isNotEmpty()) onOpen(pickedNow)
             }
             OutlinedBtn("+ shell", Modifier.weight(1f)) { newShellOpen = true }
         }
@@ -288,8 +292,16 @@ internal fun launcherEntries(
                     // the pixels did not, so the row read as "my session on the
                     // computer" and produced a phone-owned shell instead. Saying what
                     // it does is the whole fix; there is no seize path missing.
-                    note = listOfNotNull(pi.workspace?.let { "ws $it" }, "starts a new shell")
-                        .joinToString("  ·  "),
+                    // Said plainly, because the old wording did not stop anyone.
+                    // The row read as "my pi session on the computer" and tapping
+                    // `open` produced a phone-owned shell, which then wore the phone
+                    // icon — and the icon was RIGHT, because a phone-owned shell is
+                    // what it was. The lie was the row. Three words doing the work:
+                    // `not in ldmux`.
+                    note = listOfNotNull(
+                        pi.workspace?.let { "ws $it" },
+                        "not in ldmux — new shell here",
+                    ).joinToString("  ·  "),
                 ),
             )
         }
@@ -319,8 +331,29 @@ internal fun launcherEntries(
     }
 }
 
-/** One workspace, as a chip to aim a new shell at. */
-@Composable
+/**
+ * What the launcher's left button says, given what is chosen.
+ *
+ * The verb is the truth of the selection, and this exists because it was not.
+ * Every row that is a session opens one; every row that is only a directory
+ * starts a shell in it. The button said `open` over both, so choosing a desktop
+ * `pi` that is not in ldmux — a row that cannot be opened at all — read as
+ * "go to my pi on the computer", and produced a phone-owned shell instead.
+ *
+ * Pure, and separated from the composable, so the wording is testable without a
+ * rendering harness.
+ */
+internal fun openButtonLabel(picked: List<LauncherEntry>): String {
+    if (picked.isEmpty()) return "open"
+    val sessions = picked.count { it.sessionId != null }
+    return when {
+        sessions == picked.size -> "open (${picked.size})"
+        sessions == 0 -> "new shell (${picked.size})"
+        else -> "open + new (${picked.size})"
+    }
+}
+
+/** One workspace, as a chip to aim a new shell at. */@Composable
 private fun ChoiceRow(
     title: String,
     subtitle: String,

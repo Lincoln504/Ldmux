@@ -805,7 +805,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                 // set — the shell would exist with nothing pointing at it.
                 pageSelection = existing
                 pendingOpens = fresh.size
-                for (e in fresh) client.create("shell", e.cwd, e.label)
+                for (e in fresh) client.create("shell", e.cwd, folderName(e.cwd))
                 showLauncher = false
             },
             onKill = { killTarget = it },
