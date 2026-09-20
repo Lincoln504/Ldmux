@@ -11,7 +11,7 @@
 
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -228,4 +228,40 @@ test("GAP: a killed pipe reader is not noticed by tmux or by the socket", { time
   await sleep(3000);
   expect(exits).toBe(0);
   client.close();
+});
+
+/**
+ * The positive control the `GAP:` test above needs to mean anything.
+ *
+ * That test asserts a death is *not* reported, and an assertion about something not
+ * happening passes for any reason — including the watcher never having run at all. It
+ * proves tmux still claims the pipe, which makes the absence meaningful about *tmux*, but
+ * nothing there proves the poll loop is live. So this drives the case tmux **does** report:
+ * turning the pipe off makes `#{pane_pipe}` go to `0`, and the client must notice. If this
+ * ever stops firing, the `GAP:` test above becomes vacuous too, silently.
+ */
+test("the liveness watcher reports death when tmux does notice", { timeout: 30000 }, async () => {
+  const name = await newPipeSession();
+  let exits = 0;
+  const client = await TmuxPipeClient.connect({
+    sessionName: name,
+    tmuxSocket,
+    pipeDir,
+    onOutput: () => {},
+    onExit: () => exits++,
+  });
+
+  await cp.sendText(name, "printf 'WATCHER_ALIVE\\n'");
+  await cp.sendKey(name, "Enter");
+  expect(await waitFor(() => client.bytesOut > 0)).toBe(true);
+
+  // `pipe-pane` with no shell-command closes the current pipe. Driven through tmux
+  // directly rather than through `TmuxControlPlane`, which has no such method: this is a
+  // *fixture* for the client under test, and adding production API that only a test calls
+  // is how an interface grows things nothing uses.
+  const off = spawnSync("tmux", ["-L", tmuxSocket, "pipe-pane", "-t", name]);
+  expect(off.status).toBe(0);
+  expect(await waitFor(async () => (await cp.displayMessage(name, "#{pane_pipe}")).trim() === "0")).toBe(true);
+
+  expect(await waitFor(() => exits > 0, 15000)).toBe(true);
 });

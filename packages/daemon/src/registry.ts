@@ -40,16 +40,21 @@ export class Registry {
         // `ERR_INVALID_ARG_TYPE`, and the throw escaped `describeSessions`, so
         // `list` and every pushed session update failed together. The launcher
         // showed nothing and nothing anywhere said why, because each call site
-        // ends in `.catch(() => {})`. A record with no id cannot be addressed and
-        // a record with no cwd cannot be named, so they are dropped here, where the
+        // ends in `.catch(() => {})`. A record with no id cannot be addressed and a
+        // record with no cwd cannot be placed, so both are dropped here, where the
         // untrusted bytes actually arrive.
+        //
+        // **Skipped, not repaired to `""`.** The first version of this kept the
+        // record and defaulted `cwd` to an empty string, which looked inert because
+        // it stopped `basename` throwing. It is not inert: `ldmux shell`/`ldmux run`
+        // reuse a session by directory with `resolve(s.cwd) === wantCwd`, and
+        // **`resolve("")` is `process.cwd()`** — so the record aliased whatever
+        // directory the caller happened to be in. `$mod+Return` runs from alacritty's
+        // cwd, which is the home directory, so the phantom matched by default and the
+        // keybinding attached to it instead of giving a terminal. A field that is
+        // later passed to `resolve` must never be defaulted to `""`.
         if (typeof record?.id !== "string" || record.id === "") continue;
-        // `cwd` is the field that actually throws. `sessionTitle` calls
-        // `basename(record.cwd)`, and `basename(undefined)` is an
-        // `ERR_INVALID_ARG_TYPE` — so dropping only the untitled records would have
-        // left the same failure reachable one field over. An empty string cannot
-        // throw and falls through to the title or the id.
-        if (typeof record.cwd !== "string") record.cwd = "";
+        if (typeof record.cwd !== "string" || record.cwd === "") continue;
         this.sessions.set(record.id, record);
       }
     } catch {

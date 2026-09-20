@@ -199,8 +199,8 @@ export class TmuxPipeClient {
     // Liveness is still read from tmux, and tmux cannot see this one. A first attempt at
     // closing it combined EOF with the tmux poll and did not fire, so it was reverted rather
     // than shipped: docs/STATE.md §7.3 records the gap, the measurement, and the one
-    // mechanism that would actually answer it (asking whether the reader process exists,
-    // which is what the test for this does).
+    // mechanism that would actually answer it: asking whether the reader process still
+    // exists, which is how the tripwire test *finds* the reader in order to kill it.
     this.sock.on("end", () => this.checkReader());
     this.sock.on("error", () => this.checkReader());
 
@@ -230,7 +230,9 @@ export class TmuxPipeClient {
     }
     this.readerAlive = true;
     this.deadSamples = 0;
-    // tmux does not report a dead reader, so this is how we find out.
+    // This is how we find out when tmux *does* report it — the pipe unregistered, or the
+    // pane gone. It is not how we find out about a killed reader; see the note on the
+    // socket handlers above, and §7.3 of docs/STATE.md.
     this.watchTimer = setInterval(() => this.checkReader(), PIPE_READER_POLL_MS);
     this.watchTimer.unref?.();
   }

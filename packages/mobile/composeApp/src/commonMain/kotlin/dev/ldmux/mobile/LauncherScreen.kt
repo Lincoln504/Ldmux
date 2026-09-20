@@ -139,7 +139,7 @@ fun LauncherScreen(
                             // is the reason that action could not simply become an
                             // icon without losing something. It belongs with the
                             // other facts about this row.
-                            e.liveWorkspace?.let { "on ws $it" },
+                            liveWorkspaceOf(e.liveWorkspace)?.let { "on ws $it" },
                         ).joinToString("  ·  "),
                         chosen = e.key in chosen,
                         onClick = { chosen = toggle(chosen, e.key) },
@@ -314,16 +314,18 @@ internal fun launcherEntries(
                     sessionId = shell.id,
                     process = shell.process,
                     cwd = shell.cwd,
-                    note = when {
-                        shell.liveWorkspace != null -> "on desktop ${shell.liveWorkspace}"
-                        // The desktop's own shell, being looked at from here. Said
-                        // in the desktop's words rather than the protocol's: what
-                        // matters to the person holding the phone is that somebody
-                        // is at the computer with it and that touching that window
-                        // takes it back, which is what "in use" means.
-                        shell.heldElsewhere && shell.ownerKind == "desktop" -> "in use on desktop"
-                        shell.heldElsewhere -> shell.ownerName?.let { "open on $it" }
-                        else -> null
+                    note = when (val ws = liveWorkspaceOf(shell.liveWorkspace)) {
+                        null -> when {
+                            // The desktop's own shell, being looked at from here. Said
+                            // in the desktop's words rather than the protocol's: what
+                            // matters to the person holding the phone is that somebody
+                            // is at the computer with it and that touching that window
+                            // takes it back, which is what "in use" means.
+                            shell.heldElsewhere && shell.ownerKind == "desktop" -> "in use on desktop"
+                            shell.heldElsewhere -> shell.ownerName?.let { "open on $it" }
+                            else -> null
+                        }
+                        else -> "on desktop $ws"
                     },
                     openedByPhone = shell.openedByPhone,
                     liveWorkspace = shell.liveWorkspace,
@@ -345,6 +347,21 @@ internal fun launcherEntries(
  * Pure, and separated from the composable, so the wording is testable without a
  * rendering harness.
  */
+/**
+ * The workspace a shell's live window is on, or null when there is not a usable one.
+ *
+ * `!= null` is not the test. The daemon records an **empty string** when the window opened
+ * but i3 did not place it — a slow window manager, or i3 gone — because the window
+ * genuinely exists and has to be tracked (it is writable, and a claim has to follow it).
+ * That empty string then matched `liveWorkspace != null`, rendered a dangling
+ * `on desktop ` with no noun in it, and **shadowed the branches below it**, so a row that
+ * should have said "in use on desktop" said nothing useful at all.
+ *
+ * Blank means the placement is unknown, and unknown is not a fact to print. One function
+ * for both call sites, because the two drifted the moment there were two.
+ */
+internal fun liveWorkspaceOf(workspace: String?): String? = workspace?.takeIf { it.isNotBlank() }
+
 internal fun openButtonLabel(picked: List<LauncherEntry>): String {
     if (picked.isEmpty()) return "open"
     val sessions = picked.count { it.sessionId != null }

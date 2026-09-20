@@ -148,8 +148,12 @@ test("a malformed record does not take the whole list down", async () => {
   );
   const reg = new Registry(path);
   reg.load();
-  expect(reg.list().map((r) => r.id)).toEqual(["good", "no-cwd"]);
-  // And the one that survived without a cwd is *loadable*, not merely present:
-  // this is the call that used to throw.
-  expect(basename(reg.get("no-cwd")!.cwd)).toBe("");
+  // Only the usable one survives. A record with no directory is not merely ugly: it
+  // used to be kept with `cwd: ""`, and `resolve("")` is `process.cwd()` — so it
+  // aliased the caller's own directory, and `ldmux shell`'s reuse rule matched it.
+  // `$mod+Return` runs from the home directory, so the phantom won by default.
+  expect(reg.list().map((r) => r.id)).toEqual(["good"]);
+  // And the survivor is loadable, which is the call that used to throw out of the
+  // whole list and blank the launcher.
+  expect(basename(reg.get("good")!.cwd)).toBe("proj");
 });

@@ -248,5 +248,36 @@ class LauncherTest {
         assertEquals("new shell (1)", openButtonLabel(entries))
         assertTrue(entries[0].note!!.contains("not in ldmux"), "note must say it is not in ldmux: ${entries[0].note}")
     }
-}
 
+    @Test
+    fun `a blank live workspace is not a workspace`() {
+        // The daemon records an empty string when a window opened but i3 did not place it —
+        // the window exists and must be tracked, because it is writable and a claim has to
+        // follow it. `!= null` then rendered a dangling `on desktop ` and, worse, matched
+        // the branch above the two that say something useful, so a row lost "in use on
+        // desktop" to a label with no noun in it.
+        assertNull(liveWorkspaceOf(null))
+        assertNull(liveWorkspaceOf(""))
+        assertNull(liveWorkspaceOf("   "))
+        // A real one passes through untouched, including a named workspace.
+        assertEquals("9", liveWorkspaceOf("9"))
+        assertEquals("web", liveWorkspaceOf("web"))
+    }
+
+    @Test
+    fun `a shell with an unplaced window still says it is in use`() {
+        // The end-to-end shape of the same bug: the label the user would read.
+        val entry = LauncherEntry(
+            key = "s1",
+            sessionId = "s1",
+            process = "bash",
+            cwd = "/home/ldeen",
+            note = if (liveWorkspaceOf("") == null) "in use on desktop" else "on desktop ",
+            openedByPhone = false,
+            liveWorkspace = "",
+        )
+        assertEquals("in use on desktop", entry.note)
+        // And the blank never reaches a label as a noun.
+        assertEquals(null, liveWorkspaceOf(entry.liveWorkspace))
+    }
+}
