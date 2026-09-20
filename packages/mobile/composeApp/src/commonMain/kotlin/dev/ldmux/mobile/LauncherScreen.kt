@@ -292,16 +292,18 @@ internal fun launcherEntries(
                     // the pixels did not, so the row read as "my session on the
                     // computer" and produced a phone-owned shell instead. Saying what
                     // it does is the whole fix; there is no seize path missing.
-                    // Said plainly, because the old wording did not stop anyone.
-                    // The row read as "my pi session on the computer" and tapping
-                    // `open` produced a phone-owned shell, which then wore the phone
-                    // icon — and the icon was RIGHT, because a phone-owned shell is
-                    // what it was. The lie was the row. Three words doing the work:
-                    // `not in ldmux`.
-                    note = listOfNotNull(
-                        pi.workspace?.let { "ws $it" },
-                        "not in ldmux — new shell here",
-                    ).joinToString("  ·  "),
+                    // Said plainly, and *short enough to be read*. The first version
+                    // of this was "not in ldmux — new shell here", which overflowed
+                    // the row and rendered as "not in ". A notice that is cut off is
+                    // not a notice. The row read as "my pi session on the computer"
+                    // and tapping `open` produced a phone-owned shell, which then wore
+                    // the phone icon — and the icon was RIGHT, because a phone-owned
+                    // shell is what it was. The lie was the row.
+                    //
+                    // Three words do the work, and the button carries the rest:
+                    // selecting this row makes it say "new shell (N)" instead of
+                    // "open", so the row does not have to name the action too.
+                    note = "not in ldmux",
                 ),
             )
         }

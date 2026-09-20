@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -442,6 +443,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
         var waitMs = 400L
         while (currentCoroutineContext().isActive) {
             try {
+                appLog("connecting to ${config.wsUrl}")
                 http.webSocket(config.wsUrl) {
                     ws = this
                     waitMs = 400L
@@ -450,6 +452,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     for (queued in pending) runCatching { send(Frame.Text(queued)) }
                     pending.clear()
                     _connected.value = true
+                    appLog("connected")
                     // Who we are, before anything else (ADR-0010). Ownership is
                     // keyed on the connection plus this identity, and a device's
                     // claims are dropped when the connection ends — so a client
@@ -479,8 +482,13 @@ class LdmuxClient(private var config: LdmuxConfig) {
                         ws = null
                     }
                 }
-            } catch (_: Throwable) {
-                /* offline / daemon restart: fall through to the retry delay */
+            } catch (e: Throwable) {
+                // Offline / daemon restart: fall through to the retry delay. It is
+                // still worth saying so. This swallowed everything, and a swallowed
+                // throw is why "the list is empty" had no explanation anywhere — the
+                // launcher showed an empty screen and the log showed nothing at all,
+                // so the only way to find out was to read the source and guess.
+                appLog("connect failed: ${e::class.simpleName}: ${e.message}")
             }
             _connected.value = false
             // Either the timeout elapses, or the network coming back cuts it
@@ -527,30 +535,8 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 _ownedTick.value += 1
             }
             "sessions" -> {
-                val arr = root["sessions"] as? JsonArray ?: return
-                _sessions.value = arr.mapNotNull { element ->
-                    val o = element.jsonObject
-                    val id = o["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                    Session(
-                        id = id,
-                        kind = o["kind"]?.jsonPrimitive?.content ?: "shell",
-                        title = o["title"]?.jsonPrimitive?.content ?: "",
-                        cwd = o["cwd"]?.jsonPrimitive?.content ?: "",
-                        status = o["status"]?.jsonPrimitive?.content ?: "",
-                        tmuxName = o["tmuxName"]?.jsonPrimitive?.content ?: "",
-                        createdBy = o["createdBy"]?.jsonPrimitive?.content ?: "",
-                        process = o["process"]?.jsonPrimitive?.content ?: "",
-                        liveWorkspace = o.optionalText("liveWorkspace"),
-                        ownerName = (o["owner"] as? JsonObject)
-                            ?.get("name")?.let { (it as? JsonPrimitive)?.content },
-                        ownerKind = (o["owner"] as? JsonObject)
-                            ?.get("kind")?.let { (it as? JsonPrimitive)?.content },
-                        heldElsewhere = (o["owner"] as? JsonObject)
-                            ?.get("id")?.let { (it as? JsonPrimitive)?.content } != null &&
-                            ((o["owner"] as? JsonObject)
-                                ?.get("id")?.let { (it as? JsonPrimitive)?.content }) != deviceId,
-                    )
-                }
+                _sessions.value = parseSessions(root["sessions"], deviceId)
+                appLog("sessions parsed=${_sessions.value.size} attachable=${_sessions.value.count { it.attachable }}")
             }
         }
     }
@@ -562,6 +548,49 @@ class LdmuxClient(private var config: LdmuxConfig) {
 
 private fun JsonObject.text(key: String): String =
     ((this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content ?: ""
+
+/**
+ * The session list, read with this file's tolerant accessors.
+ *
+ * This parsed with `jsonPrimitive` directly while every other parser here used
+ * `text` / `number` / `flag`, and `jsonPrimitive` **throws** on a value that is
+ * `JsonNull` or an object. The safe-call only guards an *absent* key, which is
+ * why this looked defensive and was not.
+ *
+ * Where the throw landed is what made it expensive: inside `mapNotNull`, inside the
+ * receive loop, inside `catch (_: Throwable)`. One unreadable field was therefore
+ * not one dropped row — it was every row, a silently torn-down socket, and a
+ * launcher reading "Nothing open yet" with nothing anywhere to say why. The comment
+ * on the helpers below already said this. This is that comment, applied.
+ *
+ * Extracted from the message handler so the parse can be tested against the
+ * daemon's real payload instead of only against what the daemon was believed to
+ * send.
+ */
+internal fun parseSessions(element: JsonElement?, deviceId: String): List<Session> {
+    val arr = element as? JsonArray ?: return emptyList()
+    return arr.mapNotNull { entry ->
+        val o = entry as? JsonObject ?: return@mapNotNull null
+        val id = o.text("id")
+        if (id.isEmpty()) return@mapNotNull null
+        val owner = o["owner"] as? JsonObject
+        val ownerId = owner?.optionalText("id")
+        Session(
+            id = id,
+            kind = o.text("kind").ifEmpty { "shell" },
+            title = o.text("title"),
+            cwd = o.text("cwd"),
+            status = o.text("status"),
+            tmuxName = o.text("tmuxName"),
+            createdBy = o.text("createdBy"),
+            process = o.text("process"),
+            liveWorkspace = o.optionalText("liveWorkspace"),
+            ownerName = owner?.optionalText("name"),
+            ownerKind = owner?.optionalText("kind"),
+            heldElsewhere = ownerId != null && ownerId != deviceId,
+        )
+    }
+}
 
 private fun JsonObject.optionalText(key: String): String? =
     ((this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content
