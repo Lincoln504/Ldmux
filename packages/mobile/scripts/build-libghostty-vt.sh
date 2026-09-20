@@ -87,8 +87,16 @@ done
 # Timestamps answer the second question and it is the wrong one: re-saving a file
 # without changing it makes every packaged library look stale, and a checkout
 # rewrites them all.
+#
+# The files are named, not globbed. `sha256sum *.c *.h` swept up test_engine.c,
+# which is the *host* suite — it is linked into no Android library anywhere — so
+# editing a host test claimed the packaged .so was stale and demanded a full NDK
+# rebuild to clear a warning about a file that is not in the artefact. A stamp has
+# to be a list of build inputs, and a build input is a thing you can point at in
+# the build command.
 STAMP="$MOBILE/native/prebuilt/sources.sha256"
-( cd "$MOBILE/native" && sha256sum *.c *.h | LC_ALL=C sort -k2 ) > "$STAMP"
+SHIM_SOURCES="ldmux_terminal.h ldmux_terminal.c ldmux_jni.c"
+( cd "$MOBILE/native" && sha256sum $SHIM_SOURCES | LC_ALL=C sort -k2 ) > "$STAMP"
 echo "==> source stamp: $STAMP"
 
 echo "==> done"

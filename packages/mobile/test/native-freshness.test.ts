@@ -32,13 +32,29 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const NATIVE = join(ROOT, "native");
 const JNI_LIBS = join(ROOT, "composeApp", "src", "androidMain", "jniLibs");
 
-/** Every source the shim and the JNI glue are compiled from. */
+/** Every source file that lives beside the shim, whether or not it is compiled. */
 function nativeSources(): string[] {
   if (!existsSync(NATIVE)) return [];
   return readdirSync(NATIVE)
     .filter((f) => f.endsWith(".c") || f.endsWith(".h"))
     .map((f) => join(NATIVE, f));
 }
+
+/**
+ * Sources that are deliberately in no packaged library.
+ *
+ * `test_engine.c` is the *host* suite: `scripts/test-native.sh` compiles it
+ * against the portable core and runs it here. It is linked into no Android
+ * library anywhere. The stamp used to be a glob of `*.c *.h`, so editing it
+ * declared the packaged `.so` stale and demanded a full NDK rebuild to clear a
+ * warning about a file that is not in the artefact.
+ *
+ * It stays in this list rather than being ignored, because the rule that matters
+ * is the one below it: every source file has to be accounted for. A file that is
+ * neither stamped nor named here is a file somebody added and did not classify,
+ * and that is exactly when silence is expensive.
+ */
+const HOST_ONLY = new Set(["test_engine.c"]);
 
 /** The libraries Gradle will package, one per ABI. */
 function packagedLibs(): string[] {
@@ -61,7 +77,7 @@ test("every packaged .so was built from the current shim sources", () => {
   // changes nothing, or a fresh checkout that rewrites every file's timestamp,
   // cannot make a correct library look stale — and a real source change cannot
   // hide behind a timestamp that happens to be older.
-  const stampPath = join(dirname(SOURCES[0]!), "prebuilt", "sources.sha256");
+  const stampPath = join(NATIVE, "prebuilt", "sources.sha256");
   if (existsSync(stampPath)) {
     // Names are normalised so the comparison is between bytes and not between
     // one side's idea of how to spell a path.
@@ -70,15 +86,39 @@ test("every packaged .so was built from the current shim sources", () => {
       .split("\n")
       .filter(Boolean)
       .map((line) => line.replace(/  \.\//, "  "));
-    const current = SOURCES.map((s) => {
-      const sum = createHash("sha256").update(readFileSync(s)).digest("hex");
-      return `${sum}  ${basename(s)}`;
-    }).sort((a, b) => (a.slice(66) < b.slice(66) ? -1 : 1));
+    // Hashed by the name the stamp recorded, not by a walk of the directory: the
+    // stamp is the list of build inputs, and asking about anything else is asking
+    // about a file that is not in the artefact.
+    const current = recorded
+      .map((line) => {
+        const name = line.slice(line.indexOf("  ") + 2);
+        const sum = createHash("sha256")
+          .update(readFileSync(join(NATIVE, name)))
+          .digest("hex");
+        return `${sum}  ${name}`;
+      })
+      .sort((a, b) => (a.slice(66) < b.slice(66) ? -1 : 1));
     assert.deepEqual(
       current,
       recorded,
       "the packaged .so was built from different shim sources than the ones on disk. " +
         "Rebuild with: just native-android",
+    );
+
+    // And nothing may be unclassified. A new source file is either compiled into
+    // the library — in which case it must be stamped, or a real change to it would
+    // ship an unrebuilt .so — or it is not, in which case it belongs in HOST_ONLY.
+    const stamped = new Set(recorded.map((l) => l.slice(l.indexOf("  ") + 2)));
+    const unclassified = nativeSources()
+      .map((s) => basename(s))
+      .filter((f) => !stamped.has(f) && !HOST_ONLY.has(f))
+      .sort();
+    assert.deepEqual(
+      unclassified,
+      [],
+      "a native source is neither in the build stamp nor declared host-only. " +
+        "Add it to SHIM_SOURCES in scripts/build-libghostty-vt.sh if the library " +
+        "compiles it, or to HOST_ONLY in this test if it does not.",
     );
     return;
   }
