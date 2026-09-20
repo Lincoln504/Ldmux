@@ -46,10 +46,19 @@ interface RemoteInfo {
   token: string;
 }
 
-async function waitFor(pred: () => boolean, ms = 6000): Promise<boolean> {
+/**
+ * Poll until [pred] is true, or give up after [ms].
+ *
+ * The predicate may be sync or async, and the `await` is deliberately
+ * unconditional. An async predicate used to be a trap here: it returns a Promise,
+ * a Promise is truthy, so the very first check passed and the wait did nothing at
+ * all — a test that cannot fail is worse than a failing one. Awaiting a plain
+ * boolean is a no-op, so both shapes are safe and neither is silently defeated.
+ */
+async function waitFor(pred: () => boolean | Promise<boolean>, ms = 6000): Promise<boolean> {
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    if (pred()) return true;
+    if (await pred()) return true;
     await sleep(50);
   }
   return false;
@@ -560,22 +569,46 @@ test("a snapshot of an alternate-screen pane is that screen and no scrollback", 
   });
   const name = session.tmuxName;
 
+  // Poll on the pane's own state rather than sleeping. This test used fixed
+  // `sleep(400)` / `sleep(600)`, and under the suite's full concurrency — four test
+  // files at once, each with its own tmux server — a loaded machine simply did not
+  // finish starting `tput` inside 600 ms, so the snapshot was taken before the
+  // alternate screen existed and the failure read as "the feature is broken". It
+  // passed alone every time and failed in the suite, which is the signature of a
+  // test that depends on how busy the machine is.
+  const screenNow = async (): Promise<string> =>
+    (await daemonCall(daemon.socketPath, "snapshot", { id: session.id })).screen;
+  const snap = async () => await daemonCall(daemon.socketPath, "snapshot", { id: session.id });
+  const send = async (text: string) => {
+    await daemonCall(daemon.socketPath, "send", { id: session.id, text });
+    await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
+  };
+  const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
   // Something on the shell's own screen, which must never appear in a snapshot of
   // the program's screen.
-  await daemonCall(daemon.socketPath, "send", { id: session.id, text: "echo PRIMARY-MARKER" });
-  await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
-  await sleep(400);
+  //
+  // Waited for *twice*, deliberately. The shell echoes the command it is given, so
+  // the literal text is on screen the instant it is typed, before anything has run
+  // — one occurrence is the echo and two is the output. Waiting for one would let
+  // the next command be typed into a shell that had not finished the first, and the
+  // two would interleave.
+  await send("echo PRIMARY-MARKER");
+  const sawPrimary = await waitFor(async () => countOf(await screenNow(), "PRIMARY-MARKER") >= 2);
+  expect(sawPrimary).toBe(true);
 
   // `tput smcup` emits the real sequence; a hand-written escape through send-keys
   // does not survive the round trip and silently tests nothing (measured: alt=0).
-  await daemonCall(daemon.socketPath, "send", {
-    id: session.id,
-    text: "tput smcup; echo ALTERNATE-MARKER",
-  });
-  await daemonCall(daemon.socketPath, "send", { id: session.id, keys: ["Enter"] });
-  await sleep(600);
+  await send("tput smcup; echo ALTERNATE-MARKER");
+  // Waited on the **flag**, not the marker. This is the same echo trap: a wait on
+  // the marker is satisfied by the echoed command line within milliseconds, before
+  // `tput` has run, so the test then asserts against a screen that never switched
+  // and fails in 187 ms. `alternateOn` is the engine's own state and no echo can
+  // fake it.
+  const switched = await waitFor(async () => (await snap()).state.alternateOn === true);
+  expect(switched).toBe(true);
 
-  const state = await daemonCall(daemon.socketPath, "snapshot", { id: session.id });
+  const state = await snap();
   expect(state.state.alternateOn).toBe(true);
   expect(state.screen.includes("ALTERNATE-MARKER")).toBe(true);
   expect(state.screen.includes("PRIMARY-MARKER")).toBe(false);
