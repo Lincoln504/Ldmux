@@ -132,6 +132,8 @@ The wire carries **raw pty bytes**, not a grid.
 | A phone-opened shell wears the phone glyph | `RCNT` and `nocira` show it and their per-shell menu; the desk shells show neither |
 | The launcher needs the tailnet, and says why when it has none | Wi-Fi off and Tailscale down: `connect failed: SocketTimeoutException … after 10000ms` in logcat. Tailscale up: connected in 305 ms, 6 sessions parsed, 5 attachable |
 | A selection survives a new snapshot | Selected rows `34`/`35` of `seq 1 40`, pressed HOME, came back: the same two rows were still selected, both handles and the platform Copy toolbar intact. Every snapshot replaces the engine, so before this the selection was discarded outright |
+| A drag past the edge does **not** walk the selection on the alternate screen | In `less` (a real alternate-screen program, so no scrollback exists), long-pressed row 12 and dragged up past the top with 8 move events. The selection extended to the top of the screen, the **content did not move**, and the anchored end stayed on the press row. Before the fix each move walked the anchor one row, so the anchored end would have been 8 rows down the screen |
+| The clipboard round trip works end to end | Selected text in `less`, let go (copies), rotated to landscape, tapped `paste`. The text appeared in the shell, read back **from the pane via the daemon** rather than from a screenshot: `[ ldeen@debian:~$ ] twork services, Internet style`. Tapped paste again and got exactly one more copy, so the content is stable and the paste is one-for-one |
 
 ### 4.2 Suites (2026-09-20, all green)
 
@@ -207,6 +209,25 @@ the selection is still about it. Restoring at the same rows looks like it works 
 wrong in the common case; §8 records that mistake. Device-verified: `seq 1 40`, select
 34/35, HOME, return — the selection is still there.
 3. **Snapping out of the middle of a wide glyph** — still open, and small.
+
+### 5.2a Selection: what is verified, and the one thing that is not
+
+**Verified on the device** (see §4.1): a drag past the edge on the alternate screen extends the
+selection without walking its anchor, a selection survives a snapshot, and the clipboard round
+trip works — copy on release, paste from the landscape panel, read back from the pane.
+
+**Not settled, and stated as such rather than assumed.** The first copy I made captured the top
+row of the `less` screen *from the column I pressed at onwards*, and nothing below it, while the
+visual selection covered about twelve rows. I then tried to settle it properly — three known
+lines (`AAA111`, `BBB222`, `CCC333`) printed by the shell, long-pressed on the first and dragged
+across the other two — and **the clipboard was not replaced**. I could not tell whether that was
+the gesture not registering under `adb`'s synthetic input or a real defect, and I ran out of room
+to find out. So the honest position is: the round trip is proven, the multi-row *content* is not.
+
+The next step is a controlled one: make the same three-line selection by hand on the device and
+paste it, with the pane read back through `ldmux capture`. If the three lines do not come back
+with their newlines, the defect is in `selectionText()`/endpoint ordering rather than in the
+gesture, because §4.1 already shows the clipboard itself carrying text faithfully.
 
 ### 5.2 Tap-to-cursor — **the Home shortcut is fixed; the verdict is not**
 
