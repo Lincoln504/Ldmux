@@ -90,7 +90,8 @@ data class GridPlacement(
  *
  * **The sign is not obvious and was wrong.** Scrolling up ([step] = -1) shows
  * *older* lines, so the content on screen moves *down*, so the row of a cell that
- * is anchored to text goes **up**. The arithmetic is therefore `row - step`, and it
+ * is anchored to text **increases** (it moves down the screen). The arithmetic is
+ * therefore `row - step`, and it
  * lives here, in one place, because it is used by both drags and getting it
  * backwards is invisible until someone drags a selection off the top of the screen.
  *

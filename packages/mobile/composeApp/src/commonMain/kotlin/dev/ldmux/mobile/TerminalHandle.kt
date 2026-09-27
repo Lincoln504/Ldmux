@@ -127,7 +127,27 @@ interface TerminalHandle {
      * what happened rather than by what it asked for, and a `Unit` return left it no
      * way to tell those two apart.
      */
-    fun scrollBy(rows: Int): Int = 0
+    /**
+     * Scroll the viewport by [rows], negative being back into history.
+     *
+     * [pageInHistory] is false when the caller is a live selection gesture. A
+     * page-in replaces the engine, so asking for one mid-drag throws away the
+     * selection the drag is extending — ADR-0014 §4.4 requires the request to be
+     * suppressed while a gesture is live, and the caller is the only thing that
+     * knows. It is a per-call answer rather than a flag the gesture has to
+     * remember to clear, so a gesture that is cancelled cannot leave paging off
+     * for the rest of the session.
+     */
+    fun scrollBy(rows: Int, pageInHistory: Boolean = true): Int = 0
+
+    /**
+     * Park the viewport on the live bottom, whatever history it was reading.
+     *
+     * The bottom is where a shell happens — the prompt, and the output the user
+     * has not seen. A handle that cannot scroll (a test double) does nothing,
+     * like the scroll default above.
+     */
+    fun scrollToBottom() {}
 
     /**
      * The user tapped a cell. Whether that moves the shell's cursor, clicks for a

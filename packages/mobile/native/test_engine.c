@@ -292,6 +292,30 @@ static uint16_t cell_flags_at(const uint8_t *buf, size_t len, int want_col,
   return 0;
 }
 
+/* Does a row of a rendered frame start with [want], one grapheme per cell?
+ * A cell holds a single character, so a test that asserts on what a row *says*
+ * has to read the cells one at a time — which is what a replay has to get
+ * right, and what "the screen is the new one" means in cells. */
+static bool row_text_starts(const uint8_t *buf, size_t len, int want_row,
+                            const char *want) {
+  uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
+  uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
+  size_t p = 40;
+  for (int r = 0; r < want_row && r < rows; r++) {
+    for (int c = 0; c < cols; c++) {
+      if (p + 9 > len) return false;
+      p += 9 + (size_t)buf[p];
+    }
+  }
+  for (int c = 0; c < cols && want[c] != 0; c++) {
+    if (p + 9 > len) return false;
+    uint8_t n = buf[p];
+    if (n != 1 || buf[p + 9] != (uint8_t)want[c]) return false;
+    p += 9 + (size_t)n;
+  }
+  return true;
+}
+
 static int selected_cell_count(const uint8_t *buf, size_t len) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
@@ -711,6 +735,68 @@ static void test_the_scroll_offset_is_what_actually_moved(void) {
   ldmux_terminal_free(t);
 }
 
+/* The client's resize path replays a captured screen into a live engine with
+ * `ESC[r ?6l 4l H 2J` + the capture, instead of rebuilding the engine — the
+ * rebuild threw away the scrollback the client had accumulated, which is how a
+ * rotation used to empty it. Two things have to hold for that path to be safe,
+ * and both are engine behaviour, so both are asserted here against the engine:
+ * the replay replaces the visible screen and nothing else, and the scrollback
+ * above it survives. */
+static void test_a_resize_replay_replaces_the_screen_and_keeps_the_scrollback(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(20, 6);
+  char line[32];
+  for (int i = 0; i < 30; i++) {
+    snprintf(line, sizeof(line), "L%02d\r\n", i);
+    feed(t, line);
+  }
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+
+  /* Park at the top, then resize: the scrollback must survive the resize
+   * itself, or there would be nothing for the replay to preserve. */
+  ldmux_terminal_scroll(t, LDMUX_SCROLL_TOP);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(row_text_starts(buf, len, 0, "L00"));
+
+  ldmux_terminal_resize(t, 20, 10);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  ldmux_terminal_scroll(t, LDMUX_SCROLL_TOP);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(row_text_starts(buf, len, 0, "L00"));
+
+  /* The replay: reset state, clear the visible screen only, write the new
+   * capture, place the cursor. What the Kotlin side builds, byte for byte. */
+  feed(t, "\x1b[r\x1b[?6l\x1b[4l\x1b[H\x1b[2J");
+  for (int i = 0; i < 10; i++) {
+    snprintf(line, sizeof(line), i == 9 ? "N%d" : "N%d\r\n", i);
+    feed(t, line);
+  }
+  feed(t, "\x1b[1;1H");
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  /* The replay wrote the live screen; the viewport is still parked where it
+   * was — output never moves it — so the new screen is read from the bottom.
+   * `LDMUX_SCROLL_BOTTOM` is the exact value the client sends for its "back to
+   * now" pill (`NativeTerminal.SCROLL_BOTTOM`), and it takes its own branch in
+   * the shim, so it is the value worth exercising rather than a large number
+   * that only reaches the clamp. */
+  ldmux_terminal_scroll(t, LDMUX_SCROLL_BOTTOM);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  for (int i = 0; i < 10; i++) {
+    char want[8];
+    snprintf(want, sizeof(want), "N%d", i);
+    CHECK(row_text_starts(buf, len, i, want));
+  }
+  CHECK_EQ_INT(buf[17], 1); /* viewportActive: at the live bottom */
+  CHECK_EQ_INT(buf[6] | (buf[7] << 8), 0); /* cursorY */
+  /* And the oldest scrollback row is still the oldest row there was. */
+  ldmux_terminal_scroll(t, LDMUX_SCROLL_TOP);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(row_text_starts(buf, len, 0, "L00"));
+
+  ldmux_terminal_free(t);
+}
+
 static void test_frame_carries_the_endpoints(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
@@ -811,6 +897,8 @@ int main(void) {
       {"bounds is zero without a selection", test_bounds_is_zero_without_a_selection},
       {"endpoints land on the right row after scrolling", test_endpoints_land_on_the_right_row_after_scrolling},
     {"the scroll offset is what actually moved", test_the_scroll_offset_is_what_actually_moved},
+    {"a resize replay replaces the screen and keeps the scrollback",
+     test_a_resize_replay_replaces_the_screen_and_keeps_the_scrollback},
       {"a selection follows its text when the viewport moves",
        test_a_selection_follows_its_text_when_the_viewport_moves},
       {"frame carries the endpoints", test_frame_carries_the_endpoints},

@@ -54,6 +54,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import dev.ldmux.mobile.voice.Dictation
@@ -574,6 +576,11 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // nor be forgotten: every key in either bar goes through here.
     val pagerState = rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
 
+    // The shell that is meant to be on screen, by id — not the pager's page
+    // index, which a re-measure resets underneath the user. Declared here,
+    // before anything that answers to it. See the watcher below for why.
+    val shownSessionId = remember { mutableStateOf<String?>(null) }
+
     // Carries out the "go to the shell just created" request from above. It lives
     // here because this is where the pager exists; the request is made there because
     // that is where the daemon's answer arrives.
@@ -581,6 +588,9 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         val want = gotoSessionId ?: return@LaunchedEffect
         val at = pages.indexOfFirst { it.id == want }
         if (at < 0) return@LaunchedEffect
+        // Named as the intent first: the scroll below is programmatic, and the
+        // watcher below distinguishes intent from a re-measure by this id.
+        shownSessionId.value = want
         pagerState.scrollToPage(at)
         gotoSessionId = null
     }
@@ -614,44 +624,99 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // **The page is the user's, and the pager loses it on a re-measure.**
     //
     // A `PagerState` re-derives its position when the viewport changes size rather
-    // than merely re-laying-out, and the viewport changes size on every flip, because
-    // `mode` changes the moment the flip button is pressed and the window follows.
-    // Measured on the device, with the pager's identity printed alongside it: at a
-    // viewport of 2294 px it still reported page 1, and the instant it was measured at
-    // 1080 px it reported page 0 — the same state object, the same composition, the
-    // terminal area composed exactly once for the whole run. So this is not a pager
-    // being rebuilt and not a new state, which is what five earlier attempts assumed.
+    // than merely re-laying-out, and the viewport changes size on every rotation
+    // (and when the landscape panel arrives, which is a second resize after the
+    // first). Measured on the device, with the pager's identity printed alongside
+    // it: at a viewport of 2294 px it still reported page 1, and the instant it was
+    // measured at 1080 px it reported page 0 — the same state object, the same
+    // composition, the terminal area composed exactly once for the whole run.
     //
-    // The page is therefore captured while the viewport is *stable* — when a report
-    // can only be the user, from the arrows or a swipe — and put back on the change
-    // itself. On the event, not on a timer: a timer is a bet on when re-measuring has
-    // finished, and every previous attempt lost that bet.
+    // The fix that preceded this one latched the page while the viewport width was
+    // stable and put it back on the change. It lost a race a rotation runs every
+    // time: the width change and the pager's reset do not arrive in the same
+    // emission. The first emission carries the new width with the old page — which
+    // updates `width` and leaves `keep` alone — and the *second* carries the same
+    // new width with the reset page 0, which by then looks like a stable viewport
+    // and a user's choice, so `keep` was overwritten with 0 and the wrong shell
+    // was "restored".
+    //
+    // So the shell on screen is tracked by **id**, which survives a re-measure
+    // because it is not a position in anything. The two things that can change the
+    // page without a re-measure — a swipe and the arrows — say so themselves: a
+    // swipe is a drag interaction on the pager, and both arrows and "go to the new
+    // shell" set the id before they move. What is left, a settled page that is not
+    // the shell we mean, is a reset, and is put back. The index is looked up fresh
+    // every time, because shells open and close and a page number captured earlier
+    // is exactly the kind of stale guess this exists to stop.
+    //
+    // Deliberately not `isScrollInProgress` as the *choice*: that is also true of an
+    // animated arrow press and of a re-measure's own adjustment. It is used below as
+    // "still moving, do not decide yet", which is a different question.
+    val pagesForPager by rememberUpdatedState(pages)
+    val pagerDragged by pagerState.interactionSource.collectIsDraggedAsState()
     LaunchedEffect(pagerState) {
-        var keep = pagerState.currentPage
-        var width = pagerState.layoutInfo.viewportSize.width
-        snapshotFlow { pagerState.layoutInfo.viewportSize.width to pagerState.currentPage }
-            .collect { (w, p) ->
-                if (w == width) {
-                    keep = p
-                } else {
-                    width = w
-                    if (p != keep) pagerState.scrollToPage(keep)
-                }
+        // A drag is a **latch, not a decision.** `currentPage` follows the finger, so
+        // a swipe dragged past the halfway point and then released short of the snap
+        // threshold would leave the page it nearly reached adopted — and adopting a
+        // page is an *attach*, and a first attach takes the shell over (ADR-0010), so
+        // a cancelled swipe would take a shell nobody landed on. The latch is set
+        // while the finger is down and the choice is read once the pager has stopped.
+        var sawDrag = false
+        snapshotFlow {
+            Triple(
+                pagerDragged to pagerState.isScrollInProgress,
+                pagerState.currentPage,
+                pagesForPager.getOrNull(pagerState.currentPage)?.id,
+            )
+        }.collect { (motion, page, id) ->
+            val (fingerDown, moving) = motion
+            if (fingerDown) sawDrag = true
+            // Mid-flight — an arrow's animation, or a swipe still settling: what the
+            // pager reports now is not where it is going to stop.
+            if (moving || fingerDown) return@collect
+            if (id == null) return@collect
+            if (sawDrag) {
+                // The finger is up and the pager has stopped: this is where the user
+                // put it, and a snap back to where it started is not a choice.
+                sawDrag = false
+                shownSessionId.value = id
+                return@collect
             }
+            val shown = shownSessionId.value
+            if (shown == id) return@collect
+            val target = pagesForPager.indexOfFirst { it.id == shown }
+            if (target >= 0 && target != page) {
+                pagerState.scrollToPage(target)
+            } else {
+                // The shell that was on screen is gone (its page closed), or the
+                // pager is already on the right index: adopt what is here.
+                shownSessionId.value = id
+            }
+        }
     }
 
     // A latch that survived a glance at another shell would be a latch that
     // surprises you, so anything that ends the gesture clears it — and it is cleared
-    // on the session, because that is where it lives.
-    LaunchedEffect(pagerState.currentPage) {
-        pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }?.clearModifiers()
+    // on the session, because that is where it lives. Keyed on the shell, not on
+    // the pager's page: a re-measure that puts the pager on page 0 for a frame
+    // is not a glance at another shell.
+    LaunchedEffect(shownSessionId.value) {
+        shownSessionId.value?.let { id -> handles[id]?.clearModifiers() }
     }
+
+    // The shell everything in the chrome addresses — keys, the microphone, the
+    // copy mode — is the one on screen, by id. The pager's own page index is
+    // reset underneath the user on a re-measure (see `shownSessionId` above), and
+    // a key aimed at whatever page it momentarily reports would type into a
+    // shell nobody is looking at.
+    val shownIndex = pages.indexOfFirst { it.id == shownSessionId.value }
+    val shown = pages.getOrNull(shownIndex)
 
     // Every key in either bar goes through here. There is nothing to consult: the
     // latch belongs to the session and the session spends it inside sendKey, so a
     // typed character and a bar key are one mechanism rather than two.
     val press: (String) -> Unit = { key ->
-        pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }?.sendKey(key)
+        shown?.id?.let { handles[it] }?.sendKey(key)
     }
     LaunchedEffect(pages.size) {
         if (pages.isNotEmpty() && pagerState.currentPage >= pages.size) {
@@ -662,7 +727,7 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
 
 
     var killTarget by remember { mutableStateOf<Session?>(null) }
-    val currentHandle = pages.getOrNull(pagerState.currentPage)?.id?.let { handles[it] }
+    val currentHandle = shown?.id?.let { handles[it] }
 
     // **One microphone, and it belongs to the app.** Dictation is bound to the shell
     // that is on screen when it starts, because a transcript is for the shell you
@@ -675,16 +740,14 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // composed pages could each draw the banner.
     var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
 
-    // Switching shells ends dictation. Read through the remembered pager rather than
-    // through the page list, which a captured value would freeze at its first value.
-    LaunchedEffect(pagerState) {
-        var last = pagerState.currentPage
-        snapshotFlow { pagerState.currentPage }.collect { page ->
-            if (page != last) {
-                last = page
-                Dictation.stop()
-            }
-        }
+    // Switching shells ends dictation. Keyed on the shell's *id*, not the pager's
+    // page: the pager's page is reset by a re-measure (a rotation, the landscape
+    // panel arriving), and a rotation is not the user moving to another shell — it
+    // used to kill the transcription and look like a dropped connection. The
+    // session's own id is what "switching shells" means, and it is what the rest of
+    // this file watches (see `shownSessionId`).
+    LaunchedEffect(shownSessionId.value) {
+        Dictation.stop()
     }
 
     // A microphone that outlives the screen is a microphone nobody asked for.
@@ -887,6 +950,8 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         // a trailing lambda would bind to it.
                         onSettings = { showSettings = true },
                         press = press,
+                        shownId = shownSessionId.value,
+                        onShow = { id -> shownSessionId.value = id },
                     )
                 }
                 // The side panel is a landscape thing. Portrait's chrome is the bar
@@ -902,6 +967,7 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         pagerState,
                         handles,
                         typing = typing,
+                        shownId = shownSessionId.value,
                         Modifier.fillMaxSize(),
                         keyboardRequest = keyboardRequest,
                         pendingOpen = pendingOpens > 0,
@@ -945,6 +1011,8 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                     modifiers = currentHandle?.modifiers ?: Modifiers(),
                     onSticky = { which -> currentHandle?.toggleModifier(which) },
                     press = press,
+                    shownId = shownSessionId.value,
+                    onShow = { id -> shownSessionId.value = id },
                 )
             }
         }
@@ -1013,6 +1081,12 @@ private fun TerminalArea(
     pagerState: PagerState,
     handles: MutableMap<String, TerminalHandle>,
     typing: Boolean,
+    // Which shell is on screen, by id. The pager's page index is reset
+    // underneath the user by a re-measure (see `shownSessionId` in App), and
+    // "connected" decided from that index would attach — and take over, which
+    // a first attach is (ADR-0010) — a shell nobody is looking at for as long
+    // as the reset lasts.
+    shownId: String?,
     modifier: Modifier,
     keyboardRequest: Int = 0,
     // A shell just asked for has not arrived yet (see `pendingOpens` in App()) —
@@ -1051,7 +1125,7 @@ private fun TerminalArea(
                     config,
                     s.id,
                     typing,
-                    active = page == pagerState.currentPage,
+                    active = s.id == shownId,
                     Modifier.fillMaxSize(),
                     keyboardRequest = keyboardRequest,
                 )
@@ -1133,6 +1207,10 @@ private fun PortraitBar(
     modifiers: Modifiers,
     onSticky: (StickyKey) -> Unit,
     press: (String) -> Unit,
+    // The shell on screen, by id (see `shownSessionId` in App).
+    shownId: String?,
+    // Names the shell the arrows are moving to (see `ShellHeader`).
+    onShow: (String) -> Unit,
 ) {
     Column(
         Modifier.fillMaxWidth().background(Surface).padding(horizontal = 6.dp, vertical = LocalTouch.current.pad),
@@ -1141,7 +1219,17 @@ private fun PortraitBar(
         // Where you are, and how to move, at the top of the bar: the same row the
         // side panel shows, because moving between shells must not mean leaving
         // them. Navigation at one end, keys in the middle, actions at the other.
-        ShellHeader(pages, pagerState, scope, onLauncher, onSettings, showMenu = false, dense = true)
+        ShellHeader(
+            pages,
+            pagerState,
+            scope,
+            onLauncher,
+            onSettings,
+            currentId = shownId,
+            onShow = onShow,
+            showMenu = false,
+            dense = true,
+        )
 
         PanelDivider()
 
@@ -1271,10 +1359,18 @@ private fun ShellHeader(
     scope: CoroutineScope,
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
+    // The shell on screen, by id — not the pager's page index, which a
+    // re-measure resets underneath the user (see `shownSessionId` in App). The
+    // title, the count and the arrows describe the shell the user is on.
+    currentId: String?,
+    // The arrows move the pager, and they name where they are going: the watcher
+    // in App treats a settled page that is not the named shell as a re-measure
+    // to undo, and an arrow that did not name its target would be undone.
+    onShow: (String) -> Unit,
     showMenu: Boolean = true,
     dense: Boolean = false,
 ) {
-    val current = pagerState.currentPage
+    val current = pages.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
     val total = pages.size.coerceAtLeast(1)
     val here = pages.getOrNull(current)
     var menuOpen by remember { mutableStateOf(false) }
@@ -1283,7 +1379,10 @@ private fun ShellHeader(
 
     fun step(delta: Int) {
         val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
-        if (target != current) scope.launch { pagerState.animateScrollToPage(target) }
+        if (target != current) {
+            pages.getOrNull(target)?.let { onShow(it.id) }
+            scope.launch { pagerState.animateScrollToPage(target) }
+        }
     }
 
     Row(
@@ -1341,9 +1440,10 @@ private fun SidePanel(
     onLauncher: () -> Unit,
     onSettings: () -> Unit,
     press: (String) -> Unit,
+    shownId: String?,
+    onShow: (String) -> Unit,
 ) {
-    val current = pagerState.currentPage
-    val here = pages.getOrNull(current)
+    val here = pages.firstOrNull { it.id == shownId }
     val handle = here?.id?.let { handles[it] }
     val total = pages.size.coerceAtLeast(1)
 
@@ -1352,7 +1452,7 @@ private fun SidePanel(
             .padding(horizontal = 8.dp, vertical = LocalTouch.current.rowPad * 2),
         verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
     ) {
-        ShellHeader(pages, pagerState, scope, onLauncher, onSettings)
+        ShellHeader(pages, pagerState, scope, onLauncher, onSettings, currentId = shownId, onShow = onShow)
 
         PanelDivider()
 

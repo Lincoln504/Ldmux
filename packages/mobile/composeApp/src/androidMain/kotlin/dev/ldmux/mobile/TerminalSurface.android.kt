@@ -7,7 +7,9 @@ import android.os.SystemClock
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -35,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -115,11 +118,13 @@ actual fun rememberTerminalSurface(
     // fewer cells fit, and the daemon reflows the pane to that grid. Nothing is
     // ever shrunk to fit a fixed grid (ADR-0008), which is also what keeps the
     // touch mapping honest — there is no scale to divide by.
+    // The zoom is this shell's, and only while it is open: it starts at the
+    // saved default, follows the pinch, and lives in the composition — never
+    // written back to the saved settings, and never copied into another shell.
+    // It used to be saved on every pinch, which made it one global setting:
+    // zooming one shell re-sized every other open one on the next
+    // recomposition, and the size outlived the shell it was chosen for.
     var fontSp by remember { mutableStateOf(config.fontSp) }
-    // A keyless `remember` never re-initialises, so a page opened before the
-    // setting changed kept the old size and the Settings buttons looked broken.
-    // The surface is the one composable that outlives a settings change.
-    LaunchedEffect(config.fontSp) { fontSp = config.fontSp }
     val fontSizePx = with(density) { fontSp.sp.toPx() }
     val painter = remember(fontSizePx) { TerminalPainter(fontSizePx) }
     val scope = rememberCoroutineScope()
@@ -468,7 +473,7 @@ actual fun rememberTerminalSurface(
                                 // alternate screen" rule, expressed as a measurement
                                 // instead of a flag, so it cannot disagree with the
                                 // viewport it is describing.
-                                val moved = controller.scrollBy(step)
+                                val moved = controller.scrollBy(step, pageInHistory = false)
                                 // The end that is not being dragged is anchored to
                                 // *text*, and scrolling up moves the text down, so its
                                 // viewport row rises. This added the delta instead of
@@ -517,10 +522,9 @@ actual fun rememberTerminalSurface(
                                 .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP)
                         },
                         onEnd = {
-                            // Persist through a fresh load, so a stale config
-                            // capture cannot write back an old host or token.
-                            val persisted = AppPrefs.load()
-                            if (persisted.fontSp != fontSp) AppPrefs.save(persisted.copy(fontSp = fontSp))
+                            // Deliberately not saved here: the zoom belongs to this
+                            // shell for as long as it is open, and saving it made
+                            // it a setting every other shell inherited.
                             // A pinch ends with one finger still down, and that
                             // finger's release must not then be read as a tap.
                             scope.launch {
@@ -605,7 +609,7 @@ actual fun rememberTerminalSurface(
                                 // what the viewport did, so a refused scroll — the
                                 // alternate screen, or an end of the history — moves
                                 // the anchor by nothing at all.
-                                val moved = controller.scrollBy(step)
+                                val moved = controller.scrollBy(step, pageInHistory = false)
                                 if (moved != 0) fixedRow = rowAfterScroll(fixedRow, moved)
                             }
                             val index = p.dragCell(at.x, at.y)
@@ -712,6 +716,27 @@ actual fun rememberTerminalSurface(
         // through producing into. Keyed on the session, because a different shell is
         // a different line, and cleared here rather than inside the callback, which
         // is the whole point.
+        // **Back to now.** A viewport parked in history is somewhere you visit,
+        // not somewhere you live: the prompt, and the output you have not read,
+        // are at the live bottom. While the view is away from the bottom it
+        // carries this control, and one tap returns it. It is a pill rather than
+        // a bare glyph so the touch target is a finger's, not a character's.
+        val shownFrame = frame
+        if (shownFrame != null && !shownFrame.viewportActive &&
+            shownFrame.scrollTotal > shownFrame.scrollLen
+        ) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(12.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(0xB3000000))
+                    .clickable { controller.scrollToBottom() }
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+            ) {
+                Text("\u2193", color = Fg, fontSize = 16.sp)
+            }
+        }
         if (typing) {
             var field by remember(sessionId) { mutableStateOf("") }
             BasicTextField(

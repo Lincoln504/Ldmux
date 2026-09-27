@@ -187,8 +187,9 @@ pending prediction in the current epoch.
 Held epochs mean a shaky prediction is never shown; confirmed epochs make the
 next one immediate.
 
-**Rollback for free:** because every snapshot rebuilds the engine from scratch
-(`TerminalController.onSnapshot`), "discard the prediction" is one snapshot
+**Rollback for free:** because every snapshot that is not a resize rebuilds the
+engine from scratch (`TerminalController.onSnapshot`; a resize replays the captured
+screen into the live engine instead), "discard the prediction" is one snapshot
 request, not a diff-undo. The architecture already has the recovery primitive.
 
 ### 5.3 Phase 3 — adaptive frame rate (done)

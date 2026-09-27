@@ -103,17 +103,37 @@ or it advances two rows per tick.
 The app must also pass raw pointer y in surface pixels, plus the surface height: the edge
 test cannot be expressed in cells, because a cell index cannot go past the edge.
 
-### 4.4 The engine is destroyed and rebuilt on every snapshot
+### 4.4 The engine is destroyed and rebuilt on a snapshot — but not on a resize
 
-`TerminalController` closes and recreates `TerminalEngine` when history arrives, and
-history arrives **when the user scrolls to the top** — that is, during an upward
+`TerminalController` closes and recreates `TerminalEngine` when a snapshot arrives,
+and history arrives **when the user scrolls to the top** — that is, during an upward
 selection drag. Any engine-owned selection dies there.
 
-The existing code already states the invariant that saves it: the scroll offset is
-measured from the live bottom, so restoring the offset restores the view. A selection
-must be kept as **viewport endpoints** and re-seeded after a rebuild, and
-`maybeExtendHistory()` must be suppressed while a gesture is live, so autoscroll stops
-at the top of what is loaded rather than destroying the selection it is extending.
+The scroll offset counts into the scrollback **from the top**: `0` is the oldest row
+and `total - len` is the live bottom. This section used to say the offset was
+measured from the live bottom, and that mistake is what broke the page-in — the
+request was gated on `scrollOffset < scrollTotal`, which is always true, so the
+daemon was never asked (amended 2026-09-27). The guard is `scrollOffset == 0`, the
+only place there is older output to ask for.
+
+Two things keep the selection across a rebuild, and a third keeps it out of the
+rebuild in the first place:
+
+- A selection is kept as its **range plus its text**, and the text is the test: the range
+is put back at the same rows and, if those rows no longer hold the text, the screen the
+selection was made on is gone and it is dropped rather than mis-copied. The **offset-based
+re-projection** this section used to describe is not implemented and is open: a rebuild
+hands the new engine a *fresh* coordinate system (the captured screen at its bottom), so
+the difference between the old and new offsets is not a count of lines anything moved by —
+and the post-rebuild offset was in any case read before the re-render, making the delta
+always zero (STATE.md §8, 2026-09-27).
+- `maybeExtendHistory()` is **suppressed while a gesture is live**, which the caller
+says on the call (`scrollBy(rows, pageInHistory = false)`): a per-call answer cannot
+be left set by a cancelled gesture, which is what a flag would do.
+- A **resize** (rotation, font change) no longer rebuilds at all: the captured screen
+is replayed into the live engine (`replayResize`/`resizeReplayBytes`), so its
+scrollback and its selection both survive. Only attach, resync and a history page-in
+rebuild, because only those are asking for a clean parser state.
 
 ## 5. Rendering the highlight costs nothing structurally
 

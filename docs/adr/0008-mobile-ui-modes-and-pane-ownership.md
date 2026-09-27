@@ -124,7 +124,10 @@ avoid. `RECORD_AUDIO` is requested at first use, never at launch. iOS will use
 - Font size is a **client setting** (settings dialog, or pinch), and it feeds
   back into the geometry: a bigger font means fewer columns, so the shell is
   reflowed rather than the grid being scaled down. This is the same ownership
-  rule as §2, applied to the font.
+  rule as §2, applied to the font. It is per shell and it is **not persisted**
+  (amended 2026-09-27): a pinch lives for as long as that shell's composition
+  lives, and the dialog's text size is the default a new shell starts at —
+  saving the pinch had made one shell's zoom re-size every other open one.
 - Input latency is unchanged by this ADR. Predictive echo is designed in
   `docs/PREDICTIVE-ECHO.md`.
 

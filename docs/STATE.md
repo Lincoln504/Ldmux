@@ -141,8 +141,8 @@ The wire carries **raw pty bytes**, not a grid.
 |---|---|---|
 | JS/TS | **345 tests, 345 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
-| Native C (host) | **147 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
-| Kotlin (Android unit) | **151 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
+| Native C (host) | **169 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
+| Kotlin (Android unit) | **160 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
 | Architecture guard | 7 tests, part of the 345 | `packages/mobile/test/architecture.test.ts` |
 
 Counts move; the commands do not. Re-run them rather than trusting this table's numbers,
@@ -245,14 +245,17 @@ nothing and the rule holds by construction rather than by a flag that can disagr
 the viewport. No protocol change: `scrollOffset` already rides every frame. Proved in
 `test_engine.c` ("the scroll offset is what actually moved").
 2. **A selection is lost when the engine is rebuilt — done.** The engine is replaced on
-every snapshot (ADR-0014 §4 trap 4), so output arriving during a copy discarded the
-selection, which on an active shell is most of the time. The controller now **re-projects**
-the selection's rows by the change in the viewport's scroll offset — the same rule the drag
-uses, and the reason is the same: a selection is anchored to text and its viewport rows are
-a projection of that, so new output moves the text up the screen and the rows have to
-follow. The selected text is then the test: if the shifted range holds what the user chose,
-the selection is still about it. Restoring at the same rows looks like it works and is
-wrong in the common case; §8 records that mistake. Device-verified: `seq 1 40`, select
+every snapshot that is not a resize (ADR-0014 §4 trap 4) — a resize replays the captured
+screen into the live engine instead, so it keeps its scrollback and its selection; attach,
+resync and a history page-in still rebuild — so output arriving during a copy discarded the
+selection, which on an active shell is most of the time. The controller keeps the selected
+**text** and puts the range back at the same rows, then makes the text the test: if those
+rows no longer hold it, the screen the selection was made on is gone and the selection is
+dropped rather than mis-copied. **The offset-based re-projection this was meant to use is
+open, not done** — a rebuild hands the new engine a fresh coordinate system, so the two
+offsets are not comparable, and the delta was never read after the rebuild anyway (§8,
+2026-09-27). Restoring at the same rows looks like it works and is wrong in the common
+case where the content moved; §8 records that mistake. Device-verified: `seq 1 40`, select
 34/35, HOME, return — the selection is still there.
 3. **Snapping out of the middle of a wide glyph** — still open, and small.
 
@@ -510,7 +513,19 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
   hold different text and the text check would have cleared the selection in the common
   case while looking like it worked. The rows have to be **re-projected** by the change in
   the viewport's scroll offset, which is the same rule the drag already uses. Caught by
-  asking what the code actually delivers rather than what the comment said.
+  asking what the code actually delivers rather than what the comment said. **That rule did
+  not survive contact with a rebuild either, see the next entry: the offset cannot do this
+  job across one, and the "fix" never ran.**
+- **"The restored selection is re-projected by the change in the scroll offset"** — was not,
+  for over a week (2026-09-27). The code read the offset before the rebuild and again after
+  it from `_frame`, and `_frame` is written only at the *end* of `onSnapshot`, so the delta
+  was always zero and the rows went back where they were — the exact behaviour §8 already
+  records as the wrong first fix. Found by asking which write made the second read differ.
+  Two things are now true instead: the stale arithmetic is gone and the comment says what
+  the code does (same rows, text-checked), and the offset rule is recorded as **open**
+  rather than done, because it cannot work as written — a rebuild gives the new engine a
+  fresh coordinate system, so the two offsets are not comparable (a resync of a long-lived
+  pane has one in the thousands and the other at 1).
 - **`waitFor` in this suite takes a synchronous predicate.** An `async` one returns a
   Promise, a Promise is truthy, and the wait passes instantly without checking anything.
   A test that always passes is worse than a failing one.

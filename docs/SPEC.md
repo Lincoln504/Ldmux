@@ -372,7 +372,12 @@ connect/reconnect/scrollback and as an automatic fallback.
 - **Snapshots (reconnect):** `capture-pane -p -e` (plus `-a` on the alternate
   screen) + `display-message -p` state fields (see §6.2).
 - **Scrollback paging:** `capture-pane -S/-E` on demand, **bounded to 5,000
-  lines** (`scrollback` message → snapshot with `history: true`).
+  lines** (`scrollback` message → snapshot with `history: true`). Asked for by
+  the act of scrolling to the top of what is loaded — the viewport offset counts
+  from the *top* of the loaded region (0 = oldest, `total − len` = live bottom),
+  so "at the top" is `offset == 0`. A resize (rotation, font change) replays the
+  captured screen into the live engine instead of rebuilding it, because a
+  rebuild discards every line the client accumulated since the last snapshot.
 - **Fallback:** if the control client dies/stalls (`%exit`, EOF), it is
   **reconnected with bounded backoff** (3 attempts); if control mode still cannot
   be established the stream switches to **`capture-pane` row-diff polling**
@@ -624,7 +629,11 @@ server-side VT emulator seam would close it.
   new-window, rename). The prefix keystroke itself cannot be sent: `send-keys C-b`
   writes 0x02 into the pane, where the *program* reads it — a prefix is only a
   prefix to a tmux client, and the client is the daemon.
-- Gestures: two-finger drag → scroll; pinch → font size (persisted); long-press →
+- Gestures: two-finger drag → scroll; pinch → font size, **per shell and not
+  persisted** — it lives in the composition for as long as that shell is open,
+  and the settings dialog's text size is the default a *new* shell starts at
+  (amended 2026-09-27: it used to be saved on every pinch, which made one
+  shell's zoom re-size every other open one); long-press →
   select/copy; double-tap empty area → `Tab` (optional).
 - IME-safe layout via `WindowInsets`; the control quarter does not jump when the
   soft keyboard opens.
@@ -653,7 +662,10 @@ server-facing integer line id has no stable meaning across snapshots/reflow/ED3)
 - On reconnect: take the `SNAPSHOT` as a fresh baseline (`snapshotEpoch`); re-derive
   the anchor from the snapshot header; **if the anchored line is gone, stand down
   to `following` — never guess.**
-- Persistent **"↓ jump to bottom"** affordance while anchored (dooboxes requirement).
+- Persistent **"↓ jump to bottom"** affordance while anchored (dooboxes requirement;
+  built: a pill over the terminal while the viewport is away from the live
+  bottom, and any text the session sends returns the view to the bottom, because
+  typing happens at the prompt).
 - Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; the browser client that measured it was deleted)
   with a configurable max; server-side tmux `history-limit` is **10,000** lines
   (~40 MB/pane) and the `scrollback` message serves older pages on demand.

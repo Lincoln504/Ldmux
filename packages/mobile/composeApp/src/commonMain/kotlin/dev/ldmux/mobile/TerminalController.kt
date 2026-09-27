@@ -5,7 +5,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.ldmux.mobile.term.TerminalEngine
 import dev.ldmux.mobile.term.TerminalFrame
-import dev.ldmux.mobile.term.rowAfterScroll
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -137,7 +136,7 @@ class TerminalController(
     )
 
     init {
-        attach.onSnapshot = { cols, rows, screen, _, m ->
+        attach.onSnapshot = { cols, rows, screen, history, m ->
             // A snapshot is the truth: any outstanding prediction is settled by
             // it (this is also the recovery path after a mispredict).
             predictor.reset()
@@ -145,8 +144,12 @@ class TerminalController(
             // A snapshot only ever follows a *successful* attach, so this is the
             // one place that can prove the refusal no longer applies.
             _ownedBy.value = null
-            // The engine is about to be thrown away, and the selection lives in the
-            // engine (ADR-0014). Two things are kept, and both are needed.
+            historyLoading = false
+            // On the rebuild path the engine is about to be thrown away, and the
+            // selection lives in the engine (ADR-0014). On the resize path below the
+            // engine — and with it the selection — survives, so nothing is kept and
+            // nothing restored: re-projecting a selection that never moved would
+            // move it.
             //
             // The *text* is what the user chose, and it is the only honest test of
             // whether a restored range still means what they selected: a snapshot
@@ -154,57 +157,109 @@ class TerminalController(
             // different words, and a restored selection covering text nobody chose is
             // worse than none because they will copy it.
             //
-            // The *offset* is where the selected text now sits, because content moves
-            // up the screen as output arrives. The viewport's offset into the
-            // scrollback is exactly how much, so the rows are re-projected by it — the
-            // same rule the drag uses, for the same reason. Restoring at the same rows
-            // instead would be a positional guess that is wrong in the common case.
-            val offsetBefore = _frame.value?.scrollOffset
-            val keptSelection = selectionBounds()?.let { b ->
-                selectionText()?.takeIf { it.isNotEmpty() }?.let { Triple(b, it, offsetBefore) }
+            // The rows are put back where they were and the text decides — see the
+            // long note at the restore below for why the offset cannot re-project
+            // them across a rebuild.
+            val resized = replayResize(_frame.value, cols, rows, m.alternateOn)
+            val keptSelection = if (resized) {
+                null
+            } else {
+                selectionBounds()?.let { b ->
+                    selectionText()?.takeIf { it.isNotEmpty() }?.let { b to it }
+                }
             }
-            engine.close()
-            engine = TerminalEngine(cols, rows)
-            // State, then content, then cursor — see [snapshotBytes], which is the
-            // only thing that decides that order.
-            val bytes = snapshotBytes(
-                screen = screen,
-                alternateOn = m.alternateOn,
-                cursorX = m.cursorX,
-                cursorY = m.cursorY,
-                cols = cols,
-                rows = rows,
-                // Everything else the program had set, which a fresh engine does
-                // not know. See [modeSequence].
-                modes = m,
-            )
-            feed(bytes)
-            // A history page rebuilds the engine, so the view has to be put back
-            // where it was: the same offset from the live bottom is the same
-            // content, because what arrived is above it.
-            val restore = restoreOffset
-            restoreOffset = null
-            historyLoading = false
-            historyRequested = true
-            if (restore != null && restore > 0) engine.scrollBy(restore.toInt())
+            // A resize (a rotation, a pinch of the font) answers with a snapshot
+            // too, and the grid it describes is not the one the engine holds. The
+            // engine takes a new size in place — its scrollback, its selection and
+            // its scroll position all survive a resize, which a rebuild cannot
+            // say — so the screen is replayed into the engine that is already
+            // here instead of a new one built from the visible screen alone.
+            // Rebuilding was throwing away everything the client had accumulated
+            // since the last snapshot, which is how a rotation used to empty the
+            // scrollback and park the view on a screen with no history under it.
+            // Everything else — attach, resync, a mispredict's recovery — is still
+            // a rebuild: a snapshot means "the parser state may be wrong", and a
+            // fresh engine is the only way to be sure.
+            if (resized) {
+                engine.resize(cols, rows)
+                feed(
+                    resizeReplayBytes(
+                        screen = screen,
+                        cursorX = m.cursorX,
+                        cursorY = m.cursorY,
+                        cols = cols,
+                        rows = rows,
+                        modes = m,
+                    ),
+                )
+            } else {
+                engine.close()
+                engine = TerminalEngine(cols, rows)
+                // State, then content, then cursor — see [snapshotBytes], which is
+                // the only thing that decides that order.
+                val bytes = snapshotBytes(
+                    screen = screen,
+                    alternateOn = m.alternateOn,
+                    cursorX = m.cursorX,
+                    cursorY = m.cursorY,
+                    cols = cols,
+                    rows = rows,
+                    // Everything else the program had set, which a fresh engine
+                    // does not know. See [modeSequence].
+                    modes = m,
+                )
+                feed(bytes)
+                if (history) {
+                    // The page-in this controller asked for has been answered.
+                    historyRequested = true
+                    if (historyRestoreAtTop) {
+                        // The request was made from the top of what was loaded, and
+                        // a page-in only adds rows above it. How many now sit above
+                        // the row the user was reading is not knowable here — live
+                        // output that arrived between the request and this reply
+                        // moved the count — so the top is the one place that is
+                        // still honest. The user asked for more history by
+                        // reaching the top; the top is where they stay, now deeper.
+                        historyRestoreAtTop = false
+                        engine.scrollToTop()
+                    }
+                } else {
+                    // An ordinary snapshot rebuilt the engine from the visible
+                    // screen alone: whatever scrollback it held is gone, so a
+                    // page-in can be asked for again.
+                    historyRequested = false
+                    historyRestoreAtTop = false
+                }
+            }
             // Put the selection back where its text now is. The text is then the
             // test: if the shifted range holds what the user chose, the selection is
             // still about it, and if it does not then the screen it was made on is
             // gone. Output arriving during a copy used to discard the selection
             // outright, which on an active shell is most of the time.
-            if (keptSelection != null) {
-                val (bounds, text, before) = keptSelection
-                val after = _frame.value?.scrollOffset
-                // Content rises as output arrives, so a row index falls: the delta is
-                // subtracted, which is what `rowAfterScroll` does with the offset's own
-                // change. No measurement means no shift, rather than a guess.
-                val shift = if (before == null || after == null) 0 else (after - before).toInt()
-                val top = rowAfterScroll(bounds[1], shift)
-                val bottom = rowAfterScroll(bounds[3], shift)
-                // Off the grid means the selection has scrolled away entirely, and a
-                // clipped range would copy the wrong thing.
-                val onScreen = top >= 0 && bottom >= 0 && top < rows && bottom < rows
-                if (!onScreen || !selectionSet(bounds[0], top, bounds[2], bottom) || selectionText() != text) {
+            if (resized) {
+                // The engine kept its selection, exactly where it was.
+            } else if (keptSelection != null) {
+                val (bounds, text) = keptSelection
+                // **The rows go back where they were, and the text is the test.**
+                //
+                // This was meant to re-project them by the change in the viewport's
+                // scroll offset — the rule the drag uses — and that rule does not
+                // reach across a rebuild: a rebuild hands the new engine a *fresh*
+                // coordinate system (the captured screen, parked at its bottom), so
+                // the difference between the two offsets is not a count of lines that
+                // anything moved by. Measured: a resync of a long-lived pane has an
+                // offset before in the thousands and the rebuilt engine's at 1, so
+                // that "delta" would throw every selection off the grid. The offset
+                // was also never actually read after the rebuild — it came from the
+                // frame that had not been re-rendered yet, so the delta was always
+                // zero. STATE.md §5.1 records this as open rather than fixed.
+                //
+                // What does hold is the guard: if these rows no longer hold this
+                // text, the screen the selection was made on is gone, and the
+                // selection is dropped rather than mis-copied. A clipped range would
+                // copy the wrong thing for the same reason.
+                val onScreen = bounds[1] >= 0 && bounds[3] >= 0 && bounds[1] < rows && bounds[3] < rows
+                if (!onScreen || !selectionSet(bounds[0], bounds[1], bounds[2], bounds[3]) || selectionText() != text) {
                     clearSelection()
                 }
             } else {
@@ -445,6 +500,7 @@ class TerminalController(
      * slash through [sendText] would apply the modifier twice.
      */
     private fun sendTextRaw(text: String) {
+        returnToBottom()
         val bytes = text.encodeToByteArray()
         // Three gates, any one of which is enough to refuse: the setting; a
         // full-screen app (alternate screen, which does not echo the way a
@@ -480,7 +536,7 @@ class TerminalController(
             }
         }
     }
-    override fun scrollBy(rows: Int): Int {
+    override fun scrollBy(rows: Int, pageInHistory: Boolean): Int {
         if (rows == 0) return 0
         // What the viewport *did*, not what it was asked to do. The emulator's own
         // scrollbar is the only thing that knows: its offset counts into the
@@ -502,34 +558,67 @@ class TerminalController(
         // showing its working: two controls whose difference ("show me history"
         // vs "go back to now") is a distinction the user should never have had to
         // hold, because the gesture already means both.
-        if (rows < 0) maybeExtendHistory()
+        //
+        // Not while a selection gesture is live (ADR-0014 §4.4): the reply is a
+        // page-in, which rebuilds the engine, and the engine is where the drag's
+        // selection lives. The drag stops at the top of what is loaded, and the
+        // next drag asks — which is a released finger, so nothing is lost.
+        if (rows < 0 && pageInHistory) maybeExtendHistory()
         return moved
     }
 
     /**
      * Page in older output when the user reaches the top of what is loaded.
      *
-     * Once per attach at most, and only when they are actually at the top: the
+     * Once per page-in at most, and only when they are actually at the top: the
      * scrollback request re-sends the whole screen, so asking on every pixel of
      * drag would be a round trip per frame.
      */
     private fun maybeExtendHistory() {
         val f = _frame.value ?: return
-        // scrollOffset < scrollTotal means there is still loaded history above.
-        if (f.scrollOffset < f.scrollTotal) return
         if (historyRequested || historyLoading) return
+        // The offset is counted from the top of what is loaded — 0 is the oldest
+        // row and `total - len` is the live bottom — so 0 is the only place there
+        // is older output to ask for. The old test compared the offset against
+        // the total, which is always the larger number, so the answer was always
+        // "not yet" and the daemon was never asked: the scrollback stopped at
+        // whatever the client had happened to accumulate.
+        if (f.scrollOffset > 0L) return
         historyLoading = true
-        // Remember where the view was. Older lines arrive *above* what is already
-        // displayed, and the offset is measured from the live bottom, so the same
-        // content stays at the same offset — restoring the number restores the
-        // view rather than dumping the user at the top.
-        restoreOffset = f.scrollOffset
+        historyRestoreAtTop = true
         attach.scrollback(MAX_HISTORY_LINES)
     }
 
     private var historyLoading = false
     private var historyRequested = false
-    private var restoreOffset: Long? = null
+    /** The page-in was asked for from the top of what is loaded. */
+    private var historyRestoreAtTop = false
+
+    /**
+     * Park the viewport on the live bottom, whatever history it was reading.
+     *
+     * The bottom is where a shell happens: the prompt is the newest line, and
+     * output the user has not seen arrives there. This is the one control that
+     * says "back to now" without making the user drag the whole way down.
+     */
+    override fun scrollToBottom() {
+        engine.scrollToBottom()
+        renderNow()
+    }
+
+    /**
+     * Text is typed at the prompt, and the prompt is the newest line: any text
+     * this session sends returns the view to the live bottom, so the echo lands
+     * where the user is looking rather than rows above where they were reading.
+     * Keys are deliberately left alone — the arrows are navigation, and yanking
+     * the view out from under one is its own bug.
+     */
+    private fun returnToBottom() {
+        if (_frame.value?.viewportActive == false) {
+            engine.scrollToBottom()
+            renderNow()
+        }
+    }
 
     /**
      * A local selection gesture is in progress.
@@ -837,4 +926,63 @@ internal fun cursorSequence(col: Int, row: Int, cols: Int, rows: Int): String {
     val c = col.coerceIn(0, maxOf(cols - 1, 0)) + 1
     val r = row.coerceIn(0, maxOf(rows - 1, 0)) + 1
     return "\u001b[$r;${c}H"
+}
+
+/**
+ * Whether this snapshot is a resize the live engine can take in place.
+ *
+ * Three things have to be true, and each one is load-bearing:
+ *
+ * - **there is a frame** — the engine has been fed at least once, so there is
+ *   something to preserve. The first snapshot of a session has nothing and is
+ *   a rebuild like any other;
+ * - **the grid changed** — a snapshot whose size matches the engine is not a
+ *   resize, it is a resync, and a resync is asking for a clean parser state,
+ *   which only a fresh engine delivers;
+ * - **the screen did not change** — `?1049` cannot be sent here, because on an
+ *   engine that already holds its screens it *switches* them rather than
+ *   establishing one (see [snapshotBytes]). If the program moved between the
+ *   primary and the alternate screen since the last frame, the replay below
+ *   would land on the wrong one, so that case falls back to the rebuild.
+ */
+internal fun replayResize(
+    current: TerminalFrame.Frame?,
+    cols: Int,
+    rows: Int,
+    alternateOn: Boolean,
+): Boolean =
+    current != null &&
+        (current.cols != cols || current.rows != rows) &&
+        current.alternateOn == alternateOn
+
+/**
+ * A captured screen, as bytes that replace the visible screen of an engine that
+ * keeps everything else.
+ *
+ * The difference from [snapshotBytes] is the whole point: a fresh engine needs
+ * `?1049` to *establish* which screen it is on, and an engine that is being
+ * resized already knows — sending it here would switch screens and orphan the
+ * scrollback this path exists to keep. So the modes are re-asserted in their
+ * idempotent forms (every `h`/`l` here is a no-op on an engine that already
+ * holds them), then the state that would make a replay land in the wrong cells
+ * is reset (scroll region, origin mode, insert mode), and only the visible
+ * screen is erased: the scrollback above it is the point of this path.
+ *
+ * The terminator and the line feed are [snapshotReplay]'s problem, for the same
+ * reasons it documents.
+ */
+internal fun resizeReplayBytes(
+    screen: String,
+    cursorX: Int,
+    cursorY: Int,
+    cols: Int,
+    rows: Int,
+    modes: TerminalModes = TerminalModes(),
+): ByteArray {
+    val state = StringBuilder()
+    state.append(modeSequence(modes))
+    state.append("\u001b[r\u001b[?6l\u001b[4l\u001b[H\u001b[2J")
+    if (screen.isNotEmpty()) state.append(snapshotReplay(screen))
+    state.append(cursorSequence(cursorX, cursorY, cols, rows))
+    return state.toString().encodeToByteArray()
 }
