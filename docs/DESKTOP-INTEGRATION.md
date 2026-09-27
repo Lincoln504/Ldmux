@@ -105,9 +105,10 @@ actually been created was polling `get_tree` for the class — which is why
 
 **2. The tmux binary must be an absolute path.** A live window is launched
 *through the window manager*, which has the session's `PATH`, not the daemon's.
-A bare `tmux` there resolves to the system one — here 3.5a, against the daemon's
-3.7b server — and two tmux versions cannot share a server, so the window exits on
-arrival with a protocol mismatch and is gone before anyone sees it.
+A bare `tmux` there resolves to the system one — Debian's 3.5a, where the daemon
+runs the flake's pinned 3.7b (`just install`) — and a window on a different tmux than
+the server's is not guaranteed to work, so every launched client uses the daemon's
+own path.
 `resolveTmuxBin()` resolves the daemon's own binary once (honouring
 `LDMUX_TMUX_BIN`) and every spawn and every launched client uses that path.
 

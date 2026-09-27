@@ -51,7 +51,9 @@ clean-tmux:
     for base in "${TMUX_TMPDIR:-}" "${TMPDIR:-}" "/tmp"; do
       [ -n "$base" ] || continue
       dir="$base/tmux-$(id -u)"
-      for sock in $(ls "$dir" 2>/dev/null | grep -E '^(ldmux|poll-debug)' || true); do
+      # `ldmux-`, not `ldmux`: the bare prefix also matched the *production* socket,
+      # `ldmux`, so this reaped every real session along with the test debris.
+      for sock in $(ls "$dir" 2>/dev/null | grep -E '^(ldmux-|poll-debug)' | grep -vx -e ldmux -e "${LDMUX_TMUX_SOCK:-ldmux}" || true); do
         tmux -L "$sock" kill-server 2>/dev/null || true
         rm -f "$dir/$sock"
       done
@@ -87,3 +89,36 @@ android-test:
 # Over adb reverse this is loopback; point --url at the tailnet address for real.
 latency sid *runs:
     nix develop --command node scripts/measure_latency.ts --session {{sid}} --runs {{runs}}
+
+# Install the host side: the flake's runtime (node + tmux, the versions the suite
+# runs), the wrappers, and the systemd unit. The runtime link is a nix GC root, so
+# garbage collection cannot remove what the daemon runs on. Idempotent.
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state="${XDG_STATE_HOME:-$HOME/.local/state}/ldmux"
+    mkdir -p "$state" "$HOME/.local/bin" "$HOME/.config/systemd/user"
+    chmod 700 "$state"
+    nix build .#runtime --out-link "$state/runtime"
+    for f in ldmux ldmuxd ldmux-terminal; do
+      sed "s|@REPO@|$PWD|g" "deploy/bin/$f" > "$HOME/.local/bin/.$f.new"
+      chmod 755 "$HOME/.local/bin/.$f.new"
+      mv "$HOME/.local/bin/.$f.new" "$HOME/.local/bin/$f"
+    done
+    install -m 644 deploy/ldmux.service "$HOME/.config/systemd/user/ldmux.service"
+    systemctl --user daemon-reload
+    echo "installed: $("$state/runtime/bin/node" --version), $("$state/runtime/bin/tmux" -V)"
+    echo "apply with: systemctl --user restart ldmux"
+
+# Keep both dev shells' toolchains as GC roots. Without this a `nix-collect-garbage`
+# (run for any reason, by anything) deletes the JDK, NDK tooling and Zig the mobile
+# build needs, and the next build re-downloads all of it.
+pin-shells:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state="${XDG_STATE_HOME:-$HOME/.local/state}/ldmux"
+    mkdir -p "$state"
+    nix develop .#default --profile "$state/devshell-default" --command true
+    nix develop .#mobile --profile "$state/devshell-mobile" --command true
+    echo "pinned: $state/devshell-{default,mobile}"
+

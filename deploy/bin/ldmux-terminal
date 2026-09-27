@@ -10,9 +10,12 @@
 #
 # The fallback is logged. It used to be silent, and a wrapper that could not
 # find node made *every* window a plain shell for days with nothing saying so.
-LDMUX=/home/ldeen/.local/bin/ldmux
-if shim=$("$LDMUX" window "${PWD:-$HOME}" 2>/tmp/ldmux-terminal.err) && [ -n "$shim" ]; then
+LDMUX="$HOME/.local/bin/ldmux"
+err=$(mktemp) || err=/dev/null
+if shim=$("$LDMUX" window "${PWD:-$HOME}" 2>"$err") && [ -n "$shim" ]; then
+  rm -f "$err"
   exec alacritty -e /bin/sh "$shim"
 fi
-logger -t ldmux-terminal "no ldmux desk window, plain shell instead: $(head -c 300 /tmp/ldmux-terminal.err 2>/dev/null)"
+logger -t ldmux-terminal "no ldmux desk window, plain shell instead: $(head -c 300 "$err" 2>/dev/null)"
+[ "$err" = /dev/null ] || rm -f "$err"
 exec alacritty

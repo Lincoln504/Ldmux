@@ -20,18 +20,21 @@
         nodePkgs = import nixpkgs-node { inherit system; };
       });
 
-      # The runtime + dev toolchain. Node is the daemon/CLI runtime; tmux is the
-      # backend under test; the rest are dev conveniences.
-      toolchain = pkgs: nodePkgs: with pkgs; [
-        nodePkgs.nodejs_26
-        tmux
+      # What the daemon *runs on*: exactly these, in the tests and in the
+      # deployment. They were different — the suite ran this tmux 3.7b and Node 26
+      # while the unit ran Debian's tmux 3.5a and an nvm Node 25 — and a profile
+      # option that crashes 3.5a passed every test and took the real daemon down.
+      runtime = pkgs: nodePkgs: [ nodePkgs.nodejs_26 pkgs.tmux ];
+
+      # The dev toolchain: the runtime, plus conveniences.
+      toolchain = pkgs: nodePkgs: runtime pkgs nodePkgs ++ (with pkgs; [
         just
         jq
         git
         curl
         sqlite
         procps
-      ];
+      ]);
     in
     {
       devShells = forAllSystems ({ pkgs, nodePkgs, ... }: {
@@ -75,6 +78,17 @@
             echo "  ndk    $ANDROID_NDK_HOME"
           '';
         };
+      });
+
+      # `just install` builds this to ~/.local/state/ldmux/runtime and runs the
+      # daemon, CLI and desk windows from it. That link is also a GC root, so a
+      # `nix-collect-garbage` cannot take the running daemon's tmux away.
+      packages = forAllSystems ({ pkgs, nodePkgs, ... }: {
+        runtime = pkgs.buildEnv {
+          name = "ldmux-runtime";
+          paths = runtime pkgs nodePkgs;
+        };
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.runtime;
       });
 
       # `nix fmt`

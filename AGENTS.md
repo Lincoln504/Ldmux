@@ -94,6 +94,9 @@ what is requested; do not expand scope unilaterally.
   pinned by `flake.nix`; the system node/tmux are older and not used for tests).
 - i3 4.24 / X11 (`DISPLAY=:0.0`); workspaces `1..10` (`Mod+0` → `10`).
 - System toolchain (unpinned, informational): alacritty, tmux 3.5a, Node 25.8.2,
-  Rust 1.95, Go 1.24.4. Tests run against the *devShell* versions.
+  Rust 1.95, Go 1.24.4. Neither tests **nor the deployed daemon** use them: `just
+  install` runs the daemon on the flake's `.#runtime` (the devShell's pins).
+- **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the unit:
+  `deploy/` is the source of truth for both.
 - iOS builds need a macOS host (an xcframework cannot be produced here).
 - gh authed as `Lincoln504`.

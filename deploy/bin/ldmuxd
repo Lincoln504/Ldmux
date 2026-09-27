@@ -1,5 +1,6 @@
 #!/bin/sh
-# ldmux daemon entry point. Referenced by the systemd --user unit as
-# ExecStart=%h/.local/bin/ldmuxd. node by absolute path, as in `ldmux`.
-NODE=${LDMUX_NODE:-/home/ldeen/.config/nvm/versions/node/v25.8.2/bin/node}
-exec "$NODE" /home/ldeen/Documents/ldmux/packages/daemon/src/main.ts "$@"
+# ldmux daemon entry point, run by the systemd --user unit. Installed by
+# `just install`; node and tmux from the flake's runtime, as in `ldmux`.
+RUNTIME=${XDG_STATE_HOME:-$HOME/.local/state}/ldmux/runtime
+export LDMUX_TMUX_BIN="$RUNTIME/bin/tmux"
+exec "$RUNTIME/bin/node" @REPO@/packages/daemon/src/main.ts "$@"

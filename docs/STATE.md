@@ -1,6 +1,6 @@
 # ldmux — State of the project
 
-**As of 2026-09-20.** This file answers one question: *where does everything stand
+**As of 2026-09-26.** This file answers one question: *where does everything stand
 right now?* It is the register, not the specification. `docs/SPEC.md` says what the
 product is meant to be, the ADRs say why the decisions were made, and
 `docs/INVESTIGATION.md` is the historical research log. This is the current position.
@@ -177,6 +177,37 @@ this project were once green while asserting nothing, which is why §8 exists.
 
 ---
 
+## 4a. 2026-09-26: the desk ↔ phone core, after a reboot
+
+A week after the last session the phone showed nothing it could open, and "open" on a
+desk row made a new phone shell. Five independent defects composed into that; each is
+fixed and pinned by a test that fails with its fix removed.
+
+| # | Defect | Evidence | Fix |
+|---|---|---|---|
+| 1 | `$mod+Return` never made an ldmux shell | i3's PATH has no `node`; `ldmux ping` → `node: not found` → silent plain-alacritty fallback. The daemon had **0 sessions for 4 days** while 5 desk terminals ran `pi`/`claude` | `deploy/bin/*` (now versioned) run node by absolute path; the fallback logs to `journalctl --user -t ldmux-terminal` |
+| 2 | The phone could not connect at all | Remote listener `port 0`: the boot-time bind to the tailnet address failed before tailscaled had it, and was never retried | EADDRNOTAVAIL/EADDRINUSE retried every 5 s (`daemon.ts` `startRemote`) |
+| 3 | …and would have been refused anyway | The token lived in `$XDG_RUNTIME_DIR` (tmpfs), so it was re-minted on boot; the phone's token no longer existed | `LDMUX_TOKEN_FILE=%S/ldmux/token`, adopting the old one on first move; the phone's token was restored, no re-pair |
+| 4 | No shell could be created after a reboot | Global `window-size manual` **crashes tmux 3.5a** (the system tmux the unit then used) on the next `new-session`. The suite runs 3.7b, which does not | Set per session instead; `deployed-tmux.test.ts` runs the profile against every tmux installed |
+| 5 | A desk terminal was a shell nobody held | Bare `tmux attach`: the phone opened it unasked, both typed, the window was resized to the phone, closing it left the shell | Desk windows (ADR-0010 amendment 2026-09-26) |
+
+Further defects found by audit and fixed the same day: claims released only on a
+device's *last* socket (so every shell the phone ever showed stayed claimed); a desk-
+started shell seized by the phone stayed attached and was reclaimed within a second; the
+phone was never told when the desk took a shell back and kept typing into it; released
+shells stayed pinned at the phone's size; exited shells stayed `running` as dead panes
+(`remain-on-exit on`); a restart forgot every desk window; shims accumulated forever;
+one unregistered tmux session made reconcile ↔ broadcast loop endlessly; the session
+list reported the creation directory, not the live one, and a desk `pi` could not be
+traced to its shell; `just clean-tmux` matched the production socket `ldmux`.
+
+Client: `resync`, `session_dead`/`unknown_session` and `attach_failed` are acted on
+(they were ignored — a frozen terminal); the first `+ shell` no longer pages through and
+claims every shell; `+ shell` offline reports instead of hanging; the launcher socket
+counts pongs; the network wake sees VPN (Tailscale) networks and validation changes,
+and wakes terminal pages too; the notification's Disconnect releases the shells; the
+launcher lists only shells that can be opened.
+
 ## 5. Open work, in priority order
 
 Each item says what it is, why it matters, and what the next concrete step is.
@@ -351,11 +382,15 @@ from them is ADR-0015.
 
 - `just` is **not** on the host PATH. `just android` outside nix fails rc=127 with no
   build. Use `nix develop .#mobile --command just android`.
-- The host Node is **v25.8.2**; inside `nix develop` it is v26.8.2. The daemon's systemd
-  unit pins the host path.
-- The system tmux is **3.5a**; the devShell's is **3.7b**. The daemon uses the system one.
-  `tmux -L <sock>` from the *system* tmux cannot talk to a *devShell* tmux server
-  (`server exited unexpectedly`); read those through `nix develop --command tmux`.
+- **The daemon runs the flake's runtime, not the host's** (since 2026-09-26). `just
+  install` builds `.#runtime` (Node 26.8.2, tmux 3.7b — the devShell's own pins) to
+  `~/.local/state/ldmux/runtime`, a nix GC root, and the wrappers and unit run from it.
+  Before that the unit ran Debian's tmux 3.5a and an nvm Node 25.8.2 while the suite
+  ran 3.7b and 26: the untested combination was the deployed one. The host's own
+  tmux/node are untouched and unused by ldmux. Read the daemon's server with
+  `~/.local/state/ldmux/runtime/bin/tmux -L ldmux …`.
+- `just pin-shells` keeps both devShells as GC roots. A `nix-collect-garbage` on
+  2026-09-23 had deleted the mobile toolchain, and the next build re-downloaded it.
 - The phone's density override is 446 ⇒ factor 2.7875, so 48 dp = 133.8 px.
 - `adb shell input swipe` interpolates from the first millisecond, so it leaves the
   long-press slop before the timer fires. Use `input motionevent DOWN/MOVE/UP` to test a
@@ -479,9 +514,12 @@ A wrong claim is retracted in place, with the reason. These are the ones worth k
   `ldmux-test-daemon` (`/tmp/ldmux-test`, port 7624).
 - **Their sessions survive a daemon restart** because `KillMode=process` keeps the tmux
   server out of the signal path. Measured: three sessions, restart, three sessions.
-- **Host artefacts**: `~/.local/bin/{ldmux,ldmuxd,ldmux-terminal}`,
-  `~/.config/systemd/user/ldmux.service`. `$mod+Return` opens alacritty on ldmux via
-  `ldmux-terminal`, which falls back to a plain shell when no daemon answers.
+- **Host artefacts**: `~/.local/bin/{ldmux,ldmuxd,ldmux-terminal}`, installed from
+  `deploy/bin/` (the source of truth; node by absolute path, because i3's PATH has none),
+  `~/.config/systemd/user/ldmux.service`. `$mod+Return` opens alacritty as a **desk
+  window** (`ldmux window`, ADR-0010 amendment 2026-09-26) via `ldmux-terminal`, which
+  falls back to a plain shell — and logs why, `journalctl --user -t ldmux-terminal` —
+  when it cannot have one.
 - **dooboxes is uninstalled** (move-not-delete): unit renamed `.uninstalled`, PATH
   wrappers moved to `~/.config/ldmux-uninstalled-dooboxes/`, project untouched.
 - **gmux is uninstalled** (2026-09-20), not merely unwrapped. The 2026-09-15 pass removed

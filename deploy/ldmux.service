@@ -63,13 +63,19 @@ RestartSec=2
 # on this machine — measured: the session's DISPLAY is `:0.0`.
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=%h/.Xauthority
-# The tmux binary the daemon owns. A live window is launched through the window
-# manager, whose PATH is not this process's; without this, a bare `tmux` there can
-# resolve to a different version and the window dies with a protocol mismatch.
-# Leave unset to search PATH, which is right when only one tmux is installed.
-# Environment=LDMUX_TMUX_BIN=/usr/bin/tmux
+# Node and tmux are the flake's runtime (`just install` links it at
+# %S/ldmux/runtime, which is also a nix GC root): the versions the suite runs, not
+# whatever the distribution or nvm happens to have. The wrapper sets
+# LDMUX_TMUX_BIN from the same place; it is repeated here so the unit says what it
+# runs.
+Environment=LDMUX_TMUX_BIN=%S/ldmux/runtime/bin/tmux
 
 Environment=LDMUX_STATE_DIR=%t/ldmux
+
+# The bearer token the phone is paired with. Not in the state directory: that is
+# a tmpfs, so a token kept there was minted afresh on every boot and every paired
+# phone was locked out. %S is ~/.local/state.
+Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 
 # The daemon the phone talks to. Without these it answers on an unix socket only,
 # which is fine for the CLI and useless for a device.
@@ -79,14 +85,10 @@ Environment=LDMUX_STATE_DIR=%t/ldmux
 Environment=LDMUX_REMOTE_HOST=100.127.119.54
 Environment=LDMUX_REMOTE_PORT=7625
 
-# This unit runs TypeScript through Node with no build step (ADR-0009), so node has
-# to be findable by a service whose PATH is not a login shell's.
-#
-# Machine-specific: the node version directory, which changes on an nvm upgrade — and
-# the unit is then what breaks, because `node` is not on the default PATH here. A
-# system install can leave this out and put ldmuxd on the system PATH instead.
-Environment=PATH=%h/.config/nvm/versions/node/v25.8.2/bin:/usr/local/bin:/usr/bin:/bin
-# `%h/.local/bin/ldmuxd` is the wrapper (exec node …/packages/daemon/src/main.ts).
+# The runtime first on PATH, so anything the daemon spawns by name gets the same
+# versions. It used to name an nvm directory, which broke on every nvm upgrade.
+Environment=PATH=%S/ldmux/runtime/bin:/usr/local/bin:/usr/bin:/bin
+# `%h/.local/bin/ldmuxd` is the wrapper (exec runtime node …/packages/daemon/src/main.ts).
 ExecStart=%h/.local/bin/ldmuxd
 
 [Install]
