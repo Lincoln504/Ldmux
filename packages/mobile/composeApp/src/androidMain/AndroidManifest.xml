@@ -39,23 +39,11 @@
         android:usesCleartextTraffic="true">
 
         <!--
-          Orientation is locked, not sensor-driven. Rotation is a button in the app
-          (`Orientation.android.kt` applies it, `App.kt` decides it) because a
-          terminal that reflows when the phone tilts is worse than one that waits
-          to be told.
-
-          **This is the orientation the window is created in**, before Compose runs
-          and before the app has said anything. It was `landscape`, on the reasoning
-          that the app opens into a terminal — which stopped being true when the
-          launcher came first. The launcher is portrait, `showLauncher` starts true,
-          so the first composed frame asked for portrait and Android had already
-          built the window the other way up: a launch icon drawn in landscape, then
-          a visible turn to portrait, every single time the app started. The
-          manifest must agree with the first screen the app actually shows.
-
-          `sensorLandscape` and its relatives are still wrong for the reason they
-          always were: they would let the sensor pick, and would make the manifest
-          say something the app does not mean.
+          No `screenOrientation`: the device's own rotation decides (ADR-0011). The
+          rotate button and the orientation seam are gone; the app reads its shape
+          from the window size. `configChanges` includes orientation so a turn
+          resizes the composition rather than recreating the activity, which would
+          drop every open terminal page.
         -->
         <activity
             android:name=".MainActivity"

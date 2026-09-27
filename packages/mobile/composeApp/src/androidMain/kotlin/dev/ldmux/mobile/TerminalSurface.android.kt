@@ -1,6 +1,7 @@
 package dev.ldmux.mobile
 
 
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import android.content.Context
 import android.os.SystemClock
 import android.content.pm.ActivityInfo
@@ -161,6 +162,7 @@ actual fun rememberTerminalSurface(
     typing: Boolean,
     active: Boolean,
     modifier: Modifier,
+    keyboardRequest: Int,
 ): TerminalHandle {
     val controller = remember(config, sessionId) { TerminalController(config, sessionId, active) }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
@@ -308,6 +310,13 @@ actual fun rememberTerminalSurface(
     // this composable exists per *page* while the screen has one orientation, and
     // the version that lived here was a second opinion that would have fought the
     // launcher's. What remains is the keyboard, which is this surface's business.
+    val softKeyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(keyboardRequest) {
+        if (keyboardRequest > 0 && typing && active) {
+            focusRequester.requestFocus()
+            softKeyboard?.show()
+        }
+    }
     LaunchedEffect(typing) {
         if (typing) {
             focusRequester.requestFocus()

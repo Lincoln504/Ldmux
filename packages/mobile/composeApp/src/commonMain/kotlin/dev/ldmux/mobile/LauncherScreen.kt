@@ -82,7 +82,7 @@ fun LauncherScreen(
     LaunchedEffect(Unit) { onRefresh() }
 
     val openShells = sessions.filter { it.attachable }
-    val entries = launcherEntries(desktop?.piSessions.orEmpty(), openShells)
+    val entries = launcherEntries(openShells)
 
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(Bg).padding(LocalTouch.current.rowPad * 3)) {
@@ -115,32 +115,20 @@ fun LauncherScreen(
         Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
 
         // ── one list ─────────────────────────────────────────────────────────
-        if (entries.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text("Nothing open yet. Tap + shell.", color = Dim, fontSize = 12.sp)
-            }
-        } else {
+        run {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
             ) {
                 items(entries, key = { it.key }) { e ->
-                    val session = e.sessionId?.let { id -> openShells.firstOrNull { it.id == id } }
+                    val session = openShells.firstOrNull { it.id == e.sessionId }
                     ChoiceRow(
                         // The folder is always shown, because it is what tells two
                         // shells of the same kind apart. The process is the name.
                         title = e.label,
                         mobileShell = e.openedByPhone,
-                        subtitle = listOfNotNull(
-                            tildify(e.cwd),
-                            e.note,
-                            // The workspace a live window is on is *state*, and the
-                            // action's own words used to carry it ("on 9") — which
-                            // is the reason that action could not simply become an
-                            // icon without losing something. It belongs with the
-                            // other facts about this row.
-                            liveWorkspaceOf(e.liveWorkspace)?.let { "on ws $it" },
-                        ).joinToString("  ·  "),
+                        subtitle = tildify(e.cwd),
+                        inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
                         onClick = { chosen = toggle(chosen, e.key) },
                         // Closing is the launcher's alone, and it is offered only
@@ -166,7 +154,10 @@ fun LauncherScreen(
                             // icon would have traded noise for a blind spot.
                             IconBtn(
                                 onClick = { pickerFor = session },
-                                label = if (live != null) "on desktop $live" else "send to desktop",
+                                label = when {
+                                    live == null -> "send to desktop"
+                                    else -> liveWorkspaceOf(live)?.let { "on desktop $it" } ?: "on desktop"
+                                },
                                 filled = live != null,
                             ) {
                                 IconPopOut(if (live != null) Fg else Dim)
@@ -174,28 +165,32 @@ fun LauncherScreen(
                         }
                     }
                 }
+                // Starting a shell is the list's last row: it is one more thing
+                // you can open, and it sits where the list ends rather than
+                // competing with `open` for the bottom of the screen.
+                // Drawn as a row, on the rows' own background: it is one more entry in
+                // the list, not a second call to action beside `open`.
+                item(key = "+shell") {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RadiusMedium)
+                            .background(Surface)
+                            .clickable { newShellOpen = true }
+                            .padding(vertical = LocalTouch.current.rowPad * 2),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("+ shell", color = Fg, fontSize = 14.sp)
+                    }
+                }
             }
         }
 
         Spacer(Modifier.height(LocalTouch.current.rowPad))
-        // Two actions, sharing the width: opening what is chosen, and starting
-        // something new. A new shell lives *here*, where you are choosing what to
-        // work in — not in the sidebar, which is for typing into what you already
-        // opened. Neither is full width: a full-width bar reads as a page's whole
-        // purpose, and this is one of two things you might do next.
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            // The verb is the truth of the selection. Every row that is a session
-            // opens one; every row that is only a directory starts a shell in it.
-            // A button that says `open` over a row that cannot be opened is where
-            // this went wrong, so the word follows what was actually chosen.
-            val pickedNow = entries.filter { it.key in chosen }
-            AccentBtn(
-                openButtonLabel(pickedNow),
-                Modifier.weight(1.6f),
-            ) {
-                if (pickedNow.isNotEmpty()) onOpen(pickedNow)
-            }
-            OutlinedBtn("+ shell", Modifier.weight(1f)) { newShellOpen = true }
+        // Opening what is chosen is the screen's one action, so it has the width.
+        val pickedNow = entries.filter { it.key in chosen }
+        AccentBtn(openButtonLabel(pickedNow), Modifier.fillMaxWidth()) {
+            if (pickedNow.isNotEmpty()) onOpen(pickedNow)
         }
     }
 
@@ -230,9 +225,8 @@ fun LauncherScreen(
 /**
  * One row of the launcher.
  *
- * There are no sections any more. Everything the launcher offers is a place you
- * can have a shell — one already running, or a directory something is already
- * working in — and splitting that into "desktops", "pi sessions" and "shells"
+ * There are no sections any more. Everything the launcher offers is a shell you
+ * can open, and splitting that into "desktops", "pi sessions" and "shells"
  * made the reader pass three headers to reach one list. A header promises its
  * contents are a *different kind of thing*; these were not. The rows of window
  * titles under each desktop were worse still: a window manager's inventory, not
@@ -240,13 +234,17 @@ fun LauncherScreen(
  */
 data class LauncherEntry(
     val key: String,
-    /** The open session; null when this row would start a new shell. */
-    val sessionId: String?,
+    /** The session this row opens. */
+    val sessionId: String,
     /** `bash`, `vim`, `pi` — what the row *is*, not only where it is. */
     val process: String,
     val cwd: String,
-    /** Where it already is, when that is worth saying. */
-    val note: String? = null,
+    /**
+     * A phone is using it right now. Shown as a shade, not as words: the rows used
+     * to say "in use on desktop" / "on ws 9", and the only state worth marking on a
+     * list of shells you can open is the one that means *someone is connected*.
+     */
+    val inUseOnPhone: Boolean = false,
     val openedByPhone: Boolean = false,
     val liveWorkspace: String? = null,
 ) {
@@ -254,99 +252,31 @@ data class LauncherEntry(
 }
 
 /**
- * The launcher's rows, as one flat list.
+ * The launcher's rows: the shells there are to open, and nothing else.
  *
- * Order is pi-derived rows first, then open shells, because this is also the
- * order pages are opened in and therefore the order they are paged through — an
- * order that must be decided somewhere, and deciding it here keeps the screen and
- * the pager from disagreeing.
+ * Desk `pi` processes that are not in an ldmux shell used to be rows too, noted
+ * "not in ldmux", offering to start a *new* phone shell in their directory. That
+ * row could not be what it looked like — the user's pi on the computer — and
+ * choosing it produced a phone shell, which is the bug reported on 2026-09-20 and
+ * against "if there's nothing to open it shouldn't show up" (2026-09-18). A desk
+ * pi that *can* be opened is inside a desk window, and so already is one of these
+ * rows (the daemon names its process and reports its live directory).
  *
- * A pi session in a directory that already has a shell is *that shell*, not a
- * second row: offering both would show one piece of work twice, and choosing the
- * wrong one would open a duplicate shell.
+ * The order is the daemon's, and it is also the order pages are opened in.
  */
-internal fun launcherEntries(
-    piSessions: List<DesktopPiSession>,
-    openShells: List<Session>,
-): List<LauncherEntry> {
-    val shellCwds = openShells.map { it.cwd }.toSet()
-    return buildList {
-        val seen = mutableSetOf<String>()
-        for (pi in piSessions) {
-            if (pi.cwd in shellCwds) continue
-            if (!seen.add(pi.cwd)) continue
-            add(
-                LauncherEntry(
-                    key = "new:${pi.cwd}",
-                    sessionId = null,
-                    // The process *is* pi — that is what makes the directory worth
-                    // offering, and it is the one thing the row can honestly say.
-                    process = "pi",
-                    cwd = pi.cwd,
-                    // This row is not a shell, and it cannot be: a desk `pi` runs in
-                    // a bare window with no tmux server behind it, so there is
-                    // nothing to attach to and nothing to take. The row is a
-                    // *directory intention* — tapping it opens a NEW shell here,
-                    // owned by this phone. The data model has always said so
-                    // (`LauncherEntry.sessionId` is null for exactly these rows) and
-                    // the pixels did not, so the row read as "my session on the
-                    // computer" and produced a phone-owned shell instead. Saying what
-                    // it does is the whole fix; there is no seize path missing.
-                    // Said plainly, and *short enough to be read*. The first version
-                    // of this was "not in ldmux — new shell here", which overflowed
-                    // the row and rendered as "not in ". A notice that is cut off is
-                    // not a notice. The row read as "my pi session on the computer"
-                    // and tapping `open` produced a phone-owned shell, which then wore
-                    // the phone icon — and the icon was RIGHT, because a phone-owned
-                    // shell is what it was. The lie was the row.
-                    //
-                    // Three words do the work, and the button carries the rest:
-                    // selecting this row makes it say "new shell (N)" instead of
-                    // "open", so the row does not have to name the action too.
-                    note = "not in ldmux",
-                ),
-            )
-        }
-        for (shell in openShells) {
-            add(
-                LauncherEntry(
-                    key = shell.id,
-                    sessionId = shell.id,
-                    process = shell.process,
-                    cwd = shell.cwd,
-                    note = when (val ws = liveWorkspaceOf(shell.liveWorkspace)) {
-                        null -> when {
-                            // The desktop's own shell, being looked at from here. Said
-                            // in the desktop's words rather than the protocol's: what
-                            // matters to the person holding the phone is that somebody
-                            // is at the computer with it and that touching that window
-                            // takes it back, which is what "in use" means.
-                            shell.heldElsewhere && shell.ownerKind == "desktop" -> "in use on desktop"
-                            shell.heldElsewhere -> shell.ownerName?.let { "open on $it" }
-                            else -> null
-                        }
-                        else -> "on desktop $ws"
-                    },
-                    openedByPhone = shell.openedByPhone,
-                    liveWorkspace = shell.liveWorkspace,
-                ),
-            )
-        }
+internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
+    openShells.map { shell ->
+        LauncherEntry(
+            key = shell.id,
+            sessionId = shell.id,
+            process = shell.process,
+            cwd = shell.cwd,
+            inUseOnPhone = shell.ownerKind == "phone",
+            openedByPhone = shell.openedByPhone,
+            liveWorkspace = shell.liveWorkspace,
+        )
     }
-}
 
-/**
- * What the launcher's left button says, given what is chosen.
- *
- * The verb is the truth of the selection, and this exists because it was not.
- * Every row that is a session opens one; every row that is only a directory
- * starts a shell in it. The button said `open` over both, so choosing a desktop
- * `pi` that is not in ldmux — a row that cannot be opened at all — read as
- * "go to my pi on the computer", and produced a phone-owned shell instead.
- *
- * Pure, and separated from the composable, so the wording is testable without a
- * rendering harness.
- */
 /**
  * The workspace a shell's live window is on, or null when there is not a usable one.
  *
@@ -362,15 +292,9 @@ internal fun launcherEntries(
  */
 internal fun liveWorkspaceOf(workspace: String?): String? = workspace?.takeIf { it.isNotBlank() }
 
-internal fun openButtonLabel(picked: List<LauncherEntry>): String {
-    if (picked.isEmpty()) return "open"
-    val sessions = picked.count { it.sessionId != null }
-    return when {
-        sessions == picked.size -> "open (${picked.size})"
-        sessions == 0 -> "new shell (${picked.size})"
-        else -> "open + new (${picked.size})"
-    }
-}
+/** What the launcher's left button says, given what is chosen. */
+internal fun openButtonLabel(picked: List<LauncherEntry>): String =
+    if (picked.isEmpty()) "open" else "open (${picked.size})"
 
 /** One workspace, as a chip to aim a new shell at. */@Composable
 private fun ChoiceRow(
@@ -387,18 +311,18 @@ private fun ChoiceRow(
      * phone started can be moved to the desktop or closed from it.
      */
     mobileShell: Boolean = false,
+    /** A phone is connected to it: a shade of its own, between plain and chosen. */
+    inUse: Boolean = false,
     trailing: @Composable () -> Unit = {},
 ) {
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RadiusMedium)
-            .background(if (chosen) Accent.copy(alpha = 0.18f) else Surface)
-            .border(
-                width = if (chosen) 1.5.dp else 0.dp,
-                color = if (chosen) Accent else Color.Transparent,
-                shape = RadiusMedium,
-            )
+            // Being chosen is the checkbox's to say, and only the checkbox's: a tint
+            // and an outline on top of a tick was three signals for one fact. The
+            // row's own shade is reserved for "a phone is using this".
+            .background(if (inUse) Accent.copy(alpha = 0.09f) else Surface)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
         verticalAlignment = Alignment.CenterVertically,

@@ -7,6 +7,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.DropdownMenu
@@ -420,25 +421,32 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     // A phone that has just rejoined the wifi should not wait out the retry
     // backoff: the network callback cuts it short.
     DisposableEffect(Unit) {
-        BackgroundSession.watchNetwork { client.reconnectNow() }
+        BackgroundSession.watchNetwork {
+            client.reconnectNow()
+            NetworkWake.fire()
+        }
         onDispose { BackgroundSession.stopWatchingNetwork() }
     }
 
     // The launcher comes first: a terminal is somewhere you go, and which shell
     // you are going to is a question worth asking before you are in one.
     var showLauncher by remember { mutableStateOf(true) }
-    // Which shells the pager pages through. `null` means all of them; the
-    // launcher sets a set when the user chooses, and that set is what ◀ ▶ walk.
-    var pageSelection by remember { mutableStateOf<Set<String>?>(null) }
+    // Which shells the pager pages through: the ones the user chose, and nothing
+    // else. It used to start as `null`, meaning "every shell", so the first
+    // `+ shell` after launch opened a pager over *all* of them, attached page 0 —
+    // some other shell, possibly one on the desk — claimed it and resized it to the
+    // phone, and only then scrolled to the new one. A page is a hold on a shell,
+    // so nothing is a page that was not asked for.
+    var pageSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
     // Whether the portrait bar's menu is open. It lives here, at App()'s top
     // level, rather than beside the bar that draws it, because the IME watcher
     // below has to be able to tell a keypad the *user* dismissed from one we
     // dismissed ourselves by opening a focusable menu. It is the same value
     // either way, so it has one owner and not two.
     var portraitMenu by remember { mutableStateOf(false) }
-    // How many shells have been asked for and not yet answered. A chosen pi session
-    // has no ldmux shell yet, so there is no id to page to until the daemon says
-    // which one it made — and while that is outstanding the pager is legitimately
+    // How many shells have been asked for and not yet answered. A new shell has no
+    // id to page to until the daemon says which one it made — and while that is
+    // outstanding the pager is legitimately
     // empty, which is a *different* thing from "there is nothing to open" and must
     // not be shown as the same sentence.
     //
@@ -455,7 +463,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     var gotoSessionId by remember { mutableStateOf<String?>(null) }
 
     val attachable = sessions.filter { it.attachable }
-    val pages = pageSelection?.let { chosen -> attachable.filter { it.id in chosen } } ?: attachable
+    val pages = attachable.filter { it.id in pageSelection }
 
     // A shell asked for in a directory joins the selection as soon as it exists.
     // The shell the daemon made joins the pages. This is the whole reason it
@@ -467,11 +475,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         if (ids.isEmpty()) return@LaunchedEffect
         // Every id the gesture asked for, not only the last one: the daemon answers
         // a create one at a time and one gesture can ask for several.
-        // `plus` on a nullable set, not `(pageSelection ?: emptySet()) + ids`: `null`
-        // means "every shell is a page", and collapsing it to a set here would turn
-        // "all of them" into "only this one", which is the bug in the line below
-        // that used to clear the selection outright.
-        pageSelection = pageSelection?.plus(ids.toSet())
+        pageSelection = pageSelection + ids.toSet()
         pendingOpens = (pendingOpens - ids.size).coerceAtLeast(0)
         // ...and go to it. Creating a shell and staying on the screen that created it
         // is a shell the user cannot reach; this used to work only because the
@@ -526,6 +530,9 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     var keyboardWanted by remember { mutableStateOf(true) }
     LaunchedEffect(portrait) { if (portrait) keyboardWanted = true }
     val typing = portrait && keyboardWanted
+    // Whether the soft keyboard is actually on screen, for the portrait toggle.
+    val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    var keyboardRequest by remember { mutableStateOf(0) }
 
     // A popup belongs to the screen it was opened on. The portrait bar leaves the
     // composition when the mode flips, and a `remember`ed flag inside it survives
@@ -560,6 +567,41 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         delay(BackgroundSession.releaseGraceMs)
         pageSelection = emptySet()
         showLauncher = true
+    }
+
+    // **A shell that ends takes its page with it, and the last one takes the pager.**
+    // Closing a shell at the desk (or `exit`, or a kill anywhere) arrives as the
+    // daemon's pushed session list; the page is gone from `pages` at once, since
+    // only attachable shells are pages. When none of the chosen shells is left, the
+    // terminal is showing nothing, so the app goes back to the list of what there is.
+    //
+    // Not while the list could be stale or incomplete: offline, a lost link is not
+    // an ended shell; and a shell just asked for is chosen before the list carries
+    // it (`gotoSessionId` is set until the pager reaches it).
+    val chosenAlive = attachable.any { it.id in pageSelection }
+    LaunchedEffect(chosenAlive, connected, pendingOpens, gotoSessionId, showLauncher) {
+        // Not conditioned on the selection being non-empty: the effect below prunes
+        // ended ids from it, and may do so first.
+        if (!showLauncher && connected && pendingOpens == 0 && gotoSessionId == null && !chosenAlive) {
+            pageSelection = emptySet()
+            showLauncher = true
+        }
+    }
+    // Ended shells leave the selection too, so a shell id is never a page-to-be
+    // after its shell has gone.
+    LaunchedEffect(sessions) {
+        val gone = pageSelection.filter { id -> sessions.any { it.id == id && !it.attachable } }
+        if (gone.isNotEmpty()) pageSelection = pageSelection - gone.toSet()
+    }
+
+    // The notification's Disconnect is the launcher button pressed from outside
+    // the app. It used to stop only the service, leaving the sockets and claims up
+    // behind a notification that had said it disconnected.
+    LaunchedEffect(Unit) {
+        DisconnectRequests.requests.collect {
+            pageSelection = emptySet()
+            showLauncher = true
+        }
     }
 
     // Back means the same thing as the launcher button: it leaves the terminal
@@ -793,19 +835,8 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                 client.requestDesktop()
             },
             onOpen = { picked ->
-                // Two kinds of row, one gesture: an existing shell becomes a
-                // page, and a row that is only a directory gets a shell opened
-                // in it. Opening is asynchronous, so the selection is remembered
-                // by directory and resolved when the list comes back.
-                val existing = picked.mapNotNull { it.sessionId }.toSet()
-                val fresh = picked.filter { it.sessionId == null }
-                // The page set is set *before* the requests go out. A create can be
-                // answered before this loop finishes, and an answer that arrived
-                // first would then be overwritten by the line that sets the page
-                // set — the shell would exist with nothing pointing at it.
-                pageSelection = existing
-                pendingOpens = fresh.size
-                for (e in fresh) client.create("shell", e.cwd, folderName(e.cwd))
+                // The chosen shells become the pages, and nothing else is one.
+                pageSelection = picked.map { it.sessionId }.toSet()
                 showLauncher = false
             },
             onKill = { killTarget = it },
@@ -936,6 +967,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                         handles,
                         typing = typing,
                         Modifier.fillMaxSize(),
+                        keyboardRequest = keyboardRequest,
                         pendingOpen = pendingOpens > 0,
                     )
                     VoiceBanner(voice, Modifier.align(Alignment.TopStart))
@@ -948,7 +980,20 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                     pages = pages,
                     pagerState = pagerState,
                     scope = scope,
-                    onHideKeyboard = { keyboardWanted = false },
+                    keyboardUp = imeUp,
+                    onToggleKeyboard = {
+                        // Decided by what is on screen, not by the flag: the system
+                        // back gesture puts the keypad away without telling us, and
+                        // a toggle that followed the flag would then need two taps.
+                        if (imeUp) {
+                            keyboardWanted = false
+                        } else {
+                            keyboardWanted = true
+                            // The page on screen takes focus and shows it — needed
+                            // after a system dismiss, which took focus as well.
+                            keyboardRequest++
+                        }
+                    },
                     menuExpanded = portraitMenu,
                     onMenu = { portraitMenu = true },
                     onMenuDismiss = { portraitMenu = false },
@@ -1006,6 +1051,7 @@ private fun TerminalArea(
     handles: MutableMap<String, TerminalHandle>,
     typing: Boolean,
     modifier: Modifier,
+    keyboardRequest: Int = 0,
     // A shell just asked for has not arrived yet (see `pendingOpens` in App()) —
     // that is not "no sessions", it is "one is on its way", and saying the wrong
     // one of those is exactly what read as a bug: the launcher had three things
@@ -1044,6 +1090,7 @@ private fun TerminalArea(
                     typing,
                     active = page == pagerState.currentPage,
                     Modifier.fillMaxSize(),
+                    keyboardRequest = keyboardRequest,
                 )
                 LaunchedEffect(handle, s.id) { handles[s.id] = handle }
                 // Who has this shell, when it is not us (ADR-0010). Drawn over
@@ -1052,19 +1099,8 @@ private fun TerminalArea(
                 // blank terminal with no reason on it is the failure this screen
                 // exists to prevent.
                 val madeVisitable by handle.ownedBy.collectAsState()
-                // Local, so each page has its own answer, and a swipe does not
-                // carry one page's decision to another.
-                var askTakeOver by remember(s.id) { mutableStateOf(false) }
                 if (madeVisitable != null) {
-                    HeldElsewhere(
-                        holder = madeVisitable!!,
-                        confirmed = askTakeOver,
-                        onAsk = { askTakeOver = true },
-                        onTakeOver = {
-                            askTakeOver = false
-                            handle.takeOver()
-                        },
-                    )
+                    HeldElsewhere(holder = madeVisitable!!, onTakeOver = { handle.takeOver() })
                 }
               }
             }
@@ -1101,7 +1137,8 @@ private fun PortraitBar(
     pages: List<Session>,
     pagerState: PagerState,
     scope: CoroutineScope,
-    onHideKeyboard: () -> Unit,
+    keyboardUp: Boolean,
+    onToggleKeyboard: () -> Unit,
     onMenu: () -> Unit,
     menuExpanded: Boolean,
     onMenuDismiss: () -> Unit,
@@ -1148,15 +1185,16 @@ private fun PortraitBar(
                 AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
             }
         }
-        // Putting the keyboard away. It is not a rotation any more: the screen stays
-        // exactly where it is, and the keypad is the only thing that leaves.
+        // The keyboard, up or down: one toggle, a plain keyboard glyph, lit while
+        // the keypad is on screen. It is not a rotation: the screen stays where it
+        // is, and the keypad is the only thing that moves.
         val keyboardHere: @Composable RowScope.() -> Unit = {
             IconBtn(
-                onClick = onHideKeyboard,
-                label = "hide keyboard",
+                onClick = onToggleKeyboard,
+                label = if (keyboardUp) "hide keyboard" else "show keyboard",
                 modifier = Modifier.weight(1f),
             ) {
-                IconKeyboardHide(Accent, box = LocalTouch.current.icon)
+                IconKeyboard(if (keyboardUp) Accent else Dim, box = LocalTouch.current.icon)
             }
         }
         PortraitKeyRow(
@@ -1178,7 +1216,7 @@ private fun PortraitBar(
             leading = keyboardHere,
             active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
         )
-        // No microphone: the keyboard is always up in portrait and it has its own.
+        // No microphone: portrait has the keyboard, and the keyboard has its own.
         // Two microphones is one too many.
     }
 }
@@ -1648,44 +1686,20 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
 /**
  * "Another device is using this shell."
  *
- * Shown over the terminal when the daemon refuses an attach, because one device
- * owns a shell at a time (ADR-0010). It is deliberately two steps: the first says
- * who has it, and only the second takes it. Taking it makes the *other* device
- * show the same kind of screen, so doing that on a single tap would let a pocket
- * tap evict someone mid-command.
+ * Opening a shell takes it, so this is only seen when somebody took it back while
+ * it was open here — the desk pressing a key in its window, or another phone.
+ * One tap takes it again: the tap is as deliberate as opening it was.
  */
 @Composable
-private fun BoxScope.HeldElsewhere(
-    holder: String,
-    confirmed: Boolean,
-    onAsk: () -> Unit,
-    onTakeOver: () -> Unit,
-) {
+private fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
     Box(
         Modifier.fillMaxSize().background(Bg.copy(alpha = 0.96f)),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("open on $holder", color = Fg, fontSize = 15.sp)
-            Spacer(Modifier.height(LocalTouch.current.rowPad))
-            Text(
-                if (confirmed) {
-                    // True since ownership moves the shell rather than copying it:
-                    // taking it back closes the other device's view of it.
-                    "this closes $holder's view of it"
-                } else {
-                    "one device at a time"
-                },
-                color = Dim,
-                fontSize = 12.sp,
-                textAlign = TextAlign.Center,
-            )
             Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
-            if (confirmed) {
-                AccentBtn("take it over", Modifier.width(220.dp)) { onTakeOver() }
-            } else {
-                AccentBtn("take it over…", Modifier.width(220.dp)) { onAsk() }
-            }
+            AccentBtn("take it over", Modifier.width(220.dp)) { onTakeOver() }
         }
     }
 }

@@ -110,6 +110,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      * UI answers this by naming the holder and offering to take over.
      */
     var onOwned: ((holder: String?) -> Unit)? = null
+    /**
+     * The shell is gone (ended, or unknown to the daemon). The loop stops: there
+     * is nothing to re-attach to, and retrying it forever is a page that polls a
+     * corpse.
+     */
+    var onEnded: (() -> Unit)? = null
 
     /**
      * Take the shell from whoever has it.
@@ -132,6 +138,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     private var wantTakeover = false
 
+    /** Reconnect without the backoff pause, once — a resync, not an outage. */
+    private var skipBackoffOnce = false
+
+    /** Set when the daemon says the shell no longer exists; ends the loop. */
+    private var ended = false
+
     /**
      * End the current connection so the loop reconnects at once.
      *
@@ -153,6 +165,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
     fun start(scope: CoroutineScope) {
         if (job != null) return
+        // Opening a shell on the phone is the consent to take it: that is what the
+        // user opened it *for* (2026-09-26), and going back to the launcher gives it
+        // back. So the first attach of each activation takes over. A reconnect
+        // within the activation does not — a desk that took the shell back must not
+        // lose it again to a link that blinked — and the notice offers one tap.
+        wantTakeover = true
         this.scope = scope
         job = scope.launch { loop() }
     }
@@ -161,6 +179,10 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     fun stop() {
         job?.cancel()
         job = null
+        // Consent is for the attach it was given for. A takeover tapped while the
+        // link was down must not fire against whoever holds the shell minutes later.
+        wantTakeover = false
+        attempt = 0
         scope = null
         http?.let { runCatching { it.close() } }
         http = null
@@ -248,6 +270,10 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             }
             pingSentAt = null
             pongSeen = false
+            if (ended) {
+                onEnded?.invoke()
+                return
+            }
             onOffline?.invoke()
             // No pause when a takeover is armed: that path is a user waiting on
             // the result of a tap, not a link that needs a moment to recover.
@@ -258,10 +284,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             // there — and a daemon restart had every page of every phone coming
             // back in lockstep. The list client already backed off; two policies
             // for one app is drift, so this is the same one.
-            if (!wantTakeover) {
+            if (skipBackoffOnce) {
+                skipBackoffOnce = false
+            } else if (!wantTakeover) {
                 val base = (RETRY_BASE_MS shl attempt.coerceAtMost(5)).coerceAtMost(RETRY_MAX_MS)
                 attempt++
-                delay(base + Random.nextLong(base / 2 + 1))
+                if (NetworkWake.sleep(base + Random.nextLong(base / 2 + 1))) attempt = 0
             }
         }
     }
@@ -296,7 +324,29 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 )
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }
-            "error" -> onError?.invoke(root["code"]?.jsonPrimitive?.content ?: "error")
+            "error" -> {
+                val code = root["code"]?.jsonPrimitive?.content ?: "error"
+                when (code) {
+                    // The daemon dropped output it could not deliver (the stream
+                    // reconnected, or this socket fell too far behind) and stopped
+                    // sending until the client attaches again. Ignoring it left a
+                    // terminal that was wrong and then silent, with pings still
+                    // answered so nothing ever noticed. A fresh attach is the
+                    // recovery: it carries a snapshot of the screen as it is now.
+                    "resync" -> {
+                        skipBackoffOnce = true
+                        reconnectNow()
+                    }
+                    "unknown_session", "session_dead" -> {
+                        ended = true
+                        reconnectNow()
+                    }
+                    // The attach itself failed on the daemon; the socket is healthy
+                    // and would sit there with no stream. Retry, with the backoff.
+                    "attach_failed" -> reconnectNow()
+                }
+                onError?.invoke(code)
+            }
             "mousedelivered" -> onMouseDelivered?.invoke()
             "owned" -> {
                 // Refused, not broken: the shell is held by another device. Told
@@ -423,7 +473,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         const val PING_INTERVAL_MS = CLIENT_PING_INTERVAL_MS
 
         /** Unanswered pings before the link is declared dead. */
-        const val MISSED_PONGS = 3
+        const val MISSED_PONGS = CLIENT_MISSED_PONGS
 
         /** Retry floor, doubled per attempt up to [RETRY_MAX_MS], plus jitter. */
         const val RETRY_BASE_MS = 400L

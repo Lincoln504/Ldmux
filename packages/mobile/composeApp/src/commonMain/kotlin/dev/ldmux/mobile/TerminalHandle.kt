@@ -198,6 +198,11 @@ interface TerminalHandle {
  * *connected*: that would stream output for a terminal nobody is looking at and,
  * because the client owns the pane geometry, resize the panes of sessions the
  * user is not on.
+ *
+ * [keyboardRequest] changes each time the user asks for the keyboard. The page on
+ * screen answers by taking focus and showing it, because a keyboard the system
+ * dismissed (the back gesture) also took focus with it, and "show" on nothing
+ * focused shows nothing.
  */
 @Composable
 expect fun rememberTerminalSurface(
@@ -206,4 +211,5 @@ expect fun rememberTerminalSurface(
     typing: Boolean,
     active: Boolean,
     modifier: Modifier,
+    keyboardRequest: Int = 0,
 ): TerminalHandle

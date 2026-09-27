@@ -16,36 +16,24 @@ import kotlin.test.assertTrue
  */
 class LauncherTest {
 
-    private fun pi(pid: Int, cwd: String, label: String, ws: String? = "1") = DesktopPiSession(
-        pid = pid,
-        cwd = cwd,
-        sessionId = "sid-$pid",
-        startedAt = null,
-        windowId = null,
-        workspace = ws,
-        label = label,
-    )
-
     private fun shell(id: String, cwd: String, title: String = "") =
         Session(id = id, kind = "shell", title = title, cwd = cwd, status = "running", tmuxName = "ldmux-$id")
 
     @Test
-    fun `a pi session with no shell becomes a row to open a shell in its directory`() {
-        val rows = launcherEntries(listOf(pi(100, "/home/ldeen/proj", "proj")), emptyList())
-        assertEquals(1, rows.size)
-        assertEquals("new:/home/ldeen/proj", rows[0].key)
-        assertEquals("pi", rows[0].process)
-        assertEquals("/home/ldeen/proj", rows[0].cwd)
-        assertNull(rows[0].sessionId)
+    fun `desk pi processes are not rows, only shells that can be opened are`() {
+        // A pi outside ldmux cannot be opened, and a row for it used to start a new
+        // phone shell instead (2026-09-20). A pi inside a desk window is that
+        // window's shell row, named by its process.
+        val rows = launcherEntries(listOf(shell("abc", "/home/ldeen/proj").copy(process = "pi")))
+        assertEquals(listOf("abc"), rows.map { it.sessionId })
+        assertEquals("pi", rows[0].label)
     }
 
     @Test
     fun `an open shell is named by its process and located by its folder`() {
         // The row has to answer "which of these is my editor", and a directory
         // alone cannot: two shells in one folder would otherwise be the same row.
-        val rows = launcherEntries(
-            emptyList(),
-            listOf(shell("abc", "/home/ldeen/proj").copy(process = "vim")),
+        val rows = launcherEntries(listOf(shell("abc", "/home/ldeen/proj").copy(process = "vim")),
         )
         assertEquals("vim", rows[0].label)
         assertEquals("/home/ldeen/proj", rows[0].cwd)
@@ -54,56 +42,21 @@ class LauncherTest {
 
     @Test
     fun `a shell with an unknown process still has a name`() {
-        val rows = launcherEntries(emptyList(), listOf(shell("abc", "/x")))
+        val rows = launcherEntries(listOf(shell("abc", "/x")))
         assertEquals("shell", rows[0].label)
     }
 
     @Test
-    fun `a held shell says who has it`() {
+    fun `a shell a phone is using is marked, and one the desk holds is not`() {
+        // The shade says "connected"; the desk holding its own shell is the normal
+        // state and says nothing.
         val rows = launcherEntries(
-            emptyList(),
-            listOf(shell("abc", "/x").copy(heldElsewhere = true, ownerName = "Pixel 8")),
+            listOf(
+                shell("p", "/x").copy(heldElsewhere = true, ownerKind = "phone", ownerName = "Pixel 8"),
+                shell("d", "/y").copy(heldElsewhere = true, ownerKind = "desktop", ownerName = "debian"),
+            ),
         )
-        assertEquals("open on Pixel 8", rows[0].note)
-    }
-
-    @Test
-    fun `a pi session that already has a shell is that shell, not a second thing`() {
-        val rows = launcherEntries(
-            listOf(pi(100, "/home/ldeen/proj", "proj")),
-            listOf(shell("abc", "/home/ldeen/proj", "proj")),
-        )
-        // Exactly one entry: the existing shell. Offering both would show the same
-        // work twice, and choosing wrong would open a duplicate shell.
-        assertEquals(1, rows.size)
-        assertEquals("abc", rows[0].key)
-    }
-
-    @Test
-    fun `two pi sessions in one directory are one row, because the shell is per directory`() {
-        val rows = launcherEntries(listOf(pi(100, "/a", "a"), pi(200, "/a", "a")), emptyList())
-        assertEquals(1, rows.size)
-        assertEquals("new:/a", rows[0].key)
-    }
-
-    @Test
-    fun `pi rows come first, then shells, so the pager order is the screen order`() {
-        val rows = launcherEntries(
-            listOf(pi(100, "/new", "new")),
-            listOf(shell("one", "/x"), shell("two", "/y")),
-        )
-        assertEquals(listOf("new:/new", "one", "two"), rows.map { it.key })
-    }
-
-    @Test
-    fun `the keys of a new-shell row and a session id cannot collide`() {
-        val rows = launcherEntries(
-            listOf(pi(100, "/x", "x")),
-            listOf(shell("/x", "/x")),
-        )
-        // A cwd can never equal a session id, but the keys still must not meet.
-        assertEquals(1, rows.size)
-        assertEquals("/x", rows[0].key)
+        assertEquals(listOf(true, false), rows.map { it.inUseOnPhone })
     }
 
     // ── reading the daemon's answer ────────────────────────────────────────────
@@ -209,7 +162,7 @@ class LauncherTest {
     // phone-owned shell while reading as "go to my session on the computer".
     // The word now follows what was actually chosen.
 
-    private fun row(key: String, session: String?) =
+    private fun row(key: String, session: String) =
         LauncherEntry(key = key, sessionId = session, process = "pi", cwd = "/tmp/$key")
 
     @Test
@@ -220,33 +173,6 @@ class LauncherTest {
     @Test
     fun `a selection of sessions says open`() {
         assertEquals("open (2)", openButtonLabel(listOf(row("a", "s1"), row("b", "s2"))))
-    }
-
-    @Test
-    fun `a selection of directories does not say open`() {
-        // This is the whole fix. There is nothing to open.
-        assertEquals("new shell (1)", openButtonLabel(listOf(row("a", null))))
-        assertEquals("new shell (2)", openButtonLabel(listOf(row("a", null), row("b", null))))
-    }
-
-    @Test
-    fun `a mixed selection says both`() {
-        assertEquals("open + new (3)", openButtonLabel(listOf(row("a", "s1"), row("b", null), row("c", null))))
-    }
-
-    @Test
-    fun `a directory row is never a session`() {
-        // The row that caused the report: a desktop pi whose cwd has no ldmux
-        // session. `sessionId` is what `onOpen` branches on, so null is the
-        // promise that opening it can only ever start something new.
-        val entries = launcherEntries(
-            piSessions = listOf(pi(1, "/home/ldeen/Documents/ldmux", "pi", ws = "9")),
-            openShells = emptyList(),
-        )
-        assertEquals(1, entries.size)
-        assertNull(entries[0].sessionId)
-        assertEquals("new shell (1)", openButtonLabel(entries))
-        assertTrue(entries[0].note!!.contains("not in ldmux"), "note must say it is not in ldmux: ${entries[0].note}")
     }
 
     @Test
@@ -264,20 +190,4 @@ class LauncherTest {
         assertEquals("web", liveWorkspaceOf("web"))
     }
 
-    @Test
-    fun `a shell with an unplaced window still says it is in use`() {
-        // The end-to-end shape of the same bug: the label the user would read.
-        val entry = LauncherEntry(
-            key = "s1",
-            sessionId = "s1",
-            process = "bash",
-            cwd = "/home/ldeen",
-            note = if (liveWorkspaceOf("") == null) "in use on desktop" else "on desktop ",
-            openedByPhone = false,
-            liveWorkspace = "",
-        )
-        assertEquals("in use on desktop", entry.note)
-        // And the blank never reaches a label as a noun.
-        assertEquals(null, liveWorkspaceOf(entry.liveWorkspace))
-    }
 }

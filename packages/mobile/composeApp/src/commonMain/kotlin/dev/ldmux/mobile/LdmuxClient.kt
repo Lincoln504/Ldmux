@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
+import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -131,6 +132,8 @@ data class DesktopPiSession(
     val windowId: String?,
     val workspace: String?,
     val label: String,
+    /** The ldmux shell this pi runs inside, when it runs inside one. */
+    val ldmuxSessionId: String? = null,
 )
 
 /** The outcome of a make-live or close-live request. */
@@ -353,7 +356,14 @@ class LdmuxClient(private var config: LdmuxConfig) {
             if (cwd != null) put("cwd", cwd)
             if (title != null) put("title", title)
         }.toString()
-        sendControl(msg)
+        // A create with no socket used to vanish: the launcher showed "Opening a
+        // shell…" for a request that was never sent, and nothing cleared it because
+        // the connection was *already* down. It is answered here the way the daemon
+        // would answer a refused one, so the same path clears the wait and says why.
+        if (!sendControl(msg)) {
+            _serverError.value = ServerError(code = "offline", message = "not connected to the host")
+            _errorTick.value += 1
+        }
     }
 
     /**
@@ -397,16 +407,24 @@ class LdmuxClient(private var config: LdmuxConfig) {
     /** Bounded, because a client that cannot reach the daemon must not grow. */
     private val maxPending = 16
 
-    private fun sendControl(msg: String, queueIfOffline: Boolean = false) {
+    /** Returns whether the message went to a socket (queued reads count as sent). */
+    private fun sendControl(msg: String, queueIfOffline: Boolean = false): Boolean {
         val socket = ws
         if (socket == null) {
-            if (queueIfOffline && pending.size < maxPending) pending.addLast(msg)
-            return
+            if (queueIfOffline && pending.size < maxPending) {
+                pending.addLast(msg)
+                return true
+            }
+            return false
         }
         scope?.launch {
             runCatching { socket.send(Frame.Text(msg)) }
         }
+        return true
     }
+
+    /** Set by the pong handler, read once per beat: the launcher's liveness. */
+    private var pongSeen = false
 
     fun reconfigure(config: LdmuxConfig) {
         this.config = config
@@ -467,9 +485,24 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     // was perfectly healthy, leaving the launcher flickering offline
                     // once a minute. A ping is the cheapest thing that can be said,
                     // and the daemon already answers it.
+                    //
+                    // ...and the answers are counted. A ping nobody answers detects
+                    // nothing: on a sleeping radio or a NAT that has forgotten the
+                    // flow the socket stays "connected" while the list goes stale and
+                    // every command sent into it disappears. Three unanswered beats is
+                    // a link that is not there — the same rule the terminal pages use.
+                    pongSeen = true
                     val beat = launch {
+                        var missed = 0
                         while (isActive) {
                             delay(CLIENT_PING_INTERVAL_MS)
+                            missed = if (pongSeen) 0 else missed + 1
+                            pongSeen = false
+                            if (missed >= CLIENT_MISSED_PONGS) {
+                                appLog("launcher link silent for $missed beats; reconnecting")
+                                runCatching { this@webSocket.close() }
+                                break
+                            }
                             runCatching { send(Frame.Text("""{"type":"ping"}""")) }
                         }
                     }
@@ -502,6 +535,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private fun onMessage(text: String) {
         val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         when (root["type"]?.jsonPrimitive?.content) {
+            "pong" -> pongSeen = true
             "error" -> {
                 _serverError.value = ServerError(
                     code = root["code"]?.jsonPrimitive?.content ?: "error",
@@ -640,6 +674,7 @@ internal fun parseDesktop(o: JsonObject?): DesktopInventory? {
                 windowId = it.optionalText("windowId"),
                 workspace = it.optionalText("workspace"),
                 label = it.text("label"),
+                ldmuxSessionId = it.optionalText("ldmuxSessionId"),
             )
         },
         detail = o.optionalText("detail"),

@@ -112,9 +112,10 @@ fun PanelDivider() {
     Column(Modifier.fillMaxWidth().height(1.dp).background(Line)) {}
 }
 
+/** A keyboard and nothing else: the portrait bar's show/hide toggle. */
 @Composable
-fun IconKeyboardHide(tint: Color, box: Dp = 22.dp) {
-    Canvas(Modifier.size(box)) { drawKeyboardHide(tint) }
+fun IconKeyboard(tint: Color, box: Dp = 22.dp) {
+    Canvas(Modifier.size(box)) { drawKeyboard(tint) }
 }
 
 @Composable
@@ -308,38 +309,6 @@ fun IconLauncher(tint: Color, box: Dp = 20.dp) {
  * They are also the axis-aligned pair, which matters at 18-22dp: an axis-aligned
  * stroke lands on whole pixels where a diagonal one is antialiased on both edges.
  */
-/**
- * A keyboard with a downward chevron under it: put the keypad away.
- *
- * Drawn, not typed, like every other mark in this app — and drawn as an outline with
- * keys inside rather than a filled slab so that at 18 dp it still reads as a keyboard
- * instead of as a battery.
- */
-private fun DrawScope.drawKeyboardHide(tint: Color) {
-    val w = size.minDimension
-    val stroke = w * 0.10f
-    val bodyH = w * 0.46f
-    val top = w * 0.04f
-    drawRoundRect(
-        color = tint,
-        topLeft = Offset(w * 0.06f, top),
-        size = Size(w * 0.88f, bodyH),
-        cornerRadius = CornerRadius(w * 0.12f),
-        style = Stroke(width = stroke),
-    )
-    // Three keys, so the outline above reads as a keyboard and not a closed box.
-    val r = w * 0.055f
-    val keyY = top + bodyH * 0.5f
-    for (i in 0..2) {
-        drawCircle(tint, radius = r, center = Offset(w * (0.28f + i * 0.22f), keyY))
-    }
-    // The chevron. Under the body, and wide enough to be read as a direction rather
-    // than as a stray stroke.
-    val cy = w * 0.66f
-    val tipY = w * 0.84f
-    drawLine(tint, Offset(w * 0.28f, cy), Offset(w * 0.5f, tipY), stroke, StrokeCap.Round)
-    drawLine(tint, Offset(w * 0.72f, cy), Offset(w * 0.5f, tipY), stroke, StrokeCap.Round)
-}
 
 
 /**

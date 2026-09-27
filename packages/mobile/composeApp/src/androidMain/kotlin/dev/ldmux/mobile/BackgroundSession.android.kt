@@ -58,6 +58,10 @@ class LdmuxService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // Let go of the shells, not only the service: the app drops its
+                // pages, which closes their sockets and releases their claims, and
+                // that in turn tells this service to stop.
+                DisconnectRequests.request()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -189,7 +193,7 @@ actual object BackgroundSession {
     }
 
     /**
-     * Only fires for a network that is actually *validated*, not merely present.
+     * Fires when a network becomes *validated*, not merely present.
      * A phone that has joined a wifi with no internet, or is mid-handover, would
      * otherwise wake the retry loop for nothing — and a retry storm during a
      * handover is how an app gets throttled by the OS.
@@ -199,11 +203,20 @@ actual object BackgroundSession {
         val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         if (networkCallback != null) return
         val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
-                if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
-                    onNetworkUp()
-                }
+            /** Networks already reported as validated, so each wakes once. */
+            private val validated = mutableSetOf<Network>()
+
+            // Validation is usually reported *after* `onAvailable`, through a
+            // capabilities change — checking only in `onAvailable` missed most
+            // Wi-Fi rejoins. So the transition to validated is what fires.
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                val ok = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                val fresh = synchronized(validated) { if (ok) validated.add(network) else { validated.remove(network); false } }
+                if (fresh) onNetworkUp()
+            }
+
+            override fun onLost(network: Network) {
+                synchronized(validated) { validated.remove(network) }
             }
         }
         networkCallback = cb
@@ -211,6 +224,9 @@ actual object BackgroundSession {
             cm.registerNetworkCallback(
                 NetworkRequest.Builder()
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    // A request excludes VPNs unless told otherwise, and Tailscale —
+                    // the network this app actually reaches the host over — is one.
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     .build(),
                 cb,
             )
