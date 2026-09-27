@@ -385,6 +385,8 @@ test("a connection that has said nothing for too long is taken away, and its cla
   const claims = new Map<string, string>();
   const { info } = await start({
     idleMs: 300,
+    // The reap is what is under test, not the reconnect grace that follows it.
+    releaseGraceMs: 0,
     claim: (sessionId, device) => {
       const holder = claims.get(sessionId);
       if (holder && holder !== device.id) {

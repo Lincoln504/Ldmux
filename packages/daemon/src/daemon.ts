@@ -534,37 +534,27 @@ export class LdmuxDaemon {
       // transport already does this for an attach; this covers every claim the
       // daemon makes itself (a no-op for sockets the transport has cut off).
       this.remote?.displaced(result.previous.id, sessionId, device);
-      // Whether the desktop's view of this shell is affected depends on where the
-      // shell *came from*, and on nothing about who is taking it now.
-      //
-      // A shell the phone started is the phone's projection: the window is the
-      // phone's way of being at a desk, so taking the shell back takes the window
-      // with it.
-      //
-      // A shell the desk started is the desk's, and the phone is only ever
-      // borrowing it. The window it is being used in is not the phone's to
-      // disturb — the desk keeps it, and using it again is what takes the shell
-      // back, which the reconcile pass already notices ("the window has a client
-      // again"). Closing it here would destroy the desk's own terminal on a fact
-      // the desk did not know it had agreed to.
-      if (result.previous.id === this.desktopDevice.id) {
-        const record = this.registry.get(sessionId);
-        if (seizingClosesTheDeskWindow(record?.createdBy ?? "")) {
-          // Fire-and-forget: it kills a window, and the attach that displaced it
-          // must not wait on a window manager to finish.
-          void this.closeDesktopWindow(sessionId).catch(() => {});
-        } else if (record?.tmuxName) {
-          // The desk keeps its window — but not *attached*. Left attached it went
-          // on being a second writer on the phone's shell, and the reconcile pass,
-          // seeing the window's client still there, read it as the user taking the
-          // shell back and reclaimed it within a second: the phone was displaced by
-          // a window nobody had touched. Detached, the window's shim says who has
-          // the shell and waits for Enter, and *that* is the taking back.
-          void this.detachDeskWindow(record.tmuxName).catch(() => {});
-        }
-      }
-      return { ok: true, displaced: result.previous };
     }
+    // Any device other than the desk taking a shell with a desk window moves it
+    // off the desk — whether or not the desk *held* it at that moment. Keyed on the
+    // previous holder, this missed a shell nobody held (the phone had just let go,
+    // or was reconnecting) while its desk window was attached, and left two writers.
+    //
+    // What moving it off means depends on where the shell came from (ADR-0010):
+    // a phone-started shell's window was the phone's projection and closes; a
+    // desk-started shell's window is the desk's own, and is detached, showing who
+    // has it until the other device lets go or a key takes it back.
+    if (device.id !== this.desktopDevice.id && this.liveWindows.has(sessionId) && result.previous?.id !== device.id) {
+      const record = this.registry.get(sessionId);
+      if (seizingClosesTheDeskWindow(record?.createdBy ?? "")) {
+        // Fire-and-forget: it kills a window, and the attach that displaced it
+        // must not wait on a window manager to finish.
+        void this.closeDesktopWindow(sessionId).catch(() => {});
+      } else if (record?.tmuxName) {
+        void this.detachDeskWindow(record.tmuxName).catch(() => {});
+      }
+    }
+    if (result.previous && result.previous.id !== device.id) return { ok: true, displaced: result.previous };
     return { ok: true };
   }
 

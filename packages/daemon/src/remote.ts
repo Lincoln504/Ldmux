@@ -101,6 +101,8 @@ export interface RemoteServerOptions {
    * watch a socket die. Production always uses the default.
    */
   idleMs?: number;
+  /** How long a closed socket's claims outlive it, for a reconnect (default 3 s). */
+  releaseGraceMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -223,6 +225,13 @@ const WS_BACKLOG_BYTES = 64 * 1024;
  * with only the launcher open holds nothing, and reconnects when it wakes.
  */
 const WS_IDLE_MS = 20_000;
+/**
+ * How long a closed socket's claims wait for the same device to come back. Long
+ * enough for a resync or a reconnect after a blink (measured: under a second on a
+ * 600 ms-round-trip link); short enough that leaving a shell gives it back to the
+ * desk promptly.
+ */
+const RELEASE_GRACE_MS = 3_000;
 
 export class RemoteServer {
   private server: Server | undefined;
@@ -358,33 +367,15 @@ export class RemoteServer {
         // asks again.
         if (conn.device) {
           this.byDevice.get(conn.device.id)?.delete(socket);
-          // Only when this was the device's LAST connection. A phone holds one
-          // socket for the session list and one per open shell, and a reconnect
-          // overlaps the old socket with the new one — so releasing on *any*
-          // close would let the socket that is already dead free the claim its
-          // own replacement has just made. The shell would go quietly claimable
-          // by anyone, with no takeover and no message, which is the same class
-          // of failure as the *Stale State* this release exists to prevent,
-          // pointing the other way.
-          if (this.byDevice.get(conn.device.id)?.size === 0) {
-            this.byDevice.delete(conn.device.id);
-            const freed = this.opts.releaseDevice?.(conn.device.id) ?? [];
-            if (freed.length > 0) void this.broadcastSessions().catch(() => {});
-          } else if (conn.sessionId && !this.deviceStillViewing(conn.device.id, conn.sessionId)) {
-            // ...but the shell *this* socket was showing is let go when this socket
-            // goes, unless another of the device's sockets is on the same shell (a
-            // reconnect overlapping its predecessor). A phone keeps its launcher
-            // socket open for as long as the app runs, so "the device's last socket"
-            // almost never closed: going back to the launcher, swiping past a page,
-            // the background drop — each closed only the page's socket, and every
-            // shell the phone had ever shown stayed claimed by it. The next desk or
-            // device to want one was refused by a phone that was not looking at it,
-            // which ADR-0010's amendment ("going to the launcher detaches from every
-            // open shell") says must not happen.
-            if (this.opts.releaseClaim?.(conn.sessionId, conn.device.id)) {
-              void this.broadcastSessions().catch(() => {});
-            }
-          }
+          if (this.byDevice.get(conn.device.id)?.size === 0) this.byDevice.delete(conn.device.id);
+          // Released after a short grace, not at once. A reconnect closes the old
+          // socket *before* the new one attaches — a resync, a link that blinked —
+          // and releasing in that gap gave the shell away mid-reconnect: measured
+          // on a slow link, the desk window took the shell back 4 s after the
+          // phone's resync, and the phone was shown "open on debian". A socket that
+          // comes back within the grace simply still holds it; one that does not
+          // lets go, which is what makes a vanished phone stop holding shells.
+          this.releaseAfterGrace(conn.device.id, conn.sessionId);
         }
       });
       socket.on("error", () => {
@@ -472,6 +463,8 @@ export class RemoteServer {
   }
 
   stop(): void {
+    for (const t of this.graceTimers) clearTimeout(t);
+    this.graceTimers.clear();
     if (this.heartbeat) {
       clearInterval(this.heartbeat);
       this.heartbeat = null;
@@ -863,6 +856,34 @@ export class RemoteServer {
   private mayWrite(data: ConnData): boolean {
     if (!data.device || !data.sessionId || !this.opts.holds) return true;
     return this.opts.holds(data.sessionId, data.device.id);
+  }
+
+  private readonly graceTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  /**
+   * Let go of what a closed socket held, once the grace has passed and nothing of
+   * the device's has taken its place.
+   *
+   * The device's *last* socket going frees everything it holds (the launcher
+   * socket closing means the app is gone). Otherwise only the shell this socket
+   * was on is freed, unless another of the device's sockets is on it: a phone
+   * keeps its launcher socket for as long as the app runs, so going back to the
+   * launcher closes only the page's socket, and that has to let go of the page's
+   * shell (ADR-0010: "going to the launcher detaches from every open shell").
+   */
+  private releaseAfterGrace(deviceId: string, sessionId: string | undefined): void {
+    const timer = setTimeout(() => {
+      this.graceTimers.delete(timer);
+      let freed = false;
+      if (!this.byDevice.has(deviceId)) {
+        freed = (this.opts.releaseDevice?.(deviceId) ?? []).length > 0;
+      } else if (sessionId && !this.deviceStillViewing(deviceId, sessionId)) {
+        freed = this.opts.releaseClaim?.(sessionId, deviceId) ?? false;
+      }
+      if (freed) void this.broadcastSessions().catch(() => {});
+    }, this.opts.releaseGraceMs ?? RELEASE_GRACE_MS);
+    timer.unref?.();
+    this.graceTimers.add(timer);
   }
 
   /** Whether any open socket of this device is attached to this shell. */

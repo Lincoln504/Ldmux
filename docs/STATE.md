@@ -208,6 +208,21 @@ counts pongs; the network wake sees VPN (Tailscale) networks and validation chan
 and wakes terminal pages too; the notification's Disconnect releases the shells; the
 launcher lists only shells that can be opened.
 
+### Slow links and reconnects (2026-09-26, device-measured)
+
+`scripts/slow-link.ts` puts a shaping proxy between the phone and the daemon (no root
+needed): 300 ms each way, 160 kbps each way, roughly weak 3G. Through it: launcher
+list in ~2 s, first screen 4.2 s after connecting, and a 170 KB burst (`seq 1 30000`)
+overflowed the backlog, drew a `resync`, and the page re-attached with the right
+final screen 2.4 s later. That run found the last reconnect defect: releasing a
+closed socket's claim at once let the desk window take the shell in the gap between
+the old socket and the new one. A 3 s release grace (`RELEASE_GRACE_MS`) and an
+unconditional desk detach on any phone claim close it; each alone suffices, the test
+fails with both removed. Airplane mode while holding a shell: reaped in ~24 s, desk
+window takes it back, and on reconnect the phone shows "open on debian". Future
+low-bandwidth / mesh work (`docs/MESH-TRANSPORT.md`) is not built; the transport is
+the seam it would replace, and nothing here narrowed it.
+
 ## 5. Open work, in priority order
 
 Each item says what it is, why it matters, and what the next concrete step is.

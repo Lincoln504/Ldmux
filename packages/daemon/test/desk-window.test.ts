@@ -209,6 +209,23 @@ test("a pid left by an earlier window cannot end a new window's shell", async ()
   expect(await ownerOf(session.id)).toBe("desktop");
 });
 
+test("a page that reconnects keeps its shell: the desk does not take it in the gap", async () => {
+  // A resync or a blink closes the old socket before the new one attaches.
+  // Releasing in that gap let the desk window re-attach and take the shell.
+  const { id, tmuxName } = await deskWindow();
+  const device = { ...phone, id: "desk-test-phone-reconnect" };
+  const p = await phoneTakes(id, tmuxName, device.id);
+  p.ws.close();
+  await sleep(300);
+  const q = await phoneClient(device);
+  q.send({ type: "attach", sessionId: id, cols: 80, rows: 24 });
+  expect(await waitFor(() => q.text.some((m) => m.type === "caps"))).toBe(true);
+  await sleep(4500); // past the grace and the post-takeover guard
+  expect(await ownerOf(id)).toBe("phone");
+  expect(await clientTtys(tmuxName)).toEqual([]);
+  q.ws.close();
+});
+
 test("a shell cannot have two desk windows", async () => {
   const { id } = await deskWindow();
   const res = await daemonCall(daemon.socketPath, "deskWindow", { id });
