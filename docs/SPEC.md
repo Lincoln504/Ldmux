@@ -600,10 +600,11 @@ server-side VT emulator seam would close it.
 ### 7.3 Input & keys
 
 - Extra-keys bar always visible (FR-15); **sticky modifiers** built — Ctrl/Alt
-  latch for exactly one following key. A modified *character* becomes literal
-  bytes (Ctrl-C is 0x03) because that is what a keyboard would have sent; a
-  modified *named* key stays a tmux key name, because that sequence is the
-  terminal's business.
+  latch for exactly one following key. Every modified key — characters included
+  — is sent as a tmux key name (`C-a`, `M-f`, `M-C-Left`), so tmux encodes it
+  for the pane's mode: the C0 byte for a legacy program, CSI-u for one that
+  enabled extended keys (pi, Claude Code). A literal control byte is dropped by
+  tmux in that mode (measured, 3.7b), so the byte is never computed client-side.
 - **Copy-mode toggle** built, for scrolling full-screen apps (`vim`, `htop`) whose
   history is not in any buffer — their screen is the alternate one, which has no
   scrollback, so what scrolls is tmux's own view of the pane. The button shows the

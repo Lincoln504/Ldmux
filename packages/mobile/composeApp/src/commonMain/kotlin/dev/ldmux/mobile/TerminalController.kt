@@ -379,10 +379,10 @@ class TerminalController(
     /**
      * Send one key with the sticky modifiers applied.
      *
-     * A modified *character* becomes literal bytes (Ctrl-C is 0x03) — which is
-     * what a keyboard would have sent, and is what makes readline and vim inside
-     * the shell see the chord rather than a letter. A modified *named* key stays a
-     * tmux key name, because its sequence is the terminal's business, not ours.
+     * Every modified key goes as a tmux key name (`C-a`, `M-f`), characters
+     * included: tmux then encodes it for whatever the program asked for — the C0
+     * byte for readline, `CSI 97;5u` for pi or Claude Code with extended keys on. A
+     * literal control byte is dropped by tmux in that mode (see `Modifiers.kt`).
      */
     override fun sendModifiedKey(key: String, modifiers: Modifiers) {
         when (val k = modifiedKey(key, modifiers)) {

@@ -6,9 +6,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The sticky modifiers produce raw bytes for the pty, so these check the
- * *numbers*, not that a string came out. Ctrl-C that is not 0x03 is a bug no
- * amount of "it sent something" will catch.
+ * The sticky modifiers produce tmux key names, so these check the exact name, not
+ * that a string came out. A Ctrl-C that is not `C-c` is a bug no amount of "it
+ * sent something" will catch.
  */
 class ModifiersTest {
     private fun literal(key: String, mods: Modifiers): String {
@@ -35,48 +35,64 @@ class ModifiersTest {
         assertEquals("Left", named("Left", Modifiers()))
     }
 
+    /**
+     * A modified character goes by name, never as the byte.
+     *
+     * The byte (0x01 for Ctrl-a) is dropped by tmux when the program has turned on
+     * extended keys, which pi and Claude Code do: Ctrl chords worked in the shell and
+     * did nothing there. By name, tmux sends the byte to a program that wants the
+     * byte and `CSI 97;5u` to one that asked for that. Nothing here may regress to a
+     * [ModifiedKey.Literal] for a chord.
+     */
     @Test
-    fun `ctrl letters are the C0 bytes a keyboard would have sent`() {
-        assertEquals("\u0001", literal("a", Modifiers(ctrl = true)))
-        assertEquals("\u0003", literal("c", Modifiers(ctrl = true)))
-        assertEquals("\u0004", literal("d", Modifiers(ctrl = true)))
-        assertEquals("\u001a", literal("z", Modifiers(ctrl = true)))
-        // Uppercase is the same chord, not a different one.
-        assertEquals("\u0003", literal("C", Modifiers(ctrl = true)))
+    fun `ctrl on a letter is the tmux name, not the C0 byte`() {
+        assertEquals("C-a", named("a", Modifiers(ctrl = true)))
+        assertEquals("C-c", named("c", Modifiers(ctrl = true)))
+        assertEquals("C-z", named("z", Modifiers(ctrl = true)))
+        // Uppercase is the same chord, not a different one — and `C-A` would reach
+        // an extended-keys program as a different key.
+        assertEquals("C-c", named("C", Modifiers(ctrl = true)))
     }
 
     @Test
-    fun `the punctuation control codes are the classic ones, not guesses`() {
-        // Ctrl-[ is ESC and Ctrl-? is DEL; neither is derivable from the letter
-        // range, so they are the entries most worth pinning down.
-        assertEquals("\u001b", literal("[", Modifiers(ctrl = true)))
-        assertEquals("\u007f", literal("?", Modifiers(ctrl = true)))
-        assertEquals("\u0000", literal("@", Modifiers(ctrl = true)))
-        assertEquals("\u0000", literal(" ", Modifiers(ctrl = true)))
-        assertEquals("\u001c", literal("\\", Modifiers(ctrl = true)))
-        assertEquals("\u001d", literal("]", Modifiers(ctrl = true)))
-        assertEquals("\u001e", literal("^", Modifiers(ctrl = true)))
-        assertEquals("\u001f", literal("_", Modifiers(ctrl = true)))
+    fun `the punctuation control chords keep their classic keys`() {
+        // tmux turns these into ESC, DEL, NUL, 0x1c-0x1f for a legacy program.
+        assertEquals("C-[", named("[", Modifiers(ctrl = true)))
+        assertEquals("C-?", named("?", Modifiers(ctrl = true)))
+        assertEquals("C-@", named("@", Modifiers(ctrl = true)))
+        assertEquals("C-Space", named(" ", Modifiers(ctrl = true)))
+        assertEquals("C-\\", named("\\", Modifiers(ctrl = true)))
+        assertEquals("C-]", named("]", Modifiers(ctrl = true)))
+        assertEquals("C-^", named("^", Modifiers(ctrl = true)))
+        assertEquals("C-_", named("_", Modifiers(ctrl = true)))
     }
 
     @Test
-    fun `alt prepends ESC, the way a terminal does`() {
-        assertEquals("\u001bb", literal("b", Modifiers(alt = true)))
-        assertEquals("\u001b|", literal("|", Modifiers(alt = true)))
+    fun `alt on a character is the meta name`() {
+        assertEquals("M-b", named("b", Modifiers(alt = true)))
+        assertEquals("M-|", named("|", Modifiers(alt = true)))
+        // Alt keeps case: Alt-B is not Alt-b.
+        assertEquals("M-B", named("B", Modifiers(alt = true)))
+        assertEquals("M-Space", named(" ", Modifiers(alt = true)))
     }
 
     @Test
-    fun `ctrl and alt together are ESC then the control byte`() {
-        // Alt-Ctrl-c is ESC 0x03: ESC first, because Alt is the outer escape.
-        assertEquals("\u001b\u0003", literal("c", Modifiers(ctrl = true, alt = true)))
+    fun `ctrl and alt together are one name, meta first`() {
+        // tmux accepts `M-C-c`; it is what sends ESC 0x03 to a legacy program.
+        assertEquals("M-C-c", named("c", Modifiers(ctrl = true, alt = true)))
     }
 
     @Test
-    fun `a control byte that does not exist drops the ctrl rather than inventing one`() {
+    fun `a ctrl chord that does not exist drops the ctrl rather than inventing one`() {
         // Ctrl-| has no C0 assignment. Typing `|` is a plausible intent;
-        // inventing a byte is not.
+        // inventing a key is not.
         assertEquals("|", literal("|", Modifiers(ctrl = true)))
-        assertEquals("\u001b|", literal("|", Modifiers(ctrl = true, alt = true)))
+        assertEquals("M-|", named("|", Modifiers(ctrl = true, alt = true)))
+    }
+
+    @Test
+    fun `a character outside ASCII goes out as itself`() {
+        assertEquals("é", literal("é", Modifiers(ctrl = true)))
     }
 
     @Test

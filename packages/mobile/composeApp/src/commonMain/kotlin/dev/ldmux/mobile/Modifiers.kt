@@ -8,21 +8,23 @@ package dev.ldmux.mobile
  * live in a sidebar you would have to hold with a second hand while reaching for
  * a third. So the modifier is a mode: arm it, press one key, and it disarms.
  *
- * ## How a modified key is delivered, and why there are two ways
+ * ## How a modified key is delivered: always by name
  *
- * A real terminal sends **bytes**, and the two kinds of key need different bytes:
+ * A modified key goes to tmux as a **key name** (`C-a`, `M-f`, `M-C-Left`), never
+ * as the bytes we think it should produce, and that includes plain characters.
  *
- * - Ctrl and Alt on a *character* are genuine control bytes. Ctrl-C is 0x03, Alt-f
- *   is ESC then `f`. Those are sent as literal input, which is exactly what a
- *   keyboard would have produced; tmux passes literal input to the pty untouched.
- * - Ctrl and Alt on a *named* key (the arrows, Enter, Tab) are not control bytes
- *   at all — they are escape sequences with a modifier parameter, and the terminal
- *   decides which one from its own key table. There is nothing to compute, so
- *   those go as tmux key names, which is where that table lives.
+ * It used to send Ctrl and Alt on a character as literal bytes (0x01, ESC `f`),
+ * reasoning that those are what a keyboard sends. They are only what a keyboard
+ * sends to a program that has not asked for anything better. pi and Claude Code
+ * ask for extended keys (modifyOtherKeys), and tmux then encodes keys itself —
+ * `C-a` becomes `CSI 97;5u` — but only keys it *knows are keys*. A literal 0x01
+ * handed to `send-keys -l` in that mode is dropped outright (measured, tmux 3.7b),
+ * which is why Ctrl chords worked in the shell and in micro and did nothing in pi,
+ * while the C/c button, already a name, worked everywhere.
  *
- * Both end on the wire as `send-keys`, but only the first is a byte we can work
- * out ourselves; inventing escape sequences for the second is how a client ends
- * up sending a sequence the terminal would never have produced.
+ * By name, tmux produces the legacy byte for a program that wants it (identical to
+ * what the old table computed) and the extended form for one that asked for it.
+ * The encoding belongs to the terminal, and tmux is the terminal here.
  */
 
 /** Which modifiers are armed. Both may be armed at once. */
@@ -65,7 +67,8 @@ sealed interface ModifiedKey {
  *
  * These are the classic C0 assignments, and they are not guessable from the
  * letter's position: Ctrl-`[` is ESC (0x1b), Ctrl-`?` is DEL (0x7f), and Ctrl-`@`
- * is NUL. A lookup is the honest way to write this down.
+ * is NUL. The byte itself is tmux's to produce now (the key goes by name); this
+ * decides only whether a Ctrl chord exists for the character at all.
  */
 private val CTRL_BYTES: Map<Char, Char> = buildMap {
     for (c in 'a'..'z') put(c, (c - 'a' + 1).toChar())
@@ -115,12 +118,24 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
 
     if (single) {
         val ch = key[0]
-        var bytes = ""
-        // Alt first: on a real terminal Alt is ESC *prepended*, so it goes in
-        // front of whatever the character is.
-        if (mods.alt) bytes += '\u001b'
-        bytes += if (mods.ctrl) CTRL_BYTES[ch] ?: ch else ch
-        return ModifiedKey.Literal(bytes)
+        // Outside ASCII there are no control codes and no tmux names to carry a
+        // modifier; the character goes out as itself.
+        if (ch.code !in 0x20..0x7e) return ModifiedKey.Literal(key)
+        // Ctrl only exists where there is a C0 code for it (Ctrl-| has none):
+        // dropping it types a plausible character, inventing one would not.
+        val ctrl = mods.ctrl && ch in CTRL_BYTES
+        // A letter's Ctrl chord has no case — Ctrl-C is Ctrl-c — and `C-A` would
+        // reach an extended-keys program as a different key (`CSI 65;5u`).
+        val base = when {
+            ch == ' ' -> "Space"
+            ctrl && ch in 'A'..'Z' -> ch.lowercaseChar().toString()
+            else -> key
+        }
+        var prefix = ""
+        if (mods.alt) prefix += "M-"
+        if (ctrl) prefix += "C-"
+        if (prefix.isEmpty()) return ModifiedKey.Literal(key)
+        return ModifiedKey.Named(prefix + base)
     }
 
     // A named key carries its modifier *in the name*, and tmux knows which

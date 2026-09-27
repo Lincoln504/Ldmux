@@ -1,5 +1,5 @@
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -686,3 +686,53 @@ test("a click a mouse-aware program can take is answered", { timeout: 30000 }, a
   ws.close();
 });
 
+
+/**
+ * A modified character reaches a program that enabled extended keys.
+ *
+ * pi and Claude Code turn on modifyOtherKeys (`CSI > 4;2 m`). In that mode tmux
+ * encodes keys itself and **drops** a literal control byte sent as text: the phone
+ * used to send Ctrl-a as the byte 0x01, and in pi it did nothing, while the C/c
+ * button (sent by name) worked. The client now sends every modified character by
+ * name (`Modifiers.kt`); this pins that the names it sends reach the program in the
+ * extended form, and — the half that made the bug — that the literal byte does not.
+ */
+test("modified keys by name reach an extended-keys program; a literal control byte does not", { timeout: 30000 }, async () => {
+  const info = await call<RemoteInfo>(daemon.socketPath, "remote_info");
+  const { session } = await call<{ session: { id: string } }>(daemon.socketPath, "new", {
+    kind: "shell",
+    cwd: tmpdir(),
+  });
+  // A program that asks for modifyOtherKeys and prints each read as <hex>.
+  const script = join(stateDir, "keydump.cjs");
+  writeFileSync(
+    script,
+    `process.stdout.write("\\x1b[>4;2mKEYS_" + "READY\\n");
+process.stdin.setRawMode(true);
+process.stdin.on("data", (d) => {
+  process.stdout.write("<" + d.toString("hex") + ">");
+  if (d.includes(0x71)) { process.stdout.write("\\x1b[>4m"); process.exit(0); }
+});`,
+  );
+  const { ws, text, output } = await connect(info, info.token);
+  ws.send(JSON.stringify({ type: "attach", sessionId: session.id }));
+  expect(await waitFor(() => text.some((m) => m.type === "snapshot"))).toBe(true);
+  ws.send(JSON.stringify({ type: "input", data: `${process.execPath} ${script}` }));
+  ws.send(JSON.stringify({ type: "key", keys: ["Enter"] }));
+  expect(await waitFor(() => output.join("").includes("KEYS_READY"), 10000)).toBe(true);
+
+  const reads = () => [...output.join("").matchAll(/<([0-9a-f]+)>/g)].map((m) => m[1]).join("");
+  const csi = (s: string) => Buffer.from(`\x1b[${s}`).toString("hex");
+  // The literal byte first, then a marker, so its absence is observed rather than
+  // assumed: if 0x01 were delivered it would be read before the `x`.
+  ws.send(JSON.stringify({ type: "input", data: "\x01x" }));
+  expect(await waitFor(() => reads().includes("78"))).toBe(true);
+  expect(reads().startsWith("78")).toBe(true);
+
+  for (const [key, seq] of [["C-a", "97;5u"], ["M-f", "102;3u"], ["M-C-a", "97;7u"], ["M-|", "124;3u"]] as const) {
+    ws.send(JSON.stringify({ type: "key", keys: [key] }));
+    expect(await waitFor(() => reads().includes(csi(seq)))).toBe(true);
+  }
+  ws.send(JSON.stringify({ type: "input", data: "q" }));
+  ws.close();
+});

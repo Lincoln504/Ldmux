@@ -10,14 +10,14 @@ import kotlin.test.assertTrue
  * armed for whatever key came next. Both halves had one cause — the latch was read
  * and spent only by the key bars, and a typed character never goes through them.
  *
- * These pin the rule at the level where it now lives, and they pin the numbers,
- * because a Ctrl-Q that is not 0x11 is the same class of bug as a Ctrl-C that is not
- * 0x03. `spendLatchOnFirst` is pure, so this needs no socket and no device — which is
+ * These pin the rule at the level where it now lives, and they pin the exact key,
+ * because a Ctrl-Q that is not `C-q` is the same class of bug as a Ctrl-C that is not
+ * `C-c`. `spendLatchOnFirst` is pure, so this needs no socket and no device — which is
  * the whole point: the old rule lived inside the chrome and could not be reached by a
  * test at all.
  */
 class StickyLatchTest {
-    /** The bytes that actually reach the pty for the keystroke's first character. */
+    /** What is sent for the keystroke's first character: a key name, or literal text. */
     private fun firstBytes(text: String, armed: Modifiers): String {
         val t = spendLatchOnFirst(text, armed)
         if (t.head.isEmpty()) return ""
@@ -29,23 +29,23 @@ class StickyLatchTest {
     }
 
     @Test
-    fun `arming ctrl then typing q sends 0x11, not a q`() {
-        // The name of this test is the assertion: 0x11 is Ctrl-Q, and it is emphatically
+    fun `arming ctrl then typing q sends C-q, not a q`() {
+        // The name of this test is the assertion: C-q is Ctrl-Q, and it is emphatically
         // not the character `q`. There was a second line here asserting `"q" != ...`,
         // which the `assertEquals` above already entails and which therefore could never
         // be the thing that failed. A redundant assertion is not extra safety; it is a
         // number in the count that means nothing.
-        assertEquals("\u0011", firstBytes("q", Modifiers(ctrl = true)))
+        assertEquals("C-q", firstBytes("q", Modifiers(ctrl = true)))
     }
 
     @Test
     fun `arming alt then typing q sends the escape prefix`() {
-        assertEquals("\u001Bq", firstBytes("q", Modifiers(alt = true)))
+        assertEquals("M-q", firstBytes("q", Modifiers(alt = true)))
     }
 
     @Test
     fun `both armed gives the alt-ctrl byte, not a stack of two chords`() {
-        assertEquals("\u001B\u0011", firstBytes("q", Modifiers(ctrl = true, alt = true)))
+        assertEquals("M-C-q", firstBytes("q", Modifiers(ctrl = true, alt = true)))
     }
 
     @Test
