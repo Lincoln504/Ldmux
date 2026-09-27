@@ -184,3 +184,14 @@ test("code and pair refuse a daemon a phone cannot reach, and say what to set", 
     expect(r.out).toBe("");
   }
 });
+
+test("close ends a shell no desktop window holds", { timeout: 20000 }, async () => {
+  // It was listed in the usage line with no handler, and printed the usage.
+  const created = await cli("new", "shell", tmpdir());
+  expect(created.code).toBe(0);
+  const id = created.out.trim().split(/\s+/)[0]!;
+  const r = await cli("close", id);
+  expect(r.code).toBe(0);
+  expect(r.out.trim()).toBe(`closed ${id}`);
+  expect(daemon.registry.get(id)?.status).toBe("dead");
+});

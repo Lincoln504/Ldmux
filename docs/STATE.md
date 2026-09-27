@@ -64,9 +64,8 @@ The wire carries **raw pty bytes**, not a grid.
   Measured A/B in `docs/TMUX-DEPENDENCY.md` §10: the two carry the same bytes to
   within **0.015 %**, and the pipe costs ~7 ms of local echo latency.
 - CLI verbs: `ping list new run window shell send key desktop live unlive
-  clipboard-write copy capture snapshot kill forget adopt remote mirror code pair`.
-  `ldmux --help` prints the usage line in `cli.ts`, which omits `clipboard-write` and
-  `copy` and lists a `close` that has no handler.
+  clipboard-write copy capture snapshot kill close forget adopt remote mirror code
+  pair`, the same list the usage line in `cli.ts` prints.
 - **The tmux surface, enumerated from the code** (this is the dependency in full):
   - *Commands*: `set-option` (20 sites), `set-environment` (7), `send-keys` (6),
     `attach` (5), `refresh-client` (2), `list-panes` (2), and one each of

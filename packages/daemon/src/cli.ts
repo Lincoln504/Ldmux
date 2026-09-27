@@ -10,6 +10,7 @@
  *   ldmux capture <id> [--history]
  *   ldmux snapshot <id>
  *   ldmux kill <id>
+ *   ldmux close <id>                  # end it, unless a desktop window holds it
  *   ldmux forget <id>                 # drop a record without touching tmux
  *   ldmux adopt <tmux-name>
  *   ldmux mirror <id> [--rw] [--workspace N]
@@ -96,7 +97,7 @@ const KNOWN_FLAGS = new Set([
  */
 function printUsage(): void {
   console.error(
-    "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|code|pair> [args]",
+    "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|code|pair|copy|clipboard-write> [args]",
   );
 }
 
@@ -352,6 +353,16 @@ async function main() {
       const [id] = positional(rest, []);
       await daemonCall(sock, "kill", { id });
       console.log(`killed ${id}`);
+      break;
+    }
+
+    case "close": {
+      // The polite form (ADR-0010): ends the shell unless a desktop window is
+      // holding it open, in which case it is only let go. It was in the usage line
+      // with no handler, so it printed the usage and exited 2.
+      const [id] = positional(rest, []);
+      const res = await daemonCall(sock, "close", { id });
+      console.log(res.ended ? `closed ${id}` : `let go of ${id} (a desktop window holds it)`);
       break;
     }
 
