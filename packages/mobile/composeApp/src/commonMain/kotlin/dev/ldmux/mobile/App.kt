@@ -503,6 +503,11 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         delay(BackgroundSession.releaseGraceMs)
         pageSelection = emptySet()
         showLauncher = true
+        // Fresh CWDs on resume — the daemon's 2s poll will catch them
+        // automatically once this ships, but a manual refresh on resume
+        // means the launcher never shows stale directories after a
+        // background period.
+        if (connected) client.refreshSessions()
     }
 
     // **A shell that ends takes its page with it, and the last one takes the pager.**
@@ -841,6 +846,11 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                 if (link == LinkState.Online) {
                     desktopLoading = true
                     client.requestDesktop()
+                    // Also refresh the session list so the launcher shows fresh
+                    // CWDs — the daemon's 2s poll will catch them automatically
+                    // once this ships, but a manual refresh is the immediate
+                    // escape hatch and the only way before the daemon fix lands.
+                    client.refreshSessions()
                 }
             },
             onOpen = { picked ->
@@ -1256,7 +1266,7 @@ private fun PortraitBar(
                 IconBtn(onClick = onMenu, label = "menu", modifier = Modifier.fillMaxWidth(), filled = true) {
                     IconLauncher(Fg, box = LocalTouch.current.icon)
                 }
-                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings)
+                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings) // settings on toolbar, not menu
             }
         }
         // The keyboard, up or down: one toggle, a plain keyboard glyph, lit while
@@ -1398,7 +1408,7 @@ private fun ShellHeader(
                     expanded = menuOpen,
                     onDismiss = { menuOpen = false },
                     onLauncher = onLauncher,
-                    onSettings = onSettings,
+                    onSettings = onSettings, // settings on toolbar, not menu
                 )
             }
         }
@@ -1478,27 +1488,21 @@ private fun SidePanel(
             // `C/c` survives below as a one-time key, so an interrupt is still one
             // press away. The pair that leaves is the pair that needed a second press.
             //
-            // `copy` keeps its own row, which also reads correctly: it is a mode, not
-            // a chord. It toggles tmux copy-mode, which is the only way to scroll the
-            // history of a full-screen program, because a program on the alternate
-            // screen has no local scrollback to page through.
+            // `paste` is the only clipboard control in landscape: copy is automatic
+            // (highlight → release copies to system clipboard), so there is no copy
+            // button. Paste lives here because landscape has no soft keyboard and
+            // no paste gesture — it is the only way to push clipboard text into the
+            // shell. The clipboard is also where a program's own OSC 52 copy lands,
+            // so without this a program's copy would have nowhere to be pasted.
             val clipboard = LocalClipboardManager.current
-            // `paste` joins `copy` because it is the same kind of thing: a control
-            // for the shell's clipboard rather than a chord, so it belongs in a
-            // row that fills the width like every other row. It is needed in this
-            // mode in particular because landscape has no soft keyboard, which
-            // means no paste gesture at all — and the clipboard is where a
-            // program's own OSC 52 copy lands, so without this a program's copy
-            // would have nowhere to be seen.
             KeyRow(
                 listOf(
-                    "copy" to { handle?.setCopyMode(handle?.inCopyMode != true) },
                     "paste" to {
                         val text = clipboard.getText()?.text
                         if (!text.isNullOrEmpty()) handle?.paste(text)
                     },
                 ),
-                active = listOf(handle?.inCopyMode == true, false),
+                active = emptyList(),
             )
             PanelDivider()
             // Backspace joins the keys a soft keyboard cannot send. Landscape has no
@@ -1831,7 +1835,7 @@ fun AppMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
     onLauncher: () -> Unit,
-    onSettings: () -> Unit,
+    onSettings: () -> Unit, // kept for call-site compat; settings lives on the toolbar, not the menu
 ) {
     MaterialTheme(
         colorScheme = LdmuxColors,
@@ -1855,12 +1859,10 @@ fun AppMenu(
                 modifier = Modifier.height(LocalTouch.current.min),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             )
-            DropdownMenuItem(
-                text = { Text("settings", color = Fg) },
-                onClick = { onDismiss(); onSettings() },
-                modifier = Modifier.height(LocalTouch.current.min),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-            )
+            // Settings is a separate button on the toolbar (see `onSettings` at
+            // line ~875 and ~951), not part of the overflow menu — keeping it
+            // here as a single-item dropdown keeps the menu from being a full-
+            // width bar that wastes screen real estate.
         }
     }
 }

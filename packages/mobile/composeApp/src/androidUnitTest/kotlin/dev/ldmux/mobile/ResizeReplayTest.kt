@@ -36,6 +36,7 @@ class ResizeReplayTest {
         cursorX = 0,
         cursorY = 0,
         cursorVisible = true,
+        cursorKnown = true,
         cursorStyle = 1,
         defaultFg = 0,
         defaultBg = 0,

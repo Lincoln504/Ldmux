@@ -334,6 +334,11 @@ class LdmuxClient(private var config: LdmuxConfig) {
      */
     fun requestDesktop() = sendControl("""{"type":"desktop"}""", queueIfOffline = true)
 
+    /** Refresh the session list — used for manual pull-to-refresh and on resume, so
+     * the launcher shows fresh CWDs without waiting for the daemon's 2s CWD drift
+     * poll to fire. */
+    fun refreshSessions() = sendControl("""{"type":"list"}""", queueIfOffline = true)
+
     /** Put this shell's terminal on the desktop's screen, on a chosen workspace. */
     fun makeLive(sessionId: String, workspace: String) = sendControl(
         buildJsonObject {

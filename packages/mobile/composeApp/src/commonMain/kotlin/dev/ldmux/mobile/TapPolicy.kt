@@ -68,12 +68,12 @@ fun planTap(
     // A grid: rows are rows. Up/Down first, so the horizontal part clamps on the
     // line that was actually tapped rather than on the one we started from.
     if (frame.alternateOn) {
-        // A hidden cursor cannot be walked to: every delta below is measured FROM
-        // the cursor, and a program that has hidden it is not showing the user
-        // where it is. Moving it somewhere invisible is not "the cursor goes where
-        // you tapped", it is a guess with no feedback. This is byte 8 of the
-        // frame, which was decoded from the first version and never read.
-        if (!frame.cursorVisible) return TapAction.Ignore
+        // The delta below is measured FROM the cursor, so what it needs is that the
+        // cursor's position is *real* — not that the program wants one drawn. Those
+        // are two different facts in two different bytes, and this asked the wrong
+        // one: `pi` hides the hardware cursor, so every tap in it was refused even
+        // though the emulator knew the input position exactly.
+        if (!frame.cursorKnown) return TapAction.Ignore
         val rows = row - frame.cursorY
         val cols = col - frame.cursorX
         val keys = ArrayList<String>(abs(rows) + abs(cols))
@@ -82,7 +82,9 @@ fun planTap(
         return if (keys.isEmpty()) TapAction.Ignore else TapAction.Keys(keys.take(MAX_TAP_KEYS))
     }
 
-    if (!frame.cursorVisible) return TapAction.Ignore
+    // The same question as the alternate-screen branch above, and the same answer:
+    // whether the position is real, not whether a cursor was asked for.
+    if (!frame.cursorKnown) return TapAction.Ignore
 
     // The screen is a continuous strip, and the strip arithmetic is exact for a
     // WRAPPED input line: an input spanning three rows is reached by walking the

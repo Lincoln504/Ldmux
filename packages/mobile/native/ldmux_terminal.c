@@ -617,6 +617,12 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
   wr16(buf + 2, rows);
   wr16(buf + 4, cursor.viewport_has_value ? cursor.viewport_x : 0);
   wr16(buf + 6, cursor.viewport_has_value ? cursor.viewport_y : 0);
+  /* The program's own request, reported as asked. Whether the coordinates are
+   * *real* is a separate fact and travels in its own byte (`cursorKnown`, byte
+   * 40): `visible` is "draw a cursor here", `viewport_has_value` is "the emulator
+   * knows where it is". A client needs both to draw one and only the second to
+   * move one, and `pi` is exactly the program that separates them: it hides the
+   * hardware cursor and draws its own inverse-video cell instead. */
   buf[8] = (uint8_t)(cursor.visible ? 1 : 0);
   buf[9] = (uint8_t)cursor.visual_style;
 
@@ -703,6 +709,17 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
     sgr_mouse_on = sgr_mouse.value;
   }
   buf[31] = (uint8_t)(sgr_mouse_on ? 1 : 0);
+
+  /* Whether cursorX/cursorY above are meaningful. The emulator's own words: "when
+   * viewport_has_value is false, viewport_x, viewport_y and wide_tail contain
+   * undefined data and must not be read" — which is why the coordinates are
+   * written as 0 in that case, and why the position alone cannot tell a client
+   * whether it is real. Tap-to-cursor measures every step FROM the cursor, so it
+   * has to know: walking from a fabricated (0,0) aims a key run at the wrong
+   * cell. Bytes 41..47 are reserved, so the next header field costs nothing. */
+  buf[40] = (uint8_t)(cursor.viewport_has_value ? 1 : 0);
+  buf[41] = 0; buf[42] = 0; buf[43] = 0; buf[44] = 0;
+  buf[45] = 0; buf[46] = 0; buf[47] = 0;
   /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
    * encoder is mandatory: pad every missing cell with a blank. */
   bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);

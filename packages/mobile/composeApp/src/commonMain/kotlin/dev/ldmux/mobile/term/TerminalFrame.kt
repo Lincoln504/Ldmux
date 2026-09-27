@@ -5,21 +5,27 @@ package dev.ldmux.mobile.term
  * Pure Kotlin so it is unit-testable without a device.
  *
  * Layout (little-endian):
- *   header (40 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (48 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
  *                      u8 passwordInput, u8 viewportActive, u8 mouseTracking,
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
- *                      u8 mouseSgr, u8 alternateOn, u8 reserved[7]
+ *                      u8 mouseSgr, u8 alternateOn,
+ *                      u8 selectionOn, u16 selStartCol, u8 selStartRow,
+ *                      u16 selEndCol, u8 selEndRow,
+ *                      u8 cursorKnown, u8 reserved[7]
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
  *                      u8 utf8[utf8Len]
+ *   flags: bit0 bold, bit1 italic, bit2 underline, bit3 faint, bit4 blink,
+ *          bit5 inverse, bit6 invisible, bit7 strikethrough, bit8 overline,
+ *          bit9 selected
  */
 object TerminalFrame {
     /** Bytes of frame header preceding the cell records. */
-    const val HEADER_SIZE = 40
+    const val HEADER_SIZE = 48
     const val FLAG_BOLD = 1 shl 0
     const val FLAG_ITALIC = 1 shl 1
     const val FLAG_UNDERLINE = 1 shl 2
@@ -51,6 +57,52 @@ object TerminalFrame {
         val bold get() = flags and FLAG_BOLD != 0
         val italic get() = flags and FLAG_ITALIC != 0
         val underline get() = flags and FLAG_UNDERLINE != 0
+
+        /**
+         * Reverse video (`ESC[7m`): draw the cell foreground on the cell
+         * background, swapped.
+         *
+         * The flag was in the wire format from the first version and read by
+         * nobody, which is why `pi`'s cursor was invisible: `pi` draws its own
+         * cursor as an inverse-video cell (`ESC[7m` + the character under it +
+         * `ESC[27m`) rather than showing the hardware cursor, and an unrendered
+         * inverse cell is indistinguishable from a plain one. On a blank cell —
+         * the cursor at the end of typed text — it vanished completely, because
+         * the painter skips a cell with no text.
+         */
+        val inverse get() = flags and FLAG_INVERSE != 0
+
+        /**
+         * The colour this cell's background is actually drawn in.
+         *
+         * Reverse video swaps the two channels, so this is the only correct way
+         * to ask — reading [bg] directly is right for every cell except the ones
+         * the swap exists for.
+         */
+        val drawnBg: Int get() = if (inverse) fg else bg
+
+        /**
+         * The colour this cell's text is actually drawn in.
+         *
+         * Two operations, and they are not the same one: reverse video swaps,
+         * concealment paints the text in whatever the background is so the
+         * character is in the buffer and not on the screen. Treating them as one
+         * (which the first version did) drew reverse video as a solid bar with its
+         * own text hidden inside it.
+         */
+        val drawnFg: Int
+            get() = when {
+                invisible -> drawnBg
+                inverse -> bg
+                else -> fg
+            }
+
+        /**
+         * Concealed text (`ESC[8m`): the character is in the buffer and must not
+         * be shown. Not the same operation as [inverse], which swaps rather than
+         * hides — see [drawnFg].
+         */
+        val invisible get() = flags and FLAG_INVISIBLE != 0
     }
 
     class Frame(
@@ -60,6 +112,17 @@ object TerminalFrame {
         val cursorY: Int,
         val cursorVisible: Boolean,
         val cursorStyle: Int,
+        /**
+         * Whether [cursorX]/[cursorY] are real.
+         *
+         * Separate from [cursorVisible] because they are separate facts: the
+         * program asks for a cursor or not, and the emulator either knows where
+         * it is or reports coordinates that "must not be read". `pi` hides the
+         * hardware cursor — so [cursorVisible] is false — while still tracking
+         * its own input position exactly, which is what makes tap-to-cursor
+         * meaningful there and why the tap policy asks this, not that.
+         */
+        val cursorKnown: Boolean,
         /** The terminal's default foreground, as 0xRRGGBB. */
         val defaultFg: Int,
         /** The terminal's default background, as 0xRRGGBB. */
@@ -86,15 +149,18 @@ object TerminalFrame {
         /**
          * The alternate screen is active — `vim`, `less`, `htop`, `nano`, `top`.
          *
-         * This doc used to claim this flag also separates those from `pi`, Claude
-         * Code and Codex, on the theory that the latter stay on the *primary*
-         * screen. That is false, measured: `pi` emits
-         * `ESC[?1000h ?1002h ?1003h ?1004h ?1006h ?1049h`, i.e. it turns the
-         * alternate screen on too (`1049`), along with SGR mouse tracking
-         * (`1000`/`1002`/`1003`/`1006`) — so this flag alone does not tell a TUI
-         * composer apart from `vim`/`less`/`htop`/`nano`. Read from the emulator
-         * for the same freshness reason as [mouseTracking]; what it means for tap
-         * handling is a separate, still-open question from what this field reports.
+         * This doc has now claimed two different things and neither survived
+         * measurement. It first said the opposite of the paragraph above; it then
+         * claimed `pi` emits `ESC[?1000h ?1002h ?1003h ?1004h ?1006h ?1049h`.
+         * Captured from a real pane on 2026-09-27, `pi` 0.87.1 in its default
+         * `regular` mode emits **none** of them: `alternate_on`,
+         * `mouse_any_flag` and `mouse_sgr_flag` all read 0, and it draws its
+         * composer on the primary screen. It takes the alternate screen only in
+         * its `fullscreen` `tuiMode`. So in the default configuration this bit
+         * does separate a composer from `vim`/`less`/`htop`/`nano` — but nothing
+         * should be built on it in either direction without asking the emulator.
+         * Read from the emulator for the same freshness reason as
+         * [mouseTracking].
          */
         val alternateOn: Boolean,
         /**
@@ -157,7 +223,9 @@ object TerminalFrame {
         val mouseTracking = b[18].toInt() != 0
         val mouseSgr = b[31].toInt() != 0
         val alternateOn = b[32].toInt() != 0
-        // Bytes 33..39: the selection flag, then the two ends. Reserved until now.
+        // Bytes 33..39: the selection flag, then the two ends.
+        // Byte 40: whether cursorX/cursorY may be read at all.
+        val cursorKnown = b[40].toInt() != 0
         val selection = if (b[33].toInt() != 0) {
             SelectionBounds(
                 startCol = u16(b, 34),
@@ -196,6 +264,7 @@ object TerminalFrame {
             cursorY,
             cursorVisible,
             cursorStyle,
+            cursorKnown,
             defaultFg,
             defaultBg,
             passwordInput,

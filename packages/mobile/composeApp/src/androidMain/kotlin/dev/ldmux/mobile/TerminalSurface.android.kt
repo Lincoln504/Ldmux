@@ -33,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
@@ -73,8 +75,12 @@ import dev.ldmux.mobile.term.TerminalFrame
 import dev.ldmux.mobile.term.TerminalPainter
 import dev.ldmux.mobile.term.placeGrid
 import dev.ldmux.mobile.term.rowAfterScroll
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -179,6 +185,15 @@ actual fun rememberTerminalSurface(
     var pinching by remember { mutableStateOf(false) }
     /** The cursor blink phase. Its own canvas, so a blink repaints one cell. */
     var blinkOn by remember { mutableStateOf(true) }
+    /**
+     * The momentum coroutine started when a scroll drag is released with speed.
+     * Held outside the gesture detector (which is recreated only per `Unit` key,
+     * but the job itself must be reachable from the "back to now" pill and from
+     * the next drag's start) so either can cancel it — a fling that is still
+     * pushing the viewport up the scrollback when the user grabs the screen
+     * again, or taps back to live, must stop rather than fight the new input.
+     */
+    var flingJob by remember { mutableStateOf<Job?>(null) }
 
     // The gesture detectors must read the *current* frame and metrics without
     // being restarted by them (restarting would cancel an in-flight gesture).
@@ -210,7 +225,12 @@ actual fun rememberTerminalSurface(
     // The blink follows the pane's idle time: any new cursor position restarts
     // the cycle with the cursor *shown*, so a cursor never looks "off" at the
     // moment the user is typing at it.
-    val liveCursor = frame?.let { it.cursorVisible && it.viewportActive } == true
+    //
+    // `cursorKnown` rather than `viewportActive`: what the draw needs is that the
+    // coordinates are real (byte 40), which the emulator reports separately from
+    // whether the viewport is following live output. A cursor we were never given
+    // a position for must not be painted at (0,0).
+    val liveCursor = frame?.let { it.cursorVisible && it.cursorKnown } == true
     val blinkKey = frame?.let { "${it.cursorX}:${it.cursorY}:${it.cursorVisible}:${it.viewportActive}" }
     LaunchedEffect(blinkKey) {
         blinkOn = true
@@ -536,9 +556,23 @@ actual fun rememberTerminalSurface(
                 }
                 .pointerInput(Unit) {
                     var carry = 0f
+                    // Tracks the raw pointer motion of the drag in flight so that,
+                    // if the finger is still moving when it lifts, the release
+                    // speed can carry the scroll on rather than stopping it dead —
+                    // the actual complaint this fixes.
+                    val tracker = VelocityTracker()
                     detectVerticalDragGestures(
+                        onDragStart = {
+                            // A fresh drag overrides whatever momentum was still
+                            // running: the finger is back on the glass, and it — not
+                            // last gesture's decaying velocity — owns the scroll now.
+                            flingJob?.cancel()
+                            flingJob = null
+                            tracker.resetTracking()
+                        },
                         onVerticalDrag = { change, dragAmount ->
                             change.consume()
+                            tracker.addPosition(change.uptimeMillis, change.position)
                             val rowPx = currentPainter.metrics.height
                             if (rowPx <= 0f) return@detectVerticalDragGestures
                             carry += dragAmount
@@ -548,6 +582,51 @@ actual fun rememberTerminalSurface(
                             if (rows != 0) {
                                 carry -= rows * rowPx
                                 controller.scrollBy(-rows)
+                            }
+                        },
+                        onDragEnd = {
+                            val rowPx = currentPainter.metrics.height
+                            // Positive is the finger (and so the content) moving
+                            // down, matching `dragAmount`'s sign above — same
+                            // reason the fling below can reuse `-rows` unchanged.
+                            val releaseVelocity = tracker.calculateVelocity().y
+                            if (rowPx <= 0f || abs(releaseVelocity) < FLING_MIN_VELOCITY_PX_S) return@detectVerticalDragGestures
+                            flingJob = scope.launch {
+                                var velocity = releaseVelocity
+                                var lastFrameNanos = -1L
+                                // `isActive` is how a cancel (new drag, or jump-to-
+                                // bottom) stops this without a flag threaded through
+                                // three call sites.
+                                while (isActive && abs(velocity) >= FLING_MIN_VELOCITY_PX_S) {
+                                    val nowNanos = withFrameNanos { it }
+                                    if (lastFrameNanos < 0L) {
+                                        lastFrameNanos = nowNanos
+                                        continue
+                                    }
+                                    val dtSeconds = (nowNanos - lastFrameNanos) / 1_000_000_000f
+                                    lastFrameNanos = nowNanos
+                                    // Same carry the drag used: the fling is that
+                                    // same finger motion, continued past the release,
+                                    // so it inherits whatever sub-row remainder the
+                                    // drag left rather than starting a new one.
+                                    carry += velocity * dtSeconds
+                                    val rows = (carry / rowPx).toInt()
+                                    if (rows != 0) {
+                                        carry -= rows * rowPx
+                                        // Self-clamping: 0 back means the scrollback
+                                        // end (or the alternate screen) refused the
+                                        // move, which is the honest place to stop —
+                                        // decaying to zero against a wall a screen
+                                        // away just wastes frames.
+                                        if (controller.scrollBy(-rows) == 0) break
+                                    }
+                                    // Exponential decay, framerate-independent: a
+                                    // dropped frame (a slow device) still lands the
+                                    // same *speed* at the same *time*, not the same
+                                    // speed after fewer, bigger steps.
+                                    velocity *= exp(-FLING_FRICTION_PER_SEC * dtSeconds)
+                                }
+                                flingJob = null
                             }
                         },
                         // The remainder deliberately survives the end of a drag.
@@ -731,7 +810,13 @@ actual fun rememberTerminalSurface(
                     .padding(12.dp)
                     .clip(RoundedCornerShape(50))
                     .background(Color(0xB3000000))
-                    .clickable { controller.scrollToBottom() }
+                    .clickable {
+                        // A live fling still pushing the viewport up the history
+                        // must not immediately fight this jump back down.
+                        flingJob?.cancel()
+                        flingJob = null
+                        controller.scrollToBottom()
+                    }
                     .padding(horizontal = 14.dp, vertical = 6.dp),
             ) {
                 Text("\u2193", color = Fg, fontSize = 16.sp)
@@ -862,6 +947,22 @@ private const val TAP_SLOP_PX = 20f
  * and it is the one users recognise without noticing it.
  */
 private const val BLINK_MS = 530L
+
+/**
+ * Below this release speed (px/s), a drag's momentum is not worth animating —
+ * a slow lift is a deliberate stop, not a fling, and animating it anyway would
+ * read as the scroll refusing to settle.
+ */
+private const val FLING_MIN_VELOCITY_PX_S = 50f
+
+/**
+ * Per-second exponential decay rate for the fling. Chosen so a typical fast
+ * flick (roughly 4000–6000 px/s off `VelocityTracker`, measured against Android's
+ * own fling defaults) decays below [FLING_MIN_VELOCITY_PX_S] in a little under a
+ * second — present, but not a scroll that hunts for the bottom of the shell for
+ * three seconds after one flick.
+ */
+private const val FLING_FRICTION_PER_SEC = 4.5f
 
 /**
  * A thin scrollbar while the view is parked in history. The emulator polls its

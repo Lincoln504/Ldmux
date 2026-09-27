@@ -51,7 +51,15 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 val cell = frame.cells[i]
                 val x = (i % cols) * m.width
                 val y = (i / cols) * m.height
-                val bg = argb(cell.bg)
+                // Reverse video and concealment are applied by the cell itself
+                // (`drawnBg`/`drawnFg`), because getting the swap wrong is invisible
+                // in a screenshot of plain text and the two operations are easy to
+                // collapse into one. `pi` draws its cursor as reverse video
+                // (`ESC[7m` + the character under it + `ESC[27m`) rather than showing
+                // the hardware cursor, so before this the cursor cell was painted as
+                // ordinary text — and on a blank cell, where the `isBlank` skip below
+                // draws nothing at all, it vanished completely.
+                val bg = argb(cell.drawnBg)
                 // The cell's own background first, then the selection over it.
                 //
                 // This was an inversion, and an inversion of an *empty* cell's
@@ -69,7 +77,7 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                     nc.drawRect(x, y, x + m.width, y + m.height, selPaint)
                 }
                 if (cell.text.isBlank()) continue
-                fgPaint.color = argb(cell.fg)
+                fgPaint.color = argb(cell.drawnFg)
                 fgPaint.isFakeBoldText = cell.bold
                 fgPaint.textSkewX = if (cell.italic) -0.25f else 0f
                 fgPaint.isUnderlineText = cell.underline
@@ -129,7 +137,10 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 val i = frame.cursorY * frame.cols + frame.cursorX
                 val cell = frame.cells.getOrNull(i)
                 if (cell != null && cell.text.isNotBlank()) {
-                    fgPaint.color = argb(cell.bg)
+                    // The colour actually behind the glyph, which reverse video has
+                    // swapped — repainting it in `cell.bg` on an inverse cell would
+                    // draw the glyph in the colour it is already on top of.
+                    fgPaint.color = argb(cell.drawnBg)
                     fgPaint.isFakeBoldText = cell.bold
                     fgPaint.textSkewX = if (cell.italic) -0.25f else 0f
                     fgPaint.isUnderlineText = false

@@ -24,12 +24,14 @@ class TapPolicyTest {
         viewportActive: Boolean = true,
         passwordInput: Boolean = false,
         cursorVisible: Boolean = true,
+        cursorKnown: Boolean = true,
     ) = TerminalFrame.Frame(
         cols = cols,
         rows = rows,
         cursorX = cursorX,
         cursorY = cursorY,
         cursorVisible = cursorVisible,
+        cursorKnown = cursorKnown,
         cursorStyle = 1,
         defaultFg = 0,
         defaultBg = 0,
@@ -161,21 +163,30 @@ class TapPolicyTest {
     }
 
     @Test
-    fun `a hidden cursor is not walked to`() {
-        // Every delta is measured FROM the cursor. A program that has hidden it is
-        // not showing the user where it is, so moving it is a guess with no
-        // feedback — byte 8 of the frame, decoded since the first version and
-        // never read until now.
-        assertEquals(TapAction.Ignore, planTap(20, 5, frame(cursorVisible = false)))
+    fun `a cursor with no known position is not walked to`() {
+        // Every delta is measured FROM the cursor, so the position has to be real.
+        // This is not the question "does the program want a cursor drawn", and
+        // conflating the two is what left taps doing nothing in `pi`.
+        assertEquals(TapAction.Ignore, planTap(20, 5, frame(cursorKnown = false)))
         assertEquals(
             TapAction.Ignore,
-            planTap(20, 5, frame(cursorVisible = false, alternateOn = true)),
+            planTap(20, 5, frame(cursorKnown = false, alternateOn = true)),
         )
         // A mouse click still goes through: it does not depend on the cursor.
         assertEquals(
             TapAction.Click(20, 5),
-            planTap(20, 5, frame(cursorVisible = false, mouseTracking = true, mouseSgr = true)),
+            planTap(20, 5, frame(cursorKnown = false, mouseTracking = true, mouseSgr = true)),
         )
+    }
+
+    @Test
+    fun `a hidden cursor with a known position is still walked to`() {
+        // The measured `pi` case: it emits `ESC[?25l` and tracks its own input
+        // position exactly, so a tap must move the cursor rather than doing
+        // nothing — nothing is what the user saw, with a yellow outline where they
+        // touched and no cursor anywhere on the screen.
+        val a = planTap(20, 5, frame(cursorVisible = false)) as TapAction.Keys
+        assertTrue(a.keys.isNotEmpty())
     }
 
     @Test

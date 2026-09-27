@@ -9,7 +9,7 @@
  * so an upstream change breaks one translation unit rather than the app.
  *
  * Frame format returned by ldmux_terminal_render (little-endian):
- *   header (40 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (48 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
@@ -17,7 +17,8 @@
  *                      u32 scrollTotal, u32 scrollOffset, u32 scrollLen,
  *                      u8 mouseSgr, u8 alternateOn,
  *                      u8 selectionOn, u16 selStartCol, u8 selStartRow,
- *                      u16 selEndCol, u8 selEndRow)
+ *                      u16 selEndCol, u8 selEndRow,
+ *                      u8 cursorKnown, u8 reserved[7])
  *                      (the terminal's default colours so the client can paint
  *                      the whole surface in the same background; whether the
  *                      cursor is at a password prompt, which decides whether
@@ -26,7 +27,11 @@
  *                      without a second call; and the mouse modes, so a tap can
  *                      be sent as a click the moment a program asks for the
  *                      mouse rather than when the next server snapshot happens
- *                      to arrive)
+ *                      to arrive; and whether the cursor's coordinates are real,
+ *                      which the emulator reports separately from whether the
+ *                      program wants a cursor at all — `pi` hides the hardware
+ *                      cursor and draws its own, so a client that conflated the
+ *                      two had no cursor to show and no cell to walk to)
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
@@ -46,7 +51,7 @@
 
 #define CELL_MAX_UTF8 16
 #define CELL_RECORD_MAX (9 + CELL_MAX_UTF8)
-#define FRAME_HEADER 40
+#define FRAME_HEADER 48
 
 /**
  * Scroll deltas that mean "the ends", not a number of rows. They are sentinel
@@ -225,5 +230,11 @@ int ldmux_terminal_selection_bounds(LdmuxTerminal *t, int *start_col, int *start
 
 /** Set on a cell whose style flags put it inside the selection (bit 9). */
 #define LDMUX_FLAG_SELECTED (1u << 9)
+
+/* Reverse video, `ESC[7m`. Written inline in the cell encoder's style block
+ * rather than as a define, like every other style bit; named here because the
+ * tests assert it and an unnamed bit is one nobody can look up. The style block
+ * is bits 0..8 and must stay below [LDMUX_FLAG_SELECTED]. */
+#define LDMUX_FLAG_INVERSE (1u << 5)
 
 #endif /* LDMUX_TERMINAL_H */

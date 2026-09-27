@@ -60,6 +60,7 @@ class TerminalFrameTest {
         cursorX: Int = 0,
         cursorY: Int = 0,
         visible: Boolean = true,
+        known: Boolean = true,
         style: Int = 1,
         defFg: Int = 0xE6E6E6,
         defBg: Int = 0x1E1E1E,
@@ -88,6 +89,8 @@ class TerminalFrameTest {
         u32(scrollLen)
         byte(if (mouseSgr) 1 else 0)
         byte(if (alternateOn) 1 else 0)
+        repeat(7) { byte(0) } // selection: flag + two 16-bit columns + two rows
+        byte(if (known) 1 else 0)
         repeat(7) { byte(0) } // reserved
         for ((text, fg, bg) in cells) cell(text, fg, bg)
     }.build()
@@ -100,8 +103,59 @@ class TerminalFrameTest {
         assertEquals(0xE6E6E6, f.defaultFg)
         assertEquals(0x1E1E1E, f.defaultBg)
         // The C side and this decoder must agree on where the cells start.
-        assertEquals(40, TerminalFrame.HEADER_SIZE)
+        assertEquals(48, TerminalFrame.HEADER_SIZE)
         assertEquals(TerminalFrame.HEADER_SIZE, frame(1, 1, listOf(Triple("x", 1, 2))).size - 10)
+    }
+
+    @Test
+    fun `cursorKnown is decoded separately from cursorVisible`() {
+        // The measured `pi` case: a hidden cursor whose position is still real, so
+        // the client must not draw a hardware cursor and must still be able to walk
+        // to it. And the case that must not be walked to at all.
+        val pi = TerminalFrame.decode(frame(1, 1, listOf(Triple(" ", 0, 0)), visible = false, known = true))
+        assertFalse(pi.cursorVisible)
+        assertTrue(pi.cursorKnown)
+        val lost = TerminalFrame.decode(frame(1, 1, listOf(Triple(" ", 0, 0)), known = false))
+        assertFalse(lost.cursorKnown)
+    }
+
+    @Test
+    fun `reverse video swaps the two channels, and concealment hides the text`() {
+        // Two operations, not one, and a client that collapses them draws reverse
+        // video as a solid bar with its own text hidden inside it. This is the
+        // difference between `pi`'s cursor being visible and being a white rectangle.
+        val plain = TerminalFrame.Cell("x", fg = 0xFFFFFF, bg = 0x000000, flags = 0)
+        assertEquals(0xFFFFFF, plain.drawnFg)
+        assertEquals(0x000000, plain.drawnBg)
+
+        val reversed = TerminalFrame.Cell("x", 0xFFFFFF, 0x000000, TerminalFrame.FLAG_INVERSE)
+        assertEquals(0x000000, reversed.drawnFg)
+        assertEquals(0xFFFFFF, reversed.drawnBg)
+
+        val hidden = TerminalFrame.Cell("x", 0xFFFFFF, 0x000000, TerminalFrame.FLAG_INVISIBLE)
+        assertEquals(0x000000, hidden.drawnFg)
+        assertEquals(0x000000, hidden.drawnBg)
+
+        // Concealment wins over the swap: a withheld character must not come back
+        // because the cell was also reversed.
+        val both = TerminalFrame.Cell(
+            "x",
+            0xFFFFFF,
+            0x000000,
+            TerminalFrame.FLAG_INVERSE or TerminalFrame.FLAG_INVISIBLE,
+        )
+        assertEquals(both.drawnBg, both.drawnFg)
+    }
+
+    @Test
+    fun `an inverse blank cell is a filled block, which is what pi's cursor is`() {
+        // pi's cursor is reverse video over a space: no glyph, and the cell's own
+        // foreground painted as the background. If `drawnBg` is not the foreground,
+        // the cell is drawn as nothing at all and the cursor is invisible.
+        val cursor = TerminalFrame.Cell(" ", fg = 0xFFFFFF, bg = 0x000000, TerminalFrame.FLAG_INVERSE)
+        assertTrue(cursor.inverse)
+        assertTrue(cursor.text.isBlank())
+        assertEquals(0xFFFFFF, cursor.drawnBg)
     }
 
     @Test
@@ -193,7 +247,7 @@ class TerminalFrameTest {
             u32(0); u32(0); u32(0)
             byte(0) // mouse-sgr
             byte(0) // alternate screen
-            repeat(7) { byte(0) } // reserved
+            repeat(15) { byte(0) } // selection (7), cursorKnown, reserved
             cell("x", 1, 2, TerminalFrame.FLAG_BOLD or TerminalFrame.FLAG_UNDERLINE)
         }.build()
         val f = TerminalFrame.decode(bytes)
@@ -212,7 +266,7 @@ class TerminalFrameTest {
             u32(0); u32(0); u32(0)
             byte(0)
             byte(0)
-            repeat(7) { byte(0) }
+            repeat(15) { byte(0) } // selection (7), cursorKnown, reserved
             cell("x", 1, 2, TerminalFrame.FLAG_SELECTED)
             cell("y", 1, 2, TerminalFrame.FLAG_SELECTED or TerminalFrame.FLAG_BOLD)
             cell("z", 1, 2, TerminalFrame.FLAG_BOLD)
@@ -239,6 +293,7 @@ class TerminalFrameTest {
             byte(1) // selection on
             u16(3); byte(1) // start col 3, row 1
             u16(9); byte(2) // end col 9, row 2
+            repeat(8) { byte(0) } // cursorKnown, then the rest of the reserved run
             cell("x", 1, 2)
         }.build()
         val f = TerminalFrame.decode(bytes)

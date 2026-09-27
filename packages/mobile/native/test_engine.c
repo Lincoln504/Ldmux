@@ -225,26 +225,32 @@ static void test_unterminated_is_not_delivered(void) {
 
 /* ------------------------------------------------------------------- frame */
 
-/* The header is a contract with Kotlin, and one field of it is a contract with
- * the tap policy. Byte 8 is cursorVisible: TapPolicy never read it, so a tap on
- * a screen with no cursor could be classified as if there were one. */
+/* The header is a contract with Kotlin, and two of its fields are a contract with
+ * the tap policy: byte 8 is whether the program asks for a cursor at all, and byte
+ * 40 is whether the coordinates are real. A client that conflates them cannot
+ * serve `pi`, which hides the hardware cursor and draws its own. */
 static void test_frame_header_contract(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   feed(t, "hi");
   const uint8_t *buf = NULL;
   size_t len = 0;
   CHECK(ldmux_terminal_render(t, &buf, &len));
-  CHECK(len >= 40);
+  CHECK(len >= 48);
   CHECK_EQ_INT(buf[0] | (buf[1] << 8), 80); /* cols, little endian */
   CHECK_EQ_INT(buf[2] | (buf[3] << 8), 24); /* rows */
   CHECK_EQ_INT(buf[8], 1);                  /* cursorVisible */
   CHECK_EQ_INT(buf[32], 0);                 /* alternateOn: primary screen */
+  CHECK_EQ_INT(buf[40], 1);                 /* cursorKnown */
 
   ldmux_terminal_free(t);
 }
 
 /* Alternate screen is the one signal the client gets about a full-screen
- * program, and pi enables it. It must be readable. */
+ * program. What it must NOT be read as is "this is a TUI composer": measured
+ * 2026-09-27, `pi` in its default `regular` mode emits no `?1049h` at all (and no
+ * mouse modes) and draws its composer on the primary screen, so a client that
+ * keyed tap handling off this bit alone would mis-serve it. The bit reports the
+ * screen and nothing else. */
 static void test_alternate_screen_bit(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   feed(t, "\x1b[?1049h");
@@ -279,7 +285,7 @@ static uint16_t cell_flags_at(const uint8_t *buf, size_t len, int want_col,
                               int want_row) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = 40;
+  size_t p = FRAME_HEADER;
   for (int r = 0; r < rows; r++) {
     for (int c = 0; c < cols; c++) {
       if (p + 9 > len) return 0;
@@ -300,7 +306,7 @@ static bool row_text_starts(const uint8_t *buf, size_t len, int want_row,
                             const char *want) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = 40;
+  size_t p = FRAME_HEADER;
   for (int r = 0; r < want_row && r < rows; r++) {
     for (int c = 0; c < cols; c++) {
       if (p + 9 > len) return false;
@@ -319,7 +325,7 @@ static bool row_text_starts(const uint8_t *buf, size_t len, int want_row,
 static int selected_cell_count(const uint8_t *buf, size_t len) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = 40;
+  size_t p = FRAME_HEADER;
   int count = 0;
   for (int r = 0; r < rows; r++) {
     for (int c = 0; c < cols; c++) {
@@ -352,6 +358,32 @@ static const char *selection_cstr(LdmuxTerminal *t) {
  * back is the thing the user will see on the clipboard. */
 /* A press, a drag and a release is the whole gesture, and the text that comes
  * back is the thing the user will see on the clipboard. */
+/* **`pi`'s cursor, exactly — the case that made it invisible.**
+ *
+ * pi hides the hardware cursor (`ESC[?25l`) and draws its own as an inverse-video
+ * cell. The client read `cursorVisible = 0` and drew no hardware cursor (right),
+ * but it also never rendered the inverse attribute, so the cell pi drew for its
+ * own cursor came out as ordinary text — and on a blank cell, where the painter
+ * skips cells with no text, as nothing at all. Two facts have to survive the wire
+ * for that to work: the cursor is hidden, and its coordinates are still real. */
+static void test_pi_style_cursor_is_hidden_and_inverted(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  feed(t, "\x1b[?25l");        /* pi hides the hardware cursor... */
+  feed(t, "\x1b[7m \x1b[27m"); /* ...and draws its own, inverted */
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(buf[8], 0);  /* nothing for the client to draw itself */
+  CHECK_EQ_INT(buf[40], 1); /* but its position is real, so a tap can walk to it */
+  CHECK((cell_flags_at(buf, len, 0, 0) & LDMUX_FLAG_INVERSE) != 0);
+  CHECK((cell_flags_at(buf, len, 1, 0) & LDMUX_FLAG_INVERSE) == 0);
+  /* The inverse bit is the style block's, and setting it must not disturb the
+   * flags around it: bit 9 is selection and this cell is not selected. */
+  CHECK((cell_flags_at(buf, len, 0, 0) & LDMUX_FLAG_SELECTED) == 0);
+  ldmux_terminal_free(t);
+}
+
 static void test_drag_selects_text(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
@@ -881,6 +913,8 @@ int main(void) {
       {"large payload grows", test_large_payload_grows},
       {"unterminated is not delivered", test_unterminated_is_not_delivered},
       {"frame header contract", test_frame_header_contract},
+      {"pi-style cursor: hardware hidden, own cursor inverted",
+       test_pi_style_cursor_is_hidden_and_inverted},
       {"alternate screen bit", test_alternate_screen_bit},
       {"cursor advances one column", test_cursor_advances_one_column},
       {"drag selects text", test_drag_selects_text},
