@@ -1,11 +1,11 @@
 import { test, expect, afterAll } from "../../testing/src/expect.ts";
 import { TmuxControlClient } from "../src/tmux/control-client.ts";
-import { killTmuxServer } from "./tmux-cleanup.ts";
+import { killTmuxServer, TMUX_BIN } from "./tmux-cleanup.ts";
 import { spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const SOCK = `ldmux-test-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-const tm = (...args: string[]) => spawnSync("tmux", ["-L", SOCK, ...args]);
+const tm = (...args: string[]) => spawnSync(TMUX_BIN, ["-L", SOCK, ...args]);
 
 afterAll(() => {
   killTmuxServer(SOCK);
@@ -109,7 +109,7 @@ test("a control client destroyed without %exit is still reported dead", { timeou
   // resync, and a terminal frozen forever, which is exactly the failure
   // snapshot-on-connect exists to recover from.
   const sock = `ldmux-test-exit-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  const tm2 = (...args: string[]) => spawnSync("tmux", ["-L", sock, ...args]);
+  const tm2 = (...args: string[]) => spawnSync(TMUX_BIN, ["-L", sock, ...args]);
   try {
     expect(
       tm2("new-session", "-d", "-s", "gone", "-x", "80", "-y", "24", "bash", "--norc", "--noprofile").status,

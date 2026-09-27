@@ -14,8 +14,22 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { resolveTmuxBin } from "../src/tmux/control-plane.ts";
 
-export function killTmuxServer(socket: string, bin = "tmux"): void {
+/**
+ * The tmux to drive a scratch server with: the same binary the daemon will pick.
+ *
+ * Not a bare `tmux`. The daemon resolves `LDMUX_TMUX_BIN` before PATH, and when
+ * the developer's own shell *is* an ldmux session that variable points at the
+ * flake's runtime — so a bare `tmux` in a test was `/usr/bin/tmux` 3.5a issuing
+ * commands at a server 3.7b had just created. The two disagree on the socket, the
+ * server reads as "exited unexpectedly", and the damage is not one failure: 26
+ * tests across five files fail as if the product were broken, in the shell of the
+ * one person most likely to run them.
+ */
+export const TMUX_BIN = resolveTmuxBin();
+
+export function killTmuxServer(socket: string, bin = TMUX_BIN): void {
   try {
     spawnSync(bin, ["-L", socket, "kill-server"], { stdio: "ignore" });
   } catch {

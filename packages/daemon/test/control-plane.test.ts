@@ -7,7 +7,7 @@ import {
   resolveLoginShell,
   TmuxControlPlane,
 } from "../src/tmux/control-plane.ts";
-import { killTmuxServer } from "./tmux-cleanup.ts";
+import { killTmuxServer, TMUX_BIN } from "./tmux-cleanup.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "ldmux-faketmux-"));
 const realPath = process.env.PATH ?? "";
@@ -96,7 +96,7 @@ test("the size belongs to the shell's owner, and can be handed over", async () =
 
   const { execFileSync } = await import("node:child_process");
   const readSession = (name: string) =>
-    execFileSync("tmux", ["-L", SOCKET, "show-options", "-t", name, "window-size"], {
+    execFileSync(TMUX_BIN, ["-L", SOCKET, "show-options", "-t", name, "window-size"], {
       encoding: "utf8",
     }).trim();
 
@@ -134,7 +134,7 @@ test("the server profile is written, and every server we start reads it", async 
   const fresh = COLD_SOCKET;
   const { execFileSync } = await import("node:child_process");
   try {
-    execFileSync("tmux", ["-L", fresh, "kill-server"], { stdio: "ignore" });
+    execFileSync(TMUX_BIN, ["-L", fresh, "kill-server"], { stdio: "ignore" });
   } catch {
     /* no server to kill, which is the point */
   }
@@ -160,7 +160,7 @@ test("the server profile is written, and every server we start reads it", async 
   // plane — which passes `-f` on every spawn precisely so this cannot be forgotten.
   await cold.newSession({ name: "cold", cwd: tmpdir(), command: [], cols: 80, rows: 24 });
   const read = (name: string) =>
-    execFileSync("tmux", ["-L", fresh, "show-options", "-g", name], { encoding: "utf8" }).trim();
+    execFileSync(TMUX_BIN, ["-L", fresh, "show-options", "-g", name], { encoding: "utf8" }).trim();
   expect(read("history-limit")).toBe("history-limit 1234");
   expect(read("extended-keys")).toBe("extended-keys on");
   expect(read("allow-passthrough")).toBe("allow-passthrough on");

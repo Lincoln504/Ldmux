@@ -429,7 +429,12 @@ test("a connection that has said nothing for too long is taken away, and its cla
 
   // ...and then it says nothing at all, and answers nothing.
   expect(await waitFor(() => closed.length > 0, 5000)).toBe(true);
-  expect(claims.has("s1")).toBe(false);
+  // The release is a *timer*, not a synchronous consequence of the close: the
+  // grace a reconnect rides out is still one macrotask even at 0, and the server
+  // learns of the death after the client does. Asserting on the next line passed
+  // only while the client's close and the server's happened to land in that
+  // order — it was measuring the race, not the rule. Wait for the rule.
+  expect(await waitFor(() => !claims.has("s1"))).toBe(true);
 });
 
 test("an attach that fails to subscribe gives its claim back", async () => {

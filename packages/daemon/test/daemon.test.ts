@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LdmuxDaemon } from "../src/daemon.ts";
 import { Registry } from "../src/registry.ts";
-import { killTmuxServer } from "./tmux-cleanup.ts";
+import { killTmuxServer, TMUX_BIN } from "./tmux-cleanup.ts";
 import { call } from "../../protocol/src/socket-client.ts";
 import type { SessionRecord } from "../../protocol/src/rpc.ts";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -16,7 +16,7 @@ const stateDir = mkdtempSync(join(tmpdir(), "ldmux-daemon-"));
 const daemon = new LdmuxDaemon({ stateDir, tmuxSocket, remotePort: 0 });
 await daemon.start();
 
-const tm = (...a: string[]) => spawnSync("tmux", ["-L", tmuxSocket, ...a]);
+const tm = (...a: string[]) => spawnSync(TMUX_BIN, ["-L", tmuxSocket, ...a]);
 
 afterAll(() => {
   daemon.stop();

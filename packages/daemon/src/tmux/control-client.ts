@@ -10,10 +10,16 @@
 import { spawn } from "node:child_process";
 import { killTree } from "../proc.ts";
 import { ControlParser } from "./control-parser.ts";
+import { resolveTmuxBin } from "./control-plane.ts";
 
 export interface TmuxControlClientOptions {
   /** The server profile to read, so a server this client starts is not on defaults. */
   profilePath?: string;
+  /**
+   * The tmux to attach with. Defaults to [resolveTmuxBin], which is what the
+   * control plane uses — see the note on `spawnTmuxControl`.
+   */
+  bin?: string;
   onOutput?: (pane: string, text: string) => void;
   onNotification?: (line: string) => void;
   /** tmux paused a pane because this client fell behind (`%pause`). */
@@ -126,11 +132,21 @@ function spawnTmuxControl(
   socket: string,
   session: string,
   profilePath?: string,
+  bin: string = resolveTmuxBin(),
 ): ControlProc {
+  // `bin` rather than a bare `tmux`, and the reason is not tidiness: a control
+  // client *starts* the server if one is not running. A bare name here would start
+  // it on whatever PATH the caller happens to have — a second, differently
+  // configured server on the same socket — while every command from the control
+  // plane went to a server the flake's tmux had made. That is exactly how the test
+  // suite failed in 26 places at once for a developer whose shell is an ldmux
+  // session, and the same thing happens in production to a daemon started by hand
+  // rather than by the unit.
+  //
   // `-f` too: a control client can be what starts the server, and a server started
   // without the profile is a server on tmux's defaults.
   const child = spawn(
-    "tmux",
+    bin,
     ["-L", socket, ...(profilePath ? ["-f", profilePath] : []), "-C", "attach", "-t", session],
     {
     stdio: ["pipe", "pipe", "pipe"],
@@ -268,7 +284,7 @@ export class TmuxControlClient {
     session: string,
     opts: TmuxControlClientOptions = {},
   ): Promise<TmuxControlClient> {
-    const proc = spawnTmuxControl(socket, session, opts.profilePath);
+    const proc = spawnTmuxControl(socket, session, opts.profilePath, opts.bin);
     const client = new TmuxControlClient(proc, opts);
     // tmux emits an unsolicited empty `%begin/%end` block on attach; wait for
     // `%session-changed` (which follows it) before issuing commands so the

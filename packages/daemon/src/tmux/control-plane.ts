@@ -377,7 +377,38 @@ export class TmuxControlPlane {
       ["set-option", "-g", "history-limit", String(history)],
       ...(loginShell ? [["set-option", "-g", "default-shell", loginShell]] : []),
       ["set-option", "-g", "default-terminal", "tmux-256color"],
+      // **The mouse belongs to tmux, and that is a trade with a real cost.**
+      //
+      // tmux draws into the alternate screen, so a terminal attached to it has no
+      // scrollback of its own: measured 2026-09-27, with `mouse off` the wheel in a
+      // desk window does nothing at all and a drag is the terminal's own selection
+      // rather than tmux's. With `mouse on`, the wheel scrolls the pane's history and
+      // a drag selects in copy-mode — what a person at the desk expects, and the only
+      // way to scroll a tmux client at all. The cost is that copy-mode's highlight
+      // replaces alacritty's native one; the text still reaches the desktop clipboard
+      // because `set-clipboard on` and `allow-passthrough on` are set below, which is
+      // what carries copy-mode's selection out over OSC 52.
+      //
+      // Middle-click paste needs nothing added: tmux's own `MouseDown2Pane` runs
+      // `paste-buffer -p` when the pane is not asking for the mouse, which is exactly
+      // the desktop gesture.
+      //
+      // None of this reaches the mobile client, which is not a tmux client: it
+      // synthesizes clicks through `send-keys -H` and scrolls its own emulator, so
+      // neither path goes through tmux's pointer handling.
       ["set-option", "-g", "mouse", "on"],
+      // ...and the wheel moves further per notch than tmux's stock five lines, so a
+      // desk window scrolls at something like the speed of the terminal it is sitting
+      // in. Both mode tables are bound, because `mode-keys` picks which one is live
+      // and this server deliberately does not choose that for the user. `select-pane`
+      // keeps tmux's own rule of focusing the pane under the pointer first; the `;`
+      // separator is quoted by [tmuxConfigWord] into `';'`, which tmux parses back to
+      // a literal argument (verified 2026-09-27, including through `source-file` on a
+      // running server) instead of splitting the command.
+      ["bind-key", "-T", "copy-mode", "WheelUpPane", "select-pane", ";", "send-keys", "-X", "-N", "15", "scroll-up"],
+      ["bind-key", "-T", "copy-mode", "WheelDownPane", "select-pane", ";", "send-keys", "-X", "-N", "15", "scroll-down"],
+      ["bind-key", "-T", "copy-mode-vi", "WheelUpPane", "select-pane", ";", "send-keys", "-X", "-N", "15", "scroll-up"],
+      ["bind-key", "-T", "copy-mode-vi", "WheelDownPane", "select-pane", ";", "send-keys", "-X", "-N", "15", "scroll-down"],
       ["set-option", "-g", "status", "off"],
       // The desk window's title is the program's, as it is outside tmux: a pane's
       // OSC title (pi's "π - project", a shell's prompt title) goes no further than
@@ -390,12 +421,20 @@ export class TmuxControlPlane {
       // server re-reads this file ([ensureServer]) and would otherwise keep it.
       ["set-option", "-gu", "window-size"],
       // `window-size manual` is **not** set here, and must not be: set globally,
-      // tmux 3.5a — Debian 13's, and the one the deployed daemon runs — crashes on
-      // the next `new-session -d` ("server exited unexpectedly"), from a config
-      // file and from a live `set -g` alike. It is set per session in
-      // [newSession] instead, which 3.5a handles (measured 2026-09-26). The suite
-      // runs on the devShell's 3.7b, which does not crash, and that is how a daemon
-      // that could not create a single shell after a reboot passed every test.
+      // tmux 3.5a — Debian 13's, the system tmux on this machine — crashes on the
+      // next `new-session -d` ("server exited unexpectedly"), from a config file and
+      // from a live `set -g` alike. It is set per session in [newSession] instead,
+      // which 3.5a handles (measured 2026-09-26). The suite runs on the devShell's
+      // 3.7b, which does not crash, and that is how a daemon that could not create a
+      // single shell after a reboot passed every test.
+      //
+      // CORRECTION (2026-09-27): this said 3.5a was "the one the deployed daemon
+      // runs". It is not. The unit sets `LDMUX_TMUX_BIN=%S/ldmux/runtime/bin/tmux`,
+      // which `just install` links to the flake's runtime, so the deployed daemon
+      // runs the same 3.7b the suite does — and did already when that line was
+      // written. 3.5a is the *fallback*: a daemon started by hand, on a host with no
+      // installed runtime, resolves PATH instead. Supported rather than deployed, and
+      // `deployed-tmux.test.ts` is what keeps it that way.
       ["set-option", "-g", "set-clipboard", "on"],
       ["set-option", "-g", "focus-events", "on"],
       // **Extended keys, because a program inside a pane can tell.**

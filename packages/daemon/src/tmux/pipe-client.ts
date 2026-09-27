@@ -35,6 +35,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { resolveTmuxBin } from "./control-plane.ts";
 
 /** A pipe that dies this often is not worth restarting. */
 export const PIPE_READER_POLL_MS = 500;
@@ -95,7 +96,12 @@ export class TmuxPipeClient {
   }
 
   private get bin(): string {
-    return this.opts.bin ?? "tmux";
+    // [resolveTmuxBin] rather than a bare `tmux`, for the same reason the control
+    // client uses it: this client both attaches to a session *and* starts a server
+    // when one is not running, so a name resolved by PATH here can be a different
+    // tmux from the one the control plane creates sessions with. Two servers on one
+    // socket, two profiles, and the visible symptom is a pane that never streams.
+    return this.opts.bin ?? resolveTmuxBin();
   }
 
   private baseArgs(): string[] {
@@ -106,25 +112,44 @@ export class TmuxPipeClient {
   }
 
   /** One tmux command, awaited. Returns null on failure rather than throwing. */
+  /**
+   * tmux's own words about the last command that failed.
+   *
+   * Kept because they are the only diagnosis available. A non-zero `pipe-pane` is
+   * one bit of information, and the caller could only ever say "could not be
+   * started" — while tmux had already said exactly what was wrong, in a stream the
+   * handler here discarded. That cost real time: a missing devShell and a pane that
+   * genuinely refuses a pipe produced identical, undiagnosable failures.
+   */
+  private lastStderr = "";
+
   private async tmux(args: string[]): Promise<string | null> {
     return new Promise((resolve) => {
       const child = spawn(this.bin, [...this.baseArgs(), ...args], {
         stdio: ["ignore", "pipe", "pipe"],
       });
       let out = "";
+      let err = "";
+      const done = (result: string | null) => {
+        this.lastStderr = err.trim();
+        return result;
+      };
       child.stdout?.on("data", (d: Buffer) => (out += d.toString("utf8")));
-      child.stderr?.on("data", () => {});
+      child.stderr?.on("data", (d: Buffer) => (err += d.toString("utf8")));
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
-        resolve(null);
+        // A timeout with no words from tmux still has to say which command hung.
+        err ||= `timed out after ${(this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)}ms`;
+        resolve(done(null));
       }, this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      child.on("error", () => {
+      child.on("error", (e: Error) => {
         clearTimeout(timer);
-        resolve(null);
+        err ||= e.message;
+        resolve(done(null));
       });
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolve(code === 0 ? out : null);
+        resolve(done(code === 0 ? out : null));
       });
     });
   }
@@ -208,7 +233,9 @@ export class TmuxPipeClient {
     const started = await this.tmux(["pipe-pane", "-t", this.opts.sessionName, "-o", cmd]);
     if (started === null) {
       await this.teardown();
-      throw new Error("pipe-pane could not be started");
+      throw new Error(
+        `pipe-pane could not be started${this.lastStderr ? `: ${this.lastStderr}` : ""}`,
+      );
     }
     this.started = true;
     // Confirm tmux actually took the pipe before declaring the client live.

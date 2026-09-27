@@ -24,6 +24,7 @@
 import { run } from "./exec.ts";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveTmuxBin } from "./tmux/control-plane.ts";
 
 export interface MirrorOptions {
   /** Read-only client (default true): mirror, never steal input. */
@@ -34,6 +35,10 @@ export interface MirrorOptions {
   terminal?: string;
   /** X window class, so i3 can target/float it. */
   windowClass?: string;
+  /**
+   * The tmux to attach with. Defaults to [resolveTmuxBin] — see [mirrorArgv].
+   */
+  tmuxBin?: string;
 }
 
 export const DEFAULT_MIRROR_WORKSPACE = 10;
@@ -64,11 +69,18 @@ export function mirrorTmuxArgs(tmuxSocket: string, tmuxName: string, opts: Mirro
   return ["-L", tmuxSocket, "attach", ...(ro ? ["-r"] : []), "-t", tmuxName];
 }
 
-/** Full shell-less argv: `<terminal> --class <class> -e tmux <args...>`. */
+/** Full shell-less argv: `<terminal> --class <class> -e <tmux> <args...>`. */
 export function mirrorArgv(tmuxSocket: string, tmuxName: string, opts: MirrorOptions = {}): string[] {
   const terminal = opts.terminal ?? "alacritty";
   const windowClass = opts.windowClass ?? DEFAULT_MIRROR_CLASS;
-  return [terminal, "--class", windowClass, "-e", "tmux", ...mirrorTmuxArgs(tmuxSocket, tmuxName, opts)];
+  // An absolute tmux, not a bare name. This argv is handed to `i3-msg exec`, which
+  // runs it in **i3's** environment, not the daemon's — so a bare `tmux` resolves to
+  // whatever the window manager has on its PATH, which is the system's tmux and not
+  // the one the ldmux server was started with. Two versions, one socket. The control
+  // plane's own note asks for this and the live-window shim already does it; the
+  // mirror window did not.
+  const tmuxBin = opts.tmuxBin ?? resolveTmuxBin();
+  return [terminal, "--class", windowClass, "-e", tmuxBin, ...mirrorTmuxArgs(tmuxSocket, tmuxName, opts)];
 }
 
 /**

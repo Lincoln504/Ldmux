@@ -42,7 +42,11 @@ test("mirror can be made writable with readOnly:false", () => {
 });
 
 test("mirrorArgv wraps tmux in the terminal with an i3-targetable class", () => {
-  expect(mirrorArgv("sock", "ldmux-x")).toEqual([
+  // The tmux in this argv runs under i3, not under the daemon, so it must be an
+  // absolute path — a bare `tmux` there is the window manager's version, not the
+  // one the server was started with. Pinned with an explicit bin so the shape is
+  // stable, and separately pinned as resolved below.
+  expect(mirrorArgv("sock", "ldmux-x", { tmuxBin: "tmux" })).toEqual([
     "alacritty",
     "--class",
     "ldmux-mirror",
@@ -57,8 +61,19 @@ test("mirrorArgv wraps tmux in the terminal with an i3-targetable class", () => 
   ]);
 });
 
+test("the mirror window is launched with a resolved tmux, not a bare name", () => {
+  // i3-msg exec runs this in i3's environment. `resolveTmuxBin` prefers
+  // `LDMUX_TMUX_BIN` and otherwise searches PATH, and it returns an absolute path
+  // when it finds one — which is the whole point here.
+  const argv = mirrorArgv("sock", "ldmux-x");
+  const bin = argv[4];
+  expect(bin).toBe(resolveTmuxBin());
+  expect(bin).toContain("/");
+});
+
 test("mirrorCommand renders a copy-pasteable command line", () => {
-  expect(mirrorCommand("sock", "ldmux-x")).toBe(
+  const pinned = { tmuxBin: "tmux" };
+  expect(mirrorCommand("sock", "ldmux-x", pinned)).toBe(
     "alacritty --class ldmux-mirror -e tmux -L sock attach -r -t ldmux-x",
   );
   expect(mirrorCommand("sock", "ldmux-x", { terminal: "kitty", windowClass: "my-class" })).toContain("kitty --class my-class");
@@ -73,7 +88,9 @@ test("mirrorCommand shell-quotes every argument, so i3-msg exec cannot inject", 
   // A single quote inside a single-quoted string is escaped, not left dangling.
   expect(mirrorCommand("sock", "a'b")).toContain(`'a'\\''b'`);
   // Ordinary args stay bare for readability.
-  expect(mirrorCommand("sock", "ldmux-x")).toBe("alacritty --class ldmux-mirror -e tmux -L sock attach -r -t ldmux-x");
+  expect(mirrorCommand("sock", "ldmux-x", { tmuxBin: "tmux" })).toBe(
+    "alacritty --class ldmux-mirror -e tmux -L sock attach -r -t ldmux-x",
+  );
 });
 
 // ── openMirror against a stub `i3-msg` ────────────────────────────────────
@@ -123,8 +140,13 @@ test("openMirror switches workspace then execs the shell-quoted mirror command",
   expect(res.ok).toBe(true);
   const log = readFileSync(join(binDir, "args.log"), "utf8");
   expect(log).toContain("workspace number 7");
-  // The exec line carries the quoted command, so a metacharacter cannot inject.
-  expect(log).toContain("exec -- alacritty --class ldmux-mirror -e tmux -L sock attach -r -t ldmux-x");
+  // The exec line carries the quoted command, so a metacharacter cannot inject —
+  // and it carries the *resolved* tmux, because i3 runs this line in i3's
+  // environment and a bare name there is the window manager's tmux, not the
+  // server's.
+  expect(log).toContain(
+    `exec -- alacritty --class ldmux-mirror -e ${resolveTmuxBin()} -L sock attach -r -t ldmux-x`,
+  );
 });
 
 test("openMirror reports a failure when i3-msg is unavailable", async () => {

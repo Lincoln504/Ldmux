@@ -19,9 +19,17 @@ what is requested; do not expand scope unilaterally.
 
 ## Rules
 
-- **Tests + types are the gate.** `node --test "packages/*/test/*.test.ts"` and
-  `node --run typecheck` must both pass before committing; the typecheck is strict
-  and there is no build step (Node strips the types).
+- **Tests + types are the gate.** `nix develop --command node --test
+  "packages/*/test/*.test.ts"` and `node --run typecheck` must both pass before
+  committing; the typecheck is strict and there is no build step (Node strips the
+  types). **Inside `nix develop` is part of the command, not a preference.** The
+  suite drives scratch tmux servers, and the daemon resolves its tmux from
+  `LDMUX_TMUX_BIN` before PATH — so running it in a shell that *is* an ldmux session
+  points the daemon at the flake's runtime tmux while a bare `tmux` on PATH is the
+  system's, and the two versions cannot share a socket. The result is 26 failures
+  across five files that read like product defects (measured 2026-09-27). One test
+  still needs `zbarimg`, which only the devShell provides. Outside the devShell,
+  treat any failure as environment until it reproduces inside.
 - **tmux is the source of truth.** Never introduce a second session/PTY layer.
 - **Tailnet only.** Never bind a public interface; never disable auth.
 - **Scroll fidelity is sacred.** Any terminal UI change must preserve the

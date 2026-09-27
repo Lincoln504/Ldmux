@@ -8,12 +8,16 @@ import { killTmuxServer } from "./tmux-cleanup.ts";
 /**
  * The daemon's server profile, against every tmux this machine could run it with.
  *
- * The suite runs on the devShell's tmux, and the deployed daemon runs on the
- * system's. They are different versions, and on 2026-09-26 the difference was
- * total: the profile's global `window-size manual` crashes tmux 3.5a on the first
- * `new-session`, so after a reboot the real daemon could not create a single
- * shell while every test here passed. This test exists so that the binary the
- * unit actually uses is exercised too, whenever it is installed.
+ * The suite runs on the devShell's tmux. The deployed daemon runs on the flake's
+ * runtime tmux (`LDMUX_TMUX_BIN`, set by the unit to `%S/ldmux/runtime/bin/tmux`),
+ * which is the same 3.7b — and this docstring said the opposite until 2026-09-27.
+ *
+ * The candidates below are what a daemon started by hand, or on a host with no
+ * installed runtime, would resolve from PATH — the system's tmux. On 2026-09-26 that
+ * difference was total: the profile's global `window-size manual` crashes tmux 3.5a
+ * on the first `new-session`, so a fallback daemon could not create a single shell
+ * while every test passed. This test exists so that every binary that could be
+ * resolved is exercised, whether or not it is the one the unit names.
  */
 const candidates = [...new Set([resolveTmuxBin(), "/usr/bin/tmux", "/usr/local/bin/tmux"])].filter((b) => existsSync(b));
 const dir = mkdtempSync(join(tmpdir(), "ldmux-deployed-"));

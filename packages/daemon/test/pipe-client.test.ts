@@ -17,7 +17,7 @@ import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TmuxControlPlane } from "../src/tmux/control-plane.ts";
 import { TmuxPipeClient, pipeFifoPath } from "../src/tmux/pipe-client.ts";
-import { killTmuxServer } from "./tmux-cleanup.ts";
+import { killTmuxServer, TMUX_BIN } from "./tmux-cleanup.ts";
 
 const tmuxSocket = `ldmux-pipetest-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const tmp = mkdtempSync(join(tmpdir(), "ldmux-pipe-"));
@@ -259,7 +259,7 @@ test("the liveness watcher reports death when tmux does notice", { timeout: 3000
   // directly rather than through `TmuxControlPlane`, which has no such method: this is a
   // *fixture* for the client under test, and adding production API that only a test calls
   // is how an interface grows things nothing uses.
-  const off = spawnSync("tmux", ["-L", tmuxSocket, "pipe-pane", "-t", name]);
+  const off = spawnSync(TMUX_BIN, ["-L", tmuxSocket, "pipe-pane", "-t", name]);
   expect(off.status).toBe(0);
   expect(await waitFor(async () => (await cp.displayMessage(name, "#{pane_pipe}")).trim() === "0")).toBe(true);
 

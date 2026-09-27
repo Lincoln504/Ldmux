@@ -219,6 +219,16 @@ export class LdmuxDaemon {
   /** When the live windows were last checked, and when to check again. */
   private liveCheckedAt = 0;
   /**
+   * Each running session's directory, as of the last poll — the live-timer's
+   * only way to notice `cd`. tmux has no notification for a pane's directory
+   * changing (there is no such control-mode event), so this is a plain poll: the
+   * same `paneFacts()` call `describeSessions()` already uses to answer `list`,
+   * run again every 2s so a client that is NOT asking (the mobile app sends
+   * `list` once, at connect) still sees a `cd` within ~2s rather than only on
+   * the next unrelated broadcast (a kill, a claim, a desk window opening).
+   */
+  private readonly lastCwds = new Map<string, string>();
+  /**
    * The device identity that owns a desktop window.
    *
    * One per host, because there is one desktop: it is not the identity of the
@@ -340,9 +350,18 @@ export class LdmuxDaemon {
       // only when somebody asked for the list, so a shell that exited with no page
       // open stayed `running`, and the phone went on offering to take it over.
       // `reconcile` broadcasts on its own when anything changed.
+      //
+      // `checkCwdDrift` costs one `list-panes -a` per tick, and that is the price
+      // of the feature rather than an accident: tmux's control mode has no event
+      // for a pane's directory changing, so "did it change" can only be answered
+      // by asking again and diffing. One subprocess every 2s, on a timer that was
+      // already running, is the cheapest form this can take.
       this.liveTimer = setInterval(() => {
         void this.reconcile({ sweep: false })
           .then(() => this.reconcileLive())
+          .then((liveChanged) =>
+            this.checkCwdDrift().then((cwdChanged) => liveChanged || cwdChanged),
+          )
           .then((changed) => {
             if (changed) void this.remote?.broadcastSessions().catch(() => {});
           })
@@ -926,6 +945,45 @@ export class LdmuxDaemon {
       // totally" (the user, 2026-09-17; again 2026-09-26).
       await this.handle("kill", { id }).catch(() => {});
     }
+    return changed;
+  }
+
+  /**
+   * Has any running session `cd`'d since the last poll?
+   *
+   * The only signal is polling: tmux's control mode has no notification for a
+   * pane's current directory changing (confirmed absent from the control-plane
+   * client's event handling), so "did it change" can only be answered by asking
+   * again and diffing against what was asked last time. `paneFacts()` is the
+   * exact call `describeSessions()` already makes to answer a `list` request —
+   * this is that same read, run on the 2s live-timer tick instead of only when a
+   * client happens to ask.
+   *
+   * Skipped with no tmux call at all when nothing is running, which is the
+   * common idle case (the daemon up with every shell closed).
+   */
+  private async checkCwdDrift(): Promise<boolean> {
+    const running = this.registry.list().filter((r) => r.status === "running" && r.tmuxName);
+    if (running.length === 0) {
+      if (this.lastCwds.size > 0) this.lastCwds.clear();
+      return false;
+    }
+    const panes = await this.cp.paneFacts();
+    let changed = false;
+    const seen = new Set<string>();
+    for (const record of running) {
+      const path = panes.get(record.tmuxName!)?.path;
+      if (path === undefined) continue;
+      seen.add(record.id);
+      if (this.lastCwds.get(record.id) !== path) {
+        this.lastCwds.set(record.id, path);
+        changed = true;
+      }
+    }
+    // A session that stopped running (or was pruned) between passes leaves a
+    // stale entry behind otherwise — harmless on its own, but an unbounded map
+    // in a daemon meant to run for days is not a habit worth keeping.
+    for (const id of [...this.lastCwds.keys()]) if (!seen.has(id)) this.lastCwds.delete(id);
     return changed;
   }
 
