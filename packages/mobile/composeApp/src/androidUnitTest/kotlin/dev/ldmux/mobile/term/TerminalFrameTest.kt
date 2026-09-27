@@ -148,6 +148,29 @@ class TerminalFrameTest {
     }
 
     @Test
+    fun `a block cursor can always be told apart from the glyph it covers`() {
+        // The cursor fills the cell with `drawnFg` and repaints the glyph in
+        // `drawnBg`, so those two being equal is a cursor with the character inside
+        // it erased — which is exactly what filling with the default foreground did
+        // on a reverse-video cell. Concealed text is the one case where they are
+        // deliberately the same.
+        val plain = TerminalFrame.Cell("x", fg = 0xF0F0F0, bg = 0x101010, flags = 0)
+        assertTrue(plain.drawnFg != plain.drawnBg)
+
+        val reversed = TerminalFrame.Cell("x", 0xF0F0F0, 0x101010, TerminalFrame.FLAG_INVERSE)
+        assertTrue(reversed.drawnFg != reversed.drawnBg)
+
+        // The ordinary `pi` cursor: reverse video over the default colours.
+        val cursor = TerminalFrame.Cell(" ", 0xF0F0F0, 0x101010, TerminalFrame.FLAG_INVERSE)
+        assertTrue(cursor.inverse)
+        assertEquals(0x101010, cursor.drawnFg)
+        assertEquals(0xF0F0F0, cursor.drawnBg)
+
+        val hidden = TerminalFrame.Cell("x", 0xF0F0F0, 0x101010, TerminalFrame.FLAG_INVISIBLE)
+        assertEquals(hidden.drawnFg, hidden.drawnBg)
+    }
+
+    @Test
     fun `an inverse blank cell is a filled block, which is what pi's cursor is`() {
         // pi's cursor is reverse video over a space: no glyph, and the cell's own
         // foreground painted as the background. If `drawnBg` is not the foreground,

@@ -105,11 +105,12 @@ internal fun rowAfterScroll(row: Int, step: Int): Int = row - step
 /**
  * Place a [cols]x[rows] grid of [cellWidth]x[cellHeight] cells inside a viewport.
  *
- * Centred when it fits (the leftover is under one cell, so this is about
- * symmetry, not letterboxing). When it does not fit it is pinned to the
- * bottom-left so the shell's prompt stays on screen — the overflowing case is a
- * font change or a rotation whose resize has not landed yet, and the bottom row
- * is the one holding the cursor.
+ * Flush to the top-left when it fits. (This line said "centred" until 2026-09-27 —
+ * the KDoc of a behaviour the body no longer had, left behind describing it, six
+ * lines above the comment explaining why centring was removed.) When it does not fit
+ * it is pinned to the bottom-left so the shell's prompt stays on screen — the
+ * overflowing case is a font change or a rotation whose resize has not landed yet,
+ * and the bottom row is the one holding the cursor.
  */
 fun placeGrid(
     cellWidth: Float,

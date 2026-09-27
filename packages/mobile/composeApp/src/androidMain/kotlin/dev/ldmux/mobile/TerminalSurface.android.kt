@@ -82,6 +82,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.floor
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Fallback surface colour until the engine has told us its own background. */
@@ -392,8 +393,11 @@ actual fun rememberTerminalSurface(
                             val index = p.cellAt(pos.x, pos.y) ?: return@detectTapGestures
                             val row = index / p.cols
                             val col = index % p.cols
-                            tapAt = col to row
-                            controller.tapCell(col, row)
+                            // The outline marks a tap that did something. Set
+                            // unconditionally it flashed over taps the policy
+                            // refused — a password prompt, history, a program with
+                            // no cursor position — which reads as a dropped tap.
+                            tapAt = if (controller.tapCell(col, row)) col to row else null
                         },
                     )
                 }
@@ -603,7 +607,19 @@ actual fun rememberTerminalSurface(
                                         lastFrameNanos = nowNanos
                                         continue
                                     }
-                                    val dtSeconds = (nowNanos - lastFrameNanos) / 1_000_000_000f
+                                    // Clamped, and the first frame is not the only
+                                    // one that can be far away: frames stop arriving
+                                    // when the screen sleeps or the app is
+                                    // backgrounded, so a fling in flight across that
+                                    // gap came back to one enormous delta — which is
+                                    // one `scrollBy` to the end of the scrollback,
+                                    // not a fling at all. The cap is what a 30 fps
+                                    // frame would be, so ordinary slow frames are
+                                    // unaffected and a suspended app cannot jump.
+                                    val dtSeconds = min(
+                                        (nowNanos - lastFrameNanos) / 1_000_000_000f,
+                                        FLING_MAX_FRAME_SECONDS,
+                                    )
                                     lastFrameNanos = nowNanos
                                     // Same carry the drag used: the fling is that
                                     // same finger motion, continued past the release,
@@ -963,6 +979,18 @@ private const val FLING_MIN_VELOCITY_PX_S = 50f
  * three seconds after one flick.
  */
 private const val FLING_FRICTION_PER_SEC = 4.5f
+
+/**
+ * The longest frame the fling will believe in, in seconds.
+ *
+ * `withFrameNanos` stops firing when nothing is being drawn — the screen sleeps, or
+ * the app goes to the background — and resumes with one delta covering the whole
+ * gap. Multiplied by a live release velocity that is a scroll of thousands of rows:
+ * the viewport lands at the end of the scrollback from a flick that was meant to
+ * move a screen. Nothing here is measured in frames, so the fix is a bound rather
+ * than a count: a third of a second is slower than any frame a device draws and far
+ * shorter than any suspension. */
+private const val FLING_MAX_FRAME_SECONDS = 0.033f
 
 /**
  * A thin scrollbar while the view is parked in history. The emulator polls its

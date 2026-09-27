@@ -240,9 +240,18 @@ object TerminalFrame {
         val scrollOffset = u32(b, 23)
         val scrollLen = u32(b, 27)
 
-        val cells = ArrayList<Cell>(cols * rows)
+        // How many cells the buffer can possibly describe. A cell record is at least
+        // 9 bytes, so anything the header claims beyond that is a claim about a frame
+        // that did not arrive — and without this the header's own numbers are the
+        // array's *capacity*: `cols` and `rows` are `u16`, so their product overflows
+        // an Int (65535 * 65535 is negative, and `ArrayList(negative)` throws) or
+        // allocates for a frame that is nowhere in the buffer. The loop below already
+        // refused to read past the end; it just did it after the allocation.
+        val fits = (b.size - HEADER_SIZE) / 9
+        val cellCount = minOf(cols * rows, fits)
+        val cells = ArrayList<Cell>(cellCount.coerceAtLeast(0))
         var p = HEADER_SIZE
-        for (i in 0 until cols * rows) {
+        for (i in 0 until cellCount) {
             if (p + 9 > b.size) break
             val len = b[p].toInt() and 0xff
             val flags = (b[p + 1].toInt() and 0xff) or ((b[p + 2].toInt() and 0xff) shl 8)

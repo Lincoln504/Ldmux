@@ -152,8 +152,14 @@ interface TerminalHandle {
     /**
      * The user tapped a cell. Whether that moves the shell's cursor, clicks for a
      * mouse-aware program, or does nothing, is decided by the pane's state.
+     *
+     * Returns whether it did anything. The surface draws its tap outline on a yes
+     * and nothing on a no, because the outline is feedback for an action: drawn
+     * unconditionally, a tap the policy refused — a password prompt, history, a
+     * program that hides its cursor and so reports no position — flashed a box over
+     * the cell and moved nothing, which reads as the app having missed the tap.
      */
-    fun tapCell(col: Int, row: Int) {}
+    fun tapCell(col: Int, row: Int): Boolean = false
 
     /**
      * Enter or leave tmux copy-mode.

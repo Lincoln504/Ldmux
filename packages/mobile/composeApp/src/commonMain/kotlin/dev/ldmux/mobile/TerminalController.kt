@@ -727,8 +727,8 @@ class TerminalController(
      * only carries it out. A click is a request to the server (only it can see
      * the pane), so it may come back refused — see [onServerError].
      */
-    override fun tapCell(col: Int, row: Int) {
-        val f = _frame.value ?: return
+    override fun tapCell(col: Int, row: Int): Boolean {
+        val f = _frame.value ?: return false
         when (val action = planTap(col, row, f, mouseRefused)) {
             is TapAction.Click -> {
                 pendingTap = action.col to action.row
@@ -741,9 +741,15 @@ class TerminalController(
                     _frame.value?.let { moveCursorTo(stuck.first, stuck.second, it) }
                 }
                 attach.mouseClick(action.col, action.row)
+                return true
             }
-            is TapAction.Keys -> sendKeyBatches(action.keys)
-            TapAction.Ignore -> Unit
+            is TapAction.Keys -> {
+                sendKeyBatches(action.keys)
+                return true
+            }
+            // Nothing was sent, so the surface has nothing to draw: no cursor
+            // moved, no click went out.
+            TapAction.Ignore -> return false
         }
     }
 

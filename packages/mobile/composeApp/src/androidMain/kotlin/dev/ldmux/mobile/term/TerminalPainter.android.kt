@@ -116,7 +116,16 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
         if (frame.cursorX >= frame.cols || frame.cursorY >= frame.rows) return
         val x = 0f
         val y = 0f
-        cursorPaint.color = argb(frame.defaultFg)
+        val i = frame.cursorY * frame.cols + frame.cursorX
+        val cell = frame.cells.getOrNull(i)
+        // A block cursor *inverts* the cell it sits on: it fills with what the text
+        // was drawn in and repaints the glyph in what was behind it. Filling with the
+        // default foreground instead broke exactly one case and broke it completely —
+        // on a reverse-video cell whose foreground is the default (`ESC[7m` + text,
+        // which is how `pi` draws its own cursor) the fill and the glyph came out the
+        // same colour and the character under the cursor vanished. It also made the
+        // cursor the default colour on a cell whose text is not.
+        cursorPaint.color = argb(cell?.drawnFg ?: frame.defaultFg)
         when (frame.cursorStyle) {
             0 -> { // bar
                 val w = (m.width / 8f).coerceAtLeast(1f)
@@ -134,8 +143,6 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
             }
             else -> { // block
                 nc.drawRect(x, y, x + m.width, y + m.height, cursorPaint)
-                val i = frame.cursorY * frame.cols + frame.cursorX
-                val cell = frame.cells.getOrNull(i)
                 if (cell != null && cell.text.isNotBlank()) {
                     // The colour actually behind the glyph, which reverse video has
                     // swapped — repainting it in `cell.bg` on an inverse cell would
