@@ -1,11 +1,15 @@
 package dev.ldmux.mobile
 
 import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.http.HttpHeaders
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -200,6 +204,16 @@ class LdmuxClient(private var config: LdmuxConfig) {
      */
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected
+
+    /** The link as one value (see [LinkState]); [connected] is its `Online` case. */
+    private val _link = MutableStateFlow(if (config.isPaired) LinkState.Connecting else LinkState.Unpaired)
+    val link: StateFlow<LinkState> = _link
+
+    /**
+     * Which run of [loop] is current. A cancelled loop still runs its cleanup, and
+     * without this it cleared the *new* loop's socket and marked it disconnected.
+     */
+    private var generation = 0
 
     /**
      * Woken when something outside the retry loop knows the network just came
@@ -426,21 +440,37 @@ class LdmuxClient(private var config: LdmuxConfig) {
     /** Set by the pong handler, read once per beat: the launcher's liveness. */
     private var pongSeen = false
 
+    /**
+     * Point the client at a (possibly) different daemon, or at none.
+     *
+     * Everything learned from the old one goes: its shells, its desktop and the
+     * reads queued for it. Keeping them showed the new host's name above the old
+     * host's shells for as long as the new one was unreachable.
+     */
     fun reconfigure(config: LdmuxConfig) {
         this.config = config
         job?.cancel()
-        job = scope?.launch { loop() }
+        job = null
+        generation++
+        ws = null
+        pending.clear()
+        _sessions.value = emptyList()
+        _desktop.value = null
+        _connected.value = false
+        _link.value = if (config.isPaired) LinkState.Connecting else LinkState.Unpaired
+        scope?.let { s -> if (config.isPaired) job = s.launch { loop() } }
     }
 
     fun start(scope: CoroutineScope) {
         this.scope = scope
-        if (job != null) return
+        if (job != null || !config.isPaired) return
         job = scope.launch { loop() }
     }
 
     fun stop() {
         job?.cancel()
         job = null
+        generation++
         scope = null
         _connected.value = false
         http.close()
@@ -455,14 +485,17 @@ class LdmuxClient(private var config: LdmuxConfig) {
     }
 
     private suspend fun loop() {
+        val gen = ++generation
+        val endpoint = config.endpoint ?: return
+        fun current() = gen == generation
         // Backed off rather than fixed, and capped: a daemon that is down for an
         // hour should not be asked twelve hundred times, and one that comes back
         // ten seconds later should not make the user wait two seconds to notice.
         var waitMs = 400L
         while (currentCoroutineContext().isActive) {
             try {
-                appLog("connecting to ${config.wsUrl}")
-                http.webSocket(config.wsUrl) {
+                appLog("connecting to ${endpoint.host}")
+                http.webSocket(endpoint.wsUrl, request = { header(HttpHeaders.Authorization, endpoint.authorization) }) {
                     ws = this
                     waitMs = 400L
                     // Flush what was asked for while there was no socket, oldest
@@ -470,6 +503,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     for (queued in pending) runCatching { send(Frame.Text(queued)) }
                     pending.clear()
                     _connected.value = true
+                    _link.value = LinkState.Online
                     appLog("connected")
                     // Who we are, before anything else (ADR-0010). Ownership is
                     // keyed on the connection plus this identity, and a device's
@@ -512,24 +546,50 @@ class LdmuxClient(private var config: LdmuxConfig) {
                         }
                     } finally {
                         beat.cancel()
-                        ws = null
+                        if (ws === this) ws = null
                     }
                 }
+                // The socket closed after having been up: the machine went away or
+                // restarted. Unreachable until the next attempt says otherwise.
+                if (current()) _link.value = LinkState.Unreachable
+            } catch (e: CancellationException) {
+                // Reconfigured or stopped: the caller asked for this, and the new
+                // loop owns every piece of state from here.
+                throw e
             } catch (e: Throwable) {
-                // Offline / daemon restart: fall through to the retry delay. It is
-                // still worth saying so. This swallowed everything, and a swallowed
-                // throw is why "the list is empty" had no explanation anywhere — the
-                // launcher showed an empty screen and the log showed nothing at all,
-                // so the only way to find out was to read the source and guess.
-                appLog("connect failed: ${e::class.simpleName}: ${e.message}")
+                // Why, not just that: a refused token and a machine that is off are
+                // different problems with different fixes, and the handshake's own
+                // exception cannot tell them apart. The daemon can (see [probe]).
+                appLog("connect failed: ${e::class.simpleName}")
+                val state = linkStateFromProbe(probe(endpoint))
+                if (current()) _link.value = state
             }
+            if (!current()) return
             _connected.value = false
+            if (_link.value == LinkState.Rejected) {
+                // Waiting will not fix a refused token. Only a refresh (or a new
+                // pairing, which replaces this loop) tries again.
+                appLog("token refused; waiting for a refresh or a new pairing")
+                wake.first()
+                waitMs = 400L
+                continue
+            }
             // Either the timeout elapses, or the network coming back cuts it
             // short. `withTimeoutOrNull` returning normally means the wake fired.
             val woken = withTimeoutOrNull(waitMs) { wake.first() } != null
             if (!woken) waitMs = (waitMs * 2).coerceAtMost(10_000L)
             else waitMs = 400L
         }
+    }
+
+    /**
+     * The daemon's HTTP status for a plain `GET /ws`, or null when nothing answered.
+     * Bounded, because a machine that is not there does not say so quickly.
+     */
+    private suspend fun probe(endpoint: Endpoint): Int? = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
+        runCatching {
+            http.get(endpoint.probeUrl) { header(HttpHeaders.Authorization, endpoint.authorization) }.status.value
+        }.getOrNull()
     }
 
     private fun onMessage(text: String) {

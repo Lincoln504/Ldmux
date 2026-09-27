@@ -56,7 +56,9 @@ import androidx.compose.ui.unit.sp
  */
 @Composable
 fun LauncherScreen(
-    host: String,
+    /** The line under the title: what this is paired with and how the link is ([linkLabel]). */
+    status: String,
+    link: LinkState,
     sessions: List<Session>,
     desktop: DesktopInventory?,
     desktopLoading: Boolean,
@@ -78,9 +80,10 @@ fun LauncherScreen(
     // Which shell the desktop picker is choosing for. Null means closed.
     var pickerFor by remember { mutableStateOf<Session?>(null) }
 
-    // The desktop is fetched when the screen appears and when asked for, never on
-    // a timer: it is a run of window-manager and /proc reads on the host.
-    LaunchedEffect(Unit) { onRefresh() }
+    // The desktop is fetched when the screen appears with a link (App's effect on
+    // `showLauncher` and the link) and when asked for, never on a timer: it is a run
+    // of window-manager and /proc reads on the host. It was also requested from
+    // here on appear, so every visit asked twice.
 
     val openShells = sessions.filter { it.attachable }
     val entries = launcherEntries(openShells)
@@ -92,7 +95,7 @@ fun LauncherScreen(
             Column(Modifier.weight(1f)) {
                 Text("ldmux", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    host.ifEmpty { "no host" },
+                    status,
                     color = Dim,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -123,6 +126,10 @@ fun LauncherScreen(
         Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
 
         // ── one list ─────────────────────────────────────────────────────────
+        // Unpaired, there is no list and nothing to open: the header says
+        // `unpaired`, and pairing is in Settings. The app does not jump to a scanner
+        // by itself (ADR-0017).
+        if (link == LinkState.Unpaired) return@Column
         run {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),

@@ -75,73 +75,6 @@ import kotlinx.coroutines.launch
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
-/** Set from MainActivity so [AppPrefs] can reach SharedPreferences. */
-object AndroidApp {
-    lateinit var context: Context
-}
-
-/**
- * A random install id, generated once.
- *
- * `UUID.randomUUID` rather than a hardware identifier: this must not be a
- * tracking id, and it must not be spoofable into someone else's — it only has to
- * be unique among the handful of devices that share a daemon.
- */
-actual fun newDeviceId(): String = java.util.UUID.randomUUID().toString()
-
-/** The model name, e.g. "Pixel 8" — what "open on …" should call this phone. */
-actual fun deviceLabel(): String = android.os.Build.MODEL.ifEmpty { "phone" }
-
-actual object AppPrefs {
-    private const val FILE = "ldmux"
-    private const val KEY_HOST = "host"
-    private const val KEY_TOKEN = "token"
-    private const val KEY_SIDE = "side"
-    private const val KEY_PREDICT = "predict"
-    private const val KEY_FONT = "font_sp"
-    private const val KEY_COMPACT = "compact"
-    private const val KEY_DEVICE_ID = "device_id"
-    private const val KEY_DEVICE_LABEL = "device_label"
-
-    actual fun load(): LdmuxConfig {
-        val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-        // Generated on first load and written back immediately, so the identity
-        // is stable from the first connection onwards — including the very first
-        // one, which is the one that creates the claim this id is attributed to.
-        val deviceId = sp.getString(KEY_DEVICE_ID, null)
-            ?.takeIf { it.isNotEmpty() }
-            ?: newDeviceId().also { sp.edit().putString(KEY_DEVICE_ID, it).apply() }
-        val label = sp.getString(KEY_DEVICE_LABEL, null)
-            ?.takeIf { it.isNotEmpty() }
-            ?: deviceLabel().also { sp.edit().putString(KEY_DEVICE_LABEL, it).apply() }
-        return LdmuxConfig(
-            host = sp.getString(KEY_HOST, null) ?: LdmuxConfig.DEFAULT.host,
-            token = sp.getString(KEY_TOKEN, null) ?: LdmuxConfig.DEFAULT.token,
-            side = sp.getString(KEY_SIDE, null) ?: LdmuxConfig.DEFAULT.side,
-            predict = sp.getBoolean(KEY_PREDICT, LdmuxConfig.DEFAULT.predict),
-            fontSp = sp.getFloat(KEY_FONT, LdmuxConfig.DEFAULT_FONT_SP)
-                .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
-            compact = sp.getBoolean(KEY_COMPACT, LdmuxConfig.DEFAULT.compact),
-            deviceId = deviceId,
-            deviceLabel = label,
-        )
-    }
-
-    actual fun save(config: LdmuxConfig) {
-        AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_HOST, config.host)
-            .putString(KEY_TOKEN, config.token)
-            .putString(KEY_SIDE, config.side)
-            .putBoolean(KEY_PREDICT, config.predict)
-            .putFloat(KEY_FONT, config.fontSp)
-            .putBoolean(KEY_COMPACT, config.compact)
-            .putString(KEY_DEVICE_ID, config.deviceId)
-            .putString(KEY_DEVICE_LABEL, config.deviceLabel)
-            .apply()
-    }
-}
-
 /** Fallback surface colour until the engine has told us its own background. */
 private val TermBg = Color(0xFF000000)
 
@@ -164,8 +97,13 @@ actual fun rememberTerminalSurface(
     modifier: Modifier,
     keyboardRequest: Int,
 ): TerminalHandle {
-    val controller = remember(config, sessionId) { TerminalController(config, sessionId, active) }
+    // Rebuilt only when the connection changes. It was keyed on the whole config, so
+    // saving a font size reconnected every open page, and the first attach of a
+    // controller takes its shell over (ADR-0010): a settings change took every shell
+    // back from the desk.
+    val controller = remember(config.connectionKey, sessionId) { TerminalController(config, sessionId, active) }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
+    LaunchedEffect(controller, config.predict) { controller.predict = config.predict }
 
     // Entering or leaving the foreground starts or drops the stream. The last
     // painted frame stays, so swiping back is instant rather than blank.

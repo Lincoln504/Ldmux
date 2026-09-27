@@ -41,7 +41,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -272,86 +271,6 @@ val Line = Color(0xFF2A2A2A)
 /** The landscape panel's width. The terminal gets everything else. */
 private val PANEL_WIDTH = 190.dp
 
-/** Where the daemon is and how to authenticate. Persisted by the platform. */
-data class LdmuxConfig(
-    val host: String,
-    val token: String,
-    val side: String = "left",
-    /**
-     * Show typed text before the server echoes it (docs/PREDICTIVE-ECHO.md).
-     * Off by default: it trades a little honesty for a lot of latency, and a
-     * prompt that does not echo is exactly where the trade is most visible.
-     */
-    val predict: Boolean = false,
-    /**
-     * Terminal font size. It is a client setting because the client owns the
-     * geometry: a bigger font means fewer cells fit, and the client tells the
-     * daemon the grid it can paint, so the pane reflows to match instead of
-     * being scaled down to fit (ADR-0008).
-     */
-    val fontSp: Float = DEFAULT_FONT_SP,
-    /**
-     * Thin chrome, and this is the default.
-     *
-     * Every control in the app has one height, and that height is a real decision with
-     * two defensible answers, so it is the user's rather than mine. Thin by default: a
-     * terminal is a thing you read, and a row of chrome is a row of output you cannot
-     * see. Set it false and every control gets the platform's 48dp minimum target,
-     * which is what a thumb wants.
-     *
-     * One switch for the whole app rather than one per control, because the failure
-     * that made it a decision was exactly that: the same control came out a different
-     * height in two places, and neither of them was chosen.
-     */
-    val compact: Boolean = true,
-    /**
-     * This install's identity, announced with `hello` (ADR-0010).
-     *
-     * Stable for the life of the install, generated once and kept. It is **not**
-     * an account and not a credential: it exists so two devices can be told apart
-     * in a sentence about a shell they both want ("open on Pixel 8").
-     */
-    val deviceId: String = "",
-    /** What that sentence calls this device. */
-    val deviceLabel: String = "",
-) {
-    val baseUrl: String get() = if (host.startsWith("http")) host else "http://$host"
-
-    val wsUrl: String get() {
-        val ws = baseUrl.replace("https://", "wss://").replace("http://", "ws://")
-        return if (token.isEmpty()) "$ws/ws" else "$ws/ws?token=$token"
-    }
-
-    val panelLeft: Boolean get() = side != "right"
-
-    /**
-     * The web-client URL for one session. `chrome=0` tells the client the native
-     * shell owns the chrome, so it renders only the terminal.
-     */
-    fun urlFor(sessionId: String?): String {
-        val params = buildList {
-            if (token.isNotEmpty()) add("token=$token")
-            if (sessionId != null) add("session=$sessionId")
-            add("chrome=0")
-        }
-        return "$baseUrl/?${params.joinToString("&")}"
-    }
-
-    companion object {
-        const val DEFAULT_FONT_SP = 12f
-        const val MIN_FONT_SP = 7f
-        const val MAX_FONT_SP = 28f
-
-        val DEFAULT = LdmuxConfig(host = "localhost:7623", token = "", side = "left", predict = false)
-    }
-}
-
-/** Platform persistence for [LdmuxConfig]. */
-expect object AppPrefs {
-    fun load(): LdmuxConfig
-    fun save(config: LdmuxConfig)
-}
-
 /**
  * Landscape app: a terminal filling the screen with a slim **side** panel — no
  * top bar. The panel carries everything: prev/next between open shells, the
@@ -392,20 +311,21 @@ fun App() {
     // both. A setting that reached only some of the controls would be worse than no
     // setting: the whole reason this one exists is that the app disagreed with
     // itself about the same control in two places.
-    var config by remember { mutableStateOf(AppPrefs.load()) }
+    val store = remember { ConfigStore(AppPrefs.load(), AppPrefs::save) }
+    val config by store.config.collectAsState()
     MaterialTheme(colorScheme = LdmuxColors) {
         CompositionLocalProvider(
             LocalTextStyle provides BodyStyle,
             LocalTouch provides touchFor(config.compact),
         ) {
-            AppContent(config, onConfig = { config = it })
+            AppContent(config, store)
         }
     }
 }
 
 /** The app itself. A separate function only so the theme can wrap all of it. */
 @Composable
-private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
+private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     var showSettings by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
@@ -414,6 +334,7 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     val sessions by client.sessions.collectAsState()
     val desktop by client.desktop.collectAsState()
     val connected by client.connected.collectAsState()
+    val link by client.link.collectAsState()
     // Read here, not inside the launcher branch: a refusal releases a pending
     // shell request, and that request is made from a screen the branch does not own.
     val errorTick by client.errorTick.collectAsState()
@@ -438,6 +359,19 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
     // phone, and only then scrolled to the new one. A page is a hold on a shell,
     // so nothing is a page that was not asked for.
     var pageSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    // **The connection follows the pairing, and only the pairing.** A display
+    // setting changes nothing here. A new pairing (or none) is a different machine:
+    // the pages were the old one's shells, so they close and the launcher shows the
+    // new one — or says `unpaired`.
+    var connectedKey by remember { mutableStateOf(config.connectionKey) }
+    LaunchedEffect(config.connectionKey) {
+        if (config.connectionKey == connectedKey) return@LaunchedEffect
+        connectedKey = config.connectionKey
+        client.reconfigure(config)
+        pageSelection = emptySet()
+        showLauncher = true
+    }
     // Whether the portrait bar's menu is open. It lives here, at App()'s top
     // level, rather than beside the bar that draws it, because the IME watcher
     // below has to be able to tell a keypad the *user* dismissed from one we
@@ -813,6 +747,9 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         // as "the three-dot button next to settings that does nothing."
         val serverError by client.serverError.collectAsState()
         LaunchedEffect(errorTick) { if (errorTick > 0) desktopLoading = false }
+        // No link, no answer coming: the refresh icon must not stay dimmed for a
+        // request that is queued behind a refused token or an unreachable host.
+        LaunchedEffect(link) { if (link != LinkState.Online) desktopLoading = false }
 
         // Ask for the machine's desktop when the launcher appears, and again if
         // the link was not up yet when it did. Keyed on `connected` as well as the
@@ -826,13 +763,19 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         }
         Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         LauncherScreen(
-            host = config.host,
+            status = linkLabel(link, config),
+            link = link,
             sessions = sessions,
             desktop = desktop,
             desktopLoading = desktopLoading,
             onRefresh = {
-                desktopLoading = true
-                client.requestDesktop()
+                // Refresh is also "try the link again": it is the one thing that
+                // retries a refused token, and it cuts an unreachable backoff short.
+                if (link != LinkState.Online) client.reconnectNow()
+                if (link == LinkState.Online) {
+                    desktopLoading = true
+                    client.requestDesktop()
+                }
             },
             onOpen = { picked ->
                 // The chosen shells become the pages, and nothing else is one.
@@ -887,19 +830,9 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
                 }
             }
         }
-        killTarget?.let { ConfirmKill(it, onDismiss = { killTarget = null }) { client.close(it.id); killTarget = null } }
-        if (showSettings) {
-            SettingsDialog(
-                current = config,
-                onDismiss = { showSettings = false },
-                onSave = {
-                    onConfig(it)
-                    AppPrefs.save(it)
-                    client.reconfigure(it)
-                    showSettings = false
-                },
-            )
-        }
+        // The close confirmation and Settings are drawn once, below both branches.
+        // They were drawn here as well, so on the launcher each opened twice, one
+        // dialog stacked on the other.
     } else {
         // **One terminal, in one place.** The two modes differ in what is arranged
         // around it, not in the terminal itself, and that is load-bearing rather
@@ -1025,16 +958,43 @@ private fun AppContent(config: LdmuxConfig, onConfig: (LdmuxConfig) -> Unit) {
         }
     }
 
+    // A pairing link from outside the app (ADR-0017): asked about, never applied
+    // silently, because it replaces where every keystroke goes.
+    val inbound by PairingInbox.link.collectAsState()
+    inbound?.let { raw ->
+        when (val decision = inboundPairing(raw, config)) {
+            InboundPairing.Invalid -> NotACode(onDismiss = { PairingInbox.clear() })
+            is InboundPairing.Same -> LaunchedEffect(raw) {
+                // Already paired with exactly this: nothing to ask. The name is kept
+                // current, since that is the one part that may differ.
+                store.pair(decision.pairing)
+                PairingInbox.clear()
+            }
+            is InboundPairing.Ask -> ConfirmPairing(
+                decision.pairing,
+                onDismiss = { PairingInbox.clear() },
+                onConfirm = {
+                    store.pair(decision.pairing)
+                    PairingInbox.clear()
+                    showSettings = false
+                },
+            )
+        }
+    }
+
     if (showSettings) {
         SettingsDialog(
             current = config,
             onDismiss = { showSettings = false },
             onSave = {
-                onConfig(it)
-                AppPrefs.save(it)
-                client.reconfigure(it)
+                store.update(it)
                 showSettings = false
             },
+            onPaired = { p ->
+                store.pair(p)
+                showSettings = false
+            },
+            onUnpair = { store.unpair() },
         )
     }
 }
@@ -1117,6 +1077,29 @@ private fun TerminalArea(
  * Ending a shell throws away whatever is running in it, so it is always
  * confirmed — and named, so the wrong one cannot be closed by reflex.
  */
+@Composable
+private fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("pair with ${p.name.ifEmpty { p.host }}?", color = Fg) },
+        containerColor = Surface,
+        tonalElevation = 0.dp,
+        confirmButton = { MiniTextButton(onClick = onConfirm) { Text("pair", color = Accent) } },
+        dismissButton = { MiniTextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
+    )
+}
+
+@Composable
+private fun NotACode(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(NOT_A_CODE, color = Fg) },
+        containerColor = Surface,
+        tonalElevation = 0.dp,
+        confirmButton = { MiniTextButton(onClick = onDismiss) { Text("ok", color = Accent) } },
+    )
+}
+
 @Composable
 fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
@@ -1554,9 +1537,15 @@ private fun KeyBtn(
 }
 
 @Composable
-private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: (LdmuxConfig) -> Unit) {
-    var host by remember { mutableStateOf(current.host) }
-    var token by remember { mutableStateOf(current.token) }
+private fun SettingsDialog(
+    current: LdmuxConfig,
+    onDismiss: () -> Unit,
+    onSave: (LdmuxConfig) -> Unit,
+    /** A good scan: pair and close. Pressing `pair` was the question, so nothing is asked. */
+    onPaired: (Pairing) -> Unit,
+    /** Forget the pairing now (ADR-0017). */
+    onUnpair: () -> Unit,
+) {
     var side by remember { mutableStateOf(current.side) }
     var predict by remember { mutableStateOf(current.predict) }
     var fontSp by remember { mutableStateOf(current.fontSp) }
@@ -1571,27 +1560,13 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
         tonalElevation = 0.dp,
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                PairingRow(current, onPaired, onUnpair)
+                Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("panel", color = Dim, fontSize = 12.sp)
                     MiniTextButton(onClick = { side = "left" }) { Text("left", color = if (side == "left") Accent else Dim) }
                     MiniTextButton(onClick = { side = "right" }) { Text("right", color = if (side == "right") Accent else Dim) }
                 }
-                Box(Modifier.height(LocalTouch.current.rowPad))
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("host[:port]") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Box(Modifier.height(LocalTouch.current.rowPad))
-                OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
-                    label = { Text("token") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
                 Box(Modifier.height(LocalTouch.current.rowPad))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("predictive echo", color = Dim, fontSize = 12.sp)
@@ -1639,22 +1614,16 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
         },
         confirmButton = {
             MiniTextButton(onClick = {
+                // A copy, never a rebuild. This used to construct the config by
+                // position, and a field it did not list (the device id, once) was
+                // silently cleared on every save. The pairing is not this button's:
+                // it changes the moment `pair` or `unpair` is pressed.
                 onSave(
-                    LdmuxConfig(
-                        host.trim(),
-                        token.trim(),
-                        side,
-                        predict,
-                        fontSp.coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
-                        compact,
-                        // Carried, not rebuilt. This call used to construct a
-                        // config without the identity fields, so every visit to
-                        // settings cleared the device id and the next load minted a
-                        // new one — silently, and against ADR-0010, which exists so
-                        // two devices can be told apart in a sentence about a shell
-                        // they both want.
-                        current.deviceId,
-                        current.deviceLabel,
+                    current.copy(
+                        side = side,
+                        predict = predict,
+                        fontSp = fontSp.coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
+                        compact = compact,
                     ),
                 )
             }) {
@@ -1663,6 +1632,46 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
         },
         dismissButton = { MiniTextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
     )
+}
+
+/**
+ * The pairing, as one row (ADR-0017).
+ *
+ * Unpaired: `unpaired` and `pair`, which opens the scanner. Paired: the machine's
+ * name and `unpair`, which asks once (`unpair?`) because it ends every shell's link.
+ * A scan that is not an ldmux code says so on the row, in three words.
+ */
+@Composable
+private fun PairingRow(current: LdmuxConfig, onPaired: (Pairing) -> Unit, onUnpair: () -> Unit) {
+    var problem by remember { mutableStateOf<String?>(null) }
+    var confirmUnpair by remember(current.connectionKey) { mutableStateOf(false) }
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (current.isPaired) {
+                Text(current.pairedName, color = Fg, fontSize = 13.sp, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                MiniTextButton(onClick = {
+                    if (confirmUnpair) onUnpair() else confirmUnpair = true
+                }) {
+                    Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Accent else Dim)
+                }
+            } else {
+                Text("unpaired", color = Dim, fontSize = 12.sp)
+                MiniTextButton(onClick = {
+                    problem = null
+                    CodeScanner.scan { result ->
+                        when (val o = scanOutcome(result)) {
+                            is PairOutcome.Paired -> onPaired(o.pairing)
+                            is PairOutcome.Problem -> problem = o.text
+                            PairOutcome.Nothing -> Unit
+                        }
+                    }
+                }) {
+                    Text("pair", color = Accent)
+                }
+            }
+        }
+        problem?.let { Text(it, color = Dim, fontSize = 11.sp) }
+    }
 }
 
 /**

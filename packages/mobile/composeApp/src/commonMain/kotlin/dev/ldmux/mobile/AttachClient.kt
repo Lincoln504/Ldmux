@@ -1,6 +1,8 @@
 package dev.ldmux.mobile
 
 import io.ktor.client.HttpClient
+import io.ktor.client.request.header
+import io.ktor.http.HttpHeaders
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
@@ -191,7 +193,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     private suspend fun loop() {
         while (currentCoroutineContext().isActive) {
             try {
-                httpClient().webSocket(config.wsUrl) {
+                // A page exists only for a paired app; an unpaired config ends it.
+                val endpoint = config.endpoint ?: return
+                httpClient().webSocket(endpoint.wsUrl, request = { header(HttpHeaders.Authorization, endpoint.authorization) }) {
                     ws = this
                     appLog("page $sessionId: connected, attaching${if (wantTakeover) " (take over)" else ""}")
                     // Say who we are first, exactly as the session-list client

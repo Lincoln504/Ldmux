@@ -1,6 +1,7 @@
 package dev.ldmux.mobile
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -17,8 +18,25 @@ class MainActivity : ComponentActivity() {
         // Dictation finds its own Activity rather than taking one through the
         // shared seam, so this is where it is told which activity that is.
         Dictation.attachHost(this)
+        CodeScanner.attachHost(this)
         enableEdgeToEdge()
+        // A cold start from a pairing link: held in the inbox until the UI reads it.
+        // Not on a restore — the link was already handled by the instance that saw it.
+        if (savedInstanceState == null) offerPairingLink(intent)
         setContent { App() }
+    }
+
+    /** A pairing link while the app is already running (singleTask). */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        offerPairingLink(intent)
+    }
+
+    private fun offerPairingLink(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val link = intent.dataString ?: return
+        PairingInbox.offer(link)
     }
 
     override fun onStart() {

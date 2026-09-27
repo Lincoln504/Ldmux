@@ -55,7 +55,7 @@ export function parsePairingLink(link: string): Pairing | null {
   } catch {
     return null;
   }
-  if (url.protocol !== "ldmux:" || url.hostname !== "pair") return null;
+  if (url.protocol !== "ldmux:" || url.hostname.toLowerCase() !== "pair" || url.pathname !== "" || url.port !== "") return null;
   if (url.searchParams.get("v") !== String(PAIRING_VERSION)) return null;
   const p: Pairing = {
     host: url.searchParams.get("host") ?? "",

@@ -49,12 +49,33 @@
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              The pairing link (ADR-0017): `ldmux code` on the computer, scanned by the
+              system camera, opens here. singleTask so a link arriving while the app is
+              open reaches the running activity (onNewIntent) instead of stacking a
+              second one on the camera's task, with a second client and service.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="ldmux" android:host="pair" />
+            </intent-filter>
         </activity>
+
+        <!--
+          Ask Play services to fetch the code scanner at install time rather than on
+          the first `pair`, which would otherwise wait on a download.
+        -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
 
         <!--
           specialUse rather than dataSync: this is a long-lived *interactive*

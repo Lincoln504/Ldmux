@@ -95,6 +95,12 @@ class TerminalController(
 
     private val attach = AttachClient(config, sessionId)
 
+    /**
+     * Predictive echo, live: a display setting, so it changes on this controller
+     * rather than rebuilding it (a rebuild reconnects, see [LdmuxConfig.connectionKey]).
+     */
+    var predict: Boolean = config.predict
+
     private val _link = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
 
     /** What the link is doing, for the chrome to show. */
@@ -287,7 +293,7 @@ class TerminalController(
      * the prediction, once from the server).
      */
     private fun writeOutput(bytes: ByteArray) {
-        if (!config.predict) {
+        if (!predict) {
             feed(bytes)
             scheduleRender()
             return
@@ -444,7 +450,7 @@ class TerminalController(
         // full-screen app (alternate screen, which does not echo the way a
         // shell does); and a password prompt, which the emulator itself tells us
         // about — so we never have to guess from timing.
-        val canShowNow = config.predict &&
+        val canShowNow = predict &&
             !modes.alternateOn &&
             _frame.value?.passwordInput != true &&
             predictor.canPredict(bytes)
