@@ -3,7 +3,8 @@
  *
  *   ldmux list
  *   ldmux new <shell|pi> <cwd> [--title T]
- *   ldmux run <shell|pi> [cwd]        # create, then attach tmux
+ *   ldmux run <shell|pi> [cwd]        # create, then become its desk window here
+ *   ldmux window [cwd]                # create a desk-window shell, print its shim
  *   ldmux send <id> <text>
  *   ldmux key <id> <Key...>
  *   ldmux capture <id> [--history]
@@ -25,6 +26,24 @@ import type { PingResult, SessionRecord } from "../../protocol/src/rpc.ts";
 import { DEFAULT_MIRROR_WORKSPACE, mirrorCommand, openMirror } from "./desktop.ts";
 import { resolveTmuxBin } from "./tmux/control-plane.ts";
 import { buildPairInfo, expose, tailnetHost } from "./pairing.ts";
+
+/**
+ * Become a desk window of a shell, in this terminal.
+ *
+ * `run` and `shell` used to `tmux attach` directly, which made a shell nobody
+ * held: the phone opened it without asking and both sides typed into one pty.
+ * Through `deskWindow` the desk holds it, is detached rather than left typing
+ * when another device takes it, and gets it back on Enter (ADR-0010). Asking for
+ * the shell here is the consent, so it takes the shell from whoever has it.
+ */
+async function runAsDeskWindow(sock: string, id: string): Promise<number> {
+  const res = await daemonCall(sock, "deskWindow", { id });
+  if (!res.ok || !res.shimPath) {
+    console.error(`ldmux: ${res.detail ?? "could not make a desk window"}`);
+    return 1;
+  }
+  return spawnSync("/bin/sh", [res.shimPath], { stdio: "inherit" }).status ?? 0;
+}
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -76,7 +95,7 @@ const KNOWN_FLAGS = new Set([
  */
 function printUsage(): void {
   console.error(
-    "usage: ldmux <ping|list|desktop|new|shell|run|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
+    "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
   );
 }
 
@@ -153,16 +172,39 @@ async function main() {
 
     case "run": {
       const [kind, cwd] = positional(rest, []);
-      const ping = await call<PingResult>(sock, "ping");
       const { session } = await daemonCall(sock, "new", {
         kind: (kind as "shell" | "pi") ?? "shell",
         cwd: cwd ?? process.cwd(),
+        createdBy: "local",
       });
-      console.error(`ldmux: session ${session.id} (${session.tmuxName}) — detach with Ctrl-b d`);
-      const proc = spawnSync(resolveTmuxBin(), ["-L", ping.tmuxSocket, "attach", "-t", session.tmuxName], {
-        stdio: "inherit",
+      console.error(`ldmux: session ${session.id} (${session.tmuxName})`);
+      process.exit(await runAsDeskWindow(sock, session.id));
+    }
+
+    /**
+     * A new shell for a desk terminal to become, printed as the shim to exec.
+     *
+     * What `$mod+Return` runs (deploy/bin/ldmux-terminal). A plain `tmux attach`
+     * made a shell nobody held: a phone opened it without being asked, both
+     * typed into one pty, the window was resized to the phone, and closing the
+     * window left the shell running. As a desk window it is the desk's, the phone
+     * asks before taking it, and closing the window ends it (ADR-0010). The
+     * terminal execs the shim itself so no Node process stays behind per window.
+     */
+    case "window": {
+      const [cwd] = positional(rest, []);
+      const { session } = await daemonCall(sock, "new", {
+        kind: "shell",
+        cwd: cwd ?? process.cwd(),
+        createdBy: "local",
       });
-      process.exit(proc.status ?? 0);
+      const res = await daemonCall(sock, "deskWindow", { id: session.id });
+      if (!res.ok || !res.shimPath) {
+        console.error(`ldmux: ${res.detail ?? "could not make a desk window"}`);
+        process.exit(1);
+      }
+      console.log(res.shimPath);
+      break;
     }
 
     /**
@@ -173,7 +215,6 @@ async function main() {
      * the shell it starts is an ldmux session like any other.
      */
     case "shell": {
-      const ping = await call<PingResult>(sock, "ping");
       const name = flag(rest, "--name");
       const wantCwd = resolve(flag(rest, "--cwd") ?? process.cwd());
       const { sessions } = await daemonCall(sock, "list", {});
@@ -202,8 +243,8 @@ async function main() {
 
       let target: string;
       if (existing) {
-        target = existing.tmuxName;
-        console.error(`ldmux: reusing ${existing.id} (${target})`);
+        target = existing.id;
+        console.error(`ldmux: reusing ${existing.id} (${existing.tmuxName})`);
       } else {
         const { session } = await daemonCall(sock, "new", {
           kind: "shell",
@@ -211,15 +252,10 @@ async function main() {
           title: wanted,
           createdBy: "local",
         });
-        target = session.tmuxName;
-        console.error(`ldmux: session ${session.id} (${target}) — detach with Ctrl-b d`);
+        target = session.id;
+        console.error(`ldmux: session ${session.id} (${session.tmuxName})`);
       }
-      const proc = // By absolute path: the daemon and this shell may not share a PATH, and
-      // two tmux versions cannot share a server.
-      spawnSync(resolveTmuxBin(), ["-L", ping.tmuxSocket, "attach", "-t", target], {
-        stdio: "inherit",
-      });
-      process.exit(proc.status ?? 0);
+      process.exit(await runAsDeskWindow(sock, target));
     }
 
     case "send": {

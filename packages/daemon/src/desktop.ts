@@ -134,6 +134,11 @@ export interface LiveSpec {
   argv: string[];
 }
 
+/** Where a session's live-window shim lives. One place, so the cleanup agrees. */
+export function liveShimPath(stateDir: string, sessionId: string): string {
+  return join(stateDir, "live", `live-${liveWindowClass(sessionId)}.sh`);
+}
+
 /**
  * Write a session's live-window shim and return what to run.
  *
@@ -149,9 +154,8 @@ export async function prepareLive(
   tmuxBin: string,
   terminal?: string,
 ): Promise<LiveSpec> {
-  const dir = join(stateDir, "live");
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const shimPath = join(dir, `live-${liveWindowClass(sessionId)}.sh`);
+  await mkdir(join(stateDir, "live"), { recursive: true, mode: 0o700 });
+  const shimPath = liveShimPath(stateDir, sessionId);
   await writeFile(shimPath, liveShimScript(tmuxBin, tmuxSocket, tmuxName), { mode: 0o700 });
   return { shimPath, argv: liveArgv(shimPath, sessionId, terminal) };
 }
@@ -191,16 +195,30 @@ LDMUX_LIVE_TTY=$(tty 2>/dev/null || true)
 if [ -n "$LDMUX_LIVE_TTY" ]; then
   ${t} set-option -t ${name} -q @ldmux_live_tty "$LDMUX_LIVE_TTY"
 fi
+# ...and which process this window is. The window is closed exactly when this
+# shell is gone, which the daemon can ask the kernel instead of the window
+# manager — the only answer available for a terminal whose window class is not
+# ours, and a better one for those whose is.
+${t} set-option -t ${name} -q @ldmux_live_pid "$$"
 while :; do
   ${t} attach -t ${name}
   if ! ${t} has-session -t ${name} 2>/dev/null; then
     printf '\\n  This shell has ended.\\n\\n'
     break
   fi
-  printf '\\n\\n  LDMUX\\n\\n  This shell is open on another device.\\n  Press Enter to take it back.\\n\\n'
-  # One keypress is the consent. \`read\` also fails when the window is closed
-  # while we wait, which is exactly when looping again would be wrong.
-  read -r _ || break
+  printf '\\n\\n  LDMUX\\n\\n  This shell is open on another device.\\n  Press any key to take it back.\\n\\n'
+  # Wait for one of two things, checking once a second: a key (the user taking
+  # it back — any key, "interacting with it takes it back"), or the other device
+  # letting go, which the daemon says by clearing @ldmux_held_elsewhere. Either
+  # way the loop re-attaches. The terminal is raw for the wait and restored after.
+  LDMUX_STTY=$(stty -g 2>/dev/null) && stty -icanon -echo min 0 time 10 2>/dev/null
+  while :; do
+    LDMUX_GOT=$(dd bs=1 count=1 2>/dev/null | wc -c)
+    [ "$LDMUX_GOT" -gt 0 ] && break
+    ${t} has-session -t ${name} 2>/dev/null || break
+    [ -z "$(${t} show-option -t ${name} -qv @ldmux_held_elsewhere 2>/dev/null)" ] && break
+  done
+  [ -n "$LDMUX_STTY" ] && stty "$LDMUX_STTY" 2>/dev/null
 done
 `;
 }

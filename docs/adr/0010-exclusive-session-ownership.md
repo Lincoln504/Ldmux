@@ -63,7 +63,7 @@ deliberate act:
 
 - the phone shows a dialog — *"open on Desktop. Take it over?"* — and sends
   `takeover: true` only if the user confirms;
-- the desktop's live window shows *"open on another device — press Enter to take
+- the desktop's live window shows *"open on another device — press any key to take
   it back"*, and the keystroke is the consent.
 
 Neither can steal silently, so a simultaneous race is not possible in a way that
@@ -158,3 +158,41 @@ again:
   you choose what to open, so arriving there lets go of everything. A page is a
   hold on a shell, and holding shells you are not looking at is how the phone
   keeps a session somebody else might want.
+
+## Amendment (2026-09-26): a desk terminal is a desk window
+
+The ownership model covered windows `makeLive` opened and nothing else, and the
+terminal the desk actually uses — `$mod+Return` — was a bare `tmux attach` on a
+shell nobody held. So for the most common desk shell none of this ADR applied: the
+phone opened it without being asked, both sides typed into one pty, the phone's
+claim resized the desk's window, and closing the window left the shell running.
+(For four days after a reboot it was worse: the wrapper could not find `node`
+under i3's PATH, and every window silently became a plain shell the phone could
+not open at all.)
+
+- **`ldmux window` / `run` / `shell` make the terminal a desk window.** The CLI
+  creates (or, for `shell`, reuses) a shell, calls `deskWindow`, and the terminal
+  execs the shim `makeLive` windows already run. The desk holds the shell from the
+  start, so the phone gets `owned` and asks.
+- **A seizure detaches a desk-started window; it does not leave it attached.** The
+  2026-09-18 amendment said the desk *keeps* its window, and the code kept it
+  attached — a second writer — and the reconcile pass read that client as the user
+  taking the shell back and reclaimed it within a second. Detached, the shim shows
+  "open on another device — press any key", and that key is the taking back.
+- **The window is open exactly while its shim process is.** The shim records its
+  pid beside its tty; the daemon asks the kernel, not the window manager, and so
+  can tell a closed desk terminal (no window class of ours) from a detached one.
+- **Closing the window ends the shell when the desk holds it.** When the phone has
+  it, the window was only a notice, and closing it leaves the shell to the phone.
+- **A page's claim goes with the page's socket.** Claims were released only when a
+  device's *last* socket closed, and the launcher socket never closes, so every
+  shell the phone had shown stayed claimed. Now a page socket releases the shell
+  it was on unless another socket of the same device is on it (a reconnect).
+- **A released shell's size goes back** to the terminals attached to it
+  (`window-size latest`), rather than staying pinned at the phone's grid.
+- **A restart rebuilds the window map** from the tty and pid each shim recorded.
+- **A shell that exits ends its session** (`remain-on-exit off`), and a shell that
+  ended by any route loses its claim, window record and shim.
+
+Pinned by `packages/daemon/test/desk-window.test.ts`, each case checked to fail
+with its fix removed.

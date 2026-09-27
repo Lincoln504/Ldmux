@@ -30,6 +30,10 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 
 
+
+/** Messages that change what is in a shell, and so are only the holder's to send. */
+const WRITES = new Set<string>(["input", "key", "mouseclick", "copymode"]);
+
 export interface RemoteServerOptions {
   hostname: string;
   /** 0 = ephemeral (tests). */
@@ -74,6 +78,8 @@ export interface RemoteServerOptions {
   releaseDevice?(deviceId: string): string[];
   /** Let go of one session without ending it. */
   releaseClaim?(sessionId: string, deviceId: string): boolean;
+  /** Whether this device holds this session right now. */
+  holds?(sessionId: string, deviceId: string): boolean;
   /** What is on the machine's desktop, for the launcher. */
   desktopInventory?(): Promise<DesktopInventory>;
   /** Put a session's terminal on the desktop's screen, on a chosen workspace. */
@@ -91,7 +97,7 @@ export interface RemoteServerOptions {
   /**
    * How long a connection may say nothing before it is presumed gone.
    *
-   * An option rather than a constant only because a test cannot wait a minute to
+   * An option rather than a constant only because a test cannot wait twenty seconds to
    * watch a socket die. Production always uses the default.
    */
   idleMs?: number;
@@ -207,12 +213,16 @@ const WS_BACKLOG_BYTES = 64 * 1024;
  *
  * The client has a watchdog (`AttachClient`, three missed pings, about 12.6 s) and
  * reconnects. Nothing on this side did, so there was nothing to reconnect *to*:
- * only a claim nobody could ask for. 60 s is seven times the client's 4 s ping
- * interval, and past the 45 s a backgrounded phone is allowed before it is
- * supposed to let go on purpose — so a socket reaped here is one that had already
- * stopped being a client.
+ * only a claim nobody could ask for.
+ *
+ * 20 s: five of the client's 4 s pings, so one or two lost on a bad link are not a
+ * death. It was 60 s, and a phone that vanished held the desk's shells for a
+ * minute — the desk window sat on "open on another device" for a device that was
+ * gone. A backgrounded phone with a page open keeps pinging (its foreground
+ * service holds a wake lock), so this does not cut into its 45 s grace; a phone
+ * with only the launcher open holds nothing, and reconnects when it wakes.
  */
-const WS_IDLE_MS = 60_000;
+const WS_IDLE_MS = 20_000;
 
 export class RemoteServer {
   private server: Server | undefined;
@@ -360,6 +370,20 @@ export class RemoteServer {
             this.byDevice.delete(conn.device.id);
             const freed = this.opts.releaseDevice?.(conn.device.id) ?? [];
             if (freed.length > 0) void this.broadcastSessions().catch(() => {});
+          } else if (conn.sessionId && !this.deviceStillViewing(conn.device.id, conn.sessionId)) {
+            // ...but the shell *this* socket was showing is let go when this socket
+            // goes, unless another of the device's sockets is on the same shell (a
+            // reconnect overlapping its predecessor). A phone keeps its launcher
+            // socket open for as long as the app runs, so "the device's last socket"
+            // almost never closed: going back to the launcher, swiping past a page,
+            // the background drop — each closed only the page's socket, and every
+            // shell the phone had ever shown stayed claimed by it. The next desk or
+            // device to want one was refused by a phone that was not looking at it,
+            // which ADR-0010's amendment ("going to the launcher detaches from every
+            // open shell") says must not happen.
+            if (this.opts.releaseClaim?.(conn.sessionId, conn.device.id)) {
+              void this.broadcastSessions().catch(() => {});
+            }
           }
         }
       });
@@ -535,6 +559,14 @@ export class RemoteServer {
       this.sendError(ws, "bad_json", "invalid JSON");
       return;
     }
+    // Writing to a shell is the holder's. A socket stays attached after its claim
+    // went elsewhere by some route that did not reach it (a `close` sent on the
+    // launcher socket, say), and it used to go on typing into a shell another
+    // device held — the split input exclusive ownership exists to prevent.
+    if (WRITES.has(msg.type) && !this.mayWrite(data)) {
+      this.sendError(ws, "not_holder", "this device does not hold that shell");
+      return;
+    }
     try {
       switch (msg.type) {
         case "ping":
@@ -555,7 +587,13 @@ export class RemoteServer {
             if (previous !== undefined && previous !== device.id.slice(0, 64)) {
               const old = this.byDevice.get(previous);
               old?.delete(ws);
-              if (old && old.size === 0) this.byDevice.delete(previous);
+              if (old && old.size === 0) {
+                this.byDevice.delete(previous);
+                // ...and the old identity's claims, which nothing else would free.
+                if ((this.opts.releaseDevice?.(previous) ?? []).length > 0) {
+                  void this.broadcastSessions().catch(() => {});
+                }
+              }
             }
             data.device = {
               id: device.id.slice(0, 64),
@@ -821,6 +859,32 @@ export class RemoteServer {
    * has lost a shell must not keep receiving its output: it would still be able
    * to read it, and it would still be *typing* into it.
    */
+  /** A socket may write when it has no identity (no claims apply) or holds the shell. */
+  private mayWrite(data: ConnData): boolean {
+    if (!data.device || !data.sessionId || !this.opts.holds) return true;
+    return this.opts.holds(data.sessionId, data.device.id);
+  }
+
+  /** Whether any open socket of this device is attached to this shell. */
+  private deviceStillViewing(deviceId: string, sessionId: string): boolean {
+    for (const socket of this.byDevice.get(deviceId) ?? []) {
+      const conn = this.connState.get(socket);
+      if (conn && !conn.disposed && conn.sessionId === sessionId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A claim changed hands somewhere other than an attach on this transport — the
+   * desk taking a shell back, a desk window, `makeLive`. The displaced device has
+   * to be told *and cut off*, exactly as for an attach: without this a phone went
+   * on showing, and typing into, a shell the desk had just taken back.
+   * Idempotent: a socket already cut off is skipped.
+   */
+  displaced(deviceId: string, sessionId: string, newOwner: DeviceInfo): void {
+    this.notifyDisplaced(deviceId, sessionId, newOwner);
+  }
+
   private notifyDisplaced(deviceId: string, sessionId: string, newOwner: DeviceInfo): void {
     const holders = this.byDevice.get(deviceId);
     // Logged because "who took my shell" is the first question a user asks, and

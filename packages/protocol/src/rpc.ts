@@ -89,6 +89,16 @@ export interface DesktopPiSession {
   pid: number;
   cwd: string;
   sessionId: string | null;
+  /**
+   * The ldmux session this desk `pi` runs inside, found by walking its process
+   * ancestry up to a tmux pane. The phone opens that session to reach this pi.
+   *
+   * Null when the pi was started in a terminal that is not an ldmux session (a
+   * plain alacritty window): its pty belongs to that terminal, so there is no
+   * session for the phone to attach to. A pi started *in* an ldmux shell — from
+   * the phone or from a desk window — always has one.
+   */
+  ldmuxSessionId?: string | null;
   startedAt: string | null;
   transcript: string | null;
   windowId: string | null;
@@ -190,7 +200,7 @@ export interface DaemonMethods {
     params: { id: string; device: DeviceInfo };
     result: { ok: boolean; detail?: string };
   };
-  /** Drop a record without touching tmux (cleanup for dead/adopted leftovers). */
+  /** Drop a record that is over, without touching tmux. Refused for a running shell: use `kill`. */
   forget: { params: { id: string }; result: { ok: true; removed: boolean } };
   adopt: { params: { tmuxName: string; kind?: SessionKind; title?: string }; result: { session: SessionRecord } };
   desktop: { params: Record<string, never>; result: DesktopInventory };
@@ -199,6 +209,16 @@ export interface DaemonMethods {
     result: { ok: boolean; detail?: string };
   };
   closeLive: { params: { id: string }; result: { ok: boolean; detail?: string } };
+  /**
+   * Make the terminal the caller is about to become a desk window of a shell.
+   *
+   * What `$mod+Return` runs: the caller creates a shell, calls this, and execs
+   * the returned shim in its own terminal. From then on that terminal is a live
+   * window like one `makeLive` opened — it holds the shell for the desktop, is
+   * detached (not left typing) when another device takes the shell over, and
+   * closing it ends the shell.
+   */
+  deskWindow: { params: { id: string }; result: { ok: boolean; shimPath?: string; detail?: string } };
   copyMode: { params: { id: string; on: boolean }; result: { ok: true } };
   /**
    * May a program inside a shell put text on the phone's clipboard?

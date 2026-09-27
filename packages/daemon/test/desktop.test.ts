@@ -196,8 +196,8 @@ test("the shim loops, so being detached does not close the window", () => {
   // window disappears, which is the behaviour this design exists to avoid.
   const s = liveShimScript("/usr/bin/tmux", "ldmux", "sess");
   expect(s).toContain("while :; do");
-  expect(s).toContain("Press Enter to take it back");
-  expect(s).toContain("read -r _");
+  expect(s).toContain("Press any key to take it back");
+  expect(s).toContain("dd bs=1 count=1");
   // A shell that ended says so and stops, rather than offering a reclaim that
   // cannot work.
   expect(s).toContain("has-session");

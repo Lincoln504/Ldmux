@@ -1,0 +1,18 @@
+#!/bin/sh
+# super+Return. A terminal keybinding must always give a terminal, so this asks
+# ldmux for a desk window and falls back to a plain shell when it cannot have one
+# — a fresh boot before the unit is up, or a daemon that is down.
+#
+# A desk window (`ldmux window`), not `ldmux run`: a bare `tmux attach` made a
+# shell nobody held, so the phone opened it without asking, both typed into one
+# pty, and closing the window left the shell running (ADR-0010). The shim is
+# exec'd directly so no Node process stays behind per window.
+#
+# The fallback is logged. It used to be silent, and a wrapper that could not
+# find node made *every* window a plain shell for days with nothing saying so.
+LDMUX=/home/ldeen/.local/bin/ldmux
+if shim=$("$LDMUX" window "${PWD:-$HOME}" 2>/tmp/ldmux-terminal.err) && [ -n "$shim" ]; then
+  exec alacritty -e /bin/sh "$shim"
+fi
+logger -t ldmux-terminal "no ldmux desk window, plain shell instead: $(head -c 300 /tmp/ldmux-terminal.err 2>/dev/null)"
+exec alacritty

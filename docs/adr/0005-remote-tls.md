@@ -18,7 +18,8 @@ resolve MagicDNS, so a `100.x` fallback is needed.
   fallback if `serve` is unavailable.
 - **Two gates:** tailnet identity (WireGuard; optional `whois`/identity-header
   allow list) + bearer token. The token is stored **plaintext** at
-  `<stateDir>/token` with mode `0600` (state dir `0700`) and compared in constant
+  `$LDMUX_TOKEN_FILE` (the unit sets `~/.local/state/ldmux/token`, so it survives a
+  reboot; default `<stateDir>/token`) with mode `0600` (directory `0700`) and compared in constant
   time: another process running as the same user can read it, so it is a gate
   against the network, not against a local user. The identity allow list
   mentioned above is **not implemented**.

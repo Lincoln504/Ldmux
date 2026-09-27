@@ -58,7 +58,9 @@ export class Registry {
         this.sessions.set(record.id, record);
       }
     } catch {
-      // Missing/corrupt registry: start empty (tmux will be re-adopted).
+      // Missing/corrupt registry: start empty. Nothing re-adopts automatically:
+      // an `ldmux-*` session still running in tmux stays unlisted until
+      // `ldmux adopt <tmux-name>`.
     }
   }
 

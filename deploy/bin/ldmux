@@ -1,0 +1,11 @@
+#!/bin/sh
+# ldmux CLI. A wrapper, not a build step: the daemon and protocol packages are
+# TypeScript and Node runs them directly (ADR-0009, no build step).
+#
+# node by absolute path. This is run from i3 (super+Return, via ldmux-terminal),
+# whose PATH is the login manager's and has no nvm node in it: a bare `node`
+# there is "not found", the ping in ldmux-terminal fails, and every desktop
+# window silently became a plain shell the phone can never open. Same pin as
+# the unit's PATH.
+NODE=${LDMUX_NODE:-/home/ldeen/.config/nvm/versions/node/v25.8.2/bin/node}
+exec "$NODE" /home/ldeen/Documents/ldmux/packages/daemon/src/cli.ts "$@"

@@ -242,8 +242,9 @@ A **session** is one tmux session on the private socket `-L ldmux`.
 - **cwd:** arbitrary directory (FR-10).
 - **Created-by / owner:** which pi session or client created it (families, phase 2).
 - **State:** `starting | running | attached | detached | dead`.
-- **Persistence:** tmux keeps the pane alive across disconnects; `remain-on-exit`
-  lets the daemon observe exit and retain scrollback.
+- **Persistence:** tmux keeps the pane alive across disconnects. A shell that
+  exits ends its session (`remain-on-exit off`): the row goes, and a desk window
+  on it closes. Exit-status capture is not built.
 
 **Pi sessions** are ordinary tmux sessions whose pane runs `pi`. Interactive `pi`
 is launched into tmux by the shell wrapper:
@@ -341,10 +342,11 @@ set -g default-terminal tmux-256color   # fall back to screen-256color if unsupp
 set -g mouse on
 set -g status off                        # consistent for phone stream and mirror
 set -g aggressive-resize off
-set -g window-size manual
 set -g set-clipboard on
 set -g focus-events on
-set -g remain-on-exit on
+set -g remain-on-exit off               # a shell that exits ends its session
+# NOT global: `window-size manual`. Set globally it crashes tmux 3.5a (Debian 13)
+# on the next new-session; it is set per session at creation instead.
 # NOT applied: `allow-passthrough on`. Arbitrary escape pass-through is exactly
 # what the ADR-0001 sanitizer bounds; re-add only with an explicit policy.
 ```
@@ -475,8 +477,9 @@ helper suffices), and owner/families.
   Nothing here is broken by a slow client, and the fix is not a bigger queue: `list`
   is a request for *current state*, so a queued one is worthless the moment a newer
   one exists and should be dropped rather than served. Recorded, not yet changed.
-- **`remain-on-exit`** + `pane_died` detection: record `exit_code`/`exited_at`,
-  keep scrollback, mark `dead`, notify clients, remove from the *live* list.
+- **Pane death ends the session** (`remain-on-exit off`); reconcile marks it
+  `dead`, releases its claim, window record and shim, and broadcasts. Recording
+  `exit_code` and keeping the final scrollback is not built.
 - **The pi extension is gone (ADR-0009).** This section used to carry a table of
   what the extension did on `quit`, `reload`, `new`, `resume` and `fork`. There is
   no extension: ldmux is not a pi plugin, and `pi` runs inside a session like any

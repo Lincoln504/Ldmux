@@ -170,3 +170,35 @@ test("a state directory that already exists is tightened, not trusted", async ()
   // refusing: the shell did not stop being the owner's because a mode was wrong.
   expect(existsSync(daemon.socketPath)).toBe(true);
 });
+
+test("a remote bind that fails because the address is busy comes up once it frees", async () => {
+  // The boot case is EADDRNOTAVAIL (the tailnet address is not assigned yet),
+  // which a test cannot produce and then clear; EADDRINUSE takes the same retry
+  // path and can be. Without the retry the second daemon stays at port 0 forever.
+  const holder = freshDaemon();
+  await holder.start();
+  const port = holder.remoteInfoForTest().port;
+
+  const waiting = freshDaemon({ remotePort: port, remoteRetryMs: 50 });
+  await waiting.start();
+  expect(waiting.remoteInfoForTest().port).toBe(0);
+
+  holder.stop();
+  const deadline = Date.now() + 4000;
+  while (waiting.remoteInfoForTest().port === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  expect(waiting.remoteInfoForTest().port).toBe(port);
+});
+
+test("a stopped daemon does not go on retrying its remote bind", async () => {
+  const holder = freshDaemon();
+  await holder.start();
+  const port = holder.remoteInfoForTest().port;
+  const waiting = freshDaemon({ remotePort: port, remoteRetryMs: 50 });
+  await waiting.start();
+  waiting.stop();
+  holder.stop();
+  await new Promise((r) => setTimeout(r, 200));
+  expect(waiting.remoteInfoForTest().port).toBe(0);
+});

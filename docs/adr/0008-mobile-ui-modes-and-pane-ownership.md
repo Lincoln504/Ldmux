@@ -13,7 +13,7 @@ three had visible consequences on the device:
    phone in landscape covers most of the screen (and, on this device, most of
    the side panel too), which makes landscape the *wrong* place to type.
 2. **Who owns the pane size.** The daemon creates sessions at a fixed
-   `120x40`. With `window-size manual` (set in `ensureServer`), nothing ever
+   `120x40`. With `window-size manual` (set per session at creation), nothing ever
    resized a pane afterwards, so a phone rendered a 120-column grid scaled down
    to ~12 px cells. ADR-0002 fixed the *canonical* geometry (cols/rows, never
    pixels); it did not say who gets to choose it at runtime.

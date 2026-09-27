@@ -18,7 +18,13 @@ const realPath = process.env.PATH ?? "";
  */
 const SOCKET = `ldmux-cp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 
+/** The cold-start test's own server and profile directory, reaped with the rest. */
+const COLD_SOCKET = `${SOCKET}-cold`;
+const coldDirs: string[] = [];
+
 afterAll(() => {
+  killTmuxServer(COLD_SOCKET);
+  for (const d of coldDirs) rmSync(d, { recursive: true, force: true });
   killTmuxServer(SOCKET);
   process.env.PATH = realPath;
   rmSync(dir, { recursive: true, force: true });
@@ -114,8 +120,9 @@ test("the server profile is written, and every server we start reads it", async 
   // server we start actually reads it.
   process.env.PATH = realPath;
   const dir = mkdtempSync(join(tmpdir(), "ldmux-profile-"));
+  coldDirs.push(dir);
   const profilePath = join(dir, "tmux-server.conf");
-  const fresh = `${SOCKET}-cold`;
+  const fresh = COLD_SOCKET;
   const { execFileSync } = await import("node:child_process");
   try {
     execFileSync("tmux", ["-L", fresh, "kill-server"], { stdio: "ignore" });

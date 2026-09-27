@@ -15,9 +15,9 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-export function killTmuxServer(socket: string): void {
+export function killTmuxServer(socket: string, bin = "tmux"): void {
   try {
-    spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
+    spawnSync(bin, ["-L", socket, "kill-server"], { stdio: "ignore" });
   } catch {
     /* no tmux on PATH */
   }

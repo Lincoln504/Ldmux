@@ -13,6 +13,23 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { spawnCaptured } from "../proc.ts";
 
 /**
+ * One word of a tmux config file, quoted unless it is plainly a bare word.
+ *
+ * The file is parsed, not split on spaces: `#` starts a comment, and `;`, `$`,
+ * `~`, `{` and quotes all mean something. `set-titles-string #T` was written
+ * bare, tmux read `#T` as a comment and the line as an error, and tmux shows
+ * config errors by putting the first attached client's pane into view-mode —
+ * where every key the phone sent afterwards went, instead of into the shell.
+ * Single quotes are literal in tmux's parser; a value can therefore carry
+ * anything but a single quote, which none of the profile's values contain.
+ */
+export function tmuxConfigWord(word: string): string {
+  if (/^[A-Za-z0-9_./:,=+@%-]+$/.test(word)) return word;
+  if (word.includes("'")) throw new Error(`a tmux profile value cannot contain a single quote: ${word}`);
+  return `'${word}'`;
+}
+
+/**
  * Find the tmux binary to run.
  *
  * `LDMUX_TMUX_BIN` wins, because a systemd unit or an image may know exactly
@@ -362,8 +379,23 @@ export class TmuxControlPlane {
       ["set-option", "-g", "default-terminal", "tmux-256color"],
       ["set-option", "-g", "mouse", "on"],
       ["set-option", "-g", "status", "off"],
+      // The desk window's title is the program's, as it is outside tmux: a pane's
+      // OSC title (pi's "π - project", a shell's prompt title) goes no further than
+      // tmux unless tmux passes it on, so every desk window read "Alacritty" and
+      // could not be told apart in the window list.
+      ["set-option", "-g", "set-titles", "on"],
+      ["set-option", "-g", "set-titles-string", "#T"],
       ["set-option", "-g", "aggressive-resize", "off"],
-      ["set-option", "-g", "window-size", "manual"],
+      // ...and a global one left by an older profile is removed, since a running
+      // server re-reads this file ([ensureServer]) and would otherwise keep it.
+      ["set-option", "-gu", "window-size"],
+      // `window-size manual` is **not** set here, and must not be: set globally,
+      // tmux 3.5a — Debian 13's, and the one the deployed daemon runs — crashes on
+      // the next `new-session -d` ("server exited unexpectedly"), from a config
+      // file and from a live `set -g` alike. It is set per session in
+      // [newSession] instead, which 3.5a handles (measured 2026-09-26). The suite
+      // runs on the devShell's 3.7b, which does not crash, and that is how a daemon
+      // that could not create a single shell after a reboot passed every test.
       ["set-option", "-g", "set-clipboard", "on"],
       ["set-option", "-g", "focus-events", "on"],
       // **Extended keys, because a program inside a pane can tell.**
@@ -430,7 +462,13 @@ export class TmuxControlPlane {
       // plane, so this only ever delayed the desk's own window — and 500 ms of
       // nothing after pressing Esc is the kind of lag that reads as a hang.
       ["set-option", "-sg", "escape-time", "0"],
-      ["set-option", "-g", "remain-on-exit", "on"],
+      // A shell that exits ends its session. `remain-on-exit on` was set here from
+      // the first commit for an exit-status feature (SPEC §5.5) that was never
+      // built, and what it did instead was keep every exited shell as a dead pane:
+      // the registry only asks whether the *session* exists, so the row stayed
+      // `running`, the phone attached to a corpse, and the desk window sat on
+      // tmux's "Pane is dead" screen instead of closing when you typed `exit`.
+      ["set-option", "-g", "remain-on-exit", "off"],
     ];
   }
 
@@ -461,13 +499,8 @@ export class TmuxControlPlane {
   writeServerProfile(opts: { historyLimit?: number } = {}): string | null {
     if (!this.profilePath) return null;
     const lines = this.serverOptionArgs(opts).map((argv) => {
-      // Values are quoted defensively: a login shell path with a space in it is
-      // absurd, and if it ever happens it should still be one value.
       const [cmd, ...rest] = argv;
-      const value = rest
-        .map((a) => (a.includes(" ") ? `'${a.replaceAll("'", "")}'` : a))
-        .join(" ");
-      return `${cmd} ${value}`;
+      return `${cmd} ${rest.map(tmuxConfigWord).join(" ")}`;
     });
     const body = `${lines.join("\n")}\n`;
     try {
@@ -496,9 +529,20 @@ export class TmuxControlPlane {
     return this.profilePath;
   }
 
-  /** Keep the old name: writing the profile is what ensuring the server means now. */
+  /**
+   * Write the profile, and hand it to a server that is already running.
+   *
+   * tmux reads `-f` only when a server starts, and the server outlives the daemon
+   * (`KillMode=process`), so a changed profile never reached the server the shells
+   * were in: `remain-on-exit off` would have waited for the next reboot. When no
+   * server is running there is nothing to do — the next command starts one with
+   * the file.
+   */
   async ensureServer(opts: { historyLimit?: number } = {}): Promise<void> {
-    this.writeServerProfile(opts);
+    const profile = this.writeServerProfile(opts);
+    if (!profile) return;
+    const { code } = await this.run(["list-sessions"]);
+    if (code === 0) await this.run(["source-file", profile]);
   }
 
   /**
@@ -541,20 +585,30 @@ export class TmuxControlPlane {
    * daemon's event loop waits on. The answer is what lets the launcher say
    * *what* a shell is — `bash`, `vim`, `pi` — instead of only where it is.
    */
-  async paneCommands(): Promise<Map<string, string>> {
+  /**
+   * Each session's first pane: what it runs, where it is now, and its pid.
+   *
+   * The directory is the pane's *current* one. A session's recorded cwd is where
+   * it was created, and a desk window starts wherever i3 was — `~` — and is then
+   * `cd`'d somewhere else, so the recorded one said nothing about where the work
+   * is. The pid is how a process on the desk is traced back to its session.
+   */
+  async paneFacts(): Promise<Map<string, { command: string; path: string; pid: number }>> {
     const { code, out } = await this.run([
-      "list-panes", "-a", "-F", "#{session_name}|#{pane_current_command}",
+      "list-panes", "-a", "-F", "#{session_name}|#{pane_current_command}|#{pane_pid}|#{pane_current_path}",
     ]);
-    if (code !== 0) return new Map();
-    const commands = new Map<string, string>();
+    const facts = new Map<string, { command: string; path: string; pid: number }>();
+    if (code !== 0) return facts;
     for (const line of out.split("\n")) {
       if (!line) continue;
-      const [name, command] = line.split("|");
+      const [name, command, pid, ...rest] = line.split("|");
       // First pane wins: it is the session's own pane, and a session with an
       // exotic layout should not have its label decided by a split.
-      if (name && command && !commands.has(name)) commands.set(name, command);
+      if (name && !facts.has(name)) {
+        facts.set(name, { command: command ?? "", path: rest.join("|"), pid: Number(pid) || 0 });
+      }
     }
-    return commands;
+    return facts;
   }
 
   async listPanes(session: string): Promise<TmuxPane[]> {
@@ -601,6 +655,15 @@ export class TmuxControlPlane {
 
 
   /**
+   * Detach one client, by its tty. The client's `attach` returns, which is what
+   * lets a live window say who took the shell instead of going on typing into it.
+   */
+  async detachClient(tty: string): Promise<boolean> {
+    const { code } = await this.run(["detach-client", "-t", tty]);
+    return code === 0;
+  }
+
+  /**
    * Set a session-scoped user option (`@name`).
    *
    * `-q` suppresses the error when the option did not previously exist; tmux
@@ -608,6 +671,11 @@ export class TmuxControlPlane {
    */
   async setSessionOption(session: string, key: string, value: string): Promise<void> {
     await this.run(["set-option", "-t", session, "-q", key, value]);
+  }
+
+  /** Unset a session-scoped user option; a missing one is not an error. */
+  async unsetSessionOption(session: string, key: string): Promise<void> {
+    await this.run(["set-option", "-t", session, "-qu", key]);
   }
 
   /**
@@ -634,6 +702,10 @@ export class TmuxControlPlane {
     if (opts.command?.length) args.push("--");
     const { code, err } = await this.run([...args, ...(opts.command ?? [])]);
     if (code !== 0) throw new Error(`tmux new-session failed: ${err.trim() || code}`);
+    // A phone is not a tmux client, so nothing would size this window; `manual`
+    // is what makes the daemon's `resize-window` stick ([setWindowSize]). Per
+    // session, never global — see [serverOptionArgs].
+    await this.run(["set-option", "-t", opts.name, "window-size", "manual"]);
     if (opts.destroyUnattached) {
       // Session-scoped so it never affects ldmux's own or other sessions.
       await this.run(["set-option", "-t", opts.name, "destroy-unattached", "on"]);
@@ -735,7 +807,7 @@ export class TmuxControlPlane {
   /**
    * Who decides this session's size: a real terminal window, or us.
    *
-   * `window-size` is set to `manual` globally because a phone is not a tmux
+   * `window-size` is set to `manual` on every session because a phone is not a tmux
    * client: nothing about an RPC client's grid reaches tmux on its own, so the
    * daemon states it with `resize-window`. That is right for a session only a
    * phone is looking at.
@@ -754,7 +826,7 @@ export class TmuxControlPlane {
    * shell is sized for.
    */
   async setWindowSize(name: string, mode: "manual" | "latest"): Promise<void> {
-    // Session-scoped, and so an override of the global `manual` that nothing else
+    // Session-scoped, and so an override of the session's `manual` that nothing else
     // has to know about: a session that goes back to being phone-only needs no
     // second write to go back.
     await this.run(["set-option", "-t", name, "window-size", mode]);

@@ -62,3 +62,28 @@ test("comparison does not throw on differently-sized buffers", () => {
   expect(() => tokenMatches("abc", "abcdef")).not.toThrow();
   expect(() => tokenMatches("abcdef", "abc")).not.toThrow();
 });
+
+test("a token path outside the state dir survives the state dir being wiped", () => {
+  // The state dir is a tmpfs under XDG_RUNTIME_DIR: gone on every reboot.
+  const tokenPath = join(dir, "persist", "nested", "token");
+  const first = loadOrCreateToken(mkdtempSync(join(dir, "boot1-")), tokenPath);
+  expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+  expect(loadOrCreateToken(mkdtempSync(join(dir, "boot2-")), tokenPath)).toBe(first);
+});
+
+test("moving the token to its own path adopts the one already paired", () => {
+  const stateDir = mkdtempSync(join(dir, "legacy-"));
+  const paired = loadOrCreateToken(stateDir);
+  const tokenPath = join(mkdtempSync(join(dir, "moved-")), "token");
+  expect(loadOrCreateToken(stateDir, tokenPath)).toBe(paired);
+  expect(readFileSync(tokenPath, "utf8")).toBe(paired);
+});
+
+test("once moved, the old copy is gone, so deleting the token really rotates it", () => {
+  const stateDir = mkdtempSync(join(dir, "rotate-"));
+  const paired = loadOrCreateToken(stateDir);
+  const tokenPath = join(mkdtempSync(join(dir, "rotate-p-")), "token");
+  loadOrCreateToken(stateDir, tokenPath);
+  rmSync(tokenPath);
+  expect(loadOrCreateToken(stateDir, tokenPath)).not.toBe(paired);
+});

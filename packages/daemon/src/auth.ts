@@ -7,19 +7,34 @@
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
-export function loadOrCreateToken(stateDir: string): string {
-  const path = join(stateDir, "token");
-  if (existsSync(path)) {
-    const existing = readFileSync(path, "utf8").trim();
-    if (existing) return existing;
+export function loadOrCreateToken(stateDir: string, tokenPath?: string): string {
+  const path = tokenPath ?? join(stateDir, "token");
+  const legacyPath = join(stateDir, "token");
+  const existing = readToken(path);
+  if (existing) {
+    // A copy left at the old place would be adopted again if the real one were
+    // deleted to rotate it — silently bringing the old token back.
+    if (tokenPath && tokenPath !== legacyPath) rmSync(legacyPath, { force: true });
+    return existing;
   }
-  const token = randomBytes(32).toString("hex");
+  // Moving the token out of the state directory must not unpair a phone that
+  // was paired against the old location: the first start with a new path adopts
+  // the token that is already there rather than minting one.
+  const legacy = tokenPath ? readToken(legacyPath) : "";
+  const token = legacy || randomBytes(32).toString("hex");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, token, { mode: 0o600 });
   chmodSync(path, 0o600);
+  if (tokenPath && tokenPath !== legacyPath) rmSync(legacyPath, { force: true });
   return token;
+}
+
+function readToken(path: string): string {
+  if (!existsSync(path)) return "";
+  return readFileSync(path, "utf8").trim();
 }
 
 /**

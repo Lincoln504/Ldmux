@@ -8,7 +8,7 @@
  * each other's socket.
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,7 @@ import { hostname } from "node:os";
 import { PaneStream } from "./stream.ts";
 import { RemoteServer } from "./remote.ts";
 import { readDesktop } from "./desktop-inventory.ts";
-import { closeLive, liveWindowState, openLive } from "./desktop.ts";
+import { closeLive, liveShimPath, liveWindowState, openLive, prepareLive } from "./desktop.ts";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
 import { loadOrCreateToken } from "./auth.ts";
 import { readClipboardWritePolicy, writeClipboardWritePolicy } from "./clipboard-policy.ts";
@@ -68,6 +68,21 @@ export function seizingClosesTheDeskWindow(createdBy: string): boolean {
 const LIVE_RECHECK_MS = 1000;
 /** The session option a live window records its own client tty in. */
 const LIVE_TTY_OPTION = "@ldmux_live_tty";
+/**
+ * Set while another device holds a shell that has a desk window. The window's shim
+ * watches it and re-attaches the moment it clears, so a phone letting go — going
+ * back to its launcher, being swiped away, losing its link — gives the desk its
+ * shell back without anybody touching the desk.
+ */
+const LIVE_HELD_OPTION = "@ldmux_held_elsewhere";
+/** ...and the pid of the shim that runs in it: alive exactly while the window is open. */
+const LIVE_PID_OPTION = "@ldmux_live_pid";
+/**
+ * How long a new desk window may take to record its pid before its absence means
+ * anything. The shim writes it before its first attach, so this only has to cover
+ * a terminal starting up.
+ */
+const LIVE_PID_GRACE_MS = 15_000;
 
 export interface LdmuxDaemonOptions {
   /** Directory for ldmuxd.sock + registry.json + ldmuxd.lock. */
@@ -93,7 +108,19 @@ export interface LdmuxDaemonOptions {
   remotePort?: number;
   /** Set false to run without the remote transport (tests). */
   enableRemote?: boolean;
-  /** Static web client root to serve at / (defaults to the bundled client). */
+  /**
+   * Where the remote bearer token lives (default `<stateDir>/token`). The state
+   * directory is normally `$XDG_RUNTIME_DIR/ldmux`, a tmpfs, so a token kept there
+   * is regenerated on every boot and every paired phone is locked out with a
+   * token that no longer exists. The unit points this at persistent storage.
+   */
+  tokenPath?: string;
+  /**
+   * How long to wait before retrying a remote bind that failed because the
+   * address is not there yet (default 5000 ms). The tailnet address appears
+   * only once tailscaled is up, which at boot is after this daemon.
+   */
+  remoteRetryMs?: number;
 }
 
 interface RpcRequest {
@@ -168,6 +195,8 @@ export class LdmuxDaemon {
   private readonly streams = new Map<string, PaneStream>();
   private remoteInfo: { hostname: string; port: number } | undefined;
   private token = "";
+  private remoteRetry: ReturnType<typeof setTimeout> | undefined;
+  private stopped = false;
   /**
    * Who holds each session (ADR-0010). In memory and nowhere else: a claim that
    * outlives its connection blocks the next attach, so a restart losing every
@@ -181,7 +210,12 @@ export class LdmuxDaemon {
    * "closing on the phone leaves it open" decidable, and the probe was wrong in
    * both directions (a window that had just closed still looked open).
    */
-  private readonly liveWindows = new Map<string, { workspace: string }>();
+  private readonly liveWindows = new Map<string, { workspace: string; since: number }>();
+  /** A window pass is running; see [reconcileLive]. */
+  private liveChecking = false;
+  private liveTimer: ReturnType<typeof setInterval> | undefined;
+  /** The tmux sessions the registry did not know at the last reconcile. */
+  private unknownSessionsKey = "";
   /** When the live windows were last checked, and when to check again. */
   private liveCheckedAt = 0;
   /**
@@ -252,10 +286,14 @@ export class LdmuxDaemon {
   async start(): Promise<void> {
     if (!this.acquireLock()) throw new Error("ldmuxd already running");
     this.ownsLock = true;
+    this.stopped = false;
     try {
       await this.cp.ensureServer({ historyLimit: this.historyLimit });
       this.registry.load();
+      await this.adoptOwnSessions();
       await this.reconcile();
+      await this.rebuildLiveWindows();
+      this.sweepShims();
       try {
         rmSync(this.socketPath);
       } catch {
@@ -294,6 +332,23 @@ export class LdmuxDaemon {
         console.error(`ldmuxd: control socket error: ${err.message}`);
       });
       await this.startRemote();
+      // The windows are checked on a clock as well as from the session list: with
+      // no phone asking for the list, a desk window that was closed left its shell
+      // running until somebody did.
+      //
+      // ...and so is whether each session is still alive at all. That was settled
+      // only when somebody asked for the list, so a shell that exited with no page
+      // open stayed `running`, and the phone went on offering to take it over.
+      // `reconcile` broadcasts on its own when anything changed.
+      this.liveTimer = setInterval(() => {
+        void this.reconcile({ sweep: false })
+          .then(() => this.reconcileLive())
+          .then((changed) => {
+            if (changed) void this.remote?.broadcastSessions().catch(() => {});
+          })
+          .catch(() => {});
+      }, 2000);
+      this.liveTimer.unref?.();
     } catch (err) {
       this.releaseLock();
       throw err;
@@ -303,7 +358,7 @@ export class LdmuxDaemon {
   private async startRemote(): Promise<void> {
     if (this.opts.enableRemote === false) return;
     try {
-      this.token = loadOrCreateToken(this.stateDir);
+      this.token = loadOrCreateToken(this.stateDir, this.opts.tokenPath);
       this.remote = new RemoteServer({
         hostname: this.opts.remoteHost ?? "127.0.0.1",
         port: this.opts.remotePort ?? 7623,
@@ -326,8 +381,17 @@ export class LdmuxDaemon {
         // two copies of "who owns this" is how a client ends up being told one
         // thing and enforced against another (ADR-0010).
         claim: (sessionId, device, takeover) => this.claimSession(sessionId, device, takeover),
-        releaseDevice: (deviceId) => this.ownership.releaseDevice(deviceId),
-        releaseClaim: (sessionId, deviceId) => this.ownership.release(sessionId, deviceId),
+        releaseDevice: (deviceId) => {
+          const freed = this.ownership.releaseDevice(deviceId);
+          for (const id of freed) this.handSizeBack(id);
+          return freed;
+        },
+        holds: (sessionId, deviceId) => this.ownership.owner(sessionId)?.device.id === deviceId,
+        releaseClaim: (sessionId, deviceId) => {
+          const released = this.ownership.release(sessionId, deviceId);
+          if (released) this.handSizeBack(sessionId);
+          return released;
+        },
         closeSession: async (id) =>
           (await this.handle("close", { id })) as { ok: boolean; ended: boolean; detail?: string },
         copyMode: async (id: string, on: boolean) => {
@@ -342,11 +406,41 @@ export class LdmuxDaemon {
         log: (msg) => console.error(msg),
       });
       this.remoteInfo = await this.remote.start();
+      // A retry that was already binding when the daemon stopped must not leave a
+      // listener behind it.
+      if (this.stopped) {
+        this.remote.stop();
+        this.remote = undefined;
+        return;
+      }
+      if (this.remoteRetry !== undefined) console.error(`ldmuxd: remote up after retry`);
+      this.remoteRetry = undefined;
     } catch (err) {
       // Remote is optional: a bind failure must not take down local control.
-      console.error(`ldmuxd: remote disabled: ${(err as Error).message}`);
+      try {
+        this.remote?.stop();
+      } catch {
+        /* never listened */
+      }
       this.remote = undefined;
       this.remoteInfo = undefined;
+      // An address that is not there *yet* is not a configuration error. At boot
+      // this unit starts before tailscaled has assigned the tailnet address, the
+      // bind fails with EADDRNOTAVAIL, and giving up then left a daemon that was
+      // `active (running)` for days with no WebSocket at all — every phone got
+      // "connection refused" and nothing said why. Measured 2026-09-26. So the
+      // two conditions that clear on their own are retried until they do.
+      const code = (err as NodeJS.ErrnoException).code;
+      if ((code === "EADDRNOTAVAIL" || code === "EADDRINUSE") && !this.stopped) {
+        if (this.remoteRetry === undefined) {
+          console.error(`ldmuxd: remote not yet bindable (${code}); retrying until it is`);
+        }
+        this.remoteRetry = setTimeout(() => {
+          void this.startRemote();
+        }, this.opts.remoteRetryMs ?? 5000);
+      } else {
+        console.error(`ldmuxd: remote disabled: ${(err as Error).message}`);
+      }
     }
   }
 
@@ -370,18 +464,25 @@ export class LdmuxDaemon {
     if (live) for (const s of live) activity.set(s.name, s.activity * 1000);
     // What each pane is running, so a row can say `bash` or `pi` and not just a
     // directory. Skipped when there is nothing terminal-backed to ask about.
-    const commands = live && live.length > 0 ? await this.cp.paneCommands() : new Map<string, string>();
-    return this.registry.list().map((record) => ({
+    const panes = live && live.length > 0 ? await this.cp.paneFacts() : new Map<string, { command: string; path: string; pid: number }>();
+    return this.registry.list().map((record) => {
+      const pane = record.tmuxName ? panes.get(record.tmuxName) : undefined;
+      // Where the shell is *now*. The launcher matches desk `pi` processes to
+      // shells by directory and titles a row by it, and the creation directory
+      // made a desk window opened in `~` and `cd`'d into a project read as `ldeen`
+      // and fail to match the pi running in it — so "open" made a new shell.
+      const here = record.status === "running" && pane?.path ? { ...record, cwd: pane.path } : record;
+      return {
       id: record.id,
       kind: record.kind,
-      title: sessionTitle(record),
-      cwd: record.cwd,
+      title: sessionTitle(here),
+      cwd: here.cwd,
       status: record.status,
       tmuxName: record.tmuxName,
       // Who opened it. The phone shows a per-shell menu only for shells it
       // opened itself, so this has to survive to the client.
       createdBy: record.createdBy,
-      process: record.tmuxName ? commands.get(record.tmuxName) : undefined,
+      process: pane?.command || undefined,
       lastActivityAt:
         (record.tmuxName ? activity.get(record.tmuxName) : undefined) ?? record.updatedAt,
       // Where it is, and who has it, as facts. The launcher used to infer the
@@ -390,7 +491,8 @@ export class LdmuxDaemon {
       // hide the button on one that was.
       liveWorkspace: this.liveWindows.get(record.id)?.workspace,
       owner: this.ownerOf(record.id) ?? undefined,
-    }));
+      };
+    });
   }
 
   /** The device holding a session, as clients are told about it. */
@@ -423,10 +525,15 @@ export class LdmuxDaemon {
     // client was used last. See [ControlPlane.setWindowSize].
     const record = this.registry.get(sessionId);
     if (record) {
-      const mode = device.id === this.desktopDevice.id ? "latest" : "manual";
-      void this.cp.setWindowSize(record.tmuxName, mode).catch(() => {});
+      const desk = device.id === this.desktopDevice.id;
+      void this.cp.setWindowSize(record.tmuxName, desk ? "latest" : "manual").catch(() => {});
+      if (desk) void this.cp.unsetSessionOption(record.tmuxName, LIVE_HELD_OPTION).catch(() => {});
     }
     if (result.previous && result.previous.id !== device.id) {
+      // The device that lost it is told and cut off, whoever took it. The
+      // transport already does this for an attach; this covers every claim the
+      // daemon makes itself (a no-op for sockets the transport has cut off).
+      this.remote?.displaced(result.previous.id, sessionId, device);
       // Whether the desktop's view of this shell is affected depends on where the
       // shell *came from*, and on nothing about who is taking it now.
       //
@@ -446,11 +553,54 @@ export class LdmuxDaemon {
           // Fire-and-forget: it kills a window, and the attach that displaced it
           // must not wait on a window manager to finish.
           void this.closeDesktopWindow(sessionId).catch(() => {});
+        } else if (record?.tmuxName) {
+          // The desk keeps its window — but not *attached*. Left attached it went
+          // on being a second writer on the phone's shell, and the reconcile pass,
+          // seeing the window's client still there, read it as the user taking the
+          // shell back and reclaimed it within a second: the phone was displaced by
+          // a window nobody had touched. Detached, the window's shim says who has
+          // the shell and waits for Enter, and *that* is the taking back.
+          void this.detachDeskWindow(record.tmuxName).catch(() => {});
         }
       }
       return { ok: true, displaced: result.previous };
     }
     return { ok: true };
+  }
+
+  /**
+   * Clear what a previous window wrote into the session before a new one opens.
+   * A dead pid left there made the new window look closed before its own shim had
+   * written anything, and the shell was ended under it.
+   */
+  private async forgetWindowOptions(tmuxName: string): Promise<void> {
+    await this.cp.unsetSessionOption(tmuxName, LIVE_PID_OPTION);
+    await this.cp.unsetSessionOption(tmuxName, LIVE_TTY_OPTION);
+    await this.cp.unsetSessionOption(tmuxName, LIVE_HELD_OPTION);
+  }
+
+  /** Detach a session's desk window client, if it has one attached. */
+  private async detachDeskWindow(tmuxName: string): Promise<void> {
+    // Marked before the detach, so the shim finds it set when its attach returns.
+    await this.cp.setSessionOption(tmuxName, LIVE_HELD_OPTION, "1");
+    const tty = await this.cp.getSessionOption(tmuxName, LIVE_TTY_OPTION);
+    if (tty && (await this.cp.listClientTtys(tmuxName)).includes(tty)) await this.cp.detachClient(tty);
+  }
+
+  /**
+   * A device let go of a shell: the size goes back to the terminals attached to it.
+   *
+   * A phone's claim pins the window at the phone's grid (`manual`), and nothing
+   * undid that on release, so a desk window went on drawing a phone-sized shell
+   * after the phone had left. Nobody holds it now, so whichever client is used
+   * sizes it.
+   */
+  private handSizeBack(sessionId: string): void {
+    const record = this.registry.get(sessionId);
+    if (!record?.tmuxName) return;
+    void this.cp.setWindowSize(record.tmuxName, "latest").catch(() => {});
+    // ...and a desk window waiting on it takes it back (see LIVE_HELD_OPTION).
+    void this.cp.unsetSessionOption(record.tmuxName, LIVE_HELD_OPTION).catch(() => {});
   }
 
   /** The bound remote endpoint, when remote started successfully. */
@@ -508,6 +658,9 @@ export class LdmuxDaemon {
   }
 
   stop(): void {
+    this.stopped = true;
+    if (this.remoteRetry !== undefined) clearTimeout(this.remoteRetry);
+    if (this.liveTimer !== undefined) clearInterval(this.liveTimer);
     try {
       this.remote?.stop();
     } catch {
@@ -672,7 +825,20 @@ export class LdmuxDaemon {
     const live = liveSessions ? new Set(liveSessions.map((s) => s.name)) : null;
     const { dead, adopted } = this.registry.reconcile(live);
     const pruned = this.registry.prune({ maxDeadAgeMs: this.deadRecordTtlMs, maxRecords: this.maxRecords });
-    if (dead.length || adopted.length || pruned.length) {
+    // `adopted` is every tmux session the registry does not know, reported on
+    // every pass and never recorded — so reacting to it being non-empty made one
+    // stray session (a `forget`, a hand-made one) an endless loop: save,
+    // broadcast, and the broadcast's own list reconciled and found it again.
+    // Only a *change* in that set is news.
+    const unknownKey = live ? [...adopted].sort().join("\n") : this.unknownSessionsKey;
+    const unknownChanged = unknownKey !== this.unknownSessionsKey;
+    this.unknownSessionsKey = unknownKey;
+    // A shell that ended on its own (`exit`, killed outside ldmux) has to lose its
+    // claim, its window record and its shim exactly as one killed through ldmux
+    // does. Only the killing paths did this, so a shell that exited kept its owner
+    // until the record was pruned a day later.
+    for (const id of dead) this.forgetSessionState(id);
+    if (dead.length || unknownChanged || pruned.length) {
       this.registry.save();
       // The set of live sessions changed, so every connected client's pager is
       // now wrong. Tell them, rather than waiting for a request that may never
@@ -711,15 +877,25 @@ export class LdmuxDaemon {
    * from the session list, which clients ask for constantly.
    */
   private async reconcileLive(): Promise<boolean> {
-    if (this.liveWindows.size === 0) return false;
+    if (this.liveWindows.size === 0 || this.liveChecking) return false;
     const now = Date.now();
     if (now - this.liveCheckedAt < LIVE_RECHECK_MS) return false;
     this.liveCheckedAt = now;
+    // One pass at a time: a pass awaits tmux and the window manager, and two
+    // overlapping passes would both decide to end the same shell.
+    this.liveChecking = true;
+    try {
+      return await this.reconcileLivePass();
+    } finally {
+      this.liveChecking = false;
+    }
+  }
 
+  private async reconcileLivePass(): Promise<boolean> {
     let changed = false;
     for (const id of [...this.liveWindows.keys()]) {
       const record = this.registry.get(id);
-      if (!record?.tmuxName) {
+      if (!record?.tmuxName || record.status !== "running") {
         this.liveWindows.delete(id);
         changed = true;
         continue;
@@ -728,16 +904,21 @@ export class LdmuxDaemon {
       const attached = tty !== null && (await this.cp.listClientTtys(record.tmuxName)).includes(tty);
 
       if (attached) {
-        // The window has a client again. If it is not the holder, the user took
-        // it back by hand.
+        // The window has a client, so it is where the shell is being used. If the
+        // desk does not hold it, it takes it — both when another device holds it
+        // (the user pressed a key on "open on another device") and when *nobody*
+        // does (the phone let go first). Leaving the second case unclaimed meant
+        // the next phone to open it got it silently while the desk was typing.
         const owner = this.ownership.owner(id);
-        if (owner && owner.device.id !== this.desktopDevice.id) {
-          // Through `claimSession`, like every other claim, because the claim is
-          // also what hands the *size* over. The window has a client again, so it
-          // is a tmux client again, and it must stop being pinned to the phone's
-          // grid — otherwise tmux fills it to the pane's width with
-          // `fill-character`. This is the same omission `claimSession`'s note
-          // describes, reached from the reconcile pass instead of from makeLive.
+        const deskHolds = owner?.device.id === this.desktopDevice.id;
+        // Not in the moment right after a takeover: the seizure detaches the
+        // window asynchronously, and a pass that lands before the detach would
+        // read the window's old client as the user taking it back.
+        const justTaken = owner !== null && owner !== undefined && Date.now() - owner.since <= 3000;
+        if (!deskHolds && !justTaken) {
+          // Through `claimSession`, because the claim is also what hands the size
+          // over: the window is a tmux client and must stop being pinned to the
+          // phone's grid, or tmux fills the rest with `fill-character`.
           this.claimSession(id, this.desktopDevice, true);
           changed = true;
         }
@@ -746,13 +927,64 @@ export class LdmuxDaemon {
 
       // Detached, or closed? Only an explicit "absent" may end a session — an
       // unanswered window manager must not be read as a closed window.
-      if (record.status === "running" && (await liveWindowState(id)) === "absent") {
-        this.liveWindows.delete(id);
-        changed = true;
-        await this.handle("kill", { id });
-      }
+      if ((await this.deskWindowState(id, record.tmuxName)) !== "absent") continue;
+      this.liveWindows.delete(id);
+      changed = true;
+      // Closing the desk window ends the shell, everywhere — including under a
+      // phone that is using it, which is then told the shell is gone and goes
+      // back to its launcher. "Closing a desktop window closes the session
+      // totally" (the user, 2026-09-17; again 2026-09-26).
+      await this.handle("kill", { id }).catch(() => {});
     }
     return changed;
+  }
+
+  /**
+   * Is a session's desk window still open?
+   *
+   * Asked of the kernel when the shim recorded its pid: the window is open exactly
+   * while that process is. Otherwise (a window opened before the pid was recorded)
+   * of the window manager, by the window class `makeLive` gives its windows — which
+   * a desk terminal does not have, so for one of those a missing pid is "not yet"
+   * for a grace period and "absent" after it.
+   */
+  private async deskWindowState(id: string, tmuxName: string): Promise<"present" | "absent" | "unknown"> {
+    const pid = Number(await this.cp.getSessionOption(tmuxName, LIVE_PID_OPTION));
+    if (Number.isInteger(pid) && pid > 0) return processAlive(pid) ? "present" : "absent";
+    const since = this.liveWindows.get(id)?.since ?? 0;
+    if (Date.now() - since < LIVE_PID_GRACE_MS) return "unknown";
+    return liveWindowState(id);
+  }
+
+  /**
+   * Find the desk windows a previous daemon knew about.
+   *
+   * The window map is memory, and the windows are not: after a restart every one of
+   * them was forgotten, so closing one no longer ended its shell, a phone could
+   * attach without being asked, and a phone `close` killed a shell with a window on
+   * the desk. The shim wrote down its tty and pid in the session, which is enough to
+   * know the window is still there and whether it is the one attached.
+   */
+  private async rebuildLiveWindows(): Promise<void> {
+    for (const record of this.registry.list()) {
+      if (record.status !== "running" || !record.tmuxName) continue;
+      const pid = Number(await this.cp.getSessionOption(record.tmuxName, LIVE_PID_OPTION));
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      if (!processAlive(pid)) {
+        // The window was closed while no daemon was watching. Closing a desk window
+        // ends its shell; skipping it here left a shell running that no window and
+        // no rule would ever end — measured on this machine the day it was added.
+        console.error(`ldmuxd: ${record.id}'s desk window closed while the daemon was down; ending it`);
+        await this.handle("kill", { id: record.id }).catch(() => {});
+        continue;
+      }
+      const tty = await this.cp.getSessionOption(record.tmuxName, LIVE_TTY_OPTION);
+      const attached = tty !== null && (await this.cp.listClientTtys(record.tmuxName)).includes(tty);
+      this.liveWindows.set(record.id, { workspace: "", since: Date.now() });
+      // Through `claimSession`, so the size goes back to the window as well: a
+      // `manual` left over from a phone would otherwise outlive the restart.
+      if (attached) this.claimSession(record.id, this.desktopDevice, true);
+    }
   }
 
   /**
@@ -806,6 +1038,34 @@ export class LdmuxDaemon {
     const owner = this.ownership.owner(sessionId);
     if (owner) this.ownership.release(sessionId, owner.device.id);
     this.liveWindows.delete(sessionId);
+    // ...and its window's shim, which was otherwise left in the state directory
+    // for every desk window ever opened. Unlinking is safe while a window still
+    // runs it: the shell holds the file open.
+    rmSync(liveShimPath(this.stateDir, sessionId), { force: true });
+  }
+
+  /**
+   * Remove shims whose session is not running. The state directory is a tmpfs
+   * normally, but a daemon that ran for weeks accumulated one per window, and a
+   * state directory on disk would keep them for good.
+   */
+  private sweepShims(): void {
+    const keep = new Set(
+      this.registry
+        .list()
+        .filter((r) => r.status === "running")
+        .map((r) => liveShimPath(this.stateDir, r.id)),
+    );
+    let names: string[] = [];
+    try {
+      names = readdirSync(join(this.stateDir, "live"));
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const path = join(this.stateDir, "live", name);
+      if (name.endsWith(".sh") && !keep.has(path)) rmSync(path, { force: true });
+    }
   }
 
   /**
@@ -825,12 +1085,36 @@ export class LdmuxDaemon {
     }
     // The promise is cached, not its value: concurrent callers share one read
     // instead of stacking up probes.
-    const value = readDesktop().catch((err: unknown) => {
+    const value = readDesktop().then((inv) => this.linkPiToSessions(inv)).catch((err: unknown) => {
       this.desktopCache = undefined;
       throw err;
     });
     this.desktopCache = { at: now, value };
     return value;
+  }
+
+  /**
+   * Say which ldmux session each desk `pi` runs inside.
+   *
+   * A pi in a desk window is a descendant of that session's pane, and nothing
+   * else links the two: the inventory walks a pi's ancestry to find its *window*,
+   * which for a pane ends at the tmux server rather than at alacritty. Without
+   * this the phone could only guess by directory, and a guess that missed showed
+   * the user's running pi as "not in ldmux" and opened a new shell instead.
+   */
+  private async linkPiToSessions(inv: DesktopInventory): Promise<DesktopInventory> {
+    if (inv.piSessions.length === 0) return inv;
+    const panes = await this.cp.paneFacts();
+    const byPanePid = new Map<number, string>();
+    for (const [tmuxName, pane] of panes) {
+      const record = this.registry.byTmuxName(tmuxName);
+      if (record && pane.pid > 0) byPanePid.set(pane.pid, record.id);
+    }
+    if (byPanePid.size === 0) return inv;
+    return {
+      ...inv,
+      piSessions: inv.piSessions.map((pi) => ({ ...pi, ldmuxSessionId: ancestorIn(pi.pid, byPanePid) })),
+    };
   }
 
   private require(id: string): SessionRecord {
@@ -875,6 +1159,7 @@ export class LdmuxDaemon {
         const workspace = String(p.workspace ?? "");
         // Best-effort by design: not every host has a window manager, and a phone
         // must not be told its shell is broken because the desktop is headless.
+        await this.forgetWindowOptions(record.tmuxName);
         const result = await openLive(
           this.cp.socket,
           record.tmuxName,
@@ -894,7 +1179,7 @@ export class LdmuxDaemon {
           // therefore recorded nowhere: the daemon could not close it, the reconcile
           // pass never saw it, and it stayed on the desktop for good. The workspace is
           // what may be wrong here, not the window.
-          this.liveWindows.set(record.id, { workspace: result.placed ? workspace : "" });
+          this.liveWindows.set(record.id, { workspace: result.placed ? workspace : "", since: Date.now() });
           // ...and the shell moves to the desktop. The window is writable, so
           // leaving the phone holding it would be two writers on one pty — the
           // split input the exclusive rule exists to prevent (ADR-0010).
@@ -908,6 +1193,23 @@ export class LdmuxDaemon {
           void this.remote?.broadcastSessions().catch(() => {});
         }
         return result;
+      }
+
+      case "deskWindow": {
+        const record = this.requireTerminal(String((params as { id?: unknown }).id ?? ""));
+        if (record.status !== "running") return { ok: false, detail: `that shell is ${record.status}` };
+        // One window per shell. A second one overwrote the first's recorded tty and
+        // pid, so the first became an untracked writer, a takeover detached only the
+        // second, and closing the second ended the shell under the first.
+        if (this.liveWindows.has(record.id)) return { ok: false, detail: "that shell already has a desk window" };
+        await this.forgetWindowOptions(record.tmuxName);
+        const spec = await prepareLive(this.stateDir, this.cp.socket, record.tmuxName, record.id, this.cp.bin);
+        this.liveWindows.set(record.id, { workspace: "", since: Date.now() });
+        // The desk holds it from the start, so a phone that opens it is asked first
+        // (ADR-0010) rather than silently sharing the pty and resizing the window.
+        this.claimSession(record.id, this.desktopDevice, true);
+        void this.remote?.broadcastSessions().catch(() => {});
+        return { ok: true, shimPath: spec.shimPath };
       }
 
       case "closeLive": {
@@ -1016,7 +1318,14 @@ export class LdmuxDaemon {
         // An RPC-only session has nothing in tmux to kill; ending it still has
         // to mark the record dead so the list does not keep showing it.
         if (record.tmuxName) {
-          await this.cp.killSession(record.tmuxName);
+          try {
+            await this.cp.killSession(record.tmuxName);
+          } catch (err) {
+            // Already gone is what was asked for. Failing here left the record
+            // `running`, and its claim and window state in place, for a shell that
+            // had exited a moment before the kill arrived.
+            if (await this.cp.hasSession(record.tmuxName)) throw err;
+          }
           this.dropStream(record.tmuxName);
         }
         record.status = "dead";
@@ -1053,6 +1362,13 @@ export class LdmuxDaemon {
         const id = String(params.id);
         const record = this.registry.get(id);
         if (!record) return { ok: true, removed: false };
+        // Not a running shell: forgetting one made it invisible to every client
+        // while it went on running, and nothing could reach it again. `kill` ends
+        // a shell; this tidies up what is already over.
+        if (record.status === "running" && record.tmuxName && (await this.cp.hasSession(record.tmuxName))) {
+          throw new Error(`${id} is running; end it with kill, not forget`);
+        }
+        this.forgetSessionState(id);
         if (record.tmuxName) this.dropStream(record.tmuxName, "session forgotten");
         this.registry.remove(id);
         this.registry.save();
@@ -1112,6 +1428,25 @@ export class LdmuxDaemon {
     return { session: record };
   }
 
+  /**
+   * Take back this daemon's own sessions that the registry does not list.
+   *
+   * A registry that is missing, corrupt, or older than the last `new-session` (a
+   * crash between creating the session and saving the record) leaves shells
+   * running that no client can see or reach. Their names say they are ours, and
+   * say their ids. Only at startup: a pass during normal running would race `new`,
+   * which creates the tmux session before it records it.
+   */
+  private async adoptOwnSessions(): Promise<void> {
+    const live = await this.cp.listSessions();
+    for (const s of live ?? []) {
+      const id = /^ldmux-([A-Za-z0-9]+)$/.exec(s.name)?.[1];
+      if (!id || this.registry.byTmuxName(s.name) || this.registry.get(id)) continue;
+      await this.adopt({ tmuxName: s.name, id, title: "shell" }).catch(() => {});
+      console.error(`ldmuxd: adopted ${s.name}, which the registry did not list`);
+    }
+  }
+
   private async adopt(params: Record<string, unknown>): Promise<SessionRecord> {
     const tmuxName = String(params.tmuxName);
     if (!isValidSessionName(tmuxName)) throw new Error(`invalid tmux session name: ${tmuxName}`);
@@ -1125,7 +1460,9 @@ export class LdmuxDaemon {
     if (raced) return raced;
     const now = Date.now();
     const record: SessionRecord = {
-      id: shortId(),
+      // One of this daemon's own sessions keeps its id: it is in the name, in the
+      // shell's LDMUX_SESSION_ID, and in any window class made for it.
+      id: typeof params.id === "string" && params.id ? params.id : shortId(),
       tmuxName,
       kind: parseKind(params.kind),
       cwd: panes[0]?.cwd ?? process.cwd(),
@@ -1139,4 +1476,32 @@ export class LdmuxDaemon {
     this.registry.save();
     return record;
   }
+}
+
+/** Whether a process exists (signal 0 checks without signalling). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** The value for the nearest ancestor of `pid` (itself included) found in `map`. */
+function ancestorIn(pid: number, map: ReadonlyMap<number, string>): string | null {
+  let current = pid;
+  for (let depth = 0; depth < 64 && current > 1; depth++) {
+    const hit = map.get(current);
+    if (hit) return hit;
+    try {
+      // Field 4 of /proc/<pid>/stat, read after the last ')' because the command
+      // name in field 2 can itself contain spaces and parentheses.
+      const stat = readFileSync(`/proc/${current}/stat`, "utf8");
+      current = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
