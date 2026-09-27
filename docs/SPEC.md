@@ -221,7 +221,7 @@ Tailscale only, and far less functionality than dooboxes.
 | Component | Language | Role |
 |-----------|----------|------|
 | **`ldmuxd`** (daemon) | TypeScript on Node 26 (types stripped, no build step) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
-| **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write` and `copy`). Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
+| **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `close`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write` and `copy`). Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
 | **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the launcher holds portrait and the shell view follows the device's rotation, while the app owns the keyboard — no flip button (ADR-0011 and its amendment); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
 | **Desktop mirror / live window** | shell + WM | `i3-msg exec -- alacritty --class ldmux-live-<id> -e <abs tmux> -L ldmux attach -t <name>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. See docs/DESKTOP-INTEGRATION.md. |
 
@@ -829,7 +829,7 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
   Remaining: implement the robust parser (framing, octal→bytes, per-pane
   incremental UTF-8, `%begin/%end` correlation) and a burst/`%pause` test.
 - `ldmux` CLI: `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`,
-  `kill`, `forget`, `adopt`, `mirror`, `remote`, `code`, `pair` (all implemented;
+  `kill`, `close`, `forget`, `adopt`, `mirror`, `remote`, `code`, `pair` (all implemented;
   later verbs are listed in §4.2).
 - **Geometry probe (ADR-0002):** confirm `window-size manual` behavior and the
   canonical-size default.
