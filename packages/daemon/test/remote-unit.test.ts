@@ -372,7 +372,9 @@ test("an unauthenticated absolute-form upgrade is refused, not fatal", async () 
     socket.on("close", () => resolve(buf.split("\r\n")[0] ?? ""));
     socket.on("error", reject);
   });
-  expect(status).toContain("401");
+  // Refused either way: a URL with no path is not `/ws` (404) before it is
+  // unauthenticated (401). What matters is that it is a refusal, not a crash.
+  expect(status).toMatch(/^HTTP\/1\.1 40[14] /);
   // Still alive and answering.
   expect((await fetch(`http://${info.hostname}:${info.port}/`)).status).toBe(404);
 });
@@ -459,4 +461,43 @@ test("an attach that fails to subscribe gives its claim back", async () => {
     await waitFor(() => c.text.some((m) => m.type === "error" && m.code === "attach_failed")),
   ).toBe(true);
   expect(claims.has("s1")).toBe(false);
+});
+
+/**
+ * Tailnet only (ADR-0016), at the one place that listens.
+ *
+ * The daemon refuses the address before binding it: 0.0.0.0 would put a shell on
+ * every network this machine touches with only the token in front of it, and a
+ * LAN address would put it on that LAN. The address rules themselves are pinned in
+ * `protocol/test/net.test.ts`; this pins that the server applies them.
+ */
+test("the server refuses to listen anywhere but the tailnet or loopback", async () => {
+  for (const hostname of ["0.0.0.0", "::", "192.168.1.5"]) {
+    const server = new RemoteServer({
+      hostname,
+      port: 0,
+      token: "test-token",
+      getSession: () => undefined,
+      listSessions: () => [],
+      acquireStream: () => stubStream().stream as unknown as PaneStream,
+    });
+    await expect(server.start()).rejects.toThrow(/refusing to listen/);
+  }
+});
+
+test("only /ws upgrades; any other path is a 404, not a second WebSocket", async () => {
+  const { info } = await start();
+  const status = await new Promise<string>((resolve, reject) => {
+    const sock = netConnect(info.port, info.hostname, () => {
+      sock.write(
+        "GET /other?token=test-token HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+      );
+    });
+    let buf = "";
+    sock.on("data", (d: Buffer) => (buf += d.toString()));
+    sock.on("close", () => resolve(buf.split("\r\n")[0] ?? ""));
+    sock.on("error", reject);
+  });
+  expect(status).toBe("HTTP/1.1 404 Not Found");
 });

@@ -1,6 +1,6 @@
 # ADR-0005: Remote access via loopback bind + `tailscale serve`, token + QR pairing
 
-**Status:** Accepted (system Tailscale v1.102.3 present)
+**Status:** Superseded by [ADR-0016](0016-direct-tailnet-bind.md): the daemon binds the tailnet address directly, and pairing is a QR code ([ADR-0017](0017-qr-pairing.md)). Kept as the record of what was first decided.
 
 ## Context
 

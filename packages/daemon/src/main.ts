@@ -4,12 +4,14 @@
  *
  * Environment: LDMUX_STATE_DIR, LDMUX_SOCK, LDMUX_TMUX_SOCK (resolved via
  * `protocol/paths.ts`), plus LDMUX_REMOTE_HOST and LDMUX_REMOTE_PORT for the
- * loopback WebSocket (docs/REMOTE.md), and LDMUX_TOKEN_FILE for where its bearer
- * token persists (default: the state directory).
+ * WebSocket (docs/REMOTE.md; tailnet or loopback address only, ADR-0016), and
+ * LDMUX_TOKEN_FILE for where its bearer token persists (default: the state
+ * directory).
  */
 
 import { resolveStateDir, resolveTmuxSocket } from "../../protocol/src/paths.ts";
 import { LdmuxDaemon } from "./daemon.ts";
+import { isTailnetOrLoopback } from "../../protocol/src/net.ts";
 
 /**
  * Last-resort backstops.
@@ -64,10 +66,21 @@ if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) {
   process.exit(1);
 }
 
+// The same rule the server enforces when it listens, checked here so a wrong address
+// is an exit and a message rather than a running daemon with no WebSocket — the
+// failure the port check above describes.
+const remoteHost = process.env.LDMUX_REMOTE_HOST ?? "127.0.0.1";
+if (!isTailnetOrLoopback(remoteHost)) {
+  console.error(
+    `ldmuxd: LDMUX_REMOTE_HOST must be this machine's tailnet address or loopback, got ${JSON.stringify(remoteHost)}`,
+  );
+  process.exit(1);
+}
+
 const daemon = new LdmuxDaemon({
   stateDir: resolveStateDir(),
   tmuxSocket: resolveTmuxSocket(),
-  remoteHost: process.env.LDMUX_REMOTE_HOST ?? "127.0.0.1",
+  remoteHost,
   remotePort,
   tokenPath: process.env.LDMUX_TOKEN_FILE || undefined,
   // `control` (default) or `pipe`. Runtime-selectable so the two transports can

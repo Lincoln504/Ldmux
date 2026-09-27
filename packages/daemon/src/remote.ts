@@ -1,10 +1,10 @@
 /**
  * Remote WebSocket transport.
  *
- * Binds loopback only (ADR-0005): the intended exposure is
- *   tailscale serve --bg --https=443 http://127.0.0.1:<port>
- * so TLS + tailnet identity are provided by Tailscale, and this server adds a
- * bearer-token gate. Terminal output is sent as binary OUTPUT frames (frames.ts
+ * Tailnet only (ADR-0016): it listens on loopback or on this machine's tailnet
+ * address and nothing else, and it answers only peers on the tailnet or loopback
+ * (`protocol/src/net.ts`). WireGuard encrypts the link; the bearer token is the
+ * gate on top. Terminal output is sent as binary OUTPUT frames (frames.ts
  * — the one canonical frame format); control/handshake is JSON text.
  *
  * One connection = one attached session (open N connections to view N sessions).
@@ -28,6 +28,7 @@ import type { PaneStream, StreamSnapshot } from "./stream.ts";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { DesktopInventory } from "../../protocol/src/rpc.ts";
+import { isTailnetOrLoopback } from "../../protocol/src/net.ts";
 
 
 
@@ -264,6 +265,14 @@ export class RemoteServer {
    */
   async start(): Promise<{ hostname: string; port: number }> {
     const opts = this.opts;
+    // Refused here, at the one place that listens, rather than trusted to every
+    // caller: a wrong LDMUX_REMOTE_HOST (0.0.0.0, a LAN address) would otherwise put
+    // a shell on that network with only the token in front of it.
+    if (!isTailnetOrLoopback(opts.hostname)) {
+      throw new Error(
+        `refusing to listen on ${opts.hostname}: not a tailnet or loopback address (100.64.0.0/10, fd7a:115c:a1e0::/48, 127.0.0.0/8, ::1)`,
+      );
+    }
     this.server = createServer((req, res) => {
       // Never leave this promise unobserved: an unhandled rejection here is a
       // dead daemon, and every attached terminal with it.
@@ -383,6 +392,20 @@ export class RemoteServer {
       });
     });
     this.server.on("upgrade", (req: IncomingMessage, socket, head) => {
+      // Before the token: a peer that is not on the tailnet is not a client, however
+      // it reached this socket (a port forward, a misrouted packet).
+      if (!isTailnetOrLoopback(req.socket.remoteAddress ?? "")) {
+        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      // The one endpoint. Upgrading on any path made every URL on this port a
+      // WebSocket, which is a second surface for nothing.
+      if (this.parseUrl(req)?.pathname !== "/ws") {
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
       if (!this.authorized(req)) {
         socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
         socket.destroy();
@@ -511,6 +534,11 @@ export class RemoteServer {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!isTailnetOrLoopback(req.socket.remoteAddress ?? "")) {
+      res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+      res.end("forbidden\n");
+      return;
+    }
     const url = this.parseUrl(req);
     if (!url) {
       res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
