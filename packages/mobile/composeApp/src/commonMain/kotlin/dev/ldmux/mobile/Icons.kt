@@ -19,6 +19,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -198,38 +200,97 @@ fun IconPopOut(tint: Color, box: Dp = 18.dp) {
     }
 }
 
-@Composable
 /**
- * Settings: a cog.
+ * Settings: the ordinary gear.
  *
- * A cog and not three sliders-with-knobs, which is what this used to be and what
- * it looked like from across a room: three short horizontal strokes, each with a
- * dot on it, is the *overflow* mark — a list of things — so the button read as
- * "more options" and its being next to `refresh` made two buttons that both
- * looked like something else. The teeth are what makes it a cog: a ring alone is
- * a record, and a ring with eight radial strokes is unmistakably a gear.
+ * A filled wheel with eight square teeth and a round hole, the shape every
+ * platform uses for settings. The earlier outline ring with eight radial strokes
+ * read as a sun or a spark at 20dp, not as a gear.
  */
+@Composable
 fun IconCog(tint: Color, box: Dp = 20.dp) {
     Canvas(Modifier.size(box)) {
         val w = size.minDimension
         val c = Offset(w / 2f, w / 2f)
-        val stroke = w * 0.095f
-        // Eight teeth. Each starts inside the ring's outer edge so the whole thing
-        // reads as one object rather than a circle with spikes around it.
-        for (i in 0 until 8) {
-            val a = (i * 45.0) * PI / 180.0
-            val ux = cos(a).toFloat()
-            val uy = sin(a).toFloat()
-            drawLine(
-                tint,
-                Offset(c.x + ux * w * 0.21f, c.y + uy * w * 0.21f),
-                Offset(c.x + ux * w * 0.45f, c.y + uy * w * 0.45f),
-                stroke,
-                StrokeCap.Round,
-            )
+        val teeth = 8
+        val outer = w * 0.47f
+        val body = w * 0.36f
+        // Each tooth spans this fraction of its sector at the tip, a bit more at
+        // the root, so it tapers like a real tooth.
+        val tip = 0.36f
+        val root = 0.52f
+        val sector = 2.0 * PI / teeth
+        fun at(r: Float, a: Double) = Offset(c.x + r * cos(a).toFloat(), c.y + r * sin(a).toFloat())
+        val gear = Path().apply {
+            for (i in 0 until teeth) {
+                val mid = i * sector - PI / 2
+                val r0 = at(body, mid - sector * root / 2)
+                if (i == 0) moveTo(r0.x, r0.y) else lineTo(r0.x, r0.y)
+                at(outer, mid - sector * tip / 2).let { lineTo(it.x, it.y) }
+                at(outer, mid + sector * tip / 2).let { lineTo(it.x, it.y) }
+                at(body, mid + sector * root / 2).let { lineTo(it.x, it.y) }
+                // The body between teeth, as a short arc of the wheel's rim.
+                val next = (i + 1) * sector - PI / 2 - sector * root / 2
+                val steps = 3
+                val from = mid + sector * root / 2
+                for (k in 1..steps) at(body, from + (next - from) * k / steps).let { lineTo(it.x, it.y) }
+            }
+            close()
+            addOval(Rect(c, w * 0.15f))
+            fillType = PathFillType.EvenOdd
         }
-        // The body, hollow: a filled disc would swallow the teeth's inner ends.
-        drawCircle(tint, w * 0.30f, c, style = Stroke(stroke))
+        drawPath(gear, tint)
+    }
+}
+
+/**
+ * Refresh: one arrow going most of the way round a circle.
+ *
+ * The universal mark for "fetch this again". A gap at the top, which the
+ * arrowhead points into, so the circle reads as a motion rather than a ring.
+ */
+@Composable
+fun IconRefresh(tint: Color, box: Dp = 20.dp) {
+    Canvas(Modifier.size(box)) {
+        val w = size.minDimension
+        val stroke = w * 0.11f
+        val r = w * 0.31f
+        val c = Offset(w / 2f, w / 2f)
+        // Clockwise from the top-right round to the top-left, leaving the gap at
+        // the top that the head points into.
+        val start = -50f
+        val sweep = 280f
+        drawArc(
+            tint,
+            start,
+            sweep,
+            false,
+            Offset(c.x - r, c.y - r),
+            Size(r * 2f, r * 2f),
+            style = Stroke(stroke, cap = StrokeCap.Round),
+        )
+        // The head, at the end of the arc, pointing on along it (clockwise).
+        val a = (start + sweep) * PI / 180.0
+        val end = Offset(c.x + r * cos(a).toFloat(), c.y + r * sin(a).toFloat())
+        // Clockwise tangent in screen coordinates.
+        val tx = -sin(a).toFloat()
+        val ty = cos(a).toFloat()
+        // Radial direction, for the head's width.
+        val nx = cos(a).toFloat()
+        val ny = sin(a).toFloat()
+        val len = w * 0.30f
+        val half = w * 0.19f
+        val headTip = Offset(end.x + tx * len * 0.6f, end.y + ty * len * 0.6f)
+        val back = Offset(end.x - tx * len * 0.4f, end.y - ty * len * 0.4f)
+        drawPath(
+            Path().apply {
+                moveTo(headTip.x, headTip.y)
+                lineTo(back.x + nx * half, back.y + ny * half)
+                lineTo(back.x - nx * half, back.y - ny * half)
+                close()
+            },
+            tint,
+        )
     }
 }
 

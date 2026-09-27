@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -97,9 +98,16 @@ fun LauncherScreen(
                     fontFamily = FontFamily.Monospace,
                 )
             }
-            SmallAction(if (desktopLoading) "…" else "refresh", onRefresh)
+            // Refresh and settings are one pair: same square, same background as the
+            // list rows, icons rather than words. While a refresh is running the
+            // arrow dims rather than turning into text.
+            HeaderIcon(label = if (desktopLoading) "refreshing" else "refresh", onClick = onRefresh) {
+                // Dimmed as one layer: a translucent tint would draw darker where the
+                // head overlaps the arc.
+                Box(Modifier.alpha(if (desktopLoading) 0.4f else 1f)) { IconRefresh(Dim) }
+            }
             Spacer(Modifier.width(6.dp))
-            IconBtn(onClick = onSettings, label = "settings") { IconCog(Dim) }
+            HeaderIcon(label = "settings", onClick = onSettings) { IconCog(Dim) }
         }
 
         // Where a new shell goes is asked for in the dialogue that creates it, and
@@ -189,8 +197,22 @@ fun LauncherScreen(
         Spacer(Modifier.height(LocalTouch.current.rowPad))
         // Opening what is chosen is the screen's one action, so it has the width.
         val pickedNow = entries.filter { it.key in chosen }
-        AccentBtn(openButtonLabel(pickedNow), Modifier.fillMaxWidth()) {
-            if (pickedNow.isNotEmpty()) onOpen(pickedNow)
+        // Drawn like the rows above it (and like `+ shell`): the list's own
+        // background and shape, rather than a filled accent bar.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(RadiusMedium)
+                .background(Surface)
+                .clickable(role = Role.Button) { if (pickedNow.isNotEmpty()) onOpen(pickedNow) }
+                .padding(vertical = LocalTouch.current.rowPad * 2),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                openButtonLabel(pickedNow),
+                color = if (pickedNow.isEmpty()) Dim else Fg,
+                fontSize = 14.sp,
+            )
         }
     }
 
@@ -366,18 +388,19 @@ private fun ChoiceRow(
     }
 }
 
+/** A square header button on the list rows' background; drawn icons need a spoken [label]. */
 @Composable
-private fun SmallAction(label: String, onClick: () -> Unit) {
+private fun HeaderIcon(label: String, onClick: () -> Unit, content: @Composable () -> Unit) {
     Box(
         Modifier
             .clip(RadiusMedium)
             .background(Surface)
-            .heightIn(min = LocalTouch.current.min)
+            .size(LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp),
+            .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = Dim, fontSize = 11.sp)
+        content()
     }
 }
 
