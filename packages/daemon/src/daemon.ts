@@ -102,7 +102,7 @@ export interface LdmuxDaemonOptions {
   deadRecordTtlMs?: number;
   /** Hard cap on registry size before oldest records are pruned (default 500). */
   maxRecords?: number;
-  /** Remote WebSocket bind host (default 127.0.0.1 — never a public interface). */
+  /** Remote WebSocket bind host (default 127.0.0.1; only tailnet or loopback is accepted, ADR-0016). */
   remoteHost?: string;
   /** Remote WebSocket port; 0 picks an ephemeral port (tests). */
   remotePort?: number;

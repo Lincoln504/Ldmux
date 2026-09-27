@@ -209,7 +209,9 @@ pointed.
 ## Status
 
 - [x] KMP/Compose shell that builds, installs and runs.
-- [x] Settings (host + token + panel side) persisted on device.
+- [x] Settings persisted on device: one pairing row (`pair` opens the code
+      scanner; paired shows the machine and `unpair`, ADR-0017), panel side,
+      predictive echo, control size, text size.
 - [x] **No top bar**: a slim side panel carries back/forward between open
       shells, the extra keys, `+shell` and settings.
 - [x] Session list + `new`/`kill` over the daemon's WebSocket; one page per live
@@ -218,8 +220,9 @@ pointed.
       renderer, live attach stream, 1:1 with the pane. Verified on device.
 - [x] **Client-driven pane resize**: the phone's viewport is the authority;
       the daemon clamps and runs `tmux resize-window`.
-- [x] **Landscape/portrait by device rotation** (ADR-0011), keyboard portrait-only and
-      dismissable without moving the screen.
+- [x] **Landscape/portrait by device rotation** in the shell view (ADR-0011), keyboard
+      portrait-only and dismissable without moving the screen. The launcher and its
+      dialogs hold portrait (ADR-0011 amendment).
 - [x] Panel and bar keys drive the native terminal directly.
 - [x] **Headless dictation** (Android `SpeechRecognizer`) — no keyboard needed.
 - [x] **Scrollback**: the emulator's own viewport is scrolled (drag, or `⤒`/

@@ -1,9 +1,10 @@
 /**
  * Remote access token.
  *
- * The daemon exposes a WebSocket on loopback; remote clients reach it through
- * `tailscale serve` (ADR-0005). Access additionally requires a bearer token
- * stored 0600 in the state dir and rotated only on demand.
+ * The daemon's WebSocket listens on the tailnet address (or loopback) and answers
+ * only tailnet or loopback peers (ADR-0016). Access additionally requires a bearer
+ * token stored 0600 at `LDMUX_TOKEN_FILE` (default `<stateDir>/token`) and
+ * rotated only on demand.
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";

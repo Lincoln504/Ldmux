@@ -37,8 +37,9 @@ snapshot that includes up to 5,000 lines of paged history (`caps` advertises
 ### 3. No embedded second tailnet node (vs gmux `tsnet`)
 
 gmux embeds a tailnet node, which requires an interactive login/`TS_AUTHKEY`.
-ldmux binds to loopback and is exposed by the **system** `tailscale serve`
-(ADR-0005), already proven on this machine.
+ldmux binds this machine's tailnet address through the **system** `tailscaled`
+and answers only tailnet or loopback peers (ADR-0016, superseding ADR-0005's
+loopback + `tailscale serve`).
 
 ### 4. No native renderer churn (vs dooboxes Flutter / libghostty)
 

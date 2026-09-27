@@ -28,7 +28,7 @@ either. It is deliberately simpler and tmux-native:
 > [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
 > [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
 >
-> Note: `SPEC.md` predates two decisions and still describes their old state —
+> Note: `SPEC.md` predates some decisions and says so in its status note —
 > the runtime is **Node 26**, not Bun, and the **pi extension has been removed**
 > ([ADR-0009](docs/adr/0009-node-runtime-and-no-pi-extension.md)).
 
@@ -73,8 +73,9 @@ just daemon            # run ldmuxd in the foreground
 just cli run shell     # create a session and attach tmux
 just cli list          # sessions (and their tmux names)
 just cli mirror <id>   # read-only desktop mirror (i3 workspace 10)
-just pair              # phone url + ldmux:// deep link + tailscale serve command
-just expose            # expose the loopback remote over the tailnet
+just remote            # remote host, port, token, and whether it is listening
+just code              # pairing QR code for the phone to scan (ADR-0017)
+just pair              # the same pairing, as an ldmux:// link
 just latency <id>      # round-trip echo latency against a session
 ```
 
@@ -100,8 +101,9 @@ the commands that produce them):
   stateful **output sanitizer** (drops OSC 52/DCS/device-status before a client
   sees them); JSON session registry with reconciliation and pruning; Unix-socket
   JSON daemon (pid-lockfile single-instance, owner-only 0600 socket); **live
-  `PaneStream` fan-out** with per-subscriber output coalescing; **loopback
-  WebSocket remote transport with bearer-token auth** (`docs/REMOTE.md`);
+  `PaneStream` fan-out** with per-subscriber output coalescing; **WebSocket
+  remote transport on the tailnet address, with bearer-token auth** (ADR-0016,
+  `docs/REMOTE.md`);
   desktop mirror + tailnet pairing; CLI — run `ldmux --help` for the list rather than
   reading it here, where it went stale twice (`shell`, `live`, `unlive`,
   `clipboard-write` and `copy` were all missing).
@@ -114,14 +116,14 @@ the commands that produce them):
   `ldmux remote: the endpoint is /ws`, so the port explains itself.
 - `packages/mobile` — native KMP + Compose Multiplatform client (Android first).
   A Compose `Canvas` renderer over a **libghostty-vt** emulator behind a narrow
-  JNI seam; client-driven pane resize; **the device owns the rotation and the app owns
-  the keyboard** — portrait is typing with a two-row bar, landscape is the side panel,
-  and there is no locked orientation and no flip button (ADR-0011); scrollback, cursor
+  JNI seam; client-driven pane resize; **the shell view follows the device's rotation
+  and the app owns the keyboard** — portrait is typing with a two-row bar, landscape is
+  the side panel, and there is no flip button; the launcher holds portrait (ADR-0011); scrollback, cursor
   rendering, tap-to-position, and predictive local echo at a low, adaptive frame
   rate. See [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) and
   [`packages/mobile/README.md`](packages/mobile/README.md).
-- pairing/desktop helpers — `ldmux pair` / `ldmux expose` (tailscale URL +
-  `ldmux://` deep link) and `ldmux mirror` (read-only i3 + alacritty view).
+- pairing/desktop helpers — `ldmux code` (QR code) / `ldmux pair` (the same
+  `ldmux://pair` link as text) and `ldmux mirror` (read-only i3 + alacritty view).
 
 Not yet: iOS (needs a macOS host for the xcframework), and the mobile client's
 Compose renderer hardening (cursor blink, zoom).

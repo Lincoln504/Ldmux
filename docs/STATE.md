@@ -55,17 +55,18 @@ The wire carries **raw pty bytes**, not a grid.
 - **State: done, test-covered, running as `ldmux.service`.**
 - tmux control-mode parser + client; control plane; output sanitizer; JSON session
   registry with reconciliation; Unix-socket JSON daemon (pid lockfile, owner-only
-  socket); `PaneStream` fan-out with coalescing; loopback WebSocket remote transport
-  with bearer-token auth.
+  socket); `PaneStream` fan-out with coalescing; WebSocket remote transport on the
+  tailnet address (tailnet/loopback peers only, ADR-0016) with bearer-token auth.
 - Stream modes: `control` (raw `%output`) with automatic fallback to `capture-pane`
   **polling** at ~4/s (`stream.ts:35`, `:39`, `:234`), and **`pipe`** — `pipe-pane`
   into a FIFO, read with no protocol at all (`tmux/pipe-client.ts`). Selected at
   runtime with `LDMUX_STREAM_TRANSPORT=pipe`; `control` is the default.
   Measured A/B in `docs/TMUX-DEPENDENCY.md` §10: the two carry the same bytes to
   within **0.015 %**, and the pipe costs ~7 ms of local echo latency.
-- CLI verbs: `ping list new run shell send key desktop live unlive clipboard-write
-  copy capture snapshot kill forget adopt remote mirror pair expose` — and `ldmux
-  --help` prints the same list, so it cannot drift from this one.
+- CLI verbs: `ping list new run window shell send key desktop live unlive
+  clipboard-write copy capture snapshot kill forget adopt remote mirror code pair`.
+  `ldmux --help` prints the usage line in `cli.ts`, which omits `clipboard-write` and
+  `copy` and lists a `close` that has no handler.
 - **The tmux surface, enumerated from the code** (this is the dependency in full):
   - *Commands*: `set-option` (20 sites), `set-environment` (7), `send-keys` (6),
     `attach` (5), `refresh-client` (2), `list-panes` (2), and one each of
@@ -135,15 +136,15 @@ The wire carries **raw pty bytes**, not a grid.
 | A drag past the edge does **not** walk the selection on the alternate screen | In `less` (a real alternate-screen program, so no scrollback exists), long-pressed row 12 and dragged up past the top with 8 move events. The selection extended to the top of the screen, the **content did not move**, and the anchored end stayed on the press row. Before the fix each move walked the anchor one row, so the anchored end would have been 8 rows down the screen |
 | The clipboard round trip works end to end | Selected text in `less`, let go (copies), rotated to landscape, tapped `paste`. The text appeared in the shell, read back **from the pane via the daemon** rather than from a screenshot: `[ ldeen@debian:~$ ] twork services, Internet style`. Tapped paste again and got exactly one more copy, so the content is stable and the paste is one-for-one |
 
-### 4.2 Suites (2026-09-20, all green)
+### 4.2 Suites (2026-09-27, all green)
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **303 tests, 303 pass** | `node --run test` (`--test-concurrency=4`) |
+| JS/TS | **344 tests, 344 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
 | Native C (host) | **147 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
-| Kotlin (Android unit) | **143 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
-| Architecture guard | 7 tests, part of the 300 | `packages/mobile/test/architecture.test.ts` |
+| Kotlin (Android unit) | **151 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
+| Architecture guard | 7 tests, part of the 344 | `packages/mobile/test/architecture.test.ts` |
 
 Counts move; the commands do not. Re-run them rather than trusting this table's numbers,
 and note that a green suite is only evidence of what it asserts — several of the tests in

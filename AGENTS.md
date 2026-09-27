@@ -8,7 +8,7 @@ app, reachable only over Tailscale. See
 ## Status
 
 Phase 1 (local core) is implemented and tested; Phase 3 (remote transport) is
-implemented (loopback WebSocket + token auth — `docs/REMOTE.md`) along with the
+implemented (WebSocket on the tailnet address + token auth — `docs/REMOTE.md`, ADR-0016) along with the
 desktop mirror, and tailnet pairing. The daemon serves no static files: the old
 buildless browser client (`packages/web`) is deleted, so native KMP/Compose is
 the client. The mobile app

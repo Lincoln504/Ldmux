@@ -1,6 +1,6 @@
 # ldmux — Software Specification
 
-> **Status note (2026-09-20) — three decisions post-date this document.**
+> **Status note (2026-09-20, amended 2026-09-27) — these decisions post-date this document.**
 >
 > - **Runtime: Node 26, not Bun.** The daemon/CLI/protocol run on Node 26 with
 >   TypeScript stripped by Node itself (no build step, erasable syntax only).
@@ -10,11 +10,13 @@
 >   `packages/extension` package, the `install-extension` CLI command, and the
 >   `register`/`session_end` RPC methods are gone, along with the RPC-only session
 >   expiry that existed to serve them. Sessions are created with `new`/`adopt`.
-> - **The orientation is the device's** (§7.1 below is wrong). There is no locked
->   orientation and no flip button; the device rotates and the app only decides whether
->   the keyboard is up. See [ADR-0011](adr/0011-screen-orientation.md). Any claim in this
->   document that Android is landscape-locked, or that `requestedOrientation` is set, is
->   historical.
+> - **The shell view's orientation is the device's** (§7.1 below is wrong). There is
+>   no flip button; the device rotates the shell view and the app only decides whether
+>   the keyboard is up. The launcher and its dialogs hold portrait (ADR-0011's
+>   amendment). See [ADR-0011](adr/0011-screen-orientation.md). Any claim in this
+>   document that Android is landscape-locked is historical.
+> - **Remote is a direct tailnet bind, paired by QR code** (added 2026-09-27):
+>   ADR-0016 and ADR-0017 supersede ADR-0005's loopback + `tailscale serve`.
 >
 > The rest of this document is still the design of record for the transport,
 > geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime", any
@@ -195,7 +197,7 @@ Tailscale only, and far less functionality than dooboxes.
                        │                  TAILNET                     │
                        │  (WireGuard; debian.tail496756.ts.net)       │
                        └───────────────┬─────────────────────────────┘
-                                       │  TLS/WSS (tailscale serve, token)
+                                       │  ws:// on the tailnet address, token
         ┌──────────────────────────────┴──────────────────────────────┐
         │                                                               │
  ┌──────▼────────┐        ┌───────────────────────────────┐     ┌──────▼───────┐
@@ -219,8 +221,8 @@ Tailscale only, and far less functionality than dooboxes.
 | Component | Language | Role |
 |-----------|----------|------|
 | **`ldmuxd`** (daemon) | TypeScript on Node 26 (types stripped, no build step) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
-| **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`. Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
-| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the device owns the rotation and the app owns the keyboard — no locked orientation and no flip button (ADR-0011); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
+| **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write` and `copy`). Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
+| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the launcher holds portrait and the shell view follows the device's rotation, while the app owns the keyboard — no flip button (ADR-0011 and its amendment); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
 | **Desktop mirror / live window** | shell + WM | `i3-msg exec -- alacritty --class ldmux-live-<id> -e <abs tmux> -L ldmux attach -t <name>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. See docs/DESKTOP-INTEGRATION.md. |
 
 ### 4.3 Why the daemon is a separate process
@@ -426,16 +428,16 @@ metadata + scrollback reference for replay.
 > **Aspirational — not implemented.** The shipped surface is deliberately
 > smaller: newline-delimited JSON RPC over a Unix socket
 > (`packages/protocol/src/rpc.ts`: ping/list/new/send/capture/snapshot/kill/
-> adopt/register/session_end/remote_info), one WebSocket per session at `WS /ws`
-> (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`), and the static web
-> client at `/`. No REST layer, no `/api/dirs`, no session creation from a
-> client. Scrollback paging **is** implemented, as the `scrollback` WebSocket
+> close/forget/adopt/desktop/makeLive/closeLive/remote_info and a few more), one WebSocket per session at `WS /ws`
+> (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`). The daemon serves
+> no static files. No REST layer and no `/api/dirs`; a client creates sessions
+> with the `new` WebSocket message. Scrollback paging **is** implemented, as the `scrollback` WebSocket
 > message (a snapshot carrying `history: true`, up to 5,000 lines) rather than
 > the REST route below. The table records original intent, not the contract.
 
 Local: Unix socket `$XDG_RUNTIME_DIR/ldmux/ldmuxd.sock`.
-Remote: `wss://debian.tail496756.ts.net/…` + `https://…/api/…` (via
-`tailscale serve`; see §10).
+Remote: `ws://100.127.119.54:7625/ws` — the daemon's own tailnet address, no
+proxy (ADR-0016; see §10).
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -492,17 +494,20 @@ helper suffices), and owner/families.
 
 ### 6.1 Transport and auth
 
-- WebSocket over TLS (`wss://`) provided by **`tailscale serve`** with the daemon
-  bound to **loopback** (ADR-0005). This removes bind-address churn (the tailnet IP
-  can change) and gives MagicDNS + optional identity headers.
-- **Gates:** (1) WireGuard/tailnet reachability, and (2) a bearer **token**
-  stored plaintext at `<stateDir>/token` with mode `0600` and compared in
-  constant time. The optional `tailscale whois` / `Tailscale-User-Login` allow
-  list is **not implemented** (documented as a later hardening step): the token
+- Plain WebSocket (`ws://`) on the daemon's **tailnet address** (ADR-0016,
+  superseding ADR-0005's loopback + `tailscale serve`). WireGuard encrypts the
+  link. The daemon listens only on a tailnet (`100.64.0.0/10`,
+  `fd7a:115c:a1e0::/48`) or loopback address and answers `403` to any peer
+  outside those ranges, before the token is checked (`protocol/src/net.ts`).
+- **Gates:** (1) the peer is on the tailnet (or loopback), and (2) a bearer
+  **token** stored plaintext at `$LDMUX_TOKEN_FILE` (default `<stateDir>/token`)
+  with mode `0600` and compared in constant time; the app sends it as
+  `Authorization: Bearer`. There is no per-user identity allow list: the token
   is the only authentication, so treat it as the credential it is.
-- **Pairing:** `ldmux pair` prints the URL, local URL and deep link (no QR: `qrencode` is absent) (deep link
-  `ldmux://pair?host=…&port=…&token=…`); manual entry fallback. If MagicDNS fails
-  in the app, fall back to the `100.x` address shown at pairing.
+- **Pairing (ADR-0017):** `ldmux code` draws a QR code of
+  `ldmux://pair?v=1&host=<addr:port>&token=…&name=<machine>`; `ldmux pair`
+  prints the same link. Both refuse a loopback-only or not-yet-listening daemon.
+  The app scans it from Settings; there is no manual host/token entry.
 - **Framing:** terminal data is **binary**; control/handshake is **JSON text**
   frames. `protocolVersion` is negotiated in the handshake; enforces max frame
   sizes: 16 MiB absolute frame ceiling, 16 KiB of `input` data, 32 keys per
@@ -515,13 +520,17 @@ This is the shipped set (the source of truth is
 `packages/protocol/src/messages.ts`; behaviour is in `docs/REMOTE.md`).
 Everything below is a JSON **text** message except the last line.
 
-Client → server: `attach {sessionId}`, `input {data}`, `key {keys}`,
-`follow {mode}`, `scrollback {sessionId, lines?}`, `list`, `new {kind?, cwd?, title?}`,
-`kill {sessionId}`, `ping {id?}`.
+Client → server: `hello {device}`, `attach {sessionId, cols?, rows?, takeover?}`,
+`resize {cols, rows}`, `input {data}`, `key {keys}`, `mouseclick {col, row}`,
+`copymode {on}`, `follow {mode}`, `scrollback {sessionId, lines?}`, `list`,
+`new {kind?, cwd?, title?}`, `kill {sessionId}`, `close {sessionId}`, `desktop`,
+`makelive {sessionId, workspace}`, `closelive {sessionId}`, `ping {id?}`.
 
 Server → client: `caps {protocolVersion, sessionId, cols, rows, snapshotEpoch,
 capabilities {controlMode, scrollback}}`, `snapshot {…state fields…, history?}`,
-`sessions {sessions[]}` (the answer to `list`/`new`/`kill`), `pong {id?}`,
+`sessions {sessions[]}` (the answer to `list`/`new`/`kill`/`close`),
+`created {sessionId, cwd}`, `owned {sessionId, owner}`, `mousedelivered {col, row}`,
+`desktop {inventory}`, `live {sessionId, ok, detail?}`, `pong {id?}`,
 `error {code, message}`.
 
 Binary: exactly one frame type is emitted — `OUTPUT` (raw pane bytes) — using the
@@ -530,7 +539,7 @@ for later revisions; no shipped code sends them, and the `flags` byte is 0).
 
 Deliberately **cut** from the v0.1 draft: `HELLO`/`resumeToken`,
 `SESSION_STATE`, a server-side `SCROLLBACK` frame, `CLOSE`, and the binary
-`INPUT`/`RESIZE` frames (input is JSON; the client never resizes).
+`INPUT`/`RESIZE` frames (input and resize are JSON messages).
 
 `snapshot`/`caps` state fields (fixes v0.1's fidelity gap — the client replays
 bracketed-paste, application-cursor and opt-in mouse from them): `cols`, `rows`,
@@ -578,8 +587,9 @@ server-side VT emulator seam would close it.
 ### 7.1 Orientation & layout
 
 > **Superseded by [ADR-0011](adr/0011-screen-orientation.md).** The device owns the
-> rotation and the app owns the keyboard: portrait is typing with a two-row bar,
-> landscape is the side panel, and there is no locked orientation and no flip button.
+> rotation of the shell view and the app owns the keyboard: portrait is typing with
+> a two-row bar, landscape is the side panel, and there is no flip button. The
+> launcher and its dialogs hold portrait (ADR-0011 amendment).
 > Android never ignores it, because nothing is being requested.
 
 - ~~**Landscape-locked** (FR-6).~~ Caveat: Android large-screen APIs may ignore
@@ -692,15 +702,17 @@ XDG_RUNTIME_DIR`, and the helper exports `DISPLAY=:0`/`XAUTHORITY` as fallback.
 ## 10. Tailscale & security (FR-4)
 
 - **Transport:** system `tailscaled` v1.102.3 (already running). The daemon binds
-  **loopback**; `tailscale serve --bg --https=443 http://127.0.0.1:<port>` exposes
-  it on the tailnet with TLS + MagicDNS (ADR-0005). `tailscale cert` is the
-  fallback. **No Funnel** unless explicitly enabled.
-- **Gates:** tailnet identity (WireGuard; optional `whois`/identity-header allow
-  list) + bearer token. Constant-time comparison.
-- **Refuse** to bind a public interface.
-- Mobile: Android cleartext scoped to `localhost` + `*.ts.net`; token in
-  EncryptedSharedPreferences (Keystore); iOS in Keychain (iOS is a **target**, not
-  v1 — see §11.2).
+  this machine's tailnet address directly (`LDMUX_REMOTE_HOST` in
+  `deploy/ldmux.service`), plain `ws://` under WireGuard (ADR-0016). No
+  `tailscale serve`, no Funnel.
+- **Gates:** tailnet or loopback peer address (checked per request, `403`
+  otherwise) + bearer token. Constant-time comparison.
+- **Refuse** to bind anything but a tailnet or loopback address: `main.ts` exits,
+  and `RemoteServer.start` throws.
+- Mobile: Android allows cleartext (`usesCleartextTraffic`, needed for `ws://`
+  over the tailnet); the app refuses a pairing host that is not tailnet or
+  loopback. Token in the app's private SharedPreferences; iOS in Keychain (iOS
+  is a **target**, not v1 — see §11.2).
 - `/api/dirs` is read-only and constrained to configured roots; the filesystem
   enumeration surface is documented and acceptable for single-user.
 
@@ -817,19 +829,17 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
   Remaining: implement the robust parser (framing, octal→bytes, per-pane
   incremental UTF-8, `%begin/%end` correlation) and a burst/`%pause` test.
 - `ldmux` CLI: `ping`, `list`, `new`, `run`, `send`, `key`, `capture`, `snapshot`,
-  `kill`, `forget`, `adopt`, `mirror`, `remote`, `pair`, `expose`,
-  `install-extension` (all implemented).
+  `kill`, `forget`, `adopt`, `mirror`, `remote`, `code`, `pair` (all implemented;
+  later verbs are listed in §4.2).
 - **Geometry probe (ADR-0002):** confirm `window-size manual` behavior and the
   canonical-size default.
 
-**Phase 2 — pi extension.**
-- Reason-branched supervision/registration (ADR-0003), `/ldmux`, `ldmux_*` tools.
-- Bash `pi()` wrapper → `ldmux -- pi`; env contract; wrapper test matrix.
-- E2E: pi sessions appear/update/disappear correctly across `/new`,`/resume`,`quit`.
+**Phase 2 — pi extension.** Dropped: the extension was removed (ADR-0009) and
+ldmux is not a pi plugin.
 
 **Phase 3 — remote + auth.**
-- `tailscale serve` + token + pairing (URL/deep link; no QR generator on this
-  machine); loopback bind. **DONE.**
+- Direct tailnet bind + token (ADR-0016) and QR pairing via `ldmux code`
+  (ADR-0017). **DONE.**
 - Reconnect (snapshot-then-stream), heartbeats, `resumeToken`.
 
 **Phase 4 — mobile client (Android v1).**
@@ -848,7 +858,8 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 
 **Phase 5 — desktop mirror + polish.**
 - i3 + alacritty mirror (read-only default), focus/close helper.
-- Settings, theming, `install.sh`, `systemd --user` unit, `ldmux doctor`.
+- Settings, theming, `install.sh`, `ldmux doctor`. The `systemd --user` unit
+  (`deploy/ldmux.service`) and `just install` exist.
 
 ---
 
@@ -864,13 +875,13 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
 | R6 | tmux socket under `/tmp` / `TMUX_TMPDIR` nesting. | A bare `-L ldmux` name (no `TMUX_TMPDIR` override); unique per-run socket names in tests, and `killTmuxServer` also unlinks the socket file, which `kill-server` leaves behind when the server already exited. |
 | R7 | Split input with a desktop mirror. | Mirror read-only by default; explicit "take control". |
 | R8 | i3 placement races. | `for_window` rule keyed by `ldmux-mirror`. |
-| R9 | Token/identity security. | Loopback bind, `tailscale serve` TLS, token `0600` (plaintext at rest; the state dir is `0700`). No identity allow list yet. |
+| R9 | Token/identity security. | Tailnet-or-loopback bind and peer check (ADR-0016), WireGuard encryption, token `0600` (plaintext at rest; its directory is `0700`). No identity allow list or per-device tokens yet. |
 | R10 | Language choice. | TS/Bun v1 with a `PaneStream` seam to Rust. |
 | R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |
 | R12 | Control-mode parser robustness (octal, split UTF-8, sequence correlation). | Robust parser + tests; capture-pane fallback; tmux owns state. |
 | R13 | iOS scope creep. | v1 = Android; iOS is a documented target. |
 | Q1 | Wrapper attaches interactively? | Recommend yes (gmux parity). |
-| Q2 | ~~serve vs direct bind~~ | **Resolved (ADR-0005): `tailscale serve`.** |
+| Q2 | ~~serve vs direct bind~~ | **Resolved (ADR-0016): direct tailnet bind**, superseding ADR-0005's `tailscale serve`. |
 | Q3 | Native renderer timing? | Defer behind `TerminalSurface`. |
 | Q4 | Session families? | Phase 2+. |
 
@@ -915,7 +926,9 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0002** | **Canonical geometry:** pin `window-size manual` + a canonical grid; clients render viewports and never resize the pane. |
 | **ADR-0003** | **Extension lifecycle:** branch on `session_shutdown.reason`; only `quit` ends a session; never tear down the daemon/tmux on shutdown. |
 | **ADR-0004** | **Scroll anchor:** client-owned explicit `following`/`anchored` state machine; server never resolves line ids. |
-| **ADR-0005** | **TLS/remote:** loopback bind + `tailscale serve --bg`; token + QR pairing; no Funnel. |
+| **ADR-0005** | ~~**TLS/remote:** loopback bind + `tailscale serve --bg`; token + QR pairing; no Funnel.~~ **Superseded** by ADR-0016 and ADR-0017. |
+| **ADR-0016** | **Direct tailnet bind:** listen only on the tailnet address or loopback, `403` for any other peer, plain `ws://` under WireGuard, bearer token. |
+| **ADR-0017** | **QR pairing:** `ldmux code` shows `ldmux://pair?v=1&host=…&token=…&name=…` as a QR code; the app scans it from Settings; no manual host/token entry. |
 
 Individual ADRs live under `docs/adr/`. ADR-0001 is now **frozen** (proven on this
 machine); ADR-0002's geometry probe is **done** (asserted in the daemon tests:

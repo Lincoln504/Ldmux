@@ -19,9 +19,10 @@
 # lines, each marked below. It used to be a template with those three commented out,
 # which was worse than useless: installing it gave a loopback-only daemon that
 # reported success and exited 0, so the phone could not connect and nothing said why.
-# There is no installer for this repo — copy the file to
-# `~/.config/systemd/user/ldmux.service`, then `systemctl --user daemon-reload` and
-# `systemctl --user enable --now ldmux`.
+# Install with `just install`: it builds the runtime, writes the wrappers to
+# `~/.local/bin`, copies this file to `~/.config/systemd/user/ldmux.service` and
+# runs `systemctl --user daemon-reload`. It does not enable or restart the unit:
+# `systemctl --user enable --now ldmux` the first time, `restart` after that.
 [Unit]
 Description=ldmux daemon — remote terminal sessions over tmux
 # A real path, rather than one an installer that does not exist would have created.
