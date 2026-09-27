@@ -59,6 +59,16 @@
           JAVA_HOME = "${pkgs.jdk25}";
           shellHook = ''
             export ANDROID_HOME="$HOME/Android/Sdk"
+            # The debug signing key. Gradle keeps it in $ANDROID_USER_HOME, falling
+            # back to ~/.android, and on this machine the key every installed build
+            # was signed with lives in ~/.config/.android. A shell without the
+            # variable made a *new* key in ~/.android, and the phone then refused the
+            # update ("signatures do not match") until the app was uninstalled, which
+            # wipes its pairing. Measured 2026-09-27. Use the existing key when there
+            # is one, and never override a value someone set on purpose.
+            if [ -z "''${ANDROID_USER_HOME:-}" ] && [ -f "$HOME/.config/.android/debug.keystore" ]; then
+              export ANDROID_USER_HOME="$HOME/.config/.android"
+            fi
             export ANDROID_SDK_ROOT="$ANDROID_HOME"
             # libghostty-vt's build locates the NDK via ANDROID_NDK_HOME. Never
             # hard-code a version, and never sort the *directory names*: SDK
