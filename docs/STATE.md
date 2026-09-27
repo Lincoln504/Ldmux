@@ -139,11 +139,17 @@ The wire carries **raw pty bytes**, not a grid.
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **345 tests, 345 pass** | `node --run test` (`--test-concurrency=4`) |
+| JS/TS | **347 tests, 347 pass** | `nix develop --command node --test "packages/*/test/*.test.ts"` |
 | Typecheck | clean | `node --run typecheck` |
-| Native C (host) | **169 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
-| Kotlin (Android unit) | **160 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
-| Architecture guard | 7 tests, part of the 345 | `packages/mobile/test/architecture.test.ts` |
+| Native C (host) | **198 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
+| Kotlin (Android unit) | **165 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
+| Architecture guard | 8 tests, part of the 347 | `packages/mobile/test/architecture.test.ts` |
+
+Run the JS/TS suite **inside `nix develop`**. The daemon resolves its tmux from
+`LDMUX_TMUX_BIN` before PATH, so in a shell that is itself an ldmux session the suite
+starts scratch servers with the flake's tmux while a bare `tmux` on PATH is the
+system's — two versions, one socket, and 26 tests fail as if the product were broken
+(measured 2026-09-27). One test also needs `zbarimg`, which only the devShell has.
 
 Counts move; the commands do not. Re-run them rather than trusting this table's numbers,
 and note that a green suite is only evidence of what it asserts — several of the tests in

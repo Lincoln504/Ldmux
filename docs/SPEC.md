@@ -648,24 +648,35 @@ gmux's bug (PR #500): stale `wasAtBottom`/pixel snapshots racing user wheel inpu
 across BSU→ESU→rAF windows (25 wheel-up notches → net −41 lines). Fix: an explicit
 mode state machine.
 
-ldmux adopts the same explicit model, **owned entirely by the client** (a
-server-facing integer line id has no stable meaning across snapshots/reflow/ED3):
+ldmux keeps the **property** and not the mechanism. The anchor is the emulator's
+own viewport, read from the frame header on every render, rather than a
+client-side line identity:
 
-- Modes: **`following`** (pinned to bottom) and **`anchored`** (user is reading;
-  anchor = absolute line identity + distance-from-bottom).
-- **Only explicit user intent** changes the mode. **Output never moves the
-  viewport**; it only re-resolves the mode.
-- Anchor by **line identity**, not pixels. The server never resolves line ids.
-- Handle BSU/ESU (DEC 2026), ED3 (scrollback clear), alternate-screen enter/exit,
-  and resize reflow from the parser, not byte scanning. On resize, preserve the
-  anchor; reflow per xterm.js semantics.
-- On reconnect: take the `SNAPSHOT` as a fresh baseline (`snapshotEpoch`); re-derive
-  the anchor from the snapshot header; **if the anchored line is gone, stand down
-  to `following` — never guess.**
-- Persistent **"↓ jump to bottom"** affordance while anchored (dooboxes requirement;
-  built: a pill over the terminal while the viewport is away from the live
-  bottom, and any text the session sends returns the view to the bottom, because
-  typing happens at the prompt).
+- The scroll position always comes from libghostty-vt (`viewport_active`,
+  `scroll_offset`) through the C shim, so there is one source of truth for where
+  the view is and no second line space to reconcile.
+- `scrollBy` **asks, then reports what actually moved**, read back from the header
+  instead of assuming the request was honoured. On the alternate screen — vim,
+  less, htop — the engine refuses, the report is 0, and a drag moves nothing.
+- **Only explicit user intent** changes the view. **Output never moves the
+  viewport**: measured 2026-09-27 in `packages/mobile/native/test_engine.c`
+  (`output does not move a scrolled viewport`), a viewport parked 10 rows back is
+  unchanged by 30 further lines of output.
+- BSU/ESU (DEC 2026), ED3, alternate-screen enter/exit and resize reflow are the
+  emulator's, not byte scanning — the parser is the engine.
+- Persistent **"↓ jump to bottom"** affordance while the viewport is away from the
+  live bottom, and any text the session sends returns the view to the bottom,
+  because typing happens at the prompt.
+
+**Correction (2026-09-27).** This section described a client-owned anchor by
+absolute line identity, a `following`/`anchored` mode machine, `FOLLOW {mode}`, and
+a `snapshotEpoch` baseline, and ADR-0004 named a `Scroller` module with
+`scrollMode`, `anchorFromBottom` and `anchoredTarget`. None of it was built: no such
+module exists, the client never sends `FOLLOW`, and the `snapshotEpoch` that `caps`
+carries is never read by the client. What is built is the emulator's viewport above,
+which delivers the property this section exists for without needing a line identity
+to do it. The superseded description is left in ADR-0004 as the record of what was
+planned.
 - Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; the browser client that measured it was deleted)
   with a configurable max; server-side tmux `history-limit` is **10,000** lines
   (~40 MB/pane) and the `scrollback` message serves older pages on demand.
@@ -879,7 +890,7 @@ ldmux is not a pi plugin.
 
 | ID | Risk / question | Mitigation |
 |----|-----------------|------------|
-| R1 | Scroll fidelity is hard. | Explicit `following`/`anchored` client state machine from day one; test 30 Hz BSU/ESU + wheel/touch. |
+| R1 | Scroll fidelity is hard. | ~~Explicit `following`/`anchored` client state machine from day one~~; **built as the emulator's own viewport, with the property tested** (§7.4 correction, 2026-09-27). |
 | R2 | Snapshot fidelity (cursor/modes/alt-screen/soft-wrap). | v1: `capture-pane -e` + state fields; document limits; phase-3 optional server-side VT emulator. |
 | R3 | tmux version differences (3.5a here). | Conformance tests; feature-detect; probe before freezing ADRs. |
 | R4 | Android background kill severs the WS. | Foreground service, wake lock, backoff + jitter, tmux persistence, resync on resume. |
@@ -937,7 +948,7 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0001** | **Transport:** tmux control mode `-C` over pipes (no PTY) + `capture-pane` snapshots/fallback, behind a `PaneStream` interface. Proven on tmux 3.5a + Bun 1.3.9. |
 | **ADR-0002** | **Canonical geometry:** pin `window-size manual` + a canonical grid; clients render viewports and never resize the pane. |
 | **ADR-0003** | **Extension lifecycle:** branch on `session_shutdown.reason`; only `quit` ends a session; never tear down the daemon/tmux on shutdown. |
-| **ADR-0004** | **Scroll anchor:** client-owned explicit `following`/`anchored` state machine; server never resolves line ids. |
+| **ADR-0004** | **Scroll anchor:** ~~client-owned explicit `following`/`anchored` state machine; server never resolves line ids~~ — **as built, the anchor is the emulator's viewport and `scrollBy` reports the movement it measured** (see ADR-0004's correction). |
 | **ADR-0005** | ~~**TLS/remote:** loopback bind + `tailscale serve --bg`; token + QR pairing; no Funnel.~~ **Superseded** by ADR-0016 and ADR-0017. |
 | **ADR-0016** | **Direct tailnet bind:** listen only on the tailnet address or loopback, `403` for any other peer, plain `ws://` under WireGuard, bearer token. |
 | **ADR-0017** | **QR pairing:** `ldmux code` shows `ldmux://pair?v=1&host=…&token=…&name=…` as a QR code; the app scans it from Settings; no manual host/token entry. |
