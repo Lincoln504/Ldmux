@@ -139,11 +139,11 @@ The wire carries **raw pty bytes**, not a grid.
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **344 tests, 344 pass** | `node --run test` (`--test-concurrency=4`) |
+| JS/TS | **345 tests, 345 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
 | Native C (host) | **147 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
 | Kotlin (Android unit) | **151 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
-| Architecture guard | 7 tests, part of the 344 | `packages/mobile/test/architecture.test.ts` |
+| Architecture guard | 7 tests, part of the 345 | `packages/mobile/test/architecture.test.ts` |
 
 Counts move; the commands do not. Re-run them rather than trusting this table's numbers,
 and note that a green suite is only evidence of what it asserts — several of the tests in

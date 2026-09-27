@@ -122,8 +122,10 @@ adb reverse tcp:7629 tcp:7629
 
 ## Modes
 
-**The device owns the orientation. The app owns the keyboard.** They are separate
-decisions and they no longer share a variable (ADR-0011).
+**The device owns the orientation in the shell view. The app owns the keyboard.** They
+are separate decisions and they no longer share a variable (ADR-0011). The launcher and
+its dialogs are the one exception: they hold portrait while shown and hand the device
+back when a shell opens (`HoldOrientation`, ADR-0011 amendment).
 
 - The manifest declares no `screenOrientation` and does declare `configChanges`, so the
   activity is not recreated when the device turns. Whether the app is portrait or

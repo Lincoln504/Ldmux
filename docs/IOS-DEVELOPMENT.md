@@ -21,7 +21,9 @@ work starts from facts rather than discovery.
 | `newDeviceId`, `deviceLabel` | `UIDevice` | easy |
 | `BackgroundSession` | already designed as a number, not a call (`releaseGraceMs`) | easy |
 | `BackToLauncher` | a swipe gesture; iPhone has no back button | moderate |
-| `lockOrientation` | see below — this one is a real seam constraint | **hard** |
+| `ScreenOrientation` | the scene's supported orientations (`requestGeometryUpdate`, iOS 16+); see below | moderate |
+| `CodeScanner` | VisionKit `DataScannerViewController` (iOS 16+), returning the code's text; parsing is shared (ADR-0017) | moderate |
+| pairing links | not a seam: register the `ldmux` URL scheme in Info.plist and pass `onOpenURL` to `PairingInbox.offer` | easy |
 | `TerminalPainter` | Core Text instead of Android `Paint` | **the real work** |
 | `rememberTerminalSurface` | the surface, once the painter and engine exist | moderate |
 
@@ -30,11 +32,13 @@ worth stating: the C shim split means the terminal core is portable C and only t
 binding is platform code, and the dictation seam now says what dictation *is* rather
 than how Android does it. Both were done for exactly this.
 
-**`lockOrientation` deserves a warning.** iOS cannot rotate a running app before
-iOS 16; below that, orientation is an Info.plist constraint plus asking the user. That
-is a case where *the platform cannot express the shared concept* — the one legitimate
-reason for a seam to differ (ADR-0013) — and the honest thing is to write that down in
-the ADR rather than pretend the seam is symmetric.
+**`ScreenOrientation` deserves a warning.** Only the launcher holds a policy (portrait,
+ADR-0011 amendment); everything else follows the device. iOS can change a running
+scene's orientation only from iOS 16 (`requestGeometryUpdate` plus
+`supportedInterfaceOrientations`), and below that it is an Info.plist constraint. That
+is a case where *the platform cannot express the shared concept* on every version, the
+one legitimate reason for a seam to differ (ADR-0013), so an iOS minimum of 16 is the
+simple answer (VisionKit's scanner needs 16 anyway).
 
 ## The machine that would build it
 
