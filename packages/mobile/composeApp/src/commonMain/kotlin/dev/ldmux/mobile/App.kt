@@ -65,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -499,15 +500,20 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // Deliberately the same mechanism as the launcher button: dropping the pages
     // *is* the detach, so there is one way for a shell to be let go of.
     LaunchedEffect(AppLifecycle.foreground) {
-        if (AppLifecycle.foreground) return@LaunchedEffect
+        if (AppLifecycle.foreground) {
+            // **Fresh session data on the way back in.** The daemon pushes a
+            // broadcast whenever a directory changes, so this is belt and braces —
+            // but the case it covers is the one the push cannot: a phone that was
+            // asleep, whose socket came back with the app and whose list is
+            // whatever it was before. Asked *here*, on resume. The comment below
+            // said "on resume" while the call sat on the backgrounding edge, where
+            // nobody is looking at the list being refreshed.
+            if (connected) client.refreshSessions()
+            return@LaunchedEffect
+        }
         delay(BackgroundSession.releaseGraceMs)
         pageSelection = emptySet()
         showLauncher = true
-        // Fresh CWDs on resume — the daemon's 2s poll will catch them
-        // automatically once this ships, but a manual refresh on resume
-        // means the launcher never shows stale directories after a
-        // background period.
-        if (connected) client.refreshSessions()
     }
 
     // **A shell that ends takes its page with it, and the last one takes the pager.**
@@ -981,6 +987,11 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         Modifier.fillMaxSize(),
                         keyboardRequest = keyboardRequest,
                         pendingOpen = pendingOpens > 0,
+                        // The attach's own verdict about the shell it was attached
+                        // to, which is not the same signal as the session list: the
+                        // list arrives when the list socket is up, and a page left
+                        // behind is a frozen frame with nothing to read.
+                        onShellGone = { id -> pageSelection = pageSelection - id },
                     )
                     VoiceBanner(voice, Modifier.align(Alignment.TopStart))
                 }
@@ -1105,6 +1116,14 @@ private fun TerminalArea(
     // on it, one was tapped, and the terminal screen it landed on flatly denied
     // anything was open.
     pendingOpen: Boolean = false,
+    /**
+     * A page's shell is gone: ended, or unknown to the daemon.
+     *
+     * The caller drops the page, which is what it also does for a shell that left
+     * the session list. Passed in rather than handled here because the page set and
+     * the launcher's visibility live with the caller.
+     */
+    onShellGone: (String) -> Unit = {},
 ) {
     Box(modifier.background(Bg)) {
         if (pages.isEmpty()) {
@@ -1139,7 +1158,19 @@ private fun TerminalArea(
                     Modifier.fillMaxSize(),
                     keyboardRequest = keyboardRequest,
                 )
-                LaunchedEffect(handle, s.id) { handles[s.id] = handle }
+                DisposableEffect(handle, s.id) {
+                    handles[s.id] = handle
+                    // A page that leaves composition is disposed, and its handle must
+                    // leave with it. This map was written and read and never pruned,
+                    // so it grew one disposed controller per session shown — each
+                    // holding a frame grid — and a read in the frame before a page
+                    // re-registered got the *disposed* one. That is survivable only
+                    // because every engine call is guarded on a non-zero handle, so
+                    // the symptom is a key that does nothing rather than a fault.
+                    // Only remove our own entry: a re-registration must not have its
+                    // handle dropped by the outgoing page's teardown.
+                    onDispose { if (handles[s.id] === handle) handles.remove(s.id) }
+                }
                 // Who has this shell, when it is not us (ADR-0010). Drawn over
                 // the terminal rather than replacing the page: the page is still
                 // real, it is just somebody else's to type in right now — and a
@@ -1148,6 +1179,15 @@ private fun TerminalArea(
                 val madeVisitable by handle.ownedBy.collectAsState()
                 if (madeVisitable != null) {
                     HeldElsewhere(holder = madeVisitable!!, onTakeOver = { handle.takeOver() })
+                }
+                // The shell is gone: ended, or unknown to the daemon. Drop the page
+                // on the attach's own verdict rather than waiting for the session
+                // list to stop carrying it — the list arrives when the list socket
+                // is up, and a page left behind is a frozen frame with nothing to
+                // read and no retry.
+                val gone by handle.ended.collectAsState()
+                LaunchedEffect(gone) {
+                    if (gone) onShellGone(s.id)
                 }
               }
             }
@@ -1561,12 +1601,20 @@ private fun SidePanel(
         }
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,
-        // so this is the reason a slow link feels the way it does.
+        // so this is the reason a slow link feels the way it does. It survives the
+        // link going down — the whole page has nothing else to say about it, and a
+        // line that simply disappears reads as a slow app rather than a dead socket.
+        // Typing in that state is dropped silently, so the least this can do is say so.
         val link by (handle?.link ?: TerminalHandle.EMPTY_LINK).collectAsState()
-        if (link.measured) {
+        val linkText = when {
+            link.offline -> "link down · reconnecting"
+            link.measured -> "link ${link.rttMs} ms · ${link.fps} fps"
+            else -> null
+        }
+        linkText?.let {
             Text(
-                "link ${link.rttMs} ms · ${link.fps} fps",
-                color = Dim.copy(alpha = 0.7f),
+                it,
+                color = if (link.offline) Accent else Dim.copy(alpha = 0.7f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
             )
@@ -1791,7 +1839,21 @@ private fun PairingRow(current: LdmuxConfig, onPaired: (Pairing) -> Unit, onUnpa
 @Composable
 private fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
     Box(
-        Modifier.fillMaxSize().background(Bg.copy(alpha = 0.96f)),
+        Modifier
+            .fillMaxSize()
+            // Consume every pointer event. An overlay that only *looks* modal is
+            // worse than none: a tap fell through to the terminal underneath and
+            // moved its cursor, and a drag fell through to the key bars, all in a
+            // shell this device does not hold and whose input the daemon refuses.
+            // The one control below is the only thing that should react.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent().changes.forEach { it.consume() }
+                    }
+                }
+            }
+            .background(Bg.copy(alpha = 0.96f)),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {

@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -140,6 +141,20 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     private var wantTakeover = false
 
+    /**
+     * Whether this page has ever armed a takeover.
+     *
+     * Opening a shell on the phone is the consent to take it (2026-09-26), and the
+     * consent is for that opening. `start` is called on every *activation*, and
+     * activation is which page the pager is showing — the user swiping between
+     * shells calls `stop` and `start` on each. Arming on every one of those meant
+     * swiping away from a shell and back took it from the desk: no tap, no notice,
+     * mid-keystroke. It also made the notice unreachable for that case, since the
+     * notice is only drawn when the daemon *refuses* an attach. One arming per page,
+     * and `takeOver()` for every deliberate take-back after it.
+     */
+    private var armedOnce = false
+
     /** Reconnect without the backoff pause, once — a resync, not an outage. */
     private var skipBackoffOnce = false
 
@@ -172,7 +187,15 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         // back. So the first attach of each activation takes over. A reconnect
         // within the activation does not — a desk that took the shell back must not
         // lose it again to a link that blinked — and the notice offers one tap.
-        wantTakeover = true
+        //
+        // ...and it is the first attach of the *page*, not of every activation. That
+        // sentence was above this line while the code armed on each one, and
+        // activation is page visibility, so a swipe away and back stole the shell.
+        // See [armedOnce].
+        if (!armedOnce) {
+            armedOnce = true
+            wantTakeover = true
+        }
         this.scope = scope
         job = scope.launch { loop() }
     }
@@ -294,17 +317,27 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             // for one app is drift, so this is the same one.
             if (skipBackoffOnce) {
                 skipBackoffOnce = false
-            } else if (!wantTakeover) {
-                val base = (RETRY_BASE_MS shl attempt.coerceAtMost(5)).coerceAtMost(RETRY_MAX_MS)
+            } else {
+                // The one attempt that follows an armed takeover is immediate — the
+                // user tapped and is watching — and every attempt after that backs
+                // off. It used to be "no pause while a takeover is armed" for all of
+                // them, and that is a hot loop: `wantTakeover` is only consumed by a
+                // connection that *succeeds*, so a page that cannot reach the daemon
+                // at all — which is exactly when someone taps take-over — retried with
+                // no delay, forever, and `attempt` never grew to widen the gap.
+                val immediate = wantTakeover && attempt == 0
+                val base =
+                    if (immediate) 0L
+                    else (RETRY_BASE_MS shl attempt.coerceAtMost(5)).coerceAtMost(RETRY_MAX_MS)
                 attempt++
-                if (NetworkWake.sleep(base + Random.nextLong(base / 2 + 1))) attempt = 0
+                if (base > 0 && NetworkWake.sleep(base + Random.nextLong(base / 2 + 1))) attempt = 0
             }
         }
     }
 
     private fun onControl(text: String) {
         val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-        when (root["type"]?.jsonPrimitive?.content) {
+        when (field(root, "type")) {
             // The daemon has answered, so the link works and the next failure is
             // a new one: the backoff starts over rather than staying where the
             // last outage left it.
@@ -319,10 +352,10 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 onRtt?.invoke(sent.elapsedNow().inWholeMilliseconds)
             }
             "snapshot" -> {
-                val cols = root["cols"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
-                val rows = root["rows"]?.jsonPrimitive?.content?.toIntOrNull() ?: return
-                val screen = root["screen"]?.jsonPrimitive?.content ?: ""
-                val history = root["history"]?.jsonPrimitive?.content?.toBoolean() ?: false
+                val cols = field(root, "cols").toIntOrNull() ?: return
+                val rows = field(root, "rows").toIntOrNull() ?: return
+                val screen = field(root, "screen")
+                val history = bool(root, "history")
                 val modes = TerminalModes(
                     mouse = bool(root, "mouse"),
                     appCursor = bool(root, "appCursor"),
@@ -330,13 +363,13 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     alternateOn = bool(root, "alternateOn"),
                     mouseSgr = bool(root, "mouseSgr"),
                     paneInMode = bool(root, "paneInMode"),
-                    cursorX = root["cursorX"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
-                    cursorY = root["cursorY"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                    cursorX = field(root, "cursorX").toIntOrNull() ?: 0,
+                    cursorY = field(root, "cursorY").toIntOrNull() ?: 0,
                 )
                 onSnapshot?.invoke(cols, rows, screen, history, modes)
             }
             "error" -> {
-                val code = root["code"]?.jsonPrimitive?.content ?: "error"
+                val code = field(root, "code").ifEmpty { "error" }
                 appLog("page $sessionId: error $code")
                 when (code) {
                     // The daemon dropped output it could not deliver (the stream
@@ -365,7 +398,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 // as an ordinary outcome so the UI can offer to take it over
                 // rather than showing an error about the link.
                 val holder = (root["owner"] as? JsonObject)
-                    ?.get("name")?.let { (it as? JsonPrimitive)?.content }
+                    ?.let { field(it, "name").ifEmpty { null } }
                 appLog("page $sessionId: held by $holder")
                 onOwned?.invoke(holder)
             }
@@ -385,8 +418,21 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         onOutput?.invoke(data.copyOfRange(8, end))
     }
 
-    private fun bool(root: kotlinx.serialization.json.JsonObject, key: String): Boolean =
-        root[key]?.jsonPrimitive?.content?.toBoolean() ?: false
+    /**
+     * Read a field without `jsonPrimitive`, which **throws** on a `JsonNull` or an
+     * object. `?.jsonPrimitive` guards an *absent* key and nothing else, so a field
+     * the daemon sent as `null` looked handled and was not.
+     *
+     * What made that expensive is where the throw lands: inside the receive loop's
+     * `catch (Throwable)`, which reads as a dead link. So one unreadable field is not
+     * one dropped value — it is the socket, a silent reconnect, and a terminal that
+     * flinches for no visible reason. The sibling client was fixed for exactly this
+     * and has the post-mortem; this file kept the old accessor.
+     */
+    private fun field(root: JsonObject, key: String): String =
+        ((root[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content ?: ""
+
+    private fun bool(root: JsonObject, key: String): Boolean = field(root, key) == "true"
 
     private fun sendControl(msg: String) {
         scope?.launch { runCatching { ws?.send(Frame.Text(msg)) } }

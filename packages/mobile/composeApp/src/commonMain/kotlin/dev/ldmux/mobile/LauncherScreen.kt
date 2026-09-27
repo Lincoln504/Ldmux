@@ -47,8 +47,10 @@ import androidx.compose.ui.unit.sp
  * Two things can be *chosen* rather than merely shown:
  *
  *   - **Shells and pi sessions**, by tapping. What you choose becomes the set the
- *     terminal pages through with ◀ ▶ — nothing chosen means everything, so the
- *     screen still works as a plain session list.
+ *     terminal pages through with ◀ ▶, and the `open` button opens exactly that set
+ *     — it is inert, and dimmed, with nothing chosen. (This line said "nothing
+ *     chosen means everything, so the screen still works as a plain session list"
+ *     until 2026-09-27; there is no such mode, and the dimmed button says so.)
  *   - **A desktop workspace**, by tapping its target ring. That is where a shell
  *     opened from here will be put, and it is a deliberate choice: the previous
  *     behaviour picked "the last one" for you, which meant a shell could appear on

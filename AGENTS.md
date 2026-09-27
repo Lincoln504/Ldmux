@@ -19,17 +19,24 @@ what is requested; do not expand scope unilaterally.
 
 ## Rules
 
-- **Tests + types are the gate.** `nix develop --command node --test
-  "packages/*/test/*.test.ts"` and `node --run typecheck` must both pass before
-  committing; the typecheck is strict and there is no build step (Node strips the
-  types). **Inside `nix develop` is part of the command, not a preference.** The
-  suite drives scratch tmux servers, and the daemon resolves its tmux from
-  `LDMUX_TMUX_BIN` before PATH — so running it in a shell that *is* an ldmux session
-  points the daemon at the flake's runtime tmux while a bare `tmux` on PATH is the
-  system's, and the two versions cannot share a socket. The result is 26 failures
-  across five files that read like product defects (measured 2026-09-27). One test
-  still needs `zbarimg`, which only the devShell provides. Outside the devShell,
-  treat any failure as environment until it reproduces inside.
+- **Tests + types are the gate.** `nix develop --command node --run test` and
+  `node --run typecheck` must both pass before committing; the typecheck is strict
+  and there is no build step (Node strips the types). **Inside `nix develop` is part
+  of the command, not a preference.** The suite drives scratch tmux servers, and the
+  daemon resolves its tmux from `LDMUX_TMUX_BIN` before PATH — so running it in a
+  shell that *is* an ldmux session points the daemon at the flake's runtime tmux
+  while a bare `tmux` on PATH is the system's, and the two versions cannot share a
+  socket. The result is 26 failures across five files that read like product defects
+  (measured 2026-09-27). One test also needs `zbarimg`, which only the devShell has.
+
+  **`node --run test`, not `node --test "packages/*/test/*.ts"`.** The script is
+  `node --test --test-concurrency=4`, and the bound is load-bearing: `a real tmux
+  %pause resyncs subscribers` needs tmux to notice a *lagging* client, and 12 files
+  in parallel on a 12-core machine starve the producer until the client keeps up and
+  the pause never happens. Measured 2026-09-27 on this host: the bare command failed
+  that test and killed a whole file's process (4 tests never ran) while the script
+  passed. A file whose process dies reports one failure and hides its tests, so treat
+  "a file failed" in this suite as "its tests did not run" until proven otherwise.
 - **tmux is the source of truth.** Never introduce a second session/PTY layer.
 - **Tailnet only.** Never bind a public interface; never disable auth.
 - **Scroll fidelity is sacred.** Any terminal UI change must preserve the

@@ -139,7 +139,7 @@ The wire carries **raw pty bytes**, not a grid.
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **347 tests, 347 pass** | `nix develop --command node --test "packages/*/test/*.test.ts"` |
+| JS/TS | **347 tests, 347 pass** | `node --run test` (`--test-concurrency=4`) |
 | Typecheck | clean | `node --run typecheck` |
 | Native C (host) | **198 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
 | Kotlin (Android unit) | **165 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |

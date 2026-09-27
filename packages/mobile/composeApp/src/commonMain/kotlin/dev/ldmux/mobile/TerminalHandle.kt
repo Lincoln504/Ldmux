@@ -16,6 +16,16 @@ data class LinkStats(
     val frameIntervalMs: Long,
     /** True once a real round trip has been measured. */
     val measured: Boolean,
+    /**
+     * The link is down.
+     *
+     * Not the same state as "no measurement yet": while the socket is gone the user
+     * can still type, and every keystroke is dropped without a trace. The line this
+     * feeds is the only thing on a terminal page that says anything at all about the
+     * link, so it has to survive the link failing rather than vanish with it — a
+     * disappearing diagnostic reads as the app being slow, not the link being absent.
+     */
+    val offline: Boolean = false,
 ) {
     val fps: Int get() = (1000L / frameIntervalMs.coerceAtLeast(1L)).toInt()
 }
@@ -180,6 +190,16 @@ interface TerminalHandle {
     val ownedBy: StateFlow<String?>
         get() = EMPTY_OWNED
 
+    /**
+     * The shell is gone (ended, or unknown to the daemon), so the page is over.
+     *
+     * A state rather than an event, for the same reason as [ownedBy]: a page that
+     * only reacted if somebody happened to be listening would sit there showing a
+     * frozen frame with nothing to read.
+     */
+    val ended: StateFlow<Boolean>
+        get() = EMPTY_ENDED
+
     /** The user confirmed: take the shell from whoever has it. */
     fun takeOver() {}
 
@@ -209,6 +229,8 @@ interface TerminalHandle {
         val EMPTY_LINK: StateFlow<LinkStats> = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
         /** For surfaces that do not report ownership (the web view, tests). */
         val EMPTY_OWNED: StateFlow<String?> = MutableStateFlow(null)
+        /** For surfaces whose shell cannot end (the web view, tests). */
+        val EMPTY_ENDED: StateFlow<Boolean> = MutableStateFlow(false)
     }
 }
 

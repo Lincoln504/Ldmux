@@ -290,10 +290,24 @@ class TerminalController(
             _ownedBy.value = holder ?: "another device"
         }
         attach.onRtt = { sample ->
+            // A round trip is proof the socket is there, whatever it said before.
+            linkOffline = false
             pacing.onRttSample(sample)
             _link.value = linkStats()
         }
+        attach.onEnded = {
+            // The daemon says this shell is gone. Nothing is retried (the attach loop
+            // stops by itself), so the page has to go: a page kept on a shell that no
+            // longer exists is a frozen frame with no message and no retry, which is
+            // what this callback was declared for. It was declared, invoked and wired
+            // to nothing, so the removal depended entirely on the launcher's session
+            // list arriving — which it does when the list socket is up, and does not
+            // when the two sockets disagree. Cleared here, and App.kt prunes the page.
+            _ownedBy.value = null
+            _ended.value = true
+        }
         attach.onOffline = {
+            linkOffline = true
             pacing.onDisconnected()
             _link.value = linkStats()
         }
@@ -502,13 +516,18 @@ class TerminalController(
     private fun sendTextRaw(text: String) {
         returnToBottom()
         val bytes = text.encodeToByteArray()
-        // Three gates, any one of which is enough to refuse: the setting; a
+        // Four gates, any one of which is enough to refuse: the setting; a
         // full-screen app (alternate screen, which does not echo the way a
-        // shell does); and a password prompt, which the emulator itself tells us
-        // about — so we never have to guess from timing.
+        // shell does); a password prompt, which the emulator itself tells us
+        // about — so we never have to guess from timing; and a shell this device
+        // does not hold. The last one is not cosmetic: while another device owns
+        // the shell the daemon refuses the input, so a prediction would paint a
+        // character that is then withdrawn a moment later — the user typing into a
+        // shell they cannot type into, and watching their text disappear.
         val canShowNow = predict &&
             !modes.alternateOn &&
             _frame.value?.passwordInput != true &&
+            _ownedBy.value == null &&
             predictor.canPredict(bytes)
         if (canShowNow) {
             // Paint it before the server is even asked. If the echo disagrees,
@@ -753,7 +772,20 @@ class TerminalController(
         }
     }
 
+    /** Whether the attach socket is currently down, for the diagnostics line. */
+    private var linkOffline = false
+
     private val _ownedBy = MutableStateFlow<String?>(null)
+
+    /**
+     * The shell is gone: ended, or unknown to the daemon.
+     *
+     * The page must not outlive it. `App.kt` watches this and drops the page, the
+     * same way it drops one whose shell left the session list.
+     */
+    private val _ended = MutableStateFlow(false)
+
+    override val ended: StateFlow<Boolean> = _ended
 
     /**
      * The shell is held by another device, named when known.
@@ -762,7 +794,6 @@ class TerminalController(
      * this cannot get stuck showing a refusal after a successful takeover.
      */
     override val ownedBy: StateFlow<String?> = _ownedBy
-
     /** The user confirmed: take the shell from whoever has it. */
     override fun takeOver() {
         attach.takeOver()
