@@ -73,13 +73,6 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   return result;
 }
 
-JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_clean(JNIEnv *env, jclass cls,
-                                                jlong handle) {
-  (void)env; (void)cls;
-  ldmux_terminal_clean(handle_of(handle));
-}
-
 /*
  * One call, not two. A `kind` call followed by a `bytes` call would be two reads
  * of a value that is consumed by reading it, which is the shape of bug this

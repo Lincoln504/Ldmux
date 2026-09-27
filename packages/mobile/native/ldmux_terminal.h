@@ -95,9 +95,6 @@ void ldmux_terminal_scroll(LdmuxTerminal *t, int32_t delta);
  */
 bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len);
 
-/** Clear the render state's dirty tracking. */
-void ldmux_terminal_clean(LdmuxTerminal *t);
-
 /**
  * What the remote program asked of the system clipboard, if anything.
  *
@@ -231,10 +228,25 @@ int ldmux_terminal_selection_bounds(LdmuxTerminal *t, int *start_col, int *start
 /** Set on a cell whose style flags put it inside the selection (bit 9). */
 #define LDMUX_FLAG_SELECTED (1u << 9)
 
-/* Reverse video, `ESC[7m`. Written inline in the cell encoder's style block
- * rather than as a define, like every other style bit; named here because the
- * tests assert it and an unnamed bit is one nobody can look up. The style block
- * is bits 0..8 and must stay below [LDMUX_FLAG_SELECTED]. */
+/*
+ * The style block, bits 0..8. Named here as well as in the cell encoder because
+ * these are a wire contract with a reader in another language: Kotlin decodes the
+ * same word in `TerminalFrame.kt`, cannot see these constants, and a bit that means
+ * "inverse" on one side and something else on the other is a silent corruption.
+ * `packages/mobile/test/frame-flags.test.ts` compares the two lists, which only
+ * works while both are declarations rather than shifts inline in the encoder.
+ *
+ * Icons: `pi` draws its own cursor as reverse video, so bit 5 is what makes the
+ * cursor visible at all on this side of the wire.
+ */
+#define LDMUX_FLAG_BOLD (1u << 0)
+#define LDMUX_FLAG_ITALIC (1u << 1)
+#define LDMUX_FLAG_UNDERLINE (1u << 2)
+#define LDMUX_FLAG_FAINT (1u << 3)
+#define LDMUX_FLAG_BLINK (1u << 4)
 #define LDMUX_FLAG_INVERSE (1u << 5)
+#define LDMUX_FLAG_INVISIBLE (1u << 6)
+#define LDMUX_FLAG_STRIKETHROUGH (1u << 7)
+#define LDMUX_FLAG_OVERLINE (1u << 8)
 
 #endif /* LDMUX_TERMINAL_H */

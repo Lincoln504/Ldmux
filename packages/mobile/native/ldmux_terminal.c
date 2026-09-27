@@ -767,15 +767,15 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
       GhosttyColorRgb bg = resolve_color(style.bg_color, &colors, colors.background);
 
       uint16_t flags = 0;
-      if (style.bold) flags |= 1u << 0;
-      if (style.italic) flags |= 1u << 1;
-      if (style.underline) flags |= 1u << 2;
-      if (style.faint) flags |= 1u << 3;
-      if (style.blink) flags |= 1u << 4;
-      if (style.inverse) flags |= 1u << 5;
-      if (style.invisible) flags |= 1u << 6;
-      if (style.strikethrough) flags |= 1u << 7;
-      if (style.overline) flags |= 1u << 8;
+      if (style.bold) flags |= LDMUX_FLAG_BOLD;
+      if (style.italic) flags |= LDMUX_FLAG_ITALIC;
+      if (style.underline) flags |= LDMUX_FLAG_UNDERLINE;
+      if (style.faint) flags |= LDMUX_FLAG_FAINT;
+      if (style.blink) flags |= LDMUX_FLAG_BLINK;
+      if (style.inverse) flags |= LDMUX_FLAG_INVERSE;
+      if (style.invisible) flags |= LDMUX_FLAG_INVISIBLE;
+      if (style.strikethrough) flags |= LDMUX_FLAG_STRIKETHROUGH;
+      if (style.overline) flags |= LDMUX_FLAG_OVERLINE;
 
       /* Selection rides in the cell's own flag word rather than a new header
        * field. Bit 9 was the first free bit, the client already decodes this
@@ -786,7 +786,7 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
       if (ghostty_render_state_row_cells_get(
               t->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED,
               &selected) == GHOSTTY_SUCCESS && selected) {
-        flags |= 1u << 9;
+        flags |= LDMUX_FLAG_SELECTED;
       }
 
       buf[p++] = (uint8_t)n;
@@ -801,10 +801,21 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
 
   *out = t->frame;
   *len = p;
-  return true;
-}
 
-void ldmux_terminal_clean(LdmuxTerminal *t) {
-  if (!t) return;
+  /* The frame above is the whole grid, so the dirty state has been consumed by the
+   * time this returns: every row and every cell was written, from the row iterator
+   * or as a blank pad. `ghostty_render_state_clean` is what the render state's own
+   * documentation asks for at exactly this point ("after successfully rendering a
+   * complete frame"), and leaving it out meant the state could never go clean.
+   *
+   * It used to be exported for a caller to invoke instead, and no caller ever did —
+   * the Kotlin binding and its JNI wrapper existed for it and nothing called either.
+   * One lifecycle, owned by the one function that produces a frame, is the whole
+   * contract; a second entry point that could clean a frame that was never built is
+   * only a way to get it wrong. `test_every_frame_is_the_full_grid` is what holds
+   * this: the render state's `next_dirty` iterator skips clean rows, so if the state
+   * going clean could make an iterator hand back fewer rows, rows would vanish from
+   * the screen rather than merely being redrawn. Measured: they do not. */
   ghostty_render_state_clean(t->render_state);
+  return true;
 }

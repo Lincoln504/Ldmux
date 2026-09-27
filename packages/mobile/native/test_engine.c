@@ -277,6 +277,30 @@ static void test_cursor_advances_one_column(void) {
   ldmux_terminal_free(t);
 }
 
+/* One cell's grapheme bytes. A wide glyph and the cell it spills into are only
+ * distinguishable by looking at the bytes, so this is the only way to answer
+ * "does the tail repeat the glyph?" with evidence. */
+static bool cell_text_at(const uint8_t *buf, size_t len, int want_col, int want_row,
+                         const uint8_t **out, size_t *out_len) {
+  uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
+  uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
+  size_t p = FRAME_HEADER;
+  for (int r = 0; r < rows; r++) {
+    for (int c = 0; c < cols; c++) {
+      if (p + 9 > len) return false;
+      uint8_t n = buf[p];
+      if (r == want_row && c == want_col) {
+        if (p + 9 + n > len) return false;
+        *out = buf + p + 9;
+        *out_len = n;
+        return true;
+      }
+      p += 9 + (size_t)n;
+    }
+  }
+  return false;
+}
+
 /* Read one cell's flag word out of a rendered frame. The frame is a flat run of
  * `9 + grapheme_bytes` records after the header, in row-major order, and a test
  * that asserts "this cell is not selected" has to be able to look at a specific
@@ -320,6 +344,58 @@ static bool row_text_starts(const uint8_t *buf, size_t len, int want_row,
     p += 9 + (size_t)n;
   }
   return true;
+}
+
+/* A frame is the *whole* grid, every time.
+ *
+ * The render state tracks dirty rows, and its `next_dirty` iterator skips rows that
+ * are clean. The shim uses the plain iterator and pads whatever it does not get
+ * with blank cells, so the two only agree while every row is produced. If a partial
+ * change ever made the emulator hand back fewer rows, the rows it omitted would be
+ * *erased* on screen rather than left alone. Measured rather than argued from the
+ * header's wording, because the header describes both iterators and only one of them
+ * filters. */
+static void test_every_frame_is_the_full_grid(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  feed(t, "one");
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+
+  /* Change one row. Row 0 is now the row the emulator has no reason to redraw. */
+  feed(t, "\r\n\x1b[Ktwo");
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(row_text_starts(buf, len, 0, "one"));
+  CHECK(row_text_starts(buf, len, 1, "two"));
+
+  /* ...and a render with nothing new is the same frame, not a blank one. */
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK(row_text_starts(buf, len, 0, "one"));
+  CHECK(row_text_starts(buf, len, 1, "two"));
+  ldmux_terminal_free(t);
+}
+
+/* A wide glyph occupies two cells. What the second one holds is not specified
+ * anywhere a client can see, and the painter draws a cell's grapheme whenever it
+ * has one — so a tail that repeated the glyph would draw it twice, and a tail the
+ * engine reports as empty is the only thing that makes drawing per cell correct. */
+static void test_a_wide_glyph_does_not_paint_twice(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  feed(t, "\xe4\xbd\xa0" "a"); /* U+4F60 is wide, then a narrow character */
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+
+  const uint8_t *cell = NULL;
+  size_t n = 0;
+  CHECK(cell_text_at(buf, len, 0, 0, &cell, &n));
+  CHECK(n == 3 && memcmp(cell, "\xe4\xbd\xa0", 3) == 0); /* the glyph, once */
+  CHECK(cell_text_at(buf, len, 1, 0, &cell, &n));
+  CHECK(n == 0); /* the tail carries no grapheme, so nothing draws twice */
+  CHECK(cell_text_at(buf, len, 2, 0, &cell, &n));
+  CHECK(n == 1 && cell[0] == 'a'); /* ...and the glyph advanced two columns */
+  CHECK_EQ_INT(buf[4] | (buf[5] << 8), 3); /* cursorX */
+  ldmux_terminal_free(t);
 }
 
 static int selected_cell_count(const uint8_t *buf, size_t len) {
@@ -774,6 +850,44 @@ static void test_the_scroll_offset_is_what_actually_moved(void) {
  * and both are engine behaviour, so both are asserted here against the engine:
  * the replay replaces the visible screen and nothing else, and the scrollback
  * above it survives. */
+/* Output does not move the viewport.
+ *
+ * SPEC §7.4 calls this the property the scroll model exists for, and nothing tested
+ * it — not here and not in Kotlin. The client's anchor is the emulator's own
+ * viewport (whatever ADR-0004 describes as a client-owned line identity does not
+ * exist in the code), so this assertion *is* the guarantee. If bytes arriving from
+ * the pane dragged the view back to the bottom, reading history would be impossible
+ * on any shell that is still printing — which is every shell worth reading. */
+static void test_output_does_not_move_a_scrolled_viewport(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  use_geometry(t);
+  for (int i = 0; i < 60; i++) {
+    char line[32];
+    snprintf(line, sizeof(line), "line-%02d\r\n", i);
+    feed(t, line);
+  }
+  const uint8_t *buf = NULL;
+  size_t len = 0;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+
+  ldmux_terminal_scroll(t, -10);
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(buf[17], 0); /* the viewport is back in history, not at the bottom */
+  const uint32_t anchored = frame_u32(buf, 23);
+  CHECK(anchored > 0);
+
+  /* ...and the pane keeps printing, which is the case that matters. */
+  for (int i = 60; i < 90; i++) {
+    char line[32];
+    snprintf(line, sizeof(line), "line-%02d\r\n", i);
+    feed(t, line);
+  }
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT((int)frame_u32(buf, 23), (int)anchored);
+  CHECK_EQ_INT(buf[17], 0);
+  ldmux_terminal_free(t);
+}
+
 static void test_a_resize_replay_replaces_the_screen_and_keeps_the_scrollback(void) {
   LdmuxTerminal *t = ldmux_terminal_new(20, 6);
   char line[32];
@@ -913,6 +1027,8 @@ int main(void) {
       {"large payload grows", test_large_payload_grows},
       {"unterminated is not delivered", test_unterminated_is_not_delivered},
       {"frame header contract", test_frame_header_contract},
+      {"every frame is the full grid", test_every_frame_is_the_full_grid},
+      {"a wide glyph does not paint twice", test_a_wide_glyph_does_not_paint_twice},
       {"pi-style cursor: hardware hidden, own cursor inverted",
        test_pi_style_cursor_is_hidden_and_inverted},
       {"alternate screen bit", test_alternate_screen_bit},
@@ -931,6 +1047,7 @@ int main(void) {
       {"bounds is zero without a selection", test_bounds_is_zero_without_a_selection},
       {"endpoints land on the right row after scrolling", test_endpoints_land_on_the_right_row_after_scrolling},
     {"the scroll offset is what actually moved", test_the_scroll_offset_is_what_actually_moved},
+    {"output does not move a scrolled viewport", test_output_does_not_move_a_scrolled_viewport},
     {"a resize replay replaces the screen and keeps the scrollback",
      test_a_resize_replay_replaces_the_screen_and_keeps_the_scrollback},
       {"a selection follows its text when the viewport moves",

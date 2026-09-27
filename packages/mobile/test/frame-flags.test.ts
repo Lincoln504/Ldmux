@@ -36,15 +36,45 @@ test("selection flag bit agrees between the C core and the client", () => {
   assert.equal(cFlagBit(header, "LDMUX_FLAG_SELECTED"), kotlinFlagBit(frame, "FLAG_SELECTED"));
 });
 
-test("the style flags the client already decodes still agree", () => {
-  // The bits a client ignores are harmless; the bits it *misreads* are not. Bold
-  // through overline are the ones that were already on the wire.
+test("every style flag bit agrees between the C core and the client", () => {
+  // Bit by bit, not a sample. The bits a client ignores are harmless; the bits it
+  // *misreads* are not, and the one that made the cursor invisible in `pi` was a
+  // mismatch nobody had checked. Both sides declare their bits now — the C used to
+  // shift them inline in the encoder, which is why this could only assert on the
+  // block's boundary before.
   const header = read("native/ldmux_terminal.h");
   const frame = read("composeApp/src/commonMain/kotlin/dev/ldmux/mobile/term/TerminalFrame.kt");
-  // C writes these inline rather than as #defines, so the check is that the C
-  // side's highest style bit stays below the selection bit and that Kotlin's
-  // numbering is what the header implies.
-  const selected = cFlagBit(header, "LDMUX_FLAG_SELECTED");
-  assert.ok(selected >= 9, "the style block occupies bits 0..8; selection must not overlap it");
-  assert.equal(kotlinFlagBit(frame, "FLAG_OVERLINE"), 8);
+  const pairs: [string, string][] = [
+    ["LDMUX_FLAG_BOLD", "FLAG_BOLD"],
+    ["LDMUX_FLAG_ITALIC", "FLAG_ITALIC"],
+    ["LDMUX_FLAG_UNDERLINE", "FLAG_UNDERLINE"],
+    ["LDMUX_FLAG_FAINT", "FLAG_FAINT"],
+    ["LDMUX_FLAG_BLINK", "FLAG_BLINK"],
+    ["LDMUX_FLAG_INVERSE", "FLAG_INVERSE"],
+    ["LDMUX_FLAG_INVISIBLE", "FLAG_INVISIBLE"],
+    ["LDMUX_FLAG_STRIKETHROUGH", "FLAG_STRIKETHROUGH"],
+    ["LDMUX_FLAG_OVERLINE", "FLAG_OVERLINE"],
+    ["LDMUX_FLAG_SELECTED", "FLAG_SELECTED"],
+  ];
+  for (const [cName, ktName] of pairs) {
+    assert.equal(cFlagBit(header, cName), kotlinFlagBit(frame, ktName), `${ktName} disagrees`);
+  }
+  // ...and the style block stays clear of the selection bit, so adding a flag to
+  // one side without a free bit cannot silently overlap the other.
+  const styleBits = pairs.slice(0, 9).map(([cName]) => cFlagBit(header, cName));
+  assert.deepEqual([...styleBits].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(cFlagBit(header, "LDMUX_FLAG_SELECTED"), 9);
+});
+
+test("the frame header size agrees", () => {
+  // The same shape of mistake as the flags, and the newest one: the header grew
+  // from 40 to 48 bytes for the cursor byte, and a one-sided move would decode the
+  // first cell record as the last header byte without either test suite noticing.
+  const header = read("native/ldmux_terminal.h");
+  const frame = read("composeApp/src/commonMain/kotlin/dev/ldmux/mobile/term/TerminalFrame.kt");
+  const c = header.match(/#define\s+FRAME_HEADER\s+(\d+)/);
+  assert.ok(c, "FRAME_HEADER not found in the C header");
+  const kt = frame.match(/const val\s+HEADER_SIZE\s*=\s*(\d+)/);
+  assert.ok(kt, "HEADER_SIZE not found in the Kotlin source");
+  assert.equal(Number(c[1]), Number(kt[1]));
 });

@@ -45,9 +45,6 @@ object NativeTerminal {
      */
     external fun render(handle: Long): ByteArray?
 
-    /** Acknowledge a rendered frame so the core can reset its dirty state. */
-    external fun clean(handle: Long)
-
     /**
      * Take the clipboard write the remote program last asked for, as one array:
      * the kind in byte 0 ([CLIPBOARD_SET] or [CLIPBOARD_CLEAR]) followed by the
