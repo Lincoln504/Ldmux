@@ -1602,14 +1602,6 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                         Text("on", color = if (predict) Accent else Dim)
                     }
                 }
-                Text(
-                    // Said once, in the shortest form that is still true. A setting
-                    // is a thing you already decided to change; it does not need the
-                    // reasoning that made you open this.
-                    "text appears before the server echoes it",
-                    color = Dim,
-                    fontSize = 10.sp,
-                )
                 Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("control size", color = Dim, fontSize = 12.sp)
@@ -1620,11 +1612,6 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                         Text("thin", color = if (compact) Accent else Dim)
                     }
                 }
-                Text(
-                    "tall is easier to hit; thin fits more lines",
-                    color = Dim,
-                    fontSize = 10.sp,
-                )
                 Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("text size", color = Dim, fontSize = 12.sp)
@@ -1648,11 +1635,6 @@ private fun SettingsDialog(current: LdmuxConfig, onDismiss: () -> Unit, onSave: 
                         Text("+", color = if (larger) Accent else Dim.copy(alpha = 0.4f), fontSize = 16.sp)
                     }
                 }
-                Text(
-                    "bigger text means fewer columns; the shell is resized to match",
-                    color = Dim,
-                    fontSize = 10.sp,
-                )
             }
         },
         confirmButton = {
