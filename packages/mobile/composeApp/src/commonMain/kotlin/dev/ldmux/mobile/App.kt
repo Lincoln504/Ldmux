@@ -761,6 +761,9 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                 client.requestDesktop()
             }
         }
+        // The launcher and everything opened from it stay portrait; the shell view
+        // follows the device (ADR-0011).
+        HoldOrientation(OrientationPolicy.Portrait)
         Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         LauncherScreen(
             status = linkLabel(link, config),

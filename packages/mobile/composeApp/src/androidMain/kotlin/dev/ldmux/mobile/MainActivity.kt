@@ -19,6 +19,7 @@ class MainActivity : ComponentActivity() {
         // shared seam, so this is where it is told which activity that is.
         Dictation.attachHost(this)
         CodeScanner.attachHost(this)
+        ScreenOrientation.attachHost(this)
         enableEdgeToEdge()
         // A cold start from a pairing link: held in the inbox until the UI reads it.
         // Not on a restore — the link was already handled by the instance that saw it.

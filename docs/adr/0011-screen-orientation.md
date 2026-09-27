@@ -1,6 +1,6 @@
 # ADR-0011: The device rotates, the keyboard does not
 
-**Status:** Accepted
+**Status:** Accepted, amended 2026-09-27 (the launcher holds portrait; see the end)
 **Supersedes:** [ADR-0008](0008-mobile-ui-modes-and-pane-ownership.md) §1 — the
 locked-orientation decision.
 
@@ -57,11 +57,29 @@ decision and they no longer share a variable.**
 
 - No flip control exists anywhere: not in the menu, not in the portrait bar, not in
   the landscape panel. The landscape panel's bottom row is now the microphone alone.
-- `Orientation.kt` and its Android actual are deleted. There is no seam, because
-  there is nothing to write. If iOS needs a shape source that is not the window size,
-  that is a seam with a reason and can be added then (ADR-0013).
+- `Orientation.kt` and its Android actual were deleted here. They came back with the
+  amendment below, as a policy seam (`ScreenOrientation`) rather than a lock button.
 - Auto-rotate-off now means the app is stuck in one shape, which is what the user
   asked for by turning auto-rotate off.
 - A user who closes the keyboard in portrait gets a portrait terminal with no
   keyboard. That is a legitimate state, and it is the one the user asked for: the bar
   still sends keys, so the shell is still usable.
+
+## Amendment (2026-09-27): the launcher holds portrait
+
+Asked for by name: the launcher (the list and every dialog opened from it: new shell,
+settings, the desktop picker) stays portrait and does not auto-rotate. The shell view
+is unchanged and follows the device.
+
+- **Nothing here is the keyboard coupling this ADR removed.** No state is shared
+  between orientation and the keyboard, and closing the keyboard still rotates
+  nothing.
+- **One writer, by construction.** Only the launcher branch composes
+  `HoldOrientation(Portrait)`. Leaving the launcher restores `FollowDevice`, which
+  is the manifest's own unspecified orientation, so the device decides again.
+- **The shape is still read from the window, never assumed.** A shell opened from a
+  portrait launcher on a phone lying sideways turns as soon as it is shown.
+- **It is a seam, `ScreenOrientation` (ADR-0013).** Applying an orientation policy
+  is the OS's job: an Activity's requested orientation on Android, a scene's
+  supported orientations on iOS. Which screen holds which policy is decided in
+  `commonMain`.

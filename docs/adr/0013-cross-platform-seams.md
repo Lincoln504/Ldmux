@@ -48,17 +48,22 @@ the rule was not yet true (§4 — both are now done; this sentence originally s
 
 | Seam | Why it is a seam |
 | --- | --- |
-| `lockOrientation` | Screen orientation is an OS policy. Android sets it on the Activity, iOS on the scene. The *decision* (one orientation per screen, ADR-0011) is shared. |
 | `BackToLauncher` | Android has a system back gesture, iOS does not. The *meaning* ("back leaves the shell and lets go") is shared and is the same call the launcher button makes. |
-| `rememberTerminalSurface` | The surface is a native view holding a native engine. Everything above it (sizing, tap policy, gestures, mode) is shared. |
+| `rememberTerminalSurface` | The surface is a native view holding a native engine. The tap policy and grid placement above it are shared (`TapPolicy`, `GridPlacement`). **Not yet shared** (found 2026-09-27): the gesture wiring (tap, long-press selection, pinch, drag-to-scroll) and the grid computation still live in `TerminalSurface.android.kt`, and are the extraction to make before iOS, or an iOS port would copy that file. |
 | `TerminalEngine` | The terminal emulator is a C library reached through a platform binding. |
 | `TerminalPainter` | Text rasterisation: `android.graphics.Paint` on Android, Skia on iOS. |
 | `BackgroundSession` | Background policy is the OS's to define. Android may hold a process and a link, iOS suspends within seconds and kills a task that outlives the background window. |
+| `CodeScanner` | Reading a QR code needs the camera, which is the OS's: Google's code scanner on Android, VisionKit on iOS. The seam returns text; what the text means (`parsePairingLink`, `scanOutcome`) is shared (ADR-0017). |
+| `ScreenOrientation` | Applying an orientation policy is the OS's (an Activity's requested orientation, a scene's supported orientations). Which screen holds which policy is shared (ADR-0011 amendment). |
 | `AppPrefs` | Persistent storage is per-platform, and on iOS it is not SharedPreferences. |
 | `newDeviceId` / `deviceLabel` | Device identity and the human name of a device come from the OS. |
 
 Each of these is a leaf. None of them decides anything the other platform would
 want to decide differently.
+
+`PairingInbox` is deliberately **not** a seam: only the delivery of a link differs
+(Android's VIEW intent, iOS's `onOpenURL`), and delivery is one call to `offer`. The
+inbox and everything it decides are shared.
 
 ## 3. The shape of a good seam
 
