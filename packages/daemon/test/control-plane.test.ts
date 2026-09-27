@@ -12,6 +12,15 @@ import { killTmuxServer } from "./tmux-cleanup.ts";
 const dir = mkdtempSync(join(tmpdir(), "ldmux-faketmux-"));
 const realPath = process.env.PATH ?? "";
 
+// **The stub tests find tmux through PATH, so an explicit binary must not win.**
+//
+// `LDMUX_TMUX_BIN` overrides PATH (`resolveTmuxBin`), and every shell inside an ldmux
+// session inherits it from the deployed daemon. Run from such a shell, the stubs
+// below were never executed: the deployed tmux ran instead, and four tests failed
+// with a missing marker or a missing socket — against the real binary, which is the
+// silent-pass trap AGENTS.md describes, caught only because these assert the marker.
+delete process.env.LDMUX_TMUX_BIN;
+
 /**
  * These tests spawn real tmux servers; a leaked one outlives the test run, so
  * every file that creates one must reap it even when a test fails or times out.

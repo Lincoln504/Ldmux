@@ -184,10 +184,15 @@ test("ownership: the session list carries the owner as a fact", { timeout: 30000
   a.send({ type: "attach", sessionId: id });
   expect(await waitFor(() => a.text.some((m) => m.type === "caps"))).toBe(true);
 
+  // Wait for the answer to *this* list, not for any `sessions` at all: the server
+  // also pushes the list unprompted, and one sent before the claim landed has the
+  // row without an owner. Accepting it made this fail about one run in three under
+  // the parallel suite.
+  const before = a.text.filter((m) => m.type === "sessions").length;
   a.send({ type: "list" });
-  expect(await waitFor(() => a.sessions().length > 0)).toBe(true);
+  expect(await waitFor(() => a.text.filter((m) => m.type === "sessions").length > before)).toBe(true);
   const row = a.sessions().find((s: any) => s.id === id);
-  expect(row.owner.name).toBe("Pixel 8");
+  expect(row?.owner?.name).toBe("Pixel 8");
   expect(row.owner.kind).toBe("phone");
 
   a.close();
