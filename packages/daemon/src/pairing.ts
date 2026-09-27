@@ -1,71 +1,42 @@
 /**
- * Pairing: turn the loopback remote endpoint into something a phone can use.
+ * What `ldmux code` and `ldmux pair` show: the pairing for the address this
+ * daemon actually listens on (ADR-0016, ADR-0017).
  *
- * ADR-0005 keeps the daemon on loopback and exposes it with `tailscale serve`
- * (TLS + MagicDNS). Pairing hands the client a URL and a deep link carrying the
- * bearer token; the web client already accepts `?token=` and strips it from the
- * address bar.
+ * Built from `remote_info`, never from a guess about how the machine is exposed.
+ * The previous version assembled a `tailscale serve` URL and a deep link with port
+ * 443 for an architecture that was not deployed, so the one output meant to connect
+ * a phone pointed it at a port where nothing listened.
  */
 
-import { run } from "./exec.ts";
+import { hostname } from "node:os";
+import { classifyAddress } from "../../protocol/src/net.ts";
+import { pairingLink, type Pairing } from "../../protocol/src/pairing.ts";
 
-export interface PairInput {
-  /** Tailnet hostname (MagicDNS) or 100.x address. */
-  host: string;
-  /** Local remote port (the loopback bind). */
+export interface ListenInfo {
+  hostname: string;
   port: number;
   token: string;
-  /** Public HTTPS port used by `tailscale serve` (default 443). */
-  publicPort?: number;
+  listening: boolean;
 }
 
-export interface PairInfo {
-  /** Browser URL for the phone (https when served by tailscale). */
-  url: string;
-  /** Local URL (same machine / port-forward). */
-  localUrl: string;
-  /** Custom-scheme deep link for the future native app. */
-  deepLink: string;
-  /** Command that exposes the loopback port over the tailnet. */
-  serveCommand: string;
-}
-
-export function buildPairInfo(input: PairInput): PairInfo {
-  const publicPort = input.publicPort ?? 443;
-  const token = encodeURIComponent(input.token);
-  const host = input.host;
-  const authority = publicPort === 443 ? host : `${host}:${publicPort}`;
-  return {
-    url: `https://${authority}/?token=${token}`,
-    localUrl: `http://127.0.0.1:${input.port}/?token=${token}`,
-    deepLink: `ldmux://pair?host=${encodeURIComponent(host)}&port=${publicPort}&token=${token}`,
-    serveCommand: `tailscale serve --bg --https=${publicPort} http://127.0.0.1:${input.port}`,
-  };
-}
-
-/** The machine's tailnet hostname, or undefined when tailscale is unavailable. */
-export async function tailnetHost(): Promise<string | undefined> {
-  const res = await run(["tailscale", "status", "--json"]);
-  if (res.code !== 0) return undefined;
-  try {
-    const status = JSON.parse(res.out) as { Self?: { DNSName?: string; TailscaleIPs?: string[] } };
-    const dns = status.Self?.DNSName?.replace(/\.$/, "");
-    return dns || status.Self?.TailscaleIPs?.[0];
-  } catch {
-    return undefined;
+/** The pairing a phone should use, or an error saying what to fix. */
+export function pairingFor(info: ListenInfo, name: string = hostname()): { pairing: Pairing; link: string } {
+  if (!info.listening) {
+    throw new Error("the daemon's WebSocket is not up yet (is tailscale up?); try again in a few seconds");
   }
-}
-
-/** Run `tailscale serve` to expose the loopback port (best-effort). */
-export async function expose(input: { port: number; publicPort?: number }): Promise<{ ok: boolean; detail?: string }> {
-  const publicPort = input.publicPort ?? 443;
-  const res = await run([
-    "tailscale",
-    "serve",
-    "--bg",
-    `--https=${publicPort}`,
-    `http://127.0.0.1:${input.port}`,
-  ]);
-  if (res.code !== 0) return { ok: false, detail: res.err.trim() || "tailscale serve failed" };
-  return { ok: true };
+  if (classifyAddress(info.hostname) === "loopback") {
+    throw new Error(
+      `the daemon listens on ${info.hostname} only, which a phone cannot reach: ` +
+        "set LDMUX_REMOTE_HOST to this machine's tailnet address (`tailscale ip -4`) in deploy/ldmux.service, then `just install`",
+    );
+  }
+  const address = info.hostname.includes(":") ? `[${info.hostname}]` : info.hostname;
+  const pairing: Pairing = {
+    host: `${address}:${info.port}`,
+    token: info.token,
+    // What the app calls the machine. Trimmed to what the link allows rather than
+    // refused: a long hostname is not a reason not to pair.
+    name: name.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 64),
+  };
+  return { pairing, link: pairingLink(pairing) };
 }

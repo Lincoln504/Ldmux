@@ -14,8 +14,8 @@
  *   ldmux adopt <tmux-name>
  *   ldmux mirror <id> [--rw] [--workspace N]
  *   ldmux remote
- *   ldmux pair
- *   ldmux expose [--dry-run]
+ *   ldmux code                        # the pairing QR code, for the phone to scan
+ *   ldmux pair                        # the same pairing, as a link
  */
 
 import { basename, resolve } from "node:path";
@@ -25,7 +25,8 @@ import { call } from "../../protocol/src/socket-client.ts";
 import type { PingResult, SessionRecord } from "../../protocol/src/rpc.ts";
 import { DEFAULT_MIRROR_WORKSPACE, mirrorCommand, openMirror } from "./desktop.ts";
 import { resolveTmuxBin } from "./tmux/control-plane.ts";
-import { buildPairInfo, expose, tailnetHost } from "./pairing.ts";
+import { pairingFor } from "./pairing.ts";
+import { encodeQr, renderQrTerminal } from "./qr.ts";
 
 /**
  * Become a desk window of a shell, in this terminal.
@@ -95,7 +96,7 @@ const KNOWN_FLAGS = new Set([
  */
 function printUsage(): void {
   console.error(
-    "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|pair|expose> [args]",
+    "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|code|pair> [args]",
   );
 }
 
@@ -371,8 +372,7 @@ async function main() {
     case "remote": {
       const info = await daemonCall(sock, "remote_info", {});
       console.log(JSON.stringify(info, null, 2));
-      console.log(`\nlocal:     ws://${info.hostname}:${info.port}${info.path}`);
-      console.log(`expose:    tailscale serve --bg --https=443 http://${info.hostname}:${info.port}`);
+      console.log(info.listening ? `\nws://${info.hostname}:${info.port}${info.path}` : "\nnot listening yet");
       break;
     }
 
@@ -400,33 +400,15 @@ async function main() {
       break;
     }
 
-    case "pair": {
-      const info = await daemonCall(sock, "remote_info", {});
-      const host = await tailnetHost();
-      if (!host) {
-        console.error("ldmux: tailscale unavailable; using localhost");
-      }
-      const pair = buildPairInfo({ host: host ?? "127.0.0.1", port: info.port, token: info.token });
-      console.log(`url:        ${pair.url}`);
-      console.log(`local:      ${pair.localUrl}`);
-      console.log(`deep link:  ${pair.deepLink}`);
-      console.log(`expose:     ${pair.serveCommand}`);
+    case "code": {
+      const { pairing, link } = pairingFor(await daemonCall(sock, "remote_info", {}));
+      console.log(renderQrTerminal(encodeQr(link)));
+      console.log(`${pairing.name || "ldmux"}  ${pairing.host}`);
       break;
     }
 
-    case "expose": {
-      const info = await daemonCall(sock, "remote_info", {});
-      if (rest.includes("--dry-run")) {
-        console.log(`tailscale serve --bg --https=443 http://127.0.0.1:${info.port}`);
-        break;
-      }
-      const res = await expose({ port: info.port });
-      if (!res.ok) {
-        console.error(`ldmux: ${res.detail}`);
-        process.exit(1);
-      }
-      const pair = buildPairInfo({ host: (await tailnetHost()) ?? "127.0.0.1", port: info.port, token: info.token });
-      console.log(`exposed on the tailnet: ${pair.url}`);
+    case "pair": {
+      console.log(pairingFor(await daemonCall(sock, "remote_info", {})).link);
       break;
     }
 

@@ -34,6 +34,9 @@
         curl
         sqlite
         procps
+        # A QR *decoder*, for tests only: the encoder behind `ldmux code` is judged
+        # by reading every code it makes back (packages/daemon/test/qr.test.ts).
+        zbar
       ]);
     in
     {

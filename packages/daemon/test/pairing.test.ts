@@ -1,86 +1,36 @@
 import { test, expect } from "../../testing/src/expect.ts";
-import { buildPairInfo } from "../src/pairing.ts";
+import { pairingFor } from "../src/pairing.ts";
+import { parsePairingLink } from "../../protocol/src/pairing.ts";
+import { encodeQr } from "../src/qr.ts";
 
-test("pair builds the https url, local url, deep link and serve command", () => {
-  const p = buildPairInfo({ host: "debian.tail496756.ts.net", port: 7623, token: "abc123" });
-  expect(p.url).toBe("https://debian.tail496756.ts.net/?token=abc123");
-  expect(p.localUrl).toBe("http://127.0.0.1:7623/?token=abc123");
-  expect(p.deepLink).toBe("ldmux://pair?host=debian.tail496756.ts.net&port=443&token=abc123");
-  expect(p.serveCommand).toBe("tailscale serve --bg --https=443 http://127.0.0.1:7623");
+const token = "0123456789abcdef".repeat(4);
+const live = { hostname: "100.127.119.54", port: 7625, token, listening: true };
+
+test("the pairing is the address the daemon listens on, not a guess", () => {
+  const { pairing, link } = pairingFor(live, "debian");
+  expect(pairing).toEqual({ host: "100.127.119.54:7625", token, name: "debian" });
+  expect(parsePairingLink(link)).toEqual(pairing);
 });
 
-test("a non-443 public port is carried in the url and deep link", () => {
-  const p = buildPairInfo({ host: "100.127.119.54", port: 7623, token: "t", publicPort: 8443 });
-  expect(p.url).toBe("https://100.127.119.54:8443/?token=t");
-  expect(p.deepLink).toBe("ldmux://pair?host=100.127.119.54&port=8443&token=t");
-  expect(p.serveCommand).toBe("tailscale serve --bg --https=8443 http://127.0.0.1:7623");
+test("an IPv6 tailnet address is bracketed", () => {
+  expect(pairingFor({ ...live, hostname: "fd7a:115c:a1e0::5" }, "d").pairing.host).toBe("[fd7a:115c:a1e0::5]:7625");
 });
 
-test("the token is url-encoded", () => {
-  const p = buildPairInfo({ host: "h", port: 1, token: "a b&c" });
-  expect(p.url).toBe("https://h/?token=a%20b%26c");
-  expect(p.deepLink).toContain("token=a%20b%26c");
-});
-// ── tailnetHost/expose against a stub `tailscale` ─────────────────────────
-// These parse real command output, so they are tested with a fake binary on
-// PATH rather than skipped when the machine's tailscale is absent or logged out.
-import { afterAll, beforeEach } from "../../testing/src/expect.ts";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { expose, tailnetHost } from "../src/pairing.ts";
-
-const binDir = mkdtempSync(join(tmpdir(), "ldmux-faketailscale-"));
-const realPath = process.env.PATH ?? "";
-
-function stubTailscale(script: string): void {
-  const path = join(binDir, "tailscale");
-  writeFileSync(path, `#!/bin/sh\n${script}\n`);
-  chmodSync(path, 0o755);
-  process.env.PATH = `${binDir}:${realPath}`;
-}
-
-beforeEach(() => {
-  process.env.PATH = realPath;
+test("a daemon on loopback cannot be paired with, and says what to set", () => {
+  expect(() => pairingFor({ ...live, hostname: "127.0.0.1" }, "d")).toThrow(/LDMUX_REMOTE_HOST/);
 });
 
-afterAll(() => {
-  process.env.PATH = realPath;
-  rmSync(binDir, { recursive: true, force: true });
+test("a daemon whose WebSocket is not up yet says so rather than printing 127.0.0.1:0", () => {
+  expect(() => pairingFor({ hostname: "127.0.0.1", port: 0, token, listening: false }, "d")).toThrow(/not up yet/);
 });
 
-test("tailnetHost reads Self.DNSName and strips the trailing dot", async () => {
-  stubTailscale(`echo '{"Self":{"DNSName":"debian.tail496756.ts.net.","TailscaleIPs":["100.127.119.54"]}}'`);
-  expect(await tailnetHost()).toBe("debian.tail496756.ts.net");
+test("a long or odd hostname is trimmed to what the link allows", () => {
+  const { pairing } = pairingFor(live, "x".repeat(80) + "\n");
+  expect(pairing.name).toBe("x".repeat(64));
 });
 
-test("tailnetHost falls back to the 100.x address when there is no DNS name", async () => {
-  stubTailscale(`echo '{"Self":{"TailscaleIPs":["100.127.119.54","fd7a::1"]}}'`);
-  expect(await tailnetHost()).toBe("100.127.119.54");
-});
-
-test("tailnetHost is undefined when tailscale fails or returns junk", async () => {
-  stubTailscale(`exit 1`);
-  expect(await tailnetHost()).toBeUndefined();
-  stubTailscale(`echo 'not json'`);
-  expect(await tailnetHost()).toBeUndefined();
-  stubTailscale(`echo '{}'`);
-  expect(await tailnetHost()).toBeUndefined();
-  // A missing binary must be undefined too, not a thrown error.
-  process.env.PATH = join(binDir, "definitely-empty");
-  expect(await tailnetHost()).toBeUndefined();
-});
-
-test("expose runs tailscale serve with the loopback target and reports success", async () => {
-  stubTailscale(`echo "$@" > ${binDir}/args.txt; exit 0`);
-  expect(await expose({ port: 7623 })).toEqual({ ok: true });
-  const args = readFileSync(join(binDir, "args.txt"), "utf8").trim();
-  expect(args).toBe("serve --bg --https=443 http://127.0.0.1:7623");
-});
-
-test("expose surfaces tailscale's stderr on failure", async () => {
-  stubTailscale(`echo "serve: not logged in" >&2; exit 1`);
-  const res = await expose({ port: 7623, publicPort: 8443 });
-  expect(res.ok).toBe(false);
-  expect(res.detail).toContain("not logged in");
+test("the deployed shape of link fits a version-6 code", () => {
+  // The widest IPv4 tailnet address, the widest port, and a typical name.
+  const { link } = pairingFor({ ...live, hostname: "100.127.255.254", port: 65535 }, "debian");
+  expect(encodeQr(link).version).toBeLessThanOrEqual(6);
 });

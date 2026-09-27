@@ -22,17 +22,17 @@ cli *args:
 probe socket session:
     node packages/daemon/src/probe.ts {{socket}} {{session}}
 
-# Print remote connection info (host/port/token) + the tailscale serve command.
+# Print remote connection info (host/port/token, and whether it is listening).
 remote:
     node packages/daemon/src/cli.ts remote
 
-# Pair the phone: https url + ldmux:// deep link + the tailscale serve command.
+# Pair the phone: a QR code to scan with the app (ADR-0017).
+code:
+    node packages/daemon/src/cli.ts code
+
+# The same pairing, as a link.
 pair:
     node packages/daemon/src/cli.ts pair
-
-# Expose the loopback remote over the tailnet via `tailscale serve`.
-expose:
-    node packages/daemon/src/cli.ts expose
 
 # Open a read-only mirror of a session on the desktop (i3 workspace 10).
 #   just mirror <id>

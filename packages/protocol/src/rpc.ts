@@ -230,7 +230,12 @@ export interface DaemonMethods {
   clipboardWrite: { params: { on: boolean }; result: { on: boolean } };
   remote_info: {
     params: Record<string, never>;
-    result: { hostname: string; port: number; path: string; token: string };
+    /**
+     * `listening` is false while the WebSocket is not up — at boot, before
+     * tailscaled has assigned the tailnet address — and `hostname`/`port` are
+     * then not an address anything can reach.
+     */
+    result: { hostname: string; port: number; path: string; token: string; listening: boolean };
   };
 }
 

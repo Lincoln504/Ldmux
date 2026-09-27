@@ -173,3 +173,14 @@ test("--help explains the tool and starts nothing", { timeout: 20000 }, async ()
   expect((await cli("send", id, "--", "--not-a-flag")).code).toBe(0);
   await cli("kill", id);
 });
+
+test("code and pair refuse a daemon a phone cannot reach, and say what to set", { timeout: 20000 }, async () => {
+  // This daemon listens on loopback (tests), which is exactly the case a QR code
+  // must not be shown for: the phone would scan it and connect to itself.
+  for (const verb of ["code", "pair"]) {
+    const r = await cli(verb);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("LDMUX_REMOTE_HOST");
+    expect(r.out).toBe("");
+  }
+});

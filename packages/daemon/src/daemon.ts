@@ -1238,6 +1238,7 @@ export class LdmuxDaemon {
           port: this.remoteInfo?.port ?? 0,
           path: "/ws",
           token: this.token,
+          listening: this.remoteInfo !== undefined,
         };
 
       case "list": {
