@@ -238,7 +238,7 @@ internal data class Touch(
 )
 
 /** The two densities, named once so neither is a pair of literals in two places. */
-private val ThinTouch = Touch(min = 34.dp, dense = 28.dp, pad = 5.dp, rowPad = 4.dp, icon = 18.dp, check = 16.dp)
+private val ThinTouch = Touch(min = 36.dp, dense = 30.dp, pad = 6.dp, rowPad = 6.dp, icon = 18.dp, check = 16.dp)
 private val TallTouch = Touch(min = MinTouch, dense = DenseTouch, pad = 8.dp, rowPad = 8.dp, icon = 22.dp, check = 18.dp)
 
 internal fun touchFor(compact: Boolean): Touch = if (compact) ThinTouch else TallTouch

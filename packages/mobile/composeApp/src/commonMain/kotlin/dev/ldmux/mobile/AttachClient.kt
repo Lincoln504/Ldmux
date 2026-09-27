@@ -193,6 +193,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             try {
                 httpClient().webSocket(config.wsUrl) {
                     ws = this
+                    appLog("page $sessionId: connected, attaching${if (wantTakeover) " (take over)" else ""}")
                     // Say who we are first, exactly as the session-list client
                     // does. A connection with no identity holds nothing, so the
                     // daemon would have no claim to refuse a second device with.
@@ -265,9 +266,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             } catch (e: CancellationException) {
                 // Deactivation, not a broken link: the caller asked for this.
                 throw e
-            } catch (_: Throwable) {
-                /* offline / daemon restart: retry below */
+            } catch (e: Throwable) {
+                // Offline / daemon restart: retry below. Said, because a page that
+                // silently retries is indistinguishable from a page that is stuck.
+                appLog("page $sessionId: link lost: ${e::class.simpleName}")
             }
+            appLog("page $sessionId: disconnected")
             pingSentAt = null
             pongSeen = false
             if (ended) {
@@ -300,7 +304,10 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             // The daemon has answered, so the link works and the next failure is
             // a new one: the backoff starts over rather than staying where the
             // last outage left it.
-            "caps" -> attempt = 0
+            "caps" -> {
+                attempt = 0
+                appLog("page $sessionId: attached")
+            }
             "pong" -> {
                 pongSeen = true
                 val sent = pingSentAt ?: return
@@ -326,6 +333,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             }
             "error" -> {
                 val code = root["code"]?.jsonPrimitive?.content ?: "error"
+                appLog("page $sessionId: error $code")
                 when (code) {
                     // The daemon dropped output it could not deliver (the stream
                     // reconnected, or this socket fell too far behind) and stopped
@@ -354,6 +362,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 // rather than showing an error about the link.
                 val holder = (root["owner"] as? JsonObject)
                     ?.get("name")?.let { (it as? JsonPrimitive)?.content }
+                appLog("page $sessionId: held by $holder")
                 onOwned?.invoke(holder)
             }
         }
