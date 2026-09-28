@@ -14,8 +14,11 @@ buildless browser client (`packages/web`) is deleted, so native KMP/Compose is
 the client. The mobile app
 (`docs/NATIVE-TERMINAL.md`, `docs/adr/0007`, `docs/adr/0008`). Deliberate
 divergences from dooboxes/gmux are recorded in `docs/adr/0006-divergences.md`.
-The pi extension was removed (ADR-0009): ldmux is not a pi plugin. Keep building
-what is requested; do not expand scope unilaterally.
+The pi extension was removed (ADR-0009): ldmux is not a pi plugin. The Rust port +
+tmux removal is planned and operative (`docs/RUST-PORT-PLAN.md`, audit 2026-09-28,
+§3.14): it is not started, and its §3.13 D-1 fix (the live-window reclaim fires on
+any byte) is the one in-scope TS fix that is live in production. Keep building what is
+requested; do not expand scope unilaterally.
 
 ## Rules
 

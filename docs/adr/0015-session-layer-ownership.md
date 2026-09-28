@@ -1,6 +1,11 @@
 # ADR-0015 — The session layer: tmux keeps the PTYs
 
-- **Status:** Accepted (the decision it records is *not* to build this)
+- **Status:** Accepted — **decision superseded 2026-09-28, per user direction:**
+  the session layer is now built in Rust as part of the port (`docs/RUST-PORT-
+  PLAN.md` §0/§3, D1 resolved 2026-09-27). This ADR's investigation (the
+  six-system survey, the detach-buffering table) stands as the record; only
+  the "not built" decision is reversed. The port marks this ADR formally
+  superseded post-port (§8 of the plan).
 - **Date:** 2026-09-19
 - **Supersedes:** nothing
 - **Related:** ADR-0001 (transport), ADR-0003 (session lifecycle), `docs/TMUX-DEPENDENCY.md`

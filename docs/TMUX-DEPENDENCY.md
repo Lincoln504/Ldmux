@@ -1,10 +1,14 @@
 # The tmux dependency
 
-**Status: open decision.** The user's steer is to keep tmux as the PTY keeper and
-investigate replacing the control-mode dependency with something of our own. The second
-option — building the session layer ourselves — was asked to be investigated in depth
-and is written up here as far as the evidence goes. **Nothing has been decided and
-nothing has been started.**
+**Status: superseded as a decision doc (2026-09-28), by `docs/RUST-PORT-PLAN.md`.**
+Option (a) is moot (the pipe path was built and measured, and retires with tmux),
+and option (c) is decided — build, in the Rust port, per user direction (ADR-0015's
+"not built" decision superseded 2026-09-28; its investigation stands). The
+measurements in §6/§8/§10 and the §9 survey remain the record. The steer that
+opened this doc, for the record: keep tmux as the PTY keeper and investigate
+replacing the control-mode dependency with something of our own; the second
+option — building the session layer ourselves — was asked to be investigated in
+depth and is written up here as far as the evidence goes.
 
 ---
 

@@ -337,13 +337,27 @@ Still open:
   correcting it means `--amend` plus `--force-with-lease`.
 - **Ahead of `origin/main`** (`git log --oneline origin/main..HEAD` is the current answer). The push is held for the user's word.
 
+### 5.7 The Rust port + tmux removal — plan operative, nothing ported yet
+
+- The plan is operative and audited: `docs/RUST-PORT-PLAN.md` (audit
+  2026-09-28, §3.14; findings F1–F9 fixed in the plan itself). D1 resolved
+  (keeper, one unit, auto-spawned, ssh-agent pattern); D2/D3/D4 open; the
+  port is not started.
+- **D-1 is the one in-scope fix that should land in the TS tree first:** the
+  live-window reclaim fires on any byte (dictation into the focused window
+  mis-reclaims the shell). It is live in production; the fix is Ctrl+R +
+  echo + a recorded consent (RUST-PORT-PLAN §3.13).
+- The engine artefacts (host `.a` + headers, `prebuilt/`) are **not
+  committed**; the port commits the headers and adds the engine-pin
+  cross-check (§3.14/F4).
+
 ---
 
 ## 6. Pending decisions
 
 | Decision | Options | Where the evidence is |
 |---|---|---|
-| **The tmux dependency** | (a) keep tmux as the PTY keeper, replace control mode with `pipe-pane`; (b) keep everything as it is; (c) build the session layer ourselves. **(c) is decided: not built** (ADR-0015). **(a) is built and measured but not switched to** — the default is still `control` | **`docs/TMUX-DEPENDENCY.md`** §7 and §10, **ADR-0015** |
+| **The tmux dependency** | (a) keep tmux as the PTY keeper, replace control mode with `pipe-pane`; (b) keep everything as it is; (c) build the session layer ourselves. **(c) is decided: build — in the Rust port** (RUST-PORT-PLAN §0; D1 per user direction 2026-09-27; ADR-0015's 2026-09-19 "not built" decision superseded 2026-09-28, its investigation stands). **(a) is built, measured, and now moot** — the default remains `control` until the port's switch | **`docs/TMUX-DEPENDENCY.md`** §7 and §10, **ADR-0015**, **`docs/RUST-PORT-PLAN.md`** |
 | Whether to bring up the macOS VM for iOS | now / after Android is finished | §5.4, `docs/IOS-DEVELOPMENT.md` |
 | Whether the login shell's own PS1 should be honoured or overridden | honoured today; `set-environment -gu PS1` ensures the value is the user's | `packages/daemon/src/tmux/control-plane.ts`, the `serverOptionArgs` block |
 | Whether `~/.tmux.conf` should be read | **Decided: no.** ldmux drives its own server, and a shell whose behaviour depends on whose dotfiles are on the machine is not supportable | `writeServerProfile` |
