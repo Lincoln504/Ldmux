@@ -351,3 +351,32 @@ links `vt-sys` only for the plain `Cell`/`CellStyle` types it consumes):
 The §3.11 parity harness (byte-diff vs a scratch tmux `capture-pane -e -p -N`)
 lands next; it is the gate for this format. Gate: `cargo test -p ldmux-daemon`
 → 99 pass (was 88). New code clippy-clean.
+
+**§3.11 parity harness — OPEN DESIGN QUESTION (2026-09-28):** the plan
+§3.11 says "same input bytes → (a) real tmux `capture-pane -p -e -N` and (b)
+our keeper render + `State`. Byte-diff." But there is a seam the plan does not
+address: a tmux pane runs a **shell**, so the pane's grid is the **shell's
+output** (the echoed command + the `printf` result + the prompt), not the raw
+input bytes. Our engine, fed the raw input bytes directly, has a grid that is
+just the input bytes. So a naive byte-diff of `(a) vs (b)` diverges on the
+shell's prompt/echo, not on our format.
+
+The resolution the harness must pick (decide before building it):
+1. **Feed the input as the pane's *output*, not its input** — run the pane on
+   a program that *emits* the corpus bytes (e.g. a `printf` whose *stdout* is
+   the corpus, with the shell's echo/prompt suppressed: `stty -echo`, a
+   dedicated session that runs the emitter, not a login shell). Then tmux's
+   grid is the corpus bytes, and the byte-diff is clean.
+2. **Diff on the corpus rows only** — locate the corpus rows in both outputs
+   (they are a contiguous block) and byte-diff just those rows, ignoring the
+   shell's prompt/echo around them.
+3. **Accept the shell's output as the shared input** — feed the *same*
+   shell command to both; tmux's grid and our engine's grid both become
+   "prompt + echoed command + printf output", and the diff is on the
+   format, not the content. (We'd run the emitter in our engine too.)
+
+Option 1 is cleanest (the pane's grid *is* the corpus). The harness is **not
+built yet** — this is the next concrete step, and it needs a decision (I lean
+option 1). The renderer + SGR encoder above are in place and unit-tested;
+the harness is what will byte-diff them against a scratch tmux
+`capture-pane -e -p -N` and settle the format.
