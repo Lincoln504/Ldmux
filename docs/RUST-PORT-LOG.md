@@ -284,3 +284,50 @@ stream goes live).
 - **No live system touched.** The keeper/attach run in-process against a
   scratch socket + a scratch PTY; no live daemon, no `just install`, no
   `systemctl`, no device.
+
+## Phase 4 — emulator + parity (OPENED 2026-09-28)
+
+**Scope (plan §7):** keeper emulator integration (per-session ghostty-vt), the
+snapshot renderer (emit tmux-`capture-pane -e` format), the state fields,
+scrollback paging, and the §3.11 parity harness run against a (scratch) tmux
+server. Gate: **parity report: zero divergences** (or a defect list with
+reproducers).
+
+**D2 finding (amends the plan's D2 decision, 2026-09-28):** the D2 decision
+said "the C surface is one generic accessor — `ghostty_terminal_get` /
+`get_multi` keyed by the `GhosttyTerminalData` enum." That is **true for the
+state fields** (cursor, colors, active-screen, mouse — all scalar `get`
+values), but it **under-binds the snapshot renderer**. The grid/cell access is
+a **separate** API in `render.h` (`ghostty_render_state_update` → a
+`GhosttyRenderState`, then a row iterator → a row-cells iterator, each a
+`new`/`next`/`get`/`free` group over opaque handles), **not** a key in
+`GhosttyTerminalData`. So the `-sys` binds the terminal's `get`/`get_multi`
+*and* the render-state row/cell accessors. The cells are still the source of
+truth; the renderer emits the `capture-pane` format itself (plan §3.4 /
+§3.11.3). The cell's `GhosttyStyle` (fg/bg/underline colors as tagged unions,
+bold/italic/faint/blink/inverse/invisible/strikethrough/overline, underline
+kind) is what the SGR encoder consumes.
+
+**Location decision:** the SGR encoder (style → SGR sequence) and the renderer
+(cells → `capture-pane` format) are **pure functions**; they live in the
+`daemon` crate (`crates/daemon/src/sgr.rs`, `crates/daemon/src/snapshot.rs`),
+take plain-Rust cell structs (not the C types), and are testable without the
+C library. The keeper holds the C render state, iterates the cells, and hands
+the extracted cell data to the renderer.
+
+**Render-state FFI milestone (2026-09-28, committed):** the `-sys` now binds
+`render.h` (`GhosttyRenderState` + the row/cell iterators +
+`ROW_CELLS_DATA_STYLE`/`_GRAPHEMES_UTF8`), and the `RenderState` wrapper
+(`safe.rs`) iterates a row into one plain `Cell` per column. **Key finding:
+the C `GhosttyStyle` is 72 bytes** (unpacked, 8-byte aligned — the colour
+value is an 8-aligned union, so `GhosttyStyleColor` is 16 bytes: tag @0,
+value @8), **not** 56. The C `ROW_CELLS_DATA_STYLE` `@alignCast`s its `out`
+pointer, so it needs an **8-byte-aligned 72-byte buffer** — a packed Rust
+mirror (56) is UB (heap corruption). We allocate the C size (72) and read
+raw bytes at the measured offsets (fg @8, bg @24, underline @40, the eight
+attributes @56..64, underline kind @64). **The attributes ARE reflected** in
+`ROW_CELLS_DATA_STYLE` (a bold/italic/inverse/strikethrough/underline cell
+reads back correctly); an earlier "attribute gap" was a misread of bytes
+44–51 (the `underline_color`), not the attributes. A cell with no explicit
+colour gets a sentinel tag (neither PALETTE=1 nor RGB=2), mapped to `None`.
+Gate: `cargo test -p ldmux-vt-sys` → 8 pass (was 6).

@@ -8,4 +8,4 @@
 pub mod ffi;
 mod safe;
 
-pub use safe::{FfiError, Terminal};
+pub use safe::{Cell, CellStyle, FfiError, RenderState, StyleColor, Terminal};

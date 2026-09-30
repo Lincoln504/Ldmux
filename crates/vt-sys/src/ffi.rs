@@ -136,3 +136,149 @@ unsafe extern "C" {
         len: usize,
     );
 }
+
+// ── render.h: the render-state row/cell accessors (the grid) ─────────────
+// The grid is not a `GhosttyTerminalData` key (plan D2 under-bounded it); it
+// is a separate API over opaque handles. The cells are the source of truth for
+// the snapshot renderer (plan §3.4 / §3.11.3).
+
+/// Opaque render-state handle (`struct GhosttyRenderStateImpl*`).
+pub type GhosttyRenderState = *mut c_void;
+/// Opaque row-iterator handle.
+pub type GhosttyRenderStateRowIterator = *mut c_void;
+/// Opaque row-cells handle.
+pub type GhosttyRenderStateRowCells = *mut c_void;
+
+/// An RGB color (0-255 each).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GhosttyColorRgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+// The C style structs are UNPACKED (the colour value sits at offset 8 of each
+// 16-byte `GhosttyStyleColor`, with 4 bytes of padding after the 4-byte tag).
+// We mirror them `#[repr(C)]` (72-byte `GhosttyStyle`) so `size_of` matches the
+// C, and read the fields as raw bytes (`style_to_plain`) at the measured
+// offsets, not via the field accessors.
+/// A color value: the raw 8 bytes of the C union.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GhosttyStyleColorValue {
+    pub bytes: [u8; 8],
+}
+
+/// A tagged color: unset (tag 0), a palette index (tag 1), or RGB (tag 2).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GhosttyStyleColor {
+    pub tag: u32,
+    pub value: GhosttyStyleColorValue,
+}
+
+/// A terminal cell's complete visual style (a sized struct; 72 bytes in C).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GhosttyStyle {
+    pub size: u64,
+    pub fg_color: GhosttyStyleColor,
+    pub bg_color: GhosttyStyleColor,
+    pub underline_color: GhosttyStyleColor,
+    pub bold: bool,
+    pub italic: bool,
+    pub faint: bool,
+    pub blink: bool,
+    pub inverse: bool,
+    pub invisible: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub underline: u32,
+}
+
+/// A caller-provided byte buffer (the `GRAPHEMES_UTF8` out).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttyBuffer {
+    pub ptr: *mut u8,
+    pub cap: usize,
+    pub len: usize,
+}
+
+// ── render.h enums (the `: int` underlying type → u32) ────────────────────
+// `GhosttyRenderStateData` keys (the `ghostty_render_state_get` selector).
+pub const RS_COLS: u32 = 1;
+pub const RS_ROWS: u32 = 2;
+// The row-iterator data kind (populates a `GhosttyRenderStateRowIterator`).
+pub const ROW_ITERATOR: u32 = 4;
+
+pub const ROW_DATA_CELLS: u32 = 3;
+
+pub const ROW_CELLS_DATA_STYLE: u32 = 2;
+pub const ROW_CELLS_DATA_GRAPHEMES_UTF8: u32 = 9;
+
+unsafe extern "C" {
+    /// Create an empty render state (the per-session renderer's state).
+    pub fn ghostty_render_state_new(
+        allocator: *const GhosttyAllocator,
+        state: *mut GhosttyRenderState,
+    ) -> c_int;
+
+    /// Free a render state (may be passed NULL; then a no-op).
+    pub fn ghostty_render_state_free(state: GhosttyRenderState);
+
+    /// Update a render state from a terminal (one convenience call).
+    pub fn ghostty_render_state_update(state: GhosttyRenderState, terminal: GhosttyTerminal)
+        -> c_int;
+
+    /// Get a value from a render state (e.g. ROW_ITERATOR).
+    pub fn ghostty_render_state_get(state: GhosttyRenderState, data: u32, out: *mut c_void) -> c_int;
+
+    /// Create a row-iterator instance (populated via `get` ROW_ITERATOR).
+    pub fn ghostty_render_state_row_iterator_new(
+        allocator: *const GhosttyAllocator,
+        out_iterator: *mut GhosttyRenderStateRowIterator,
+    ) -> c_int;
+
+    /// Free a row iterator.
+    pub fn ghostty_render_state_row_iterator_free(iterator: GhosttyRenderStateRowIterator);
+
+    /// Advance to the next row (y = 0, ascending). Returns true if a row is
+    /// now available to read.
+    pub fn ghostty_render_state_row_iterator_next(
+        iterator: GhosttyRenderStateRowIterator,
+    ) -> bool;
+
+    /// Read a value of the current row (e.g. ROW_DATA_CELLS).
+    pub fn ghostty_render_state_row_get(
+        iterator: GhosttyRenderStateRowIterator,
+        data: u32,
+        out: *mut c_void,
+    ) -> c_int;
+
+    /// Create a row-cells instance (the cells of the current row).
+    pub fn ghostty_render_state_row_cells_new(
+        allocator: *const GhosttyAllocator,
+        out_cells: *mut GhosttyRenderStateRowCells,
+    ) -> c_int;
+
+    /// Free a row-cells instance.
+    pub fn ghostty_render_state_row_cells_free(cells: GhosttyRenderStateRowCells);
+
+    /// Advance to the next cell. Returns true if a cell is now available.
+    pub fn ghostty_render_state_row_cells_next(cells: GhosttyRenderStateRowCells) -> bool;
+
+    /// Position the cell iterator at column `x`.
+    pub fn ghostty_render_state_row_cells_select(
+        cells: GhosttyRenderStateRowCells,
+        x: u16,
+    ) -> c_int;
+
+    /// Read a value of the current cell (e.g. STYLE, GRAPHEMES_UTF8).
+    pub fn ghostty_render_state_row_cells_get(
+        cells: GhosttyRenderStateRowCells,
+        data: u32,
+        out: *mut c_void,
+    ) -> c_int;
+}
