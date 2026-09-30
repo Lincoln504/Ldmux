@@ -30,3 +30,5 @@ pub mod registry;
 pub mod sanitize;
 pub mod screen_diff;
 pub mod ownership;
+pub mod sgr;
+pub mod snapshot;

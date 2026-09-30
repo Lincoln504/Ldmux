@@ -123,6 +123,7 @@ name = "ldmux-daemon"
 version = "0.1.0"
 dependencies = [
  "ldmux-protocol",
+ "ldmux-vt-sys",
  "nix",
  "rand",
  "serde",

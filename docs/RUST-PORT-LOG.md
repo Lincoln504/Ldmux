@@ -331,3 +331,23 @@ reads back correctly); an earlier "attribute gap" was a misread of bytes
 44–51 (the `underline_color`), not the attributes. A cell with no explicit
 colour gets a sentinel tag (neither PALETTE=1 nor RGB=2), mapped to `None`.
 Gate: `cargo test -p ldmux-vt-sys` → 8 pass (was 6).
+
+**SGR encoder + snapshot renderer (2026-09-28, committed):** the pure half of
+the snapshot path, in the `daemon` crate (no C dependency for the *logic* — it
+links `vt-sys` only for the plain `Cell`/`CellStyle` types it consumes):
+
+- `crates/daemon/src/sgr.rs` — `transition(from, to)`: the minimal SGR bytes
+  for a style change, `capture-pane -e`-style. A changed cell re-issues the
+  whole style (a `0` then every "on" attribute + colour), the encoding tmux
+  actually emits for a changed cell (a diff would depend on the corpus's
+  change-order, which is not pinned). `BLANK` is the row-start style. Verified
+  against a scratch `tmux capture-pane -e -p`: `\x1b[1m` bold, `\x1b[32m` green,
+  `\x1b[0m` reset, text interspersed.
+- `crates/daemon/src/snapshot.rs` — `render(rows, width)`: one line per row,
+  SGR-prefixed (a style run is emitted once, then its text), full-width (the
+  `-N` semantics — every cell to the right edge), `\n`-joined. `FullWidthRow`
+  pads a short row to `width` with blank cells.
+
+The §3.11 parity harness (byte-diff vs a scratch tmux `capture-pane -e -p -N`)
+lands next; it is the gate for this format. Gate: `cargo test -p ldmux-daemon`
+→ 99 pass (was 88). New code clippy-clean.
