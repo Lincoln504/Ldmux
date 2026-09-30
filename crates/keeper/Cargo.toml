@@ -1,0 +1,21 @@
+[package]
+name = "ldmux-keeper"
+version = "0.1.0"
+edition = "2024"
+description = "The ldmux keeper: allocates PTYs, owns the shell pids, supervises them, and serves the keeper protocol over a Unix socket (the tmux-server position, plan §3)"
+license = "MIT"
+
+[lib]
+name = "keeper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ldmux-keeper"
+path = "src/main.rs"
+
+[dependencies]
+ldmux-protocol = { path = "../protocol" }
+nix = { version = "0.29", features = ["term", "process", "signal"] }
+tokio = { version = "1", features = ["net", "io-util", "time", "process", "rt", "macros", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

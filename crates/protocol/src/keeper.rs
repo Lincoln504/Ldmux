@@ -19,12 +19,17 @@ pub enum KeeperMessage {
     Write(Write),
     Resize(Resize),
     Read(Read),
+    Peek(Peek),
+    PeekResult(PeekResult),
     Snapshot(Snapshot),
     State(State),
     List(List),
+    ListResult(ListResult),
     ChildInfo(ChildInfo),
     ChildExited(ChildExited),
     Close(Close),
+    Ack(Ack),
+    Error(Error),
 }
 
 /// Keeper message tags.
@@ -34,12 +39,17 @@ pub mod k {
     pub const WRITE: &str = "write";
     pub const RESIZE: &str = "resize";
     pub const READ: &str = "read";
+    pub const PEEK: &str = "peek";
+    pub const PEEK_RESULT: &str = "peekresult";
     pub const SNAPSHOT: &str = "snapshot";
     pub const STATE: &str = "state";
     pub const LIST: &str = "list";
     pub const CHILD_INFO: &str = "childinfo";
     pub const CHILD_EXITED: &str = "childexited";
     pub const CLOSE: &str = "close";
+    pub const LIST_RESULT: &str = "listresult";
+    pub const ACK: &str = "ack";
+    pub const ERROR: &str = "error";
 }
 
 /// Daemon → keeper: spawn a session (a PTY + shell + one emulator task).
@@ -87,6 +97,28 @@ pub struct Read {
     pub session_id: String,
 }
 
+/// Daemon → keeper: drain the session's buffered output bytes (the attach's
+/// stream direction — the bytes the shell has written to the pty since the
+/// last peek). The attach polls this to pull the pane; the keeper always
+/// reads the master into the buffer, so a peek is a bounded, non-blocking
+/// pull.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Peek {
+    pub session_id: String,
+}
+
+/// Keeper → daemon: the drained bytes (empty when the buffer is empty).
+///
+/// `data` is the raw pty bytes as a JSON byte array (the skeleton's encoding;
+/// a framed binary stream replaces it when the stream direction goes live).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeekResult {
+    pub session_id: String,
+    pub data: Vec<u8>,
+}
+
 /// Daemon → keeper: re-send the pane, optionally with paged scrollback
 /// (the keeper-side of the client's `scrollback` request).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +159,29 @@ pub struct ChildInfo {
 pub struct ChildExited {
     pub session_id: String,
     pub code: i64,
+}
+
+/// The answer to `List`: every session the keeper holds, as its state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResult {
+    pub sessions: Vec<State>,
+}
+
+/// A bare acknowledgement for a message that carries no meaningful result
+/// (a `Write`, a `Close`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Ack {}
+
+/// A failure answer (a request the keeper could not perform): the error is
+/// human-readable, the daemon surfaces it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Error {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Close the daemon↔keeper connection (not a session close).

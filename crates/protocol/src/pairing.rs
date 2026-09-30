@@ -97,26 +97,10 @@ pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
         let decoded = decode_query_value(val);
         // First value wins, as URLSearchParams.get.
         match k {
-            "v" => {
-                if v.is_none() {
-                    v = Some(decoded);
-                }
-            }
-            "host" => {
-                if host.is_none() {
-                    host = Some(decoded);
-                }
-            }
-            "token" => {
-                if token.is_none() {
-                    token = Some(decoded);
-                }
-            }
-            "name" => {
-                if name.is_none() {
-                    name = Some(decoded);
-                }
-            }
+            "v" if v.is_none() => v = Some(decoded),
+            "host" if host.is_none() => host = Some(decoded),
+            "token" if token.is_none() => token = Some(decoded),
+            "name" if name.is_none() => name = Some(decoded),
             _ => {}
         }
     }
@@ -188,7 +172,7 @@ fn parse_port(s: &str) -> Option<u16> {
         return None;
     }
     let p: u32 = s.parse().ok()?;
-    if p < 1 || p > 65535 {
+    if !(1..=65535).contains(&p) {
         return None;
     }
     Some(p as u16)
@@ -210,9 +194,9 @@ fn encode_uri_component(s: &str) -> String {
 }
 
 fn is_unreserved(b: u8) -> bool {
-    (b'0'..=b'9').contains(&b)
-        || (b'A'..=b'Z').contains(&b)
-        || (b'a'..=b'z').contains(&b)
+    b.is_ascii_digit()
+        || b.is_ascii_uppercase()
+        || b.is_ascii_lowercase()
         || matches!(b, b'-' | b'_' | b'.' | b'!' | b'*' | b'~')
 }
 

@@ -107,6 +107,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ldmux-attach"
+version = "0.1.0"
+dependencies = [
+ "ldmux-keeper",
+ "ldmux-protocol",
+ "nix",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ldmux-daemon"
 version = "0.1.0"
 dependencies = [
@@ -117,6 +129,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "ldmux-keeper"
+version = "0.1.0"
+dependencies = [
+ "ldmux-protocol",
+ "nix",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

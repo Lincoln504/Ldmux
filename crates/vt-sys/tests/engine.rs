@@ -44,7 +44,7 @@ fn scrollback_grows_past_the_viewport() {
     let mut t = Terminal::new(80, 24).unwrap();
     assert_eq!(t.scrollback_rows(), 0);
     // 30 lines in a 24-row screen -> 6 rows of history.
-    t.write(&*b"\n".repeat(30));
+    t.write(&b"\n".repeat(30));
     assert!(t.scrollback_rows() > 0);
     assert!(t.total_rows() > 24);
 }

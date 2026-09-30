@@ -1,0 +1,386 @@
+//! The ldmux keeper: the process that owns the PTYs and the shells.
+//!
+//! It is the tmux-server position (plan §3): it allocates a PTY per session,
+//! spawns the shell into it, supervises it (the authoritative death signal is
+//! `waitpid`, not the master EOF), **always reads the master** (so the kernel
+//! pty buffer never fills from a slow reader), and serves the keeper protocol
+//! over a Unix socket. It is **stateless beyond the kernel** — fds, pids, one
+//! ghostty-vt per session (the emulator is wired in phase 4) — and is
+//! auto-spawned detached by the daemon (phase 5); here it is built to run in
+//! process (a library) and to run as a binary.
+//!
+//! New (no TS source of record): the keeper does not exist in the TS tree.
+//! The design of record is `docs/RUST-PORT-PLAN.md` §3.2/§3.3/§3.5.
+
+use std::collections::{HashMap, VecDeque};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::{Arc, Mutex};
+
+use ldmux_protocol::keeper::{self as km, Ack, KeeperMessage, ListResult, PeekResult, State};
+
+/// One session: a PTY + a supervised shell (+, in phase 4, one ghostty-vt).
+///
+/// The whole `Keeper` is held behind one `Mutex`, so a session is touched by
+/// one critical section at a time; the per-session emulator task (phase 4)
+/// will own its `ghostty_vt` handle.
+pub struct Session {
+    pub id: String,
+    pub pid: i32,
+    /// The master side of the PTY. The reader task holds its own `Arc` clone.
+    pub master: Arc<OwnedFd>,
+    pub cols: u16,
+    pub rows: u16,
+    pub dead: bool,
+    pub exit_code: i32,
+    /// The master's bytes, buffered as they arrive (the "always reads the
+    /// master" stream). Phase 4 feeds this to the emulator; phase 5 streams it
+    /// to attaching clients.
+    pub out: Arc<Mutex<VecDeque<u8>>>,
+}
+
+/// The keeper itself. `sessions` is the one shared map; every message handler
+/// takes it briefly. `shell` is the argv the keeper spawns per session (the
+/// user's shell; the daemon decides, the keeper runs it).
+pub struct Keeper {
+    sessions: Mutex<HashMap<String, Session>>,
+    shell: Vec<String>,
+}
+
+impl Keeper {
+    /// A keeper that spawns `shell` (argv) per session.
+    pub fn new(shell: Vec<String>) -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            shell,
+        }
+    }
+
+    /// Process one keeper message, returning the answer (or an [`km::Error`]).
+    ///
+    /// Synchronous: the daemon (phase 5) calls it from its event loop. The
+    /// keeper→daemon *pushes* (`ChildExited`) are not request methods in this
+    /// skeleton — the daemon learns a death by `State`/`List`/`Read` reporting
+    /// `dead: true` (the push channel is wired in phase 5/6).
+    pub fn handle(&self, msg: &KeeperMessage) -> Result<KeeperMessage, String> {
+        self.reap(); // refresh liveness before answering anything
+        match msg {
+            km::KeeperMessage::Spawn(s) => match self.spawn_session(s) {
+                Ok(sess) => {
+                    self.sessions
+                        .lock()
+                        .unwrap()
+                        .insert(s.session_id.clone(), sess);
+                    Ok(KeeperMessage::State(State {
+                        session_id: s.session_id.clone(),
+                        cols: s.cols,
+                        rows: s.rows,
+                        dead: false,
+                    }))
+                }
+                Err(e) => Err(e.to_string()),
+            },
+            km::KeeperMessage::Kill(k) => {
+                let pid = {
+                    let g = self.sessions.lock().unwrap();
+                    match g.get(&k.session_id) {
+                        Some(s) => s.pid,
+                        None => return Err(format!("no such session: {}", k.session_id)),
+                    }
+                };
+                self.group_kill(pid);
+                self.reap();
+                self.sessions.lock().unwrap().remove(&k.session_id);
+                Ok(KeeperMessage::State(State {
+                    session_id: k.session_id.clone(),
+                    cols: 0,
+                    rows: 0,
+                    dead: true,
+                }))
+            }
+            km::KeeperMessage::Write(w) => {
+                use nix::libc as libc;
+                let m = {
+                    let g = self.sessions.lock().unwrap();
+                    match g.get(&w.session_id) {
+                        Some(s) if !s.dead => s.master.clone(),
+                        _ => return Err(format!("no live session: {}", w.session_id)),
+                    }
+                };
+                let fd = m.as_raw_fd();
+                let bytes = w.data.as_bytes();
+                let mut off = 0usize;
+                while off < bytes.len() {
+                    let n = unsafe {
+                        libc::write(fd, bytes[off..].as_ptr() as *const _, bytes.len() - off)
+                    };
+                    if n <= 0 {
+                        return Err(format!("write to {} failed", w.session_id));
+                    }
+                    off += n as usize;
+                }
+                Ok(KeeperMessage::Ack(Ack {}))
+            }
+            km::KeeperMessage::Resize(r) => {
+                use nix::libc as libc;
+                let m = {
+                    let g = self.sessions.lock().unwrap();
+                    match g.get(&r.session_id) {
+                        Some(s) if !s.dead => s.master.clone(),
+                        _ => return Err(format!("no live session: {}", r.session_id)),
+                    }
+                };
+                let ws = libc::winsize {
+                    ws_row: r.rows as u16,
+                    ws_col: r.cols as u16,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                let fd = m.as_raw_fd();
+                if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } < 0 {
+                    return Err(format!("TIOCSWINSZ failed on session {}", r.session_id));
+                }
+                {
+                    let mut g = self.sessions.lock().unwrap();
+                    if let Some(s) = g.get_mut(&r.session_id) {
+                        s.cols = r.cols as u16;
+                        s.rows = r.rows as u16;
+                    }
+                }
+                self.state_of(&r.session_id)
+            }
+            km::KeeperMessage::Read(rd) => self.state_of(&rd.session_id),
+            km::KeeperMessage::Peek(p) => {
+                let g = self.sessions.lock().unwrap();
+                match g.get(&p.session_id) {
+                    Some(s) => {
+                        // Drain the buffer (the attach's stream pull). The reader
+                        // task holds only the `out` lock, never the sessions
+                        // lock, so this cannot deadlock with it.
+                        let data: Vec<u8> = {
+                            let mut out = s.out.lock().unwrap();
+                            let d: Vec<u8> = out.iter().copied().collect();
+                            *out = VecDeque::new();
+                            d
+                        };
+                        Ok(KeeperMessage::PeekResult(PeekResult {
+                            session_id: p.session_id.clone(),
+                            data,
+                        }))
+                    }
+                    None => Err(format!("no such session: {}", p.session_id)),
+                }
+            }
+            // Skeleton: a full snapshot render is phase 4. Report the state
+            // (the pane is up) so the shape is exercised.
+            km::KeeperMessage::Snapshot(s) => self.state_of(&s.session_id),
+            km::KeeperMessage::List(_l) => {
+                let g = self.sessions.lock().unwrap();
+                let sessions: Vec<State> = g
+                    .values()
+                    .map(|s| State {
+                        session_id: s.id.clone(),
+                        cols: s.cols as u64,
+                        rows: s.rows as u64,
+                        dead: s.dead,
+                    })
+                    .collect();
+                Ok(KeeperMessage::ListResult(ListResult { sessions }))
+            }
+            km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
+            // The keeper→daemon pushes (`ChildInfo`, `ChildExited`) and the
+            // request-only shapes are not request methods in this skeleton.
+            other => Err(format!("not a request: {other:?}")),
+        }
+    }
+
+    /// The `State` answer for a session (the attach/snapshot shape).
+    fn state_of(&self, id: &str) -> Result<KeeperMessage, String> {
+        let g = self.sessions.lock().unwrap();
+        match g.get(id) {
+            Some(s) => Ok(KeeperMessage::State(State {
+                session_id: s.id.clone(),
+                cols: s.cols as u64,
+                rows: s.rows as u64,
+                dead: s.dead,
+            })),
+            None => Err(format!("no such session: {id}")),
+        }
+    }
+
+    /// Allocate a PTY, spawn the shell into it (own session, slave as 0/1/2),
+    /// and start the always-reads-the-master reader.
+    fn spawn_session(&self, s: &km::Spawn) -> std::io::Result<Session> {
+        use nix::libc as libc;
+        let winsize = libc::winsize {
+            ws_row: s.rows as u16,
+            ws_col: s.cols as u16,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let opened = nix::pty::openpty(Some(&winsize), None)
+            .map_err(|e| std::io::Error::other(format!("openpty: {e}")))?;
+        let master = opened.master;
+        let slave = opened.slave;
+
+        // Stdio takes the slave by value (From<OwnedFd>), so each of the child's
+        // 0/1/2 is its own dup of the slave; the parent's copy is dropped below.
+        let slave_in = slave.try_clone()?;
+        let slave_out = slave.try_clone()?;
+        let slave_err = slave.try_clone()?;
+        let mut cmd = tokio::process::Command::new(&self.shell[0]);
+        cmd.args(&self.shell[1..]);
+        cmd.stdin(slave_in);
+        cmd.stdout(slave_out);
+        cmd.stderr(slave_err);
+        if let Some(cwd) = &s.cwd {
+            cmd.current_dir(cwd);
+        }
+        // Own session + process group, so `group_kill` takes the whole tree
+        // down; the slave becomes the shell's controlling terminal.
+        unsafe {
+            cmd.pre_exec(|| match nix::unistd::setsid() {
+                Ok(_pid) => Ok(()),
+                Err(e) => Err(e.into()),
+            });
+        }
+        let child = cmd.spawn()?;
+        let pid = child.id().expect("tokio reports the pid for every spawn") as i32;
+        drop(slave); // close the parent's copy; only the child holds the slave
+        drop(child); // we supervise via waitpid, not tokio's Child
+
+        let master = Arc::new(master);
+        let out = Arc::new(Mutex::new(VecDeque::new()));
+        {
+            // The reader: always read the master into the buffer (plan §3.3 —
+            // the kernel pty buffer must never fill from a slow reader).
+            let m = master.clone();
+            let o = out.clone();
+            tokio::task::spawn_blocking(move || {
+                use nix::libc as libc;
+                let fd = m.as_raw_fd();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                    if n <= 0 {
+                        break;
+                    }
+                    let mut g = o.lock().unwrap();
+                    g.extend(&buf[..n as usize]);
+                }
+            });
+        }
+        Ok(Session {
+            id: s.session_id.clone(),
+            pid,
+            master,
+            cols: s.cols as u16,
+            rows: s.rows as u16,
+            dead: false,
+            exit_code: 0,
+            out,
+        })
+    }
+
+    /// Group-kill the session's process group (SIGTERM, grace, SIGKILL).
+    fn group_kill(&self, pid: i32) {
+        use nix::sys::signal::Signal;
+        let g = nix::unistd::Pid::from_raw(-pid);
+        let _ = nix::sys::signal::kill(g, Signal::SIGTERM);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = nix::sys::signal::kill(g, Signal::SIGKILL);
+    }
+
+    /// Reap any exited children (the authoritative death signal), marking the
+    /// matching sessions dead. Non-blocking: `waitpid(-1, WNOHANG)`.
+    fn reap(&self) {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        loop {
+            match waitpid(nix::unistd::Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => break,
+                Ok(WaitStatus::Exited(pid, code)) => {
+                    self.mark_dead(pid.as_raw(), code);
+                }
+                Ok(WaitStatus::Signaled(pid, _sig, _core)) => {
+                    self.mark_dead(pid.as_raw(), -1);
+                }
+                Ok(_) => {}
+                Err(_) => break, // ECHILD: no children left
+            }
+        }
+    }
+
+    fn mark_dead(&self, pid: i32, code: i32) {
+        let mut g = self.sessions.lock().unwrap();
+        for s in g.values_mut() {
+            if s.pid == pid {
+                s.dead = true;
+                s.exit_code = code;
+            }
+        }
+    }
+
+    /// How many master bytes are currently buffered for a session (test/
+    /// diagnostic: proves the keeper is reading the master).
+    pub fn buffered_len(&self, id: &str) -> Option<usize> {
+        let g = self.sessions.lock().unwrap();
+        g.get(id).map(|s| s.out.lock().unwrap().len())
+    }
+}
+
+/// Serve the keeper protocol on a Unix socket: one tagged
+/// [`KeeperMessage`] per line, one request line → one response line per
+/// connection (one call == one connection).
+pub async fn serve(self_: &Arc<Keeper>, socket: &std::path::Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(socket);
+    let listener = tokio::net::UnixListener::bind(socket)?;
+    loop {
+        let (sock, _addr) = listener.accept().await?;
+        let me = self_.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_conn(&me, sock).await {
+                eprintln!("ldmux-keeper: connection: {e}");
+            }
+        });
+    }
+}
+
+async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut rd, mut wr) = sock.into_split();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = rd.read(&mut tmp).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.contains(&b'\n') {
+            break;
+        }
+    }
+    let nl = buf.iter().position(|&b| b == b'\n').unwrap();
+    let line = String::from_utf8_lossy(&buf[..nl]).to_string();
+    let req: KeeperMessage = match serde_json::from_str(&line) {
+        Ok(m) => m,
+        Err(e) => {
+            let err = serde_json::json!({ "error": e.to_string() });
+            let _ = wr
+                .write_all(format!("{}\n", serde_json::to_string(&err).unwrap()).as_bytes())
+                .await;
+            return Ok(());
+        }
+    };
+    let resp = match me.handle(&req) {
+        Ok(m) => m,
+        Err(e) => KeeperMessage::Error(km::Error {
+            error: e,
+            session_id: None,
+        }),
+    };
+    let resp_line = format!("{}\n", serde_json::to_string(&resp).unwrap());
+    wr.write_all(resp_line.as_bytes()).await?;
+    wr.flush().await?;
+    Ok(())
+}

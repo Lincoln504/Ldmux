@@ -335,9 +335,9 @@ pub struct Live {
     pub detail: Option<String>,
 }
 
-/// The keeper (daemon↔keeper) messages live in the [`crate::keeper`] module:
-/// they share names with some client messages (`Kill`, `Resize`, `Snapshot`,
-/// `List`, `Close`) but have different fields, so they are modelled separately.
+// The keeper (daemon↔keeper) messages live in the `crate::keeper` module:
+// they share names with some client messages (`Kill`, `Resize`, `Snapshot`,
+// `List`, `Close`) but have different fields, so they are modelled separately.
 
 #[cfg(test)]
 mod tests {
@@ -434,7 +434,7 @@ mod tests {
         match back {
             Message::Snapshot(s) => {
                 assert_eq!(s.session_id, "s1");
-                assert!(!s.history.is_some(), "history must be absent");
+                assert!(s.history.is_none(), "history must be absent");
             }
             _ => panic!("wrong variant"),
         }

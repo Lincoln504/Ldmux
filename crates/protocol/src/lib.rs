@@ -11,6 +11,7 @@
 
 pub mod frames;
 pub mod keeper;
+pub mod keeper_call;
 pub mod messages;
 pub mod net;
 pub mod paths;

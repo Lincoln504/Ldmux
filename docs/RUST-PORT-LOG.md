@@ -10,7 +10,7 @@ this file, then the plan §7 table, then the phase's source of record.
 |---|---|---|---|
 | 1 protocol | **done** (2026-09-28) | `cargo test -p ldmux-protocol` | **40 passed, 0 failed** (clippy: 8 non-blocking warnings, see Findings) |
 | 2 pure modules | **done** (2026-09-28) | `cargo test -p ldmux-daemon` | **88 passed, 0 failed** |
-| 3 keeper ∥ vt-sys ∥ attach skeletons | in progress (2026-09-28) | per §7 | vt-sys **done** (6 tests, links the vendored `.a`); keeper ∥ attach pending |
+| 3 keeper ∥ vt-sys ∥ attach skeletons | **done** (2026-09-28) | per §7 | keeper **4** + vt-sys **6** + attach **2** + protocol **40** + daemon **88** = **140 passed, 0 failed**; TS **347/347** |
 | 4 emulator + parity | not started | parity report: zero divergences | — |
 | 5 daemon | not started | full TS-equivalent suite vs keeper | — |
 | 6 desktop/restart/backpressure e2e | not started | §6 risk tests green | — |
@@ -173,3 +173,114 @@ Gate `cargo test -p ldmux-daemon` → **88 passed, 0 failed** (system rustup
   rename (was the deprecated `thread_rng`) was taken; no new runtime deps were
   added beyond the allowlist (`serde`, `serde_json`, `tokio`, `uuid`, `nix`,
   `rand` — `rand`/`nix` are used only by `auth`/`proc`/`exec`).
+
+## Phase 3 — keeper ∥ vt-sys ∥ attach skeletons (DONE 2026-09-28)
+
+**Scope (plan §7, workstreams C ∥ D ∥ E):** the keeper (PTY + supervision +
+server skeleton), `vt-sys` (FFI against the vendored headers), and the
+attach-client skeleton (pty pair + protocol loop). Gate (plan §7): "keeper
+boots, serves `List`/`Spawn`; FFI links the vendored `.a`; attach boots
+headless." **All three met.** New crate: `crates/keeper`, `crates/vt-sys`
+(done in the prior vt-sys commit), `crates/attach`; protocol gains
+`Peek`/`PeekResult` (the attach's stream pull).
+
+**Gate:** full workspace `cargo test --workspace` → **140 passed, 0 failed**
+(attach 2, daemon 88, keeper 4, protocol 40, vt-sys 6). TS gate re-run green:
+`node --run test` 347/347, `node --run typecheck` clean (the TS tree is
+untouched by this phase). Clippy on the new crates (`keeper`, `attach`,
+`protocol`): **0 warnings**. (The pre-existing Phase-2 `daemon` crate still
+carries its clippy warnings — out of scope here; the daemon gate is tests,
+not clippy.)
+
+**Keeper (`crates/keeper`, package `ldmux-keeper`, lib `keeper`, bin
+`ldmux-keeper`)** — the tmux-server position (plan §3). It owns a PTY per
+session, spawns the shell into it, supervises it, **always reads the master**
+(the kernel pty buffer never fills from a slow reader), and serves the keeper
+protocol over a Unix socket (one tagged `KeeperMessage` per line, one request
+line → one response line, one call == one connection). State is one
+`Mutex<HashMap<id, Session>>`; the reader is a `spawn_blocking` task that
+reads the master into a per-session `VecDeque` buffer.
+- `spawn_session` — `openpty` → `try_clone` the slave ×3 (the child's 0/1/2),
+  `setsid` pre_exec (own session, so group-kill takes the tree), slave as the
+  child's stdio, parent drops its slave copy. The reader task reads the master
+  into `Session.out`.
+- `group_kill` — `kill(-pid, SIGTERM)`, 50 ms grace, `kill(-pid, SIGKILL)`.
+- `reap` — `waitpid(-1, WNOHANG)` loop (the authoritative death signal, not the
+  master EOF); `StillAlive` breaks, `Exited`/`Signaled` marks the session dead.
+- handlers: `Spawn`, `Kill`, `Write` (raw `write` to the master), `Resize`
+  (`TIOCSWINSZ` on the master), `Read`/`Snapshot` (→ `State`), `List`, `Peek`
+  (drain the buffer), `Close`.
+- `serve` — `UnixListener` accept loop, one `serve_conn` task per connection
+  (read one JSON line, `handle`, write one JSON line).
+- tests (4): boot + empty `List`; `Spawn` a real `/bin/sh`, `List`, `Write`
+  `printf`, prove the keeper reads the master (buffered > 0), `Read` (alive),
+  `Kill` (dead, list empty); `Resize` (state 120×40) + `Kill`; unknown session
+  → error answer.
+- **The `resize` test hung until it `Kill`ed its session** — see Findings (the
+  reader thread wedged in `read(pty)` blocks the runtime drop on exit).
+
+**vt-sys (`crates/vt-sys`)** — done in the prior commit (`727114a`): `build.rs`
+links the vendored `libghostty-vt.a` (`static=ghostty-vt`, `-lm -lpthread`);
+`src/ffi.rs` is the `extern "C"` binding (`ghostty_terminal_new/free/set/
+vt_write/resize/get/get_multi`, the `GhosttyResult`/`GhosttyTerminalData`/
+`GhosttyTerminalOption` constants, the opaque `GhosttyTerminal`); `src/safe.rs`
+is a `Terminal` (owns the C handle, `!Send`/`!Sync`, `Drop` frees it, the
+accessors + `write`/`resize`); `tests/engine.rs` (6 tests) proves the FFI links
+and the round-trip works. The vendored `.a` (20 MB, x86_64-linux-gnu) is at
+`packages/mobile/native/prebuilt/host/lib/`.
+
+**Attach (`crates/attach`, package `ldmux-attach`, lib `attach`, bin
+`ldmux-attach`)** — the desktop window client skeleton (plan §3.9). In
+production it is `alacritty -e ldmuxd attach <id>` (its stdio **is**
+alacritty's pty — no nested pty); here it is the skeleton: two fds for its
+local terminal (where it reads user input, where it writes session output),
+connects to the keeper, and pipes. `Attach::connect` does the `Read`
+handshake (→ `State`, errors if the session is dead/unknown); `send_input`
+(→ `Write`); `read_output` (→ `Peek`, the stream pull); `write_output` (write
+to the local terminal); `read_input` (non-blocking poll of the local
+terminal). Tests (2): boot headless + pipe a session's bytes (send
+`printf 'ldmux-hi\n'`, poll the output until it contains `ldmux-hi`); reject
+an unknown session.
+
+**Protocol addition (`Peek`/`PeekResult`):** the attach's stream direction —
+drain the session's buffered output bytes. `Peek { session_id }` →
+`PeekResult { session_id, data: Vec<u8> }`. The keeper always reads the master
+into the buffer, so a peek is a bounded, non-blocking pull (the skeleton's
+encoding is a JSON byte array; a framed binary stream replaces it when the
+stream goes live).
+
+**Findings / decisions (this phase):**
+- **A keeper/attach test that spawns a session must `Kill` it at the end.**
+  The reader task does a *blocking* `read(pty_master)`; while a session is
+  alive the master has no data (the shell is idle), so the read blocks, and a
+  `#[tokio::test]` cannot drop its runtime while a blocking-pool thread is
+  wedged in that syscall — the process hangs on exit (it is *not* a hang in
+  the assertions; the assertions pass). The fix is to `Kill` the session in
+  the test (the shell exits, the master gets EOF, the reader returns). The
+  same rule applies to any future keeper/attach test that leaves a session
+  live. (Caught by a `/proc/<pid>/task/*/syscall` dump: the wedged thread was
+  `read(fd, 4096)`.)
+- **`nix::pty::openpty` returns an `OpenptyResult` struct, not a tuple** —
+  `let opened = openpty(...)?; let master = opened.master; let slave =
+  opened.slave;` (a `(master, slave)` destructure fails).
+- **`Stdio` takes the pty slave by value** (`From<OwnedFd>`), so the child's
+  0/1/2 are each a `try_clone` of the slave; the parent's copy is dropped
+  after spawn. (`&OwnedFd`/`&BorrowedFd` do **not** satisfy `Into<Stdio>`.)
+- **`OwnedFd`/`BorrowedFd` fd access:** `OwnedFd` has no inherent
+  `as_fd()->c_int`; use `AsRawFd::as_raw_fd()` for the raw number (the
+  `TIOCSWINSZ` ioctl, the raw `read`/`write`), and `AsFd::as_fd()` for a
+  `&BorrowedFd`. Raw `libc::read`/`write` are used for the master (the std
+  `Read`/`Write` on `&BorrowedFd` did not method-resolve).
+- **`waitpid(-1, WNOHANG)` is the non-blocking reap** — `nix::sys::wait::
+  waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG))` returns
+  `StillAlive` immediately (no child to reap); it does **not** block (the
+  earlier "blocking waitpid" reading was the wedged *reader* `read`, not the
+  `reap`).
+- **`Peek` drains via `iter().copied().collect::<Vec<u8>>()`** (a `VecDeque`
+  does not `Into<Vec>` directly).
+- **Clippy:** the new crates are clean (0 warnings). The pre-existing
+  Phase-1 `protocol` warnings (`pairing`, `frames`, `messages`) were also
+  fixed this pass, so `ldmux-protocol` is now **0 warnings** too.
+- **No live system touched.** The keeper/attach run in-process against a
+  scratch socket + a scratch PTY; no live daemon, no `just install`, no
+  `systemctl`, no device.
