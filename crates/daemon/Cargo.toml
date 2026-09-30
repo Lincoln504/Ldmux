@@ -1,0 +1,15 @@
+[package]
+name = "ldmux-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "The ldmux daemon proper: registry, ownership, remote WS, streams, desktop, CLI (and the pure modules the daemon is built from)"
+license = "MIT"
+
+[dependencies]
+ldmux-protocol = { path = "../protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "time", "rt", "macros", "sync"] }
+rand = { version = "0.9", features = ["std"] }
+nix = { version = "0.29", features = ["process", "signal"] }
+uuid = { version = "1", features = ["v4"] }
