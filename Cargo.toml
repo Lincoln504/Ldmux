@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/daemon"]
+members = ["crates/protocol", "crates/daemon", "crates/vt-sys"]
 
 [profile.release]
 strip = "symbols"

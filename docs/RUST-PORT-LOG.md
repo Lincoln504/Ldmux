@@ -10,7 +10,7 @@ this file, then the plan §7 table, then the phase's source of record.
 |---|---|---|---|
 | 1 protocol | **done** (2026-09-28) | `cargo test -p ldmux-protocol` | **40 passed, 0 failed** (clippy: 8 non-blocking warnings, see Findings) |
 | 2 pure modules | **done** (2026-09-28) | `cargo test -p ldmux-daemon` | **88 passed, 0 failed** |
-| 3 keeper ∥ vt-sys ∥ attach skeletons | not started | per §7 | — |
+| 3 keeper ∥ vt-sys ∥ attach skeletons | in progress (2026-09-28) | per §7 | vt-sys **done** (6 tests, links the vendored `.a`); keeper ∥ attach pending |
 | 4 emulator + parity | not started | parity report: zero divergences | — |
 | 5 daemon | not started | full TS-equivalent suite vs keeper | — |
 | 6 desktop/restart/backpressure e2e | not started | §6 risk tests green | — |
