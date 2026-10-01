@@ -85,6 +85,30 @@ this file, then the plan §7 table, then the phase's source of record.
   the corpus file ends `…D\x1b[0m\n`; the subsequence match on `CORPUS_BODY`
   passes, the full-corpus match fails at the last byte.
   `crates/keeper/tests/keeper.rs`.
+- **2026-09-28, the plan's `keypad_cursor_flag` source was mislabeled; the
+  empirical gate caught it.** The plan §3.4 table maps `keypad_cursor_flag`
+  (the `appCursor` state field) to `mode()` (DECTCEM) — but DEC mode **25 is
+  "cursor *visible*"**, on by default and stays on (a fresh 80x24 terminal
+  reads `mode(25) == true`). tmux's `keypad_cursor_flag` is the application
+  cursor-key mode (**DECCKM, mode 1**), off by default and tracking
+  `?1h`/`?1l`. The faithful source is **DECCKM (mode 1)**, so
+  `MODE_APP_CURSOR = 1` (not 25). The user delegated the call ("i am not
+  sure, document, but let's decide this"); this is the documented decision.
+  Evidence: `crates/vt-sys/tests/scrollback.rs`
+  (`terminal_modes_and_alternate_screen_are_tracked` pins `mode(1)`
+  off-by-default + `?1h`/`?1l`, distinct from `cursor_visible()`).
+- **2026-09-28, a natural shell exit is never reported `dead` (pre-existing
+  bug, flagged, not fixed).** The keeper spawns the shell with
+  `tokio::process::Command` and then `drop(child)` "to supervise via
+  waitpid, not tokio's Child" — but tokio's global `ChildReaper` reaps the
+  child first, so the keeper's raw `waitpid(-1, WNOHANG)` in `reap()` finds
+  nothing (`ECHILD`) and `mark_dead` never runs; only a `Kill` sets `dead`.
+  A standalone pty probe confirms `exit\n` *does* exit the shell (reaped,
+  `alive=False`), so the write is fine — the reaper conflict is the cause.
+  Fix: spawn via a raw `fork`/`exec` (e.g. `nix`) so the keeper is the sole
+  reaper and the raw `waitpid` is authoritative (plan §3.3). Not fixed here —
+  a separate concern from the state fields; the reaper fix is a non-trivial
+  change to `spawn_session`.
 
 ## Phase 1 — protocol (DONE 2026-09-28)
 
@@ -539,6 +563,44 @@ wired (DONE).**
   (attach 2, daemon 88, parity 6, keeper 8, protocol 41, vt-sys 11+8+2);
   TS **347/347** + typecheck. New code clippy-clean.
 
-**Next (Phase 4):** the `display-message` state fields (the `State`/`List`
-report — `cursor_x/y`, `alternate_on`, `history_size`, `pane_dead`, mouse /
-keypad / bracket-paste flags, `pane_current_command`, cwd).
+**Milestone: §3.4 state fields (the `display-message` fields, direct from
+ghostty-vt) are wired (DONE).**
+- **`vt-sys`:** bound `GHOSTTY_TERMINAL_DATA_MODE` (37) with the
+  `GhosttyTerminalModeConfig` in/out struct (`mode: u16`, `value: bool` — a
+  4-byte layout, no padding) + `GhosttyTerminalScreen` (Primary/Alternate,
+  the `DATA_ACTIVE_SCREEN` out type). New `Terminal::mode(mode) -> bool`
+  (the generic DEC-mode query) and `Terminal::alternate_on()`. Named mode
+  constants: `MODE_APP_CURSOR` (1, DECCKM — the corrected source, see the
+  finding above), `MODE_SGR_MOUSE` (1006), `MODE_BRACKETED_PASTE` (2004).
+  **Pinned empirically** in `crates/vt-sys/tests/scrollback.rs` (the modes
+  test): SGR mouse, bracketed paste, DECCKM, cursor-visible, and the
+  alternate screen all track the fed `?N h`/`?N l` stream.
+- **Keeper:** the `Snapshot` answer now reports the pane's state (plan §3.4 —
+  the `display-message` fields, read direct, not a parsed format string). The
+  emulator thread (which owns the `!Send` `Terminal`) reads `cursor_x/y`,
+  `alternate_on`, `mouse_tracking`, `mode(1006)`, `mode(1)`, `mode(2004)`,
+  `scrollback_rows` and returns them in `Outcome`. The keeper adds `dead`
+  and the `/proc` fields (`/proc/<pid>/comm` = `foreground`,
+  `/proc/<pid>/cwd` = `cwd`), read **only for a live** pane (a reaped pid may
+  be recycled, so a dead pane reports empty, not a stale read). The
+  `Snapshot` handler now allows a **dead** pane (the emulator thread keeps
+  running after the master EOF, so the last content is still renderable) —
+  `dead` reported, `/proc` empty. `pane_in_mode` is reported **`false`**:
+  there is no tmux "pane in a mode" concept in ghostty-vt, and no client
+  reads the field (documented choice).
+- **Tests:** a new keeper test (`the_emulator_reports_the_pane_state`) drives
+  a fresh 80x24 pane and asserts the state: geometry, `dead == false`,
+  `alternate_on == false`, all modes off (`mouse`/`mouse_sgr`/`app_cursor`/
+  `bracketed_paste` — the last now correctly sourced from DECCKM, off by
+  default), cursor in-bounds, `history_size == 0`, non-empty `foreground`
+  (the shell) + `cwd`. (A dead-pane test was written and then removed: its
+  precondition — a natural shell exit — is the flagged reaper bug above, so
+  the contract is covered by construction, not a live test.)
+- Gate: `cargo test --workspace` (inside `nix develop`) → **168 passed**
+  (attach 2, daemon 88, parity 6, keeper 9, protocol 41, vt-sys 11+8+3);
+  TS **347/347** + typecheck. New code clippy-clean.
+
+**Next (Phase 4):** the reaper fix (flagged above) so a natural shell exit is
+reported `dead` — raw `fork`/`exec` so the keeper is the sole reaper — then
+the `State`/`List` report carries the same fields as the `Snapshot` answer
+(the daemon reads liveness without a render).
