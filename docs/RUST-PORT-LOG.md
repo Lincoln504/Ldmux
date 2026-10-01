@@ -61,6 +61,16 @@ this file, then the plan §7 table, then the phase's source of record.
   `normalize` pads every row to the pinned width on both sides, and parity
   held on **both** 3.5a (bare shell) and 3.7b (devShell). Evidence:
   `crates/daemon/tests/parity.rs` (the 3.5a quirk note) and the gate runs.
+- **2026-09-28, pty output post-processing (ONLCR) is live in the keeper
+  stream (observed while writing the emulator tests).** Bytes the shell
+  writes to its stdout (and the echoed input) pass through the pty's
+  output processing: a `\n` leaves the master as `\r\n`. The emulator
+  parses it fine (the engine normalises), but any byte-exact assertion on
+  the *stream* must match the corpus **body** (no trailing `\n`), not the
+  file's bytes. Evidence: the drained `out` buffer held `…D\x1b[0m\r\n`,
+  the corpus file ends `…D\x1b[0m\n`; the subsequence match on `CORPUS_BODY`
+  passes, the full-corpus match fails at the last byte.
+  `crates/keeper/tests/keeper.rs`.
 
 ## Phase 1 — protocol (DONE 2026-09-28)
 
@@ -440,8 +450,47 @@ pre-existing daemon-lib warnings are unchanged, out of scope).
   binary, so a bare-shell run failed at `assert_eq!(res.code, 0)` with no
   message. Guard is now `res.code != -1` → clear "not on PATH" message.
 
-**Next (Phase 4, unblocked):** the **keeper emulator integration** — wire a
-per-session `ghostty_vt` into the keeper (create via FFI, feed master bytes
-via `GhosttyVtInputWrite`, render via `RenderState` + `sgr` + `snapshot`),
-then scrollback paging (`scroll_viewport` / grid access) and the
-`display-message` state fields.
+**Milestone: §3.4 the per-session emulator is wired into the keeper (DONE).**
+- **`sgr` + `snapshot` re-homed** `crates/daemon/src` → `crates/vt-sys/src`
+  (decision: the format consumes `Cell`/`CellStyle`, which `vt-sys` defines,
+  and the keeper — a separate binary — must not depend on the daemon's
+  library; both consumers already depend on `vt-sys`). The daemon keeps
+  `ldmux-vt-sys` as a **dev-dep** only (the parity harness). The modules'
+  docs now state the format is ours (plan §3.11(3)) and pin the round-trip.
+- **The emulator is one blocking thread per session** (the plan's
+  one-task-per-session, the owner being a thread): it **creates** the
+  `!Send` `Terminal`/`RenderState` *inside* itself (they cannot cross the
+  `spawn_blocking` `Send` boundary from the caller); a **boot oneshot**
+  gates the session's visibility — on a creation failure the child is
+  group-killed before `Spawn` returns. It reads the master with
+  **`poll(2)` at 1 ms** + `libc::read`, feeds the bytes to the emulator
+  *and* the session's `out` buffer (the attach's stream), and services
+  `EmuMsg`s (a `std::sync::mpsc`, FIFO — a `Resize` is applied before a
+  later `Snapshot`) with a `try_recv` before every poll. Replies ride a
+  `tokio::sync::oneshot` per request (the `Sender` is `Send`; the thread
+  answers, the handler `await`s). On master **EOF** (the shell died) it
+  stops reading and services messages only (a snapshot of a dead pane is
+  still valid — the grid keeps its last content); the thread exits when
+  the session's `em_tx` drops (a kill) or the fd errors. **Why not an async
+  task:** tokio 1.53.1 has **no `net::UnixFd`** (verified in the registry
+  source), so there is no async read to `select!` over — the 1 ms poll is
+  the keeper-side equivalent, and a `!Send` value also cannot be moved
+  into a `tokio::spawn`/`spawn_blocking` closure.
+- **Protocol:** `SnapshotResult { session_id, cols, rows, text }`, tag
+  `snapshotresult` (the answer to a `Snapshot`; the geometry is re-read
+  from the terminal on each render, so a resize is observable).
+- **Tests (3 new keeper tests):** render — the corpus row appears in our
+  format, found by `lines().any(== CORPUS_LINE)` because the **leading
+  line count is not pinned** (dash prints a job-control notice + the
+  prompt, so the corpus lands on line 2, not line 1); resize — a
+  `Snapshot` reports 120x40 after a `Resize` (FIFO ordering makes it
+  deterministic); buffer identity — the corpus **body** is a subsequence
+  of the drained `Peek` bytes (the `out` buffer and the emulator are fed
+  by the one read; see the ONLCR finding above).
+- Gate: `cargo test --workspace` (inside `nix develop`) → **163 passed**
+  (attach 2, daemon 88, parity 6, keeper 7, protocol 41, vt-sys 11+8);
+  TS **347/347** + typecheck. New code clippy-clean (the pre-existing
+  daemon-lib warnings are unchanged, out of scope).
+
+**Next (Phase 4):** scrollback paging (`scroll_viewport` / grid access)
+and the `display-message` state fields.
