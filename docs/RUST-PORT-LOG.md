@@ -11,7 +11,7 @@ this file, then the plan §7 table, then the phase's source of record.
 | 1 protocol | **done** (2026-09-28) | `cargo test -p ldmux-protocol` | **40 passed, 0 failed** (clippy: 8 non-blocking warnings, see Findings) |
 | 2 pure modules | **done** (2026-09-28) | `cargo test -p ldmux-daemon` | **88 passed, 0 failed** |
 | 3 keeper ∥ vt-sys ∥ attach skeletons | **done** (2026-09-28) | per §7 | keeper **4** + vt-sys **6** + attach **2** + protocol **40** + daemon **88** = **140 passed, 0 failed**; TS **347/347** |
-| 4 emulator + parity | not started | parity report: zero divergences | — |
+| 4 emulator + parity | in progress (2026-09-28) | parity report: zero divergences | §3.11 cell parity: **zero divergences** (minimal corpus, both tmux versions); keeper emulator integration is the next item |
 | 5 daemon | not started | full TS-equivalent suite vs keeper | — |
 | 6 desktop/restart/backpressure e2e | not started | §6 risk tests green | — |
 | 7 build/deploy + D4 | not started | deploy green | — |
@@ -30,6 +30,37 @@ this file, then the plan §7 table, then the phase's source of record.
   is pending — until then the gate command is `cargo test -p ldmux-protocol`
   (system toolchain). Record it here so a fresh session does not assume the
   flake already provides cargo.
+- **2026-09-28, §3.11 gate decision (user-approved): the gate is on the
+  CELLS, not the SGR bytes.** Plan §3.11(3) is explicit — "the cells are the
+  source of truth; the format is ours" — and that supersedes the
+  byte-identical reading of §3.11(2): tmux's `capture-pane -e` spelling is a
+  *transition* encoder (\x1b[1m, \x1b[39m …) and a **moving** reference across
+  tmux versions, while the cells are the stable truth both engines must
+  match. Our `sgr.rs` keeps its reset-then-re-issue encoding (a valid SGR);
+  its fidelity to the cells is pinned by a round-trip test
+  (`parse(render(cells)) == cells`), and the engine's match to tmux is pinned
+  by a cell-by-cell parity test. Consequence: the harness needed an
+  SGR→cells decoder (`sgrep`) for the tmux side — see the Phase 4 section.
+- **2026-09-28, gate-environment finding (evidence: a confusing failure
+  that then self-diagnosed).** `zbarimg` (the QR decode tests) is available
+  **only inside `nix develop`** (devShell `zbar-0.23.93`); the daemon gate
+  must run inside it. A bare-shell `cargo test` fails the two QR decode
+  tests — and, worse, the `zbar_on_path` guard was written for a
+  shell-exec model (exit 127 / stderr "not found") while our `exec::run`
+  spawns directly and returns `code: -1` on a missing binary, so the guard
+  let the missing binary through and the test died at
+  `assert_eq!(res.code, 0)` (−1 vs 0) with no message. **Fix (committed):**
+  the guard is now `res.code != -1`, and a bare-shell run fails with the
+  clear message "zbarimg is not on PATH: run the tests inside `nix develop`".
+  **The Rust gate command is `nix develop --command <cargo test …>`** —
+  outside it the QR tests cannot pass.
+- **2026-09-28, tmux 3.5a `capture-pane -N` padding quirk (observed, dated).**
+  On the system tmux 3.5a, `-N` pads a short row to 20 columns and a long
+  row to the window width (measured: 1-char→20, 10-char→20, 40-char→80,
+  63-char→80) — not a uniform 80. The §3.11 cell gate does not depend on it:
+  `normalize` pads every row to the pinned width on both sides, and parity
+  held on **both** 3.5a (bare shell) and 3.7b (devShell). Evidence:
+  `crates/daemon/tests/parity.rs` (the 3.5a quirk note) and the gate runs.
 
 ## Phase 1 — protocol (DONE 2026-09-28)
 
@@ -348,35 +379,69 @@ links `vt-sys` only for the plain `Cell`/`CellStyle` types it consumes):
   `-N` semantics — every cell to the right edge), `\n`-joined. `FullWidthRow`
   pads a short row to `width` with blank cells.
 
-The §3.11 parity harness (byte-diff vs a scratch tmux `capture-pane -e -p -N`)
-lands next; it is the gate for this format. Gate: `cargo test -p ldmux-daemon`
-→ 99 pass (was 88). New code clippy-clean.
+Gate: `cargo test -p ldmux-daemon` → 99 pass (was 88). New code clippy-clean.
 
-**§3.11 parity harness — OPEN DESIGN QUESTION (2026-09-28):** the plan
-§3.11 says "same input bytes → (a) real tmux `capture-pane -p -e -N` and (b)
-our keeper render + `State`. Byte-diff." But there is a seam the plan does not
-address: a tmux pane runs a **shell**, so the pane's grid is the **shell's
-output** (the echoed command + the `printf` result + the prompt), not the raw
-input bytes. Our engine, fed the raw input bytes directly, has a grid that is
-just the input bytes. So a naive byte-diff of `(a) vs (b)` diverges on the
-shell's prompt/echo, not on our format.
+**§3.11 parity harness (RESOLVED + BUILT, 2026-09-28, committed):** the open
+design question (a tmux pane runs a *shell*, so the pane's grid is the
+shell's echo+prompt, not the raw input bytes) is resolved by **option 1**:
+the pane runs `clear; cat <corpus-file>; exec sleep 9999` — `clear` erases
+the echoed command text, `cat` emits the corpus as the pane's *output* (so
+the **emulator** parses it, not the shell), and `exec sleep` suppresses the
+prompt — so the pane's grid is *just* the corpus, the same scope as our
+engine fed the same bytes directly.
 
-The resolution the harness must pick (decide before building it):
-1. **Feed the input as the pane's *output*, not its input** — run the pane on
-   a program that *emits* the corpus bytes (e.g. a `printf` whose *stdout* is
-   the corpus, with the shell's echo/prompt suppressed: `stty -echo`, a
-   dedicated session that runs the emitter, not a login shell). Then tmux's
-   grid is the corpus bytes, and the byte-diff is clean.
-2. **Diff on the corpus rows only** — locate the corpus rows in both outputs
-   (they are a contiguous block) and byte-diff just those rows, ignoring the
-   shell's prompt/echo around them.
-3. **Accept the shell's output as the shared input** — feed the *same*
-   shell command to both; tmux's grid and our engine's grid both become
-   "prompt + echoed command + printf output", and the diff is on the
-   format, not the content. (We'd run the emitter in our engine too.)
+The gate is **on the cells, not the SGR bytes** (user-approved 2026-09-28;
+plan §3.11(3): "the cells are the source of truth; the format is ours"). The
+first run of a byte-diff harness surfaced a real divergence — ours emits a
+reset-then-re-issue (\x1b[0;1m, \x1b[0m), tmux emits a transition
+(\x1b[1m, \x1b[39m) — and the decision above settles it: that spelling
+difference is *our format* (valid SGR, pinned by round-trip), not a defect;
+the *engine* is what the gate compares. The harness:
 
-Option 1 is cleanest (the pane's grid *is* the corpus). The harness is **not
-built yet** — this is the next concrete step, and it needs a decision (I lean
-option 1). The renderer + SGR encoder above are in place and unit-tested;
-the harness is what will byte-diff them against a scratch tmux
-`capture-pane -e -p -N` and settle the format.
+- `crates/daemon/tests/parity.rs` —
+  - `parity_corpus_cells_match_tmux`: same input bytes → (a) a scratch tmux
+    pane's grid, decoded from `capture-pane -p -e -N`, and (b) our engine's
+    cells (`RenderState` walk). Compared cell by cell, with
+    `normalize` (pad to 80; a `" "+BLANK` cell folds to empty — a written
+    space and a never-written position are indistinguishable in a real
+    grid). A divergence is an R1 defect (the engines parsed the same bytes
+    differently).
+  - `round_trip_render_then_parse_is_identity`: `parse(render(cells)) ==
+    cells` on a synthetic row (plain/bold/underline/256/24-bit) — our SGR
+    spelling is faithful to the cells.
+- `crates/daemon/tests/sgrep/mod.rs` — the test-only SGR→cells decoder for
+  the tmux side (one char = one column; `38;5;n` / `38;2;r;g;b` / 39 / 49 /
+  the attribute table; panics on a non-SGR escape — the corpus emits none).
+  Wide/emoji cells are deferred with the corpus (single-width only so far).
+
+**Result: zero divergences** on the minimal corpus (bold B, underline U,
+256-colour C, 24-bit D, newline) — engine cells == tmux cells, verified on
+**both** tmux 3.5a (bare shell) and 3.7b (devShell). The plan's full corpus
+(all attributes, wide/emoji, wrap, OSC 8, scroll) extends `CORPUS`
+deliberately — the golden changes with it. The `State` half of §3.11
+(`display-message` fields) is a separate next step (the state mapping is
+not built yet). Gate: `cargo test --workspace` (inside `nix develop`) →
+**159 passed** (attach 2, daemon 99, parity 6, keeper 4, protocol 40,
+vt-sys 8); TS **347/347** + typecheck. New code clippy-clean (the
+pre-existing daemon-lib warnings are unchanged, out of scope).
+
+**Also fixed while the gate ran (my own code, recorded so it is not lost):**
+- The vt-sys raw-FFI test had a **dead assertion block**: it selected cell
+  2 (absent — the input is `A\x1b[31mB`, so the red cell is **cell 1**) and
+  read its 72 style bytes into a variable it never used — the "red cell"
+  claim was unverified, and `select(2)` on an empty column returned
+  SUCCESS (so the test passed while proving nothing about colour). Now it
+  selects cell 1 and asserts tag PALETTE=1, index 1; the tag0 assert also
+  dropped a redundant disjunct (the "no colour" sentinel is 0xfffffffe, not
+  0 — "neither 1 nor 2" is the contract). Removed two redundant
+  `buf as *mut u8` dealloc casts in the same test.
+- `zbar_on_path` (QR tests) — see the Findings log: the guard was written
+  for a shell-exec model; our `exec::run` returns `code: -1` on a missing
+  binary, so a bare-shell run failed at `assert_eq!(res.code, 0)` with no
+  message. Guard is now `res.code != -1` → clear "not on PATH" message.
+
+**Next (Phase 4, unblocked):** the **keeper emulator integration** — wire a
+per-session `ghostty_vt` into the keeper (create via FFI, feed master bytes
+via `GhosttyVtInputWrite`, render via `RenderState` + `sgr` + `snapshot`),
+then scrollback paging (`scroll_viewport` / grid access) and the
+`display-message` state fields.
