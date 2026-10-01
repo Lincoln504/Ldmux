@@ -620,8 +620,29 @@ reaper; a natural shell exit is reaped by the raw `waitpid` in `reap()` and
 reported `dead`. The `#[ignore]`d test proves it alone; the full keeper suite
 passes.
 
-**Next (Phase 4):** the `State`/`List` report carries the same fields as the
-`Snapshot` answer (the daemon reads liveness without a render) — the
-`State` message gains `cursor_x/y`, the mode flags, `alternate_on`,
-`history_size`, `foreground`, `cwd` — so the daemon can report a pane's
-state without paying for a render. Then Phase 5 (the daemon) is unblocked.
+**Milestone: the `State`/`List` liveness report carries the pane's state
+(DONE — §3.4 complete).** The `State` message (the answer to a `Read`/`State`
+and each `List` entry) now carries the display-message fields —
+`cursor_x/y`, `alternate_on`, `pane_in_mode`, `mouse`, `mouse_sgr`,
+`app_cursor`, `bracketed_paste`, `history_size`, `foreground`, `cwd` — the
+same fields a `Snapshot` answer carries, so the daemon reads liveness
+without paying for a render. The emulator gained `EmuMsg::StateQuery` +
+`StateOutcome` (the state fields, no render — reuses the same
+`cursor_x/y`/`mode`/`alternate_on`/`mouse_tracking`/`scrollback_rows` reads
+the `Snapshot` answer uses). The keeper's `state_of` is now async: it reads
+the state from the emulator (a `StateQuery` oneshot), adds `cols`/`rows`/
+`dead` (from the `Session`) and the `/proc` fields (`foreground`/
+`cwd` — empty for a dead pane). `Read`/`Spawn`/`Resize` use it; `List` builds
+one `State` per session (each a `state_of`); `Kill` constructs a dead `State`
+with default state fields (the session is removed, so the state is not read
+from a gone emulator). A new keeper test (`the_state_query_carries_the_pane_state`)
+drives a fresh pane and asserts the `Read`→`State` carries the state (geometry,
+liveness, modes, cursor in-bounds, `history_size`, `foreground`, `cwd`).
+- Gate: `cargo test --workspace` (inside `nix develop`) → **169 passed** /
+  1 ignored (attach 2, daemon 88, parity 6, keeper 10, protocol 41,
+  vt-sys 11+8+3); TS **347/347** + typecheck. New code clippy-clean.
+
+**Phase 4 (§3.4 the emulator) is COMPLETE.** The per-session emulator, the
+`Snapshot { history_lines }` capture, the state fields, the reaper fix, and
+the `State`/`List` liveness report are all wired and gated. The §3.11
+cell-parity gate was met earlier. Phase 5 (the daemon) is unblocked.
