@@ -14,3 +14,9 @@ tokio = { version = "1", features = ["process", "io-util", "time", "rt", "macros
 rand = { version = "0.9", features = ["std"] }
 nix = { version = "0.29", features = ["process", "signal"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# The §3.11 parity harness (tests/parity.rs) drives the engine directly, so the
+# crate under test's engine dep is also a dev-dep (tests/ is a separate crate
+# that sees the crate under test + its dev-deps, not its plain deps).
+ldmux-vt-sys = { path = "../vt-sys" }

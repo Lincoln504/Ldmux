@@ -213,7 +213,7 @@ mod tests {
     fn decode_rejects_an_oversized_length_field_instead_of_allocating() {
         // A hostile/corrupt header must not make the decoder trust the length.
         let mut header = [0u8; HEADER_SIZE];
-        header[4..8].copy_from_slice(&((MAX_FRAME_PAYLOAD + 1) as u32).to_be_bytes());
+        header[4..8].copy_from_slice(&(MAX_FRAME_PAYLOAD + 1).to_be_bytes());
         assert!(decode_frames(&header).is_err());
     }
 

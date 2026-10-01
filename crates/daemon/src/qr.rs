@@ -639,8 +639,15 @@ mod tests {
         s
     }
 
+    /// Whether `zbarimg` actually ran (so the result below is a decode
+    /// verdict, not a missing-binary artefact).
+    ///
+    /// `exec::run` spawns directly (no shell) and returns `code: -1` when the
+    /// binary is missing (spawn fails) or the command times out; either way
+    /// `zbarimg` did not run, so treat it as absent. A real exit code (0 on
+    /// success, non-zero on a decode failure) means it was present.
     fn zbar_on_path(res: &crate::exec::ExecResult) -> bool {
-        res.code != 127 && !res.err.contains("ENOENT") && !res.err.contains("not found")
+        res.code != -1
     }
 
     #[tokio::test]

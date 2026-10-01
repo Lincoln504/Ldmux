@@ -121,7 +121,7 @@ fn render_state_walks_rows_and_reads_cells() {
             ffi::SUCCESS
         );
         let b = unsafe { std::slice::from_raw_parts(buf as *const u8, 72) }.to_vec();
-        unsafe { std::alloc::dealloc(buf as *mut u8, layout) };
+        unsafe { std::alloc::dealloc(buf, layout) };
         b
     };
     let mut buf = [0u8; 64];
@@ -135,21 +135,27 @@ fn render_state_walks_rows_and_reads_cells() {
     // explicit colour gets a sentinel (neither PALETTE=1 nor RGB=2); the
     // `color_from_raw` maps anything-but-1/2 to `None`.
     let tag0 = u32::from_le_bytes([style0[8], style0[9], style0[10], style0[11]]);
-    assert!((tag0 != 1 && tag0 != 2) || tag0 == 0, "col 0 has no explicit fg color");
+    // Neither PALETTE (1) nor RGB (2): no explicit colour. (A "no colour"
+    // cell carries a sentinel tag, e.g. 0xfffffffe — anything-but-1/2.)
+    assert!(tag0 != 1 && tag0 != 2, "col 0 has no explicit fg color (tag {tag0:#x})");
 
-    // The SGR is after "AB", so cell 2 ("C") is the red one (PALETTE, index 1);
-    // cell 1 ("B") has no explicit colour.
-    assert_eq!(unsafe { ffi::ghostty_render_state_row_cells_select(cells, 2) }, ffi::SUCCESS);
-    let style2 = {
+    // The SGR is after "A", so cell 1 ("B") is the red one (PALETTE, index 1).
+    assert_eq!(unsafe { ffi::ghostty_render_state_row_cells_select(cells, 1) }, ffi::SUCCESS);
+    let style1 = {
         let buf = unsafe { std::alloc::alloc(layout) };
         assert_eq!(
             unsafe { ffi::ghostty_render_state_row_cells_get(cells, ffi::ROW_CELLS_DATA_STYLE, buf as *mut c_void) },
             ffi::SUCCESS
         );
         let b = unsafe { std::slice::from_raw_parts(buf as *const u8, 72) }.to_vec();
-        unsafe { std::alloc::dealloc(buf as *mut u8, layout) };
+        unsafe { std::alloc::dealloc(buf, layout) };
         b
     };
+    // fg_color is at offset 8 (16 bytes: tag @8, value @16).
+    let tag1 = u32::from_le_bytes([style1[8], style1[9], style1[10], style1[11]]);
+    let val1 = u32::from_le_bytes([style1[16], style1[17], style1[18], style1[19]]);
+    assert_eq!(tag1, 1, "cell 1 fg is PALETTE");
+    assert_eq!(val1, 1, "cell 1 fg palette index is 1");
 
     // Free.
     unsafe {
