@@ -58,6 +58,7 @@ pub const DATA_TITLE: c_int = 12;
 pub const DATA_PWD: c_int = 13;
 pub const DATA_TOTAL_ROWS: c_int = 14;
 pub const DATA_SCROLLBACK_ROWS: c_int = 15;
+pub const DATA_MODE: c_int = 37;
 pub const DATA_WIDTH_PX: c_int = 16;
 pub const DATA_HEIGHT_PX: c_int = 17;
 pub const DATA_VIEWPORT_ACTIVE: c_int = 32;
@@ -142,6 +143,28 @@ unsafe extern "C" {
         terminal: GhosttyTerminal,
         behavior: GhosttyTerminalScrollViewport,
     );
+}
+
+// ── terminal modes + active screen (terminal.h / modes.h) ────────────────
+
+/// `GhosttyTerminalScreen` (the `DATA_ACTIVE_SCREEN` out type):
+/// which screen the terminal is on.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GhosttyTerminalScreen {
+    Primary = 0,
+    Alternate = 1,
+}
+
+/// `GhosttyTerminalModeConfig` — the in/out struct of `DATA_MODE`. `mode`
+/// is the mode identifier to configure or query; `value` is the value to
+/// set, or the current value on a query. (A `u16` + a `bool`: 4-byte layout,
+/// matching C — no padding needed.)
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct GhosttyTerminalModeConfig {
+    pub mode: u16,
+    pub value: bool,
 }
 
 // ── scroll_viewport tagged union (terminal.h) ─────────────────────────────

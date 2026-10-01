@@ -10,4 +10,7 @@ mod safe;
 pub mod snapshot;
 pub mod sgr;
 
-pub use safe::{Cell, CellStyle, FfiError, RenderState, ScrollViewport, StyleColor, Terminal};
+pub use safe::{
+    Cell, CellStyle, FfiError, MODE_APP_CURSOR, MODE_BRACKETED_PASTE, MODE_SGR_MOUSE,
+    RenderState, ScrollViewport, StyleColor, Terminal,
+};

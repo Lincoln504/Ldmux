@@ -31,7 +31,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use ldmux_vt_sys::{Cell, RenderState, ScrollViewport, Terminal};
+use ldmux_vt_sys::{
+    Cell, RenderState, ScrollViewport, Terminal, MODE_APP_CURSOR, MODE_BRACKETED_PASTE,
+    MODE_SGR_MOUSE,
+};
 use nix::libc as libc;
 use tokio::sync::oneshot;
 
@@ -60,6 +63,18 @@ pub struct Outcome {
     /// The number of history lines actually captured (0 = live only).
     pub history_lines: u64,
     pub text: String,
+    // The pane's state, read from the `Terminal` the thread owns (plan §3.4
+    // — the `display-message` fields, direct from ghostty-vt). The `/proc`
+    // fields (`foreground`, `cwd`) and `dead` are added by the keeper, which
+    // owns the pid.
+    pub cursor_x: u16,
+    pub cursor_y: u16,
+    pub alternate_on: bool,
+    pub mouse: bool,
+    pub mouse_sgr: bool,
+    pub app_cursor: bool,
+    pub bracketed_paste: bool,
+    pub history_size: u32,
 }
 
 /// Start the session's emulator thread.
@@ -181,11 +196,20 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState) {
             //    order the client replays into its own scrollback).
             let all: Vec<&[Cell]> = hist.iter().chain(live.iter()).map(|r| r.as_slice()).collect();
             let text = snapshot::render(&all, rs.cols() as usize);
+            // The state reflects the live screen (we're back at `Bottom`).
             let _ = reply.send(Outcome {
                 cols: rs.cols(),
                 rows: rs.rows(),
                 history_lines: n as u64,
                 text,
+                cursor_x: term.cursor_x(),
+                cursor_y: term.cursor_y(),
+                alternate_on: term.alternate_on(),
+                mouse: term.mouse_tracking(),
+                mouse_sgr: term.mode(MODE_SGR_MOUSE),
+                app_cursor: term.mode(MODE_APP_CURSOR),
+                bracketed_paste: term.mode(MODE_BRACKETED_PASTE),
+                history_size: term.scrollback_rows() as u32,
             });
         }
         EmuMsg::Resize { cols, rows } => {

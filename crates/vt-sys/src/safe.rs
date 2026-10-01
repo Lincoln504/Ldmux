@@ -20,6 +20,19 @@ impl std::fmt::Display for FfiError {
 
 impl std::error::Error for FfiError {}
 
+/// The DEC private mode identifiers we query (plan §3.4 state fields). A DEC
+/// mode packs to its bare value in `GhosttyMode` (bit 15 = 0), so these are
+/// the numbers straight from `modes.h`.
+///
+/// `MODE_APP_CURSOR` is DECCKM (mode 1), *not* the plan's "DECTCEM" (mode 25):
+/// the plan's label was wrong, and the empirical gate caught it — mode 25 is
+/// "cursor *visible*" (on by default, stays on), which is not tmux's
+/// `keypad_cursor_flag` (application cursor-key mode, off by default, tracks
+/// `?1h`/`?1l`). Mode 1 is the faithful source.
+pub const MODE_APP_CURSOR: u16 = 1; // `appCursor` (DECCKM, application cursor keys)
+pub const MODE_SGR_MOUSE: u16 = 1006; // `mouseSgr`
+pub const MODE_BRACKETED_PASTE: u16 = 2004; // `bracketedPaste`
+
 /// One terminal instance: the per-session emulator handle.
 ///
 /// Owns the C `GhosttyTerminal`; freed on drop. `!Send`/`!Sync` (it wraps a raw
@@ -139,6 +152,35 @@ impl Terminal {
     /// Whether any mouse-tracking mode is active.
     pub fn mouse_tracking(&self) -> bool {
         self.get_bool(ffi::DATA_MOUSE_TRACKING)
+    }
+
+    /// The current value of a terminal mode, queried through `DATA_MODE`.
+    /// `mode` is the packed mode identifier (a bare value for DEC private
+    /// modes: 25 = cursor visible, 1006 = SGR mouse, 2004 = bracketed
+    /// paste). An unknown mode leaves the value false.
+    pub fn mode(&self, mode: u16) -> bool {
+        let mut cfg = ffi::GhosttyTerminalModeConfig { mode, value: false };
+        let r = unsafe {
+            ffi::ghostty_terminal_get(self.ptr, ffi::DATA_MODE, &mut cfg as *mut _ as *mut c_void)
+        };
+        // A valid DEC mode queries clean; an unknown one reports INVALID_VALUE
+        // and leaves the value false (which is the answer we want either way).
+        debug_assert!(r == ffi::SUCCESS || r == ffi::INVALID_VALUE);
+        cfg.value
+    }
+
+    /// Whether the terminal is on the alternate screen (DEC 1047/47).
+    pub fn alternate_on(&self) -> bool {
+        let mut screen = ffi::GhosttyTerminalScreen::Primary;
+        let r = unsafe {
+            ffi::ghostty_terminal_get(
+                self.ptr,
+                ffi::DATA_ACTIVE_SCREEN,
+                &mut screen as *mut _ as *mut c_void,
+            )
+        };
+        debug_assert_eq!(r, ffi::SUCCESS);
+        screen == ffi::GhosttyTerminalScreen::Alternate
     }
 
     /// Whether the viewport is pinned to the active area (vs scrolled into

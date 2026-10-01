@@ -54,6 +54,20 @@ pub struct Keeper {
     shell: Vec<String>,
 }
 
+/// The pane's foreground command name (`/proc/<pid>/comm`), e.g. `dash`,
+/// `vim`. Empty if the process is gone. (Read only for a *live* pane — a
+/// reaped pid may be recycled, so a dead pane reports empty, not a read of a
+/// possibly-different process.)
+fn proc_comm(pid: i32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// The pane's working directory (`/proc/<pid>/cwd`, a symlink). Empty if the
+/// process is gone. Same liveness gating as [`proc_comm`].
+fn proc_cwd(pid: i32) -> String {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 impl Keeper {
     /// A keeper that spawns `shell` (argv) per session.
     pub fn new(shell: Vec<String>) -> Self {
@@ -191,11 +205,16 @@ impl Keeper {
             // thread and await its reply (the cells are the source of truth;
             // the format is ours — plan §3.11(3)).
             km::KeeperMessage::Snapshot(s) => {
-                let tx = {
+                let (tx, pid, dead) = {
                     let g = self.sessions.lock().unwrap();
+                    // A snapshot is valid for a dead pane too: the emulator
+                    // thread keeps running after the master EOF (it services
+                    // messages only) and the grid keeps its last content. The
+                    // `/proc` fields are reported empty for a dead pane — a
+                    // reaped pid may be recycled, so we don't read it.
                     match g.get(&s.session_id) {
-                        Some(sess) if !sess.dead => sess.em_tx.clone(),
-                        _ => return Err(format!("no live session: {}", s.session_id)),
+                        Some(sess) => (sess.em_tx.clone(), sess.pid, sess.dead),
+                        _ => return Err(format!("no such session: {}", s.session_id)),
                     }
                 };
                 let (rtx, rrx) = oneshot::channel();
@@ -208,12 +227,31 @@ impl Keeper {
                     Ok(o) => o,
                     Err(_) => return Err("the emulator is gone".into()),
                 };
+                let (foreground, cwd) = if !dead {
+                    (proc_comm(pid), proc_cwd(pid))
+                } else {
+                    (String::new(), String::new())
+                };
                 Ok(KeeperMessage::SnapshotResult(SnapshotResult {
                     session_id: s.session_id.clone(),
                     cols: o.cols as u64,
                     rows: o.rows as u64,
                     history_lines: o.history_lines,
                     text: o.text,
+                    cursor_x: o.cursor_x as u64,
+                    cursor_y: o.cursor_y as u64,
+                    alternate_on: o.alternate_on,
+                    // No tmux "pane in a mode" concept in ghostty-vt, and no
+                    // client reads the field: report false (documented).
+                    pane_in_mode: false,
+                    mouse: o.mouse,
+                    mouse_sgr: o.mouse_sgr,
+                    app_cursor: o.app_cursor,
+                    bracketed_paste: o.bracketed_paste,
+                    history_size: o.history_size as u64,
+                    dead,
+                    foreground,
+                    cwd,
                 }))
             }
             km::KeeperMessage::List(_l) => {

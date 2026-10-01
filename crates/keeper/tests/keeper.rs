@@ -534,6 +534,63 @@ async fn the_emulator_captures_history_above_the_screen() {
     let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
 }
 
+/// A `Snapshot` reports the pane's state (plan §3.4 — the `display-message`
+/// fields, read direct from ghostty-vt, not a parsed format string): the
+/// cursor, the terminal modes (off in a fresh shell), the alternate screen,
+/// `dead`, and the `/proc` fields (foreground command + cwd).
+#[tokio::test]
+async fn the_emulator_reports_the_pane_state() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s5".to_string();
+    let s = socket.to_string_lossy();
+
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(st) => assert!(!st.dead),
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    let mut got = None;
+    for _ in 0..200 {
+        if let Ok(KeeperMessage::SnapshotResult(sr)) = keeper_call(
+            &s,
+            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            got = Some(sr);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let Some(sr) = got else { panic!("never got a snapshot") };
+
+    // Geometry + liveness.
+    assert_eq!((sr.cols, sr.rows), (80, 24));
+    assert!(!sr.dead, "a fresh pane is alive");
+    // A fresh shell is on the primary screen, not in a mode, and has not
+    // negotiated mouse / bracketed paste.
+    assert!(!sr.alternate_on);
+    assert!(!sr.pane_in_mode);
+    assert!(!sr.mouse && !sr.mouse_sgr && !sr.app_cursor && !sr.bracketed_paste);
+    // The cursor is inside the grid; nothing has scrolled yet.
+    assert!(sr.cursor_x < 80 && sr.cursor_y < 24);
+    assert_eq!(sr.history_size, 0);
+    // The `/proc` fields: the shell's command name and the session's cwd.
+    assert!(!sr.foreground.is_empty(), "the pane's foreground is the shell: {}", sr.foreground);
+    assert!(!sr.cwd.is_empty(), "the pane has a cwd");
+
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+}
+
 /// A request for a session that was never spawned is an error answer.
 #[tokio::test]
 async fn an_unknown_session_is_an_error_answer() {

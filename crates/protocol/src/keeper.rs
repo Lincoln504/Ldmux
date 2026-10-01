@@ -148,6 +148,29 @@ pub struct SnapshotResult {
     /// The number of history lines actually captured (0 = live screen only).
     pub history_lines: u64,
     pub text: String,
+    // The pane's state (plan §3.4: the `display-message` fields, read direct
+    // from ghostty-vt — not a parsed format string). See each field's source.
+    pub cursor_x: u64,
+    pub cursor_y: u64,
+    /// On the alternate screen (DEC 1047) — no scrollback, so `history_lines`
+    /// is meaningless here and the client must not request it.
+    pub alternate_on: bool,
+    pub pane_in_mode: bool,
+    /// Any mouse-tracking mode active (`mouse_any_flag`).
+    pub mouse: bool,
+    /// SGR (1006) mouse reporting negotiated — the only mouse encoding we
+    /// synthesize for.
+    pub mouse_sgr: bool,
+    /// Application cursor-key mode (DEC 25, `keypad_cursor_flag`).
+    pub app_cursor: bool,
+    /// Bracketed paste mode (DEC 2004).
+    pub bracketed_paste: bool,
+    pub history_size: u64,
+    pub dead: bool,
+    /// The pane's foreground command name (`/proc/<pid>/comm`), e.g. `dash`.
+    pub foreground: String,
+    /// The pane's working directory (`/proc/<pid>/cwd`).
+    pub cwd: String,
 }
 
 /// Keeper → daemon: report state for a session (the answer to a Read/State).
@@ -253,10 +276,25 @@ mod tests {
                 rows: 24,
                 history_lines: 0,
                 text: "\u{1b}[0;1mB".into(),
+                cursor_x: 3,
+                cursor_y: 7,
+                alternate_on: false,
+                pane_in_mode: false,
+                mouse: false,
+                mouse_sgr: false,
+                app_cursor: false,
+                bracketed_paste: false,
+                history_size: 0,
+                dead: false,
+                foreground: "dash".into(),
+                cwd: "/root".into(),
             }))
             .unwrap();
         assert_eq!(v["type"], "snapshotresult");
         assert_eq!(v["sessionId"], "s1");
+        assert_eq!(v["cursorX"], 3);
+        assert_eq!(v["mouseSgr"], false);
+        assert_eq!(v["foreground"], "dash");
         let back: KeeperMessage =
             serde_json::from_value(v).expect("snapshotresult round-trips");
         assert!(matches!(back, KeeperMessage::SnapshotResult(_)));
