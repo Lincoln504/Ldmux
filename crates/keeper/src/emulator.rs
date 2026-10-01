@@ -49,6 +49,25 @@ pub(crate) enum EmuMsg {
     /// The pane's size changed. The handler has already done `TIOCSWINSZ`;
     /// the emulator must resize its grid.
     Resize { cols: u16, rows: u16 },
+    /// Read the pane's state (the display-message fields), no render — the
+    /// `State`/`List` liveness report. The `cols`/`rows`/`dead` and the
+    /// `/proc` fields are added by the keeper (which owns the pid).
+    StateQuery { reply: oneshot::Sender<StateOutcome> },
+}
+
+/// The pane's state, read by a `StateQuery` (no render). The keeper adds
+/// `cols`/`rows`/`dead` (from the `Session`) and the `/proc` fields
+/// (`foreground`, `cwd`; empty for a dead pane).
+#[derive(Debug, Clone)]
+pub struct StateOutcome {
+    pub cursor_x: u16,
+    pub cursor_y: u16,
+    pub alternate_on: bool,
+    pub mouse: bool,
+    pub mouse_sgr: bool,
+    pub app_cursor: bool,
+    pub bracketed_paste: bool,
+    pub history_size: u32,
 }
 
 /// The result of a render: the grid's geometry + the rendered text (one SGR
@@ -202,6 +221,18 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState) {
                 rows: rs.rows(),
                 history_lines: n as u64,
                 text,
+                cursor_x: term.cursor_x(),
+                cursor_y: term.cursor_y(),
+                alternate_on: term.alternate_on(),
+                mouse: term.mouse_tracking(),
+                mouse_sgr: term.mode(MODE_SGR_MOUSE),
+                app_cursor: term.mode(MODE_APP_CURSOR),
+                bracketed_paste: term.mode(MODE_BRACKETED_PASTE),
+                history_size: term.scrollback_rows() as u32,
+            });
+        }
+        EmuMsg::StateQuery { reply } => {
+            let _ = reply.send(StateOutcome {
                 cursor_x: term.cursor_x(),
                 cursor_y: term.cursor_y(),
                 alternate_on: term.alternate_on(),

@@ -173,7 +173,10 @@ pub struct SnapshotResult {
     pub cwd: String,
 }
 
-/// Keeper → daemon: report state for a session (the answer to a Read/State).
+/// Keeper → daemon: report state for a session (the answer to a Read/State
+/// and each entry of a List). It carries the pane's state (the display-message
+/// fields, read direct from ghostty-vt) so the daemon can read liveness without
+/// paying for a `Snapshot` render.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
@@ -181,6 +184,29 @@ pub struct State {
     pub cols: u64,
     pub rows: u64,
     pub dead: bool,
+    /// The cursor column (0-based), from the emulator.
+    pub cursor_x: u64,
+    /// The cursor row (0-based), from the emulator.
+    pub cursor_y: u64,
+    /// The alternate screen is active (from `active_screen`).
+    pub alternate_on: bool,
+    /// No ghostty-vt source (the tmux "pane in a mode" concept); reported
+    /// `false` (documented choice; no client reads it).
+    pub pane_in_mode: bool,
+    /// The pane negotiated mouse reporting (from `mouse_tracking`).
+    pub mouse: bool,
+    /// The pane negotiated SGR mouse (DEC 1006).
+    pub mouse_sgr: bool,
+    /// Application cursor keys (DECCKM, DEC 1) — tmux `keypad_cursor_flag`.
+    pub app_cursor: bool,
+    /// Bracketed paste (DEC 2004) is on.
+    pub bracketed_paste: bool,
+    /// The scrollback rows (from `scrollback_rows`).
+    pub history_size: u64,
+    /// The foreground command (`/proc/<pid>/comm`); empty for a dead pane.
+    pub foreground: String,
+    /// The working directory (`/proc/<pid>/cwd`); empty for a dead pane.
+    pub cwd: String,
 }
 
 /// Daemon → keeper: list the keeper's sessions.

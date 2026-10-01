@@ -591,6 +591,64 @@ async fn the_emulator_reports_the_pane_state() {
     let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
 }
 
+/// The `State`/`List` liveness report carries the pane's state (the
+/// display-message fields, read from the emulator, no render) — the same
+/// fields a `Snapshot` answer carries, so the daemon reads liveness without
+/// paying for a render. A fresh pane: the state fields are the initial ones
+/// and the `/proc` fields name the shell + cwd.
+#[tokio::test]
+async fn the_state_query_carries_the_pane_state() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s7".to_string();
+    let s = socket.to_string_lossy();
+
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(st) => assert!(!st.dead),
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    // The liveness query (`Read` → `State`) carries the pane's state.
+    let mut st = None;
+    for _ in 0..200 {
+        if let Ok(KeeperMessage::State(x)) = keeper_call(
+            &s,
+            &KeeperMessage::Read(Read { session_id: id.clone() }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            st = Some(x);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let Some(st) = st else { panic!("never got a State") };
+
+    // Geometry + liveness.
+    assert_eq!((st.cols, st.rows), (80, 24));
+    assert!(!st.dead, "a fresh pane is alive");
+    // A fresh shell: primary screen, no mode, no negotiated mouse / paste.
+    assert!(!st.alternate_on);
+    assert!(!st.pane_in_mode);
+    assert!(!st.mouse && !st.mouse_sgr && !st.app_cursor && !st.bracketed_paste);
+    // The cursor is inside the grid; nothing has scrolled.
+    assert!(st.cursor_x < 80 && st.cursor_y < 24);
+    assert_eq!(st.history_size, 0);
+    // The `/proc` fields: the shell's command name and the session's cwd.
+    assert!(!st.foreground.is_empty(), "the pane's foreground is the shell: {}", st.foreground);
+    assert!(!st.cwd.is_empty(), "the pane has a cwd");
+
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+}
+
 /// A natural shell exit (the shell exited on its own, not a `Kill`) is
 /// reported `dead` by the raw `waitpid` in `reap()` — the keeper is the sole
 /// reaper (the raw `fork`/`exec` spawn, not `tokio::process::Command`, whose

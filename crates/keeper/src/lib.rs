@@ -94,12 +94,7 @@ impl Keeper {
                         .lock()
                         .unwrap()
                         .insert(s.session_id.clone(), sess);
-                    Ok(KeeperMessage::State(State {
-                        session_id: s.session_id.clone(),
-                        cols: s.cols,
-                        rows: s.rows,
-                        dead: false,
-                    }))
+                    self.state_of(&s.session_id).await
                 }
                 Err(e) => Err(e.to_string()),
             },
@@ -114,11 +109,25 @@ impl Keeper {
                 self.group_kill(pid);
                 self.reap();
                 self.sessions.lock().unwrap().remove(&k.session_id);
+                // The session is removed (the emulator thread exits), so the
+                // state fields are defaults (a dead pane's state is not read
+                // from a gone emulator); `dead` is the load-bearing field.
                 Ok(KeeperMessage::State(State {
                     session_id: k.session_id.clone(),
                     cols: 0,
                     rows: 0,
                     dead: true,
+                    cursor_x: 0,
+                    cursor_y: 0,
+                    alternate_on: false,
+                    pane_in_mode: false,
+                    mouse: false,
+                    mouse_sgr: false,
+                    app_cursor: false,
+                    bracketed_paste: false,
+                    history_size: 0,
+                    foreground: String::new(),
+                    cwd: String::new(),
                 }))
             }
             km::KeeperMessage::Write(w) => {
@@ -177,9 +186,9 @@ impl Keeper {
                         s.rows = r.rows as u16;
                     }
                 }
-                self.state_of(&r.session_id)
+                self.state_of(&r.session_id).await
             }
-            km::KeeperMessage::Read(rd) => self.state_of(&rd.session_id),
+            km::KeeperMessage::Read(rd) => self.state_of(&rd.session_id).await,
             km::KeeperMessage::Peek(p) => {
                 let g = self.sessions.lock().unwrap();
                 match g.get(&p.session_id) {
@@ -255,16 +264,18 @@ impl Keeper {
                 }))
             }
             km::KeeperMessage::List(_l) => {
-                let g = self.sessions.lock().unwrap();
-                let sessions: Vec<State> = g
-                    .values()
-                    .map(|s| State {
-                        session_id: s.id.clone(),
-                        cols: s.cols as u64,
-                        rows: s.rows as u64,
-                        dead: s.dead,
-                    })
-                    .collect();
+                // One `State` per session, read from each emulator (async).
+                // A session removed between listing and reading is skipped.
+                let ids: Vec<String> = {
+                    let g = self.sessions.lock().unwrap();
+                    g.values().map(|s| s.id.clone()).collect()
+                };
+                let mut sessions = Vec::new();
+                for id in ids {
+                    if let Ok(KeeperMessage::State(st)) = self.state_of(&id).await {
+                        sessions.push(st);
+                    }
+                }
                 Ok(KeeperMessage::ListResult(ListResult { sessions }))
             }
             km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
@@ -274,18 +285,56 @@ impl Keeper {
         }
     }
 
-    /// The `State` answer for a session (the attach/snapshot shape).
-    fn state_of(&self, id: &str) -> Result<KeeperMessage, String> {
-        let g = self.sessions.lock().unwrap();
-        match g.get(id) {
-            Some(s) => Ok(KeeperMessage::State(State {
-                session_id: s.id.clone(),
-                cols: s.cols as u64,
-                rows: s.rows as u64,
-                dead: s.dead,
-            })),
-            None => Err(format!("no such session: {id}")),
+    /// The `State` answer for a session (the attach/liveness shape). Reads the
+    /// pane's state from the emulator (no render) so the daemon gets the
+    /// display-message fields without a `Snapshot`; the keeper adds
+    /// `cols`/`rows`/`dead` (from the `Session`) and the `/proc` fields
+    /// (`foreground`, `cwd` — empty for a dead pane, a reaped pid may be
+    /// recycled).
+    async fn state_of(&self, id: &str) -> Result<KeeperMessage, String> {
+        // The em_tx + the Session fields, without holding the lock across the
+        // emulator round-trip.
+        let (em_tx, s_id, cols, rows, dead, pid) = {
+            let g = self.sessions.lock().unwrap();
+            match g.get(id) {
+                Some(s) => (s.em_tx.clone(), s.id.clone(), s.cols, s.rows, s.dead, s.pid),
+                None => return Err(format!("no such session: {id}")),
+            }
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if em_tx
+            .send(emulator::EmuMsg::StateQuery { reply: reply_tx })
+            .is_err()
+        {
+            // The emulator thread is gone (the session was removed).
+            return Err(format!("no such session: {id}"));
         }
+        let st = match reply_rx.await {
+            Ok(st) => st,
+            Err(_) => return Err(format!("no such session: {id}")),
+        };
+        let (foreground, cwd) = if !dead {
+            (proc_comm(pid), proc_cwd(pid))
+        } else {
+            (String::new(), String::new())
+        };
+        Ok(KeeperMessage::State(State {
+            session_id: s_id,
+            cols: cols as u64,
+            rows: rows as u64,
+            dead,
+            cursor_x: st.cursor_x as u64,
+            cursor_y: st.cursor_y as u64,
+            alternate_on: st.alternate_on,
+            pane_in_mode: false,
+            mouse: st.mouse,
+            mouse_sgr: st.mouse_sgr,
+            app_cursor: st.app_cursor,
+            bracketed_paste: st.bracketed_paste,
+            history_size: st.history_size as u64,
+            foreground,
+            cwd,
+        }))
     }
 
     /// Allocate a PTY, spawn the shell into it (own session, slave as 0/1/2),
