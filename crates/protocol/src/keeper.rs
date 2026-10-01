@@ -22,6 +22,7 @@ pub enum KeeperMessage {
     Peek(Peek),
     PeekResult(PeekResult),
     Snapshot(Snapshot),
+    SnapshotResult(SnapshotResult),
     State(State),
     List(List),
     ListResult(ListResult),
@@ -42,6 +43,7 @@ pub mod k {
     pub const PEEK: &str = "peek";
     pub const PEEK_RESULT: &str = "peekresult";
     pub const SNAPSHOT: &str = "snapshot";
+    pub const SNAPSHOT_RESULT: &str = "snapshotresult";
     pub const STATE: &str = "state";
     pub const LIST: &str = "list";
     pub const CHILD_INFO: &str = "childinfo";
@@ -128,6 +130,18 @@ pub struct Snapshot {
     /// Lines of history to include. `0`/absent = visible screen only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_lines: Option<u64>,
+}
+
+/// Keeper → daemon: the rendered snapshot (the answer to a `Snapshot`): the
+/// pane's geometry + the rendered screen (one SGR line per row, `\n`-joined —
+/// the keeper's format, `ldmux_vt_sys::snapshot::render`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotResult {
+    pub session_id: String,
+    pub cols: u64,
+    pub rows: u64,
+    pub text: String,
 }
 
 /// Keeper → daemon: report state for a session (the answer to a Read/State).
@@ -222,6 +236,23 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(v, serde_json::json!({"type":"kill","sessionId":"s1"}));
+    }
+
+    #[test]
+    fn snapshot_result_shape() {
+        let v: serde_json::Value =
+            serde_json::to_value(KeeperMessage::SnapshotResult(SnapshotResult {
+                session_id: "s1".into(),
+                cols: 80,
+                rows: 24,
+                text: "\u{1b}[0;1mB".into(),
+            }))
+            .unwrap();
+        assert_eq!(v["type"], "snapshotresult");
+        assert_eq!(v["sessionId"], "s1");
+        let back: KeeperMessage =
+            serde_json::from_value(v).expect("snapshotresult round-trips");
+        assert!(matches!(back, KeeperMessage::SnapshotResult(_)));
     }
 
     #[test]

@@ -3,8 +3,19 @@
 //! and a scratch PTY pair. This is the gate "keeper boots, serves List/Spawn".
 
 use ldmux_protocol::keeper::{
-    self as km, Kill, KeeperMessage, List, Read, Spawn,
+    self as km, Kill, KeeperMessage, List, Peek, Read, Spawn,
 };
+
+/// The corpus the §3.11 harness pins (the same four styled cells): bold B,
+/// underline U, 256-colour C, 24-bit D.
+const CORPUS: &[u8] = b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m\n";
+/// What `snapshot::render` produces for the corpus row (our format —
+/// plan §3.11(3): the cells are the source of truth, the format is ours).
+const CORPUS_LINE: &str = "\x1b[0;1mB\x1b[0;4mU\x1b[0;38;5;123mC\x1b[0;38;2;255;128;0mD\x1b[0m";
+/// The corpus as it appears in the byte stream: the body (no trailing
+/// `\n`), because the pty's output post-processing (ONLCR) turns the
+/// trailing `\n` into `\r\n` on the way out.
+const CORPUS_BODY: &[u8] = b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m";
 use ldmux_protocol::keeper_call::{keeper_call, DEFAULT_TIMEOUT_MS};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -219,6 +230,225 @@ async fn resize_reports_the_new_state() {
         KeeperMessage::State(st) => assert!(st.dead),
         other => panic!("expected State, got {other:?}"),
     }
+}
+
+/// One rendered snapshot (the answer to a `Snapshot`).
+async fn snapshot(socket: &str, id: &str) -> km::SnapshotResult {
+    match keeper_call(
+        socket,
+        &KeeperMessage::Snapshot(km::Snapshot {
+            session_id: id.to_string(),
+            history_lines: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap()
+    {
+        KeeperMessage::SnapshotResult(sr) => sr,
+        other => panic!("expected SnapshotResult, got {other:?}"),
+    }
+}
+
+/// The per-session emulator renders the pane: the corpus row appears in our
+/// format (plan §3.11(3): the cells are the source of truth; the format is
+/// ours — `snapshot::render`).
+#[tokio::test]
+async fn the_emulator_renders_the_pane_output() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s1".to_string();
+    let s = socket.to_string_lossy();
+
+    // Spawn 80x24.
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(st) => assert!(!st.dead),
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    // Emit the corpus through the pane: write the raw bytes to a file and
+    // `cat` it (cat never interprets escapes, so the pane gets the corpus
+    // byte-for-byte).
+    let corpus_file = std::env::temp_dir().join(format!("ldmux-keeper-corpus-{}.bin", std::process::id()));
+    std::fs::write(&corpus_file, CORPUS).unwrap();
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Write(km::Write {
+            session_id: id.clone(),
+            data: format!("cat {}\n", corpus_file.display()),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::Ack(_) => {}
+        other => panic!("expected Ack, got {other:?}"),
+    }
+
+    // The emulator renders the pane: one line is the corpus in our format
+    // (the prompt/echo occupy the leading lines; their count is not
+    // pinned, so look for the corpus line rather than a fixed index).
+    let mut got = None;
+    for _ in 0..200 {
+        let sr = snapshot(&s, &id).await;
+        if sr.text.lines().any(|l| l == CORPUS_LINE) {
+            got = Some(sr);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let Some(sr) = got else {
+        panic!("the emulator never rendered the corpus row")
+    };
+    assert_eq!((sr.cols, sr.rows), (80, 24), "the grid is the pane size");
+
+    // Kill the session (the shell exits; the reader thread's read returns EOF
+    // and the thread exits — without a kill the process hangs on exit).
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
+    let _ = std::fs::remove_file(&corpus_file);
+}
+
+/// The emulator's grid follows a `Resize` (FIFO: the resize is applied
+/// before a later `Snapshot`).
+#[tokio::test]
+async fn the_emulator_resizes() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s2".to_string();
+    let s = socket.to_string_lossy();
+
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(_) => {}
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    // Resize to 120x40.
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Resize(km::Resize {
+            session_id: id.clone(),
+            cols: 120,
+            rows: 40,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (120, 40), "resize took"),
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    // The emulator's grid follows (the geometry in a snapshot is re-read
+    // from the terminal after the resize).
+    let mut got = None;
+    for _ in 0..200 {
+        let sr = snapshot(&s, &id).await;
+        if (sr.cols, sr.rows) == (120, 40) {
+            got = Some(sr);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let Some(sr) = got else { panic!("the emulator never resized") };
+    assert_eq!((sr.cols, sr.rows), (120, 40), "the grid follows the resize");
+
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+}
+
+/// The attach's stream (the `out` buffer) and the emulator see the *same*
+/// bytes — both are fed by the one always-reads-the-master read.
+#[tokio::test]
+async fn the_buffer_and_the_emulator_see_the_same_bytes() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s3".to_string();
+    let s = socket.to_string_lossy();
+
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(_) => {}
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    let corpus_file = std::env::temp_dir().join(format!("ldmux-keeper-corpus-{}.bin", std::process::id()));
+    std::fs::write(&corpus_file, CORPUS).unwrap();
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Write(km::Write {
+            session_id: id.clone(),
+            data: format!("cat {}\n", corpus_file.display()),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
+
+    // `Peek` drains the buffer, so accumulate the drained bytes: the corpus
+    // must appear in the attach's stream (the same bytes the emulator
+    // rendered).
+    let mut acc: Vec<u8> = Vec::new();
+    let mut ok = false;
+    for _ in 0..200 {
+        if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
+            &s,
+            &KeeperMessage::Peek(Peek { session_id: id.clone() }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            acc.extend(pr.data);
+            if acc.windows(CORPUS_BODY.len()).any(|w| w == CORPUS_BODY) {
+                ok = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(ok, "the attach's stream must contain the bytes the pane emitted");
+
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = std::fs::remove_file(&corpus_file);
 }
 
 /// A request for a session that was never spawned is an error answer.

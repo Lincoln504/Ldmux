@@ -1,12 +1,20 @@
-//! The SGR encoder: a cell's `CellStyle` → the minimal SGR sequence that
-//! renders it, relative to a previous style.
+//! The SGR encoder: a cell's `CellStyle` → the SGR sequence that renders it,
+//! relative to a previous style.
 //!
 //! This is the pure half of the snapshot renderer (plan §3.4 / §3.11): the
 //! cells (the source of truth, from the ghostty-vt render state) are turned
-//! into tmux-`capture-pane -e`-identical bytes. The renderer
-//! (`snapshot.rs`) walks the cells row by row and asks this module for the
-//! escape to emit *between* a previous style and the current one, so the
-//! output is a run-length stream: a style run is emitted once, then its text.
+//! into the byte stream the client replays. The renderer (`snapshot.rs`)
+//! walks the cells row by row and asks this module for the escape to emit
+//! *between* a previous style and the current one, so the output is a
+//! run-length stream: a style run is emitted once, then its text.
+//!
+//! The spelling is ours (plan §3.11(3): "the cells are the source of truth;
+//! the format is ours"): a changed cell re-issues the whole style (a `0`,
+//! then every "on" attribute + colour). That is valid SGR, not
+//! byte-identical to tmux's transition spelling (a `\x1b[1m` where we emit
+//! a `\x1b[0;1m`); the fidelity to the cells is what the §3.11 round-trip
+//! test pins (`parse(render(cells)) == cells`, in
+//! `crates/daemon/tests/parity.rs`).
 //!
 //! The mapping is the standard SGR parameter table (the same codes tmux and
 //! every xterm-family terminal understand):
@@ -27,9 +35,11 @@
 //! | bg colour     | `48;5;n` / `48;2;r;g;b` | `49` |
 //!
 //! A `capture-pane -e` row always *starts* from the default style (a `0`), so
-//! the first transition is from a blank style.
+//! the first transition is from a blank style. (The table above is the
+//! reference SGR table; this encoder emits only `0` and the "on" codes —
+//! the re-issue — never the off codes.)
 
-use ldmux_vt_sys::{CellStyle, StyleColor};
+use crate::{CellStyle, StyleColor};
 
 /// The blank style: every attribute off, no explicit colour. This is the
 /// "before" style for the first cell of a row (a `capture-pane -e` row
@@ -49,7 +59,9 @@ pub const BLANK: CellStyle = CellStyle {
     underline_kind: 0,
 };
 
-/// Encode the transition from `from` to `to` as the minimal SGR sequence.
+/// Encode the transition from `from` to `to`: the empty sequence when the
+/// style did not change, otherwise a full re-issue of `to` (a `0`, then
+/// every "on" attribute + colour).
 ///
 /// The output is always terminated with `m` (or empty, if nothing changed).
 /// The attributes are emitted in a fixed order (reset, bold, faint, italic,
@@ -63,12 +75,14 @@ pub fn transition(from: &CellStyle, to: &CellStyle) -> String {
     // default-colour code (39/49).
     // New attributes: emit the "on" codes.
     //
-    // The simplest correct encoding: if the two styles differ, emit a full
-    // re-description of `to` (a `0` then every "on" attribute of `to`). This
-    // is what tmux does in practice for a cell whose style changed: it does
-    // not diff the bits, it re-issues the whole style. It is also the only
-    // encoding that is byte-stable across the corpus (a diff would depend on
-    // the order of the changes, which the corpus does not pin).
+    // A full re-issue when the styles differ (a `0` then every "on" attribute
+    // of `to`). This is *not* what tmux emits — tmux emits a transition
+    // (`\x1b[1m` where we emit `\x1b[0;1m`); the §3.11 run proved the two
+    // spellings diverge, and plan §3.11(3) settles it: the cells are the
+    // source of truth, the format is ours. The re-issue is what we keep: it
+    // is valid SGR, and it is the only encoding that is byte-stable across
+    // the corpus (a diff would depend on the order of the changes, which the
+    // corpus does not pin).
     if from != to {
         let mut sgr = vec!["0".to_string()];
         if to.bold { sgr.push("1".into()); }

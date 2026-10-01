@@ -137,6 +137,7 @@ name = "ldmux-keeper"
 version = "0.1.0"
 dependencies = [
  "ldmux-protocol",
+ "ldmux-vt-sys",
  "nix",
  "serde",
  "serde_json",

@@ -1,5 +1,5 @@
-//! The snapshot renderer: the ghostty-vt cells (the source of truth) →
-//! tmux-`capture-pane -e`-identical bytes (plan §3.4 / §3.11).
+//! The snapshot renderer: the ghostty-vt cells (the source of truth) → the
+//! snapshot byte stream (plan §3.4 / §3.11).
 //!
 //! This is the pure half of the snapshot path. The keeper holds the C render
 //! state, walks the cells (via `RenderState`), and hands the extracted cell
@@ -8,12 +8,11 @@
 //! The format (plan §3.4): one line per row, SGR-prefixed (a style run is
 //! emitted once, then its text), **full-width** (the `-N` semantics — every
 //! cell to the right edge with its attributes), `\n`-joined. The cells are
-//! the source of truth; the format is ours to write (the plan §3.4 last
-//! paragraph), and §3.11 is the byte-diff that makes it safe.
+//! the source of truth; the format is ours to write (plan §3.11(3)). The
+//! §3.11 cell-parity harness and the round-trip test
+//! (`crates/daemon/tests/parity.rs`) make it safe.
 
-use ldmux_vt_sys::Cell;
-
-use crate::sgr;
+use crate::{sgr, Cell, CellStyle};
 
 /// A row of cells, padded to the full width with blank cells (the `-N`
 /// semantics — every cell to the right edge). A cell past the row's real
@@ -72,7 +71,7 @@ impl CellView<'_> {
     }
 
     /// The cell's style (the blank style for a blank cell).
-    pub fn style(&self) -> ldmux_vt_sys::CellStyle {
+    pub fn style(&self) -> CellStyle {
         match self {
             CellView::Real(c) => c.style,
             CellView::Blank => sgr::BLANK,
@@ -85,9 +84,9 @@ impl CellView<'_> {
 /// (the `-N` semantics), `\n`-joined.
 ///
 /// `rows` is a slice of rows, each a slice of cells (the row's real content,
-/// padded to `width` by `FullWidthRow`). The output is byte-identical to
-/// tmux's `capture-pane -e -p -N` for the same cells (verified by the §3.11
-/// harness).
+/// padded to `width` by `FullWidthRow`). The output is *our* format for those
+/// cells (plan §3.11(3): the cells are the source of truth; the format is
+/// ours) — the §3.11 round-trip test pins the fidelity.
 pub fn render(rows: &[&[Cell]], width: usize) -> String {
     let mut out = String::new();
     for (i, row) in rows.iter().enumerate() {
@@ -112,7 +111,7 @@ pub fn render(rows: &[&[Cell]], width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ldmux_vt_sys::{CellStyle, StyleColor};
+    use crate::{CellStyle, StyleColor};
 
     fn cell(text: &str, mut f: impl FnMut(&mut CellStyle)) -> Cell {
         let mut c = Cell { text: text.into(), style: sgr::BLANK };

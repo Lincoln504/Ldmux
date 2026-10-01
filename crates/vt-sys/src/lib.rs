@@ -7,5 +7,7 @@
 
 pub mod ffi;
 mod safe;
+pub mod snapshot;
+pub mod sgr;
 
 pub use safe::{Cell, CellStyle, FfiError, RenderState, StyleColor, Terminal};

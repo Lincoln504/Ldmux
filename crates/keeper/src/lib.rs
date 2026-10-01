@@ -5,24 +5,29 @@
 //! `waitpid`, not the master EOF), **always reads the master** (so the kernel
 //! pty buffer never fills from a slow reader), and serves the keeper protocol
 //! over a Unix socket. It is **stateless beyond the kernel** — fds, pids, one
-//! ghostty-vt per session (the emulator is wired in phase 4) — and is
+//! ghostty-vt per session (the per-session emulator, [`emulator`]) — and is
 //! auto-spawned detached by the daemon (phase 5); here it is built to run in
 //! process (a library) and to run as a binary.
 //!
 //! New (no TS source of record): the keeper does not exist in the TS tree.
 //! The design of record is `docs/RUST-PORT-PLAN.md` §3.2/§3.3/§3.5.
 
+mod emulator;
+
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use ldmux_protocol::keeper::{self as km, Ack, KeeperMessage, ListResult, PeekResult, State};
+use ldmux_protocol::keeper::{self as km, Ack, KeeperMessage, ListResult, PeekResult, SnapshotResult, State};
+use tokio::sync::oneshot;
 
-/// One session: a PTY + a supervised shell (+, in phase 4, one ghostty-vt).
+/// One session: a PTY + a supervised shell + one ghostty-vt (the per-session
+/// emulator, [`emulator`]).
 ///
 /// The whole `Keeper` is held behind one `Mutex`, so a session is touched by
-/// one critical section at a time; the per-session emulator task (phase 4)
-/// will own its `ghostty_vt` handle.
+/// one critical section at a time; the emulator thread owns its
+/// `!Send` `Terminal`/`RenderState` — the `Mutex` here never guards them.
 pub struct Session {
     pub id: String,
     pub pid: i32,
@@ -33,9 +38,12 @@ pub struct Session {
     pub dead: bool,
     pub exit_code: i32,
     /// The master's bytes, buffered as they arrive (the "always reads the
-    /// master" stream). Phase 4 feeds this to the emulator; phase 5 streams it
-    /// to attaching clients.
+    /// master" stream). The emulator thread feeds the emulator from this
+    /// stream; phase 5 streams it to attaching clients.
     pub out: Arc<Mutex<VecDeque<u8>>>,
+    /// The emulator thread's message sender (dropped with the session — the
+    /// thread exits when it sees the disconnect).
+    em_tx: mpsc::Sender<emulator::EmuMsg>,
 }
 
 /// The keeper itself. `sessions` is the one shared map; every message handler
@@ -57,14 +65,16 @@ impl Keeper {
 
     /// Process one keeper message, returning the answer (or an [`km::Error`]).
     ///
-    /// Synchronous: the daemon (phase 5) calls it from its event loop. The
-    /// keeper→daemon *pushes* (`ChildExited`) are not request methods in this
-    /// skeleton — the daemon learns a death by `State`/`List`/`Read` reporting
-    /// `dead: true` (the push channel is wired in phase 5/6).
-    pub fn handle(&self, msg: &KeeperMessage) -> Result<KeeperMessage, String> {
+    /// Asynchronous: a `Snapshot` hands the render to the session's emulator
+    /// thread and awaits its reply. The daemon (phase 5) calls it from its
+    /// event loop. The keeper→daemon *pushes* (`ChildExited`) are not request
+    /// methods in this skeleton — the daemon learns a death by
+    /// `State`/`List`/`Read` reporting `dead: true` (the push channel is
+    /// wired in phase 5/6).
+    pub async fn handle(&self, msg: &KeeperMessage) -> Result<KeeperMessage, String> {
         self.reap(); // refresh liveness before answering anything
         match msg {
-            km::KeeperMessage::Spawn(s) => match self.spawn_session(s) {
+            km::KeeperMessage::Spawn(s) => match self.spawn_session(s).await {
                 Ok(sess) => {
                     self.sessions
                         .lock()
@@ -125,10 +135,11 @@ impl Keeper {
                 let m = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&r.session_id) {
-                        Some(s) if !s.dead => s.master.clone(),
+                        Some(s) if !s.dead => (s.master.clone(), s.em_tx.clone()),
                         _ => return Err(format!("no live session: {}", r.session_id)),
                     }
                 };
+                let (m, m_tx) = m;
                 let ws = libc::winsize {
                     ws_row: r.rows as u16,
                     ws_col: r.cols as u16,
@@ -139,6 +150,12 @@ impl Keeper {
                 if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } < 0 {
                     return Err(format!("TIOCSWINSZ failed on session {}", r.session_id));
                 }
+                // Tell the emulator to resize its grid (FIFO: it applies this
+                // before answering a later `Snapshot`).
+                let _ = m_tx.send(emulator::EmuMsg::Resize {
+                    cols: r.cols as u16,
+                    rows: r.rows as u16,
+                });
                 {
                     let mut g = self.sessions.lock().unwrap();
                     if let Some(s) = g.get_mut(&r.session_id) {
@@ -170,9 +187,31 @@ impl Keeper {
                     None => Err(format!("no such session: {}", p.session_id)),
                 }
             }
-            // Skeleton: a full snapshot render is phase 4. Report the state
-            // (the pane is up) so the shape is exercised.
-            km::KeeperMessage::Snapshot(s) => self.state_of(&s.session_id),
+            // The full snapshot: hand the render to the session's emulator
+            // thread and await its reply (the cells are the source of truth;
+            // the format is ours — plan §3.11(3)).
+            km::KeeperMessage::Snapshot(s) => {
+                let tx = {
+                    let g = self.sessions.lock().unwrap();
+                    match g.get(&s.session_id) {
+                        Some(sess) if !sess.dead => sess.em_tx.clone(),
+                        _ => return Err(format!("no live session: {}", s.session_id)),
+                    }
+                };
+                let (rtx, rrx) = oneshot::channel();
+                tx.send(emulator::EmuMsg::Snapshot(rtx))
+                    .map_err(|_| "the emulator is gone")?;
+                let o = match rrx.await {
+                    Ok(o) => o,
+                    Err(_) => return Err("the emulator is gone".into()),
+                };
+                Ok(KeeperMessage::SnapshotResult(SnapshotResult {
+                    session_id: s.session_id.clone(),
+                    cols: o.cols as u64,
+                    rows: o.rows as u64,
+                    text: o.text,
+                }))
+            }
             km::KeeperMessage::List(_l) => {
                 let g = self.sessions.lock().unwrap();
                 let sessions: Vec<State> = g
@@ -208,8 +247,10 @@ impl Keeper {
     }
 
     /// Allocate a PTY, spawn the shell into it (own session, slave as 0/1/2),
-    /// and start the always-reads-the-master reader.
-    fn spawn_session(&self, s: &km::Spawn) -> std::io::Result<Session> {
+    /// and start the per-session emulator (which always reads the master —
+    /// plan §3.3 — feeds the ghostty-vt, and services the snapshot/resize
+    /// messages).
+    async fn spawn_session(&self, s: &km::Spawn) -> std::io::Result<Session> {
         use nix::libc as libc;
         let winsize = libc::winsize {
             ws_row: s.rows as u16,
@@ -250,24 +291,26 @@ impl Keeper {
 
         let master = Arc::new(master);
         let out = Arc::new(Mutex::new(VecDeque::new()));
-        {
-            // The reader: always read the master into the buffer (plan §3.3 —
-            // the kernel pty buffer must never fill from a slow reader).
-            let m = master.clone();
-            let o = out.clone();
-            tokio::task::spawn_blocking(move || {
-                use nix::libc as libc;
-                let fd = m.as_raw_fd();
-                let mut buf = [0u8; 4096];
-                loop {
-                    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
-                    if n <= 0 {
-                        break;
-                    }
-                    let mut g = o.lock().unwrap();
-                    g.extend(&buf[..n as usize]);
-                }
-            });
+        let (em_tx, em_rx) = mpsc::channel();
+        let (boot_tx, boot_rx) = oneshot::channel();
+        // The emulator thread owns this session's ghostty-vt (the `!Send`
+        // values are created inside the thread, not moved in). It always
+        // reads the master (plan §3.3 — the kernel pty buffer must never
+        // fill from a slow reader) and feeds the emulator and the buffer.
+        emulator::spawn(
+            s.cols as u16,
+            s.rows as u16,
+            master.clone(),
+            out.clone(),
+            em_rx,
+            boot_tx,
+        );
+        // The boot reply: the `Terminal`/`RenderState` exist before the
+        // session is visible.
+        let booted = boot_rx.await.ok().unwrap_or_default();
+        if !booted {
+            self.group_kill(pid);
+            return Err(std::io::Error::other("the emulator did not boot"));
         }
         Ok(Session {
             id: s.session_id.clone(),
@@ -278,6 +321,7 @@ impl Keeper {
             dead: false,
             exit_code: 0,
             out,
+            em_tx,
         })
     }
 
@@ -372,7 +416,7 @@ async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::
             return Ok(());
         }
     };
-    let resp = match me.handle(&req) {
+    let resp = match me.handle(&req).await {
         Ok(m) => m,
         Err(e) => KeeperMessage::Error(km::Error {
             error: e,

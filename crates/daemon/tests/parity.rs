@@ -107,7 +107,7 @@ fn our_cells() -> Vec<Vec<Cell>> {
 ///    (a program that writes a space produces exactly the grid a blank
 ///    position produces), so both fold to empty.
 fn normalize(rows: Vec<Vec<Cell>>, width: usize) -> Vec<Vec<Cell>> {
-    use ldmux_daemon::sgr::BLANK;
+    use ldmux_vt_sys::sgr::BLANK;
     rows.into_iter()
         .map(|mut row| {
             while row.len() < width {
@@ -203,8 +203,7 @@ async fn parity_corpus_cells_match_tmux() {
 
 #[test]
 fn round_trip_render_then_parse_is_identity() {
-    use ldmux_vt_sys::StyleColor;
-    use ldmux_daemon::sgr::BLANK;
+    use ldmux_vt_sys::{sgr::BLANK, StyleColor};
 
     // A synthetic content row exercising every branch of both sides:
     // plain, bold, underline, 256-colour, 24-bit colour, then back to plain.
@@ -222,7 +221,7 @@ fn round_trip_render_then_parse_is_identity() {
 
     // Render our format, then parse it back: the content columns come back
     // exactly (the format is faithful to the cells).
-    let rendered = ldmux_daemon::snapshot::render(&[row.as_slice()], width);
+    let rendered = ldmux_vt_sys::snapshot::render(&[row.as_slice()], width);
     let parsed = sgrep::parse(&rendered, width);
     assert_eq!(parsed.len(), 1, "one row");
     for x in 0..row.len() {

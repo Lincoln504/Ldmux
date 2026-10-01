@@ -12,7 +12,7 @@
 //! one column, and the plan's full corpus (wide chars, emoji) is what will
 //! extend that.
 
-use ldmux_daemon::sgr::BLANK;
+use ldmux_vt_sys::sgr::BLANK;
 use ldmux_vt_sys::{Cell, CellStyle, StyleColor};
 
 /// Parse a full `capture-pane -p -e` output into rows of `Cell`s, each row

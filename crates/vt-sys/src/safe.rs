@@ -189,7 +189,7 @@ pub enum StyleColor {
 }
 
 /// A cell's complete visual style (plain Rust, produced by the render state).
-/// The SGR encoder (`daemon::sgr`) consumes this.
+/// The SGR encoder (`crate::sgr`) consumes this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellStyle {
     pub fg: Option<StyleColor>,
