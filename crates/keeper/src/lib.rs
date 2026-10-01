@@ -305,31 +305,52 @@ impl Keeper {
         let master = opened.master;
         let slave = opened.slave;
 
-        // Stdio takes the slave by value (From<OwnedFd>), so each of the child's
-        // 0/1/2 is its own dup of the slave; the parent's copy is dropped below.
+        // The child becomes its own session (`setsid`) so `group_kill` takes
+        // the whole process group down, and the slave is its 0/1/2 (the
+        // controlling terminal). We fork+exec ourselves — NOT
+        // `tokio::process::Command` — so the keeper is the SOLE reaper: tokio's
+        // global `ChildReaper` would reap the child before our raw `waitpid` in
+        // `reap()` could, so a natural shell exit was never reported dead
+        // (only a `Kill` set it). See the 2026-09-28 finding in
+        // docs/RUST-PORT-LOG.md.
         let slave_in = slave.try_clone()?;
         let slave_out = slave.try_clone()?;
         let slave_err = slave.try_clone()?;
-        let mut cmd = tokio::process::Command::new(&self.shell[0]);
-        cmd.args(&self.shell[1..]);
-        cmd.stdin(slave_in);
-        cmd.stdout(slave_out);
-        cmd.stderr(slave_err);
-        if let Some(cwd) = &s.cwd {
-            cmd.current_dir(cwd);
-        }
-        // Own session + process group, so `group_kill` takes the whole tree
-        // down; the slave becomes the shell's controlling terminal.
-        unsafe {
-            cmd.pre_exec(|| match nix::unistd::setsid() {
-                Ok(_pid) => Ok(()),
-                Err(e) => Err(e.into()),
-            });
-        }
-        let child = cmd.spawn()?;
-        let pid = child.id().expect("tokio reports the pid for every spawn") as i32;
-        drop(slave); // close the parent's copy; only the child holds the slave
-        drop(child); // we supervise via waitpid, not tokio's Child
+        let slave_in_raw = slave_in.as_raw_fd();
+        let slave_out_raw = slave_out.as_raw_fd();
+        let slave_err_raw = slave_err.as_raw_fd();
+        let master_raw = master.as_raw_fd();
+        // argv as CStrings + the NULL-terminated pointer array, built BEFORE
+        // the fork (allocation is not async-signal-safe; the child must not
+        // build it).
+        // The argv CStrings (Send) are built here; the non-`Send` pointer array
+        // and the fork itself live in `fork_shell` (a sync fn), so nothing
+        // non-`Send` is held across an await below. `fork_shell`'s child
+        // `_exit`s; only the parent returns a pid.
+        let prog = std::ffi::CString::new(self.shell[0].as_str())
+            .map_err(|e| std::io::Error::other(format!("CString: {e}")))?;
+        let argv: Vec<std::ffi::CString> = self.shell[1..]
+            .iter()
+            .map(|a| std::ffi::CString::new(a.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}"))))
+            .collect::<Result<_, _>>()?;
+        let cwd_cstr: Option<std::ffi::CString> = match &s.cwd {
+            Some(c) => Some(std::ffi::CString::new(c.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}")))?),
+            None => None,
+        };
+        let pid = fork_shell(
+            slave_in_raw,
+            slave_out_raw,
+            slave_err_raw,
+            master_raw,
+            &prog,
+            &argv,
+            cwd_cstr.as_ref(),
+        )?;
+        // The child holds its own 0/1/2 dups; close the parent's copies.
+        drop(slave_in);
+        drop(slave_out);
+        drop(slave_err);
+        drop(slave);
 
         let master = Arc::new(master);
         let out = Arc::new(Mutex::new(VecDeque::new()));
@@ -410,6 +431,45 @@ impl Keeper {
     pub fn buffered_len(&self, id: &str) -> Option<usize> {
         let g = self.sessions.lock().unwrap();
         g.get(id).map(|s| s.out.lock().unwrap().len())
+    }
+}
+
+/// Fork+exec the shell so the keeper is the SOLE reaper (see the call-site
+/// comment in `spawn_session`): the child `setsid`s, makes the slave its
+/// 0/1/2, and execs the shell; only the parent returns (the child `_exit`s).
+/// The non-`Send` pointer array is built here and dropped on return, so it is
+/// never held across an await in the async caller.
+fn fork_shell(
+    slave_in_raw: std::os::fd::RawFd,
+    slave_out_raw: std::os::fd::RawFd,
+    slave_err_raw: std::os::fd::RawFd,
+    master_raw: std::os::fd::RawFd,
+    prog: &std::ffi::CString,
+    argv: &[std::ffi::CString],
+    cwd: Option<&std::ffi::CString>,
+) -> std::io::Result<i32> {
+    use nix::libc as libc;
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null()); // execvp's argv is NULL-terminated
+    match unsafe { nix::unistd::fork() } {
+        Ok(nix::unistd::ForkResult::Child) => {
+            // Only async-signal-safe calls here, then exec.
+            let _ = unsafe { libc::setsid() };
+            let _ = unsafe { libc::dup2(slave_in_raw, 0) };
+            let _ = unsafe { libc::dup2(slave_out_raw, 1) };
+            let _ = unsafe { libc::dup2(slave_err_raw, 2) };
+            let _ = unsafe { libc::close(master_raw) };
+            let _ = unsafe { libc::close(slave_in_raw) };
+            let _ = unsafe { libc::close(slave_out_raw) };
+            let _ = unsafe { libc::close(slave_err_raw) };
+            if let Some(c) = cwd {
+                let _ = unsafe { libc::chdir(c.as_ptr()) };
+            }
+            let _ = unsafe { libc::execvp(prog.as_ptr(), argv_ptrs.as_ptr()) };
+            unsafe { libc::_exit(127) } // execvp failed
+        }
+        Ok(nix::unistd::ForkResult::Parent { child }) => Ok(child.as_raw()),
+        Err(e) => Err(std::io::Error::other(format!("fork: {e}"))),
     }
 }
 
