@@ -135,7 +135,41 @@ unsafe extern "C" {
         ptr: *mut u8,
         len: usize,
     );
+
+    /// Scroll the terminal viewport (TOP / BOTTOM / DELTA / ROW). Returns
+    /// void (may be passed NULL for the terminal, a no-op).
+    pub fn ghostty_terminal_scroll_viewport(
+        terminal: GhosttyTerminal,
+        behavior: GhosttyTerminalScrollViewport,
+    );
 }
+
+// ── scroll_viewport tagged union (terminal.h) ─────────────────────────────
+// `GhosttyTerminalScrollViewport` is a struct { tag, value-union }, passed by
+// value. The union is 16 bytes (the `_padding[2]` widens it past the 8-byte
+// `delta`/`row`), so the struct is tag(4)+pad(4)+value(16) = 24 bytes.
+/// The scroll-viewport value union (8-byte `delta`/`row`, padded to 16).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union GhosttyTerminalScrollViewportValue {
+    pub delta: isize,
+    pub row: usize,
+    pub _padding: [u64; 2],
+}
+
+/// The tagged union passed to `ghostty_terminal_scroll_viewport`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyTerminalScrollViewport {
+    pub tag: c_int,
+    pub value: GhosttyTerminalScrollViewportValue,
+}
+
+// Scroll-viewport tags (GhosttyTerminalScrollViewportTag: `int`).
+pub const SCROLL_VIEWPORT_TOP: c_int = 0;
+pub const SCROLL_VIEWPORT_BOTTOM: c_int = 1;
+pub const SCROLL_VIEWPORT_DELTA: c_int = 2;
+pub const SCROLL_VIEWPORT_ROW: c_int = 3;
 
 // ── render.h: the render-state row/cell accessors (the grid) ─────────────
 // The grid is not a `GhosttyTerminalData` key (plan D2 under-bounded it); it

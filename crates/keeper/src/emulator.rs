@@ -31,7 +31,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use ldmux_vt_sys::{Cell, RenderState, Terminal};
+use ldmux_vt_sys::{Cell, RenderState, ScrollViewport, Terminal};
 use nix::libc as libc;
 use tokio::sync::oneshot;
 
@@ -39,19 +39,26 @@ use ldmux_vt_sys::snapshot;
 
 /// One unit of work the request handlers hand the emulator thread.
 pub(crate) enum EmuMsg {
-    /// Render the visible screen (the answer to a `Snapshot`).
-    Snapshot(oneshot::Sender<Outcome>),
+    /// Render the screen: the `rows` live lines, plus `history_lines` of
+    /// history above them when requested (the `capture-pane -S -N -E -`
+    /// contract). `0` = live screen only.
+    Snapshot { history_lines: u64, reply: oneshot::Sender<Outcome> },
     /// The pane's size changed. The handler has already done `TIOCSWINSZ`;
     /// the emulator must resize its grid.
     Resize { cols: u16, rows: u16 },
 }
 
 /// The result of a render: the grid's geometry + the rendered text (one SGR
-/// line per row, `\n`-joined — `snapshot::render`'s output).
+/// line per row, `\n`-joined — `snapshot::render`'s output). When
+/// `history_lines > 0`, `text` is that many history lines above the `rows`
+/// live lines (the count is what was actually captured, clamped to the
+/// scrollback).
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub cols: u16,
     pub rows: u16,
+    /// The number of history lines actually captured (0 = live only).
+    pub history_lines: u64,
     pub text: String,
 }
 
@@ -149,14 +156,35 @@ pub(crate) fn spawn(
 /// Service one message (called on the emulator thread).
 fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState) {
     match msg {
-        EmuMsg::Snapshot(reply) => {
+        EmuMsg::Snapshot { history_lines, reply } => {
+            // Clamp to the available scrollback (a capture cannot exceed what
+            // the grid retained).
+            let n = (history_lines as usize).min(term.scrollback_rows());
+            // 1. The live screen, at the bottom (the `rows` live lines).
+            term.scroll_viewport(ScrollViewport::Bottom);
             let _ = rs.update(term);
-            let rows: Vec<Vec<Cell>> = (0..rs.rows()).map(|y| rs.row(y)).collect();
-            let refs: Vec<&[Cell]> = rows.iter().map(|r| r.as_slice()).collect();
-            let text = snapshot::render(&refs, rs.cols() as usize);
+            let rows = rs.rows();
+            let live: Vec<Vec<Cell>> = (0..rows).map(|y| rs.row(y)).collect();
+            // 2. The last `n` history lines: scroll up `n`, read the top `n`
+            //    rows (the run immediately above the live screen), restore.
+            let hist: Vec<Vec<Cell>> = if n > 0 {
+                term.scroll_viewport(ScrollViewport::Delta(-(n as i32)));
+                let _ = rs.update(term);
+                let h: Vec<Vec<Cell>> = (0..n).map(|y| rs.row(y as u16)).collect();
+                term.scroll_viewport(ScrollViewport::Bottom);
+                let _ = rs.update(term);
+                h
+            } else {
+                Vec::new()
+            };
+            // 3. Render: the history lines first, then the live screen (the
+            //    order the client replays into its own scrollback).
+            let all: Vec<&[Cell]> = hist.iter().chain(live.iter()).map(|r| r.as_slice()).collect();
+            let text = snapshot::render(&all, rs.cols() as usize);
             let _ = reply.send(Outcome {
                 cols: rs.cols(),
                 rows: rs.rows(),
+                history_lines: n as u64,
                 text,
             });
         }

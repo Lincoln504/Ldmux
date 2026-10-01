@@ -199,8 +199,11 @@ impl Keeper {
                     }
                 };
                 let (rtx, rrx) = oneshot::channel();
-                tx.send(emulator::EmuMsg::Snapshot(rtx))
-                    .map_err(|_| "the emulator is gone")?;
+                tx.send(emulator::EmuMsg::Snapshot {
+                    history_lines: s.history_lines.unwrap_or(0),
+                    reply: rtx,
+                })
+                .map_err(|_| "the emulator is gone")?;
                 let o = match rrx.await {
                     Ok(o) => o,
                     Err(_) => return Err("the emulator is gone".into()),
@@ -209,6 +212,7 @@ impl Keeper {
                     session_id: s.session_id.clone(),
                     cols: o.cols as u64,
                     rows: o.rows as u64,
+                    history_lines: o.history_lines,
                     text: o.text,
                 }))
             }

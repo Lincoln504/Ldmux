@@ -134,13 +134,19 @@ pub struct Snapshot {
 
 /// Keeper → daemon: the rendered snapshot (the answer to a `Snapshot`): the
 /// pane's geometry + the rendered screen (one SGR line per row, `\n`-joined —
-/// the keeper's format, `ldmux_vt_sys::snapshot::render`).
+/// the keeper's format, `ldmux_vt_sys::snapshot::render`). When
+/// `history_lines > 0`, `text` is that many history lines (oldest first) above
+/// the `rows` live lines — the `capture-pane -S -N -E -` contract. The count
+/// is reported from what was actually captured (clamped to the scrollback),
+/// not from what was asked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotResult {
     pub session_id: String,
     pub cols: u64,
     pub rows: u64,
+    /// The number of history lines actually captured (0 = live screen only).
+    pub history_lines: u64,
     pub text: String,
 }
 
@@ -245,6 +251,7 @@ mod tests {
                 session_id: "s1".into(),
                 cols: 80,
                 rows: 24,
+                history_lines: 0,
                 text: "\u{1b}[0;1mB".into(),
             }))
             .unwrap();

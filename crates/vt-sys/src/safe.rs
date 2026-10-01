@@ -63,6 +63,47 @@ impl Terminal {
         let _ = unsafe { ffi::ghostty_terminal_resize(self.ptr, cols, rows, cw, ch) };
     }
 
+    /// Cap the retained scrollback to `lines` physical lines (the
+    /// `history-limit` analogue, plan §3.4/§3.7). Set once after creation,
+    /// before any input, so the grid history is bounded from the start.
+    /// `lines == 0` disables scrollback (erases retained history).
+    pub fn set_max_scrollback(&self, lines: usize) {
+        let v = lines;
+        let r = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr,
+                ffi::OPT_SCROLLBACK_MAX_LINES,
+                &v as *const _ as *const c_void,
+            )
+        };
+        debug_assert_eq!(r, ffi::SUCCESS, "set_max_scrollback");
+    }
+
+    /// Scroll the terminal viewport (the history-page mechanism, plan §3.4).
+    /// The live pane always sits at `Bottom`; a snapshot with history
+    /// scrolls up, renders, and scrolls back — all on the owning thread.
+    pub fn scroll_viewport(&mut self, how: ScrollViewport) {
+        let b = match how {
+            ScrollViewport::Top => ffi::GhosttyTerminalScrollViewport {
+                tag: ffi::SCROLL_VIEWPORT_TOP,
+                value: ffi::GhosttyTerminalScrollViewportValue { _padding: [0; 2] },
+            },
+            ScrollViewport::Bottom => ffi::GhosttyTerminalScrollViewport {
+                tag: ffi::SCROLL_VIEWPORT_BOTTOM,
+                value: ffi::GhosttyTerminalScrollViewportValue { _padding: [0; 2] },
+            },
+            ScrollViewport::Delta(d) => ffi::GhosttyTerminalScrollViewport {
+                tag: ffi::SCROLL_VIEWPORT_DELTA,
+                value: ffi::GhosttyTerminalScrollViewportValue { delta: d as isize },
+            },
+            ScrollViewport::Row(r) => ffi::GhosttyTerminalScrollViewport {
+                tag: ffi::SCROLL_VIEWPORT_ROW,
+                value: ffi::GhosttyTerminalScrollViewportValue { row: r as usize },
+            },
+        };
+        unsafe { ffi::ghostty_terminal_scroll_viewport(self.ptr, b) };
+    }
+
     // ── Scalar accessors (through the one generic `get`) ─────────────────
 
     /// Terminal width in cells.
@@ -212,6 +253,20 @@ pub struct CellStyle {
 pub struct Cell {
     pub text: String,
     pub style: CellStyle,
+}
+
+/// A scroll-viewport behavior (plan §3.4: history pages). The live pane sits
+/// at `Bottom`; a history snapshot scrolls up, renders, and scrolls back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollViewport {
+    /// Top of the scrollback (the oldest retained line).
+    Top,
+    /// Bottom: the active area (the live screen).
+    Bottom,
+    /// A relative scroll in rows (up is negative, down positive).
+    Delta(i32),
+    /// An absolute row offset from the top of the scrollback.
+    Row(u32),
 }
 
 /// One terminal's render state: the per-session renderer's state.

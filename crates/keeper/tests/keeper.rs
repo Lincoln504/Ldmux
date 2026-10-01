@@ -451,6 +451,89 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
     let _ = std::fs::remove_file(&corpus_file);
 }
 
+/// A `Snapshot` with `history_lines` returns that many history lines above
+/// the visible screen (the `capture-pane -S -N -E -` contract): the client
+/// replays history first, then the live screen.
+#[tokio::test]
+async fn the_emulator_captures_history_above_the_screen() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s4".to_string();
+    let s = socket.to_string_lossy();
+
+    // Spawn 80x24.
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(st) => assert!(!st.dead),
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    // Emit 30 numbered lines (H0001..H0030) into the pane. The echoed command
+    // occupies one line; the 30 lines fill the rest. In an 80x24 pane the
+    // live screen holds the last 23 content lines (H0008..H0030) + the empty
+    // cursor row; the scrollback holds the echoed line + H0001..H0007.
+    let data = "i=1; while [ $i -le 30 ]; do printf \"H%04d\\n\" $i; i=$((i+1)); done\n";
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Write(km::Write { session_id: id.clone(), data: data.to_string() }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::Ack(_) => {}
+        other => panic!("expected Ack, got {other:?}"),
+    }
+
+    // Ask for 5 history lines. The answer is 5 history lines + 24 live lines
+    // = 29 lines: the run immediately above the live screen (H0003..H0007),
+    // then the live screen (H0008..H0030 + the empty cursor row).
+    let mut got = None;
+    for _ in 0..200 {
+        let sr = keeper_call(
+            &s,
+            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: Some(5) }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .ok()
+        .and_then(|m| match m {
+            KeeperMessage::SnapshotResult(sr) if sr.history_lines == 5 && sr.text.lines().count() == 29 => Some(sr),
+            _ => None,
+        });
+        if let Some(sr) = sr {
+            got = Some(sr);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let Some(sr) = got else { panic!("the emulator never returned a 5-history, 29-line capture") };
+    assert_eq!((sr.cols, sr.rows), (80, 24), "the grid is the pane size");
+    let lines: Vec<&str> = sr.text.lines().collect();
+    assert_eq!(lines.len(), 29, "5 history + 24 live");
+    // The history run (oldest first) and the history/live boundary.
+    assert_eq!(lines[0], "H0003");
+    assert_eq!(lines[4], "H0007", "last history line");
+    assert_eq!(lines[5], "H0008", "first live line");
+    // The last live content line is the last line emitted; the cursor row
+    // holds the shell's prompt (a shell detail, not the contract).
+    assert_eq!(lines[27], "H0030");
+    assert!(!lines[28].is_empty(), "cursor row holds the prompt");
+
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+}
+
 /// A request for a session that was never spawned is an error answer.
 #[tokio::test]
 async fn an_unknown_session_is_an_error_answer() {
