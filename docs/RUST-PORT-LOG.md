@@ -61,6 +61,20 @@ this file, then the plan §7 table, then the phase's source of record.
   `normalize` pads every row to the pinned width on both sides, and parity
   held on **both** 3.5a (bare shell) and 3.7b (devShell). Evidence:
   `crates/daemon/tests/parity.rs` (the 3.5a quirk note) and the gate runs.
+- **2026-09-28, the ghostty-vt scrollback mechanism (measured, before it
+  was wired).** In an 80x10 terminal with `set_max_scrollback(100)`, writing
+  30 lines (`L0000`..`L0029`, each `X\r\n`) leaves the last line on **row 8**
+  and the cursor on the **empty row 9**; `scrollback_rows` = 21, `total_rows`
+  = 31 (total = live + scrollback). `scroll_viewport(Delta, -N)` slides the
+  viewport up: the top N rows become the last N scrollback lines (after
+  `-5`, row 0 = `L0016`), `viewport_active` goes false, and the render state
+  reflects the scrolled position. `scroll_viewport(Bottom)` restores the live
+  screen (`viewport_active` true again). Consequence for the history capture:
+  the last N history lines are the **top N rows of the viewport after a
+  `Delta(-N)`**, and the full live screen is a separate render at `Bottom` —
+  one scrolled render alone gives a `rows`-line window (N history + rows-N
+  live), *not* the N+rows the `capture-pane -S -N -E -` contract wants. Evidence:
+  `crates/vt-sys/tests/scrollback.rs` (both tests pin the exact values).
 - **2026-09-28, pty output post-processing (ONLCR) is live in the keeper
   stream (observed while writing the emulator tests).** Bytes the shell
   writes to its stdout (and the echoed input) pass through the pty's
@@ -492,5 +506,39 @@ pre-existing daemon-lib warnings are unchanged, out of scope).
   TS **347/347** + typecheck. New code clippy-clean (the pre-existing
   daemon-lib warnings are unchanged, out of scope).
 
-**Next (Phase 4):** scrollback paging (`scroll_viewport` / grid access)
-and the `display-message` state fields.
+**Milestone: §3.4 history paging (the `Snapshot { history_lines }` capture) is
+wired (DONE).**
+- **`vt-sys`:** bound `ghostty_terminal_scroll_viewport` (the
+  `GhosttyTerminalScrollViewport` tagged union — a 24-byte struct, the union
+  padded to 16 by `_padding[2]`) + `GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES`
+  (the `history-limit` analogue). New `Terminal::scroll_viewport` (Top /
+  Bottom / `Delta(i32)` / `Row`), `set_max_scrollback`, and the existing
+  `scrollback_rows`/`total_rows`/`viewport_active`. The `ScrollViewport` enum
+  is the ergonomic wrapper. **Pinned empirically** in
+  `crates/vt-sys/tests/scrollback.rs` (2 tests): scrollback accumulates,
+  `Delta(-5)` puts the viewport top on the 5th history line, `Bottom`
+  restores — the invariants the capture is built on.
+- **Emulator:** `EmuMsg::Snapshot { history_lines }` now renders the
+  `capture-pane -S -N -E -` contract: clamp `history_lines` to
+  `scrollback_rows`, read the **live screen at `Bottom`** (the `rows` live
+  lines), then `Delta(-N)` + read the **top N rows** (the last N history
+  lines) + restore to `Bottom`, and render history-then-live as one
+  `rows`+N SGR stream. All on the emulator thread (FIFO, atomic with respect
+  to input). `Outcome`/`SnapshotResult` gained `history_lines` (reported from
+  what was actually captured, clamped — like the TS "reported from what was
+  actually captured").
+- **Protocol:** `SnapshotResult { session_id, cols, rows, history_lines,
+  text }`. The `Snapshot { history_lines: Option<u64> }` request is unchanged
+  (`None`/`0` = live screen only).
+- **Tests:** a new keeper test drives the full capture — 30 numbered lines
+  into an 80x24 pane, `Snapshot { history_lines: 5 }` → 29 lines (5 history
+  `H0003`..`H0007` + 24 live `H0008`..`H0030` + prompt row), boundary and
+  last-live-line asserted exactly. (The cursor row holds the shell's prompt,
+  a shell detail, not the contract — asserted non-empty, not empty.)
+- Gate: `cargo test --workspace` (inside `nix develop`) → **166 passed**
+  (attach 2, daemon 88, parity 6, keeper 8, protocol 41, vt-sys 11+8+2);
+  TS **347/347** + typecheck. New code clippy-clean.
+
+**Next (Phase 4):** the `display-message` state fields (the `State`/`List`
+report — `cursor_x/y`, `alternate_on`, `history_size`, `pane_dead`, mouse /
+keypad / bracket-paste flags, `pane_current_command`, cwd).
