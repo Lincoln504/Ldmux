@@ -759,3 +759,23 @@ that no longer exist).
   real keeper (plan §3.5).
 - Gate: `cargo test` → **186 passed** / 1 ignored (daemon **105** = +1); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the `LdmuxDaemon` `start` (the main loop, onto the keeper) — §3.5.**
+The daemon's `start` (the TS `start` sequence, retargeted): acquire the
+single-instance lock (the `ldmuxd.lock` pid lockfile — a concurrent daemon
+refuses, callers treat that as success), ensure the keeper (auto-spawn if
+dead — the [KeeperSupervisor](crate::keeper_supervisor)), load the registry,
+adopt the daemon's own sessions, and reconcile. `adopt_own_sessions` lists the
+keeper (a `List`), and for each `ldmux-<id>` pane the registry does not know,
+`adopt` creates a record (verifying liveness with a `Read`, the terminal name
+`ldmux-<id>`, the record's `id` is the keeper `session_id`). The rest of the TS
+`start` (the control socket server's serving, the remote, the live timer) is
+layered on as it is ported.
+- **Test:** `start_adopts_the_daemons_own_sessions_against_the_fake_keeper` —
+  the daemon's `start`, run against a fake keeper: a keeper session the
+  registry does not know is adopted (a record is created for it, `created_by`
+  `adopt`, status `running`), all over the keeper socket, never a tmux control
+  plane. The fake keeper is already alive, so `ensure` does not spawn (the
+  socket connect is the liveness test).
+- Gate: `cargo test` → **187 passed** / 1 ignored (daemon **106** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
