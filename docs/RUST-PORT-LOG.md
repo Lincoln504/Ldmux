@@ -712,3 +712,26 @@ echo); unknown methods are an `error` response.
   `ping`, reads `pong` back with its `id`) + `an_unknown_method_is_an_error_response`.
 - Gate: `cargo test` → **175 passed** / 1 ignored (daemon **94** = +2); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the fake keeper (the test double) — §3.5.** The daemon's tests
+run against a fake keeper, not a live one: a Unix socket that speaks the
+keeper protocol (the tagged `KeeperMessage`s) with an **in-memory** session
+table — no real PTY, no real shell, no real ghostty-vt. It mirrors the real
+keeper's `handle` exactly (the request→response shapes, one request line →
+one response line per connection), so the daemon under test cannot tell the
+difference: a `Spawn` answers a live `State`, a `Read`/`List` answers `State`,
+a `Peek` drains the buffered output, a `Snapshot` answers the rendered
+content, a `Kill` answers a dead `State` (empty `foreground`/`cwd` — a reaped
+pid may be recycled), a `Write`/`Close` answers an `Ack`. The test hooks
+(`inject_output`, `kill`, `set_snapshot`) let a test script the fake pane.
+This is the plan §3.5 win: the daemon's whole logic (registry, ownership,
+remote, stream, CLI) is now testable without a live tmux server — a socket that
+speaks 10 messages is the double.
+- **Tests:** 9 drive `handle` directly (spawn/read/peek/write/snapshot/kill/
+  list shapes + the duplicate-spawn and unknown-session errors) and 1 is the
+  end-to-end `keeper_call` over the socket (the exact path the daemon uses,
+  including the bind→connect wait). The end-to-end test hits the same
+  bind→connect race the keeper's `is_alive` bridges (the `serve` task binds the
+  socket a beat after the spawn is scheduled), so it waits on the file.
+- Gate: `cargo test` → **185 passed** / 1 ignored (daemon **104** = +10); TS
+  **347/347** + typecheck. New code clippy-clean.
