@@ -26,6 +26,7 @@ pub mod control_socket;
 pub mod daemon;
 pub mod daemon_lock;
 pub mod fake_keeper;
+pub mod stream;
 pub mod exec;
 pub mod keeper_supervisor;
 pub mod pairing;
