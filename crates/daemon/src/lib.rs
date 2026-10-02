@@ -22,6 +22,7 @@
 
 pub mod auth;
 pub mod cwd;
+pub mod control_socket;
 pub mod daemon_lock;
 pub mod exec;
 pub mod keeper_supervisor;
