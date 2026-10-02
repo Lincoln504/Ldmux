@@ -23,6 +23,7 @@
 pub mod auth;
 pub mod cwd;
 pub mod exec;
+pub mod keeper_supervisor;
 pub mod pairing;
 pub mod proc;
 pub mod qr;
