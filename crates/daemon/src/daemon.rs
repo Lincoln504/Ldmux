@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use ldmux_protocol::keeper::{self as km, KeeperMessage};
 
+use crate::daemon_lock::DaemonLock;
 use crate::keeper_supervisor::KeeperSupervisor;
 use crate::ownership::Ownership;
 use crate::registry::Registry;
@@ -32,7 +33,8 @@ pub struct ReconcileResult {
     pub pruned: Vec<String>,
 }
 
-/// The daemon's main state: the keeper, the registry, the ownership.
+/// The daemon's main state: the keeper, the registry, the ownership, and the
+/// single-instance lock.
 pub struct LdmuxDaemon {
     state_dir: PathBuf,
     keeper: KeeperSupervisor,
@@ -40,6 +42,9 @@ pub struct LdmuxDaemon {
     ownership: Ownership,
     dead_record_ttl_ms: u64,
     max_records: usize,
+    /// The single-instance lock (the `ldmuxd.lock` pid lockfile); `Drop`
+    /// releases it.
+    lock: DaemonLock,
 }
 
 impl LdmuxDaemon {
@@ -56,6 +61,7 @@ impl LdmuxDaemon {
             ownership: Ownership::new(),
             dead_record_ttl_ms: 24 * 60 * 60 * 1000,
             max_records: 500,
+            lock: DaemonLock::new(&state_dir),
         }
     }
 
@@ -139,6 +145,106 @@ impl LdmuxDaemon {
             .collect();
         self.ownership.retain(&known);
         Ok(ReconcileResult { dead, adopted, pruned })
+    }
+
+    /// Start the daemon's main loop (the core of the TS `start`).
+    ///
+    /// The sequence, retargeted onto the keeper: acquire the single-instance
+    /// lock (a concurrent daemon refuses — callers treat that as success,
+    /// someone else won), ensure the keeper (auto-spawn if dead), load the
+    /// registry, adopt the daemon's own sessions (the keeper's `ldmux-<id>`
+    /// panes the registry does not list), and reconcile. The rest of the TS
+    /// `start` (the control socket server, the remote, the live timer) is
+    /// layered on as it is ported.
+    pub async fn start(&mut self) -> Result<(), String> {
+        // Acquire the lock (the single-instance pid lockfile).
+        self.lock.acquire().map_err(|e| e.to_string())?;
+        // Ensure the keeper (auto-spawn if dead).
+        self.keeper.ensure().await?;
+        // Load the registry.
+        self.registry.load();
+        // Adopt the daemon's own sessions.
+        self.adopt_own_sessions().await?;
+        // Reconcile.
+        let _ = self.reconcile().await?;
+        Ok(())
+    }
+
+    /// Adopt the daemon's own sessions (the keeper's `ldmux-<id>` panes the
+    /// registry does not list). Mirrors the TS `adoptOwnSessions`: a session the
+    /// registry does not know is adopted (a record is created for it), and the
+    /// adoption is logged.
+    ///
+    /// Returns the count adopted.
+    pub async fn adopt_own_sessions(&mut self) -> Result<usize, String> {
+        let resp = self.keeper_call(&KeeperMessage::List(km::List {})).await?;
+        let states = match resp {
+            KeeperMessage::ListResult(lr) => lr.sessions,
+            _ => return Err("expected a listresult".into()),
+        };
+        let mut adopted = 0;
+        for s in &states {
+            let tmux_name = format!("ldmux-{}", s.session_id);
+            // A session the registry does not know (by name or by id) is an
+            // adoption candidate. A failed adopt is not counted (a dead or
+            // gone session is not adopted).
+            if self.registry.by_tmux_name(&tmux_name).is_none()
+                && self.registry.get(&s.session_id).is_none()
+                && self.adopt(&s.session_id).await.is_ok()
+            {
+                adopted += 1;
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// Adopt a single keeper session into the registry (the TS `adopt`).
+    ///
+    /// Verifies the keeper session is live (a `Read`), and creates a record for
+    /// it if one does not already exist. The terminal name is `ldmux-<id>`;
+    /// the record's `id` is the keeper `session_id` (one of this daemon's own
+    /// sessions keeps its id: it is in the name, in the shell's
+    /// `LDMUX_SESSION_ID`, and in any window class made for it).
+    pub async fn adopt(&mut self, session_id: &str) -> Result<ldmux_protocol::rpc::SessionRecord, String> {
+        // Verify the keeper session is live (a `Read`).
+        let resp = self
+            .keeper_call(&KeeperMessage::Read(km::Read {
+                session_id: session_id.into(),
+            }))
+            .await?;
+        let state = match resp {
+            KeeperMessage::State(s) => s,
+            _ => return Err("expected a state".into()),
+        };
+        if state.dead {
+            return Err("session is dead".into());
+        }
+        // A record already exists for this session: return it (the adoption is
+        // idempotent; two concurrent adopts of one session race to one record).
+        let tmux_name = format!("ldmux-{}", session_id);
+        if let Some(existing) = self.registry.by_tmux_name(&tmux_name) {
+            return Ok(existing.clone());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let record = ldmux_protocol::rpc::SessionRecord {
+            id: session_id.to_string(),
+            tmux_name,
+            kind: "shell".into(),
+            cwd: state.cwd,
+            title: "shell".into(),
+            created_at: now,
+            updated_at: now,
+            created_by: "adopt".into(),
+            status: "running".into(),
+            exit_code: None,
+            exited_at: None,
+        };
+        self.registry.upsert(record.clone());
+        let _ = self.registry.save();
+        Ok(record)
     }
 }
 
@@ -248,6 +354,53 @@ mod tests {
 
         // The record is dead in the registry.
         assert_eq!(d.registry().get("s1").unwrap().status, "dead");
+
+        drop(fk);
+    }
+
+    /// `start` (the main loop) against a fake keeper: a keeper session the
+    /// registry does not know is adopted (a record is created for it). The
+    /// daemon's `start` acquires the lock, ensures the keeper (the fake is
+    /// already alive, so no spawn), loads the registry, adopts the session, and
+    /// reconciles — all over the keeper socket, never a tmux control plane.
+    #[tokio::test]
+    async fn start_adopts_the_daemons_own_sessions_against_the_fake_keeper() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        // A daemon rooted at the same dir (its keeper socket == the fake's).
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+
+        // A session the registry does not know (the daemon's own session).
+        let spawn = KeeperMessage::Spawn(Spawn {
+            session_id: "s1".into(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+        });
+        ldmux_protocol::keeper_call::keeper_call(
+            keeper_sock.to_str().unwrap(),
+            &spawn,
+            ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+
+        // `start` (the main loop).
+        d.start().await.unwrap();
+
+        // The session was adopted: the registry has a record for it.
+        let r = d.registry().get("s1").unwrap();
+        assert_eq!(r.tmux_name, "ldmux-s1");
+        assert_eq!(r.status, "running");
+        assert_eq!(r.created_by, "adopt");
 
         drop(fk);
     }
