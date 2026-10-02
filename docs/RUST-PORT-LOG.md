@@ -646,3 +646,40 @@ liveness, modes, cursor in-bounds, `history_size`, `foreground`, `cwd`).
 `Snapshot { history_lines }` capture, the state fields, the reaper fix, and
 the `State`/`List` liveness report are all wired and gated. The §3.11
 cell-parity gate was met earlier. Phase 5 (the daemon) is unblocked.
+
+**Milestone: the `KeeperSupervisor` auto-spawn (ssh-agent pattern) — the first
+Phase 5 item (plan §3.2).** The daemon owns the keeper: it auto-spawns a
+detached keeper on first need and re-spawns if it finds it dead. The socket
+connect is the authoritative liveness test (a connect succeeds iff the keeper
+is listening); a non-blocking `flock` on `<stateDir>/keeper.lock` serializes
+concurrent spawn attempts (the kernel releases it on death, unlike a pidfile);
+the keeper is spawned with `setsid` (own session, outlives the daemon), the
+`Child` handle dropped (not waited). `ensure()` is idempotent: fast-path
+`is_alive()` returns if a keeper is already up; the slow path takes the
+flock, re-checks, spawns, then waits for the socket file.
+- **The `is_alive()` retry (the non-obvious fix).** The keeper's `bind`
+  creates the socket file a moment *before* its accept-loop is scheduled to
+  answer a connect; `wait_for_socket()` gates on **file existence**, which is
+  one instruction early. A bare `connect()` right after the `bind` can lose that
+  race (the keeper process is `State: S`, the socket file exists, yet a fresh
+  connect gets `ECONNREFUSED` — a manual connect a beat later succeeds). So
+  `is_alive()` retries briefly (20 × 25 ms = 0.5 s): a **dead** keeper keeps
+  failing through the whole budget (nothing will ever accept), while a **live**
+  keeper answers within a poll or two. The probe that proved it: the same
+  `tokio::process::Command` + `setsid` + `Child`-drop path in a standalone
+  binary left the keeper alive and connectable, isolating the failure to the
+  test's connect timing, not the spawn.
+- **Tests:** `auto_spawns_and_re_spawns_the_keeper` (the ssh-agent pattern:
+  `ensure` auto-spawns a dead keeper, kills it, and re-spawns it) and
+  `ensure_is_idempotent_on_a_live_keeper` (a second `ensure` against a live
+  keeper is a no-op — no re-spawn). Both drive the real keeper binary in a
+  scratch dir and stop it by pid (the keeper is one process, not a group).
+- Gate: `cargo test` (with `zbarimg` on PATH) → **171 passed** / 1 ignored
+  (attach 2, daemon **90** = +2, parity 6, keeper 10, protocol 41, vt-sys
+  11+8+3); TS **347/347** + typecheck. New code clippy-clean.
+
+**Phase 5 in progress.** The `KeeperSupervisor` is the daemon's first
+auto-spawned child. Remaining: the daemon's own single-instance lock + socket,
+the registry/ownership rewiring onto the keeper, the remote (WS) server, the
+stream, the desktop + inventory, and the CLI — all against the (now real)
+keeper, not a fake.
