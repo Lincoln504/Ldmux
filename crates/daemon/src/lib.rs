@@ -22,6 +22,7 @@
 
 pub mod auth;
 pub mod cwd;
+pub mod daemon_lock;
 pub mod exec;
 pub mod keeper_supervisor;
 pub mod pairing;
