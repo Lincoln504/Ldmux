@@ -683,3 +683,32 @@ auto-spawned child. Remaining: the daemon's own single-instance lock + socket,
 the registry/ownership rewiring onto the keeper, the remote (WS) server, the
 stream, the desktop + inventory, and the CLI — all against the (now real)
 keeper, not a fake.
+
+**Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
+lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
+created exclusively (O_CREAT|O_EXCL) and records the daemon's pid. A concurrent
+daemon that finds a *live* pid refuses ("ldmuxd already running"); one that finds
+a *dead* pid steals the lock (the daemon crashed without releasing). The
+liveness probe is `/proc/<pid>` exists (the same contract as the TS daemon's
+`process.kill(pid, 0)` — a process that exists is signalable, one that doesn't
+is not). `Drop` releases the lock.
+- **Tests:** `refuses_when_a_live_pid_holds_the_lock` (a live pid refuses; a dead
+  pid, rewritten into the file, is stolen) + `acquire_release_reacquire_is_clean`.
+- Gate: `cargo test` → **173 passed** / 1 ignored (daemon **92** = +2); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the control socket (`ldmuxd.sock`) JSON API server — §3.2/§3.5.**
+The daemon's Unix socket, a newline-delimited JSON API that the CLI, the
+mobile/web clients, and the desktop attach client all speak (the same client
+protocol as the daemon↔keeper connection, plan §3.5). `bind()` removes the
+stale socket, binds with a 0o077 umask (so the file is created 0600, not 0755 —
+the window between bind and chmod is closed, owner-only), and returns a tokio
+`UnixListener`. `serve_one` reads bytes to a newline (or EOF), parses the
+`{id, method, params}` request, dispatches, and writes a `{ok, id, result}`
+or `{ok:false, id, error}` line. An empty line is a no-op (a client that opened
+and closed without sending). The method table starts with `ping` (the parity
+echo); unknown methods are an `error` response.
+- **Tests:** `a_ping_is_served_as_a_json_line` (a client connects, sends a
+  `ping`, reads `pong` back with its `id`) + `an_unknown_method_is_an_error_response`.
+- Gate: `cargo test` → **175 passed** / 1 ignored (daemon **94** = +2); TS
+  **347/347** + typecheck. New code clippy-clean.
