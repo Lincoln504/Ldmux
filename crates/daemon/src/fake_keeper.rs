@@ -109,12 +109,20 @@ impl FakeKeeper {
                 let s = sessions.get(&s.session_id).unwrap();
                 Ok(KeeperMessage::State(Self::state_fields(s)))
             }
-            km::KeeperMessage::Kill(k) => match sessions.get_mut(&k.session_id) {
-                Some(s) => {
-                    s.dead = true;
-                    Ok(KeeperMessage::State(Self::state_fields(s)))
-                }
-                None => Err(format!("no such session: {}", k.session_id)),
+            km::KeeperMessage::Kill(k) => {
+                // The real keeper removes the session on a Kill (the emulator
+                // thread exits), so a later `List` no longer includes it — the
+                // daemon's `reconcile` reads liveness from the `List`, so a
+                // kept session would never mark dead. Build the state first.
+                let st = match sessions.get_mut(&k.session_id) {
+                    Some(s) => {
+                        s.dead = true;
+                        Self::state_fields(s)
+                    }
+                    None => return Err(format!("no such session: {}", k.session_id)),
+                };
+                sessions.remove(&k.session_id);
+                Ok(KeeperMessage::State(st))
             },
             km::KeeperMessage::Write(w) => match sessions.get_mut(&w.session_id) {
                 Some(s) if !s.dead => {
@@ -419,19 +427,16 @@ mod tests {
         }
     }
 
-    /// A `Kill` answers a dead `State`; a dead pane's `foreground`/`cwd` are
-    /// empty (a reaped pid may be recycled).
+    /// A `Kill` answers a dead `State` and removes the session (the real
+    /// keeper's `Kill` removes it, so a later `List` no longer includes it — the
+    /// daemon's `reconcile` reads liveness from the `List`). The dead `State`
+    /// reports empty `foreground`/`cwd` (a reaped pid may be recycled).
     #[test]
-    fn kill_answers_a_dead_state() {
+    fn kill_answers_a_dead_state_and_removes_the_session() {
         let k = FakeKeeper::new(std::path::PathBuf::from("/tmp/fk-t"));
         let _ = spawn_id(&k, "s1").unwrap();
         let m = k
             .handle(&KeeperMessage::Kill(Kill { session_id: "s1".into() }))
-            .unwrap();
-        assert!(is_state(&m, "s1", true));
-        // A `Read` on the (still-tabled) dead session reports dead.
-        let m = k
-            .handle(&KeeperMessage::Read(Read { session_id: "s1".into() }))
             .unwrap();
         match &m {
             KeeperMessage::State(st) => {
@@ -441,6 +446,11 @@ mod tests {
             }
             _ => panic!("not a state"),
         }
+        // The session is removed: a later `Read` is a "no such session" error.
+        let m = k
+            .handle(&KeeperMessage::Read(Read { session_id: "s1".into() }))
+            .unwrap_err();
+        assert!(m.contains("no such session"));
     }
 
     /// A `List` answers one `State` per session.
