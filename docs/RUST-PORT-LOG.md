@@ -779,3 +779,27 @@ layered on as it is ported.
   socket connect is the liveness test).
 - Gate: `cargo test` → **187 passed** / 1 ignored (daemon **106** = +1); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the `PaneStream` core (the bounded queue, §3.7) — §3.5/§3.7.** The
+stream: one live keeper stream per viewed session, fanned out to any number of
+subscribers (the WebSocket clients). The retarget of record: the TS
+`PaneStream` holds a live tmux control-mode client (`%output`); the Rust
+`PaneStream` holds a keeper connection (a `keeper_call`), and the plan §3.7
+flow-control is the new piece: the keeper never stops reading (it always
+buffers the master), and each subscriber pulls from a **bounded** queue — when
+a slow subscriber's queue overflows, it is dropped and forced to resync from a
+snapshot (the client repaints from scratch), rather than the pane pausing. The
+core: the `KeeperConn` seam (a `SocketKeeperConn` for production, a `TestKeeper`
+for tests — the test double boundary), the `subscribe`/`fanout`/`drain`
+(the §3.7 fan-out + the bounded queue), the `snapshot` (via the keeper's
+`Snapshot`, the epoch counts *delivered* snapshots), the sanitizer (the
+clipboard/DCS/device-status filter), and the `close` (the subscribers are told
+to resync). The linger/reconnect lifecycle and the remote (the phone-facing WS
+server) are layered on as they are ported.
+- **Tests:** `the_fanout_delivers_to_every_subscriber` (the §3.7 fan-out),
+  `a_subscribers_queue_is_bounded_and_drains` (the bounded queue: bytes are
+  queued and drained, the pull), and `a_snapshot_returns_the_screen_and_an_epoch`
+  (the snapshot via the keeper's `Snapshot`, the monotonically increasing
+  epoch).
+- Gate: `cargo test` → **188 passed** / 1 ignored (daemon **109** = +3); TS
+  **347/347** + typecheck. New code clippy-clean.
