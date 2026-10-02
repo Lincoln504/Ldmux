@@ -735,3 +735,27 @@ speaks 10 messages is the double.
   socket a beat after the spawn is scheduled), so it waits on the file.
 - Gate: `cargo test` → **185 passed** / 1 ignored (daemon **104** = +10); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the `LdmuxDaemon` core (reconcile onto the keeper) — §3.5.** The
+daemon's main state (`LdmuxDaemon`): owns the keeper (via the
+`KeeperSupervisor`), the session registry, and the ownership. The retarget of
+record: today's tmux control-plane calls become keeper calls over the socket —
+a `List` for the live set, a `Read` for liveness, a `State` for the pane facts
+— so the daemon under test runs against the [fake keeper](crate::fake_keeper),
+not a live tmux server. `reconcile()` is the core of the loop: it lists the
+keeper's sessions (a `List`), maps each keeper `session_id` to its terminal
+name `ldmux-<id>`, reconciles the registry (the dead/adopted sets), prunes
+(past-TTL, cap), saves, and retains the ownership (drops claims for sessions
+that no longer exist).
+- **The fake keeper's `Kill` now removes the session** (the real keeper's `Kill`
+  does — the emulator thread exits), so a later `List` no longer includes it.
+  The daemon's `reconcile` reads liveness from the `List`, so a kept session
+  would never mark dead. This is why the fake keeper is a faithful double, not
+  an approximation.
+- **Test:** `reconcile_drives_the_registry_against_the_keeper` — the daemon's
+  `reconcile`, run against a fake keeper: a live keeper session keeps its
+  record running (the `dead` set is empty), and killing it marks the record
+  dead (the `dead` set gains the id). The daemon cannot tell the fake from the
+  real keeper (plan §3.5).
+- Gate: `cargo test` → **186 passed** / 1 ignored (daemon **105** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
