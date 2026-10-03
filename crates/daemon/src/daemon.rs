@@ -394,6 +394,16 @@ impl LdmuxDaemon {
                 let inv = self.desktop_inventory().await;
                 serde_json::to_value(&inv).map_err(|e| e.to_string())
             }
+            // The stream-dependent handlers (send, capture, snapshot, copyMode,
+            // makeLive, closeLive, attach, resize, mouseclick, input, key,
+            // follow, scrollback, remote_info) require the stream to be active
+            // (the `acquireStream`/`releaseStream` methods), which are not yet
+            // ported. They are stubbed as `not_implemented` for now.
+            "send" | "capture" | "snapshot" | "copyMode" | "makeLive" | "closeLive"
+            | "attach" | "resize" | "mouseclick" | "input" | "key" | "follow" | "scrollback"
+            | "remote_info" | "adopt" | "deskWindow" | "clipboardWrite" => {
+                Err(format!("not_implemented: {method}"))
+            }
             _ => Err(format!("unknown method: {method}")),
         }
     }
