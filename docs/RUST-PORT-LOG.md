@@ -1028,3 +1028,31 @@ Port of the pure functions from `packages/daemon/src/desktop.ts` (428 lines):
   `safe_workspace("a".repeat(33))` needs `&` (the `repeat` returns a `String`).
 - Gate: `cargo test` → **225 passed** / 1 ignored (daemon **143** = +12); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the control socket RpcHandler indirection — Phase 5.**
+The ControlSocketServer now has an RpcHandler type
+(`Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>`) and two new
+methods: `serve_one_with` (takes an RpcHandler) and `serve_accept_with` (takes an
+RpcHandler). The old `serve_one` method is kept as a wrapper that uses the stub
+dispatch method (for tests). This indirection lets the production path wire the
+daemon's `handle` method into the control socket without holding a `&mut`
+reference (the accept loop is a spawned task). The full wiring (the daemon's
+`handle` method as the handler) is a refinement for later.
+- Gate: `cargo test` → **225 passed** / 1 ignored (daemon **143**); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the desktop live-window shim + i3 tree walker + exec argv — Phase 5.**
+Port of the pure functions from `packages/daemon/src/desktop.ts`:
+- `live_shim_script` — the shell script for a session's live window (records the
+  tty and pid, loops: attach, say what happened, wait for a key to re-attach).
+- `find_window_id_by_class` — walks an i3 tree to find a window by class (the
+  only reliable criterion: the window may be floating or nested).
+- `live_exec_argv` — the argv for i3-msg exec (separate arguments, each quoted).
+- **Tests:** 5 tests: `liveShimScript` (valid shell script),
+  `findWindowIdByClass` (finds a window, returns None when absent, finds nested
+  and floating), `liveExecArgv` (each argument quoted).
+- **Findings:** the `$` prefix is reserved in Rust 2024+ (prefixed identifiers),
+  so the `live_shim_script` function builds the script by `push_str` concatenation
+  (not `format!`) to avoid the `$` being treated as a prefix.
+- Gate: `cargo test` → **230 passed** / 1 ignored (daemon **148** = +5); TS
+  **347/347** + typecheck. New code clippy-clean.
