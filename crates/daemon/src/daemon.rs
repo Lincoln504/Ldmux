@@ -246,6 +246,57 @@ impl LdmuxDaemon {
         let _ = self.registry.save();
         Ok(record)
     }
+
+    // ── Remote-facing daemon methods (the callbacks the TS `RemoteServer` takes) ──
+
+    /// Get a session record by id (the TS `getSession`).
+    pub fn get_session(&self, id: &str) -> Option<ldmux_protocol::rpc::SessionRecord> {
+        self.registry.get(id).cloned()
+    }
+
+    /// Read the desktop inventory (the TS `desktopInventory`).
+    pub async fn desktop_inventory(&self) -> ldmux_protocol::rpc::DesktopInventory {
+        let home = std::env::var("HOME").unwrap_or_default();
+        crate::desktop_inventory::read_desktop(&home).await
+    }
+
+    /// Claim a session for a device (the TS `claimSession`, ADR-0010).
+    ///
+    /// Returns the ownership result. The daemon-side side effects (size,
+    /// desk-window handling, displaced notification) are layered on by the
+    /// remote (they depend on the transport state the remote owns).
+    pub fn claim(
+        &mut self,
+        session_id: &str,
+        device: &ldmux_protocol::rpc::DeviceInfo,
+        takeover: bool,
+    ) -> crate::ownership::ClaimResult {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        self.ownership.claim(session_id, device.clone(), takeover, Some(now))
+    }
+
+    /// Release a claim (the TS `releaseClaim`).
+    pub fn release_claim(&mut self, session_id: &str, device_id: &str) -> bool {
+        self.ownership.release(session_id, device_id)
+    }
+
+    /// Whether a device holds a session (the TS `holds`).
+    pub fn holds(&self, session_id: &str, device_id: &str) -> bool {
+        self.ownership
+            .owner(session_id)
+            .map(|c| c.device.id == device_id)
+            .unwrap_or(false)
+    }
+
+    /// Release all claims for a device (the TS `releaseDevice`).
+    ///
+    /// Returns the list of session ids that were freed.
+    pub fn release_device(&mut self, device_id: &str) -> Vec<String> {
+        self.ownership.release_device(device_id)
+    }
 }
 
 #[cfg(test)]

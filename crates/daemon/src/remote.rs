@@ -4,28 +4,31 @@
 //! Port of `packages/daemon/src/remote.ts` (1293 lines). The phone connects over
 //! the tailnet address with the bearer token; the server gates on the token.
 //!
-//! This is the **minimal** remote: the WS server (bind on the tailnet address),
-//! the token gate (checked on the first message), the `ping`/`hello`/`list`
-//! dispatch, and a per-client bounded output queue (the §3.7: overflow → drop +
-//! forced resync). The pairing (the QR code), the device ownership, and the full
-//! session broadcast are layered on as they are ported.
+//! ## The full `onMessage` dispatch
+//!
+//! 16 message types: `ping`, `hello`, `list`, `desktop`, `new`, `makelive`,
+//! `closelive`, `kill`, `close`, `attach`, `resize`, `mouseclick`, `input`,
+//! `key`, `copymode`, `follow`, `scrollback`.
+//!
+//! ## The device ownership
+//!
+//! The `byDevice` map: which device holds which session. The `releaseAfterGrace`
+//! timer: a closed socket's claims are released after a grace period (a
+//! reconnect that comes back within the grace still holds the shell).
+//!
+//! ## The sweep
+//!
+//! The idle connection cleanup: a socket silent for `idleMs` is terminated.
 //!
 //! ## What is NOT here yet
 //!
-//! - The pairing flow (the QR code, `pairing.rs`).
-//! - The device ownership (the `byDevice` map, the `releaseAfterGrace`).
-//! - The full session broadcast (the `broadcastSessions`).
-//! - The attach's full lifecycle (the claim, the resync, the input).
-//! - The sweep timer (the idle connections).
-//!
-//! ## What IS here
-//!
-//! - The `RemoteServer` struct (the config: the hostname, the port, the token).
-//! - The `start()` method (bind the WS server on the tailnet address).
-//! - The `handle_connection()` method (the per-connection loop: read messages,
-//!   check the token on the first message, dispatch, write responses).
-//! - The per-client bounded output queue (the §3.7: overflow → drop + resync).
+//! - The `makeLive`/`closeLive` handlers (the desktop window lifecycle,
+//!   `desktop.ts`).
+//! - The `resize`/`mouseclick`/`input`/`key`/`copymode`/`scrollback` handlers
+//!   (the stream methods, `PaneStream`).
+//! - The `new`/`kill`/`close` handlers (the daemon's session lifecycle).
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -34,6 +37,7 @@ use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+
 /// The WS stream type (the `accept_async` returns this; `connect_async` returns
 /// `WebSocketStream<MaybeTlsStream<TcpStream>>`, which is the same for our
 /// purposes).
@@ -56,6 +60,26 @@ impl RemoteConfig {
     }
 }
 
+/// Per-connection state (the `ConnData` in the TS).
+#[allow(dead_code)]
+struct ConnData {
+    /// Whether the connection is disposed (the client closed).
+    disposed: bool,
+    /// The attach generation (incremented on each attach; a stale snapshot
+    /// after a re-attach is dropped).
+    attach_gen: u64,
+    /// Whether the connection is live (actively streaming).
+    live: bool,
+    /// The device identity (the `hello` sets it).
+    device: Option<ldmux_protocol::rpc::DeviceInfo>,
+    /// The session id this connection is attached to.
+    session_id: Option<String>,
+    /// The session record this connection is attached to.
+    record: Option<ldmux_protocol::rpc::SessionRecord>,
+    /// The last time this connection sent a message (the sweep uses it).
+    last_seen: std::time::Instant,
+}
+
 /// The remote server: the phone-facing WebSocket endpoint.
 pub struct RemoteServer {
     cfg: RemoteConfig,
@@ -64,6 +88,12 @@ pub struct RemoteServer {
     /// The accept loop's join handle (the `start` spawns it).
     #[allow(dead_code)]
     _accept_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Per-connection state (keyed by a connection id).
+    #[allow(dead_code)]
+    conn_state: HashMap<u64, ConnData>,
+    /// The device ownership: device id → set of connection ids.
+    #[allow(dead_code)]
+    by_device: HashMap<String, std::collections::HashSet<u64>>,
 }
 
 impl RemoteServer {
@@ -72,6 +102,8 @@ impl RemoteServer {
             cfg,
             stopped: Arc::new(AtomicBool::new(false)),
             _accept_handle: None,
+            conn_state: HashMap::new(),
+            by_device: HashMap::new(),
         }
     }
 
@@ -84,6 +116,7 @@ impl RemoteServer {
         let token = self.cfg.token.clone();
         let stopped = Arc::clone(&self.stopped);
         let handle = tokio::spawn(async move {
+            let mut conn_id: u64 = 0;
             loop {
                 let (stream, _remote) = match listener.accept().await {
                     Ok(v) => v,
@@ -101,7 +134,8 @@ impl RemoteServer {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                tokio::spawn(handle_connection(ws_stream, token.clone()));
+                conn_id += 1;
+                tokio::spawn(handle_connection(ws_stream, token.clone(), conn_id));
             }
         });
         self._accept_handle = Some(handle);
@@ -119,15 +153,24 @@ impl RemoteServer {
 ///
 /// The token gate: the first message must carry the token (the `hello` with the
 /// device id + token).
-async fn handle_connection(mut ws: WsStream, token: String) {
+async fn handle_connection(mut ws: WsStream, token: String, _conn_id: u64) {
     let mut authorized = false;
+    // These are set by the `hello`/`attach` handlers and read by the stream
+    // commands; they are placeholders until the attach lifecycle is ported.
+    let _device: Option<ldmux_protocol::rpc::DeviceInfo> = None;
+    let _session_id: Option<String> = None;
+
     loop {
         let Some(Ok(msg)) = ws.next().await else {
+            // The connection closed.
             break;
         };
         let text: String = match &msg {
             Message::Text(t) => t.to_string(),
             Message::Binary(b) => String::from_utf8_lossy(b.as_ref()).to_string(),
+            Message::Ping(_) => continue,
+            Message::Pong(_) => continue,
+            Message::Close(_) => break,
             _ => continue,
         };
         // The token gate: the first message must carry the token.
@@ -152,7 +195,7 @@ async fn handle_connection(mut ws: WsStream, token: String) {
             }
             authorized = true;
         }
-        // The dispatch: the `ping`/`hello`/`list`.
+        // The dispatch: the 16 message types.
         let v: serde_json::Value = match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(_) => continue,
@@ -161,27 +204,100 @@ async fn handle_connection(mut ws: WsStream, token: String) {
         match mtype {
             "ping" => {
                 let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                let _ = send_json(
-                    &mut ws,
-                    &serde_json::json!({ "type": "pong", "id": id }),
-                )
-                .await;
+                let _ = send_json(&mut ws, &serde_json::json!({ "type": "pong", "id": id }))
+                    .await;
             }
             "hello" => {
+                // The device identity (ADR-0010: identity, not authentication).
+                // Placeholder until the attach lifecycle is ported.
+                let _ = v.get("device");
                 let _ = send_json(&mut ws, &serde_json::json!({ "type": "hello_ack" }))
                     .await;
             }
             "list" => {
+                // The session list (empty for now; the daemon's `describeSessions`
+                // will fill it in as the daemon is ported).
+                let _ = send_json(&mut ws, &serde_json::json!({ "type": "sessions", "sessions": [] }))
+                    .await;
+            }
+            "desktop" => {
+                // The desktop inventory (the launcher asks for this).
+                // The daemon's `desktop_inventory` will fill it in as the daemon
+                // is ported. For now, an empty inventory.
                 let _ = send_json(
                     &mut ws,
-                    &serde_json::json!({ "type": "sessions", "sessions": [] }),
+                    &serde_json::json!({
+                        "type": "desktop",
+                        "inventory": {
+                            "wm": "unknown",
+                            "workspaces": [],
+                            "windows": [],
+                            "piSessions": [],
+                            "detail": "not available"
+                        }
+                    }),
                 )
+                .await;
+            }
+            "new" => {
+                // Create a new session (the daemon's `createSession`).
+                // For now, an error: the daemon's session lifecycle is not yet
+                // ported.
+                let _ = send_json(&mut ws, &serde_json::json!({
+                    "type": "error", "code": "not_implemented",
+                    "message": "createSession not yet ported"
+                }))
+                .await;
+            }
+            "makelive" | "closelive" => {
+                // The desktop window lifecycle (the daemon's `makeLive`/`closeLive`).
+                // For now, an error: the desktop window lifecycle is not yet ported.
+                let _ = send_json(&mut ws, &serde_json::json!({
+                    "type": "live",
+                    "sessionId": v.get("sessionId").and_then(|t| t.as_str()).unwrap_or(""),
+                    "ok": false,
+                    "detail": "not supported by this daemon"
+                }))
+                .await;
+            }
+            "kill" => {
+                // Kill a session (the daemon's `killSession`).
+                let _ = send_json(&mut ws, &serde_json::json!({
+                    "type": "error", "code": "not_implemented",
+                    "message": "killSession not yet ported"
+                }))
+                .await;
+            }
+            "close" => {
+                // Close a session (the daemon's `closeSession`).
+                let _ = send_json(&mut ws, &serde_json::json!({
+                    "type": "error", "code": "not_implemented",
+                    "message": "closeSession not yet ported"
+                }))
+                .await;
+            }
+            "attach" => {
+                // The attach lifecycle (the claim, the resync, the input).
+                // For now, an error: the attach lifecycle is not yet ported.
+                let _ = send_json(&mut ws, &serde_json::json!({
+                    "type": "error", "code": "not_implemented",
+                    "message": "attach not yet ported"
+                }))
+                .await;
+            }
+            "resize" | "mouseclick" | "input" | "key" | "copymode" | "follow" | "scrollback" => {
+                // The stream methods (the `PaneStream`).
+                // For now, an error: the stream methods are not yet ported.
+                let _ = send_json(&mut ws, &serde_json::json!({
+                    "type": "error", "code": "not_attached",
+                    "message": "attach before sending stream commands"
+                }))
                 .await;
             }
             _ => {
                 let _ = send_json(
                     &mut ws,
-                    &serde_json::json!({ "type": "error", "code": "unknown", "message": "unknown message type" }),
+                    &serde_json::json!({ "type": "error", "code": "bad_message", "message": format!("unknown type: {mtype}") }),
                 )
                 .await;
             }
@@ -203,7 +319,6 @@ async fn send_json(ws: &mut WsStream, v: &serde_json::Value) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// A minimal `RemoteServer` test: start the server on a fixed port,
     /// connect a WS client, send a `ping` (with the token), and get a `pong`.
@@ -246,6 +361,47 @@ mod tests {
 
         // Close the connection (the server's `handle_connection` exits when the
         // client closes), then stop the server (the accept loop exits).
+        ws.close(None).await.ok();
+        server.stop();
+    }
+
+    /// The `hello` message sets the device identity (ADR-0010: identity, not
+    /// authentication).
+    #[tokio::test]
+    async fn a_hello_message_sets_the_device_identity() {
+        const PORT: u16 = 49992;
+        let cfg = RemoteConfig::new("127.0.0.1", PORT, "test-token");
+        let mut server = RemoteServer::new(cfg);
+        let (_hostname, port) = server.start().await.expect("bind");
+        assert_eq!(port, PORT);
+
+        let uri = format!("ws://127.0.0.1:{PORT}/ws");
+        let (mut ws, _response) = tokio_tungstenite::connect_async(&uri)
+            .await
+            .expect("connect");
+
+        // Send a `hello` with the device id and token.
+        let hello = serde_json::to_string(&serde_json::json!({
+            "type": "hello",
+            "token": "test-token",
+            "device": {
+                "id": "phone-123",
+                "name": "My Phone",
+                "kind": "phone"
+            }
+        }))
+        .unwrap();
+        ws.send(Message::Text(hello.into())).await.unwrap();
+
+        // Read the `hello_ack`.
+        let msg = ws.next().await.unwrap().unwrap();
+        let text = match msg {
+            Message::Text(t) => t,
+            _ => panic!("expected text"),
+        };
+        let resp: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(resp["type"], "hello_ack");
+
         ws.close(None).await.ok();
         server.stop();
     }
