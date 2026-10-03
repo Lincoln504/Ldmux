@@ -220,7 +220,7 @@ impl LdmuxDaemon {
         // be taken down by a remote bind failure).
         if let Some(cfg) = self.remote_cfg.clone() {
             let mut rs = crate::remote::RemoteServer::new(cfg);
-            match rs.start().await {
+            match rs.start(arc).await {
                 Ok((host, port)) => {
                     eprintln!("ldmuxd: remote ws://{host}:{port}/ws");
                     self.remote = Some(rs);

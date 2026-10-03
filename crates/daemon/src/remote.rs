@@ -109,13 +109,21 @@ impl RemoteServer {
     }
 
     /// Bind the WS server on the tailnet address (the `start()`).
-    pub async fn start(&mut self) -> Result<(String, u16), String> {
+    ///
+    /// The `daemon_arc` is the `Arc<Mutex<LdmuxDaemon>>` shared with the
+    /// daemon; the `handle_connection` function uses it to call the daemon's
+    /// methods (session lifecycle, stream, desktop).
+    pub async fn start(
+        &mut self,
+        daemon_arc: &std::sync::Arc<tokio::sync::Mutex<super::daemon::LdmuxDaemon>>,
+    ) -> Result<(String, u16), String> {
         let addr = format!("{}:{}", self.cfg.hostname, self.cfg.port);
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
         let token = self.cfg.token.clone();
         let stopped = Arc::clone(&self.stopped);
+        let daemon_arc = daemon_arc.clone();
         let handle = tokio::spawn(async move {
             let mut conn_id: u64 = 0;
             loop {
@@ -136,7 +144,12 @@ impl RemoteServer {
                     Err(_) => continue,
                 };
                 conn_id += 1;
-                tokio::spawn(handle_connection(ws_stream, token.clone(), conn_id));
+                tokio::spawn(handle_connection(
+                    ws_stream,
+                    token.clone(),
+                    conn_id,
+                    daemon_arc.clone(),
+                ));
             }
         });
         self._accept_handle = Some(handle);
@@ -154,12 +167,17 @@ impl RemoteServer {
 ///
 /// The token gate: the first message must carry the token (the `hello` with the
 /// device id + token).
-async fn handle_connection(mut ws: WsStream, token: String, _conn_id: u64) {
+async fn handle_connection(
+    mut ws: WsStream,
+    token: String,
+    _conn_id: u64,
+    daemon_arc: std::sync::Arc<tokio::sync::Mutex<super::daemon::LdmuxDaemon>>,
+) {
     let mut authorized = false;
     // These are set by the `hello`/`attach` handlers and read by the stream
-    // commands; they are placeholders until the attach lifecycle is ported.
-    let _device: Option<ldmux_protocol::rpc::DeviceInfo> = None;
-    let _session_id: Option<String> = None;
+    // commands.
+    let mut device: Option<ldmux_protocol::rpc::DeviceInfo> = None;
+    let mut session_id: Option<String> = None;
 
     loop {
         let Some(Ok(msg)) = ws.next().await else {
@@ -321,6 +339,25 @@ async fn send_json(ws: &mut WsStream, v: &serde_json::Value) -> Result<(), Strin
 mod tests {
     use super::*;
 
+    /// A helper: create a dummy `Arc<Mutex<LdmuxDaemon>>` for tests.
+    async fn dummy_daemon_arc() -> std::sync::Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>> {
+        let dir = std::env::temp_dir().join(format!("ldmux-remote-test-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(crate::fake_keeper::FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            crate::fake_keeper::FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        for _ in 0..50 {
+            if keeper_sock.exists() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let d = crate::daemon::LdmuxDaemon::new(dir, std::path::PathBuf::from("/nonexistent"));
+        std::sync::Arc::new(tokio::sync::Mutex::new(d))
+    }
+
     /// A minimal `RemoteServer` test: start the server on a fixed port,
     /// connect a WS client, send a `ping` (with the token), and get a `pong`.
     ///
@@ -332,7 +369,8 @@ mod tests {
         const PORT: u16 = 49991;
         let cfg = RemoteConfig::new("127.0.0.1", PORT, "test-token");
         let mut server = RemoteServer::new(cfg);
-        let (_hostname, port) = server.start().await.expect("bind");
+        let daemon_arc = dummy_daemon_arc().await;
+        let (_hostname, port) = server.start(&daemon_arc).await.expect("bind");
         assert_eq!(port, PORT);
 
         // Connect a WS client. The first message carries the token.
@@ -373,7 +411,8 @@ mod tests {
         const PORT: u16 = 49992;
         let cfg = RemoteConfig::new("127.0.0.1", PORT, "test-token");
         let mut server = RemoteServer::new(cfg);
-        let (_hostname, port) = server.start().await.expect("bind");
+        let daemon_arc = dummy_daemon_arc().await;
+        let (_hostname, port) = server.start(&daemon_arc).await.expect("bind");
         assert_eq!(port, PORT);
 
         let uri = format!("ws://127.0.0.1:{PORT}/ws");
