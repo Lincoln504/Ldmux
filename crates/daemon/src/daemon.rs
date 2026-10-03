@@ -456,14 +456,78 @@ impl LdmuxDaemon {
                 let inv = self.desktop_inventory().await;
                 serde_json::to_value(&inv).map_err(|e| e.to_string())
             }
-            // The stream-dependent handlers (send, capture, snapshot, copyMode,
-            // makeLive, closeLive, attach, resize, mouseclick, input, key,
-            // follow, scrollback, remote_info) require the stream to be active
-            // (the `acquireStream`/`releaseStream` methods), which are not yet
-            // ported. They are stubbed as `not_implemented` for now.
-            "send" | "capture" | "snapshot" | "copyMode" | "makeLive" | "closeLive"
-            | "attach" | "resize" | "mouseclick" | "input" | "key" | "follow" | "scrollback"
-            | "remote_info" | "adopt" | "deskWindow" | "clipboardWrite" => {
+            "send" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let keys = params.get("keys").and_then(|v| v.as_array());
+                let record = self.registry.get(id).ok_or_else(|| format!("no such session: {id}"))?;
+                if record.tmux_name.is_empty() {
+                    return Err("no terminal-backed session".to_string());
+                }
+                // Build the input: text + keys (the keys are sent as bytes).
+                let mut input = String::new();
+                if !text.is_empty() {
+                    input.push_str(text);
+                }
+                if let Some(keys) = keys {
+                    for k in keys {
+                        let ks = k.as_str().unwrap_or("");
+                        input.push_str(ks);
+                    }
+                }
+                // Send the input to the keeper (the `Write` message).
+                self.keeper_call(&km::KeeperMessage::Write(km::Write {
+                    session_id: record.tmux_name.clone(),
+                    data: input,
+                }))
+                .await?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            "capture" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let history = params.get("history").and_then(|v| v.as_bool()).unwrap_or(false);
+                let record = self.registry.get(id).ok_or_else(|| format!("no such session: {id}"))?;
+                if record.tmux_name.is_empty() {
+                    return Err("no terminal-backed session".to_string());
+                }
+                // Take a snapshot (the keeper's `Snapshot` message).
+                let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
+                    session_id: record.tmux_name.clone(),
+                    history_lines: if history { Some(100) } else { None },
+                }))
+                .await?;
+                let text = match &resp {
+                    KeeperMessage::SnapshotResult(s) => s.text.clone(),
+                    _ => return Err("expected SnapshotResult".to_string()),
+                };
+                Ok(serde_json::json!({ "screen": text }))
+            }
+            "snapshot" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let record = self.registry.get(id).ok_or_else(|| format!("no such session: {id}"))?;
+                if record.tmux_name.is_empty() {
+                    return Err("no terminal-backed session".to_string());
+                }
+                // Take a snapshot (the keeper's `Snapshot` message).
+                let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
+                    session_id: record.tmux_name.clone(),
+                    history_lines: None,
+                }))
+                .await?;
+                let result = match &resp {
+                    KeeperMessage::SnapshotResult(s) => s.clone(),
+                    _ => return Err("expected SnapshotResult".to_string()),
+                };
+                Ok(serde_json::to_value(&result).map_err(|e| e.to_string())?)
+            }
+            // The remaining stream-dependent handlers (copyMode, makeLive,
+            // closeLive, attach, resize, mouseclick, input, key, follow,
+            // scrollback, remote_info, adopt, deskWindow, clipboardWrite) are
+            // stubbed as `not_implemented` (they require the desktop window
+            // lifecycle and the attach lifecycle, which are not yet ported).
+            "copyMode" | "makeLive" | "closeLive" | "attach" | "resize" | "mouseclick"
+            | "input" | "key" | "follow" | "scrollback" | "remote_info" | "adopt"
+            | "deskWindow" | "clipboardWrite" => {
                 Err(format!("not_implemented: {method}"))
             }
             _ => Err(format!("unknown method: {method}")),
@@ -982,6 +1046,43 @@ mod tests {
         d.kill_session(&record.id).await.unwrap();
         d.sweep_streams();
         assert!(!d.streams.contains_key(&tmux_name));
+
+        drop(fk);
+    }
+
+    /// The `send`, `capture`, and `snapshot` RPC handlers: `send` writes input
+    /// to the keeper, `capture` returns the rendered screen, and `snapshot`
+    /// returns the rendered screen + state.
+    #[tokio::test]
+    async fn send_capture_snapshot_dispatch() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let id = record.id.clone();
+
+        // `send` writes input to the keeper.
+        let r = d.handle("send", serde_json::json!({ "id": id, "text": "hello" })).await.unwrap();
+        assert!(r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+
+        // `capture` returns the rendered screen (the fake keeper's snapshot_text
+        // is empty until a test sets it, so we only assert the field exists).
+        let r = d.handle("capture", serde_json::json!({ "id": id })).await.unwrap();
+        assert!(r.get("screen").is_some(), "the screen field should exist");
+
+        // `snapshot` returns the rendered screen + state.
+        let r = d.handle("snapshot", serde_json::json!({ "id": id })).await.unwrap();
+        assert!(r.get("cols").and_then(|v| v.as_u64()).is_some());
+        assert!(r.get("rows").and_then(|v| v.as_u64()).is_some());
 
         drop(fk);
     }
