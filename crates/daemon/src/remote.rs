@@ -336,13 +336,76 @@ async fn handle_connection(
                 }
             }
             "attach" => {
-                // The attach lifecycle (the claim, the resync, the input).
-                // For now, an error: the attach lifecycle is not yet ported.
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "not_implemented",
-                    "message": "attach not yet ported"
-                }))
-                .await;
+                // The attach lifecycle (the claim, the snapshot, the input).
+                let sid = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
+                let _cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(80);
+                let _rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(24);
+                let takeover = v.get("takeover").and_then(|t| t.as_bool()).unwrap_or(false);
+                let mut d = daemon_arc.lock().await;
+                // Get the session record.
+                let rec = d.get_session(sid);
+                match rec {
+                    None => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "unknown_session",
+                            "message": format!("no session: {sid}")
+                        }))
+                        .await;
+                    }
+                    Some(rec) => {
+                        if rec.status != "running" {
+                            let _ = send_json(&mut ws, &serde_json::json!({
+                                "type": "error", "code": "session_dead",
+                                "message": format!("session is dead: {sid}")
+                            }))
+                            .await;
+                        } else {
+                            // Claim the session (exclusivity, ADR-0010).
+                            let claimed = if let Some(dev) = &device {
+                                match d.claim(sid, dev, takeover) {
+                                    crate::ownership::ClaimResult::HeldBy { device } => {
+                                        let _ = send_json(&mut ws, &serde_json::json!({
+                                            "type": "owned",
+                                            "sessionId": sid,
+                                            "owner": serde_json::to_value(&device)
+                                                .unwrap_or(serde_json::Value::Null),
+                                        }))
+                                        .await;
+                                        None
+                                    }
+                                    _ => Some(()),
+                                }
+                            } else {
+                                Some(())
+                            };
+                            if claimed.is_some() {
+                                // Get or create a stream.
+                                let stream = d.stream_for(&rec.tmux_name);
+                                // Subscribe with a no-op on_output (the
+                                // simplified attach: the client gets a
+                                // snapshot; output is polled via capture).
+                                let sub = crate::stream::StreamSubscriber {
+                                    on_output: Box::new(|_text: &[u8]| {}),
+                                    on_reset: Box::new(|_reason: &str| {}),
+                                };
+                                let _unsubscribe = stream.subscribe(sub);
+                                session_id = Some(sid.to_string());
+                                // Take a snapshot.
+                                let snap = stream.snapshot();
+                                let _ = send_json(
+                                    &mut ws,
+                                    &serde_json::json!({
+                                        "type": "state",
+                                        "sessionId": sid,
+                                        "snapshot": serde_json::to_value(&snap)
+                                            .unwrap_or(serde_json::Value::Null),
+                                    }),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
             }
             "resize" | "mouseclick" | "input" | "key" | "copymode" | "follow" | "scrollback" => {
                 // The stream methods (the `PaneStream`).
