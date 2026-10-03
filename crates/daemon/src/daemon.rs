@@ -45,6 +45,23 @@ pub struct LdmuxDaemon {
     /// The single-instance lock (the `ldmuxd.lock` pid lockfile); `Drop`
     /// releases it.
     lock: DaemonLock,
+    /// The remote WS server (the phone-facing endpoint); `Option` because the
+    /// remote is optional (a bind failure must not take down local control).
+    #[allow(dead_code)]
+    remote: Option<crate::remote::RemoteServer>,
+    /// The remote config (the hostname, port, token).
+    #[allow(dead_code)]
+    remote_cfg: Option<crate::remote::RemoteConfig>,
+}
+
+impl Drop for LdmuxDaemon {
+    fn drop(&mut self) {
+        // The lock is released by its own `Drop` (the `DaemonLock`'s `Drop`).
+        // The remote is stopped here (its `stop()` sets the stopped flag).
+        if let Some(r) = self.remote.as_mut() {
+            r.stop();
+        }
+    }
 }
 
 impl LdmuxDaemon {
@@ -62,7 +79,20 @@ impl LdmuxDaemon {
             dead_record_ttl_ms: 24 * 60 * 60 * 1000,
             max_records: 500,
             lock: DaemonLock::new(&state_dir),
+            remote: None,
+            remote_cfg: None,
         }
+    }
+
+    /// Configure the remote (the hostname, port, token) before `start`.
+    pub fn with_remote(mut self, hostname: String, port: u16, token: String) -> Self {
+        self.remote_cfg = Some(crate::remote::RemoteConfig::new(hostname, port, token));
+        self
+    }
+
+    /// The control socket path (the `ldmuxd.sock`).
+    pub fn socket_path(&self) -> std::path::PathBuf {
+        self.state_dir.join("ldmuxd.sock")
     }
 
     /// The state dir.
@@ -153,9 +183,8 @@ impl LdmuxDaemon {
     /// lock (a concurrent daemon refuses — callers treat that as success,
     /// someone else won), ensure the keeper (auto-spawn if dead), load the
     /// registry, adopt the daemon's own sessions (the keeper's `ldmux-<id>`
-    /// panes the registry does not list), and reconcile. The rest of the TS
-    /// `start` (the control socket server, the remote, the live timer) is
-    /// layered on as it is ported.
+    /// panes the registry does not list), and reconcile. The remote is started
+    /// after the core (a bind failure must not take down local control).
     pub async fn start(&mut self) -> Result<(), String> {
         // Acquire the lock (the single-instance pid lockfile).
         self.lock.acquire().map_err(|e| e.to_string())?;
@@ -167,7 +196,31 @@ impl LdmuxDaemon {
         self.adopt_own_sessions().await?;
         // Reconcile.
         let _ = self.reconcile().await?;
+        // Start the remote (the phone-facing WS endpoint). A bind failure is
+        // logged, not fatal: the remote is optional (local control must not
+        // be taken down by a remote bind failure).
+        if let Some(cfg) = self.remote_cfg.clone() {
+            let mut rs = crate::remote::RemoteServer::new(cfg);
+            match rs.start().await {
+                Ok((host, port)) => {
+                    eprintln!("ldmuxd: remote ws://{host}:{port}/ws");
+                    self.remote = Some(rs);
+                }
+                Err(e) => {
+                    eprintln!("ldmuxd: remote disabled: {e}");
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Stop the daemon (the TS `stop`). Stops the remote, releases the lock.
+    /// Tolerates a partially-started daemon (a signal during startup).
+    pub fn stop(&mut self) {
+        if let Some(ref mut r) = self.remote {
+            r.stop();
+        }
+        // The lock is released by `DaemonLock::drop`.
     }
 
     /// Adopt the daemon's own sessions (the keeper's `ldmux-<id>` panes the

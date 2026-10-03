@@ -45,6 +45,7 @@ type WsStream = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
 /// The remote config: the hostname (the tailnet address), the port, and the
 /// token (the ADR-0010 bearer).
+#[derive(Clone)]
 pub struct RemoteConfig {
     /// The hostname to bind (the tailnet address, e.g. `100.127.119.54`).
     pub hostname: String,
