@@ -30,7 +30,13 @@ pub struct ControlSocketServer {
 /// The daemon's `handle` method is the production handler; the tests use a
 /// simple stub. This indirection lets the `serve_one` method call the daemon
 /// without holding a `&mut` reference (the accept loop is a spawned task).
-pub type RpcHandler = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+///
+/// The handler is async: the daemon's `handle` method is async, and the
+/// `tokio::sync::Mutex` guard is `Send` (the daemon is `Send`), so the guard
+/// can be held across an `.await`.
+pub type RpcHandler = Box<
+    dyn Fn(&str, &Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> + Send + Sync,
+>;
 
 impl ControlSocketServer {
     /// Create a server for `<state_dir>/ldmuxd.sock`.
@@ -72,11 +78,12 @@ impl ControlSocketServer {
         let handler: RpcHandler = Box::new(|_method, req| {
             let resp = Self::dispatch(req);
             // Extract the `result` from the stub response.
-            if resp.get("ok").and_then(|o| o.as_bool()) == Some(true) {
+            let result = if resp.get("ok").and_then(|o| o.as_bool()) == Some(true) {
                 Ok(resp.get("result").cloned().unwrap_or(Value::Null))
             } else {
                 Err(resp.get("error").and_then(|e| e.as_str()).unwrap_or("error").to_string())
-            }
+            };
+            Box::pin(async move { result })
         });
         self.serve_one_with(stream, &handler).await
     }
@@ -115,7 +122,7 @@ impl ControlSocketServer {
             .get("method")
             .and_then(|m| m.as_str())
             .unwrap_or_default();
-        let result = handler(method, &req);
+        let result = handler(method, &req).await;
         let response = match result {
             Ok(r) => Value::from_iter([
                 ("ok", Value::Bool(true)),

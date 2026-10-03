@@ -78,18 +78,26 @@ fn main() {
 
     // Create the daemon.
     let keeper_bin = std::path::PathBuf::from("ldmux-keeper");
-    let mut daemon = LdmuxDaemon::new(state_dir.clone(), keeper_bin)
+    let daemon = LdmuxDaemon::new(state_dir.clone(), keeper_bin)
         .with_remote(remote_host.clone(), remote_port, token);
+    // Wrap the daemon in an `Arc<tokio::sync::Mutex>` so the control socket's
+    // spawned tasks can call `handle` (which takes `&mut self`).
+    let daemon_arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(daemon));
 
     // Start the daemon.
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        match daemon.start().await {
+    let daemon_ref = daemon_arc.clone();
+    rt.block_on(async move {
+        // The daemon is inside the `Arc`. We need a `&mut` reference to call
+        // `start`. The `Arc`'s `Mutex` gives us that.
+        let mut d = daemon_ref.lock().await;
+        match d.start(&daemon_ref).await {
             Ok(()) => {
                 println!(
                     "ldmuxd listening on {} (keeper: {})",
-                    daemon.socket_path().display(),
-                    daemon.keeper_socket_path().display(),
+                    d.socket_path().display(),
+                    d.keeper_socket_path().display(),
                 );
             }
             Err(e) => {
@@ -105,10 +113,6 @@ fn main() {
 
     // The daemon started successfully. Now block forever (the process is
     // stopped by SIGTERM/SIGINT; the `Drop` impl releases the lock).
-    //
-    // In a real deployment, the systemd unit sends SIGTERM on stop; the
-    // process's default disposition (kill) is fine for now. The `Drop` impl
-    // on `LdmuxDaemon` releases the lock and stops the remote.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }

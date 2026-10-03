@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ldmux_protocol::keeper::{self as km, KeeperMessage};
+use serde_json::Value;
 
 use std::collections::HashMap;
 
@@ -199,7 +200,11 @@ impl LdmuxDaemon {
     /// registry, adopt the daemon's own sessions (the keeper's `ldmux-<id>`
     /// panes the registry does not list), and reconcile. The remote is started
     /// after the core (a bind failure must not take down local control).
-    pub async fn start(&mut self) -> Result<(), String> {
+    /// Start the daemon. The daemon is wrapped in an `Arc<tokio::sync::Mutex>`
+    /// (created by the caller) so that the control socket's spawned tasks can
+    /// call `handle` (which takes `&mut self`). The `Arc` is shared across the
+    /// accept loop.
+    pub async fn start(&mut self, arc: &std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>>) -> Result<(), String> {
         // Acquire the lock (the single-instance pid lockfile).
         self.lock.acquire().map_err(|e| e.to_string())?;
         // Ensure the keeper (auto-spawn if dead).
@@ -225,6 +230,34 @@ impl LdmuxDaemon {
                 }
             }
         }
+        // Start the control socket (the `ldmuxd.sock` Unix socket).
+        // The daemon's `handle` method is the handler: each RPC call locks the
+        // mutex and calls `handle`.
+        let cs = crate::control_socket::ControlSocketServer::new(&self.state_dir);
+        let listener = cs.bind().map_err(|e| format!("bind control socket: {e}"))?;
+        let handler: crate::control_socket::RpcHandler = Box::new({
+            let arc2 = arc.clone();
+            move |method: &str, params: &Value| {
+                let method = method.to_string();
+                let params = params.clone();
+                let arc = arc2.clone();
+                Box::pin(async move {
+                    let mut daemon = arc.lock().await;
+                    daemon.handle(&method, params).await
+                })
+            }
+        });
+        tokio::spawn(async move {
+            loop {
+                match crate::control_socket::serve_accept_with(&cs, &listener, &handler).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("ldmuxd: control socket: {e}");
+                        break;
+                    }
+                }
+            }
+        });
         Ok(())
     }
 
@@ -808,10 +841,16 @@ mod tests {
         .await
         .unwrap();
 
-        // `start` (the main loop).
-        d.start().await.unwrap();
+        // `start` (the main loop). The daemon is wrapped in an `Arc` so the
+        // control socket's spawned tasks can call `handle`.
+        let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(d));
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+        drop(d);
 
         // The session was adopted: the registry has a record for it.
+        let mut d = arc.lock().await;
         let r = d.registry().get("s1").unwrap();
         assert_eq!(r.tmux_name, "ldmux-s1");
         assert_eq!(r.status, "running");
@@ -1087,3 +1126,5 @@ mod tests {
         drop(fk);
     }
 }
+
+
