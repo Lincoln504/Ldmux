@@ -228,49 +228,70 @@ async fn handle_connection(
             }
             "hello" => {
                 // The device identity (ADR-0010: identity, not authentication).
-                // Placeholder until the attach lifecycle is ported.
-                let _ = v.get("device");
+                let dev = v.get("device").cloned().unwrap_or(serde_json::Value::Null);
+                if let Ok(d) = serde_json::from_value::<ldmux_protocol::rpc::DeviceInfo>(dev) {
+                    device = Some(d);
+                }
                 let _ = send_json(&mut ws, &serde_json::json!({ "type": "hello_ack" }))
                     .await;
             }
             "list" => {
-                // The session list (empty for now; the daemon's `describeSessions`
-                // will fill it in as the daemon is ported).
-                let _ = send_json(&mut ws, &serde_json::json!({ "type": "sessions", "sessions": [] }))
-                    .await;
+                // The session list from the daemon.
+                let mut d = daemon_arc.lock().await;
+                match d.handle("list", serde_json::json!({})).await {
+                    Ok(r) => {
+                        let sessions = r.get("sessions").cloned().unwrap_or(serde_json::json!([]));
+                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "sessions", "sessions": sessions }))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "daemon_error", "message": e
+                        }))
+                        .await;
+                    }
+                }
             }
             "desktop" => {
-                // The desktop inventory (the launcher asks for this).
-                // The daemon's `desktop_inventory` will fill it in as the daemon
-                // is ported. For now, an empty inventory.
+                // The desktop inventory from the daemon.
+                let d = daemon_arc.lock().await;
+                let inv = d.desktop_inventory().await;
                 let _ = send_json(
                     &mut ws,
                     &serde_json::json!({
                         "type": "desktop",
-                        "inventory": {
-                            "wm": "unknown",
-                            "workspaces": [],
-                            "windows": [],
-                            "piSessions": [],
-                            "detail": "not available"
-                        }
+                        "inventory": serde_json::to_value(&inv).unwrap_or(serde_json::Value::Null),
                     }),
                 )
                 .await;
             }
             "new" => {
                 // Create a new session (the daemon's `createSession`).
-                // For now, an error: the daemon's session lifecycle is not yet
-                // ported.
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "not_implemented",
-                    "message": "createSession not yet ported"
-                }))
-                .await;
+                let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("shell");
+                let cwd = v.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
+                let title = v.get("title").and_then(|t| t.as_str());
+                let created_by = device.as_ref().map(|d| d.id.clone()).unwrap_or_else(|| "phone".to_string());
+                let mut d = daemon_arc.lock().await;
+                match d.handle("new", serde_json::json!({
+                    "kind": kind,
+                    "cwd": cwd,
+                    "title": title.map(|t| t.to_string()),
+                    "createdBy": created_by,
+                })).await {
+                    Ok(r) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "session", "session": r }))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "daemon_error", "message": e
+                        }))
+                        .await;
+                    }
+                }
             }
             "makelive" | "closelive" => {
                 // The desktop window lifecycle (the daemon's `makeLive`/`closeLive`).
-                // For now, an error: the desktop window lifecycle is not yet ported.
                 let _ = send_json(&mut ws, &serde_json::json!({
                     "type": "live",
                     "sessionId": v.get("sessionId").and_then(|t| t.as_str()).unwrap_or(""),
@@ -281,19 +302,37 @@ async fn handle_connection(
             }
             "kill" => {
                 // Kill a session (the daemon's `killSession`).
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "not_implemented",
-                    "message": "killSession not yet ported"
-                }))
-                .await;
+                let id = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
+                let mut d = daemon_arc.lock().await;
+                match d.handle("kill", serde_json::json!({ "id": id })).await {
+                    Ok(r) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "killed", "session": r }))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "daemon_error", "message": e
+                        }))
+                        .await;
+                    }
+                }
             }
             "close" => {
                 // Close a session (the daemon's `closeSession`).
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "not_implemented",
-                    "message": "closeSession not yet ported"
-                }))
-                .await;
+                let id = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
+                let mut d = daemon_arc.lock().await;
+                match d.handle("close", serde_json::json!({ "id": id })).await {
+                    Ok(r) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "closed", "result": r }))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "daemon_error", "message": e
+                        }))
+                        .await;
+                    }
+                }
             }
             "attach" => {
                 // The attach lifecycle (the claim, the resync, the input).
