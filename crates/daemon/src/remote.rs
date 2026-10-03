@@ -279,7 +279,8 @@ async fn handle_connection(
                     "createdBy": created_by,
                 })).await {
                     Ok(r) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "session", "session": r }))
+                        let session = r.get("session").cloned().unwrap_or(serde_json::Value::Null);
+                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "session", "session": session }))
                             .await;
                     }
                     Err(e) => {
