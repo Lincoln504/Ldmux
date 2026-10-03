@@ -195,6 +195,7 @@ pub struct PingResult {
     /// Always `true` on the wire.
     pub pong: bool,
     pub version: u32,
+    #[serde(rename = "tmuxSocket")]
     pub tmux_socket: String,
 }
 

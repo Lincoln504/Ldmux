@@ -458,6 +458,7 @@ impl LdmuxDaemon {
             "ping" => {
                 Ok(serde_json::json!({
                     "pong": true,
+                    "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,
                     "tmuxSocket": self.keeper_socket_path().to_string_lossy(),
                 }))
             }
