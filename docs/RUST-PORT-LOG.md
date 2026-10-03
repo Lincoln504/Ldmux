@@ -1075,3 +1075,22 @@ Port of the side-effect functions from `packages/daemon/src/desktop.ts`:
   `findWindowIdByClass`, `liveExecArgv`) are tested.
 - Gate: `cargo test` → **230 passed** / 1 ignored (daemon **148**); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the control socket wiring — Phase 5.**
+The control socket now calls the daemon's `handle` method as its handler.
+The daemon is wrapped in an `Arc<tokio::sync::Mutex<LdmuxDaemon>>` (the
+daemon is `Send`), so the control socket's spawned tasks can lock the mutex
+and call `handle` (which takes `&mut self`). The `RpcHandler` is now async
+(returns a `Pin<Box<dyn Future>>`). The `serve_one_with` method awaits the
+handler's future. The `start()` method takes an `Arc` reference, creates the
+control socket with the daemon's `handle` as the handler, and spawns the
+accept loop. The `main()` function creates the `Arc`, wraps the daemon in it,
+and passes it to `start()`.
+- **Findings:** `Arc<tokio::sync::Mutex<T>>` as a `self` parameter is invalid
+  Rust (E0307); the `start()` method takes `&mut self` and an `Arc` reference
+  instead. The `RpcHandler` closure must clone `method` and `params` before
+  the `async move` (the borrows don't outlive the future). The `arc.clone()`
+  inside the closure captures the `Arc` by value (the `Arc` is `Clone`), so
+  the future is `Send`.
+- Gate: `cargo test` → **230 passed** / 1 ignored (daemon **155** = +7); TS
+  **347/347** + typecheck. New code clippy-clean.
