@@ -350,6 +350,54 @@ impl LdmuxDaemon {
         }
     }
 
+    /// The RPC dispatch (the TS `handle` method): maps an RPC method name to a
+    /// daemon method and returns the result as a JSON value.
+    ///
+    /// This is the core of the control socket server: the `serve_one` method
+    /// in `control_socket.rs` calls this to handle each RPC request.
+    pub async fn handle(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        match method {
+            "ping" => {
+                Ok(serde_json::json!({
+                    "pong": true,
+                    "tmuxSocket": self.keeper_socket_path().to_string_lossy(),
+                }))
+            }
+            "list" => {
+                let sessions: Vec<SessionRecord> = self.registry.list();
+                Ok(serde_json::json!({ "sessions": sessions }))
+            }
+            "new" => {
+                let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("shell");
+                let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
+                let title = params.get("title").and_then(|v| v.as_str());
+                let created_by = params.get("createdBy").and_then(|v| v.as_str()).unwrap_or("local");
+                let record = self.create_session(kind, cwd, title, created_by).await?;
+                Ok(serde_json::json!({ "session": record }))
+            }
+            "kill" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let record = self.kill_session(id).await?;
+                Ok(serde_json::json!({ "ok": true, "session": record }))
+            }
+            "close" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let (ended, record) = self.close_session(id).await?;
+                Ok(serde_json::json!({ "ok": true, "ended": ended, "session": record }))
+            }
+            "forget" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let removed = self.forget_session(id).await?;
+                Ok(serde_json::json!({ "ok": true, "removed": removed }))
+            }
+            "desktop" => {
+                let inv = self.desktop_inventory().await;
+                serde_json::to_value(&inv).map_err(|e| e.to_string())
+            }
+            _ => Err(format!("unknown method: {method}")),
+        }
+    }
+
     /// Adopt the daemon's own sessions (the keeper's `ldmux-<id>` panes the
     /// registry does not list). Mirrors the TS `adoptOwnSessions`: a session the
     /// registry does not know is adopted (a record is created for it), and the
@@ -761,6 +809,67 @@ mod tests {
         let removed = d.forget_session(&id).await.unwrap();
         assert!(removed);
         assert!(d.registry().get(&id).is_none());
+        drop(fk);
+    }
+
+    /// The RPC dispatch (`handle`): `ping`, `list`, `new`, `kill`, `close`,
+    /// `forget`, and `desktop` are dispatched to the daemon's methods.
+    #[tokio::test]
+    async fn handle_dispatches_rpc_methods() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+
+        // `ping` returns the tmux socket.
+        let r = d.handle("ping", serde_json::json!({})).await.unwrap();
+        assert!(r.get("pong").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert_eq!(
+            r.get("tmuxSocket").and_then(|v| v.as_str()).unwrap_or(""),
+            keeper_sock.to_string_lossy(),
+        );
+
+        // `new` creates a session.
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let r = d.handle("new", serde_json::json!({ "kind": "shell", "cwd": cwd })).await.unwrap();
+        let id: &str = r.get("session").and_then(|s| s.get("id")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(!id.is_empty());
+
+        // `list` includes the new session.
+        let r = d.handle("list", serde_json::json!({})).await.unwrap();
+        let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        assert!(sessions.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)));
+
+        // `kill` kills the session.
+        let r = d.handle("kill", serde_json::json!({ "id": id })).await.unwrap();
+        assert!(r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+
+        // `list` shows the session as dead.
+        let r = d.handle("list", serde_json::json!({})).await.unwrap();
+        let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        let status = sessions
+            .iter()
+            .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
+            .and_then(|s| s.get("status").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        assert_eq!(status, "dead");
+
+        // `forget` removes the dead session.
+        let r = d.handle("forget", serde_json::json!({ "id": id })).await.unwrap();
+        assert!(r.get("removed").and_then(|v| v.as_bool()).unwrap_or(false));
+
+        // `list` no longer includes the session.
+        let r = d.handle("list", serde_json::json!({})).await.unwrap();
+        let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        assert!(!sessions.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)));
+
         drop(fk);
     }
 }
