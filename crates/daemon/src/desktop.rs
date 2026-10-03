@@ -7,6 +7,9 @@
 //!
 //! The pure functions (command construction) are ported 1:1 and unit-tested.
 
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
+
 /// The default mirror workspace (the last one, 10).
 pub const DEFAULT_MIRROR_WORKSPACE: u32 = 10;
 /// The default mirror window class.
@@ -246,6 +249,179 @@ pub fn live_exec_argv(command: &[&str]) -> Vec<String> {
         argv.push(shell_quote(arg));
     }
     argv
+}
+
+/// The result of a live-window operation.
+pub struct LiveResult {
+    pub ok: bool,
+    pub placed: Option<bool>,
+    pub window_id: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Write a session's live-window shim and return what to run.
+///
+/// Written with mode 700 and overwritten on every make-live: it embeds the tmux
+/// socket and session name, so a stale copy is a window that attaches to the
+/// wrong thing, and a world-writable one is a command somebody else can
+/// replace.
+pub async fn prepare_live(
+    state_dir: &str,
+    tmux_socket: &str,
+    tmux_name: &str,
+    session_id: &str,
+    tmux_bin: &str,
+) -> Result<(String, Vec<String>), String> {
+    let shim_path = live_shim_path(state_dir, session_id);
+    // Create the live directory.
+    std::fs::create_dir_all(format!("{state_dir}/live"))
+        .map_err(|e| format!("create live dir: {e}"))?;
+    // Write the shim (mode 700).
+    let script = live_shim_script(tmux_bin, tmux_socket, tmux_name);
+    std::fs::write(&shim_path, &script)
+        .map_err(|e| format!("write shim: {e}"))?;
+    std::fs::set_permissions(
+        &shim_path,
+        Permissions::from_mode(0o700),
+    )
+    .map_err(|e| format!("chmod shim: {e}"))?;
+    let argv = live_argv(&shim_path, session_id, "alacritty");
+    Ok((shim_path, argv))
+}
+
+/// Close a session's live window, if it is open.
+///
+/// i3 answers an unmatched criterion with success too, so this says "asked",
+/// not "was open" — which is the honest thing to report.
+pub async fn close_live(session_id: &str) -> Result<bool, String> {
+    if std::env::var("DISPLAY").is_err() {
+        return Err("no DISPLAY (not an X11 session)".to_string());
+    }
+    let class = live_window_class(session_id);
+    let result = crate::exec::run(
+        vec!["i3-msg".to_string(), format!("[class=\"{class}\"] kill")],
+        crate::exec::ExecOpts { timeout_ms: Some(3000), env: None },
+    )
+    .await;
+    if result.code == 0 {
+        Ok(true)
+    } else {
+        Err("i3-msg not available".to_string())
+    }
+}
+
+/// Is a session's live window still on screen?
+///
+/// Three answers, not two. "Unknown" is not "absent": the caller uses this to
+/// decide whether a shell was *disposed of*, and treating "i3 is not
+/// answering" as "the window was closed" would kill sessions every time the
+/// window manager hiccupped.
+pub async fn live_window_state(session_id: &str) -> Result<&'static str, String> {
+    if std::env::var("DISPLAY").is_err() {
+        return Ok("unknown");
+    }
+    let class = live_window_class(session_id);
+    let result = crate::exec::run(
+        vec!["i3-msg".to_string(), "-t".to_string(), "get_tree".to_string()],
+        crate::exec::ExecOpts { timeout_ms: Some(3000), env: None },
+    )
+    .await;
+    if result.code == 0 {
+        let found = find_window_id_by_class(&result.out, &class).is_some();
+        Ok(if found { "present" } else { "absent" })
+    } else {
+        Ok("unknown")
+    }
+}
+
+/// Launch a session's live window and put it on a chosen workspace.
+///
+/// The launch goes through `i3-msg exec` (which is how a window gets made at all
+/// under i3) but the *placement* is `place_live`, so the user's view never moves.
+pub async fn open_live(
+    tmux_socket: &str,
+    tmux_name: &str,
+    session_id: &str,
+    workspace: &str,
+    tmux_bin: &str,
+    state_dir: &str,
+) -> Result<LiveResult, String> {
+    let target = safe_workspace(workspace).ok_or("invalid workspace name")?;
+    if std::env::var("DISPLAY").is_err() {
+        return Err("no DISPLAY (not an X11 session)".to_string());
+    }
+    let (shim_path, argv) = prepare_live(state_dir, tmux_socket, tmux_name, session_id, tmux_bin)
+        .await?;
+    let exec_argv = live_exec_argv(&argv.iter().map(|s| s.as_str()).collect::<Vec<&str>>());
+    let result = crate::exec::run(
+        exec_argv.clone(),
+        crate::exec::ExecOpts { timeout_ms: Some(3000), env: None },
+    )
+    .await;
+    if result.code != 0 {
+        return Err("i3-msg not available".to_string());
+    }
+    let placed = place_live(session_id, &target, 5000).await;
+    Ok(LiveResult {
+        ok: true,
+        placed: Some(placed.0),
+        window_id: placed.1.clone(),
+        detail: placed.2.clone(),
+    })
+}
+
+/// Place a session's live window on a chosen workspace.
+///
+/// Polls for the window rather than sleeping a guessed interval: a terminal can
+/// take a moment to map, and the move is a no-op until it exists.
+pub async fn place_live(
+    session_id: &str,
+    workspace: &str,
+    timeout_ms: u64,
+) -> (bool, Option<String>, Option<String>) {
+    let target = match safe_workspace(workspace) {
+        Some(t) => t,
+        None => return (false, None, Some("invalid workspace name".to_string())),
+    };
+    if std::env::var("DISPLAY").is_err() {
+        return (false, None, Some("no DISPLAY (not an X11 session)".to_string()));
+    }
+    let class = live_window_class(session_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return (false, None, Some("the window did not appear".to_string()));
+        }
+        let result = crate::exec::run(
+            vec!["i3-msg".to_string(), "-t".to_string(), "get_tree".to_string()],
+            crate::exec::ExecOpts { timeout_ms: Some(3000), env: None },
+        )
+        .await;
+        if result.code == 0 {
+            if let Some(window_id) = find_window_id_by_class(&result.out, &class) {
+                let moved = crate::exec::run(
+                    vec![
+                        "i3-msg".to_string(),
+                        format!("[id=\"{window_id}\"] move to workspace number {target}"),
+                    ],
+                    crate::exec::ExecOpts { timeout_ms: Some(3000), env: None },
+                )
+                .await;
+                if moved.code == 0 {
+                    return (true, Some(window_id), None);
+                } else {
+                    return (
+                        false,
+                        Some(window_id),
+                        Some("i3 move failed".to_string()),
+                    );
+                }
+            }
+        } else if std::time::Instant::now() > deadline - std::time::Duration::from_millis(4000) {
+            return (false, None, Some("i3-msg not available".to_string()));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 #[cfg(test)]
