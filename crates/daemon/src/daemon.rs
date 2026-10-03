@@ -17,10 +17,18 @@ use std::path::PathBuf;
 
 use ldmux_protocol::keeper::{self as km, KeeperMessage};
 
+use ldmux_protocol::rpc::SessionRecord;
+
 use crate::daemon_lock::DaemonLock;
 use crate::keeper_supervisor::KeeperSupervisor;
 use crate::ownership::Ownership;
 use crate::registry::Registry;
+
+/// Generate a short id (the TS `shortId`): a UUID with dashes removed,
+/// truncated to 10 characters.
+fn short_id() -> String {
+    uuid::Uuid::new_v4().to_string().replace("-", "")[..10].to_string()
+}
 
 /// The result of a `reconcile` pass (the dead/adopted/pruned sets).
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -221,6 +229,125 @@ impl LdmuxDaemon {
             r.stop();
         }
         // The lock is released by `DaemonLock::drop`.
+    }
+
+    /// Create a new session (the TS `handleNew`).
+    pub async fn create_session(
+        &mut self,
+        kind: &str,
+        cwd: &str,
+        title: Option<&str>,
+        created_by: &str,
+    ) -> Result<SessionRecord, String> {
+        let kind = if kind == "shell" || kind == "pi" {
+            kind.to_string()
+        } else {
+            return Err(format!("invalid kind: {kind:?} (expected shell or pi)"));
+        };
+        let cwd = crate::cwd::resolve_cwd(Some(cwd));
+        if !std::path::Path::new(&cwd).is_dir() {
+            return Err(format!("not a directory: {cwd}"));
+        }
+        let id = short_id();
+        let tmux_name = format!("ldmux-{id}");
+        let command: Vec<String> = if kind == "pi" { vec!["pi".to_string()] } else { vec![] };
+        let now: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let record = SessionRecord {
+            id: id.clone(),
+            tmux_name: tmux_name.clone(),
+            kind: kind.to_string(),
+            cwd: cwd.clone(),
+            title: title.map(|t| t.to_string()).unwrap_or_else(|| {
+                if kind == "pi" { "pi".to_string() } else { "shell".to_string() }
+            }),
+            created_at: now,
+            updated_at: now,
+            created_by: created_by.to_string(),
+            status: "running".to_string(),
+            exit_code: None,
+            exited_at: None,
+        };
+        let env: Vec<(String, String)> = vec![
+            ("LDMUX".to_string(), "1".to_string()),
+            ("LDMUX_SESSION_ID".to_string(), id.clone()),
+            ("LDMUX_KIND".to_string(), kind.to_string()),
+            ("LDMUX_SOCKET".to_string(), self.socket_path().to_string_lossy().into_owned()),
+            ("LDMUX_TMUX_NAME".to_string(), tmux_name.clone()),
+            ("LDMUX_TMUX_SOCK".to_string(), self.keeper_socket_path().to_string_lossy().into_owned()),
+        ];
+        // Call the keeper's `Spawn` (the equivalent of the TS `cp.newSession`,
+        // retargeted onto the keeper: a `Spawn` creates a new emulator session).
+        let spawn_resp = self.keeper_call(&km::KeeperMessage::Spawn(km::Spawn {
+            session_id: tmux_name.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: Some(cwd.clone()),
+        }))
+        .await?;
+        let _ = spawn_resp;
+        self.registry.upsert(record.clone());
+        self.registry.save();
+        Ok(record)
+    }
+
+    /// Kill a session (the TS `handleKill`).
+    pub async fn kill_session(&mut self, id: &str) -> Result<SessionRecord, String> {
+        let mut record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
+        if !record.tmux_name.is_empty() {
+            let _ = self
+                .keeper_call(&km::KeeperMessage::Kill(km::Kill {
+                    session_id: record.tmux_name.clone(),
+                }))
+                .await;
+        }
+        record.status = "dead".to_string();
+        let now: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        record.exited_at = Some(now as i64);
+        record.updated_at = now;
+        record.exit_code = None;
+        self.registry.upsert(record.clone());
+        self.registry.save();
+        self.forget_session_state(&record.id);
+        Ok(record)
+    }
+
+    /// Close a session (the TS `handleClose`).
+    pub async fn close_session(&mut self, id: &str) -> Result<(bool, SessionRecord), String> {
+        let record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
+        if self.ownership.owner(id).is_some() {
+            return Ok((false, record));
+        }
+        let record = self.kill_session(id).await?;
+        Ok((true, record))
+    }
+
+    /// Forget a session (the TS `forget`).
+    pub async fn forget_session(&mut self, id: &str) -> Result<bool, String> {
+        let record = match self.registry.get(id) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        if record.status == "running" && !record.tmux_name.is_empty() {
+            return Err(format!("{id} is running; end it with kill, not forget"));
+        }
+        self.forget_session_state(id);
+        self.registry.remove(id);
+        self.registry.save();
+        Ok(true)
+    }
+
+    /// Forget a session's state (the TS `forgetSessionState`).
+    /// Clears the ownership record for the session.
+    pub fn forget_session_state(&mut self, id: &str) {
+        if let Some(claim) = self.ownership.owner(id).cloned() {
+            self.ownership.release(id, &claim.device.id);
+        }
     }
 
     /// Adopt the daemon's own sessions (the keeper's `ldmux-<id>` panes the
