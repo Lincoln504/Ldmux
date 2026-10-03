@@ -701,17 +701,16 @@ the `PaneStream` core (bounded queue, §3.7), the remote WS server (full `onMess
 dispatch, 16 types), the desktop inventory (`desktop-inventory.ts` 671), the CLI
 (`cli.ts` 435, 20 of 23 commands), the main entry point (`main.ts` 115), the
 session lifecycle (`create_session`, `kill_session`, `close_session`,
-`forget_session`), and the RPC dispatch (`handle` method: `ping`, `list`, `new`,
-`kill`, `close`, `forget`, `desktop`; stream-dependent methods stubbed). Remaining:
-the remote's daemon wiring (the daemon-side handlers for the 13 stream-dependent
-methods), the desktop window lifecycle side effects (`desktop.ts` 428: `makeLive`,
-`closeLive`, `openMirror`, `openLive` — spawn alacritty, manage i3 windows), the
-attach lifecycle (the `attach` command handler), device ownership + sweep, and the
-remaining TS tests (CLI, stream, desktop, desk window) — all against the fake
-keeper (plan §3.5). The stream retargeting (`streamFor`, `dropStream`,
-`releaseStreamIfIdle`, `sweepStreams`) is now ported. The `send`, `capture`, and
-`snapshot` RPC handlers are ported. The desktop pure functions (command
-construction) are ported (12 tests).
+`forget_session`), the RPC dispatch (`handle` method: `ping`, `list`, `new`,
+`kill`, `close`, `forget`, `desktop`, `send`, `capture`, `snapshot`), the control
+socket wiring (Arc<Mutex> approach, full lifecycle test), the remote daemon
+wiring (hello, list, desktop, new, kill, close, attach, resize, input handlers),
+the stream lifecycle (`stream_for`, `drop_stream`, `release_stream_if_idle`,
+`sweep_streams`), and the `PaneStream::resize` method. Remaining: the `key`,
+`mouseclick`, `copymode`, `follow`, `scrollback` handlers (stream-dependent), the
+desktop window lifecycle side effects (`desktop.ts` 428: `makeLive`, `closeLive`),
+device ownership + sweep, and the remaining TS tests (stream, desktop, desk
+window) — all against the fake keeper (plan §3.5).
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
