@@ -23,6 +23,7 @@
 pub mod auth;
 pub mod cwd;
 pub mod control_socket;
+pub mod remote;
 pub mod daemon;
 pub mod daemon_lock;
 pub mod fake_keeper;
