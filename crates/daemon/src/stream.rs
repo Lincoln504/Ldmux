@@ -224,9 +224,18 @@ impl PaneStream {
     ///
     /// Returns the rendered screen + the epoch (count *delivered* snapshots).
     pub fn snapshot(&self) -> Result<(String, u64), String> {
+        self.snapshot_with_history(None)
+    }
+
+    /// Take a snapshot with a history line count (the `scrollback` path).
+    /// `history_lines: 0`/`None` = visible screen only.
+    pub fn snapshot_with_history(
+        &self,
+        history_lines: Option<u64>,
+    ) -> Result<(String, u64), String> {
         let req = KeeperMessage::Snapshot(Snapshot {
             session_id: self.session_id.clone(),
-            history_lines: None,
+            history_lines,
         });
         let resp = self.keeper.call(&req)?;
         match resp {

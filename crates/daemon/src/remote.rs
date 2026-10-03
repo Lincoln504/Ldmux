@@ -589,7 +589,45 @@ async fn handle_connection(
             "follow" => {
                 // Client-owned scroll (ADR-0004): a no-op.
             }
-            "mouseclick" | "copymode" | "scrollback" => {
+            "scrollback" => {
+                // Send a snapshot with history (the `scrollback` path).
+                let sid = session_id.clone().unwrap_or_default();
+                let lines = v.get("lines").and_then(|l| l.as_u64()).unwrap_or(0);
+                let wants_history = lines > 0;
+                let mut d = daemon_arc.lock().await;
+                let stream = d.get_stream(&sid);
+                match stream {
+                    Some(stream) => {
+                        let hist = if wants_history { Some(lines) } else { None };
+                        match stream.snapshot_with_history(hist) {
+                            Ok((_text, _epoch)) => {
+                                // Send a state message with the history flag.
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "state",
+                                    "sessionId": sid,
+                                    "history": wants_history,
+                                }))
+                                .await;
+                            }
+                            Err(e) => {
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "error", "code": "scrollback_failed",
+                                    "message": e
+                                }))
+                                .await;
+                            }
+                        }
+                    }
+                    None => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "not_attached",
+                            "message": "attach before requesting scrollback"
+                        }))
+                        .await;
+                    }
+                }
+            }
+            "mouseclick" | "copymode" => {
                 // The stream methods (the `PaneStream`).
                 // For now, an error: the stream methods are not yet ported.
                 let _ = send_json(&mut ws, &serde_json::json!({
