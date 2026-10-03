@@ -484,7 +484,39 @@ async fn handle_connection(
                     }
                 }
             }
-            "key" | "mouseclick" | "copymode" | "follow" | "scrollback" => {
+            "key" => {
+                // Send keys to the pane (the `sendKey` method).
+                let sid = session_id.clone().unwrap_or_default();
+                let keys: Vec<String> = v
+                    .get("keys")
+                    .and_then(|k| k.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|k| k.as_str())
+                            .filter(|k| !k.is_empty() && !k.starts_with('-'))
+                            .map(|k| k.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let keys_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+                let mut d = daemon_arc.lock().await;
+                let stream = d.get_stream(&sid);
+                match stream {
+                    Some(stream) => {
+                        if !keys_refs.is_empty() {
+                            let _ = stream.send_key(&keys_refs);
+                        }
+                    }
+                    None => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "not_attached",
+                            "message": "attach before sending keys"
+                        }))
+                        .await;
+                    }
+                }
+            }
+            "mouseclick" | "copymode" | "follow" | "scrollback" => {
                 // The stream methods (the `PaneStream`).
                 // For now, an error: the stream methods are not yet ported.
                 let _ = send_json(&mut ws, &serde_json::json!({

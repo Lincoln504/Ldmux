@@ -201,6 +201,16 @@ impl PaneStream {
     }
 
     /// A snapshot (the full-screen capture, via the keeper's `Snapshot`).
+    /// Send keys to the pane (the `sendKey` method): send a `Write` keeper
+    /// message with the key text.
+    pub fn send_key(&self, keys: &[&str]) -> Result<KeeperMessage, String> {
+        let text: String = keys.iter().copied().collect();
+        self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
+            session_id: self.session_id.clone(),
+            data: text,
+        }))
+    }
+
     /// Resize the pane (the `resize` method): send a `Resize` keeper message.
     /// Returns the response, or an error.
     pub fn resize(&self, cols: u64, rows: u64) -> Result<KeeperMessage, String> {
