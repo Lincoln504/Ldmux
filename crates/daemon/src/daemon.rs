@@ -17,12 +17,15 @@ use std::path::PathBuf;
 
 use ldmux_protocol::keeper::{self as km, KeeperMessage};
 
+use std::collections::HashMap;
+
 use ldmux_protocol::rpc::SessionRecord;
 
 use crate::daemon_lock::DaemonLock;
 use crate::keeper_supervisor::KeeperSupervisor;
 use crate::ownership::Ownership;
 use crate::registry::Registry;
+use crate::stream::PaneStream;
 
 /// Generate a short id (the TS `shortId`): a UUID with dashes removed,
 /// truncated to 10 characters.
@@ -60,6 +63,8 @@ pub struct LdmuxDaemon {
     /// The remote config (the hostname, port, token).
     #[allow(dead_code)]
     remote_cfg: Option<crate::remote::RemoteConfig>,
+    /// The per-session streams (the `PaneStream` per tmux session).
+    streams: HashMap<String, PaneStream>,
 }
 
 impl Drop for LdmuxDaemon {
@@ -89,6 +94,7 @@ impl LdmuxDaemon {
             lock: DaemonLock::new(&state_dir),
             remote: None,
             remote_cfg: None,
+            streams: HashMap::new(),
         }
     }
 
@@ -347,6 +353,62 @@ impl LdmuxDaemon {
     pub fn forget_session_state(&mut self, id: &str) {
         if let Some(claim) = self.ownership.owner(id).cloned() {
             self.ownership.release(id, &claim.device.id);
+        }
+    }
+
+    /// Get or create the `PaneStream` for a session (the TS `streamFor`).
+    ///
+    /// The stream is created with a `SocketKeeperConn` (the production path)
+    /// that talks to the keeper's socket. The stream outlives an idle client
+    /// by `WS_IDLE_MS`, so a change lands within a minute of the next attach.
+    pub fn stream_for(&mut self, tmux_name: &str) -> &mut PaneStream {
+        if !self.streams.contains_key(tmux_name) {
+            let conn = Box::new(crate::stream::SocketKeeperConn::new(
+                self.keeper_socket_path().to_string_lossy().into_owned(),
+            ));
+            let stream = PaneStream::new(tmux_name.to_string(), conn);
+            self.streams.insert(tmux_name.to_string(), stream);
+        }
+        // Re-borrow after the insert (the previous borrow ended).
+        self.streams.get_mut(tmux_name).unwrap()
+    }
+
+    /// Close and forget a stream (the TS `dropStream`).
+    /// Its tmux session is gone.
+    pub fn drop_stream(&mut self, tmux_name: &str) {
+        if let Some(stream) = self.streams.remove(tmux_name) {
+            stream.close("session ended");
+        }
+    }
+
+    /// Release a stream only if nothing is subscribed to it (the TS
+    /// `releaseStreamIfIdle`).
+    pub fn release_stream_if_idle(&mut self, tmux_name: &str) {
+        // Check the subscriber count without holding a mutable borrow.
+        let idle = self
+            .streams
+            .get(tmux_name)
+            .map(|s| s.subscriber_count() == 0)
+            .unwrap_or(false);
+        if idle {
+            self.drop_stream(tmux_name);
+        }
+    }
+
+    /// Evict streams whose backing session is gone (the TS `sweepStreams`).
+    /// Bounded memory: a stream for a dead session is dropped.
+    pub fn sweep_streams(&mut self) {
+        let to_drop: Vec<String> = self
+            .streams
+            .keys()
+            .filter(|tmux_name| {
+                let record = self.registry.by_tmux_name(tmux_name);
+                record.is_none() || record.as_ref().map(|r| r.status.as_str()) == Some("dead")
+            })
+            .cloned()
+            .collect();
+        for tmux_name in to_drop {
+            self.drop_stream(&tmux_name);
         }
     }
 
@@ -879,6 +941,47 @@ mod tests {
         let r = d.handle("list", serde_json::json!({})).await.unwrap();
         let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
         assert!(!sessions.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)));
+
+        drop(fk);
+    }
+
+    /// The stream lifecycle: `stream_for` creates a stream, `release_stream_if_idle`
+    /// releases it when no one is subscribed, and `sweep_streams` drops streams
+    /// whose backing session is dead.
+    #[tokio::test]
+    async fn stream_lifecycle_create_release_sweep() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let tmux_name = record.tmux_name.clone();
+
+        // `stream_for` creates the stream.
+        let stream = d.stream_for(&tmux_name);
+        assert_eq!(stream.session_id(), tmux_name);
+        assert_eq!(stream.subscriber_count(), 0);
+
+        // `release_stream_if_idle` releases the stream (no subscribers).
+        d.release_stream_if_idle(&tmux_name);
+        assert!(!d.streams.contains_key(&tmux_name));
+
+        // `stream_for` recreates the stream.
+        let _stream = d.stream_for(&tmux_name);
+        assert!(d.streams.contains_key(&tmux_name));
+
+        // Kill the session, then `sweep_streams` drops the stream.
+        d.kill_session(&record.id).await.unwrap();
+        d.sweep_streams();
+        assert!(!d.streams.contains_key(&tmux_name));
 
         drop(fk);
     }
