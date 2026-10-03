@@ -1124,3 +1124,16 @@ passes. A direct control-socket test (`control_with_daemon`) also passes.
   deserialization failure in the CLI's `PingResult` parse (missing
   `version` + wrong field name), not a socket issue.
 - Gate: `cargo test` → **232 passed** / 1 ignored; TS **347/347** + typecheck.
+
+**Milestone: full CLI lifecycle test + params extraction fix — Phase 5.**
+The `serve_one_with` function was passing the full request as `params` to
+the handler, but the daemon `handle` method expects the `params` field. Fixed
+by extracting the `params` field in the handler closure. The full CLI
+lifecycle test (new, send, capture, snapshot, kill, forget over the control
+socket) now passes.
+- **Findings:** the `RpcHandler` type takes `&str` (the method) and `&Value`
+  (the full request). The handler closure is responsible for extracting the
+  `params` field from the full request before calling `daemon.handle`.
+  The stub `dispatch` method (used by `serve_one`) works with the full
+  request directly.
+- Gate: `cargo test` → **233 passed** / 1 ignored; TS **347/347** + typecheck.
