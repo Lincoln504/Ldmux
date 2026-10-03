@@ -843,3 +843,35 @@ layered on as they are ported.
   ends.
 - Gate: `cargo test` → **189 passed** / 1 ignored (daemon **110** = +1); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the desktop inventory (WM probing + pi session scanning) — §3.9.**
+The desktop inventory: what is on this machine's desktop, and which of it is a
+pi session. Port of `packages/daemon/src/desktop-inventory.ts` (671 lines).
+The pure parsers are ported 1:1 with 14 tests:
+- `walk_i3_tree` — flatten an i3/sway tree into workspaces and windows.
+- `merge_i3_workspace_flags` — merge `get_workspaces` flags (focused/visible).
+- `parse_niri` — parse niri JSON (workspaces + windows).
+- `parse_hyprland` — parse Hyprland JSON (workspaces + clients + active).
+- `parse_ewmh_client_list` — parse `xprop -root _NET_CLIENT_LIST`.
+- `parse_ewmh_window` — parse `xprop -id <id>` output for one window.
+- `encode_pi_session_dir` — encode the cwd into pi's session directory name.
+- `parse_pi_session_head` — read the `{"type":"session",...}` header.
+- `ppid_from_stat` — parse the ppid from `/proc/<pid>/stat`.
+- `start_ticks_from_stat` — `/proc/<pid>/stat` field 22.
+- `attribute_windows` — walk a process's parents, find the WM window.
+- `assign_transcripts` — pair pi processes with transcripts (newest-first zip).
+The async probes (`probe_i3_like`, `enrich_window_pids`, `probe_ewmh`,
+`probe_window_manager`) call external commands via `exec::run` and read `/proc`.
+The pi session scanner (`scan_pi_sessions`) reads `/proc` and
+`~/.pi/agent/sessions/`. The one call the RPC makes is `read_desktop()`.
+- **Findings:** `ppid_from_stat` — the ppid is field index 1 (not 0) after
+  the `)` — field 0 is the state char (`S`/`R`/`D`/…). `I3LikeNode` — the
+  JSON uses snake_case (`app_id`, `window_properties`, `floating_nodes`), not
+  camelCase. `parse_niri`/`parse_hyprland` — numeric `id`/`address` need
+  `.to_string()`, not `.as_str()`. `assign_transcripts` — the
+  `transcriptsByCwd` must be sorted newest-first (as `listTranscripts`
+  returns them). `exec::run` takes `Vec<String>` + `ExecOpts`, not
+  `&[&str]` + `Option<u64>`.
+- Gate: `cargo test` → **205 passed** / 1 ignored (daemon **124** = +14); TS
+  **347/347** + typecheck. New code clippy-clean (1 non-blocking `sort_by`
+  warning).
