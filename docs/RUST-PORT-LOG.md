@@ -704,11 +704,11 @@ session lifecycle (`create_session`, `kill_session`, `close_session`,
 `forget_session`), the RPC dispatch (`handle` method: `ping`, `list`, `new`,
 `kill`, `close`, `forget`, `desktop`, `send`, `capture`, `snapshot`), the control
 socket wiring (Arc<Mutex> approach, full lifecycle test), the remote daemon
-wiring (hello, list, desktop, new, kill, close, attach, resize, input handlers),
-the stream lifecycle (`stream_for`, `drop_stream`, `release_stream_if_idle`,
-`sweep_streams`), and the `PaneStream::resize` method. Remaining: the `key`,
-`mouseclick`, `copymode`, `follow`, `scrollback` handlers (stream-dependent), the
-desktop window lifecycle side effects (`desktop.ts` 428: `makeLive`, `closeLive`),
+wiring (hello, list, desktop, new, kill, close, attach, resize, input, key,
+follow, scrollback, makeLive, closeLive handlers), the stream lifecycle
+(`stream_for`, `drop_stream`, `release_stream_if_idle`, `sweep_streams`), the
+`PaneStream::resize`, `PaneStream::send_key`, and `PaneStream::snapshot_with_history`
+methods. Remaining: the `mouseclick` and `copymode` handlers (stream-dependent),
 device ownership + sweep, and the remaining TS tests (stream, desktop, desk
 window) — all against the fake keeper (plan §3.5).
 
