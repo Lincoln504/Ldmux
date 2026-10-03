@@ -409,6 +409,11 @@ impl LdmuxDaemon {
         self.streams.get_mut(tmux_name).unwrap()
     }
 
+    /// Get a stream by session id (the `streams` map lookup, without creating).
+    pub fn get_stream(&mut self, tmux_name: &str) -> Option<&mut PaneStream> {
+        self.streams.get_mut(tmux_name)
+    }
+
     /// Close and forget a stream (the TS `dropStream`).
     /// Its tmux session is gone.
     pub fn drop_stream(&mut self, tmux_name: &str) {

@@ -201,6 +201,16 @@ impl PaneStream {
     }
 
     /// A snapshot (the full-screen capture, via the keeper's `Snapshot`).
+    /// Resize the pane (the `resize` method): send a `Resize` keeper message.
+    /// Returns the response, or an error.
+    pub fn resize(&self, cols: u64, rows: u64) -> Result<KeeperMessage, String> {
+        self.keeper.call(&KeeperMessage::Resize(ldmux_protocol::keeper::Resize {
+            session_id: self.session_id.clone(),
+            cols,
+            rows,
+        }))
+    }
+
     ///
     /// Returns the rendered screen + the epoch (count *delivered* snapshots).
     pub fn snapshot(&self) -> Result<(String, u64), String> {

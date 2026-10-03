@@ -407,12 +407,89 @@ async fn handle_connection(
                     }
                 }
             }
-            "resize" | "mouseclick" | "input" | "key" | "copymode" | "follow" | "scrollback" => {
+            "resize" => {
+                // Resize the stream (the viewing client owns the geometry).
+                let sid = session_id.clone().unwrap_or_default();
+                let cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(80);
+                let rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(24);
+                if cols == 0 || rows == 0 {
+                    let _ = send_json(&mut ws, &serde_json::json!({
+                        "type": "error", "code": "bad_size",
+                        "message": "invalid size"
+                    }))
+                    .await;
+                } else {
+                    let mut d = daemon_arc.lock().await;
+                    let stream = d.get_stream(&sid);
+                    match stream {
+                        Some(stream) => {
+                            match stream.resize(cols, rows) {
+                                Ok(_resp) => {
+                                    // Send a fresh snapshot (the pane geometry changed).
+                                    let snap = stream.snapshot();
+                                    let _ = send_json(
+                                        &mut ws,
+                                        &serde_json::json!({
+                                            "type": "state",
+                                            "sessionId": sid,
+                                            "snapshot": serde_json::to_value(&snap)
+                                                .unwrap_or(serde_json::Value::Null),
+                                        }),
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    let _ = send_json(&mut ws, &serde_json::json!({
+                                        "type": "error", "code": "resize_failed",
+                                        "message": e
+                                    }))
+                                    .await;
+                                }
+                            }
+                        }
+                        None => {
+                            let _ = send_json(&mut ws, &serde_json::json!({
+                                "type": "error", "code": "not_attached",
+                                "message": "attach before resizing"
+                            }))
+                            .await;
+                        }
+                    }
+                }
+            }
+            "input" => {
+                // Send input text to the pane.
+                let sid = session_id.clone().unwrap_or_default();
+                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    let _ = send_json(&mut ws, &serde_json::json!({
+                        "type": "error", "code": "no_text",
+                        "message": "no text to send"
+                    }))
+                    .await;
+                } else {
+                    let mut d = daemon_arc.lock().await;
+                    let stream = d.get_stream(&sid);
+                    match stream {
+                        Some(stream) => {
+                            stream.fanout(text);
+                        }
+                        None => {
+                            let _ = send_json(&mut ws, &serde_json::json!({
+                                "type": "error", "code": "not_attached",
+                                "message": "attach before sending input"
+                            }))
+                            .await;
+                        }
+                    }
+                }
+            }
+            "key" | "mouseclick" | "copymode" | "follow" | "scrollback" => {
                 // The stream methods (the `PaneStream`).
                 // For now, an error: the stream methods are not yet ported.
                 let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "not_attached",
-                    "message": "attach before sending stream commands"
+                    "type": "error", "code": "not_implemented",
+                    "message": format!("{mtype} not yet ported")
                 }))
                 .await;
             }
