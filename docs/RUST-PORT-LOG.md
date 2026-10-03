@@ -123,6 +123,22 @@ this file, then the plan §7 table, then the phase's source of record.
   not detected within a sane bound, so it is flaky in the full gate. It is
   `#[ignore]`d (documented) and verified with
   `cargo test -p ldmux-keeper --test keeper a_natural_shell_exit`.
+- **2026-09-28, the remote WS test pattern (observed while writing the remote
+  milestone).** `#[tokio::test]` uses a multi-threaded runtime by default, so
+  `tokio::spawn` tasks (the accept loop, the `handle_connection`) run
+  concurrently with the test. A WS test that does not explicitly close the
+  connection and stop the server hangs: the tokio runtime waits for all
+  spawned tasks to finish before the test ends. The pattern: (1) start the
+  server, (2) connect a WS client, (3) send the message, (4) read the
+  response, (5) `ws.close(None)` (the `handle_connection` exits when the
+  client closes — `ws.next()` returns `None`), (6) `server.stop()` (the accept
+  loop exits — it checks the `stopped` flag). Omitting steps 5/6 hangs the
+  test (the detached tasks never exit). `tokio-tungstenite` 0.26: the server
+  side is `accept_async(TcpStream) -> WebSocketStream<TcpStream>`; the client
+  side is `connect_async(uri) -> WebSocketStream<MaybeTlsStream<TcpStream>>`
+  (different type parameters, but both implement `Stream`/`Sink` via
+  `futures_util`). `Message::Text` takes `Utf8Bytes` (not `String`); `text.into()`
+  converts. `ws.next().await` returns `Option<Result<Message, Error>>`.
 
 ## Phase 1 — protocol (DONE 2026-09-28)
 
