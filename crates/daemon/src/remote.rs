@@ -291,15 +291,85 @@ async fn handle_connection(
                     }
                 }
             }
-            "makelive" | "closelive" => {
-                // The desktop window lifecycle (the daemon's `makeLive`/`closeLive`).
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "live",
-                    "sessionId": v.get("sessionId").and_then(|t| t.as_str()).unwrap_or(""),
-                    "ok": false,
-                    "detail": "not supported by this daemon"
-                }))
-                .await;
+            "makelive" => {
+                // The desktop window lifecycle (the daemon's `makeLive`).
+                let sid = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
+                let mut d = daemon_arc.lock().await;
+                let rec = d.get_session(sid);
+                match rec {
+                    None => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "live", "sessionId": sid, "ok": false,
+                            "detail": format!("no session: {sid}")
+                        }))
+                        .await;
+                    }
+                    Some(rec) => {
+                        let tmux_socket = d.keeper_socket_path().to_string_lossy();
+                        let tmux_bin = d.keeper_bin().to_string_lossy();
+                        let state_dir = d.state_dir().to_string_lossy();
+                        let result = crate::desktop::open_live(
+                            &tmux_socket,
+                            &rec.tmux_name,
+                            sid,
+                            "10",
+                            &tmux_bin,
+                            &state_dir,
+                        )
+                        .await;
+                        match result {
+                            Ok(lr) => {
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "live", "sessionId": sid,
+                                    "ok": lr.ok, "placed": lr.placed,
+                                    "detail": lr.detail,
+                                }))
+                                .await;
+                            }
+                            Err(e) => {
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "live", "sessionId": sid,
+                                    "ok": false, "detail": e,
+                                }))
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+            "closelive" => {
+                // The desktop window lifecycle (the daemon's `closeLive`).
+                let sid = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
+                let d = daemon_arc.lock().await;
+                let rec = d.get_session(sid);
+                match rec {
+                    None => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "live", "sessionId": sid, "ok": false,
+                            "detail": format!("no session: {sid}")
+                        }))
+                        .await;
+                    }
+                    Some(_rec) => {
+                        let result = crate::desktop::close_live(sid).await;
+                        match result {
+                            Ok(ok) => {
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "live", "sessionId": sid,
+                                    "ok": ok,
+                                }))
+                                .await;
+                            }
+                            Err(e) => {
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "live", "sessionId": sid,
+                                    "ok": false, "detail": e,
+                                }))
+                                .await;
+                            }
+                        }
+                    }
+                }
             }
             "kill" => {
                 // Kill a session (the daemon's `killSession`).

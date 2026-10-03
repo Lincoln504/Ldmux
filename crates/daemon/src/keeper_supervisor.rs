@@ -59,6 +59,11 @@ impl KeeperSupervisor {
         &self.socket_path
     }
 
+    /// The keeper's binary path.
+    pub fn keeper_bin(&self) -> &Path {
+        &self.keeper_bin
+    }
+
     /// The keeper's lock path.
     pub fn lock_path(&self) -> &Path {
         &self.lock_path

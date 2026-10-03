@@ -120,6 +120,11 @@ impl LdmuxDaemon {
         self.keeper.socket_path()
     }
 
+    /// The keeper's binary path.
+    pub fn keeper_bin(&self) -> &std::path::Path {
+        self.keeper.keeper_bin()
+    }
+
     /// A handle to the registry (test/inspection: seed records, read them).
     pub fn registry(&mut self) -> &mut Registry {
         &mut self.registry
