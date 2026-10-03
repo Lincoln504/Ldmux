@@ -1111,3 +1111,16 @@ is updated to use the `Arc` approach.
   the `async move` (the borrows don't outlive the future).
 - Gate: `cargo test` → **230 passed** / 1 ignored (daemon **149**); TS
   **347/347** + typecheck.
+
+**Milestone: CLI integration test + PingResult fix — Phase 5.**
+The control socket wiring issue from the previous session was resolved:
+the `PingResult` struct was missing the `version` field in the daemon
+`handle` response, and the `tmux_socket` field needed a
+`#[serde(rename = "tmuxSocket")]` attribute to match the wire format. With
+these fixes, the CLI integration test (ping + list over the control socket)
+passes. A direct control-socket test (`control_with_daemon`) also passes.
+- **Findings:** the `Arc<Mutex>` approach works correctly for the control
+  socket wiring; the previous "response not written" symptom was actually a
+  deserialization failure in the CLI's `PingResult` parse (missing
+  `version` + wrong field name), not a socket issue.
+- Gate: `cargo test` → **232 passed** / 1 ignored; TS **347/347** + typecheck.
