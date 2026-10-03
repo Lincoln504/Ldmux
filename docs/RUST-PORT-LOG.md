@@ -1056,3 +1056,22 @@ Port of the pure functions from `packages/daemon/src/desktop.ts`:
   (not `format!`) to avoid the `$` being treated as a prefix.
 - Gate: `cargo test` → **230 passed** / 1 ignored (daemon **148** = +5); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the desktop window lifecycle side effects — Phase 5.**
+Port of the side-effect functions from `packages/daemon/src/desktop.ts`:
+- `prepare_live` — writes the live-window shim script (mode 700) and returns
+  the argv.
+- `close_live` — kills the live window via `i3-msg` (i3 answers an unmatched
+  criterion with success, so this says "asked", not "was open").
+- `live_window_state` — checks if the live window is on screen (three answers:
+  present, absent, unknown — "unknown" is not "absent").
+- `open_live` — launches the live window via `i3-msg exec` and places it.
+- `place_live` — polls for the window and moves it to the chosen workspace.
+- **Findings:** `exec::run` returns `ExecResult` (not `Result`), so the side-effect
+  functions match on `result.code` directly (not `Ok(r)`/`Err(e)`).
+  The `exec::run` function takes `Vec<String>` (not `&[&str]`).
+- **Not tested headlessly** (they spawn `i3-msg` and manage X11 windows; they
+  require a display and i3). The pure functions (`liveShimScript`,
+  `findWindowIdByClass`, `liveExecArgv`) are tested.
+- Gate: `cargo test` → **230 passed** / 1 ignored (daemon **148**); TS
+  **347/347** + typecheck. New code clippy-clean.
