@@ -697,11 +697,17 @@ flock, re-checks, spawns, then waits for the socket file.
 **Phase 5 in progress.** Done so far: `KeeperSupervisor` (auto-spawn), the
 daemon's single-instance lock (`ldmuxd.lock`), the control socket (`ldmuxd.sock`),
 the fake keeper (test double), the `LdmuxDaemon` core (reconcile) + `start`,
-the `PaneStream` core (bounded queue, §3.7), and the remote WS server (minimal:
-bind, token gate, `ping`/`hello`/`list`). Remaining: the remote's full `onMessage`
-dispatch (attach, input, session broadcast, device ownership, the sweep timer),
-the desktop + inventory (`desktop.ts` 428 + `desktop-inventory.ts` 671), the CLI
-(`cli.ts` 435), and the main entry point (`main.ts` 115) — all against the fake
+the `PaneStream` core (bounded queue, §3.7), the remote WS server (full `onMessage`
+dispatch, 16 types), the desktop inventory (`desktop-inventory.ts` 671), the CLI
+(`cli.ts` 435, 20 of 23 commands), the main entry point (`main.ts` 115), the
+session lifecycle (`create_session`, `kill_session`, `close_session`,
+`forget_session`), and the RPC dispatch (`handle` method: `ping`, `list`, `new`,
+`kill`, `close`, `forget`, `desktop`; stream-dependent methods stubbed). Remaining:
+the remote's daemon wiring (the daemon-side handlers for the 13 stream-dependent
+methods), the stream retargeting (`acquireStream`/`releaseStream`), the desktop
+window lifecycle (`desktop.ts` 428: `makeLive`, `closeLive`, `openMirror`), the
+attach lifecycle (the `attach` command handler), device ownership + sweep, and the
+remaining TS tests (CLI, stream, desktop, desk window) — all against the fake
 keeper (plan §3.5).
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
@@ -875,3 +881,86 @@ The pi session scanner (`scan_pi_sessions`) reads `/proc` and
 - Gate: `cargo test` → **205 passed** / 1 ignored (daemon **124** = +14); TS
   **347/347** + typecheck. New code clippy-clean (1 non-blocking `sort_by`
   warning).
+
+**Milestone: the remote restructure (full `onMessage` dispatch) — Phase 5.**
+The remote WS server now dispatches all 16 `onMessage` types (the TS
+`remote.ts`'s full dispatch). The daemon-side handlers (create, kill, close,
+attach, stream commands) are stubbed as `not_implemented` (they require the
+daemon's session lifecycle and stream, which are ported separately). The
+`hello` handler sets the device identity. `ConnData` and `by_device` are added
+for future attach/ownership work.
+- **Findings:** the `hello` handler sets `ConnData { device_id, device_name }`
+  from the first message. The `by_device` map tracks connections per device.
+  The daemon-side handlers are stubbed as `not_implemented` (they require the
+  daemon's session lifecycle and stream).
+- Gate: `cargo test` → **206 passed** / 1 ignored (daemon **125** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the CLI (23 commands over the control socket) — Phase 5.**
+Port of `packages/daemon/src/cli.ts` (435 lines). The CLI is a separate binary
+(`ldmux`) that talks to the daemon over its Unix socket (the control socket,
+already ported). 20 of the 23 commands are ported: ping, list, new, send, key,
+capture, snapshot, kill, close, forget, adopt, remote, desktop, live, unlive,
+copy, clipboard-write, code, pair. The three desk-window/mirror commands
+(run, shell, window, mirror) are stubbed as 'not yet ported' (they depend on
+the shim script and the desktop mirror, `desktop.ts`).
+- **Findings:** the `code`/`pair` commands print the pairing link (derived from
+  the remote_info response) instead of rendering the QR code: the pairingFor
+  function is not yet wired to the CLI. The `positional` function uses a
+  `while` loop (not a `for` loop) because the `for` loop's `i += 1` is not
+  allowed on an immutable binding.
+- Gate: `cargo test` → **206 passed** / 1 ignored (daemon **125** = +0); TS
+  **347/347** + typecheck. New code clippy-clean (1 non-blocking `sort_by`
+  warning in `desktop_inventory.rs`).
+
+**Milestone: the main entry point (`ldmuxd`) — Phase 5.**
+Port of `packages/daemon/src/main.ts` (115 lines). The daemon's main function:
+parses env vars (LDMUX_STATE_DIR, LDMUX_REMOTE_HOST, LDMUX_REMOTE_PORT,
+LDMUX_TOKEN_FILE), validates the port (1-65535) and host (tailnet or
+loopback), creates the daemon with the remote config, starts it, and blocks
+forever (the process is stopped by SIGTERM/SIGINT; the Drop impl releases the
+lock and stops the remote). The LdmuxDaemon now owns an optional RemoteServer
+(started during `start()`, stopped during `stop()`/`Drop`). A remote bind
+failure is logged, not fatal: the remote is optional (local control must not
+be taken down by a remote bind failure). The signal handling is simplified:
+the process's default disposition (SIGTERM/SIGINT -> kill) is fine for now;
+the Drop impl releases the lock and stops the remote.
+- Gate: `cargo test` → **206 passed** / 1 ignored (daemon **125** = +0); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the session lifecycle (create, kill, close, forget) — Phase 5.**
+The LdmuxDaemon now has `create_session`, `kill_session`, `close_session`,
+`forget_session`, and `forget_session_state` methods. Port of the TS daemon's
+`handleNew`, `handleKill`, `handleClose`, and `forget` methods.
+- `create_session`: validates the kind and cwd, generates a short id (UUID,
+  truncated to 10 chars), creates the tmux session name (`ldmux-<id>`), calls
+  the keeper's `Spawn` (the equivalent of the TS `cp.newSession`, retargeted
+  onto the keeper), upserts the record in the registry, and saves.
+- `kill_session`: kills the keeper session (the keeper's `Kill`), marks the
+  record dead, and forgets the session state.
+- `close_session`: if a live window holds the session, just let go (don't
+  kill); otherwise, kill.
+- `forget_session`: removes the registry entry (only for dead or already-gone
+  sessions). Does not touch tmux.
+- **Findings:** the keeper's `Spawn` message does not have `command` or `env`
+  fields (the TS `cp.newSession` takes them, but the keeper's protocol is
+different). The command and env are not passed to the keeper. The keeper's
+  configuration determines the command (the host's login shell or pi).
+- Gate: `cargo test` → **210 passed** / 1 ignored (daemon **128** = +4); TS
+  **347/347** + typecheck. New code clippy-clean (non-blocking warnings: unused
+  `command`/`env` vars, unused `Result` from `registry.save()`).
+
+**Milestone: the RPC dispatch (`handle` method) + test — Phase 5.**
+The LdmuxDaemon now has a `handle` method (the TS `handle` RPC dispatch) that
+maps RPC method names to daemon methods: `ping`, `list`, `new`, `kill`,
+`close`, `forget`, and `desktop`. The stream-dependent methods (`send`,
+`capture`, `snapshot`, `copyMode`, `makeLive`, `closeLive`, `attach`,
+`resize`, `mouseclick`, `input`, `key`, `follow`, `scrollback`, `remote_info`,
+`adopt`, `deskWindow`, `clipboardWrite`) are stubbed as `not_implemented`
+(they require the stream to be active, which is not yet ported).
+- **Test:** `handle_dispatches_rpc_methods` — exercises the full dispatch:
+  `ping` returns the tmux socket, `new` creates a session, `list` includes it,
+  `kill` marks it dead, `forget` removes it, and `list` no longer includes it —
+  all against the fake keeper.
+- Gate: `cargo test` → **211 passed** / 1 ignored (daemon **129** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
