@@ -738,7 +738,7 @@ Dependency graph: `protocol` → {pure modules ∥ keeper ∥ vt-sys ∥ attach}
 | 2 | B1–B6 | pure modules: auth, qr, sanitize, screen-diff, ownership, registry/cwd/exec/proc/pairing | per-module tests |
 | 3 | C1–C2 ∥ D1–D2 ∥ E1 | C: keeper PTY+supervision+server skeleton; D: `vt-sys` FFI (against vendored headers) + emulator task; E: attach-client skeleton (pty pair + protocol loop) | keeper boots, serves `List`/`Spawn`; FFI links the vendored `.a`; attach boots headless |
 | 4 | F1–F2 | keeper: emulator integration (per-session ghostty-vt), snapshot renderer + **§3.11 parity harness run against live tmux**, state fields, scrollback paging | parity report: zero divergences (or a defect list with reproducers) |
-| 5 | G1–G3 | daemon: remote, stream (retargeted), desktop+inventory, cli, keeper client, registry/ownership rewiring | full TS-equivalent suite green against keeper |
+| 5 | G1–G3 | daemon: remote (full `onMessage` dispatch, device ownership, session broadcast, sweep), stream (retargeted, §3.7), desktop+inventory, cli, keeper client, registry/ownership rewiring, **main entry point** (`main.ts` 115) | full suite green against the fake keeper (the ported TS tests + the new Rust tests for the daemon's main loop, remote, desktop, CLI, and main entry point — plan §3.5) |
 | 6 | H1–H2 | desktop e2e (attach client + i3), restart-survival e2e, backpressure, dead-reader | §6 risk tests green |
 | 7 | I1 | build/deploy: flake, justfile, 1 unit + auto-spawned keeper, wrappers; A/B switch + tmux removal from runtime (D4 window starts) | deploy green on the box; phone against Rust daemon |
 

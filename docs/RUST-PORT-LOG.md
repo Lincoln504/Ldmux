@@ -11,8 +11,8 @@ this file, then the plan §7 table, then the phase's source of record.
 | 1 protocol | **done** (2026-09-28) | `cargo test -p ldmux-protocol` | **40 passed, 0 failed** (clippy: 8 non-blocking warnings, see Findings) |
 | 2 pure modules | **done** (2026-09-28) | `cargo test -p ldmux-daemon` | **88 passed, 0 failed** |
 | 3 keeper ∥ vt-sys ∥ attach skeletons | **done** (2026-09-28) | per §7 | keeper **4** + vt-sys **6** + attach **2** + protocol **40** + daemon **88** = **140 passed, 0 failed**; TS **347/347** |
-| 4 emulator + parity | in progress (2026-09-28) | parity report: zero divergences | §3.11 cell parity: **zero divergences** (minimal corpus, both tmux versions); keeper emulator integration is the next item |
-| 5 daemon | not started | full TS-equivalent suite vs keeper | — |
+| 4 emulator + parity | **done** (2026-09-28) | parity report: zero divergences | §3.11 cell parity: **zero divergences** (minimal corpus, both tmux versions); §3.4 emulator, snapshot, state, paging, reaper, liveness all wired |
+| 5 daemon | in progress (2026-09-28) | full TS-equivalent suite vs keeper | KeeperSupervisor, daemon lock, control socket, fake keeper, daemon core+start, PaneStream, remote (minimal) done; remaining: remote (full), desktop+inventory, CLI, main entry point |
 | 6 desktop/restart/backpressure e2e | not started | §6 risk tests green | — |
 | 7 build/deploy + D4 | not started | deploy green | — |
 
@@ -678,11 +678,15 @@ flock, re-checks, spawns, then waits for the socket file.
   (attach 2, daemon **90** = +2, parity 6, keeper 10, protocol 41, vt-sys
   11+8+3); TS **347/347** + typecheck. New code clippy-clean.
 
-**Phase 5 in progress.** The `KeeperSupervisor` is the daemon's first
-auto-spawned child. Remaining: the daemon's own single-instance lock + socket,
-the registry/ownership rewiring onto the keeper, the remote (WS) server, the
-stream, the desktop + inventory, and the CLI — all against the (now real)
-keeper, not a fake.
+**Phase 5 in progress.** Done so far: `KeeperSupervisor` (auto-spawn), the
+daemon's single-instance lock (`ldmuxd.lock`), the control socket (`ldmuxd.sock`),
+the fake keeper (test double), the `LdmuxDaemon` core (reconcile) + `start`,
+the `PaneStream` core (bounded queue, §3.7), and the remote WS server (minimal:
+bind, token gate, `ping`/`hello`/`list`). Remaining: the remote's full `onMessage`
+dispatch (attach, input, session broadcast, device ownership, the sweep timer),
+the desktop + inventory (`desktop.ts` 428 + `desktop-inventory.ts` 671), the CLI
+(`cli.ts` 435), and the main entry point (`main.ts` 115) — all against the fake
+keeper (plan §3.5).
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
