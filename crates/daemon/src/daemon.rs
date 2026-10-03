@@ -247,7 +247,7 @@ impl LdmuxDaemon {
                 })
             }
         });
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match crate::control_socket::serve_accept_with(&cs, &listener, &handler).await {
                     Ok(()) => {}
@@ -258,6 +258,9 @@ impl LdmuxDaemon {
                 }
             }
         });
+        // Store the handle so the daemon can be dropped cleanly.
+        // (For now, we just drop it; the accept loop runs until the process exits.)
+        let _ = handle;
         Ok(())
     }
 

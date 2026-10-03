@@ -191,7 +191,7 @@ pub async fn serve_accept_with(
     listener: &UnixListener,
     handler: &RpcHandler,
 ) -> Result<(), String> {
-    let (stream, _addr) = listener
+let (stream, _addr) = listener
         .accept()
         .await
         .map_err(|e| format!("accept control connection: {e}"))?;
@@ -219,7 +219,7 @@ mod tests {
 
         // Spawn a task to serve the connection.
         let accept_task = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
+        let (stream, _addr) = listener.accept().await.unwrap();
             server.serve_one(stream).await
         });
 
@@ -266,7 +266,7 @@ mod tests {
         let socket_path = server.socket_path().to_path_buf();
 
         let accept_task = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
+        let (stream, _addr) = listener.accept().await.unwrap();
             server.serve_one(stream).await
         });
 
