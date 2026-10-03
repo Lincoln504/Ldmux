@@ -237,9 +237,9 @@ impl LdmuxDaemon {
         let listener = cs.bind().map_err(|e| format!("bind control socket: {e}"))?;
         let handler: crate::control_socket::RpcHandler = Box::new({
             let arc2 = arc.clone();
-            move |method: &str, params: &Value| {
+            move |method: &str, req: &Value| {
                 let method = method.to_string();
-                let params = params.clone();
+                let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let arc = arc2.clone();
                 Box::pin(async move {
                     let mut daemon = arc.lock().await;

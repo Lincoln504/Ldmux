@@ -103,3 +103,73 @@ async fn cli_ping_over_the_control_socket() {
     drop(fk);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn cli_full_lifecycle_over_the_control_socket() {
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+    let fk_serve = fk.clone();
+    let fk_sock = keeper_sock.clone();
+    tokio::spawn(async move {
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+    });
+    wait_socket(&keeper_sock).await;
+
+    ensure_cli_built();
+
+    let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+    let dir_str = dir.to_string_lossy().into_owned();
+
+    // `new` — create a session. The output is the session id (a hex string).
+    let (code, out, err) = run_cli(&["new", "shell", &dir_str], &dir_str).await;
+    assert_eq!(code, 0, "new failed: {out} {err}");
+    let session_id = out.trim().to_string();
+    assert!(!session_id.is_empty(), "no session id: {out} {err}");
+
+    // `list` — should contain the session.
+    let (code, out, err) = run_cli(&["list"], &dir_str).await;
+    assert_eq!(code, 0, "list failed: {out} {err}");
+    assert!(out.contains("running"), "no session in list: {out} {err}");
+
+    // `send` — send text to the session.
+    let (code, out, err) = run_cli(&["send", &session_id, "echo hi"], &dir_str).await;
+    assert_eq!(code, 0, "send failed: {out} {err}");
+
+    // `capture` — capture the screen (the fake keeper's snapshot text is
+    // empty by default, so the screen is empty).
+    let (code, out, err) = run_cli(&["capture", &session_id], &dir_str).await;
+    assert_eq!(code, 0, "capture failed: {out} {err}");
+
+    // `snapshot` — snapshot the session.
+    let (code, out, err) = run_cli(&["snapshot", &session_id], &dir_str).await;
+    assert_eq!(code, 0, "snapshot failed: {out} {err}");
+    assert!(out.contains("cols"), "no cols in snapshot: {out} {err}");
+
+    // `kill` — kill the session.
+    let (code, out, err) = run_cli(&["kill", &session_id], &dir_str).await;
+    assert_eq!(code, 0, "kill failed: {out} {err}");
+
+    // `list` — should show the session as dead.
+    let (code, out, err) = run_cli(&["list"], &dir_str).await;
+    assert_eq!(code, 0, "list failed: {out} {err}");
+    assert!(out.contains("dead"), "session not dead: {out} {err}");
+
+    // `forget` — forget the dead session.
+    let (code, out, err) = run_cli(&["forget", &session_id], &dir_str).await;
+    assert_eq!(code, 0, "forget failed: {out} {err}");
+
+    // `list` — should be empty.
+    let (code, out, err) = run_cli(&["list"], &dir_str).await;
+    assert_eq!(code, 0, "list failed: {out} {err}");
+    assert!(out.trim() == "(no sessions)", "session still in list: {out} {err}");
+
+    drop(fk);
+    let _ = std::fs::remove_dir_all(&dir);
+}
