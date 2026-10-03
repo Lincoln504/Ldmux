@@ -25,6 +25,13 @@ pub struct ControlSocketServer {
     socket_path: std::path::PathBuf,
 }
 
+/// A handler that dispatches an RPC request to a response.
+///
+/// The daemon's `handle` method is the production handler; the tests use a
+/// simple stub. This indirection lets the `serve_one` method call the daemon
+/// without holding a `&mut` reference (the accept loop is a spawned task).
+pub type RpcHandler = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+
 impl ControlSocketServer {
     /// Create a server for `<state_dir>/ldmuxd.sock`.
     pub fn new(state_dir: &std::path::Path) -> Self {
@@ -57,12 +64,33 @@ impl ControlSocketServer {
         Ok(listener)
     }
 
+    /// Serve one connection with the stub handler (the old `dispatch` method).
+    ///
+    /// For tests and the parity test. The production path uses
+    /// `serve_one_with` with the daemon's `handle` method.
+    pub async fn serve_one(&self, stream: UnixStream) -> Result<(), String> {
+        let handler: RpcHandler = Box::new(|_method, req| {
+            let resp = Self::dispatch(req);
+            // Extract the `result` from the stub response.
+            if resp.get("ok").and_then(|o| o.as_bool()) == Some(true) {
+                Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+            } else {
+                Err(resp.get("error").and_then(|e| e.as_str()).unwrap_or("error").to_string())
+            }
+        });
+        self.serve_one_with(stream, &handler).await
+    }
+
     /// Serve one connection: read a JSON line, dispatch, write the response.
     ///
     /// Reads bytes until a newline (or EOF); an empty line is a no-op (a client
     /// that opened and closed without sending). The response is a JSON line
     /// (the `id` echoed back, an `ok`/`result`, or an `error`).
-    pub async fn serve_one(&self, stream: UnixStream) -> Result<(), String> {
+    pub async fn serve_one_with(
+        &self,
+        stream: UnixStream,
+        handler: &RpcHandler,
+    ) -> Result<(), String> {
         let mut stream = stream;
         let mut buf: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
@@ -83,7 +111,23 @@ impl ControlSocketServer {
         }
         let req: Value =
             serde_json::from_slice(&buf).map_err(|e| format!("parse request: {e}"))?;
-        let response = Self::dispatch(&req);
+        let method = req
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default();
+        let result = handler(method, &req);
+        let response = match result {
+            Ok(r) => Value::from_iter([
+                ("ok", Value::Bool(true)),
+                ("id", req.get("id").cloned().unwrap_or(Value::Null)),
+                ("result", r),
+            ]),
+            Err(e) => Value::from_iter([
+                ("ok", Value::Bool(false)),
+                ("id", req.get("id").cloned().unwrap_or(Value::Null)),
+                ("error", Value::String(e)),
+            ]),
+        };
         let mut out = response.to_string();
         out.push('\n');
         stream
@@ -135,16 +179,16 @@ impl ControlSocketServer {
 }
 
 /// Accept one connection from the listener and serve it.
-/// Accept one connection from the listener and serve it.
-pub async fn serve_accept(
+pub async fn serve_accept_with(
     server: &ControlSocketServer,
     listener: &UnixListener,
+    handler: &RpcHandler,
 ) -> Result<(), String> {
     let (stream, _addr) = listener
         .accept()
         .await
         .map_err(|e| format!("accept control connection: {e}"))?;
-    server.serve_one(stream).await
+    server.serve_one_with(stream, handler).await
 }
 
 #[cfg(test)]
