@@ -586,7 +586,10 @@ async fn handle_connection(
                     }
                 }
             }
-            "mouseclick" | "copymode" | "follow" | "scrollback" => {
+            "follow" => {
+                // Client-owned scroll (ADR-0004): a no-op.
+            }
+            "mouseclick" | "copymode" | "scrollback" => {
                 // The stream methods (the `PaneStream`).
                 // For now, an error: the stream methods are not yet ported.
                 let _ = send_json(&mut ws, &serde_json::json!({
