@@ -635,4 +635,132 @@ mod tests {
 
         drop(fk);
     }
+
+    /// `create_session` against the fake keeper: a new session is created on
+    /// the keeper, a record is added to the registry, and the registry is saved.
+    #[tokio::test]
+    async fn create_session_spawns_on_the_keeper_and_records() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        // Create a session in the current dir (which exists).
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        assert_eq!(record.kind, "shell");
+        assert_eq!(record.status, "running");
+        assert!(!record.tmux_name.is_empty());
+        // The registry has the record.
+        assert!(d.registry().get(&record.id).is_some());
+        // The keeper has the session.
+        let resp = d.keeper_call(&KeeperMessage::List(km::List {})).await.unwrap();
+        let list = match &resp {
+            KeeperMessage::ListResult(l) => l.clone(),
+            _ => panic!("expected ListResult"),
+        };
+        assert!(list.sessions.iter().any(|s| s.session_id == record.tmux_name));
+        drop(fk);
+    }
+
+    /// `kill_session` against the fake keeper: the keeper session is killed,
+    /// the record is marked dead, and the session state is forgotten.
+    #[tokio::test]
+    async fn kill_session_kills_on_the_keeper_and_marks_dead() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let id = record.id.clone();
+        let tmux_name = record.tmux_name.clone();
+        // Kill the session.
+        let killed = d.kill_session(&id).await.unwrap();
+        assert_eq!(killed.status, "dead");
+        assert!(killed.exited_at.is_some());
+        // The registry has the dead record.
+        assert_eq!(d.registry().get(&id).unwrap().status, "dead");
+        drop(fk);
+    }
+
+    /// `close_session`: if no one holds the session, it is killed; the result
+    /// is `(true, record)`. If someone holds it, it is not killed; the result
+    /// is `(false, record)`.
+    #[tokio::test]
+    async fn close_session_kills_when_unheld_and_lets_go_when_held() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let id = record.id.clone();
+        // No one holds it: close kills it.
+        let (ended, _) = d.close_session(&id).await.unwrap();
+        assert!(ended);
+        assert_eq!(d.registry().get(&id).unwrap().status, "dead");
+        // Create another, claim it, and close: it is let go, not killed.
+        let record2 = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let id2 = record2.id.clone();
+        let device = ldmux_protocol::rpc::DeviceInfo {
+            id: "device1".into(),
+            name: "test".into(),
+            kind: "phone".into(),
+        };
+        d.claim(&id2, &device, false);
+        let (ended2, _) = d.close_session(&id2).await.unwrap();
+        assert!(!ended2);
+        assert_eq!(d.registry().get(&id2).unwrap().status, "running");
+        drop(fk);
+    }
+
+    /// `forget_session`: a dead session can be forgotten (removed from the
+    /// registry); a running session cannot.
+    #[tokio::test]
+    async fn forget_session_removes_dead_and_refuses_running() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let id = record.id.clone();
+        // A running session cannot be forgotten.
+        let err = d.forget_session(&id).await.unwrap_err();
+        assert!(err.contains("running"));
+        // Kill it, then forget it.
+        d.kill_session(&id).await.unwrap();
+        let removed = d.forget_session(&id).await.unwrap();
+        assert!(removed);
+        assert!(d.registry().get(&id).is_none());
+        drop(fk);
+    }
 }
