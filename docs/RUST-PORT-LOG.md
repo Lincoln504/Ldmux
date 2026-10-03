@@ -803,3 +803,23 @@ server) are layered on as they are ported.
   epoch).
 - Gate: `cargo test` → **188 passed** / 1 ignored (daemon **109** = +3); TS
   **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the remote WS server (the phone-facing tailnet endpoint) — §3.5/§3.8.**
+The remote: the phone-facing WebSocket endpoint (the tailnet address + token
+auth). Port of `packages/daemon/src/remote.ts` (1293 lines). The minimal
+remote: the `RemoteServer` struct (the config: the hostname, the port, the
+token), the `start()` (bind the WS server on the tailnet address, spawn the
+accept loop), the `handle_connection()` (the per-connection loop: read
+messages, check the token on the first message, dispatch `ping`/`hello`/`list`,
+write responses), and the `send_json()` (the WS text frame). The deps:
+`tokio-tungstenite = "0.26"` (the WS server + client) and `futures-util = "0.3"`
+(the `StreamExt`/`SinkExt` traits for `ws.next()`/`ws.send()`). The full session
+broadcast, the device ownership, the attach lifecycle, and the sweep timer are
+layered on as they are ported.
+- **Test:** `a_ws_client_gets_a_pong_over_the_tailnet_bind` — a WS client
+  connects to the tailnet bind (127.0.0.1:49991), sends a `ping` with the
+  token, and gets a `pong`. The test explicitly closes the connection and
+  stops the server so the detached `tokio::spawn` tasks exit before the test
+  ends.
+- Gate: `cargo test` → **189 passed** / 1 ignored (daemon **110** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
