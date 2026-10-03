@@ -704,11 +704,14 @@ session lifecycle (`create_session`, `kill_session`, `close_session`,
 `forget_session`), and the RPC dispatch (`handle` method: `ping`, `list`, `new`,
 `kill`, `close`, `forget`, `desktop`; stream-dependent methods stubbed). Remaining:
 the remote's daemon wiring (the daemon-side handlers for the 13 stream-dependent
-methods), the stream retargeting (`acquireStream`/`releaseStream`), the desktop
-window lifecycle (`desktop.ts` 428: `makeLive`, `closeLive`, `openMirror`), the
+methods), the desktop window lifecycle side effects (`desktop.ts` 428: `makeLive`,
+`closeLive`, `openMirror`, `openLive` — spawn alacritty, manage i3 windows), the
 attach lifecycle (the `attach` command handler), device ownership + sweep, and the
 remaining TS tests (CLI, stream, desktop, desk window) — all against the fake
-keeper (plan §3.5).
+keeper (plan §3.5). The stream retargeting (`streamFor`, `dropStream`,
+`releaseStreamIfIdle`, `sweepStreams`) is now ported. The `send`, `capture`, and
+`snapshot` RPC handlers are ported. The desktop pure functions (command
+construction) are ported (12 tests).
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
@@ -963,4 +966,65 @@ maps RPC method names to daemon methods: `ping`, `list`, `new`, `kill`,
   `kill` marks it dead, `forget` removes it, and `list` no longer includes it —
   all against the fake keeper.
 - Gate: `cargo test` → **211 passed** / 1 ignored (daemon **129** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the stream lifecycle (streamFor, dropStream, releaseStreamIfIdle,
+sweepStreams) + test — Phase 5.**
+The LdmuxDaemon now has a `streams` map (`PaneStream` per tmux session) and
+four stream lifecycle methods, ported from the TS daemon:
+- `stream_for`: get or create the `PaneStream` for a session (the TS
+  `streamFor`). The stream is created with a `SocketKeeperConn` (the production
+  path) that talks to the keeper's socket.
+- `drop_stream`: close and forget a stream (the TS `dropStream`).
+- `release_stream_if_idle`: release the stream if nothing is subscribed (the TS
+  `releaseStreamIfIdle`).
+- `sweep_streams`: evict streams whose backing session is gone (the TS
+  `sweepStreams`). Bounded memory.
+- **Test:** `stream_lifecycle_create_release_sweep` — `stream_for` creates the
+  stream, `release_stream_if_idle` releases it when no one is subscribed,
+  `stream_for` recreates it, `kill_session` kills the session, and
+  `sweep_streams` drops the stream — all against the fake keeper.
+- Gate: `cargo test` → **212 passed** / 1 ignored (daemon **130** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the send/capture/snapshot RPC handlers + test — Phase 5.**
+The `handle` method now implements the `send`, `capture`, and `snapshot` RPC
+handlers:
+- `send`: writes input to the keeper (the `Write` message). Builds the input
+  from the `text` and `keys` parameters.
+- `capture`: takes a snapshot (the keeper's `Snapshot` message) and returns the
+  rendered screen text.
+- `snapshot`: takes a snapshot and returns the full `SnapshotResult` (the
+  rendered screen + state).
+- **Test:** `send_capture_snapshot_dispatch` — `send` writes input to the
+  keeper, `capture` returns the rendered screen (the field exists; the fake
+  keeper's `snapshot_text` is empty until a test sets it), and `snapshot`
+  returns the full `SnapshotResult` with `cols` and `rows`.
+- Gate: `cargo test` → **213 passed** / 1 ignored (daemon **131** = +1); TS
+  **347/347** + typecheck. New code clippy-clean.
+
+**Milestone: the desktop pure functions (mirror/live command construction) +
+tests — Phase 5.**
+Port of the pure functions from `packages/daemon/src/desktop.ts` (428 lines):
+- `is_shell_foreground` — checks if a command is an interactive shell.
+- `mirror_tmux_args` — the tmux argv for a mirror client (`-L socket attach
+  [-r] -t name`).
+- `mirror_argv` — the full argv for the terminal emulator (`alacritty --class
+  class -e tmux ...`).
+- `mirror_command` — the human-readable command line (shell-quoted).
+- `shell_quote` — quote an argument for a POSIX shell.
+- `live_window_class` — the i3 window class for a session's live window
+  (sanitized to `[A-Za-z0-9_-]`, truncated to 40 chars).
+- `safe_workspace` — an i3 workspace target (restricted to safe chars, max 32).
+- `live_argv` — the argv for a session's live window (runs the shim via `sh`).
+- `live_shim_path` — where the live-window shim lives.
+- **Tests:** 12 tests: `isShellForeground` (known shells + non-shells),
+  `mirrorTmuxArgs` (read-only + read-write), `mirrorArgv` (full command),
+  `mirrorCommand` (quoted), `shellQuote` (safe + unsafe), `liveWindowClass`
+  (sanitization + truncation), `safeWorkspace` (valid + invalid), `liveArgv`
+  (shim command), `liveShimPath` (path construction).
+- **Findings:** the `live_shim_path` test function name shadows the imported
+  function (Rust name resolution); renamed to `live_shim_path_works`.
+  `safe_workspace("a".repeat(33))` needs `&` (the `repeat` returns a `String`).
+- Gate: `cargo test` → **225 passed** / 1 ignored (daemon **143** = +12); TS
   **347/347** + typecheck. New code clippy-clean.
