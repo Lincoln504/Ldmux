@@ -1,6 +1,4 @@
-# Agent Instructions — ldmux (Rust port period)
-
-## PORT MODE — in effect until the port's D4 window (tmux leaves the flake)
+# Agent Instructions — ldmux (Rust port)
 
 **The governing plan is [`docs/RUST-PORT-PLAN.md`](docs/RUST-PORT-PLAN.md) (operative,
 audited 2026-09-28, §3.14). The phase gates are §7; the phase-1..7 dependency graph is
@@ -9,35 +7,7 @@ The per-phase state, progress, and findings live in
 [`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md) — read it first, every session; the
 user compacts between phases, so it is the continuity record.**
 
-### The working mode (this period only)
-
-- **Local, test-focused, API-focused, specification-focused, functionality-focused.**
-  All port work happens against local crates, specs, and hermetic tests.
-- **No live system.** Never restart, redeploy, or touch the running ldmux daemon,
-  its tmux server, systemd units, `~/.local/bin`, `deploy/`, the phone, or the
-  pairing. No `just install`, no `systemctl`, no live-terminal validation, no
-  device runs, no integration against the live box. The live system is used
-  for *nothing* during the port; it is left exactly as-is, running, for the
-  user's day-to-day use. The only things that touch a terminal are hermetic
-  tests (scratch state dirs, scratch tmux servers, or no terminal at all —
-  the fake-keeper suite).
-- **Validation is not validation-by-running-in-production.** A phase is
-  validated by its tests (the phase gate below), by review of the code and
-  the spec it implements, and by analysis against the plan and the TS source
-  of record. It is NOT validated by deploying, restarting, or live-testing.
-- **Spec first, then code.** Each phase begins by fixing the specification
-  (the plan section + the crate's module doc / ADR where the plan is silent),
-  then the implementation, then the tests that pin the behaviour. A behaviour
-  that is not specified is not implemented; a test that does not assert the
-  behaviour is not a gate.
-- **Functional parity is the standard.** The Rust side is the port of a
-  working TS system: every behaviour has a TS source of record (the file:line,
-  the ledger row in the plan §2, or the plan's replacement design §3). Port
-  the behaviour; where the plan changes the behaviour (flow control §3.7,
-  reclaim key §3.13), the plan is the source of record and the change is
-  recorded in `docs/RUST-PORT-LOG.md`.
-
-### The method (how work proceeds)
+### The method
 
 - **No forks, no sub-agents, no delegation — ever, throughout the port.** One
   agent (this one) works the phases serially, one at a time, in the plan §7
@@ -68,6 +38,17 @@ user compacts between phases, so it is the continuity record.**
   --workspace` (inside `nix develop`, with the rustup toolchain) + the
   phase gate from §7. Clippy warnings are noted in the log; they do not
   block.
+- **Spec first, then code.** Each phase begins by fixing the specification
+  (the plan section + the crate's module doc / ADR where the plan is silent),
+  then the implementation, then the tests that pin the behaviour. A behaviour
+  that is not specified is not implemented; a test that does not assert the
+  behaviour is not a gate.
+- **Functional parity is the standard.** The Rust side is the port of a
+  working TS system: every behaviour has a TS source of record (the file:line,
+  the ledger row in the plan §2, or the plan's replacement design §3). Port
+  the behaviour; where the plan changes the behaviour (flow control §3.7,
+  reclaim key §3.13), the plan is the source of record and the change is
+  recorded in `docs/RUST-PORT-LOG.md`.
 
 ### The phases (plan §7, serial)
 
@@ -103,12 +84,13 @@ divergences from dooboxes/gmux are recorded in
 is not a pi plugin.
 
 The Rust port + tmux removal is planned and operative
-(`docs/RUST-PORT-PLAN.md`, audit 2026-09-28, §3.14). It runs in PORT MODE
-above: serial, local, test-focused; no forks/sub-agents; no live-system
-touching; `docs/RUST-PORT-LOG.md` is the per-phase continuity record. Its
-§3.13 D-1 fix (the live-window reclaim fires on any byte) is the one
-in-scope TS fix that is live in production; it lands in the TS tree before
-the port inherits it.
+(`docs/RUST-PORT-PLAN.md`, audit 2026-09-28, §3.14). It runs serially:
+no forks/sub-agents; `docs/RUST-PORT-LOG.md` is the per-phase continuity
+record. Full-scale porting, testing, and live validation are now allowed:
+restart, redeploy, live-terminal validation, and integration against the
+live box are all in scope. Its §3.13 D-1 fix (the live-window reclaim fires
+on any byte) is the one in-scope TS fix that is live in production; it
+lands in the TS tree before the port inherits it.
 
 ## Rules
 
@@ -210,7 +192,6 @@ the port inherits it.
   Rust 1.95, Go 1.24.4. Neither tests **nor the deployed daemon** use them: `just
   install` runs the daemon on the flake's `.#runtime` (the devShell's pins).
 - **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the unit:
-  `deploy/` is the source of truth for both. **During PORT MODE this is a
-  prohibition, not a convention: do not run it.**
+  `deploy/` is the source of truth for both.
 - iOS builds need a macOS host (an xcframework cannot be produced here).
 - gh authed as `Lincoln504`.

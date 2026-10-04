@@ -178,12 +178,22 @@ async fn handle_connection(
     // commands.
     let mut device: Option<ldmux_protocol::rpc::DeviceInfo> = None;
     let mut session_id: Option<String> = None;
+    // The attach output buffer (flushed on each WS message).
+    let mut attach_out: Option<Arc<std::sync::Mutex<Vec<u8>>>> = None;
 
     loop {
         let Some(Ok(msg)) = ws.next().await else {
             // The connection closed.
             break;
         };
+        // Flush the attach output buffer (the live output accumulated since
+        // the last flush is sent now).
+        if let Some(buf) = &attach_out {
+            let data: Vec<u8> = buf.lock().unwrap().drain(..).collect();
+            if !data.is_empty() {
+                let _ = ws.send(Message::Binary(data.into())).await;
+            }
+        }
         let text: String = match &msg {
             Message::Text(t) => t.to_string(),
             Message::Binary(b) => String::from_utf8_lossy(b.as_ref()).to_string(),
@@ -451,12 +461,22 @@ async fn handle_connection(
                             if claimed.is_some() {
                                 // Get or create a stream.
                                 let stream = d.stream_for(&rec.tmux_name);
-                                // Subscribe with a no-op on_output (the
-                                // simplified attach: the client gets a
-                                // snapshot; output is polled via capture).
+                                // Subscribe with an output buffer (the attach
+                                // streams live output to the client; the buffer
+                                // is flushed on each WS message).
+                                let out_buf: Arc<std::sync::Mutex<Vec<u8>>> =
+                                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                                let ob = out_buf.clone();
                                 let sub = crate::stream::StreamSubscriber {
-                                    on_output: Box::new(|_text: &[u8]| {}),
-                                    on_reset: Box::new(|_reason: &str| {}),
+                                    on_output: Box::new(move |text: &[u8]| {
+                                        ob.lock().unwrap().extend_from_slice(text);
+                                    }),
+                                    on_reset: Box::new(|reason: &str| {
+                                        // The client must resync (a forced resync,
+                                        // §3.7). The snapshot is re-sent on the
+                                        // next attach.
+                                        let _ = reason;
+                                    }),
                                 };
                                 let _unsubscribe = stream.subscribe(sub);
                                 session_id = Some(sid.to_string());
@@ -472,6 +492,8 @@ async fn handle_connection(
                                     }),
                                 )
                                 .await;
+                                // Store the output buffer for flushing.
+                                attach_out = Some(out_buf);
                             }
                         }
                     }
