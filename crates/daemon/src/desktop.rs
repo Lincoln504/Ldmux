@@ -112,29 +112,6 @@ pub fn attach_bin() -> String {
     }
 }
 
-/// Resolve the tmux binary: prefer `LDMUX_TMUX_BIN`, then the first `tmux`
-/// on `PATH`.
-///
-/// The TS `resolveTmuxBin` does the same: the daemon's own tmux (set by the
-/// flake) is preferred over whatever the window manager's PATH resolves to.
-pub fn resolve_tmux_bin() -> String {
-    if let Ok(v) = std::env::var("LDMUX_TMUX_BIN") {
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    // Fall back to the first `tmux` on PATH.
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("tmux");
-            if candidate.is_file() {
-                return candidate.to_string_lossy().into_owned();
-            }
-        }
-    }
-    // Last resort: bare `tmux`.
-    "tmux".to_string()
-}
 
 /// Find a window id in an i3 tree by window class.
 ///
@@ -507,16 +484,4 @@ mod tests {
         assert!(joined.contains("'sock with space'"), "args with spaces must be quoted: {joined}");
     }
 
-    /// Resolve the tmux binary: prefer LDMUX_TMUX_BIN, then PATH order (the TS
-    /// `resolveTmuxBin prefers LDMUX_TMUX_BIN, then PATH order, keeping an
-    /// absolute path`).
-    #[test]
-    fn resolve_tmux_bin_prefers_env_then_path() {
-        // Set LDMUX_TMUX_BIN to a known path.
-        unsafe { std::env::set_var("LDMUX_TMUX_BIN", "/usr/bin/tmux-custom"); }
-        let resolved = resolve_tmux_bin();
-        assert_eq!(resolved, "/usr/bin/tmux-custom", "LDMUX_TMUX_BIN must win");
-        // Clear the env var.
-        unsafe { std::env::remove_var("LDMUX_TMUX_BIN"); }
-    }
 }

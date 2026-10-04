@@ -466,7 +466,7 @@ metadata + scrollback reference for replay.
 
 > **Aspirational — not implemented.** The shipped surface is deliberately
 > smaller: newline-delimited JSON RPC over a Unix socket
-> (`packages/protocol/src/rpc.ts`: ping/list/new/send/capture/snapshot/kill/
+> (`crates/protocol/src/rpc.rs`: ping/list/new/send/capture/snapshot/kill/
 > close/forget/adopt/desktop/makeLive/closeLive/remote_info and a few more), one WebSocket per session at `WS /ws`
 > (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`). The daemon serves
 > no static files. No REST layer and no `/api/dirs`; a client creates sessions
@@ -556,7 +556,7 @@ helper suffices), and owner/families.
 ### 6.2 Message types (implemented)
 
 This is the shipped set (the source of truth is
-`packages/protocol/src/messages.ts`; behaviour is in `docs/REMOTE.md`).
+`crates/protocol/src/messages.rs`; behaviour is in `docs/REMOTE.md`).
 Everything below is a JSON **text** message except the last line.
 
 Client → server: `hello {device}`, `attach {sessionId, cols?, rows?, takeover?}`,
@@ -848,31 +848,42 @@ alive to reconnect. Measured as a deadlock before it was fixed.
 
 ```
 ldmux/
-├─ README.md · AGENTS.md · Justfile · flake.nix · package.json · tsconfig.json
+├─ README.md · AGENTS.md · Justfile · flake.nix · Cargo.toml
+├─ crates/
+│  ├─ protocol/       # frames, messages, keeper messages, rpc, pairing, net,
+│  │                  # paths, socket — the wire contract, one implementation
+│  ├─ keeper/         # the session layer: PTYs, child supervision + reaping,
+│  │                  # one libghostty-vt per session, the keeper socket server
+│  ├─ daemon/         # registry, ownership, remote WS, streams, desktop +
+│  │                  # inventory, the CLI (`bin/ldmux`), `bin/ldmuxd`
+│  ├─ attach/         # the desk-window client (`ldmuxd attach`)
+│  └─ vt-sys/         # hand-written FFI against the vendored libghostty-vt
+├─ deploy/            # the systemd user unit, the `$mod+Return` launcher
+├─ scripts/           # measure_latency.ts, slow-link.ts (dev tools)
 ├─ docs/
-│  ├─ SPEC.md · INVESTIGATION.md · TRANSPORT.md · REMOTE.md · WEB.md ·
-│  │  NATIVE-TERMINAL.md · PREDICTIVE-ECHO.md
-│  └─ adr/            # 0001 transport, 0002 geometry, 0003 lifecycle,
-│                     # 0004 scroll, 0005 remote/tls, 0006 divergences,
-│                     # 0007 native terminal engine, 0008 mobile UI modes,
-│                     # 0009 Node runtime / extension removed
-├─ packages/
-│  ├─ protocol/       # frames, messages, rpc, socket client, paths
-│  ├─ daemon/         # ldmuxd + cli + probe + tmux/, stream.ts, remote.ts
-│  ├─ testing/        # the test/expect vocabulary over node:test
-│  └─ mobile/         # native KMP + Compose Multiplatform client (Android
-│                     # first), with the libghostty-vt core behind JNI
-└─ (packages/web, the buildless xterm.js/WebView client, has been deleted —
-   this tree used to list it under packages/ and said "the web client is
-   served by the daemon"; the mobile app is the only client now, and it is
-   native, not served)
+│  ├─ SPEC.md · RUST-PORT-PLAN.md · RUST-PORT-LOG.md · STATE.md · REMOTE.md ·
+│  │  NATIVE-TERMINAL.md · PREDICTIVE-ECHO.md · MESH-TRANSPORT.md · WIRE-COST.md
+│  └─ adr/            # the decision record; 0018 is the session layer
+└─ packages/
+   └─ mobile/         # native KMP + Compose Multiplatform client (Android
+                      # first), with the libghostty-vt core behind JNI
 ```
 
-Binaries: `ldmux` (CLI), `ldmuxd` (daemon).
+The TypeScript implementation (`packages/{daemon,protocol,testing}`, and tmux as
+the session layer) was deleted at D4 — see ADR-0018 and
+`docs/RUST-PORT-LOG.md`. It is readable at git commit `6b3efb8`.
+
+Binaries: `ldmux` (CLI), `ldmuxd` (daemon), `ldmux-keeper` (auto-spawned).
 
 ---
 
-## 13. Phased plan
+## 13. Phased plan — **historical**
+
+> This is the plan as written against tmux and TypeScript. It was executed, and
+> then the implementation it describes was replaced: the phases ran as the Rust
+> port (`docs/RUST-PORT-PLAN.md`, `docs/RUST-PORT-LOG.md`), and the tmux/TS tree
+> was deleted at D4 (ADR-0018). Kept as the record of how the product was built;
+> `packages/**` paths below no longer exist.
 
 **Phase 0 — spec (this doc).**
 

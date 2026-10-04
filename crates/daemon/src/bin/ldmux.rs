@@ -34,17 +34,14 @@
 use ldmux_protocol::socket::{self as ps, CallError};
 use ldmux_protocol::rpc::PingResult;
 
-/// The default socket path (the `LDMUX_STATE_DIR` env var, or `~/.ldmux/ldmuxd.sock`).
+/// The daemon socket path, resolved exactly as the daemon resolves it.
+///
+/// This used to hand-roll the fallback (`$HOME/.ldmux/ldmuxd.sock`) instead of
+/// calling the protocol helper, so the CLI looked somewhere the daemon never
+/// binds — every command answered `connect: No such file or directory` unless
+/// `LDMUX_STATE_DIR` happened to be exported. One resolver, one answer.
 fn default_socket_path() -> String {
-    let state_dir = std::env::var("LDMUX_STATE_DIR").unwrap_or_default();
-    if !state_dir.is_empty() {
-        return std::path::Path::new(&state_dir)
-            .join("ldmuxd.sock")
-            .to_string_lossy()
-            .into_owned();
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/.ldmux/ldmuxd.sock")
+    ldmux_protocol::paths::resolve_socket_path()
 }
 
 /// A typed call against the daemon socket (the TS `daemonCall`).
@@ -640,5 +637,23 @@ async fn main() {
             print_usage();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    /// The CLI must not resolve the socket itself: a hand-rolled fallback sent it
+    /// to a path the daemon never binds, and every command failed with
+    /// `connect: No such file or directory` unless `LDMUX_STATE_DIR` was exported.
+    #[test]
+    fn cli_socket_path_is_the_protocol_one() {
+        assert_eq!(
+            super::default_socket_path(),
+            ldmux_protocol::paths::resolve_socket_path()
+        );
+        assert!(
+            super::default_socket_path().ends_with("ldmuxd.sock"),
+            "one resolver, one answer"
+        );
     }
 }

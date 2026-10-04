@@ -150,15 +150,15 @@ The wire carries **raw pty bytes**, not a grid.
 | A drag past the edge does **not** walk the selection on the alternate screen | In `less` (a real alternate-screen program, so no scrollback exists), long-pressed row 12 and dragged up past the top with 8 move events. The selection extended to the top of the screen, the **content did not move**, and the anchored end stayed on the press row. Before the fix each move walked the anchor one row, so the anchored end would have been 8 rows down the screen |
 | The clipboard round trip works end to end | Selected text in `less`, let go (copies), rotated to landscape, tapped `paste`. The text appeared in the shell, read back **from the pane via the daemon** rather than from a screenshot: `[ ldeen@debian:~$ ] twork services, Internet style`. Tapped paste again and got exactly one more copy, so the content is stable and the paste is one-for-one |
 
-### 4.2 Suites (2026-09-27, all green)
+### 4.2 Suites (2026-09-27; the Rust/mobile rows updated 2026-10-04 at D4)
 
 | Suite | Count | Command |
 |---|---|---|
-| JS/TS | **347 tests, 347 pass** | `node --run test` (`--test-concurrency=4`) |
-| Typecheck | clean | `node --run typecheck` |
+| Rust workspace | **29 test binaries, all green** (2 ignored) | `cargo test --workspace` inside `nix develop` |
+| Mobile TS | **13 tests, 13 pass** | `just mobile-test` |
 | Native C (host) | **198 checks, 0 failures** | `just native-test` / `scripts/test-native.sh` |
 | Kotlin (Android unit) | **165 `@Test` methods** | `./gradlew :composeApp:testDebugUnitTest` |
-| Architecture guard | 8 tests, part of the 347 | `packages/mobile/test/architecture.test.ts` |
+| Architecture guard | part of the 13 | `packages/mobile/test/architecture.test.ts` |
 
 Run the JS/TS suite **inside `nix develop`**. The daemon resolves its tmux from
 `LDMUX_TMUX_BIN` before PATH, so in a shell that is itself an ldmux session the suite
