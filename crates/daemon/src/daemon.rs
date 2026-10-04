@@ -210,6 +210,27 @@ impl LdmuxDaemon {
     /// call `handle` (which takes `&mut self`). The `Arc` is shared across the
     /// accept loop.
     pub async fn start(&mut self, arc: &std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>>) -> Result<(), String> {
+        // Create or tighten the state dir to 0700 (the TS daemon creates it
+        // with `mode: 0o700`; a pre-existing dir is tightened, not trusted).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::path::Path::new(&self.state_dir).exists() {
+                // Tighten an existing dir.
+                let _ = std::fs::set_permissions(
+                    &self.state_dir,
+                    std::fs::Permissions::from_mode(0o700),
+                );
+            } else {
+                // Create with 0700.
+                std::fs::create_dir_all(&self.state_dir)
+                    .map_err(|e| format!("create state dir: {e}"))?;
+                let _ = std::fs::set_permissions(
+                    &self.state_dir,
+                    std::fs::Permissions::from_mode(0o700),
+                );
+            }
+        }
         // Acquire the lock (the single-instance pid lockfile).
         self.lock.acquire().map_err(|e| e.to_string())?;
         // Ensure the keeper (auto-spawn if dead).
@@ -269,13 +290,23 @@ impl LdmuxDaemon {
         Ok(())
     }
 
-    /// Stop the daemon (the TS `stop`). Stops the remote, releases the lock.
-    /// Tolerates a partially-started daemon (a signal during startup).
+    /// Stop the daemon (the TS `stop`). Stops the remote, closes streams,
+    /// removes the socket, releases the lock. Tolerates a partially-started
+    /// daemon (a signal during startup).
     pub fn stop(&mut self) {
         if let Some(ref mut r) = self.remote {
             r.stop();
         }
-        // The lock is released by `DaemonLock::drop`.
+        // Close all streams.
+        for stream in self.streams.values() {
+            stream.close("daemon stopped");
+        }
+        self.streams.clear();
+        // Remove the socket file.
+        let sock = self.socket_path();
+        let _ = std::fs::remove_file(&sock);
+        // Release the lock.
+        self.lock.release();
     }
 
     /// Create a new session (the TS `handleNew`).
@@ -1138,6 +1169,141 @@ mod tests {
         assert!(r.get("rows").and_then(|v| v.as_u64()).is_some());
 
         drop(fk);
+    }
+
+    /// Stop removes the socket and the lock (the TS `stop removes the socket
+    /// and the lock, and leaves tmux alone`).
+    #[tokio::test]
+    async fn stop_removes_the_socket_and_the_lock() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
+        let mut d = arc.lock().await;
+        d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
+        drop(d);
+
+        // The socket exists.
+        let sock = dir.join("ldmuxd.sock");
+        assert!(sock.exists(), "socket should exist after start");
+        let lock = dir.join("ldmuxd.lock");
+        assert!(lock.exists(), "lock should exist after start");
+
+        // Stop.
+        arc.lock().await.stop();
+
+        // The socket is gone.
+        assert!(!sock.exists(), "socket should be removed after stop");
+        // The lock is gone.
+        assert!(!lock.exists(), "lock should be removed after stop");
+    }
+
+    /// Stop is idempotent (the TS `stop is idempotent and safe to call twice`).
+    #[tokio::test]
+    async fn stop_is_idempotent() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
+        let mut d = arc.lock().await;
+        d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
+        drop(d);
+
+        arc.lock().await.stop();
+        // A second stop does not panic.
+        arc.lock().await.stop();
+    }
+
+    /// A state directory that already exists is tightened to 0700 (the TS
+    /// `a state directory that already exists is tightened, not trusted`).
+    #[tokio::test]
+    async fn a_loose_state_dir_is_tightened() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        // Set the dir to loose permissions (0775) before the daemon starts.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
+        let mut d = arc.lock().await;
+        d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
+        drop(d);
+
+        // The dir is tightened to 0700.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "state dir should be tightened to 0700");
+        }
+
+        arc.lock().await.stop();
+    }
+
+    /// A remote bind failure only disables remote; local control keeps working
+    /// (the TS `a remote bind failure only disables remote; local control
+    /// keeps working`).
+    #[tokio::test]
+    async fn a_remote_bind_failure_does_not_stop_local_control() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        // Take a port with a raw TCP listener.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Start a daemon that wants the same port.
+        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"))
+            .with_remote("127.0.0.1".to_string(), port, "test-token".to_string());
+        let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
+        let mut d = arc.lock().await;
+        d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
+        drop(d);
+
+        // The daemon started (the remote bind failed, but the daemon is alive).
+        // The control socket works.
+        let sock = dir.join("ldmuxd.sock");
+        assert!(sock.exists(), "control socket should exist");
+
+        // Drop the listener so the port is free.
+        drop(listener);
+
+        arc.lock().await.stop();
     }
 }
 
