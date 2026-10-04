@@ -478,7 +478,7 @@ async fn handle_connection(
                                         let _ = reason;
                                     }),
                                 };
-                                let _unsubscribe = stream.subscribe(sub);
+                                let (_sub_id, _unsubscribe) = stream.subscribe(sub);
                                 session_id = Some(sid.to_string());
                                 // Take a snapshot.
                                 let snap = stream.snapshot();

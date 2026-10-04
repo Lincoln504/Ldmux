@@ -26,6 +26,8 @@ use ldmux_protocol::keeper::{KeeperMessage, Snapshot};
 /// this queue. When it overflows (the subscriber is too slow), the subscriber
 /// is dropped and forced to resync from a snapshot — the pane never pauses.
 struct SubQueue {
+    /// The subscriber's unique id (for removal by id, not by position).
+    id: usize,
     /// The queued output bytes (the bytes the subscriber has not drained).
     q: VecDeque<u8>,
     /// Dropped because the queue overflowed (the subscriber must resync).
@@ -143,19 +145,25 @@ impl PaneStream {
     ///
     /// The subscriber gets its own bounded queue; on overflow it is dropped and
     /// the `on_reset` callback fires (a forced resync).
-    pub fn subscribe(&self, sub: StreamSubscriber) -> Box<dyn Fn() + Send + Sync + '_> {
+    pub fn subscribe(&self, sub: StreamSubscriber) -> (usize, Box<dyn Fn() + Send + Sync + '_>) {
+        let id = {
+            let subs = self.subs.lock().unwrap();
+            subs.iter().map(|s| s.id).max().unwrap_or(0) + 1
+        };
         let mut subs = self.subs.lock().unwrap();
         subs.push(SubQueue {
+            id,
             q: VecDeque::new(),
             dropped: false,
             sub,
         });
-        Box::new(move || {
+        let id_for_close = id;
+        (id, Box::new(move || {
             let mut subs = self.subs.lock().unwrap();
-            // Drop the last queue (the subscriber is the one just pushed).
-            subs.pop();
-            drop(subs);
-        })
+            // Remove by id (not by position — other subscribers may have
+            // been added/removed since this one was pushed).
+            subs.retain(|s| s.id != id_for_close);
+        }))
     }
 
     /// Deliver `text` to every subscriber (the fanout), through the sanitizer.
@@ -192,9 +200,10 @@ impl PaneStream {
     }
 
     /// Drain a subscriber's queued output (the drain is the pull).
-    pub fn drain(&self, idx: usize) -> Vec<u8> {
+    /// `sub_id` is the id returned by `subscribe`.
+    pub fn drain(&self, sub_id: usize) -> Vec<u8> {
         let mut subs = self.subs.lock().unwrap();
-        match subs.get_mut(idx) {
+        match subs.iter_mut().find(|s| s.id == sub_id) {
             Some(sub) => {
                 let d: Vec<u8> = sub.q.drain(..).collect();
                 d
@@ -477,12 +486,12 @@ mod tests {
     fn the_fanout_delivers_to_every_subscriber() {
         let s = stream();
         let (o1, r1) = cb();
-        let _ = s.subscribe(StreamSubscriber {
+        let (_id1, _u1) = s.subscribe(StreamSubscriber {
             on_output: o1,
             on_reset: r1,
         });
         let (o2, r2) = cb();
-        let _ = s.subscribe(StreamSubscriber {
+        let (_id2, _u2) = s.subscribe(StreamSubscriber {
             on_output: o2,
             on_reset: r2,
         });
@@ -508,14 +517,14 @@ mod tests {
     fn a_subscribers_queue_is_bounded_and_drains() {
         let s = stream();
         let (o, r) = cb();
-        let _ = s.subscribe(StreamSubscriber {
+        let (sub_id, _) = s.subscribe(StreamSubscriber {
             on_output: o,
             on_reset: r,
         });
         s.fanout("abc");
-        let d = s.drain(0);
+        let d = s.drain(sub_id);
         assert_eq!(d, b"abc");
         // A second drain is empty (the queue is drained).
-        assert!(s.drain(0).is_empty());
+        assert!(s.drain(sub_id).is_empty());
     }
 }

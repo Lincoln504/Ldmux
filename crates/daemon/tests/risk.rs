@@ -148,13 +148,13 @@ async fn dead_reader_does_not_kill_the_session() {
         }),
         on_reset: Box::new(|_reason: &str| {}),
     };
-    let _unsubscribe1 = stream.subscribe(sub1);
+    let (_id1, _unsubscribe1) = stream.subscribe(sub1);
 
     let sub2 = StreamSubscriber {
         on_output: Box::new(|_text: &[u8]| {}),
         on_reset: Box::new(|_reason: &str| {}),
     };
-    let unsubscribe2 = stream.subscribe(sub2);
+    let (_id2, unsubscribe2) = stream.subscribe(sub2);
 
     // Send output to both.
     stream.fanout("hello world");
