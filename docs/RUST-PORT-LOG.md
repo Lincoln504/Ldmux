@@ -719,7 +719,17 @@ Remaining: the `copymode` handler (stubbed, tmux-specific), the idle connection
 sweep (optimization; the `by_device` map is in place), and the remaining TS
 stream/desk-window tests (not portable to the fake keeper — they require a real
 tmux + pty).
-Gate: `cargo test` → **244 passed** / 1 ignored; TS **347/347** + typecheck.
+Gate: `cargo test` → **249 passed** / 1 ignored; TS **347/347** + typecheck.
+
+**Phase 6 (risk tests) in progress.** Done so far (as of 2026-10-01):
+backpressure (2MB flood drops the slow subscriber, forced resync §3.7),
+dead-reader (unsubscribing one subscriber leaves the stream alive), spawn
+race (two concurrent `stream_for` calls produce one stream), restart-survival
+e2e (real keeper, 3 sessions survive daemon restart), keeper-death e2e (kill
+keeper with 3 live sessions, daemon respawns, all sessions marked dead),
+`keeper_call` keeper-death detection (respawn + retry), `ensure_keeper_alive`
+(respawn + reconcile). Remaining: desktop attach e2e (requires Xvfb + i3),
+and the `copymode` handler (stubbed, tmux-specific).
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
