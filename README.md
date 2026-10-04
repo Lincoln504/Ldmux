@@ -1,14 +1,15 @@
 # ldmux
 
-A **tmux-native remote terminal**: a daemon + CLI on the host, and a **native**
-Kotlin Multiplatform mobile client, reachable **only over Tailscale**.
+A **remote terminal**: a daemon + CLI on the host, and a **native** Kotlin
+Multiplatform mobile client, reachable **only over Tailscale**.
 
 `ldmux` is the successor idea to [`gmux`](https://gmux.app) and borrows heavily
 from the lessons of the local `dooboxes` project — but it is *not* a fork of
-either. It is deliberately simpler and tmux-native:
+either. It is deliberately simple:
 
-- **tmux is the single source of truth.** Every session is a tmux session. There
-  is no custom PTY/session layer to keep in sync.
+- **The keeper is the single source of truth.** Every session is a PTY owned by a
+  `ldmux-keeper` process; the daemon auto-spawns the keeper and talks to it over
+  a Unix socket. There is no tmux and no second session layer.
 - **Tailnet only.** System Tailscale is already present on this machine
   (`debian.tail496756.ts.net`, `100.127.119.54`); no public exposure, no hosted relay.
 - **Six panes of thought on the client, a thin daemon on the host.** The viewing
@@ -19,18 +20,16 @@ either. It is deliberately simpler and tmux-native:
   client repaints on its own clock rather than per packet, and predictive local
   echo is available (off by default) — `docs/PREDICTIVE-ECHO.md`.
 
-> **Status: Phase 1 (local core) + Phase 3 (remote transport) done; the native mobile
-> client is done and device-verified for Android, with iOS deferred as a build.**
-> `node --run test` passes, typecheck clean — for the counts, read
-> [`docs/STATE.md`](docs/STATE.md) §4.2, which is the register; this file states them in
-> three places and they drift. The authoritative
-> design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision is
-> [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
-> [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md).
->
-> Note: `SPEC.md` predates some decisions and says so in its status note —
-> the runtime is **Node 26**, not Bun, and the **pi extension has been removed**
-> ([ADR-0009](docs/adr/0009-node-runtime-and-no-pi-extension.md)).
+> **Status: the Rust daemon is deployed and running.** `crates/daemon`
+> (`ldmuxd`) is the live daemon under the systemd user unit; the keeper owns the
+> PTYs and runs libghostty-vt; the native mobile client is done and
+> device-verified for Android, with iOS deferred as a build. The Rust workspace
+> (`cargo test --workspace`, inside `nix develop`) and the TypeScript source of
+> record (`node --run test` + `node --run typecheck`) are the two gates. The
+> authoritative design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision
+> is [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
+> [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md); the port's own record is
+> [`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md).
 
 **Current position, open work and known unknowns: [`docs/STATE.md`](docs/STATE.md).**
 
@@ -39,16 +38,17 @@ either. It is deliberately simpler and tmux-native:
 | Doc | Purpose |
 |-----|---------|
 | [`docs/STATE.md`](docs/STATE.md) | **Where everything stands**: what is verified and how, what is open, what is not known. Start here. |
-| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | The open decision about how much of the session layer should be tmux's. |
-| [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification. |
-| [`docs/TRANSPORT.md`](docs/TRANSPORT.md) | Transport deep-dive + decision (control mode `-C` over pipes, no PTY). |
+| [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification (its tmux sections are historical). |
+| [`docs/RUST-PORT-PLAN.md`](docs/RUST-PORT-PLAN.md) | The Rust port + tmux-removal plan, and its crate map. |
+| [`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md) | The port's continuity record: what was done, what was found, what is open. |
+| [`docs/RUST-PORT-AUDIT.md`](docs/RUST-PORT-AUDIT.md) | The critical audit of the port. |
 | [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
 | [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) | The native terminal engine (libghostty-vt) and the JNI seam. |
 | [`docs/WIRE-COST.md`](docs/WIRE-COST.md) | What each interaction actually costs on the wire, measured. |
-| [`docs/MESH-TRANSPORT.md`](docs/MESH-TRANSPORT.md) | The LoRa/mesh transport profile — design only. |
 | [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
 | [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
+| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | Historical: the decision about how much of the session layer should be tmux's (decided: none). |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
 
@@ -60,73 +60,68 @@ The user's working name for the old idea was "Doombox"/"Dooboxes"; the existing
 
 ## Development
 
-The project uses a **Nix flake** for a reproducible toolchain (Node 26, tmux,
-just). `packages/mobile` additionally needs the Android/KMP toolchain
+The project uses a **Nix flake** for a reproducible toolchain (Node 26 for the
+TypeScript source of record, rustup for the Rust workspace, tmux for the parity
+harness, just). `packages/mobile` additionally needs the Android/KMP toolchain
 (`nix develop .#mobile`).
 
 ```bash
-nix develop            # node 26.8.2, npm 11.19.1, tmux 3.7b, just
-npm install            # one runtime dep: ws
-node --test "packages/*/test/*.test.ts"   # unit + live tmux tests
-node --run typecheck   # tsc --noEmit (strict, no build step)
-just daemon            # run ldmuxd in the foreground
-just cli run shell     # create a session and attach tmux
-just cli list          # sessions (and their tmux names)
-just cli mirror <id>   # read-only desktop mirror (i3 workspace 10)
-just remote            # remote host, port, token, and whether it is listening
-just code              # pairing QR code for the phone to scan (ADR-0017)
-just pair              # the same pairing, as an ldmux:// link
-just latency <id>      # round-trip echo latency against a session
+nix develop                  # node 26.8.2, rustc/cargo, tmux 3.7b, just, zbarimg
+cargo build --workspace      # build every Rust crate
+cargo test --workspace       # the Rust gate (keeper, daemon, protocol, vt-sys, attach)
+node --run test              # the TypeScript gate (the source of record)
+node --run typecheck         # tsc --noEmit (strict, no build step)
+just install                 # build the release workspace and install ldmuxd/ldmux/ldmux-keeper
+just rust-daemon             # run the Rust daemon in the foreground
+just rust-cli list           # sessions, through the Rust CLI
+just cli run shell           # create a session and attach
+just remote                  # remote host, port, token, and whether it is listening
+just code                    # pairing QR code for the phone to scan (ADR-0017)
+just pair                    # the same pairing, as an ldmux:// link
+just latency <id>            # round-trip echo latency against a session
 ```
 
-There is **no build step**: Node strips the types, so `node
-packages/daemon/src/main.ts` is the daemon. That requires the source to stay
-*erasable* (no `enum`, no `namespace`, no constructor parameter properties);
-`erasableSyntaxOnly` in `tsconfig.json` enforces it. See
-[ADR-0009](docs/adr/0009-node-runtime-and-no-pi-extension.md).
-
-The live tests spawn a scratch tmux server (`tmux -L <unique>`) and exercise the
-control-mode transport end to end; they require `tmux` on `PATH` (provided by the
-devShell).
+The TypeScript tree has **no build step** (Node strips the types; the source
+must stay *erasable*; `erasableSyntaxOnly` enforces it — see
+[ADR-0009](docs/adr/0009-node-runtime-and-no-pi-extension.md)). It is retained as
+the source of record and the parity corpus while the tmux removal completes; the
+deployed daemon is the Rust one.
 
 ## Status
 
-Implemented and tested (see [`docs/STATE.md`](docs/STATE.md) §4.2 for the counts and
-the commands that produce them):
+Implemented and tested (see [`docs/STATE.md`](docs/STATE.md) §4.2 for the counts
+and the commands that produce them):
 
-- `packages/protocol` — one canonical frame codec, control message types, runtime
-  path resolution, and the typed daemon RPC contract + socket client (shared by
-  every consumer).
-- `packages/daemon` — tmux control-mode parser + live client; control plane; a
-  stateful **output sanitizer** (drops OSC 52/DCS/device-status before a client
-  sees them); JSON session registry with reconciliation and pruning; Unix-socket
-  JSON daemon (pid-lockfile single-instance, owner-only 0600 socket); **live
-  `PaneStream` fan-out** with per-subscriber output coalescing; **WebSocket
-  remote transport on the tailnet address, with bearer-token auth** (ADR-0016,
-  `docs/REMOTE.md`);
-  desktop mirror + tailnet pairing; CLI — run `ldmux --help` for the list rather than
-  reading it here, where it went stale twice (`shell`, `live`, `unlive`,
-  `clipboard-write` and `copy` were all missing).
-- `packages/testing` — the assertion vocabulary (`test`/`expect`) the suite uses,
-  over `node:test`.
-- The daemon serves **no** static files. It used to ship a buildless xterm.js
-  browser client at `/`; that client has been deleted, because native KMP/Compose
-  is the client (ADR-0007) and a second renderer meant two copies of the snapshot
-  and mode-sequence logic to keep correct. `GET /` now answers 404 with
-  `ldmux remote: the endpoint is /ws`, so the port explains itself.
+- `crates/protocol` — one canonical frame codec, the daemon RPC contract, the
+  keeper message set, runtime path resolution, the pairing link, and the socket
+  client, shared by every consumer.
+- `crates/keeper` — the session layer: a PTY per session in its own process
+  group, libghostty-vt in-process, the `Spawn`/`Kill`/`Write`/`Resize`/`Read`/
+  `Peek`/`Snapshot`/`List`/`Close` server.
+- `crates/vt-sys` — the FFI surface of libghostty-vt (the vendored `.a`).
+- `crates/daemon` — the RPC daemon (Unix socket + pid lockfile), the session
+  registry with reconciliation and pruning, ownership with the holder guard and
+  the idle sweep, a `PaneStream` fan-out with per-subscriber coalescing, the
+  **WebSocket remote transport on the tailnet address with bearer-token auth at
+  the HTTP upgrade** (ADR-0016, `docs/REMOTE.md`), the desktop mirror, tailnet
+  pairing, and the CLI (`ldmux`).
+- `crates/attach` — the desktop desk-window client (a daemon remote-WS client).
 - `packages/mobile` — native KMP + Compose Multiplatform client (Android first).
   A Compose `Canvas` renderer over a **libghostty-vt** emulator behind a narrow
-  JNI seam; client-driven pane resize; **the shell view follows the device's rotation
-  and the app owns the keyboard** — portrait is typing with a two-row bar, landscape is
-  the side panel, and there is no flip button; the launcher holds portrait (ADR-0011); scrollback, cursor
-  rendering, tap-to-position, and predictive local echo at a low, adaptive frame
-  rate. See [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) and
+  JNI seam; client-driven pane resize; **the shell view follows the device's
+  rotation and the app owns the keyboard** — portrait is typing with a two-row
+  bar, landscape is the side panel, and there is no flip button; the launcher
+  holds portrait (ADR-0011); scrollback, cursor rendering, tap-to-position, and
+  predictive local echo at a low, adaptive frame rate. See
+  [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) and
   [`packages/mobile/README.md`](packages/mobile/README.md).
-- pairing/desktop helpers — `ldmux code` (QR code) / `ldmux pair` (the same
-  `ldmux://pair` link as text) and `ldmux mirror` (read-only i3 + alacritty view).
+- The daemon serves **no** static files. `GET /ws` is the only endpoint; a plain
+  GET answers 401/400 so the phone's connection probe can tell a refused token
+  from a machine that is off.
 
-Not yet: iOS (needs a macOS host for the xcframework), and the mobile client's
-Compose renderer hardening (cursor blink, zoom).
+Not yet: iOS (needs a macOS host for the xcframework), the mobile client's
+Compose renderer hardening (cursor blink, zoom), and the final tmux removal from
+the flake (the deployed daemon does not use it).
 
 Design divergences from dooboxes/gmux are recorded in
 [`docs/adr/0006-divergences.md`](docs/adr/0006-divergences.md).

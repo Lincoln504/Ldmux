@@ -275,21 +275,28 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         if !is_ws_upgrade(&headers) {
             // The TS `handleRequest` statuses.
             let (status, body) = plain_response(&path, authed);
+            eprintln!("ldmuxd: remote: {peer} {_method} {path} -> {status}");
             write_http(&mut stream, status, body).await;
             continue;
         }
         if path != "/ws" {
+            eprintln!("ldmuxd: remote: {peer} ws {path} -> 404");
             write_http(&mut stream, 404, "ldmux remote: the endpoint is /ws\n").await;
             continue;
         }
         if !authed {
+            eprintln!("ldmuxd: remote: {peer} ws /ws -> 401");
             write_http(&mut stream, 401, "unauthorized\n").await;
             continue;
         }
         let ws = match tokio_tungstenite::accept_async(stream).await {
             Ok(ws) => ws,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!("ldmuxd: remote: upgrade failed from {peer}: {e}");
+                continue;
+            }
         };
+        eprintln!("ldmuxd: remote: connection from {peer}");
         conn_id += 1;
         let shared = shared.clone();
         tokio::spawn(async move {

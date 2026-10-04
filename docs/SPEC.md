@@ -17,6 +17,16 @@
 >   document that Android is landscape-locked is historical.
 > - **Remote is a direct tailnet bind, paired by QR code** (added 2026-09-27):
 >   ADR-0016 and ADR-0017 supersede ADR-0005's loopback + `tailscale serve`.
+> - **The daemon is now Rust, and there is no tmux** (added 2026-10-04): the
+>   deployed daemon is `crates/daemon` (`ldmuxd`); a `ldmux-keeper` process owns
+>   every PTY and runs libghostty-vt (the same emulator the phone renders), and
+>   the daemon auto-spawns it. Every tmux reference below — §5.2's interaction
+>   model, §5.3's control-mode registry, §6.4's attachment discipline, the tmux
+>   runtime profile in §5.2, §11.1's language note — is **historical**. The
+>   session layer, the registry and the terminal engine are the keeper now
+>   (`docs/RUST-PORT-PLAN.md`, `docs/RUST-PORT-LOG.md`). The wire protocol (§6),
+>   geometry (§7), the scroll model (§7.4), the desktop mirror (§9) and the
+>   tailnet/security model (§10) stand, with the keeper in place of tmux.
 >
 > The rest of this document is still the design of record for the transport,
 > geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime", any
@@ -321,7 +331,16 @@ under ldmux (`$LDMUX=1`).
 8. Emit **events** for reactive UI (in-protocol; see §5.4).
 9. Clean up; never leak processes; never `kill-server` on exit.
 
-### 5.2 tmux interaction model
+### 5.2 tmux interaction model — **historical; the session layer is the keeper**
+
+> The deployed daemon has no tmux. `ldmux-keeper` (`crates/keeper`) is the
+> session layer: it forks a PTY per session in its own process group, runs the
+> shell under it, and runs libghostty-vt in-process to render the grid. The
+> daemon talks to the keeper over a Unix socket with the same message set as
+> the phone's wire protocol (minus auth): `Spawn`/`Kill`/`Write`/`Resize`/`Read`/
+> `Peek`/`Snapshot`/`List`/`Close`. There is no control-mode parser, no
+> `capture-pane`, no tmux server, and no `-L` socket. The text below is the
+> record of the tmux design this replaced.
 
 **Canonical geometry (ADR-0002).** tmux has **one window size per window**. If a
 viewing client influences sizing, every other client (including the desktop
