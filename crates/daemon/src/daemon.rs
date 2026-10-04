@@ -322,14 +322,36 @@ impl LdmuxDaemon {
         // logged, not fatal: the remote is optional (local control must not
         // be taken down by a remote bind failure).
         if let Some(cfg) = self.remote_cfg.clone() {
-            let mut rs = crate::remote::RemoteServer::new(cfg);
+            let mut rs = crate::remote::RemoteServer::new(cfg.clone());
             match rs.start(arc).await {
                 Ok((host, port)) => {
                     eprintln!("ldmuxd: remote ws://{host}:{port}/ws");
                     self.remote = Some(rs);
                 }
                 Err(e) => {
-                    eprintln!("ldmuxd: remote disabled: {e}");
+                    // The bind can fail at boot, before tailscaled has assigned
+                    // the tailnet address (the documented incident: the listener
+                    // was never retried and the phone could not connect at all).
+                    // Retry, so nobody has to restart the daemon to be reachable.
+                    eprintln!("ldmuxd: remote bind failed ({e}); retrying every 5s");
+                    let arc2 = arc.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            if arc2.lock().await.remote.is_some() {
+                                break;
+                            }
+                            let mut rs = crate::remote::RemoteServer::new(cfg.clone());
+                            match rs.start(&arc2).await {
+                                Ok((host, port)) => {
+                                    eprintln!("ldmuxd: remote up ws://{host}:{port}/ws");
+                                    arc2.lock().await.remote = Some(rs);
+                                    break;
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                    });
                 }
             }
         }
