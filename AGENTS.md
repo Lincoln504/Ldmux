@@ -1,197 +1,97 @@
-# Agent Instructions — ldmux (Rust port)
+# Agent Instructions — ldmux
 
-**The governing plan is [`docs/RUST-PORT-PLAN.md`](docs/RUST-PORT-PLAN.md) (operative,
-audited 2026-09-28, §3.14). The phase gates are §7; the phase-1..7 dependency graph is
-`protocol` → {pure modules ∥ keeper ∥ vt-sys ∥ attach} → `daemon` → integration/deploy.
-The per-phase state, progress, and findings live in
-[`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md) — read it first, every session; the
-user compacts between phases, so it is the continuity record.**
+ldmux is a remote terminal system: a daemon + CLI + native mobile client,
+reachable only over Tailscale. The daemon owns the PTYs. A **keeper** process
+allocates them and supervises the shells, running one **libghostty-vt** terminal
+emulator per session — the same engine the mobile client renders with, so the
+snapshot and the client share one cell model.
 
-### The method
+The implementation is **Rust**, in `crates/`:
 
-- **No forks, no sub-agents, no delegation — ever, throughout the port.** One
-  agent (this one) works the phases serially, one at a time, in the plan §7
-  order (the "agent-parallel" column is ignored; the phases are serial).
-- **One phase at a time.** Do the phase's work thoroughly — every module,
-  every behaviour, every test the phase names — before starting the next.
-  Do not start phase N+1 while phase N's gate is unmet.
-- **Test thoroughly, review thoroughly, review the TS source of record
-  thoroughly.** For every ported unit: read the TS original at file:line,
-  implement the Rust twin, port its tests (same cases, same assertions),
-  and review the result against both. Where a test's assertion is weaker
-  than the behaviour, say so in the log rather than silently weakening.
-- **Update the docs at every step, phase, and round.** After each phase (and
-  at any point the work stops), update `docs/RUST-PORT-LOG.md` with: phase
-  status (done / in progress / not started), what was completed, what is
-  pending *inside* the phase, findings (bugs in the TS source, spec
-  ambiguities, plan corrections), and the exact gate state (command +
-  result). Also keep the plan's §3.14/§7 and `docs/STATE.md` truthful when a
-  phase changes a documented statement. The log must let a fresh session
-  (post-compact) resume without re-deriving state.
-- **Work on a branch off `main`** (`port/rust`), one commit per completed
-  step, conventional-commit messages. **Local commits only — no push** (the
-  push is held for the user's word, as always).
-- **Both gates stay green at every commit.** The TS side: `nix develop
-  --command node --run test` + `node --run typecheck` (the TS tree is
-  unchanged by the port, but it is the standing gate and must stay green —
-  the parity window lives or dies on it). The Rust side: `cargo test
-  --workspace` (inside `nix develop`, with the rustup toolchain) + the
-  phase gate from §7. Clippy warnings are noted in the log; they do not
-  block.
-- **Spec first, then code.** Each phase begins by fixing the specification
-  (the plan section + the crate's module doc / ADR where the plan is silent),
-  then the implementation, then the tests that pin the behaviour. A behaviour
-  that is not specified is not implemented; a test that does not assert the
-  behaviour is not a gate.
-- **Functional parity is the standard.** The Rust side is the port of a
-  working TS system: every behaviour has a TS source of record (the file:line,
-  the ledger row in the plan §2, or the plan's replacement design §3). Port
-  the behaviour; where the plan changes the behaviour (flow control §3.7,
-  reclaim key §3.13), the plan is the source of record and the change is
-  recorded in `docs/RUST-PORT-LOG.md`.
+| crate | contents |
+|---|---|
+| `protocol` | frames, messages (incl. keeper messages), rpc, pairing, net, paths, socket |
+| `keeper` | PTYs, child supervision + reaping, ghostty-vt per session, keeper socket server |
+| `daemon` | registry, ownership, remote WS, streams, desktop + inventory, CLI (`bin/ldmux`), daemon entry (`bin/ldmuxd`) |
+| `attach` | the desktop-window client (`ldmuxd attach`) |
+| `vt-sys` | hand-written FFI against the vendored libghostty-vt headers |
 
-### The phases (plan §7, serial)
+The legacy TypeScript tree (`packages/{daemon,protocol,testing}`) and tmux are
+**being removed**. Until the switch is complete both trees exist; the deployed
+daemon is still the TS one, and tmux is still the live session layer. Never
+introduce a second session/PTY layer in either tree.
 
-| # | Content | Gate |
-|---|---|---|
-| 1 | `protocol`: frames/messages/rpc/pairing/net/paths/socket **+ keeper messages** | `cargo test -p protocol` |
-| 2 | pure modules: auth, qr, sanitize, screen-diff, ownership, registry/cwd/exec/proc/pairing | per-module tests |
-| 3 | keeper PTY+supervision+server skeleton ∥ `vt-sys` FFI + emulator task ∥ attach-client skeleton | keeper boots, serves `List`/`Spawn`; FFI links the vendored `.a`; attach boots headless |
-| 4 | emulator integration, snapshot renderer, state fields, scrollback paging, **parity harness vs live tmux (A/B window — the one live step, only when the user says so)** | parity report: zero divergences |
-| 5 | daemon: remote, stream, desktop+inventory, cli, keeper client, registry/ownership rewiring | full TS-equivalent suite green against keeper |
-| 6 | desktop e2e (attach + i3, headless), restart-survival e2e, backpressure, dead-reader | §6 risk tests green |
-| 7 | build/deploy: flake, justfile, one unit + auto-spawned keeper, wrappers; D4 window | deploy green; phone against Rust daemon |
-
-**Phase 4's parity harness is the single exception to "no live":** it runs
-against a live *scratch* tmux server (the test's own server, exactly as the
-TS suite does) — and only then, and only when the user gives the word.
+`docs/SPEC.md` is the authoritative design. `docs/RUST-PORT-PLAN.md` is the
+design of the session-layer replacement (the tmux ledger, the keeper topology,
+the snapshot-parity gate). `docs/RUST-PORT-LOG.md` is the findings + state
+record. `docs/adr/` holds the decision record.
 
 ## Status
 
-ldmux is a tmux-native remote terminal system: a daemon + CLI + native mobile
-app, reachable only over Tailscale. See [`docs/SPEC.md`](docs/SPEC.md) for
-the authoritative design and [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md)
-for the evidence base.
-
-Phase 1 (local core) is implemented and tested; Phase 3 (remote transport) is
-implemented (WebSocket on the tailnet address + token auth — `docs/REMOTE.md`,
-ADR-0016) along with the desktop mirror, and tailnet pairing. The daemon
-serves no static files: the old buildless browser client (`packages/web`) is
-deleted, so native KMP/Compose is the client. The mobile app
-(`docs/NATIVE-TERMINAL.md`, `docs/adr/0007`, `docs/adr/0008`). Deliberate
-divergences from dooboxes/gmux are recorded in
-`docs/adr/0006-divergences.md`. The pi extension was removed (ADR-0009): ldmux
-is not a pi plugin.
-
-The Rust port + tmux removal is planned and operative
-(`docs/RUST-PORT-PLAN.md`, audit 2026-09-28, §3.14). It runs serially:
-no forks/sub-agents; `docs/RUST-PORT-LOG.md` is the per-phase continuity
-record. Full-scale porting, testing, and live validation are now allowed:
-restart, redeploy, live-terminal validation, and integration against the
-live box are all in scope. Its §3.13 D-1 fix (the live-window reclaim fires
-on any byte) is the one in-scope TS fix that is live in production; it
-lands in the TS tree before the port inherits it.
+- **Rust**: the workspace builds and `cargo test --workspace` is green. The
+  protocol, keeper, vt-sys, attach, and daemon crates are implemented; the
+  daemon covers the lifecycle, control socket, remote WS, streams, desktop, and
+  CLI. See `docs/RUST-PORT-LOG.md` for the exact gate and any open item.
+- **TS**: `node --run test` + `node --run typecheck` are green. This is the
+  deployed daemon.
+- **Switch**: `just install` installs the Rust daemon + keeper and the one
+  systemd unit; the keeper is auto-spawned by the daemon (the ssh-agent pattern),
+  and survives a daemon restart. The TS unit comes back with one `systemctl`
+  switch. The registry JSON is format-identical, so no data migrates either way.
 
 ## Rules
 
-- **Tests + types are the gate.** `nix develop --command node --run test` and
-  `node --run typecheck` must both pass before committing; the typecheck is strict
-  and there is no build step (Node strips the types). **Inside `nix develop` is part
-  of the command, not a preference.** The suite drives scratch tmux servers, and the
-  daemon resolves its tmux from `LDMUX_TMUX_BIN` before PATH — so running it in a
-  shell that *is* an ldmux session points the daemon at the flake's runtime tmux
-  while a bare `tmux` on PATH is the system's, and the two versions cannot share a
-  socket. The result is 26 failures across five files that read like product defects
-  (measured 2026-09-27). One test also needs `zbarimg`, which only the devShell has.
-
-  **`node --run test`, not `node --test "packages/*/test/*.ts"`.** The script is
-  `node --test --test-concurrency=4`, and the bound is load-bearing: `a real tmux
-  %pause resyncs subscribers` needs tmux to notice a *lagging* client, and 12 files
-  in parallel on a 12-core machine starve the producer until the client keeps up and
-  the pause never happens. Measured 2026-09-27 on this host: the bare command failed
-  that test and killed a whole file's process (4 tests never ran) while the script
-  passed. A file whose process dies reports one failure and hides its tests, so treat
-  "a file failed" in this suite as "its tests did not run" until proven otherwise.
-- **tmux is the source of truth.** Never introduce a second session/PTY layer.
+- **Tests + types are the gate.** Rust: `cargo test --workspace` (inside
+  `nix develop`; the QR decode tests need `zbarimg`, which only the devShell
+  has). TS (while it lives): `nix develop --command node --run test` and
+  `node --run typecheck`. `just test` / `just rust-test` are the shorthands.
 - **Tailnet only.** Never bind a public interface; never disable auth.
 - **Scroll fidelity is sacred.** Any terminal UI change must preserve the
   `following`/`anchored` model (SPEC §7.4). Output must never move the viewport.
-- **Never split engines per client.** One terminal renderer behind one
-  `TerminalSurface` seam.
+- **Never split engines per client.** One terminal renderer (libghostty-vt)
+  behind one seam.
+- **The keeper is the PTY owner.** The daemon spawns it detached; it outlives the
+  daemon (restart survival). `KillMode=process` + linger are load-bearing — see
+  the unit header.
 - **Pin cross-component contracts with e2e tests in the same commit.**
-- Keep the design honest: update `docs/SPEC.md` (and add ADRs under `docs/adr/`)
-  when decisions change.
+- Keep the design honest: update `docs/SPEC.md` (and add ADRs under
+  `docs/adr/`) when decisions change, and grep the docs tree plus README/AGENTS
+  for the old wording in the same commit.
 
 ## Conventions
 
-- **Nix toolchain:** develop and test inside `nix develop` (Node 26 + tmux + just
-  are provided by `flake.nix`; rustup comes with it from the port — §5 of the
-  plan). Do not add unpinned system dependencies.
-- **Shared contract:** all shared types + the socket client live in
-  `packages/protocol`. There is no build step — consumers import the protocol
-  module directly, with an explicit `.ts` extension (Node's ESM resolver requires
-  it, and it is also what makes type stripping work). Do not add a bundling step
-  without an ADR.
-- **The code must stay erasable.** Node runs the TypeScript directly by stripping
-  types, so only erasable syntax is allowed: no `enum`, no `namespace`, no
-  constructor parameter properties. `erasableSyntaxOnly` in `tsconfig.json`
-  enforces this — the fix is always to declare the field and assign it.
+- **Nix toolchain.** Develop and test inside `nix develop` (cargo + rustc +
+  tmux + just come from `flake.nix`). Do not add unpinned system dependencies.
+- **Rust**: workspace under `crates/`, no code-generation, std + the plan §0
+  allowlist (`tokio`, `tokio-tungstenite`, `serde`, `clap`, `thiserror`, `ring`,
+  `uuid`, `nix`, `rand`, `fs2`); edition 2024; tests in-crate (`#[cfg(test)]`)
+  or `tests/`; match the style of the surrounding crate.
+- **TypeScript (legacy)**: strict, erasable syntax only (`erasableSyntaxOnly`),
+  no bundling step, `@ldmux/testing` is the assertion vocabulary.
 - **Daemon is a separate process.** Clients talk to it over the Unix socket; the
   daemon owns every long-lived resource.
-- Both gates must pass before a commit: the test command above and the typecheck.
 - **Children are spawned detached, in their own process group, and killed by
-  group** (`packages/daemon/src/proc.ts`). Signalling only the process we know
-  about leaves *its* children holding the pipes open — a wedged `tmux` with a
-  helper turned a 300 ms timeout into a 300-second hang, and only surfaced once
-  the test runner stopped force-exiting.
+  group.** Signalling only the process we know about leaves *its* children
+  holding the pipes open.
 - **A stub binary must be proven to have run** (e.g. a marker file): a
-  missing-socket `tmux` also yields `listSessions() === null`, so a timeout test
-  can silently pass against the real binary.
+  missing-socket binary also yields "no sessions", so a timeout test can
+  silently pass against the real binary.
 - **Never spawn synchronously in a test that also runs a daemon in-process**
-  (`spawnSync` blocks the event loop the daemon needs). Use the async path in
-  `packages/daemon/src/proc.ts`.
-- **Node's `WebSocket` returns binary messages as a Blob** unless
-  `binaryType = "arraybuffer"` is set; ldmux frames are binary, so every test
-  client and the latency harness must set it.
-- **Control messages on one connection are processed in send order** (chained per
-  connection, like the Unix-socket dispatch). Do not fan them out concurrently:
-  two `attach` messages racing makes which snapshot a client receives depend on
-  transport timing.
-- **`@ldmux/testing` is the assertion vocabulary.** Tests import `test`/`expect`
-  from `packages/testing/src/expect.ts` (a small Jest-style `expect` over
-  `node:test`), not from `bun:test` or `node:assert`. Add a matcher there rather
-  than reaching for another library.
-- Live tests spawn a scratch tmux server; clean it up with
-  `killTmuxServer()` (`packages/daemon/test/tmux-cleanup.ts`), not a bare
-  `tmux -L <unique> kill-server` — that leaves the socket file behind when the
-  server has already exited. `just clean-tmux` reaps strays after an interrupted
-  run, and never touches non-ldmux servers.
-- **Docs lag code faster than anything else here.** When a change makes a
-  documented statement false (a count, a path, an "out of scope"), grep the whole
-  docs tree plus README/AGENTS for the old wording in the same commit.
+  (`spawnSync` blocks the event loop the TS daemon needs).
+- **Live tests clean up after themselves.** Kill the scratch keeper / tmux
+  server and remove the scratch state dir in the test; a leaked keeper holds
+  PTYs and a socket for the life of the machine.
 - Conventional commits: `type(scope): summary`.
-- TypeScript: strict; avoid new runtime deps. `ws` is the only production
-  dependency (the WebSocket server side of `docs/REMOTE.md`); everything else is
-  Node's standard library.
-- Rust: workspace under `crates/`, no code-generation, std + the plan §0 allowlist
-  (`tokio`, `tokio-tungstenite`, `serde`, `clap`, `thiserror`, `ring`, `uuid`,
-  `nix`, `rand`, `fs2`); edition 2024; one crate per the plan §4 map; tests
-  in-crate (`#[cfg(test)]`) or `tests/` per the plan; match the style of the
-  surrounding crate.
 - Work on branches off `main`; open PRs against `main`.
 
-## Environment facts (this machine, observed 2026-09-13)
+## Environment facts (observed; re-check before relying)
 
-- Tailscale host `debian.tail496756.ts.net` (`100.127.119.54`); system `tailscaled`
-  v1.102.3. Phone: `motorola-edge-2024`.
-- These are observations, not guarantees: re-check before relying on any of them
-  (the devShell toolchain — currently Node 26.8.2, npm 11.19.1, tmux 3.7b — is
-  pinned by `flake.nix`; the system node/tmux are older and not used for tests).
+- Tailscale host `debian.tail496756.ts.net` (`100.127.119.54`); phone
+  `motorola-edge-2024`.
 - i3 4.24 / X11 (`DISPLAY=:0.0`); workspaces `1..10` (`Mod+0` → `10`).
-- System toolchain (unpinned, informational): alacritty, tmux 3.5a, Node 25.8.2,
-  Rust 1.95, Go 1.24.4. Neither tests **nor the deployed daemon** use them: `just
-  install` runs the daemon on the flake's `.#runtime` (the devShell's pins).
-- **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the unit:
-  `deploy/` is the source of truth for both.
-- iOS builds need a macOS host (an xcframework cannot be produced here).
+- The flake pins the devShell toolchain (Node 26 + tmux 3.7b + cargo/rustc, from
+  `flake.nix`). The system node/tmux are older and are not used for the tests.
+- **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the
+  unit: `deploy/` is the source of truth for both.
+- iOS builds need a macOS host.
 - gh authed as `Lincoln504`.
