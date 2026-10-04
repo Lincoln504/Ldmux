@@ -697,24 +697,28 @@ flock, re-checks, spawns, then waits for the socket file.
 **Phase 5 in progress.** Done so far (as of 2026-10-01): `KeeperSupervisor`
 (auto-spawn), the daemon's single-instance lock (`ldmuxd.lock`), the control socket
 (`ldmuxd.sock`), the fake keeper (test double), the `LdmuxDaemon` core (reconcile)
-+ `start`, the `PaneStream` core (bounded queue, §3.7), the remote WS server
-(full `onMessage` dispatch, 16 types), the desktop inventory (`desktop-inventory.ts`
-671), the CLI (`cli.ts` 435, 20 of 23 commands), the main entry point (`main.ts`
-115), the session lifecycle (`create_session`, `kill_session`, `close_session`,
-`forget_session`), the RPC dispatch (`handle` method: `ping`, `list`, `new`,
-`kill`, `close`, `forget`, `desktop`, `send`, `capture`, `snapshot`), the control
-socket wiring (Arc<Mutex> approach, full lifecycle test), the remote daemon wiring
-(hello, list, desktop, new, kill, close, attach, resize, input, key, follow,
-scrollback, makeLive, closeLive handlers), the stream lifecycle (`stream_for`,
-`drop_stream`, `release_stream_if_idle`, `sweep_streams`), the
-`PaneStream::resize`, `PaneStream::send_key`, and `PaneStream::snapshot_with_history`
-methods, the CLI integration test (ping, new, list, kill, send, capture,
-snapshot, forget over the control socket), and the remote integration test
-(ping, hello, list, new, list-verify, kill, list-verify-dead over the WS).
-Remaining: the `mouseclick` and `copymode` handlers (tmux-specific, no keeper
-equivalent yet), device ownership + sweep, and the remaining TS tests (stream,
-desktop, desk window) — all against the fake keeper (plan §3.5).
-Gate: `cargo test` → **234 passed** / 1 ignored; TS **347/347** + typecheck.
++ `start` (with state dir creation/tightening to 0700), the `PaneStream` core
+(bounded queue, §3.7), the remote WS server (full `onMessage` dispatch, 16 types),
+the desktop inventory (`desktop-inventory.ts` 671), the CLI (`cli.ts` 435, 20 of
+23 commands), the main entry point (`main.ts` 115), the session lifecycle
+(`create_session`, `kill_session`, `close_session`, `forget_session`), the RPC
+dispatch (`handle` method: `ping`, `list`, `new`, `kill`, `close`, `forget`,
+`desktop`, `send`, `capture`, `snapshot`), the control socket wiring (Arc<Mutex>
+approach, full lifecycle test), the remote daemon wiring (hello, list, desktop,
+new, kill, close, attach, resize, input, key, follow, scrollback, makeLive,
+closeLive, mouseclick handlers), the stream lifecycle (`stream_for`, `drop_stream`,
+`release_stream_if_idle`, `sweep_streams`), the `PaneStream::resize`,
+`PaneStream::send_key`, `PaneStream::snapshot_with_history`, and
+`PaneStream::snapshot_full` methods, the `stop()` method (closes streams, removes
+socket, releases lock), the 4 lifecycle tests (stop removes socket/lock, stop
+idempotent, loose state dir tightened, remote bind failure), the CLI integration
+test (ping, new, list, kill, send, capture, snapshot, forget over the control
+socket), and the remote integration test (ping, hello, list, new, list-verify,
+kill, list-verify-dead over the WS).
+Remaining: the `copymode` handler (tmux-specific, no keeper equivalent), device
+ownership + sweep, and the remaining TS tests (stream, desktop, desk window) —
+all against the fake keeper (plan §3.5).
+Gate: `cargo test` → **238 passed** / 1 ignored; TS **347/347** + typecheck.
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
