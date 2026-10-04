@@ -1163,3 +1163,92 @@ socket) now passes.
   The stub `dispatch` method (used by `serve_one`) works with the full
   request directly.
 - Gate: `cargo test` → **233 passed** / 1 ignored; TS **347/347** + typecheck.
+
+---
+
+## CRITICAL AUDIT (2026-09-28, commit `84a1caa`)
+
+A thorough, critical audit of the full Rust port was performed against the
+plan/spec, the TS source of record, and the code in its own merit. The full
+audit is in `docs/RUST-PORT-AUDIT.md`. Summary of the findings:
+
+### Critical bugs (functional defects that would break the system)
+
+1. **C1 — No live output loop in `PaneStream`.** The `PaneStream` has a bounded
+   queue and a `dropped` flag, but **no poll loop** that pulls `Peek` results
+   from the keeper and fans them out to subscribers. The `fanout` method is
+   never called with real output (the only call is the broken `input` handler
+   below). **Impact: the terminal is static — the phone attaches, gets a
+   snapshot, but never sees live output.** This is the single most critical
+   gap in the port.
+2. **C2 — `input` handler in `remote.rs` uses `fanout` instead of writing to
+   the keeper.** `stream.fanout(text)` sends the text to subscribers (output
+   direction), not to the PTY. **Impact: user input is looped back, never
+   reaches the shell.**
+3. **C3 — `send` handler in `daemon.rs` sends key names as strings.**
+   Concatenates `text` + key names into one string and sends as `Write`. Key
+   names like `"Enter"` are sent as the literal string, not the byte `0x0D`.
+   **Impact: every key press is broken.**
+4. **C4 — `key` handler in `remote.rs` sends key names as strings.** Same as
+   C3.
+5. **C5 — `PaneStream::send_key` sends key names as strings.** Same as C3.
+6. **C6 — Missing `adopt` handler.** The TS `adopt` handler re-adopts sessions
+   that were running when the daemon crashed. Not ported.
+7. **C7 — Missing `clipboardWrite` handler.** Not ported.
+8. **C8 — Missing `deskWindow` handler.** Not ported.
+9. **C9 — `makelive` hardcodes workspace `"10"`, omits liveWindows tracking,
+   desktop claim, and broadcast.**
+10. **C10 — `closelive` omits desktop claim release and broadcast.**
+11. **C11 — `remote_info` returns a placeholder** (`{"host": "", "port": 0}`)
+    instead of the actual remote config.
+12. **C12 — `reclaim` is a no-op** (returns `{"ok": true}`).
+
+### Moderate issues (incomplete, not broken)
+
+13. **M1 — `PaneStream::subscribe` drops the LAST subscriber, not the specific
+    one.** `subs.pop()` removes the last element.
+14. **M2 — `PaneStream::drain` is by index, not by subscriber id.** Fragile.
+15. **M3 — `ConnData` is defined but unused.**
+16. **M4 — `by_device` map is defined but unused.**
+17. **M5 — No idle connection sweep.**
+18. **M6 — No attach generation tracking.**
+19. **M7 — `attach` handler does not send the full state.**
+20. **M8 — `copymode` is stubbed** (tmux-specific, no keeper equivalent).
+21. **M9 — No signal handling in `ldmuxd.rs`** (relies on default disposition;
+    the `Drop` impl covers it, but a SIGTERM may kill the process before
+    `Drop` runs in edge cases).
+
+### What is working well
+
+- Protocol crate (frames, messages, RPC, pairing, net, paths, socket): correct
+  and tested.
+- Keeper (PTY, fork+exec, reaping, group-kill, emulator thread, snapshot/state):
+  correct and tested.
+- vt-sys (FFI, render state, SGR encoder, snapshot renderer): correct and
+  tested.
+- Attach (skeleton): correct for the headless gate.
+- Daemon lifecycle (start, stop, reconcile, adopt_own_sessions, create/kill/
+  close/forget session): correct and tested.
+- Control socket: correct and tested.
+- Remote WS (token auth, 16 message types): handlers present, but input/key/
+  stream paths are broken (C1-C5).
+- Fake keeper: well-designed test double.
+- Keeper supervisor (auto-spawn, death detection, respawn): correct and tested.
+- Risk tests (backpressure, dead-reader, spawn-race, restart-survival,
+  keeper-death, desktop e2e): all pass.
+
+### Plan audit
+
+- Plan §3.7 (flow control): the bounded queue + drop-on-overflow mechanism is
+  in place but has no source of data (C1).
+- Plan §3.5 (daemon↔keeper protocol): correctly implemented.
+- Plan §3.4 (per-session emulator): correctly implemented.
+- Plan §3.2/§3.3 (keeper PTY + supervision): correctly implemented.
+- Plan §3.11 (cell parity): correctly implemented.
+- Plan §7 (phases): phases 1-4 complete, phase 5 mostly done (stream layer gap
+  is the blocker), phase 6 done, phase 7 not started.
+
+### Gate state
+
+`cargo test` (with `zbarimg` on PATH) → **248 passed** / 1 ignored; TS
+**347/347** + typecheck.
