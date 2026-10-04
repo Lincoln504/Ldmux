@@ -242,10 +242,11 @@ impl LdmuxDaemon {
             _ => return Err("keeper did not answer a ListResult".into()),
         };
         // The live set, as terminal names (`ldmux-<id>`), the registry's key.
-        let live: std::collections::BTreeSet<String> = states
-            .iter()
-            .map(|s| format!("ldmux-{}", s.session_id))
-            .collect();
+        // The keeper's `session_id` IS that name (the daemon passes the tmux
+        // name at Spawn), so it is used verbatim — re-prefixing it made every
+        // session look dead on restart and duplicated it via `adopt`.
+        let live: std::collections::BTreeSet<String> =
+            states.iter().map(|s| s.session_id.clone()).collect();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -830,9 +831,7 @@ impl LdmuxDaemon {
             "adopt" => {
                 let tmux_name = params.get("tmuxName")
                     .and_then(|v| v.as_str()).unwrap_or("");
-                let session_id = tmux_name.strip_prefix("ldmux-")
-                    .unwrap_or(tmux_name).to_string();
-                let record = self.adopt(&session_id).await?;
+                let record = self.adopt(tmux_name).await?;
                 Ok(serde_json::to_value(&record).map_err(|e| e.to_string())?)
             }
             // ── Clipboard write policy ──
@@ -869,14 +868,20 @@ impl LdmuxDaemon {
         };
         let mut adopted = 0;
         for s in &states {
-            let tmux_name = format!("ldmux-{}", s.session_id);
-            // A session the registry does not know (by name or by id) is an
-            // adoption candidate. A failed adopt is not counted (a dead or
-            // gone session is not adopted).
-            if self.registry.by_tmux_name(&tmux_name).is_none()
-                && self.registry.get(&s.session_id).is_none()
-                && self.adopt(&s.session_id).await.is_ok()
-            {
+            // The keeper's session_id IS the terminal name (`ldmux-<id>`).
+            let tmux_name = s.session_id.clone();
+            if self.registry.by_tmux_name(&tmux_name).is_some() {
+                continue;
+            }
+            let bare = tmux_name
+                .strip_prefix("ldmux-")
+                .unwrap_or(&tmux_name)
+                .to_string();
+            if self.registry.get(&bare).is_some() {
+                continue;
+            }
+            // A failed adopt is not counted (a dead/gone session is not adopted).
+            if self.adopt(&tmux_name).await.is_ok() {
                 adopted += 1;
             }
         }
@@ -891,10 +896,17 @@ impl LdmuxDaemon {
     /// sessions keeps its id: it is in the name, in the shell's
     /// `LDMUX_SESSION_ID`, and in any window class made for it).
     pub async fn adopt(&mut self, session_id: &str) -> Result<ldmux_protocol::rpc::SessionRecord, String> {
+        // The keeper names sessions `ldmux-<id>`; accept either form (the
+        // RPC passes the terminal name, `adopt_own_sessions` the same).
+        let tmux_name = if session_id.starts_with("ldmux-") {
+            session_id.to_string()
+        } else {
+            format!("ldmux-{session_id}")
+        };
         // Verify the keeper session is live (a `Read`).
         let resp = self
             .keeper_call(&KeeperMessage::Read(km::Read {
-                session_id: session_id.into(),
+                session_id: tmux_name.clone(),
             }))
             .await?;
         let state = match resp {
@@ -906,16 +918,19 @@ impl LdmuxDaemon {
         }
         // A record already exists for this session: return it (the adoption is
         // idempotent; two concurrent adopts of one session race to one record).
-        let tmux_name = format!("ldmux-{}", session_id);
         if let Some(existing) = self.registry.by_tmux_name(&tmux_name) {
             return Ok(existing.clone());
         }
+        let id = tmux_name
+            .strip_prefix("ldmux-")
+            .unwrap_or(&tmux_name)
+            .to_string();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
         let record = ldmux_protocol::rpc::SessionRecord {
-            id: session_id.to_string(),
+            id,
             tmux_name,
             kind: "shell".into(),
             cwd: state.cwd,
@@ -1094,8 +1109,9 @@ mod tests {
         assert_eq!(d.keeper_socket_path(), keeper_sock.as_path());
 
         // Spawn a session on the fake keeper (the daemon's keeper_call path).
+        // The keeper session id IS the tmux name (the daemon passes it at Spawn).
         let spawn = KeeperMessage::Spawn(Spawn {
-            session_id: "s1".into(),
+            session_id: "ldmux-s1".into(),
             cols: 80,
             rows: 24,
             cwd: None,
@@ -1135,7 +1151,7 @@ mod tests {
         assert!(r.adopted.is_empty());
 
         // Kill the session on the fake keeper.
-        let kill = KeeperMessage::Kill(Kill { session_id: "s1".into() });
+        let kill = KeeperMessage::Kill(Kill { session_id: "ldmux-s1".into() });
         ldmux_protocol::keeper_call::keeper_call(
             keeper_sock.to_str().unwrap(),
             &kill,
@@ -1175,8 +1191,9 @@ mod tests {
         let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
 
         // A session the registry does not know (the daemon's own session).
+        // The keeper session id IS the tmux name.
         let spawn = KeeperMessage::Spawn(Spawn {
-            session_id: "s1".into(),
+            session_id: "ldmux-s1".into(),
             cols: 80,
             rows: 24,
             cwd: None,

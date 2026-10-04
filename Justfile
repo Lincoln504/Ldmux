@@ -101,12 +101,17 @@ install: install-rust
     chmod 700 "$state"
     nix build .#runtime --out-link "$state/runtime"
     # Install the TS wrappers (the A/B window: the TS daemon can still be run
-    # via ldmuxd-ts / ldmux-ts). The Rust binaries replace ldmux/ldmuxd.
-    for f in ldmux ldmuxd ldmux-terminal; do
+    # via ldmuxd-ts / ldmux-ts). The Rust binaries replace ldmux/ldmuxd. The
+    # ldmux-terminal launcher is wrapper-shape, not TS: it calls `ldmux window`,
+    # which is now the Rust CLI.
+    for f in ldmux ldmuxd; do
       sed "s|@REPO@|$PWD|g" "deploy/bin/$f" > "$HOME/.local/bin/.$f.ts.new"
       chmod 755 "$HOME/.local/bin/.$f.ts.new"
       mv "$HOME/.local/bin/.$f.ts.new" "$HOME/.local/bin/${f}-ts"
     done
+    sed "s|@REPO@|$PWD|g" "deploy/bin/ldmux-terminal" > "$HOME/.local/bin/.ldmux-terminal.new"
+    chmod 755 "$HOME/.local/bin/.ldmux-terminal.new"
+    mv "$HOME/.local/bin/.ldmux-terminal.new" "$HOME/.local/bin/ldmux-terminal"
     install -m 644 deploy/ldmux.service "$HOME/.config/systemd/user/ldmux.service"
     systemctl --user daemon-reload
     echo "installed: $("$state/runtime/bin/node" --version), $("$state/runtime/bin/tmux" -V)"
