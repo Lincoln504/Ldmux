@@ -5,6 +5,27 @@ The full audit of the Rust port as of the `port/rust` branch (commit `84a1caa`,
 own merit (bugs, races, leaks, error handling, architecture, best practice),
 (3) plan audit, (4) recommended fixes.
 
+## Fix status (as of 2026-09-29)
+
+- C1: **FIXED** (commit 54517fa) — poll loop in `stream_for`
+- C2: **FIXED** (commit 54517fa) — `input` handler uses `stream.write`
+- C3: **FIXED** (commit 54517fa) — `send` uses `key_name_to_bytes`
+- C4: **FIXED** (commit 54517fa) — `key` uses `key_name_to_bytes`
+- C5: **FIXED** (commit 54517fa) — `send_key` uses `key_name_to_bytes`
+- C6: **FIXED** (commit 3d8c339) — `adopt` handler added
+- C7: **FIXED** (commit 3d8c339) — `clipboardWrite` handler added
+- C8: **FIXED** (commit 3d8c339) — `deskWindow` handler added
+- C9: **FIXED** (commit 3d8c339) — `makeLive` fixed (workspace param, live_windows, claim)
+- C10: **FIXED** (commit 3d8c339) — `closeLive` fixed (claim release)
+- C11: **FIXED** (commit 3d8c339) — `remote_info` returns actual config
+- C12: **FIXED** (commit 3d8c339) — `reclaim` claims the session
+- M1: **FIXED** (commit 6956be1) — subscriber id tracking
+- M2: **FIXED** (commit 6956be1) — drain by id
+- M7: **FIXED** (commit ef6e16c) — attach sends full state
+- M9: **FIXED** (commit ef6e16c) — ldmuxd signal handling
+- M10: **FIXED** (commit 54517fa) — poll thread in `stream_for`
+- M3/M4/M5/M6/M8: **NOT FIXED** (low priority / by design)
+
 ---
 
 ## 1. CRITICAL BUGS (functional defects that would break the system)
