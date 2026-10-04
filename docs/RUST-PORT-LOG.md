@@ -715,10 +715,11 @@ idempotent, loose state dir tightened, remote bind failure), the CLI integration
 test (ping, new, list, kill, send, capture, snapshot, forget over the control
 socket), and the remote integration test (ping, hello, list, new, list-verify,
 kill, list-verify-dead over the WS).
-Remaining: the `copymode` handler (tmux-specific, no keeper equivalent), device
-ownership + sweep, and the remaining TS tests (stream, desktop, desk window) —
-all against the fake keeper (plan §3.5).
-Gate: `cargo test` → **238 passed** / 1 ignored; TS **347/347** + typecheck.
+Remaining: the `copymode` handler (stubbed, tmux-specific), the idle connection
+sweep (optimization; the `by_device` map is in place), and the remaining TS
+stream/desk-window tests (not portable to the fake keeper — they require a real
+tmux + pty).
+Gate: `cargo test` → **244 passed** / 1 ignored; TS **347/347** + typecheck.
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
