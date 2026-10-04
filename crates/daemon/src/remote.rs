@@ -550,7 +550,8 @@ async fn handle_connection(
                 }
             }
             "input" => {
-                // Send input text to the pane.
+                // Send input text to the pane (writes to the PTY, not to
+                // subscribers).
                 let sid = session_id.clone().unwrap_or_default();
                 let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 if text.is_empty() {
@@ -564,7 +565,7 @@ async fn handle_connection(
                     let stream = d.get_stream(&sid);
                     match stream {
                         Some(stream) => {
-                            stream.fanout(text);
+                            let _ = stream.write(text);
                         }
                         None => {
                             let _ = send_json(&mut ws, &serde_json::json!({

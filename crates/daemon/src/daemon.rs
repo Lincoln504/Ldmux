@@ -64,8 +64,11 @@ pub struct LdmuxDaemon {
     /// The remote config (the hostname, port, token).
     #[allow(dead_code)]
     remote_cfg: Option<crate::remote::RemoteConfig>,
-    /// The per-session streams (the `PaneStream` per tmux session).
-    streams: HashMap<String, PaneStream>,
+    /// The per-session streams (the `Arc<PaneStream>` per tmux session).
+    /// The `Arc` is shared with the poll thread (which holds its own `Arc`),
+    /// so the stream outlives the daemon's map entry (the poll thread keeps
+    /// it alive until it exits).
+    streams: HashMap<String, std::sync::Arc<PaneStream>>,
 }
 
 impl Drop for LdmuxDaemon {
@@ -337,7 +340,8 @@ impl LdmuxDaemon {
         if let Some(ref mut r) = self.remote {
             r.stop();
         }
-        // Close all streams.
+        // Close all streams (the `close` sets `poll_stop`, so the poll
+        // threads exit on their next iteration).
         for stream in self.streams.values() {
             stream.close("daemon stopped");
         }
@@ -471,23 +475,36 @@ impl LdmuxDaemon {
     /// Get or create the `PaneStream` for a session (the TS `streamFor`).
     ///
     /// The stream is created with a `SocketKeeperConn` (the production path)
-    /// that talks to the keeper's socket. The stream outlives an idle client
-    /// by `WS_IDLE_MS`, so a change lands within a minute of the next attach.
-    pub fn stream_for(&mut self, tmux_name: &str) -> &mut PaneStream {
+    /// that talks to the keeper's socket. A poll thread is spawned that pulls
+    /// the keeper's buffered output and fans it out to subscribers (the §3.7
+    /// live stream). The `Arc` is shared between the daemon's map and the
+    /// poll thread.
+    pub fn stream_for(&mut self, tmux_name: &str) -> &std::sync::Arc<PaneStream> {
         if !self.streams.contains_key(tmux_name) {
             let conn = Box::new(crate::stream::SocketKeeperConn::new(
                 self.keeper_socket_path().to_string_lossy().into_owned(),
             ));
-            let stream = PaneStream::new(tmux_name.to_string(), conn);
+            let stream = std::sync::Arc::new(PaneStream::new(tmux_name.to_string(), conn));
+            // Spawn the poll thread (the §3.7 live stream: pulls the keeper's
+            // buffered output and fans it out to subscribers).
+            let poll_stream = stream.clone();
+            std::thread::spawn(move || {
+                loop {
+                    if poll_stream.poll_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = poll_stream.poll_once();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
             self.streams.insert(tmux_name.to_string(), stream);
         }
-        // Re-borrow after the insert (the previous borrow ended).
-        self.streams.get_mut(tmux_name).unwrap()
+        self.streams.get(tmux_name).unwrap()
     }
 
     /// Get a stream by session id (the `streams` map lookup, without creating).
-    pub fn get_stream(&mut self, tmux_name: &str) -> Option<&mut PaneStream> {
-        self.streams.get_mut(tmux_name)
+    pub fn get_stream(&mut self, tmux_name: &str) -> Option<&std::sync::Arc<PaneStream>> {
+        self.streams.get(tmux_name)
     }
 
     /// Close and forget a stream (the TS `dropStream`).
@@ -585,21 +602,25 @@ impl LdmuxDaemon {
                 if record.tmux_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
                 }
-                // Build the input: text + keys (the keys are sent as bytes).
-                let mut input = String::new();
+                // Build the input bytes: the text as raw bytes, then each key
+                // name converted to its byte sequence (the TS `sendText` +
+                // `sendKey` are separate operations, but both write to the PTY;
+                // concatenating into one `Write` is equivalent).
+                let mut input: Vec<u8> = Vec::new();
                 if !text.is_empty() {
-                    input.push_str(text);
+                    input.extend_from_slice(text.as_bytes());
                 }
                 if let Some(keys) = keys {
                     for k in keys {
                         let ks = k.as_str().unwrap_or("");
-                        input.push_str(ks);
+                        input.extend(crate::stream::key_name_to_bytes(ks));
                     }
                 }
+                let data = String::from_utf8(input).map_err(|e| format!("invalid input bytes: {e}"))?;
                 // Send the input to the keeper (the `Write` message).
                 self.keeper_call(&km::KeeperMessage::Write(km::Write {
                     session_id: record.tmux_name.clone(),
-                    data: input,
+                    data,
                 }))
                 .await?;
                 Ok(serde_json::json!({ "ok": true }))

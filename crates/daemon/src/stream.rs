@@ -60,6 +60,8 @@ pub struct PaneStream {
     /// The sanitizer state (a partial OSC/DCS sequence can straddle chunks).
     sanitizer: Mutex<crate::sanitize::Sanitizer>,
     closed: AtomicBool,
+    /// The poll-loop stop flag (set by `drop_stream`/`stop`).
+    pub(crate) poll_stop: AtomicBool,
 }
 
 /// The keeper connection seam (the test double boundary): one
@@ -123,6 +125,7 @@ impl PaneStream {
             epoch: AtomicU64::new(0),
             sanitizer: Mutex::new(crate::sanitize::Sanitizer::new(false)),
             closed: AtomicBool::new(false),
+            poll_stop: AtomicBool::new(false),
         }
     }
 
@@ -214,13 +217,26 @@ impl PaneStream {
         }))
     }
 
-    /// Send keys to the pane (the `sendKey` method): send a `Write` keeper
-    /// message with the key text.
+    /// Send keys to the pane (the `sendKey` method): convert key names to
+    /// their byte sequences and send a `Write` keeper message.
     pub fn send_key(&self, keys: &[&str]) -> Result<KeeperMessage, String> {
-        let text: String = keys.iter().copied().collect();
+        let mut bytes: Vec<u8> = Vec::new();
+        for key in keys {
+            bytes.extend(key_name_to_bytes(key));
+        }
+        let text = String::from_utf8(bytes).map_err(|e| format!("invalid key bytes: {e}"))?;
         self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
             session_id: self.session_id.clone(),
             data: text,
+        }))
+    }
+
+    /// Write literal text to the pane (the `inputText` method): send a
+    /// `Write` keeper message with the raw text bytes.
+    pub fn write(&self, text: &str) -> Result<KeeperMessage, String> {
+        self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
+            session_id: self.session_id.clone(),
+            data: text.to_string(),
         }))
     }
 
@@ -280,11 +296,118 @@ impl PaneStream {
     /// Close the stream (the subscribers are told to resync).
     pub fn close(&self, reason: &str) {
         self.closed.store(true, Ordering::Relaxed);
+        self.poll_stop.store(true, Ordering::Relaxed);
         let mut subs = self.subs.lock().unwrap();
         for sub in subs.iter() {
             (sub.sub.on_reset)(reason);
         }
         subs.clear();
+    }
+
+    /// One poll iteration: pull the keeper's buffered output and fan it out.
+    ///
+    /// The §3.7 flow-control: the keeper always buffers the master; this poll
+    /// pulls the buffer and delivers it to subscribers through the bounded
+    /// queue. When a subscriber's queue overflows, it is dropped and forced
+    /// to resync from a snapshot.
+    pub fn poll_once(&self) -> Result<(), String> {
+        if self.closed.load(Ordering::Relaxed) || self.poll_stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let req = KeeperMessage::Peek(ldmux_protocol::keeper::Peek {
+            session_id: self.session_id.clone(),
+        });
+        let resp = self.keeper.call(&req)?;
+        match resp {
+            KeeperMessage::PeekResult(pr) => {
+                if !pr.data.is_empty() {
+                    let text = String::from_utf8_lossy(&pr.data);
+                    self.fanout(&text);
+                }
+                Ok(())
+            }
+            other => Err(format!("unexpected keeper response to Peek: {other:?}")),
+        }
+    }
+
+    /// Stop the poll loop (the `drop_stream`/`stop` path).
+    pub fn stop_polling(&self) {
+        self.poll_stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the poll loop has been stopped.
+    pub fn is_poll_stopped(&self) -> bool {
+        self.poll_stop.load(Ordering::Relaxed)
+    }
+}
+
+/// Convert a tmux key name to its byte sequence.
+///
+/// The TS `sendKey` uses tmux's `send-keys`, which converts key names to the
+/// appropriate escape sequences / control bytes. This is the Rust equivalent.
+pub fn key_name_to_bytes(name: &str) -> Vec<u8> {
+    match name {
+        "Enter" => vec![0x0D],
+        "Tab" => vec![0x09],
+        "Escape" => vec![0x1B],
+        "Backspace" => vec![0x7F],
+        "Space" => vec![0x20],
+        // Arrow keys
+        "Up" => vec![0x1B, b'[', b'A'],
+        "Down" => vec![0x1B, b'[', b'B'],
+        "Right" => vec![0x1B, b'[', b'C'],
+        "Left" => vec![0x1B, b'[', b'D'],
+        // Editing keys
+        "Home" => vec![0x1B, b'[', b'H'],
+        "End" => vec![0x1B, b'[', b'F'],
+        "PageUp" => vec![0x1B, b'[', b'5'],
+        "PageDown" => vec![0x1B, b'[', b'6'],
+        "Delete" => vec![0x1B, b'[', b'3'],
+        "Insert" => vec![0x1B, b'[', b'2', b'h'],
+        // F-keys
+        "F1" => vec![0x1B, b'O', b'P'],
+        "F2" => vec![0x1B, b'O', b'Q'],
+        "F3" => vec![0x1B, b'O', b'R'],
+        "F4" => vec![0x1B, b'O', b'S'],
+        "F5" => vec![0x1B, b'[', b'1', b'5', b'~'],
+        "F6" => vec![0x1B, b'[', b'1', b'7', b'~'],
+        "F7" => vec![0x1B, b'[', b'1', b'8', b'~'],
+        "F8" => vec![0x1B, b'[', b'1', b'9', b'~'],
+        "F9" => vec![0x1B, b'[', b'2', b'0', b'~'],
+        "F10" => vec![0x1B, b'[', b'2', b'1', b'~'],
+        "F11" => vec![0x1B, b'[', b'2', b'3', b'~'],
+        "F12" => vec![0x1B, b'[', b'2', b'4', b'~'],
+        // Control + letter
+        "C-a" => vec![0x01],
+        "C-b" => vec![0x02],
+        "C-c" => vec![0x03],
+        "C-d" => vec![0x04],
+        "C-e" => vec![0x05],
+        "C-f" => vec![0x06],
+        "C-g" => vec![0x07],
+        "C-h" => vec![0x08],
+        "C-i" => vec![0x09],
+        "C-j" => vec![0x0A],
+        "C-k" => vec![0x0B],
+        "C-l" => vec![0x0C],
+        "C-m" => vec![0x0D],
+        "C-n" => vec![0x0E],
+        "C-o" => vec![0x0F],
+        "C-p" => vec![0x10],
+        "C-q" => vec![0x11],
+        "C-r" => vec![0x12],
+        "C-s" => vec![0x13],
+        "C-t" => vec![0x14],
+        "C-u" => vec![0x15],
+        "C-v" => vec![0x16],
+        "C-w" => vec![0x17],
+        "C-x" => vec![0x18],
+        "C-y" => vec![0x19],
+        "C-z" => vec![0x1A],
+        // Single character: send as-is
+        _ if name.len() == 1 => name.as_bytes().to_vec(),
+        // Unknown: send as-is (literal)
+        _ => name.as_bytes().to_vec(),
     }
 }
 
