@@ -737,6 +737,16 @@ async fn handle_connection(
             }
         }
     }
+    // Connection closed: release the stream if idle (the subscribers are
+    // cleared, the output buffer is dropped).
+    if let Some(sid) = &session_id {
+        let tmux_name = daemon_arc.lock().await.get_session(sid)
+            .map(|r| r.tmux_name.clone())
+            .unwrap_or_default();
+        if !tmux_name.is_empty() {
+            daemon_arc.lock().await.release_stream_if_idle(&tmux_name);
+        }
+    }
 }
 
 async fn send_json(ws: &mut WsStream, v: &serde_json::Value) -> Result<(), String> {
