@@ -17,6 +17,7 @@
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_protocol::net::is_tailnet_or_loopback;
+use tokio::signal::unix::SignalKind;
 
 fn main() {
     // Last-resort backstops: an unhandled rejection or a stray exception is
@@ -85,7 +86,7 @@ fn main() {
     let daemon_arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(daemon));
 
-    // Start the daemon.
+    // Start the daemon and wait for a signal (SIGTERM/SIGINT) to stop.
     let rt = tokio::runtime::Runtime::new().unwrap();
     let daemon_ref = daemon_arc.clone();
     rt.block_on(async move {
@@ -109,11 +110,37 @@ fn main() {
                 std::process::exit(1);
             }
         }
-    });
+        // Drop the mutable guard (the daemon is started).
+        drop(d);
 
-    // The daemon started successfully. Now block forever (the process is
-    // stopped by SIGTERM/SIGINT; the `Drop` impl releases the lock).
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
+        // Watch for SIGTERM/SIGINT (the graceful shutdown, the TS
+        // `process.on('SIGTERM', ...)`). When a signal is received,
+        // stop the daemon (release the lock, close streams, drop the
+        // daemon) and exit.
+        let mut sigterm = match tokio::signal::unix::signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ldmuxd: failed to install SIGTERM handler: {e}");
+                std::process::exit(1);
+            }
+        };
+        let mut sigint = match tokio::signal::unix::signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ldmuxd: failed to install SIGINT handler: {e}");
+                std::process::exit(1);
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => {
+                eprintln!("ldmuxd: SIGTERM received, stopping");
+            }
+            _ = sigint.recv() => {
+                eprintln!("ldmuxd: SIGINT received, stopping");
+            }
+        }
+        let mut d2 = daemon_ref.lock().await;
+        let _ = d2.stop();
+        drop(d2);
+    });
 }

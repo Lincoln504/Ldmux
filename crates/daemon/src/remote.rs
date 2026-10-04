@@ -480,8 +480,9 @@ async fn handle_connection(
                                 };
                                 let (_sub_id, _unsubscribe) = stream.subscribe(sub);
                                 session_id = Some(sid.to_string());
-                                // Take a snapshot.
-                                let snap = stream.snapshot();
+                                // Take a full snapshot (the state fields are
+                                // part of the initial state, not the SGR text).
+                                let snap = stream.snapshot_full();
                                 let _ = send_json(
                                     &mut ws,
                                     &serde_json::json!({
