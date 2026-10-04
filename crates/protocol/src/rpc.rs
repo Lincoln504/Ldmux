@@ -67,6 +67,7 @@ pub struct SessionOwner {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
     pub id: String,
     /// Empty string when the session is not terminal-attached (RPC-only).
@@ -88,6 +89,7 @@ pub struct SessionRecord {
 /// daemon's internal bookkeeping, plus the freshness signal clients need.
 /// Derived from `SessionRecord` so the two cannot drift apart.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     pub id: String,
     pub kind: String,
@@ -113,6 +115,7 @@ pub struct SessionInfo {
 
 /// The desktop inventory: what the launcher shows *before* a terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopWorkspace {
     /// The WM's own name for it ("1", "web", "code").
     pub name: String,
@@ -125,6 +128,7 @@ pub struct DesktopWorkspace {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopWindow {
     pub id: String,
     pub app_class: String,
@@ -135,6 +139,7 @@ pub struct DesktopWindow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopPiSession {
     pub pid: i64,
     pub cwd: String,
@@ -158,6 +163,7 @@ pub struct DesktopPiSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopInventory {
     /// "i3" | "sway" | "niri" | "hyprland" | "ewmh" | "unknown".
     pub wm: String,
@@ -171,6 +177,7 @@ pub struct DesktopInventory {
 
 /// The pane's state, as the daemon reports it for a `snapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PaneState {
     pub cursor_x: u64,
     pub cursor_y: u64,
@@ -191,16 +198,17 @@ pub struct PaneState {
 
 /// The answer to `ping`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct PingResult {
     /// Always `true` on the wire.
     pub pong: bool,
     pub version: u32,
-    #[serde(rename = "tmuxSocket")]
     pub tmux_socket: String,
 }
 
 /// Params for `new`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NewParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -259,8 +267,11 @@ mod tests {
             exited_at: None,
         };
         let s = serde_json::to_string(&r).unwrap();
-        assert!(!s.contains("exit_code"), "exit_code must be absent: {s}");
-        assert!(!s.contains("exited_at"), "exited_at must be absent: {s}");
+        assert!(!s.contains("exitCode"), "exitCode must be absent: {s}");
+        assert!(!s.contains("exitedAt"), "exitedAt must be absent: {s}");
+        // The wire is camelCase: every multi-word field matches the TS object.
+        assert!(s.contains(r#""tmuxName":"s1""#), "got {s}");
+        assert!(s.contains(r#""createdBy":"d""#), "got {s}");
     }
 
     #[test]
@@ -279,8 +290,8 @@ mod tests {
             exited_at: Some(99),
         };
         let s = serde_json::to_string(&r).unwrap();
-        assert!(s.contains(r#""exit_code":130"#), "got {s}");
-        assert!(s.contains(r#""exited_at":99"#), "got {s}");
+        assert!(s.contains(r#""exitCode":130"#), "got {s}");
+        assert!(s.contains(r#""exitedAt":99"#), "got {s}");
         r.exit_code = Some(0);
     }
 }
