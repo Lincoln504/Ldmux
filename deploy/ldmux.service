@@ -88,8 +88,13 @@ Environment=LDMUX_REMOTE_PORT=7625
 
 # The runtime first on PATH, so anything the daemon spawns by name gets the same
 # versions. It used to name an nvm directory, which broke on every nvm upgrade.
-Environment=PATH=%S/ldmux/runtime/bin:/usr/local/bin:/usr/bin:/bin
-# `%h/.local/bin/ldmuxd` is the wrapper (exec runtime node …/packages/daemon/src/main.ts).
+# `~/.local/bin` is where the Rust binaries (ldmuxd, ldmux, ldmux-keeper) are
+# installed by `just install-rust`. The Rust daemon auto-spawns the keeper by
+# name (`ldmux-keeper`), so it must be on PATH.
+Environment=PATH=%h/.local/bin:%S/ldmux/runtime/bin:/usr/local/bin:/usr/bin:/bin
+# `%h/.local/bin/ldmuxd` is the Rust daemon binary (installed by `just
+# install-rust`). During the A/B window (D4), the TS daemon can still be run via
+# the TS wrapper (kept as `ldmuxd-ts`).
 ExecStart=%h/.local/bin/ldmuxd
 
 [Install]

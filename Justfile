@@ -93,22 +93,85 @@ latency sid *runs:
 # Install the host side: the flake's runtime (node + tmux, the versions the suite
 # runs), the wrappers, and the systemd unit. The runtime link is a nix GC root, so
 # garbage collection cannot remove what the daemon runs on. Idempotent.
-install:
+install: install-rust
     #!/usr/bin/env bash
     set -euo pipefail
     state="${XDG_STATE_HOME:-$HOME/.local/state}/ldmux"
     mkdir -p "$state" "$HOME/.local/bin" "$HOME/.config/systemd/user"
     chmod 700 "$state"
     nix build .#runtime --out-link "$state/runtime"
+    # Install the TS wrappers (the A/B window: the TS daemon can still be run
+    # via ldmuxd-ts / ldmux-ts). The Rust binaries replace ldmux/ldmuxd.
     for f in ldmux ldmuxd ldmux-terminal; do
-      sed "s|@REPO@|$PWD|g" "deploy/bin/$f" > "$HOME/.local/bin/.$f.new"
-      chmod 755 "$HOME/.local/bin/.$f.new"
-      mv "$HOME/.local/bin/.$f.new" "$HOME/.local/bin/$f"
+      sed "s|@REPO@|$PWD|g" "deploy/bin/$f" > "$HOME/.local/bin/.$f.ts.new"
+      chmod 755 "$HOME/.local/bin/.$f.ts.new"
+      mv "$HOME/.local/bin/.$f.ts.new" "$HOME/.local/bin/${f}-ts"
     done
     install -m 644 deploy/ldmux.service "$HOME/.config/systemd/user/ldmux.service"
     systemctl --user daemon-reload
     echo "installed: $("$state/runtime/bin/node" --version), $("$state/runtime/bin/tmux" -V)"
     echo "apply with: systemctl --user restart ldmux"
+
+# Build the Rust workspace (release) and install the binaries alongside the TS
+# wrappers. The Rust daemon and CLI replace the TS ones; the TS wrappers stay
+# for the A/B window (D4).
+install-rust:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --workspace
+    cp target/release/ldmuxd "$HOME/.local/bin/.ldmuxd.new"
+    chmod 755 "$HOME/.local/bin/.ldmuxd.new"
+    mv "$HOME/.local/bin/.ldmuxd.new" "$HOME/.local/bin/ldmuxd"
+    cp target/release/ldmux "$HOME/.local/bin/.ldmux.new"
+    chmod 755 "$HOME/.local/bin/.ldmux.new"
+    mv "$HOME/.local/bin/.ldmux.new" "$HOME/.local/bin/ldmux"
+    # The keeper binary (the daemon auto-spawns it; it must be on PATH).
+    cp target/release/ldmux-keeper "$HOME/.local/bin/.ldmux-keeper.new"
+    chmod 755 "$HOME/.local/bin/.ldmux-keeper.new"
+    mv "$HOME/.local/bin/.ldmux-keeper.new" "$HOME/.local/bin/ldmux-keeper"
+    echo "installed Rust daemon + CLI + keeper ($(cargo --version | awk '{print $2}'))"
+
+# ── Rust port (crates/) ──────────────────────────────────────────────────
+
+# Build the Rust workspace (debug).
+rust-build:
+    cargo build --workspace
+
+# Run the full Rust test suite (all crates).
+rust-test:
+    cargo test --workspace
+
+# Run the daemon tests only (the Phase 5/6 gate).
+rust-daemon-test:
+    cargo test -p ldmux-daemon
+
+# Run the protocol tests only (the Phase 1 gate).
+rust-protocol-test:
+    cargo test -p ldmux-protocol
+
+# Run the keeper tests only (the Phase 3/4 gate).
+rust-keeper-test:
+    cargo test -p ldmux-keeper
+
+# Run the vt-sys tests only (the Phase 4 gate).
+rust-vt-test:
+    cargo test -p ldmux-vt-sys
+
+# Run the attach tests only (the Phase 3 gate).
+rust-attach-test:
+    cargo test -p ldmux-attach
+
+# Clippy on the Rust workspace.
+rust-clippy:
+    cargo clippy --workspace
+
+# Run the Rust daemon in the foreground (default state dir).
+rust-daemon:
+    cargo run -p ldmux-daemon --bin ldmuxd
+
+# Run the Rust CLI against the running daemon, e.g. `just rust-cli list`.
+rust-cli *args:
+    cargo run -p ldmux-daemon --bin ldmux -- {{args}}
 
 # Keep both dev shells' toolchains as GC roots. Without this a `nix-collect-garbage`
 # (run for any reason, by anything) deletes the JDK, NDK tooling and Zig the mobile

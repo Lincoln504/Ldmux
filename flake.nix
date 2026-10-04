@@ -26,8 +26,14 @@
       # option that crashes 3.5a passed every test and took the real daemon down.
       runtime = pkgs: nodePkgs: [ nodePkgs.nodejs_26 pkgs.tmux ];
 
+      # The Rust toolchain (the cargo/rustc from nixpkgs, used by the Rust
+      # port). The rustup toolchain in the devShell is the system one;
+      # the flake's `rustPlatform` provides a pinned rustc + cargo for
+      # reproducible builds.
+      rustToolchain = pkgs: with pkgs; [ rustfmt clippy rustc cargo ];
+
       # The dev toolchain: the runtime, plus conveniences.
-      toolchain = pkgs: nodePkgs: runtime pkgs nodePkgs ++ (with pkgs; [
+      toolchain = pkgs: nodePkgs: runtime pkgs nodePkgs ++ rustToolchain pkgs ++ (with pkgs; [
         just
         jq
         git
