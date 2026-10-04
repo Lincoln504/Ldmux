@@ -1312,3 +1312,113 @@ are now fixed. M3/M4/M5/M6/M8 remain unfixed (low priority / by design).
 - M8: `copyMode` remains a clear error (tmux-specific, no keeper equivalent).
 - Phase 7 gate (deploy + phone against Rust daemon) is held for the user's
   word (PORT MODE prohibition).
+
+---
+
+## Live deployment and the deep audit (2026-10-04)
+
+The port was re-audited from scratch (independent, adversarial) and the wire
+protocol was found to be a sketch, not a port: the Kotlin client could not
+connect, paint, or type. A large body of fixes follows. The daemon is now
+**deployed and running** as the Rust `ldmuxd` (systemd user unit), with the
+keeper auto-spawned and the phone's wire contract verified against a live
+server.
+
+### The wire protocol (the critical finding)
+
+`crates/daemon/src/remote.rs` did not match `packages/daemon/src/remote.ts`.
+Fixed against the TS source of record and the Kotlin client
+(`LdmuxClient.kt`/`AttachClient.kt`):
+
+- **Auth was in the wrong place.** The TS authenticates at the HTTP upgrade
+  (`Authorization: Bearer` / `?token=`, constant-time compare, plus the
+  tailnet/loopback peer check and path `/ws`). The Rust server required a
+  `token` field inside the first WS message, which the client never sends. Now
+  the upgrade is gated, with 401/403/404, and a plain `GET /ws` answers 401
+  (no/bad token) or 400 (good token) — the phone's `probe()` reads that to tell
+  a refused token from a machine that is off.
+- **Output was raw bytes.** Live output must be a binary OUTPUT frame (8-byte
+  header, type 0x10); the client drops anything else. Now `encode_frame`, with
+  the TS coalescing (8 ms / 4 KiB) and the backlog→`resync` rule.
+- **Attach answered `{type:"state"}`.** The client only understands `caps`
+  then `snapshot` (the `sendState` pair), for attach, resize and scrollback
+  alike. Scrollback previously sent no screen at all.
+- **`input` read `text`**; the client sends `data`.
+- **`new`/`kill`/`close` answered `session`/`killed`/`closed`**; the client
+  knows `created`+`sessions` / `sessions` / `sessions`.
+- **The session list was snake_case `SessionRecord`.** The client reads
+  camelCase `SessionInfo` (`tmuxName`, `lastActivityAt`, `owner`,
+  `process`, `liveWorkspace`). Fixed in `protocol/src/rpc.rs` (camelCase) and
+  in the daemon (`describe_sessions`).
+- **Ownership was missing.** Added the `WRITES` holder guard, `owned` on
+  displaced devices, the release grace, and the idle sweep.
+
+`docs/RUST-PORT-AUDIT.md` had recorded "M7 FIXED — attach sends full state";
+it changed the payload but to an envelope the client cannot read. The audit's
+own claim was wrong.
+
+### Other fixes
+
+- **The registry could not be read.** The JSON on disk is camelCase; the Rust
+  structs were snake_case, so a switch started with an empty registry. Now
+  camelCase, and the existing registry loads.
+- **Spawn had no command/env.** `kind: "pi"` ran a plain shell and the
+  `LDMUX_*` spawn env (plan §2.6) was never set. `Spawn` gains `command` +
+  `env`; the keeper uses `execvpe` with the full argv and env.
+- **The daemon minted its own token.** `bin/ldmuxd.rs` generated 32 chars from
+  `0..S` with no 0600 — a token the pairing contract ("64 lowercase hex")
+  rejects. Now `auth::load_or_create_token`.
+- **`reconcile`/`adopt` re-prefixed the keeper session id.** The keeper names a
+  session `ldmux-<id>`, but both functions added another `ldmux-`, so every
+  restart marked all sessions dead and adopted a duplicate. **Found live**, on
+  the running daemon, by restarting it. Fixed; verified live (a restart keeps
+  the session running with its output, one row, no duplicate).
+- **The desk window was a keeper client.** It talked `Peek`/`Write` directly,
+  bypassing ownership and stealing the daemon poll thread's `Peek` bytes.
+  Rewritten as a daemon remote-WS client (plan §3.9): attach claims the shell,
+  streams OUTPUT frames to its terminal, forwards input, resizes on SIGWINCH,
+  handles `owned` with Ctrl+R to take over. `ldmuxd attach <id> [--readonly]`.
+  `desktop.rs` runs `alacritty -e ldmuxd attach <id>` (the tmux shim is gone).
+- **CLI `window`/`run`/`shell`/`mirror`** were "not yet ported"; implemented,
+  so `ldmux-terminal` (`$mod+Return`) works instead of falling back.
+- **Blocking keeper I/O under async tasks.** The stream's keeper socket is
+  blocking with no read timeout; the remote's stream calls now run on
+  `spawn_blocking`.
+- **Test hygiene.** `keeper_death.rs`/`restart_survival.rs` leaked a real keeper
+  per run (daemon `stop()` deliberately does not kill the orphan). Reaped.
+  `desktop_e2e` used a fixed `:99` (collided with leftovers) and left children
+  on panic; now a random display with a drop-guard.
+- **All compiler warnings cleared.**
+
+### Deploy (live)
+
+- `just install` → `install-rust` builds the release workspace and installs
+  `ldmuxd`, `ldmux`, `ldmux-keeper` to `~/.local/bin` (the TS wrappers become
+  `ldmuxd-ts`/`ldmux-ts`); the unit is installed and `daemon-reload`ed.
+- The unit runs `~/.local/bin/ldmuxd`; the keeper is auto-spawned
+  (`ldmux-keeper`, on PATH). Environment unchanged (`LDMUX_REMOTE_HOST=
+  100.127.119.54`, `LDMUX_REMOTE_PORT=7625`, token at `%S/ldmux/token`, state
+  at `%t/ldmux`).
+- Verified live: CLI list/new/capture; the WS `caps`+`snapshot` pair; the
+  attach client's screen; the probe 401/400; a full phone-shaped session
+  (hello→new→created+sessions→attach→input→OUTPUT frames→kill); and restart
+  survival with the keeper pid unchanged.
+
+### Gate state
+
+Rust `cargo test --workspace` (inside `nix develop`) → **inline green** (28
+test binaries, 0 failures, 1 ignored in the keeper); TS **347/347** + typecheck
+clean.
+
+### Still open (recorded, not gate-blocking)
+
+- The desktop e2e is still the weak one: it proves the i3-facing functions are
+  callable on a scratch display, not the full handover the plan §6 asks for
+  (an alacritty-stub, both directions, size-on-attach, wheel→history,
+  close≠detach). The attach client's own loop is covered by
+  `attach_client.rs`.
+- `copymode` is a no-op (tmux copy-mode has no keeper equivalent; the client
+  scrolls its own buffer).
+- The parity harness (§3.11) and the tmux removal from the flake (D4) are
+  pending; tmux is no longer used by the deployed daemon but the TS tree and
+  the parity corpus remain.
