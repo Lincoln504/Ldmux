@@ -2,12 +2,10 @@
 //! lifecycle functions (open/state/close) run against a real X server and WM
 //! without panicking.
 //!
-//! **Known weakness (recorded in docs/RUST-PORT-LOG.md):** the plan asks for a
-//! full handover test with an alacritty-stub (both directions, size-on-attach,
-//! wheel→history, close≠detach). This test only proves the i3-facing functions
-//! are callable on a scratch display; the attach client's own loop is covered
-//! by `attach_client.rs`. The display is random per run and the children are
-//! reaped on drop, so a failed run leaves nothing behind.
+//! **What this does not cover:** the ownership/geometry semantics of a window
+//! (size-on-attach, handover, close≠detach) live in `handover.rs`, which drives
+//! two real remote-WS clients against a daemon with no X server; the full
+//! alacritty-stub handover (a real window driven through i3) is still not built.
 
 use std::process::Command;
 

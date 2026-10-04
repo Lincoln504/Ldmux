@@ -1412,11 +1412,14 @@ clean.
 
 ### Still open (recorded, not gate-blocking)
 
-- The desktop e2e is still the weak one: it proves the i3-facing functions are
-  callable on a scratch display, not the full handover the plan §6 asks for
-  (an alacritty-stub, both directions, size-on-attach, wheel→history,
-  close≠detach). The attach client's own loop is covered by
-  `attach_client.rs`.
+- **Closed (2026-10-04):** `crates/daemon/tests/handover.rs` now covers the
+  plan §6 window semantics against a real keeper + daemon + two remote-WS
+  clients: size-on-attach (attach resizes the pane, the snapshot matches),
+  the non-takeover refusal (`owned` with the holder), takeover (the displaced
+  client is told `owner: null` and cut off), and close≠detach (a closed socket
+  keeps the claim for the 3 s grace, the release frees it, and the shell is
+  still running throughout). What remains unbuilt is only the alacritty-stub
+  variant (a real window driven through i3).
 - `copymode` is a no-op (tmux copy-mode has no keeper equivalent; the client
   scrolls its own buffer).
 - The parity harness (§3.11) and the tmux removal from the flake (D4) are
