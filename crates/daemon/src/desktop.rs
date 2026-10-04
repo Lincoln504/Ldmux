@@ -155,10 +155,30 @@ pub fn live_argv(_shim_path: &str, session_id: &str, terminal: &str) -> Vec<Stri
         "--class".to_string(),
         live_window_class(session_id),
         "-e".to_string(),
-        "ldmuxd".to_string(),
+        attach_bin(),
         "attach".to_string(),
         session_id.to_string(),
     ]
+}
+
+/// The absolute path to the attach client for a desk window.
+///
+/// **Absolute, not `ldmuxd`.** A window is launched by `i3-msg exec`, and i3's
+/// own environment has no `~/.local/bin` on `PATH` — the same failure that once
+/// made every `$mod+Return` fall back to a bare shell (`node: not found`). The
+/// running daemon's own executable is this binary, so it is the attach client.
+pub fn attach_bin() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(s) = exe.to_str() {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => format!("{h}/.local/bin/ldmuxd"),
+        _ => "ldmuxd".to_string(),
+    }
 }
 
 /// Resolve the tmux binary: prefer `LDMUX_TMUX_BIN`, then the first `tmux`
@@ -322,7 +342,14 @@ pub async fn open_live(
     tmux_bin: &str,
     state_dir: &str,
 ) -> Result<LiveResult, String> {
-    let target = safe_workspace(workspace).ok_or("invalid workspace name")?;
+    // An empty workspace means "leave it where it opens" (the current one):
+    // that is the desk-window case (`$mod+Return`), which must not move the
+    // user's view. A non-empty value must be a real i3 workspace name.
+    let target = match safe_workspace(workspace) {
+        Some(t) => Some(t),
+        None if workspace.trim().is_empty() => None,
+        None => return Err("invalid workspace name".to_string()),
+    };
     if std::env::var("DISPLAY").is_err() {
         return Err("no DISPLAY (not an X11 session)".to_string());
     }
@@ -337,7 +364,10 @@ pub async fn open_live(
     if result.code != 0 {
         return Err("i3-msg not available".to_string());
     }
-    let placed = place_live(session_id, &target, 5000).await;
+    let placed = match &target {
+        Some(t) => place_live(session_id, t, 5000).await,
+        None => (true, None, Some("left on the current workspace".to_string())),
+    };
     Ok(LiveResult {
         ok: true,
         placed: Some(placed.0),
@@ -518,11 +548,13 @@ mod tests {
                 "--class",
                 "ldmux-live-abc123",
                 "-e",
-                "ldmuxd",
+                &attach_bin(),
                 "attach",
                 "abc123",
             ]
         );
+        // The binary must be a path i3's exec can resolve without a PATH.
+        assert!(args[4].starts_with('/'), "the attach binary must be absolute: {}", args[4]);
     }
 
     #[test]

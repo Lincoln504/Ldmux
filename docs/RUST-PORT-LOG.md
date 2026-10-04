@@ -1410,6 +1410,32 @@ Rust `cargo test --workspace` (inside `nix develop`) → **inline green** (28
 test binaries, 0 failures, 1 ignored in the keeper); TS **347/347** + typecheck
 clean.
 
+### Found live, after the first deploy (2026-10-04)
+
+Two more real bugs, both on the desk-window path (`$mod+Return`), both only
+visible on the running system:
+
+- **`open_live` rejected the empty workspace.** The desk-window path passes no
+  workspace (the window belongs on whatever workspace the user is on), but
+  `safe_workspace("")` returned `None` and `open_live` turned that into
+  `"invalid workspace name"` — so `ldmux window` exited non-zero and
+  `ldmux-terminal` fell back to a plain shell, silently. The TS `deskWindow`
+  never called `openLive` at all (it wrote a shim and returned its path); with
+  the shim gone, `open_live` is the opener, so it must accept "no workspace".
+  Now an empty workspace means "leave it where it opens"; a non-empty one is
+  still validated.
+- **The window ran a bare `ldmuxd`.** `i3-msg exec` inherits i3's environment,
+  which has no `~/.local/bin` on `PATH`, so the attach client was `not found`
+  and the window closed the instant it opened. This is the same failure that
+  once made every `$mod+Return` a plain shell (`node: not found`). `live_argv`
+  now uses the daemon's own executable path (`std::env::current_exe()`) — the
+  running daemon *is* the attach client — and a test asserts it is absolute.
+
+Verified live after the fix: `ldmux window /tmp` opens
+`alacritty --class ldmux-live-<id> -e /home/ldeen/.local/bin/ldmuxd attach <id>`,
+the window is in i3's tree, `ldmux unlive <id>` closes it, and the shell keeps
+running (close ≠ detach).
+
 ### Still open (recorded, not gate-blocking)
 
 - **Closed (2026-10-04):** `crates/daemon/tests/handover.rs` now covers the
