@@ -1,5 +1,15 @@
 # RUST-PORT-AUDIT.md — the critical audit of the Rust port (2026-09-28)
 
+> **Correction, 2026-10-04.** This audit's remote/stream findings were
+> incomplete: it recorded "M7 FIXED — attach sends full state" when the attach
+> reply was a `{type:"state"}` envelope the Kotlin client cannot read, and it
+> missed that the whole remote wire protocol diverged from `remote.ts` (auth at
+> the upgrade, OUTPUT frames, `caps`+`snapshot`, `created`+`sessions`,
+> camelCase `SessionInfo`). `crates/daemon/src/remote.rs` was rewritten against
+> the TS source of record on 2026-10-04; see `docs/RUST-PORT-LOG.md` ("Live
+> deployment and the deep audit"). Treat the fix-status lines below as
+> historical.
+
 The full audit of the Rust port as of the `port/rust` branch (commit `84a1caa`,
 2026-09-28). The audit covers: (1) state against the plan/spec, (2) state in its
 own merit (bugs, races, leaks, error handling, architecture, best practice),

@@ -1,5 +1,17 @@
 # ldmux — State of the project
 
+> **Update, 2026-10-04 — the daemon is now the Rust one.** The sections below
+> describe the TypeScript/tmux system as it stood on 2026-09-26 and are kept as
+> the record of how it was built; they are **no longer the deployed
+> architecture**. The deployed daemon is `crates/daemon` (`ldmuxd`), a keeper
+> (`ldmux-keeper`) owns the PTYs and runs libghostty-vt, and tmux is no longer
+> used by the daemon. The mobile wire contract, the pairing, the ownership model
+> and the CLI are unchanged in behaviour. The port's own record — the wire-
+> protocol findings, the live-deploy results, and what is still open — is
+> `docs/RUST-PORT-LOG.md` ("Live deployment and the deep audit"). A full
+> SPEC/STATE pass over the tmux wording (§5.2 profile, the transport sections) is
+> still pending; treat every tmux claim below as historical.
+
 **As of 2026-09-26.** This file answers one question: *where does everything stand
 right now?* It is the register, not the specification. `docs/SPEC.md` says what the
 product is meant to be, the ADRs say why the decisions were made, and
