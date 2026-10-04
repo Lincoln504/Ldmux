@@ -19,9 +19,116 @@ use ldmux_protocol::socket;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
+/// The screen state a snapshot restores into a terminal.
+///
+/// The wire carries this state, not the previous implementation's assumption
+/// that the content was the only thing that mattered. The desktop client is the
+/// replacement for `tmux attach`, which restored a screen *and* the terminal
+/// modes around it, so it has to restore both.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Snapshot<'a> {
+    pub screen: &'a str,
+    pub cursor_x: u64,
+    pub cursor_y: u64,
+    pub cols: u64,
+    pub rows: u64,
+    pub alternate_on: bool,
+    pub mouse: bool,
+    pub mouse_sgr: bool,
+    pub app_cursor: bool,
+    pub bracketed_paste: bool,
+}
+
+impl<'a> Snapshot<'a> {
+    /// Read the state out of a `snapshot` frame.
+    pub fn from_json(v: &'a serde_json::Value) -> Self {
+        let b = |k: &str| v[k].as_bool().unwrap_or(false);
+        let n = |k: &str| v[k].as_u64().unwrap_or(0);
+        Self {
+            screen: v["screen"].as_str().unwrap_or(""),
+            cursor_x: n("cursorX"),
+            cursor_y: n("cursorY"),
+            cols: n("cols"),
+            rows: n("rows"),
+            alternate_on: b("alternateOn"),
+            mouse: b("mouse"),
+            mouse_sgr: b("mouseSgr"),
+            app_cursor: b("appCursor"),
+            bracketed_paste: b("bracketedPaste"),
+        }
+    }
+}
+
+/// Render a daemon snapshot onto a terminal: the desktop client's whole job.
+///
+/// This is not a terminal renderer. The daemon owns the emulator and serialises
+/// its grid, and every client is an emulator that consumes the bytes — the
+/// mobile client feeds the same `screen` string to its own libghostty-vt, and
+/// this one feeds it to alacritty. Three things go wrong if this is written
+/// carelessly, and all three were:
+///
+///   * **Rows must be separated by `\r\n`, not `\n`.** A terminal's LF moves
+///     down without returning the column, so the screen staircases diagonally.
+///   * **The trailing newline must not be written.** The daemon terminates
+///     *every* row including the last, so an N-row pane carries N newlines.
+///     Replaying all of them moves the cursor one row past the bottom, the
+///     terminal scrolls, every line shifts up by one, and the prompt a fresh
+///     shell had just printed slides off the top and reappears at the bottom.
+///   * **The modes must be re-established.** A window is a fresh terminal: the
+///     alternate screen, mouse reporting, application-cursor and bracketed
+///     paste are all off, whatever the pane's program has set. This is what
+///     `tmux attach` did for the old client and nobody did for this one.
+///
+/// The mobile client documents the first two from measurement
+/// (`snapshotReplay` in `TerminalController.kt`); this is the same contract.
+pub fn render_snapshot(s: &Snapshot) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.screen.len() + 64);
+    // Which screen, then the modes, then clear, then content, then the cursor.
+    // `?1049` is the save/switch form, which is what a full-screen program uses,
+    // and it is sent unconditionally (`l` included): on a fresh terminal leaving
+    // the primary screen is a no-op, and being unconditional is what makes the
+    // two screens impossible to get out of step.
+    out.extend_from_slice(if s.alternate_on { b"\x1b[?1049h" } else { b"\x1b[?1049l" });
+    out.extend_from_slice(if s.mouse { b"\x1b[?1000h" } else { b"\x1b[?1000l" });
+    out.extend_from_slice(if s.mouse_sgr { b"\x1b[?1006h" } else { b"\x1b[?1006l" });
+    out.extend_from_slice(if s.app_cursor { b"\x1b[?1h" } else { b"\x1b[?1l" });
+    out.extend_from_slice(if s.bracketed_paste { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+    // The window is already empty when it opens, but a resync re-renders over
+    // whatever is on screen, so the visible screen is cleared either way.
+    out.extend_from_slice(b"\x1b[2J\x1b[H");
+    let body = s.screen.strip_suffix('\n').unwrap_or(s.screen);
+    for (i, line) in body.split('\n').enumerate() {
+        if i > 0 {
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(line.as_bytes());
+    }
+    // The daemon's cursor is the authority, clamped as the mobile client clamps
+    // it so a malformed frame cannot place the cursor outside the grid.
+    let x = s.cursor_x.min(s.cols.saturating_sub(1)) + 1;
+    let y = s.cursor_y.min(s.rows.saturating_sub(1)) + 1;
+    out.extend_from_slice(format!("\x1b[{y};{x}H").as_bytes());
+    out
+}
+
 /// The device identity the desk window announces: the daemon's desktop device
 /// (`makeLive` claims the shell to this id before the window opens).
 const DESKTOP_DEVICE: &str = "desktop";
+
+/// How often this client says something to the daemon.
+///
+/// One number, because it is a property of the **protocol**, not of a client: the
+/// daemon reaps a connection silent for `WS_IDLE_MS` (20 s). The mobile client
+/// states the same rule (`CLIENT_PING_INTERVAL_MS`) and documents what happens
+/// when it is stated in two places and they disagree — one socket pinged, the
+/// other did not, and the silent one was reaped every minute and read as the
+/// daemon being flaky. This window was the third place and stated nothing at all.
+const PING_INTERVAL_MS: u64 = 4_000;
+
+/// Unanswered pings before the link is declared dead (the mobile client's
+/// `CLIENT_MISSED_PONGS`): the OS only reports a broken link when it notices,
+/// and on a sleeping radio or a NAT that forgot the flow it does not notice.
+const MAX_MISSED_PONGS: u32 = 3;
 
 /// The terminal size of fd 0 (the window's pty), or 80x24.
 fn tty_size() -> (u64, u64) {
@@ -97,8 +204,25 @@ pub async fn run_with<R, W>(
     daemon_socket: &str,
     session_id: &str,
     readonly: bool,
+    input: R,
+    output: W,
+) -> Result<(), String>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    run_with_ping(daemon_socket, session_id, readonly, input, output, PING_INTERVAL_MS).await
+}
+
+/// `run_with`, with the keep-alive interval injectable so a test can prove the
+/// contract in milliseconds instead of twenty seconds.
+pub async fn run_with_ping<R, W>(
+    daemon_socket: &str,
+    session_id: &str,
+    readonly: bool,
     mut input: R,
     mut output: W,
+    ping_ms: u64,
 ) -> Result<(), String>
 where
     R: AsyncReadExt + Unpin,
@@ -138,6 +262,18 @@ where
     let (mut cols, mut rows) = tty_size();
     let (mut sink, mut stream) = ws.split();
 
+    // Keep-alive. The daemon reaps a connection that has said nothing for
+    // `WS_IDLE_MS` (20 s) — that is what makes a phone that vanished without a
+    // FIN stop holding shells it is not looking at — so every socket has to
+    // speak on a schedule. The mobile client states this once for both of its
+    // sockets and documents the failure of stating it twice; this window is the
+    // second place, and it said nothing, so the daemon closed it and the window
+    // exited about 20 s after it opened.
+    let mut ping = tokio::time::interval(std::time::Duration::from_millis(ping_ms.max(1)));
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping.tick().await; // the first tick is immediate; the first ping is not
+    let mut missed_pongs: u32 = 0;
+
     // Identify (desktop) and attach. A read-only mirror sends no `hello`, so it
     // holds no claim and cannot type.
     if !readonly {
@@ -176,10 +312,8 @@ where
                         match v["type"].as_str() {
                             Some("snapshot") => {
                                 detached = false;
-                                let screen = v["screen"].as_str().unwrap_or("");
-                                let mut out = Vec::with_capacity(screen.len() + 8);
-                                out.extend_from_slice(b"\x1b[2J\x1b[H");
-                                out.extend_from_slice(screen.as_bytes());
+                                let snap = Snapshot::from_json(&v);
+                                let out = render_snapshot(&snap);
                                 let _ = output.write_all(&out).await;
                                 let _ = output.flush().await;
                             }
@@ -208,6 +342,9 @@ where
                                         .await;
                                     break;
                                 }
+                            }
+                            Some("pong") => {
+                                missed_pongs = 0;
                             }
                             _ => {}
                         }
@@ -269,6 +406,17 @@ where
                     .await;
                 }
             }
+            // Speak on a schedule or the daemon reaps the socket and this window
+            // exits about 20 s after it opens.
+            _ = ping.tick() => {
+                if missed_pongs >= MAX_MISSED_PONGS {
+                    break;
+                }
+                missed_pongs += 1;
+                if send(&mut sink, &serde_json::json!({ "type": "ping" })).await.is_err() {
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -282,4 +430,126 @@ where
     sink.send(Message::Text(value.to_string().into()))
         .await
         .map_err(|e| e.to_string())
+}
+#[cfg(test)]
+mod render_tests {
+    use super::{render_snapshot, Snapshot};
+
+    fn snap(screen: &str) -> Snapshot<'_> {
+        Snapshot {
+            screen,
+            cursor_x: 0,
+            cursor_y: 0,
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        }
+    }
+
+    /// A bare LF moves down without returning the column, so the screen
+    /// staircases diagonally. Both clients replay a capture, so both need CRLF.
+    #[test]
+    fn rows_are_separated_by_carriage_return_and_line_feed() {
+        let out = String::from_utf8(render_snapshot(&snap("aa\nbb\n"))).unwrap();
+        assert!(out.contains("aa\r\nbb"), "rows must not staircase: {out:?}");
+        assert_eq!(out.matches('\n').count(), 1, "one separator for two rows: {out:?}");
+    }
+
+    /// The daemon terminates *every* row, including the last, so an N-row pane
+    /// carries N newlines and the replay must write N-1 separators. Replaying
+    /// the last one moves the cursor a row past the bottom and scrolls, which is
+    /// what slid a fresh shell's prompt off the top of the window.
+    ///
+    /// The invariant is exact: a screen with its terminator and the same screen
+    /// without it must produce identical bytes.
+    #[test]
+    fn the_trailing_newline_is_not_written() {
+        fn body(out: &[u8]) -> String {
+            let s = String::from_utf8(out.to_vec()).unwrap();
+            let after = s.split("\u{1b}[2J\u{1b}[H").nth(1).unwrap();
+            after.rsplit_once('\u{1b}').unwrap().0.to_string()
+        }
+        let with = render_snapshot(&snap("aa\nbb\n"));
+        let without = render_snapshot(&snap("aa\nbb"));
+        assert_eq!(body(&with), body(&without), "the terminator must make no difference");
+        assert_eq!(body(&with), "aa\r\nbb", "two rows, one separator");
+        assert_eq!(body(&render_snapshot(&snap("aa\n"))), "aa", "one row, none");
+    }
+
+    /// The daemon's cursor is the authority: it decides where the prompt shows.
+    #[test]
+    fn the_cursor_is_placed_where_the_daemon_says() {
+        let out = String::from_utf8(render_snapshot(&Snapshot {
+            screen: "[ x$ ]\n\n",
+            cursor_x: 6,
+            cursor_y: 0,
+            ..snap("")
+        }))
+        .unwrap();
+        assert!(out.ends_with("\u{1b}[1;7H"), "{out:?}");
+        let out = String::from_utf8(render_snapshot(&Snapshot {
+            screen: "[ x$ ]\n\n",
+            cursor_x: 2,
+            cursor_y: 3,
+            ..snap("")
+        }))
+        .unwrap();
+        assert!(out.ends_with("\u{1b}[4;3H"), "{out:?}");
+    }
+
+    /// The cursor is clamped to the grid, as the mobile client clamps it: a
+    /// malformed frame must not place it outside the pane.
+    #[test]
+    fn the_cursor_is_clamped_to_the_grid() {
+        let out = String::from_utf8(render_snapshot(&Snapshot {
+            cursor_x: 999,
+            cursor_y: 999,
+            cols: 80,
+            rows: 24,
+            ..snap("x")
+        }))
+        .unwrap();
+        assert!(out.ends_with("\u{1b}[24;80H"), "{out:?}");
+    }
+
+    /// A window is a fresh terminal, so everything the pane's program set is off
+    /// unless the snapshot says otherwise. `tmux attach` restored this; the port
+    /// did not, and a full-screen program lost its mouse mode.
+    #[test]
+    fn the_screen_and_the_modes_are_established() {
+        let out = String::from_utf8(render_snapshot(&Snapshot {
+            alternate_on: true,
+            mouse: true,
+            mouse_sgr: true,
+            app_cursor: true,
+            bracketed_paste: true,
+            ..snap("x")
+        }))
+        .unwrap();
+        assert!(out.starts_with("\u{1b}[?1049h"), "alternate screen: {out:?}");
+        for seq in ["\u{1b}[?1000h", "\u{1b}[?1006h", "\u{1b}[?1h", "\u{1b}[?2004h"] {
+            assert!(out.contains(seq), "missing {seq:?} in {out:?}");
+        }
+    }
+
+    /// And they are sent unconditionally, in the `l` form too: on a fresh
+    /// terminal that is a no-op, and being unconditional is what keeps the two
+    /// screens from getting out of step.
+    #[test]
+    fn modes_are_sent_even_when_off() {
+        let out = String::from_utf8(render_snapshot(&snap("x"))).unwrap();
+        for seq in ["\u{1b}[?1049l", "\u{1b}[?1000l", "\u{1b}[?1006l", "\u{1b}[?1l", "\u{1b}[?2004l"] {
+            assert!(out.contains(seq), "missing {seq:?} in {out:?}");
+        }
+    }
+
+    /// The visible screen is cleared, so a resync does not lay the new screen
+    /// over the old one.
+    #[test]
+    fn the_screen_is_cleared_and_homed_before_the_content() {
+        let out = String::from_utf8(render_snapshot(&snap("x"))).unwrap();
+        let clear = out.find("\u{1b}[2J\u{1b}[H").expect("clear");
+        let content = out.find('x').expect("content");
+        assert!(clear < content, "clear before content: {out:?}");
+    }
 }

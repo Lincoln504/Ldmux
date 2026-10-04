@@ -141,6 +141,15 @@ impl LdmuxDaemon {
         self
     }
 
+    /// Shorten the remote's idle deadline. A test hook: the deadline is what the
+    /// keep-alive contract is against, and twenty seconds is a long test.
+    pub fn with_remote_idle_ms(mut self, idle_ms: u64) -> Self {
+        if let Some(cfg) = self.remote_cfg.take() {
+            self.remote_cfg = Some(cfg.with_idle_ms(idle_ms));
+        }
+        self
+    }
+
     /// The control socket path (the `ldmuxd.sock`).
     pub fn socket_path(&self) -> std::path::PathBuf {
         self.state_dir.join("ldmuxd.sock")

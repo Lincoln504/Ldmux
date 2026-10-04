@@ -83,6 +83,13 @@ pub struct RemoteConfig {
     pub port: u16,
     /// The bearer token (checked at the HTTP upgrade).
     pub token: String,
+    /// Reap a connection that has said nothing for this long.
+    ///
+    /// A field rather than only the const so the keep-alive contract can be
+    /// tested in milliseconds. It is a real contract: a client that does not
+    /// speak on a schedule is closed, and the desktop attach client did not, so
+    /// its window exited about 20 s after it opened.
+    pub idle_ms: u64,
 }
 
 impl RemoteConfig {
@@ -91,7 +98,14 @@ impl RemoteConfig {
             hostname: hostname.into(),
             port,
             token: token.into(),
+            idle_ms: WS_IDLE_MS,
         }
+    }
+
+    /// The idle deadline for tests: a real value, shortened.
+    pub fn with_idle_ms(mut self, idle_ms: u64) -> Self {
+        self.idle_ms = idle_ms.max(1);
+        self
     }
 }
 
@@ -151,6 +165,7 @@ struct Shared {
     conns: Mutex<HashMap<u64, Arc<ConnShared>>>,
     daemon: DaemonArc,
     token: String,
+    idle_ms: u64,
     stopped: AtomicBool,
 }
 
@@ -189,6 +204,7 @@ impl RemoteServer {
             conns: Mutex::new(HashMap::new()),
             daemon: daemon_arc.clone(),
             token: self.cfg.token.clone(),
+            idle_ms: self.cfg.idle_ms,
             stopped: AtomicBool::new(false),
         });
         let accept_shared = shared.clone();
@@ -197,7 +213,7 @@ impl RemoteServer {
         });
         let sweep_shared = shared.clone();
         let sweep = tokio::spawn(async move {
-            let step = (WS_IDLE_MS / 4).max(250);
+            let step = (sweep_shared.idle_ms / 4).max(25);
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(step)).await;
                 if sweep_shared.stopped.load(Ordering::Relaxed) {
@@ -1142,7 +1158,7 @@ async fn sweep_once(shared: &Arc<Shared>) {
         if disposed {
             continue;
         }
-        if idle > WS_IDLE_MS {
+        if idle > shared.idle_ms {
             let _ = c.tx.send(Out::Close);
         }
     }
