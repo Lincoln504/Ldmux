@@ -1252,3 +1252,63 @@ audit is in `docs/RUST-PORT-AUDIT.md`. Summary of the findings:
 
 `cargo test` (with `zbarimg` on PATH) → **248 passed** / 1 ignored; TS
 **347/347** + typecheck.
+
+---
+
+## Post-audit fixes (2026-09-29)
+
+All 12 critical bugs (C1-C12) and 6 moderate issues (M1, M2, M7, M9, M10)
+are now fixed. M3/M4/M5/M6/M8 remain unfixed (low priority / by design).
+
+### C1-C5 (commit 54517fa)
+- C1: Poll loop in `stream_for` (blocking thread, 10ms interval, pulls `Peek`
+  results from the keeper, fans out to subscribers).
+- C2: `input` handler uses `stream.write(text)` (writes to PTY via `Write`
+  keeper message).
+- C3/C4/C5: `key_name_to_bytes` function (Enter→0x0D, Tab→0x09, C-a→0x01,
+  etc.). `send`, `key`, `send_key` all use it.
+- `PaneStream::write` method (literal text to PTY).
+- `streams` changed to `HashMap<String, Arc<PaneStream>>`.
+
+### C6-C12 (commit 3d8c339)
+- C6: `adopt` handler (wires existing `adopt()` method).
+- C7: `clipboardWrite` handler (writes policy file to state dir).
+- C8: `deskWindow` handler (opens desk window, tracks in `live_windows`,
+  claims to desktop).
+- C9: `makeLive` handler (workspace param, `live_windows`, desktop claim).
+- C10: `closeLive` handler (closes window, releases desktop claim).
+- C11: `remote_info` handler (returns actual remote config).
+- C12: `reclaim` handler (claims session from device).
+- New: `live_windows` map, `desktop_device` on the daemon.
+
+### M1/M2 (commit 6956be1)
+- `subscribe` returns `(usize, Box<dyn Fn()>)` — unsubscribe by id.
+- `drain` takes a subscriber id (not an index).
+- `SubQueue` has `id: usize`.
+
+### M7/M9 (commit ef6e16c)
+- M7: `attach` handler sends `snapshot_full()` (full state).
+- M9: `ldmuxd.rs` installs SIGTERM/SIGINT handlers via `tokio::signal`,
+  gracefully stops the daemon on signal.
+- tokio `signal` feature added to Cargo.toml.
+
+### Phase 7 prep (commit a9c12fe)
+- Flake: Rust toolchain (rustc/cargo/rustfmt/clippy) in the devShell.
+- Justfile: Rust recipes (rust-build, rust-test, rust-daemon, rust-cli,
+  install-rust). TS wrappers kept as `ldmuxd-ts`/`ldmux-ts` for the A/B
+  window (D4).
+- Unit: PATH includes `~/.local/bin` (Rust binaries). ExecStart points to
+  `~/.local/bin/ldmuxd` (now the Rust binary after install-rust).
+
+### Gate state (post-fix)
+
+`cargo test` (with `zbarimg` on PATH) → **248 passed** / 1 ignored; TS
+**347/347** + typecheck.
+
+### Remaining (not gate-blocking)
+- M3/M4: `ConnData` and `by_device` are dead code (unused).
+- M5: No idle connection sweep (optimization).
+- M6: No attach generation tracking (optimization).
+- M8: `copyMode` remains a clear error (tmux-specific, no keeper equivalent).
+- Phase 7 gate (deploy + phone against Rust daemon) is held for the user's
+  word (PORT MODE prohibition).
