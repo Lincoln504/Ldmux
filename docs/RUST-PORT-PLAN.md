@@ -729,6 +729,15 @@ stream (retargeted), desktop-inventory, cli, daemon-lifecycle.
 
 ## 7. Parallelization — phases (agent-parallel, ~5 h serial, ~2.5 h with 6 agents)
 
+> **Status, 2026-10-04:** phases 1–7 are implemented and the Rust daemon is
+> **deployed live** (systemd user unit, keeper auto-spawned, phone wire contract
+> verified against the running server). The table below is the plan as written;
+> `docs/RUST-PORT-LOG.md` ("Live deployment and the deep audit") is the record
+> of what was actually done and found. The **D4 window** is the one open item:
+> the tmux runtime package and the TypeScript tree are still present (tmux is no
+> longer used by the deployed daemon; the TS tree is the source of record and
+> the standing gate).
+
 Dependency graph: `protocol` → {pure modules ∥ keeper ∥ vt-sys ∥ attach} →
 `daemon` → integration/deploy.
 
