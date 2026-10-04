@@ -201,6 +201,19 @@ impl PaneStream {
     }
 
     /// A snapshot (the full-screen capture, via the keeper's `Snapshot`).
+    /// Send an SGR mouse click (the `mouseClick` method): a press + release
+    /// at (col, row), both 0-based. The escape is `ESC [ < col+1 ; row+1 ; 0 M`
+    /// (press) then `ESC [ < col+1 ; row+1 ; 0 m` (release).
+    pub fn mouse_click(&self, col: u64, row: u64) -> Result<KeeperMessage, String> {
+        let press = format!("\u{1b}[<{};{};0M", col + 1, row + 1);
+        let release = format!("\u{1b}[<{};{};0m", col + 1, row + 1);
+        let data = format!("{}{}", press, release);
+        self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
+            session_id: self.session_id.clone(),
+            data,
+        }))
+    }
+
     /// Send keys to the pane (the `sendKey` method): send a `Write` keeper
     /// message with the key text.
     pub fn send_key(&self, keys: &[&str]) -> Result<KeeperMessage, String> {
@@ -219,6 +232,23 @@ impl PaneStream {
             cols,
             rows,
         }))
+    }
+
+    ///
+    /// Returns the full `SnapshotResult` (the `getState` equivalent).
+    pub fn snapshot_full(&self) -> Result<ldmux_protocol::keeper::SnapshotResult, String> {
+        let req = KeeperMessage::Snapshot(Snapshot {
+            session_id: self.session_id.clone(),
+            history_lines: None,
+        });
+        let resp = self.keeper.call(&req)?;
+        match resp {
+            KeeperMessage::SnapshotResult(sr) => {
+                let _ = self.epoch.fetch_add(1, Ordering::SeqCst);
+                Ok(sr)
+            }
+            other => Err(format!("not a snapshotresult: {other:?}")),
+        }
     }
 
     ///

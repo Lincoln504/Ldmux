@@ -627,12 +627,82 @@ async fn handle_connection(
                     }
                 }
             }
-            "mouseclick" | "copymode" => {
-                // The stream methods (the `PaneStream`).
-                // For now, an error: the stream methods are not yet ported.
+            "mouseclick" => {
+                // Send an SGR mouse click to the pane.
+                let sid = session_id.clone().unwrap_or_default();
+                let col = v.get("col").and_then(|c| c.as_u64());
+                let row = v.get("row").and_then(|r| r.as_u64());
+                match (col, row) {
+                    (Some(col), Some(row)) if col < 10000 && row < 10000 => {
+                        let mut d = daemon_arc.lock().await;
+                        let stream = d.get_stream(&sid);
+                        match stream {
+                            Some(stream) => {
+                                // Get the state and check mouse is enabled.
+                                match stream.snapshot_full() {
+                                    Ok(state) => {
+                                        if !(state.mouse && state.mouse_sgr) {
+                                            let _ = send_json(&mut ws, &serde_json::json!({
+                                                "type": "error", "code": "no_mouse",
+                                                "message": "pane has not enabled SGR mouse reporting"
+                                            }))
+                                            .await;
+                                        } else if col >= state.cols || row >= state.rows {
+                                            let _ = send_json(&mut ws, &serde_json::json!({
+                                                "type": "error", "code": "bad_cell",
+                                                "message": format!("cell outside the pane: {},{}", col, row)
+                                            }))
+                                            .await;
+                                        } else {
+                                            match stream.mouse_click(col, row) {
+                                                Ok(_) => {
+                                                    let _ = send_json(&mut ws, &serde_json::json!({
+                                                        "type": "mousedelivered", "col": col, "row": row,
+                                                    }))
+                                                    .await;
+                                                }
+                                                Err(e) => {
+                                                    let _ = send_json(&mut ws, &serde_json::json!({
+                                                        "type": "error", "code": "mouseclick_failed",
+                                                        "message": e
+                                                    }))
+                                                    .await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = send_json(&mut ws, &serde_json::json!({
+                                            "type": "error", "code": "snapshot_failed",
+                                            "message": e
+                                        }))
+                                        .await;
+                                    }
+                                }
+                            }
+                            None => {
+                                let _ = send_json(&mut ws, &serde_json::json!({
+                                    "type": "error", "code": "not_attached",
+                                    "message": "attach before clicking"
+                                }))
+                                .await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = send_json(&mut ws, &serde_json::json!({
+                            "type": "error", "code": "bad_cell",
+                            "message": "invalid cell"
+                        }))
+                        .await;
+                    }
+                }
+            }
+            "copymode" => {
+                // tmux-specific (the keeper has no copy-mode equivalent).
                 let _ = send_json(&mut ws, &serde_json::json!({
                     "type": "error", "code": "not_implemented",
-                    "message": format!("{mtype} not yet ported")
+                    "message": "copymode is tmux-specific, not yet ported to the keeper"
                 }))
                 .await;
             }
