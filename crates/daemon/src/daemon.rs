@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use ldmux_protocol::rpc::SessionRecord;
+use ldmux_protocol::rpc::{SessionInfo, SessionOwner};
 
 use crate::daemon_lock::DaemonLock;
 use crate::keeper_supervisor::KeeperSupervisor;
@@ -43,6 +44,25 @@ pub struct ReconcileResult {
     pub adopted: Vec<String>,
     /// Records pruned (past their dead TTL, over the cap).
     pub pruned: Vec<String>,
+}
+
+/// The row title for a session (the TS `sessionTitle`): the explicit title when
+/// it is more than the kind, else the directory's basename, else the record's.
+fn session_title(record: &SessionRecord, cwd: &str) -> String {
+    if !record.title.is_empty() && record.title != "shell" && record.title != "pi" {
+        return record.title.clone();
+    }
+    let base = std::path::Path::new(cwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !base.is_empty() {
+        base
+    } else if !record.title.is_empty() {
+        record.title.clone()
+    } else {
+        record.id.clone()
+    }
 }
 
 /// The daemon's main state: the keeper, the registry, the ownership, and the
@@ -415,16 +435,22 @@ impl LdmuxDaemon {
         ];
         // Call the keeper's `Spawn` (the equivalent of the TS `cp.newSession`,
         // retargeted onto the keeper: a `Spawn` creates a new emulator session).
+        // The `pi` kind runs `pi`; every session gets the `LDMUX_*` spawn env
+        // (plan §2.6, the replacement for the tmux profile's environment).
         let spawn_resp = self.keeper_call(&km::KeeperMessage::Spawn(km::Spawn {
             session_id: tmux_name.clone(),
             cols: 80,
             rows: 24,
             cwd: Some(cwd.clone()),
+            command: if command.is_empty() { None } else { Some(command.clone()) },
+            env: Some(env.clone()),
         }))
         .await?;
         let _ = spawn_resp;
         self.registry.upsert(record.clone());
-        self.registry.save();
+        if let Err(e) = self.registry.save() {
+            eprintln!("ldmuxd: registry save: {e}");
+        }
         Ok(record)
     }
 
@@ -447,7 +473,9 @@ impl LdmuxDaemon {
         record.updated_at = now;
         record.exit_code = None;
         self.registry.upsert(record.clone());
-        self.registry.save();
+        if let Err(e) = self.registry.save() {
+            eprintln!("ldmuxd: registry save: {e}");
+        }
         self.forget_session_state(&record.id);
         Ok(record)
     }
@@ -473,7 +501,9 @@ impl LdmuxDaemon {
         }
         self.forget_session_state(id);
         self.registry.remove(id);
-        self.registry.save();
+        if let Err(e) = self.registry.save() {
+            eprintln!("ldmuxd: registry save: {e}");
+        }
         Ok(true)
     }
 
@@ -909,6 +939,64 @@ impl LdmuxDaemon {
         self.registry.get(id).cloned()
     }
 
+    /// The session list as clients see it (the TS `describeSessions`).
+    ///
+    /// One keeper `List` for the per-pane facts (the foreground command and the
+    /// pane's own cwd, the TS `paneFacts()`), then the registry record plus the
+    /// ownership and the live-window workspace. The facts are what make a row
+    /// read `bash`/`pi` and match a desk `pi` by the directory it is in now,
+    /// rather than the one it was created in.
+    pub async fn describe_sessions(&mut self) -> Vec<SessionInfo> {
+        let mut facts: HashMap<String, (String, String)> = HashMap::new();
+        if let Ok(KeeperMessage::ListResult(lr)) =
+            self.keeper_call(&KeeperMessage::List(km::List {})).await
+        {
+            for st in lr.sessions {
+                facts.insert(st.session_id.clone(), (st.foreground.clone(), st.cwd.clone()));
+            }
+        }
+        let records = self.registry.list();
+        records
+            .into_iter()
+            .map(|record| {
+                let fact = facts.get(&record.tmux_name);
+                // `cwd` follows the pane when it is running and the keeper
+                // knows where it is; otherwise the record's creation directory.
+                let cwd = match fact {
+                    Some((_, path)) if record.status == "running" && !path.is_empty() => {
+                        path.clone()
+                    }
+                    _ => record.cwd.clone(),
+                };
+                let process = fact.map(|(cmd, _)| cmd.clone()).filter(|c| !c.is_empty());
+                let owner = self.ownership.owner(&record.id).map(|c| SessionOwner {
+                    id: c.device.id.clone(),
+                    name: c.device.name.clone(),
+                    kind: c.device.kind.clone(),
+                    since: c.since.max(0) as u64,
+                });
+                let live_workspace = self
+                    .live_windows
+                    .get(&record.id)
+                    .map(|(ws, _)| ws.clone())
+                    .filter(|w| !w.is_empty());
+                SessionInfo {
+                    id: record.id.clone(),
+                    kind: record.kind.clone(),
+                    title: session_title(&record, &cwd),
+                    cwd,
+                    status: record.status.clone(),
+                    tmux_name: record.tmux_name.clone(),
+                    created_by: record.created_by.clone(),
+                    last_activity_at: Some(record.updated_at),
+                    process,
+                    owner,
+                    live_workspace,
+                }
+            })
+            .collect()
+    }
+
     /// Read the desktop inventory (the TS `desktopInventory`).
     pub async fn desktop_inventory(&self) -> ldmux_protocol::rpc::DesktopInventory {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -1011,7 +1099,9 @@ mod tests {
             cols: 80,
             rows: 24,
             cwd: None,
-        });
+            command: None,
+            env: None,
+            });
         ldmux_protocol::keeper_call::keeper_call(
             keeper_sock.to_str().unwrap(),
             &spawn,
@@ -1082,7 +1172,7 @@ mod tests {
         wait_socket(&keeper_sock).await;
 
         // A daemon rooted at the same dir (its keeper socket == the fake's).
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
 
         // A session the registry does not know (the daemon's own session).
         let spawn = KeeperMessage::Spawn(Spawn {
@@ -1090,7 +1180,9 @@ mod tests {
             cols: 80,
             rows: 24,
             cwd: None,
-        });
+            command: None,
+            env: None,
+            });
         ldmux_protocol::keeper_call::keeper_call(
             keeper_sock.to_str().unwrap(),
             &spawn,
@@ -1168,7 +1260,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
         let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
         let id = record.id.clone();
-        let tmux_name = record.tmux_name.clone();
+        let _tmux_name = record.tmux_name.clone();
         // Kill the session.
         let killed = d.kill_session(&id).await.unwrap();
         assert_eq!(killed.status, "dead");
@@ -1398,7 +1490,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
@@ -1432,7 +1524,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
@@ -1464,7 +1556,7 @@ mod tests {
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
         }
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();

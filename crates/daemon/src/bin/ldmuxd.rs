@@ -48,34 +48,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    // The state dir (the `LDMUX_STATE_DIR` env var, or `~/.ldmux`).
-    let state_dir = std::env::var("LDMUX_STATE_DIR")
-        .map(|s| std::path::PathBuf::from(s))
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".ldmux")
-        });
+    // The state dir (the `LDMUX_STATE_DIR` env var, or
+    // `${XDG_RUNTIME_DIR:-/tmp}/ldmux` — the TS `resolveStateDir`).
+    let state_dir = std::path::PathBuf::from(ldmux_protocol::paths::resolve_state_dir());
 
-    // The token file (the `LDMUX_TOKEN_FILE` env var, or `<state_dir>/token`).
-    let token_path = std::env::var("LDMUX_TOKEN_FILE")
-        .map(|s| std::path::PathBuf::from(s))
-        .unwrap_or_else(|_| state_dir.join("token"));
-
-    // Read or generate the token.
-    let token = match std::fs::read_to_string(&token_path) {
-        Ok(t) => t.trim().to_string(),
-        Err(_) => {
-            // Generate a token if one does not exist.
-            let t: String = (0..32)
-                .map(|_| {
-                    let r = rand::random::<u8>();
-                    (b'0' + (r % 36)) as char
-                })
-                .collect();
-            let _ = std::fs::write(&token_path, &t);
-            t
-        }
-    };
+    // The token: read or mint via the project's own `auth` module (64 lowercase
+    // hex, dir 0700, file 0600, legacy adoption). `LDMUX_TOKEN_FILE` moves it
+    // out of the state dir; otherwise it lives at `<state_dir>/token`.
+    let token_path_env = std::env::var("LDMUX_TOKEN_FILE").ok();
+    let token = ldmux_daemon::auth::load_or_create_token(
+        &state_dir.to_string_lossy(),
+        token_path_env.as_deref(),
+    );
 
     // Create the daemon.
     let keeper_bin = std::path::PathBuf::from("ldmux-keeper");

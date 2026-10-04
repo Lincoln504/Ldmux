@@ -376,12 +376,37 @@ impl Keeper {
         // and the fork itself live in `fork_shell` (a sync fn), so nothing
         // non-`Send` is held across an await below. `fork_shell`'s child
         // `_exit`s; only the parent returns a pid.
-        let prog = std::ffi::CString::new(self.shell[0].as_str())
+        // The program and argv: the `Spawn.command` when given (the `pi` kind),
+        // else the keeper's login shell. `argv[0]` is the program name (the
+        // `execvpe` convention), so the whole vector is passed.
+        let argv_s: Vec<String> = match &s.command {
+            Some(cmd) if !cmd.is_empty() => cmd.clone(),
+            _ => self.shell.clone(),
+        };
+        let prog_s = argv_s
+            .first()
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("empty argv"))?;
+        let prog = std::ffi::CString::new(prog_s.as_str())
             .map_err(|e| std::io::Error::other(format!("CString: {e}")))?;
-        let argv: Vec<std::ffi::CString> = self.shell[1..]
+        let argv: Vec<std::ffi::CString> = argv_s
             .iter()
             .map(|a| std::ffi::CString::new(a.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}"))))
             .collect::<Result<_, _>>()?;
+        // The child's environment: the keeper's own (which is the daemon's),
+        // overlaid with the `Spawn.env` (the `LDMUX_*` set, plan §2.6).
+        let mut env: Vec<(String, String)> = std::env::vars().collect();
+        if let Some(extra) = &s.env {
+            for (k, v) in extra {
+                env.retain(|(ek, _)| ek != k);
+                env.push((k.clone(), v.clone()));
+            }
+        }
+        let envp_cstrings: Vec<std::ffi::CString> = env
+            .iter()
+            .map(|(k, v)| std::ffi::CString::new(format!("{k}={v}")))
+            .collect::<Result<_, _>>()
+            .map_err(|e| std::io::Error::other(format!("CString: {e}")))?;
         let cwd_cstr: Option<std::ffi::CString> = match &s.cwd {
             Some(c) => Some(std::ffi::CString::new(c.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}")))?),
             None => None,
@@ -394,6 +419,7 @@ impl Keeper {
             &prog,
             &argv,
             cwd_cstr.as_ref(),
+            &envp_cstrings,
         )?;
         // The child holds its own 0/1/2 dups; close the parent's copies.
         drop(slave_in);
@@ -496,10 +522,13 @@ fn fork_shell(
     prog: &std::ffi::CString,
     argv: &[std::ffi::CString],
     cwd: Option<&std::ffi::CString>,
+    envp: &[std::ffi::CString],
 ) -> std::io::Result<i32> {
     use nix::libc as libc;
     let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
-    argv_ptrs.push(std::ptr::null()); // execvp's argv is NULL-terminated
+    argv_ptrs.push(std::ptr::null()); // execve's argv is NULL-terminated
+    let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|c| c.as_ptr()).collect();
+    envp_ptrs.push(std::ptr::null()); // execve's envp is NULL-terminated
     match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Child) => {
             // Only async-signal-safe calls here, then exec.
@@ -514,8 +543,9 @@ fn fork_shell(
             if let Some(c) = cwd {
                 let _ = unsafe { libc::chdir(c.as_ptr()) };
             }
-            let _ = unsafe { libc::execvp(prog.as_ptr(), argv_ptrs.as_ptr()) };
-            unsafe { libc::_exit(127) } // execvp failed
+            // `execvpe` resolves `prog` on PATH and uses the given environment.
+            let _ = unsafe { libc::execvpe(prog.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr()) };
+            unsafe { libc::_exit(127) } // execvpe failed
         }
         Ok(nix::unistd::ForkResult::Parent { child }) => Ok(child.as_raw()),
         Err(e) => Err(std::io::Error::other(format!("fork: {e}"))),

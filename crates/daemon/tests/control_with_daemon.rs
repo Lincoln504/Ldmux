@@ -1,6 +1,5 @@
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_daemon::fake_keeper::FakeKeeper;
-use ldmux_protocol::keeper::{KeeperMessage, Spawn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -19,7 +18,7 @@ async fn control_socket_with_daemon_handle() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    let mut d = LdmuxDaemon::new(dir.clone(), std::path::PathBuf::from("/nonexistent"));
+    let d = LdmuxDaemon::new(dir.clone(), std::path::PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
     {

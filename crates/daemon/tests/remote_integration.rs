@@ -1,13 +1,20 @@
-//! Remote integration test: the WebSocket client talks to the daemon over the
-//! remote WS endpoint.
+//! Remote integration test: a WS client talks to the daemon over the remote WS
+//! endpoint, using the **same wire contract as the Kotlin client**.
 //!
-//! The daemon is created with a fake keeper and started (which starts the
-//! remote WS server). A WS client connects, authenticates with the token, and
-//! exercises the hello, list, desktop, new, kill, and close handlers.
+//! Pinned here so a drift from the TS source of record fails a test:
+//! - the bearer token goes in the HTTP `Authorization` header at the upgrade,
+//!   not in a message (the Kotlin `AttachClient`/`LdmuxClient` set the header and
+//!   send `hello` with no token);
+//! - `hello` is answered with nothing (the client ignores unknown types, but the
+//!   TS sends no ack);
+//! - `list` answers `{type:"sessions", sessions:[SessionInfo camelCase]}`;
+//! - `new` answers `created` **then** `sessions`;
+//! - `kill`/`close` answer `sessions`;
+//! - a plain `GET /ws` answers 401 without a token and 400 with one (the phone's
+//!   `probe()` reads the status to tell a refused token from a machine that is off).
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_daemon::fake_keeper::FakeKeeper;
-use ldmux_protocol::keeper::{KeeperMessage, Spawn};
 
 fn scratch() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -26,18 +33,34 @@ async fn wait_socket(path: &std::path::Path) {
     panic!("socket did not appear: {}", path.display());
 }
 
-/// A minimal WS helper: send a JSON message and read the response.
-async fn ws_roundtrip(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    msg: &serde_json::Value,
-) -> serde_json::Value {
-    use futures_util::sink::SinkExt;
-    use futures_util::stream::StreamExt;
+type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-    let text = serde_json::to_string(msg).unwrap();
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
-        .await
-        .unwrap();
+/// Connect with the bearer token in the HTTP upgrade header.
+async fn connect_authed(port: u16, token: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let uri = format!("ws://127.0.0.1:{port}/ws");
+    let mut req = uri.into_client_request().unwrap();
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws
+}
+
+/// Send one JSON message.
+async fn send(ws: &mut Ws, msg: &serde_json::Value) {
+    use futures_util::sink::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+}
+
+/// Read the next text message.
+async fn next_json(ws: &mut Ws) -> serde_json::Value {
+    use futures_util::stream::StreamExt;
     loop {
         let Some(Ok(m)) = ws.next().await else {
             panic!("connection closed");
@@ -48,9 +71,38 @@ async fn ws_roundtrip(
     }
 }
 
-#[tokio::test]
-async fn remote_list_and_new_over_ws() {
-    let dir = scratch();
+/// Read messages until one has the given `type`.
+async fn next_of_type(ws: &mut Ws, ty: &str) -> serde_json::Value {
+    for _ in 0..20 {
+        let v = next_json(ws).await;
+        if v["type"] == ty {
+            return v;
+        }
+    }
+    panic!("no {ty} message");
+}
+
+/// A raw plain-HTTP GET, returning the status code.
+async fn plain_get_status(port: u16, token: Option<&str>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!("GET /ws HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.ok();
+    let head = String::from_utf8_lossy(&buf);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    status
+}
+
+async fn start_daemon(dir: &std::path::Path, port: u16, token: &str) -> std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> {
     let keeper_sock = dir.join("keeper.sock");
     let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
     let fk_serve = fk.clone();
@@ -59,35 +111,25 @@ async fn remote_list_and_new_over_ws() {
         FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
     });
     wait_socket(&keeper_sock).await;
+    let d = LdmuxDaemon::new(dir.to_path_buf(), std::path::PathBuf::from("/nonexistent"))
+        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+    let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
+    arc.lock().await.start(&arc).await.unwrap();
+    arc
+}
 
-    // A daemon with the remote enabled on a test port.
+#[tokio::test]
+async fn remote_contract_list_new_kill_close() {
+    let dir = scratch();
     let port: u16 = 49995;
-    let token = "test-token".to_string();
-    let mut d = LdmuxDaemon::new(dir.clone(), std::path::PathBuf::from("/nonexistent"))
-        .with_remote("127.0.0.1".to_string(), port, token.clone());
-    let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(d));
-    {
-        let mut d = arc.lock().await;
-        d.start(&arc).await.unwrap();
-    }
+    let token = "test-token";
+    let arc = start_daemon(&dir, port, token).await;
 
-    // Connect a WS client.
-    let uri = format!("ws://127.0.0.1:{port}/ws");
-    let (mut ws, _response) = tokio_tungstenite::connect_async(&uri)
-        .await
-        .unwrap();
+    let mut ws = connect_authed(port, token).await;
 
-    // Send a `ping` with the token (the first message carries the token).
-    let resp = ws_roundtrip(
-        &mut ws,
-        &serde_json::json!({ "type": "ping", "id": "test-1", "token": token }),
-    )
-    .await;
-    assert_eq!(resp["type"], "pong");
-
-    // Send a `hello` with the device id.
-    let resp = ws_roundtrip(
+    // `hello` is answered with nothing (assert the next message is the `list`
+    // answer, not an ack).
+    send(
         &mut ws,
         &serde_json::json!({
             "type": "hello",
@@ -95,52 +137,65 @@ async fn remote_list_and_new_over_ws() {
         }),
     )
     .await;
-    assert_eq!(resp["type"], "hello_ack");
 
-    // Send a `list` — should be empty (no sessions yet).
-    let resp = ws_roundtrip(&mut ws, &serde_json::json!({ "type": "list" })).await;
-    assert_eq!(resp["type"], "sessions");
-    let sessions = resp["sessions"].as_array().unwrap();
-    assert!(sessions.is_empty(), "expected no sessions: {sessions:?}");
+    // `list` — camelCase SessionInfo array.
+    send(&mut ws, &serde_json::json!({ "type": "list" })).await;
+    let resp = next_of_type(&mut ws, "sessions").await;
+    assert!(resp["sessions"].as_array().unwrap().is_empty());
 
-    // Send a `new` — create a session.
-    let dir_str = dir.to_string_lossy().into_owned();
-    let resp = ws_roundtrip(
+    // `new` — `created` then `sessions`.
+    send(
         &mut ws,
-        &serde_json::json!({
-            "type": "new",
-            "kind": "shell",
-            "cwd": dir_str,
-        }),
+        &serde_json::json!({ "type": "new", "kind": "shell", "cwd": dir.to_string_lossy() }),
     )
     .await;
-    assert_eq!(resp["type"], "session");
-    let session = &resp["session"];
-    let session_id = session["id"].as_str().unwrap().to_string();
-    assert!(!session_id.is_empty(), "no session id: {session:?}");
+    let created = next_of_type(&mut ws, "created").await;
+    let session_id = created["sessionId"].as_str().unwrap().to_string();
+    assert!(!session_id.is_empty());
+    assert!(created.get("cwd").is_some(), "created carries cwd");
+    let sessions = next_of_type(&mut ws, "sessions").await;
+    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1);
+    // camelCase, and the fields the Kotlin `parseSessions` reads.
+    let row = &sessions["sessions"][0];
+    assert_eq!(row["id"], session_id);
+    assert!(row.get("tmuxName").is_some(), "camelCase tmuxName: {row}");
+    assert_eq!(row["createdBy"], "phone");
+    assert!(row.get("lastActivityAt").is_some());
 
-    // Send a `list` — should contain the session.
-    let resp = ws_roundtrip(&mut ws, &serde_json::json!({ "type": "list" })).await;
-    let sessions = resp["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 1, "expected 1 session: {sessions:?}");
-    assert_eq!(sessions[0]["id"].as_str().unwrap(), session_id);
-
-    // Send a `kill` — kill the session.
-    let resp = ws_roundtrip(
+    // `kill` — answered with `sessions`.
+    send(
         &mut ws,
         &serde_json::json!({ "type": "kill", "sessionId": session_id }),
     )
     .await;
-    assert_eq!(resp["type"], "killed");
+    let sessions = next_of_type(&mut ws, "sessions").await;
+    assert_eq!(sessions["sessions"][0]["status"], "dead");
 
-    // Send a `list` — should show the session as dead.
-    let resp = ws_roundtrip(&mut ws, &serde_json::json!({ "type": "list" })).await;
-    let sessions = resp["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 1, "expected 1 session: {sessions:?}");
-    assert_eq!(sessions[0]["status"].as_str().unwrap(), "dead");
-
-    // Close the connection.
     ws.close(None).await.ok();
-    drop(fk);
+    drop(arc);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn remote_rejects_a_missing_token_and_answers_the_probe() {
+    let dir = scratch();
+    let port: u16 = 49996;
+    let token = "right-token";
+    let arc = start_daemon(&dir, port, token).await;
+
+    // A WS upgrade without the token is refused (the client never gets a socket).
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let uri = format!("ws://127.0.0.1:{port}/ws");
+    let req = uri.into_client_request().unwrap();
+    let err = tokio_tungstenite::connect_async(req).await;
+    assert!(err.is_err(), "an unauthenticated upgrade must be refused");
+
+    // The phone's `probe()`: a bad token is 401 (Rejected), a good token is a
+    // non-401 (the daemon is there).
+    assert_eq!(plain_get_status(port, Some("wrong")).await, 401);
+    assert_eq!(plain_get_status(port, None).await, 401);
+    assert_eq!(plain_get_status(port, Some(token)).await, 400);
+
+    drop(arc);
     let _ = std::fs::remove_dir_all(&dir);
 }

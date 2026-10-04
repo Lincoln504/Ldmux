@@ -75,7 +75,7 @@ pub fn shell_quote(a: &str) -> String {
     // If the string is safe (no shell metacharacters), return it as-is.
     let safe: Vec<bool> = a
         .chars()
-        .map(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '=' | '.' | '/' | '-'))
+        .map(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'))
         .collect();
     if !a.is_empty() && safe.iter().all(|&b| b) {
         return a.to_string();
@@ -374,7 +374,7 @@ pub async fn open_live(
     if std::env::var("DISPLAY").is_err() {
         return Err("no DISPLAY (not an X11 session)".to_string());
     }
-    let (shim_path, argv) = prepare_live(state_dir, tmux_socket, tmux_name, session_id, tmux_bin)
+    let (_shim_path, argv) = prepare_live(state_dir, tmux_socket, tmux_name, session_id, tmux_bin)
         .await?;
     let exec_argv = live_exec_argv(&argv.iter().map(|s| s.as_str()).collect::<Vec<&str>>());
     let result = crate::exec::run(

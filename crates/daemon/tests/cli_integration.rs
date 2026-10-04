@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_daemon::fake_keeper::FakeKeeper;
-use ldmux_protocol::keeper::{KeeperMessage, Spawn};
 
 fn scratch() -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -83,7 +82,7 @@ async fn cli_ping_over_the_control_socket() {
 
     ensure_cli_built();
 
-    let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -118,7 +117,7 @@ async fn cli_full_lifecycle_over_the_control_socket() {
 
     ensure_cli_built();
 
-    let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
     {

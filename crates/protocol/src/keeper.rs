@@ -63,6 +63,14 @@ pub struct Spawn {
     pub rows: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The argv to run instead of the keeper's default login shell (the `pi`
+    /// kind runs `pi`). `command[0]` is the program.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// Extra environment for the child (the `LDMUX_*` spawn env, plan §2.6).
+    /// The keeper inherits its own environment and overlays these.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<(String, String)>>,
 }
 
 /// Daemon → keeper: kill a session (group-kill the child, drop the emulator).
@@ -281,6 +289,8 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 cwd: None,
+                command: None,
+                env: None,
             }))
             .unwrap();
         assert_eq!(v["type"], "spawn");

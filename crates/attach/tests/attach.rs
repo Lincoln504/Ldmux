@@ -68,7 +68,9 @@ async fn attach_boots_headless_and_pipes_bytes() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await

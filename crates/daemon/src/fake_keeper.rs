@@ -320,7 +320,9 @@ mod tests {
             cols: 80,
             rows: 24,
             cwd: None,
-        }))
+            command: None,
+            env: None,
+            }))
     }
 
     fn is_state(m: &KeeperMessage, id: &str, dead: bool) -> bool {
@@ -525,7 +527,9 @@ mod tests {
             cols: 80,
             rows: 24,
             cwd: None,
-        }), 2000)
+            command: None,
+            env: None,
+            }), 2000)
         .await
         .unwrap();
         assert!(is_state(&r, "s1", false));

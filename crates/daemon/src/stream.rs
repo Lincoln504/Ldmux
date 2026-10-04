@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ldmux_protocol::keeper::{KeeperMessage, Snapshot};
 
@@ -146,6 +146,33 @@ impl PaneStream {
     /// The subscriber gets its own bounded queue; on overflow it is dropped and
     /// the `on_reset` callback fires (a forced resync).
     pub fn subscribe(&self, sub: StreamSubscriber) -> (usize, Box<dyn Fn() + Send + Sync + '_>) {
+        let id_for_close = self.register(sub);
+        (id_for_close, Box::new(move || {
+            let mut subs = self.subs.lock().unwrap();
+            // Remove by id (not by position — other subscribers may have
+            // been added/removed since this one was pushed).
+            subs.retain(|s| s.id != id_for_close);
+        }))
+    }
+
+    /// Like `subscribe`, but the unsubscribe closure owns its own `Arc`, so it is
+    /// `'static`. The daemon's per-connection state outlives the borrow that
+    /// `subscribe` is tied to, so it needs this form.
+    pub fn subscribe_owned(
+        self: &Arc<Self>,
+        sub: StreamSubscriber,
+    ) -> (usize, Box<dyn Fn() + Send + Sync + 'static>) {
+        let id_for_close = self.register(sub);
+        let me = Arc::clone(self);
+        (id_for_close, Box::new(move || {
+            let mut subs = me.subs.lock().unwrap();
+            subs.retain(|s| s.id != id_for_close);
+        }))
+    }
+
+    /// Register a subscriber and return its id (the shared body of `subscribe`
+    /// and `subscribe_owned`).
+    fn register(&self, sub: StreamSubscriber) -> usize {
         let id = {
             let subs = self.subs.lock().unwrap();
             subs.iter().map(|s| s.id).max().unwrap_or(0) + 1
@@ -157,13 +184,7 @@ impl PaneStream {
             dropped: false,
             sub,
         });
-        let id_for_close = id;
-        (id, Box::new(move || {
-            let mut subs = self.subs.lock().unwrap();
-            // Remove by id (not by position — other subscribers may have
-            // been added/removed since this one was pushed).
-            subs.retain(|s| s.id != id_for_close);
-        }))
+        id
     }
 
     /// Deliver `text` to every subscriber (the fanout), through the sanitizer.
@@ -271,6 +292,30 @@ impl PaneStream {
             KeeperMessage::SnapshotResult(sr) => {
                 let _ = self.epoch.fetch_add(1, Ordering::SeqCst);
                 Ok(sr)
+            }
+            other => Err(format!("not a snapshotresult: {other:?}")),
+        }
+    }
+
+    /// A snapshot carrying **both** the full state and the delivered-snapshot
+    /// epoch, optionally including `history_lines` of paged scrollback. This is
+    /// the remote's `sendState` source: the TS `sendState` sends the state
+    /// fields *and* the screen for attach, resize and scrollback alike, so a
+    /// `snapshot()` that returned only text (as `snapshot_with_history` does)
+    /// could not build it.
+    pub fn snapshot_result(
+        &self,
+        history_lines: Option<u64>,
+    ) -> Result<(ldmux_protocol::keeper::SnapshotResult, u64), String> {
+        let req = KeeperMessage::Snapshot(Snapshot {
+            session_id: self.session_id.clone(),
+            history_lines,
+        });
+        let resp = self.keeper.call(&req)?;
+        match resp {
+            KeeperMessage::SnapshotResult(sr) => {
+                let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok((sr, epoch))
             }
             other => Err(format!("not a snapshotresult: {other:?}")),
         }

@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ldmux_daemon::daemon::LdmuxDaemon;
-use ldmux_daemon::keeper_supervisor::KeeperSupervisor;
 
 fn scratch_dir() -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -46,7 +45,7 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
     wait_socket(&keeper_sock).await;
 
     // Start a daemon connected to the real keeper.
-    let mut d = LdmuxDaemon::new(dir.clone(), keeper_bin.clone());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin.clone());
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
         let mut d = arc.lock().await;
@@ -82,7 +81,7 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Start a new daemon connected to the same keeper.
-    let mut d2 = LdmuxDaemon::new(dir.clone(), keeper_bin.clone());
+    let d2 = LdmuxDaemon::new(dir.clone(), keeper_bin.clone());
     let arc2 = Arc::new(tokio::sync::Mutex::new(d2));
     {
         let mut d = arc2.lock().await;
@@ -121,4 +120,10 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
 
     // Stop the second daemon.
     arc2.lock().await.stop();
+
+    // Belt-and-braces: reap any keeper still bound to this scratch socket (a
+    // daemon `start()` can respawn one), then remove the scratch dir.
+    let sock = keeper_sock.to_string_lossy().into_owned();
+    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
+    let _ = std::fs::remove_dir_all(&dir);
 }

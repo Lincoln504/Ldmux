@@ -94,7 +94,9 @@ async fn spawn_runs_a_shell_and_the_keeper_reads_the_master() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -193,7 +195,9 @@ async fn resize_reports_the_new_state() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     ).await.unwrap();
     match res {
@@ -268,7 +272,9 @@ async fn the_emulator_renders_the_pane_output() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -342,7 +348,9 @@ async fn the_emulator_resizes() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -402,7 +410,9 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -469,7 +479,9 @@ async fn the_emulator_captures_history_above_the_screen() {
             cols: 80,
             rows: 24,
             cwd: None,
-        }),
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -547,7 +559,10 @@ async fn the_emulator_reports_the_pane_state() {
 
     let res = keeper_call(
         &s,
-        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None }),
+        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None,
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -605,7 +620,10 @@ async fn the_state_query_carries_the_pane_state() {
 
     let res = keeper_call(
         &s,
-        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None }),
+        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None,
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -673,7 +691,10 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
 
     let res = keeper_call(
         &s,
-        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None }),
+        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None,
+            command: None,
+            env: None,
+            }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -748,4 +769,56 @@ async fn an_unknown_session_is_an_error_answer() {
         Err(e) => assert!(!e.0.is_empty(), "a failure is reported: {e}"),
         Ok(m) => panic!("expected an error, got {m:?}"),
     }
+}
+
+/// The `Spawn.command` + `Spawn.env` (plan §2.6): the command is what runs, and
+/// the child sees the `LDMUX_*` variables the daemon sets. This is the
+/// replacement for tmux's per-session `-e K=V`.
+#[tokio::test]
+async fn spawn_runs_the_command_and_passes_the_env() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "env-1".to_string();
+    let res: KeeperMessage = keeper_call(
+        &socket.to_string_lossy(),
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'MARK=%s\\n' \"$LDMUX_PROBE\"; sleep 30".into(),
+            ]),
+            env: Some(vec![("LDMUX_PROBE".into(), "hello-env".into())]),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(res, KeeperMessage::State(_)), "spawn answers State, got {res:?}");
+
+    let mut seen = Vec::new();
+    for _ in 0..200 {
+        let r = keeper_call(
+            &socket.to_string_lossy(),
+            &KeeperMessage::Peek(Peek { session_id: id.clone() }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+        if let KeeperMessage::PeekResult(pr) = r {
+            seen.extend_from_slice(&pr.data);
+        }
+        if String::from_utf8_lossy(&seen).contains("MARK=hello-env") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let text = String::from_utf8_lossy(&seen);
+    assert!(
+        text.contains("MARK=hello-env"),
+        "the command's output with its env must appear; got {text:?}"
+    );
 }

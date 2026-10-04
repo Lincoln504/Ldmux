@@ -41,7 +41,7 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
     wait_socket(&keeper_sock).await;
 
     // Start a daemon.
-    let mut d = LdmuxDaemon::new(dir.clone(), keeper_bin.clone());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin.clone());
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
         let mut d = arc.lock().await;
@@ -98,4 +98,12 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
 
     // Stop the daemon.
     arc.lock().await.stop();
+
+    // `stop()` deliberately does NOT kill the keeper (the orphan/restart-survival
+    // design), so this test must reap the keeper it caused the daemon to spawn,
+    // or every run leaks one holding PTYs and a socket. Kill by the keeper socket
+    // path (unique per scratch dir), then remove the scratch dir.
+    let sock = keeper_sock.to_string_lossy().into_owned();
+    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
+    let _ = std::fs::remove_dir_all(&dir);
 }

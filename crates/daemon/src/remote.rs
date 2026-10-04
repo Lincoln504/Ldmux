@@ -1,875 +1,1430 @@
-//! The remote server: the phone-facing WebSocket endpoint (the tailnet address +
-//! token auth).
+//! The remote server: the phone-facing WebSocket endpoint (the tailnet address
+//! + bearer-token auth).
 //!
-//! Port of `packages/daemon/src/remote.ts` (1293 lines). The phone connects over
-//! the tailnet address with the bearer token; the server gates on the token.
+//! Port of `packages/daemon/src/remote.ts` (the source of record). The phone
+//! connects over the tailnet address with the bearer token **at the HTTP
+//! upgrade**; terminal output travels as binary OUTPUT frames (`frames.rs`);
+//! control/handshake is JSON text.
 //!
-//! ## The full `onMessage` dispatch
+//! One connection = one attached session (open N connections to view N
+//! sessions). On attach: subscribe first (queueing), snapshot, send CAPS +
+//! SNAPSHOT, then flush — so no output is lost across the snapshot boundary.
 //!
-//! 16 message types: `ping`, `hello`, `list`, `desktop`, `new`, `makelive`,
-//! `closelive`, `kill`, `close`, `attach`, `resize`, `mouseclick`, `input`,
-//! `key`, `copymode`, `follow`, `scrollback`.
+//! ## The message surface (the exact shapes the Kotlin client parses)
 //!
-//! ## The device ownership
+//! - `caps` + `snapshot` (always a pair) answer `attach`, `resize`, `scrollback`.
+//! - `sessions` answers `list`, `new`, `kill`, `close`.
+//! - `created` (before `sessions`) answers `new`.
+//! - `owned` answers a refused/taken claim; `live` answers make/close-live.
+//! - `pong` answers `ping`; `error` carries a code + message.
+//! - output is `FrameType::Output` (0x10) as a binary frame.
 //!
-//! The `byDevice` map: which device holds which session. The `releaseAfterGrace`
-//! timer: a closed socket's claims are released after a grace period (a
-//! reconnect that comes back within the grace still holds the shell).
+//! ## Ownership (ADR-0010)
 //!
-//! ## The sweep
+//! `byDevice` maps a device id to its live connections; a claim is released
+//! after a grace on disconnect (a reconnect within the grace still holds the
+//! shell). A displaced device is told `owned` and cut off. Only the holder may
+//! write (`input`/`key`/`mouseclick`/`copymode`).
 //!
-//! The idle connection cleanup: a socket silent for `idleMs` is terminated.
+//! ## Flow control
 //!
-//! ## What is NOT here yet
-//!
-//! - The `makeLive`/`closeLive` handlers (the desktop window lifecycle,
-//!   `desktop.ts`).
-//! - The `resize`/`mouseclick`/`input`/`key`/`copymode`/`scrollback` handlers
-//!   (the stream methods, `PaneStream`).
-//! - The `new`/`kill`/`close` handlers (the daemon's session lifecycle).
+//! Output is coalesced into one frame per 8 ms (or 4 KiB), the input is capped
+//! at 16 KiB, keys at 32, and a connection silent for 20 s is reaped.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
-use tokio::net::TcpListener;
+use futures_util::SinkExt;
+use ldmux_protocol::frames::{encode_frame, t as ft};
+use ldmux_protocol::messages::PROTOCOL_VERSION;
+use ldmux_protocol::net::is_tailnet_or_loopback;
+use ldmux_protocol::rpc::{DeviceInfo, SessionOwner, SessionRecord};
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
-/// The WS stream type (the `accept_async` returns this; `connect_async` returns
-/// `WebSocketStream<MaybeTlsStream<TcpStream>>`, which is the same for our
-/// purposes).
-type WsStream = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+use crate::stream::{PaneStream, StreamSubscriber};
+
+/// The WS stream type (`accept_async` returns this).
+type WsStream = tokio_tungstenite::WebSocketStream<TcpStream>;
+
+/// The daemon handle shared with the connection tasks.
+type DaemonArc = Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>;
+
+/// Messages that change what is in a shell, and so are only the holder's to
+/// send (the TS `WRITES`).
+const WRITES: [&str; 4] = ["input", "key", "mouseclick", "copymode"];
+
+/// Per-type caps (the TS `MAX_INPUT_BYTES` / `MAX_KEYS`).
+const MAX_INPUT_BYTES: usize = 16 * 1024;
+const MAX_KEYS: usize = 32;
+/// Output queued between subscribe and snapshot is bounded before we resync.
+const MAX_PENDING_BYTES: usize = 1024 * 1024;
+/// Output coalescing window, and the size that flushes it early.
+const OUTPUT_FLUSH_MS: u64 = 8;
+const OUTPUT_FLUSH_BYTES: usize = 4 * 1024;
+/// Unsent output on one socket past this means the link, not the terminal, is
+/// behind — answer `resync` instead of building a history the client cannot show.
+const WS_BACKLOG_BYTES: usize = 64 * 1024;
+/// Silence that means the other end has gone.
+const WS_IDLE_MS: u64 = 20_000;
+/// How long a closed socket's claims wait for the same device to come back.
+const RELEASE_GRACE_MS: u64 = 3_000;
 
 /// The remote config: the hostname (the tailnet address), the port, and the
-/// token (the ADR-0010 bearer).
+/// bearer token.
 #[derive(Clone)]
 pub struct RemoteConfig {
     /// The hostname to bind (the tailnet address, e.g. `100.127.119.54`).
     pub hostname: String,
-    /// The port to bind (e.g. `8080`).
+    /// The port to bind (e.g. `7623`).
     pub port: u16,
-    /// The bearer token (the ADR-0010 identity).
+    /// The bearer token (checked at the HTTP upgrade).
     pub token: String,
 }
 
 impl RemoteConfig {
     pub fn new(hostname: impl Into<String>, port: u16, token: impl Into<String>) -> Self {
-        Self { hostname: hostname.into(), port, token: token.into() }
+        Self {
+            hostname: hostname.into(),
+            port,
+            token: token.into(),
+        }
     }
 }
 
-/// Per-connection state (the `ConnData` in the TS).
-#[allow(dead_code)]
-struct ConnData {
-    /// Whether the connection is disposed (the client closed).
+/// One outbound message for a connection's writer/coalescer.
+enum Out {
+    /// Pane output bytes (coalesced).
+    Output(Vec<u8>),
+    /// A JSON control message (flushes pending output first, so it cannot
+    /// overtake output it should follow).
+    Json(String),
+    /// Close the connection (the sweep, or `stop`).
+    Close,
+}
+
+/// The connection's mutable state, shared between the reader task and the
+/// output callback (which runs on the stream's poll thread).
+struct ConnInner {
     disposed: bool,
-    /// The attach generation (incremented on each attach; a stale snapshot
-    /// after a re-attach is dropped).
-    attach_gen: u64,
-    /// Whether the connection is live (actively streaming).
+    /// Whether live output is flowing (false between subscribe and the snapshot).
     live: bool,
-    /// The device identity (the `hello` sets it).
-    device: Option<ldmux_protocol::rpc::DeviceInfo>,
-    /// The session id this connection is attached to.
+    /// Incremented per attach; a superseded attach must not commit.
+    attach_gen: u64,
     session_id: Option<String>,
-    /// The session record this connection is attached to.
-    record: Option<ldmux_protocol::rpc::SessionRecord>,
-    /// The last time this connection sent a message (the sweep uses it).
-    last_seen: std::time::Instant,
+    record: Option<SessionRecord>,
+    stream: Option<Arc<PaneStream>>,
+    unsubscribe: Option<Box<dyn Fn() + Send + Sync>>,
+    device: Option<DeviceInfo>,
+    /// Output queued before `live` (bounded by `MAX_PENDING_BYTES`).
+    pending: Vec<u8>,
+    pending_bytes: usize,
+    resyncing: bool,
+    last_seen_ms: u64,
+}
+
+/// A live connection: the outbound channel, the shared state, and the count of
+/// bytes produced but not yet written to the wire (the backlog probe).
+struct ConnShared {
+    tx: tokio::sync::mpsc::UnboundedSender<Out>,
+    inner: Mutex<ConnInner>,
+    outstanding: AtomicUsize,
+}
+
+impl ConnShared {
+    fn send_json(&self, value: &serde_json::Value) {
+        let _ = self.tx.send(Out::Json(value.to_string()));
+    }
+
+    fn send_error(&self, code: &str, message: &str) {
+        self.send_json(&serde_json::json!({
+            "type": "error", "code": code, "message": message
+        }));
+    }
+}
+
+/// The server-shared state: the connections table + the daemon + the token.
+struct Shared {
+    conns: Mutex<HashMap<u64, Arc<ConnShared>>>,
+    daemon: DaemonArc,
+    token: String,
+    stopped: AtomicBool,
 }
 
 /// The remote server: the phone-facing WebSocket endpoint.
 pub struct RemoteServer {
     cfg: RemoteConfig,
-    /// Whether the server is stopped (the `stop` sets it).
-    stopped: Arc<AtomicBool>,
-    /// The accept loop's join handle (the `start` spawns it).
-    #[allow(dead_code)]
-    _accept_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Per-connection state (keyed by a connection id).
-    #[allow(dead_code)]
-    conn_state: HashMap<u64, ConnData>,
-    /// The device ownership: device id → set of connection ids.
-    #[allow(dead_code)]
-    by_device: HashMap<String, std::collections::HashSet<u64>>,
+    shared: Option<Arc<Shared>>,
+    accept: Option<tokio::task::JoinHandle<()>>,
+    sweep: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RemoteServer {
     pub fn new(cfg: RemoteConfig) -> Self {
         Self {
             cfg,
-            stopped: Arc::new(AtomicBool::new(false)),
-            _accept_handle: None,
-            conn_state: HashMap::new(),
-            by_device: HashMap::new(),
+            shared: None,
+            accept: None,
+            sweep: None,
         }
     }
 
-    /// Bind the WS server on the tailnet address (the `start()`).
-    ///
-    /// The `daemon_arc` is the `Arc<Mutex<LdmuxDaemon>>` shared with the
-    /// daemon; the `handle_connection` function uses it to call the daemon's
-    /// methods (session lifecycle, stream, desktop).
-    pub async fn start(
-        &mut self,
-        daemon_arc: &std::sync::Arc<tokio::sync::Mutex<super::daemon::LdmuxDaemon>>,
-    ) -> Result<(String, u16), String> {
+    /// Bind the WS server on the tailnet address and begin serving.
+    pub async fn start(&mut self, daemon_arc: &DaemonArc) -> Result<(String, u16), String> {
         let addr = format!("{}:{}", self.cfg.hostname, self.cfg.port);
+        // Refused here, at the one place that listens (the TS `start` check).
+        if !is_tailnet_or_loopback(&self.cfg.hostname) {
+            return Err(format!(
+                "refusing to listen on {}: not a tailnet or loopback address",
+                self.cfg.hostname
+            ));
+        }
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
-        let token = self.cfg.token.clone();
-        let stopped = Arc::clone(&self.stopped);
-        let daemon_arc = daemon_arc.clone();
-        let handle = tokio::spawn(async move {
-            let mut conn_id: u64 = 0;
+        let shared = Arc::new(Shared {
+            conns: Mutex::new(HashMap::new()),
+            daemon: daemon_arc.clone(),
+            token: self.cfg.token.clone(),
+            stopped: AtomicBool::new(false),
+        });
+        let accept_shared = shared.clone();
+        let accept = tokio::spawn(async move {
+            accept_loop(listener, accept_shared).await;
+        });
+        let sweep_shared = shared.clone();
+        let sweep = tokio::spawn(async move {
+            let step = (WS_IDLE_MS / 4).max(250);
             loop {
-                let (stream, _remote) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(_) => {
-                        if stopped.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-                if stopped.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(step)).await;
+                if sweep_shared.stopped.load(Ordering::Relaxed) {
                     break;
                 }
-                let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                conn_id += 1;
-                tokio::spawn(handle_connection(
-                    ws_stream,
-                    token.clone(),
-                    conn_id,
-                    daemon_arc.clone(),
-                ));
+                sweep_once(&sweep_shared).await;
             }
         });
-        self._accept_handle = Some(handle);
+        self.shared = Some(shared);
+        self.accept = Some(accept);
+        self.sweep = Some(sweep);
         Ok((self.cfg.hostname.clone(), self.cfg.port))
     }
 
-    /// Stop the server (the `stop()`).
+    /// Stop the server: mark stopped, tell every connection to close.
     pub fn stop(&mut self) {
-        self.stopped.store(true, Ordering::Relaxed);
+        if let Some(shared) = &self.shared {
+            shared.stopped.store(true, Ordering::Relaxed);
+            let conns = shared.conns.lock().unwrap();
+            for c in conns.values() {
+                let _ = c.tx.send(Out::Close);
+            }
+        }
+        if let Some(h) = self.accept.take() {
+            h.abort();
+        }
+        if let Some(h) = self.sweep.take() {
+            h.abort();
+        }
     }
 }
 
-/// The per-connection loop: read messages, check the token on the first
-/// message, dispatch, write responses.
-///
-/// The token gate: the first message must carry the token (the `hello` with the
-/// device id + token).
-async fn handle_connection(
-    mut ws: WsStream,
-    token: String,
-    _conn_id: u64,
-    daemon_arc: std::sync::Arc<tokio::sync::Mutex<super::daemon::LdmuxDaemon>>,
-) {
-    let mut authorized = false;
-    // These are set by the `hello`/`attach` handlers and read by the stream
-    // commands.
-    let mut device: Option<ldmux_protocol::rpc::DeviceInfo> = None;
-    let mut session_id: Option<String> = None;
-    // The attach output buffer (flushed on each WS message).
-    let mut attach_out: Option<Arc<std::sync::Mutex<Vec<u8>>>> = None;
+impl Drop for RemoteServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
+/// The accept loop: auth at the upgrade, then one task per connection.
+async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
+    let mut conn_id: u64 = 0;
     loop {
-        let Some(Ok(msg)) = ws.next().await else {
-            // The connection closed.
+        if shared.stopped.load(Ordering::Relaxed) {
             break;
-        };
-        // Flush the attach output buffer (the live output accumulated since
-        // the last flush is sent now).
-        if let Some(buf) = &attach_out {
-            let data: Vec<u8> = buf.lock().unwrap().drain(..).collect();
-            if !data.is_empty() {
-                let _ = ws.send(Message::Binary(data.into())).await;
-            }
         }
-        let text: String = match &msg {
-            Message::Text(t) => t.to_string(),
-            Message::Binary(b) => String::from_utf8_lossy(b.as_ref()).to_string(),
-            Message::Ping(_) => continue,
-            Message::Pong(_) => continue,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        // The token gate: the first message must carry the token.
-        if !authorized {
-            let v: serde_json::Value = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(_) => {
-                    let _ = send_json(&mut ws, &serde_json::json!({
-                        "type": "error", "code": "bad_json", "message": "invalid JSON"
-                    }))
-                    .await;
+        let (mut stream, peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(_) => {
+                if shared.stopped.load(Ordering::Relaxed) {
                     break;
                 }
-            };
-            let provided = v.get("token").and_then(|t| t.as_str()).unwrap_or("");
-            if provided != token {
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "unauthorized", "message": "bad token"
-                }))
-                .await;
-                break;
+                continue;
             }
-            authorized = true;
+        };
+        // Before the token: a peer that is not on the tailnet is not a client,
+        // however it reached this socket (the TS upgrade handler).
+        if !is_tailnet_or_loopback(&peer.ip().to_string()) {
+            write_http(&mut stream, 403, "forbidden\n").await;
+            continue;
         }
-        // The dispatch: the 16 message types.
-        let v: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
+        // Peek the request head (without consuming it) so a plain HTTP GET is
+        // answered rather than left to the WebSocket handshake to fail — the
+        // phone's `probe()` reads the status to tell a refused token (401) from
+        // a machine that is off.
+        let head = match read_head(&stream).await {
+            Some(h) => h,
+            None => continue,
+        };
+        let Some((_method, target, headers)) = parse_request_head(&head) else {
+            write_http(&mut stream, 400, "bad request\n").await;
+            continue;
+        };
+        let path = path_of(&target);
+        let authed = authorized(&headers, &target, &shared.token);
+        if !is_ws_upgrade(&headers) {
+            // The TS `handleRequest` statuses.
+            let (status, body) = plain_response(&path, authed);
+            write_http(&mut stream, status, body).await;
+            continue;
+        }
+        if path != "/ws" {
+            write_http(&mut stream, 404, "ldmux remote: the endpoint is /ws\n").await;
+            continue;
+        }
+        if !authed {
+            write_http(&mut stream, 401, "unauthorized\n").await;
+            continue;
+        }
+        let ws = match tokio_tungstenite::accept_async(stream).await {
+            Ok(ws) => ws,
             Err(_) => continue,
         };
-        let mtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match mtype {
-            "ping" => {
-                let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                let _ = send_json(&mut ws, &serde_json::json!({ "type": "pong", "id": id }))
-                    .await;
-            }
-            "hello" => {
-                // The device identity (ADR-0010: identity, not authentication).
-                let dev = v.get("device").cloned().unwrap_or(serde_json::Value::Null);
-                if let Ok(d) = serde_json::from_value::<ldmux_protocol::rpc::DeviceInfo>(dev) {
-                    device = Some(d);
-                }
-                let _ = send_json(&mut ws, &serde_json::json!({ "type": "hello_ack" }))
-                    .await;
-            }
-            "list" => {
-                // The session list from the daemon.
-                let mut d = daemon_arc.lock().await;
-                match d.handle("list", serde_json::json!({})).await {
-                    Ok(r) => {
-                        let sessions = r.get("sessions").cloned().unwrap_or(serde_json::json!([]));
-                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "sessions", "sessions": sessions }))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "daemon_error", "message": e
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "desktop" => {
-                // The desktop inventory from the daemon.
-                let d = daemon_arc.lock().await;
-                let inv = d.desktop_inventory().await;
-                let _ = send_json(
-                    &mut ws,
-                    &serde_json::json!({
-                        "type": "desktop",
-                        "inventory": serde_json::to_value(&inv).unwrap_or(serde_json::Value::Null),
-                    }),
-                )
-                .await;
-            }
-            "new" => {
-                // Create a new session (the daemon's `createSession`).
-                let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("shell");
-                let cwd = v.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
-                let title = v.get("title").and_then(|t| t.as_str());
-                let created_by = device.as_ref().map(|d| d.id.clone()).unwrap_or_else(|| "phone".to_string());
-                let mut d = daemon_arc.lock().await;
-                match d.handle("new", serde_json::json!({
-                    "kind": kind,
-                    "cwd": cwd,
-                    "title": title.map(|t| t.to_string()),
-                    "createdBy": created_by,
-                })).await {
-                    Ok(r) => {
-                        let session = r.get("session").cloned().unwrap_or(serde_json::Value::Null);
-                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "session", "session": session }))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "daemon_error", "message": e
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "makelive" => {
-                // The desktop window lifecycle (the daemon's `makeLive`).
-                let sid = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
-                let mut d = daemon_arc.lock().await;
-                let rec = d.get_session(sid);
-                match rec {
-                    None => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "live", "sessionId": sid, "ok": false,
-                            "detail": format!("no session: {sid}")
-                        }))
-                        .await;
-                    }
-                    Some(rec) => {
-                        let tmux_socket = d.keeper_socket_path().to_string_lossy();
-                        let tmux_bin = d.keeper_bin().to_string_lossy();
-                        let state_dir = d.state_dir().to_string_lossy();
-                        let result = crate::desktop::open_live(
-                            &tmux_socket,
-                            &rec.tmux_name,
-                            sid,
-                            "10",
-                            &tmux_bin,
-                            &state_dir,
-                        )
-                        .await;
-                        match result {
-                            Ok(lr) => {
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "live", "sessionId": sid,
-                                    "ok": lr.ok, "placed": lr.placed,
-                                    "detail": lr.detail,
-                                }))
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "live", "sessionId": sid,
-                                    "ok": false, "detail": e,
-                                }))
-                                .await;
-                            }
+        conn_id += 1;
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            handle_connection(ws, shared, conn_id).await;
+        });
+    }
+}
+
+/// The per-connection loop: read messages, enqueue responses, coalesce output.
+async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+    let conn = Arc::new(ConnShared {
+        tx,
+        inner: Mutex::new(ConnInner {
+            disposed: false,
+            live: false,
+            attach_gen: 0,
+            session_id: None,
+            record: None,
+            stream: None,
+            unsubscribe: None,
+            device: None,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            resyncing: false,
+            last_seen_ms: now_ms(),
+        }),
+        outstanding: AtomicUsize::new(0),
+    });
+    shared
+        .conns
+        .lock()
+        .unwrap()
+        .insert(conn_id, conn.clone());
+
+    // The connection loop owns the socket; outbound goes through `tx` so the
+    // coalescer and every control message share one ordering.
+    let mut ws = ws;
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        // Arm the coalescing timer only when there is output to flush.
+        let mut timer: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            if pending.is_empty() {
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(tokio::time::sleep(std::time::Duration::from_millis(
+                    OUTPUT_FLUSH_MS,
+                )))
+            };
+        tokio::select! {
+            maybe = ws.next() => {
+                match maybe {
+                    None => break,
+                    Some(Err(_)) => break,
+                    Some(Ok(msg)) => {
+                        // Flush buffered output before acting on the message, so a
+                        // reply cannot overtake the output it should follow.
+                        flush_output(&mut ws, &mut pending).await;
+                        if let Some(text) = message_text(&msg) {
+                            touch(&conn);
+                            handle_message(&text, &conn, &shared).await;
                         }
                     }
                 }
             }
-            "closelive" => {
-                // The desktop window lifecycle (the daemon's `closeLive`).
-                let sid = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
-                let d = daemon_arc.lock().await;
-                let rec = d.get_session(sid);
-                match rec {
-                    None => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "live", "sessionId": sid, "ok": false,
-                            "detail": format!("no session: {sid}")
-                        }))
-                        .await;
-                    }
-                    Some(_rec) => {
-                        let result = crate::desktop::close_live(sid).await;
-                        match result {
-                            Ok(ok) => {
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "live", "sessionId": sid,
-                                    "ok": ok,
-                                }))
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "live", "sessionId": sid,
-                                    "ok": false, "detail": e,
-                                }))
-                                .await;
-                            }
+            out = rx.recv() => {
+                match out {
+                    None => break,
+                    Some(Out::Close) => break,
+                    Some(Out::Output(b)) => {
+                        pending.extend_from_slice(&b);
+                        if pending.len() >= OUTPUT_FLUSH_BYTES {
+                            flush_output(&mut ws, &mut pending).await;
                         }
+                    }
+                    Some(Out::Json(s)) => {
+                        flush_output(&mut ws, &mut pending).await;
+                        let _ = ws.send(Message::Text(s.into())).await;
+                        maybe_resync(&conn);
                     }
                 }
             }
-            "kill" => {
-                // Kill a session (the daemon's `killSession`).
-                let id = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
-                let mut d = daemon_arc.lock().await;
-                match d.handle("kill", serde_json::json!({ "id": id })).await {
-                    Ok(r) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "killed", "session": r }))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "daemon_error", "message": e
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "close" => {
-                // Close a session (the daemon's `closeSession`).
-                let id = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
-                let mut d = daemon_arc.lock().await;
-                match d.handle("close", serde_json::json!({ "id": id })).await {
-                    Ok(r) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({ "type": "closed", "result": r }))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "daemon_error", "message": e
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "attach" => {
-                // The attach lifecycle (the claim, the snapshot, the input).
-                let sid = v.get("sessionId").and_then(|t| t.as_str()).unwrap_or("");
-                let _cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(80);
-                let _rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(24);
-                let takeover = v.get("takeover").and_then(|t| t.as_bool()).unwrap_or(false);
-                let mut d = daemon_arc.lock().await;
-                // Get the session record.
-                let rec = d.get_session(sid);
-                match rec {
-                    None => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "unknown_session",
-                            "message": format!("no session: {sid}")
-                        }))
-                        .await;
-                    }
-                    Some(rec) => {
-                        if rec.status != "running" {
-                            let _ = send_json(&mut ws, &serde_json::json!({
-                                "type": "error", "code": "session_dead",
-                                "message": format!("session is dead: {sid}")
-                            }))
-                            .await;
-                        } else {
-                            // Claim the session (exclusivity, ADR-0010).
-                            let claimed = if let Some(dev) = &device {
-                                match d.claim(sid, dev, takeover) {
-                                    crate::ownership::ClaimResult::HeldBy { device } => {
-                                        let _ = send_json(&mut ws, &serde_json::json!({
-                                            "type": "owned",
-                                            "sessionId": sid,
-                                            "owner": serde_json::to_value(&device)
-                                                .unwrap_or(serde_json::Value::Null),
-                                        }))
-                                        .await;
-                                        None
-                                    }
-                                    _ => Some(()),
-                                }
-                            } else {
-                                Some(())
-                            };
-                            if claimed.is_some() {
-                                // Get or create a stream.
-                                let stream = d.stream_for(&rec.tmux_name);
-                                // Subscribe with an output buffer (the attach
-                                // streams live output to the client; the buffer
-                                // is flushed on each WS message).
-                                let out_buf: Arc<std::sync::Mutex<Vec<u8>>> =
-                                    Arc::new(std::sync::Mutex::new(Vec::new()));
-                                let ob = out_buf.clone();
-                                let sub = crate::stream::StreamSubscriber {
-                                    on_output: Box::new(move |text: &[u8]| {
-                                        ob.lock().unwrap().extend_from_slice(text);
-                                    }),
-                                    on_reset: Box::new(|reason: &str| {
-                                        // The client must resync (a forced resync,
-                                        // §3.7). The snapshot is re-sent on the
-                                        // next attach.
-                                        let _ = reason;
-                                    }),
-                                };
-                                let (_sub_id, _unsubscribe) = stream.subscribe(sub);
-                                session_id = Some(sid.to_string());
-                                // Take a full snapshot (the state fields are
-                                // part of the initial state, not the SGR text).
-                                let snap = stream.snapshot_full();
-                                let _ = send_json(
-                                    &mut ws,
-                                    &serde_json::json!({
-                                        "type": "state",
-                                        "sessionId": sid,
-                                        "snapshot": serde_json::to_value(&snap)
-                                            .unwrap_or(serde_json::Value::Null),
-                                    }),
-                                )
-                                .await;
-                                // Store the output buffer for flushing.
-                                attach_out = Some(out_buf);
-                            }
-                        }
-                    }
-                }
-            }
-            "resize" => {
-                // Resize the stream (the viewing client owns the geometry).
-                let sid = session_id.clone().unwrap_or_default();
-                let cols = v.get("cols").and_then(|c| c.as_u64()).unwrap_or(80);
-                let rows = v.get("rows").and_then(|r| r.as_u64()).unwrap_or(24);
-                if cols == 0 || rows == 0 {
-                    let _ = send_json(&mut ws, &serde_json::json!({
-                        "type": "error", "code": "bad_size",
-                        "message": "invalid size"
-                    }))
-                    .await;
-                } else {
-                    let mut d = daemon_arc.lock().await;
-                    let stream = d.get_stream(&sid);
-                    match stream {
-                        Some(stream) => {
-                            match stream.resize(cols, rows) {
-                                Ok(_resp) => {
-                                    // Send a fresh snapshot (the pane geometry changed).
-                                    let snap = stream.snapshot();
-                                    let _ = send_json(
-                                        &mut ws,
-                                        &serde_json::json!({
-                                            "type": "state",
-                                            "sessionId": sid,
-                                            "snapshot": serde_json::to_value(&snap)
-                                                .unwrap_or(serde_json::Value::Null),
-                                        }),
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    let _ = send_json(&mut ws, &serde_json::json!({
-                                        "type": "error", "code": "resize_failed",
-                                        "message": e
-                                    }))
-                                    .await;
-                                }
-                            }
-                        }
-                        None => {
-                            let _ = send_json(&mut ws, &serde_json::json!({
-                                "type": "error", "code": "not_attached",
-                                "message": "attach before resizing"
-                            }))
-                            .await;
-                        }
-                    }
-                }
-            }
-            "input" => {
-                // Send input text to the pane (writes to the PTY, not to
-                // subscribers).
-                let sid = session_id.clone().unwrap_or_default();
-                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                if text.is_empty() {
-                    let _ = send_json(&mut ws, &serde_json::json!({
-                        "type": "error", "code": "no_text",
-                        "message": "no text to send"
-                    }))
-                    .await;
-                } else {
-                    let mut d = daemon_arc.lock().await;
-                    let stream = d.get_stream(&sid);
-                    match stream {
-                        Some(stream) => {
-                            let _ = stream.write(text);
-                        }
-                        None => {
-                            let _ = send_json(&mut ws, &serde_json::json!({
-                                "type": "error", "code": "not_attached",
-                                "message": "attach before sending input"
-                            }))
-                            .await;
-                        }
-                    }
-                }
-            }
-            "key" => {
-                // Send keys to the pane (the `sendKey` method).
-                let sid = session_id.clone().unwrap_or_default();
-                let keys: Vec<String> = v
-                    .get("keys")
-                    .and_then(|k| k.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|k| k.as_str())
-                            .filter(|k| !k.is_empty() && !k.starts_with('-'))
-                            .map(|k| k.to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let keys_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-                let mut d = daemon_arc.lock().await;
-                let stream = d.get_stream(&sid);
-                match stream {
-                    Some(stream) => {
-                        if !keys_refs.is_empty() {
-                            let _ = stream.send_key(&keys_refs);
-                        }
-                    }
-                    None => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "not_attached",
-                            "message": "attach before sending keys"
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "follow" => {
-                // Client-owned scroll (ADR-0004): a no-op.
-            }
-            "scrollback" => {
-                // Send a snapshot with history (the `scrollback` path).
-                let sid = session_id.clone().unwrap_or_default();
-                let lines = v.get("lines").and_then(|l| l.as_u64()).unwrap_or(0);
-                let wants_history = lines > 0;
-                let mut d = daemon_arc.lock().await;
-                let stream = d.get_stream(&sid);
-                match stream {
-                    Some(stream) => {
-                        let hist = if wants_history { Some(lines) } else { None };
-                        match stream.snapshot_with_history(hist) {
-                            Ok((_text, _epoch)) => {
-                                // Send a state message with the history flag.
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "state",
-                                    "sessionId": sid,
-                                    "history": wants_history,
-                                }))
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "error", "code": "scrollback_failed",
-                                    "message": e
-                                }))
-                                .await;
-                            }
-                        }
-                    }
-                    None => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "not_attached",
-                            "message": "attach before requesting scrollback"
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "mouseclick" => {
-                // Send an SGR mouse click to the pane.
-                let sid = session_id.clone().unwrap_or_default();
-                let col = v.get("col").and_then(|c| c.as_u64());
-                let row = v.get("row").and_then(|r| r.as_u64());
-                match (col, row) {
-                    (Some(col), Some(row)) if col < 10000 && row < 10000 => {
-                        let mut d = daemon_arc.lock().await;
-                        let stream = d.get_stream(&sid);
-                        match stream {
-                            Some(stream) => {
-                                // Get the state and check mouse is enabled.
-                                match stream.snapshot_full() {
-                                    Ok(state) => {
-                                        if !(state.mouse && state.mouse_sgr) {
-                                            let _ = send_json(&mut ws, &serde_json::json!({
-                                                "type": "error", "code": "no_mouse",
-                                                "message": "pane has not enabled SGR mouse reporting"
-                                            }))
-                                            .await;
-                                        } else if col >= state.cols || row >= state.rows {
-                                            let _ = send_json(&mut ws, &serde_json::json!({
-                                                "type": "error", "code": "bad_cell",
-                                                "message": format!("cell outside the pane: {},{}", col, row)
-                                            }))
-                                            .await;
-                                        } else {
-                                            match stream.mouse_click(col, row) {
-                                                Ok(_) => {
-                                                    let _ = send_json(&mut ws, &serde_json::json!({
-                                                        "type": "mousedelivered", "col": col, "row": row,
-                                                    }))
-                                                    .await;
-                                                }
-                                                Err(e) => {
-                                                    let _ = send_json(&mut ws, &serde_json::json!({
-                                                        "type": "error", "code": "mouseclick_failed",
-                                                        "message": e
-                                                    }))
-                                                    .await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = send_json(&mut ws, &serde_json::json!({
-                                            "type": "error", "code": "snapshot_failed",
-                                            "message": e
-                                        }))
-                                        .await;
-                                    }
-                                }
-                            }
-                            None => {
-                                let _ = send_json(&mut ws, &serde_json::json!({
-                                    "type": "error", "code": "not_attached",
-                                    "message": "attach before clicking"
-                                }))
-                                .await;
-                            }
-                        }
-                    }
-                    _ => {
-                        let _ = send_json(&mut ws, &serde_json::json!({
-                            "type": "error", "code": "bad_cell",
-                            "message": "invalid cell"
-                        }))
-                        .await;
-                    }
-                }
-            }
-            "copymode" => {
-                // tmux-specific (the keeper has no copy-mode equivalent).
-                let _ = send_json(&mut ws, &serde_json::json!({
-                    "type": "error", "code": "not_implemented",
-                    "message": "copymode is tmux-specific, not yet ported to the keeper"
-                }))
-                .await;
-            }
-            _ => {
-                let _ = send_json(
-                    &mut ws,
-                    &serde_json::json!({ "type": "error", "code": "bad_message", "message": format!("unknown type: {mtype}") }),
-                )
-                .await;
+            _ = &mut timer => {
+                flush_output(&mut ws, &mut pending).await;
             }
         }
     }
-    // Connection closed: release the stream if idle (the subscribers are
-    // cleared, the output buffer is dropped).
-    if let Some(sid) = &session_id {
-        let tmux_name = daemon_arc.lock().await.get_session(sid)
-            .map(|r| r.tmux_name.clone())
-            .unwrap_or_default();
-        if !tmux_name.is_empty() {
-            daemon_arc.lock().await.release_stream_if_idle(&tmux_name);
+
+    // The connection ended. Clean up: unsubscribe, release the stream, and
+    // release the device's claims after the grace.
+    disconnect(conn, shared).await;
+}
+
+/// Send every buffered output frame.
+async fn flush_output(ws: &mut WsStream, pending: &mut Vec<u8>) {
+    if pending.is_empty() {
+        return;
+    }
+    let data = std::mem::take(pending);
+    match encode_frame(ft::OUTPUT, &data, 0) {
+        Ok(frame) => {
+            let _ = ws.send(Message::Binary(frame.into())).await;
+        }
+        Err(_) => {
+            let _ = ws
+                .send(Message::Text(
+                    serde_json::json!({"type":"error","code":"resync","message":"output frame too large"})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
         }
     }
 }
 
-async fn send_json(ws: &mut WsStream, v: &serde_json::Value) -> Result<(), String> {
-    let text = serde_json::to_string(v).map_err(|e| e.to_string())?;
-    ws.send(Message::Text(text.into()))
-        .await
-        .map_err(|e| e.to_string())
+/// Mark the connection seen (any inbound message counts).
+fn touch(conn: &ConnShared) {
+    conn.inner.lock().unwrap().last_seen_ms = now_ms();
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+/// If the connection has produced more output than the link can carry, ask it
+/// to resync once (the TS `queueOutput` backlog rule).
+fn maybe_resync(conn: &ConnShared) {
+    let outstanding = conn.outstanding.load(Ordering::Relaxed);
+    if outstanding > WS_BACKLOG_BYTES {
+        let mut inner = conn.inner.lock().unwrap();
+        if !inner.resyncing {
+            inner.resyncing = true;
+            inner.pending.clear();
+            inner.pending_bytes = 0;
+            let _ = conn.tx.send(Out::Json(
+                serde_json::json!({"type":"error","code":"resync","message":"client is behind the link"})
+                    .to_string(),
+            ));
+        }
+    }
+}
+
+/// Handle one control message (the TS `onMessage` dispatch).
+async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
+    let v: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => {
+            conn.send_error("bad_json", "invalid JSON");
+            return;
+        }
+    };
+    let mtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+
+    // Writing to a shell is the holder's (the TS `WRITES` / `mayWrite`).
+    if WRITES.contains(&mtype.as_str()) {
+        let (device, session) = {
+            let inner = conn.inner.lock().unwrap();
+            (inner.device.clone(), inner.session_id.clone())
+        };
+        if let (Some(device), Some(session)) = (device, session) {
+            let holds = {
+                let d = shared.daemon.lock().await;
+                d.holds(&session, &device.id)
+            };
+            if !holds {
+                conn.send_error("not_holder", "this device does not hold that shell");
+                return;
+            }
+        }
+    }
+
+    match mtype.as_str() {
+        "ping" => {
+            let id = v.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            conn.send_json(&serde_json::json!({"type":"pong","id":id}));
+        }
+        "hello" => {
+            // Identity, not authentication (ADR-0010).
+            let dev = v.get("device");
+            if let Some(dev) = dev {
+                let id = dev.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                if !id.is_empty() {
+                    let id = id.chars().take(64).collect::<String>();
+                    let name = dev
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("device")
+                        .chars()
+                        .take(32)
+                        .collect::<String>();
+                    let kind = if dev.get("kind").and_then(|x| x.as_str()) == Some("desktop") {
+                        "desktop"
+                    } else {
+                        "phone"
+                    };
+                    conn.inner.lock().unwrap().device = Some(DeviceInfo {
+                        id,
+                        name: if name.is_empty() { "device".into() } else { name },
+                        kind: kind.into(),
+                    });
+                }
+            }
+        }
+        "list" => {
+            let sessions = {
+                let mut d = shared.daemon.lock().await;
+                d.describe_sessions().await
+            };
+            conn.send_json(&sessions_message(&sessions));
+        }
+        "desktop" => {
+            let inv = {
+                let d = shared.daemon.lock().await;
+                d.desktop_inventory().await
+            };
+            conn.send_json(&serde_json::json!({"type":"desktop","inventory":inv}));
+        }
+        "new" => {
+            let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("shell");
+            let kind = if kind == "pi" { "pi" } else { "shell" };
+            let cwd = v.get("cwd").and_then(|x| x.as_str());
+            let title = v.get("title").and_then(|x| x.as_str());
+            let record = {
+                let mut d = shared.daemon.lock().await;
+                let fallback = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                d.create_session(kind, cwd.unwrap_or(&fallback), title, "phone")
+                    .await
+            };
+            match record {
+                Ok(record) => {
+                    // Before the list, so a client that opens what it asked for
+                    // has the id by the time the list arrives.
+                    conn.send_json(&serde_json::json!({
+                        "type": "created", "sessionId": record.id, "cwd": record.cwd
+                    }));
+                    send_sessions(conn, shared).await;
+                }
+                Err(e) => conn.send_error("handler_error", &e),
+            }
+        }
+        "makelive" => {
+            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let workspace = v.get("workspace").and_then(|x| x.as_str()).unwrap_or("");
+            let result = {
+                let mut d = shared.daemon.lock().await;
+                d.handle("makeLive", serde_json::json!({"id": id, "workspace": workspace}))
+                    .await
+            };
+            let (ok, detail) = live_result(result);
+            conn.send_json(&serde_json::json!({
+                "type": "live", "sessionId": id, "ok": ok, "detail": detail
+            }));
+            if ok {
+                broadcast_sessions(shared).await;
+            }
+        }
+        "closelive" => {
+            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let result = {
+                let mut d = shared.daemon.lock().await;
+                d.handle("closeLive", serde_json::json!({"id": id})).await
+            };
+            let (ok, detail) = live_result(result);
+            conn.send_json(&serde_json::json!({
+                "type": "live", "sessionId": id, "ok": ok, "detail": detail
+            }));
+            broadcast_sessions(shared).await;
+        }
+        "kill" => {
+            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
+            {
+                let mut d = shared.daemon.lock().await;
+                let _ = d.kill_session(id).await;
+            }
+            send_sessions(conn, shared).await;
+        }
+        "close" => {
+            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let device = conn.inner.lock().unwrap().device.clone();
+            // A shell opened at the desk belongs to the desk: closing it from a
+            // phone is putting it down, not destroying it (ADR-0010).
+            let record = {
+                let d = shared.daemon.lock().await;
+                d.get_session(&id)
+            };
+            let phone_owned_closed = device.as_ref().map(|dev| dev.kind == "phone").unwrap_or(false)
+                && record.as_ref().map(|r| r.created_by != "phone").unwrap_or(false);
+            if phone_owned_closed {
+                if let Some(dev) = &device {
+                    let mut d = shared.daemon.lock().await;
+                    d.release_claim(&id, &dev.id);
+                }
+                stop_viewing(conn, shared).await;
+                send_sessions(conn, shared).await;
+                return;
+            }
+            let (ended, _) = {
+                let mut d = shared.daemon.lock().await;
+                d.close_session(&id).await.unwrap_or((true, default_record(&id)))
+            };
+            if let Some(dev) = &device {
+                if !ended {
+                    let mut d = shared.daemon.lock().await;
+                    d.release_claim(&id, &dev.id);
+                }
+            }
+            stop_viewing(conn, shared).await;
+            send_sessions(conn, shared).await;
+        }
+        "attach" => {
+            let session_id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let takeover = v.get("takeover").and_then(|x| x.as_bool()).unwrap_or(false);
+            let cols = v.get("cols").and_then(|x| x.as_u64());
+            let rows = v.get("rows").and_then(|x| x.as_u64());
+            attach(conn, shared, session_id, takeover, cols, rows).await;
+        }
+        "resize" => {
+            let (cols, rows, gen_id) = {
+                let inner = conn.inner.lock().unwrap();
+                (
+                    v.get("cols").and_then(|x| x.as_u64()),
+                    v.get("rows").and_then(|x| x.as_u64()),
+                    inner.attach_gen,
+                )
+            };
+            let (Some(cols), Some(rows)) = (cols, rows) else {
+                conn.send_error("bad_size", "invalid size");
+                return;
+            };
+            let stream = active_stream(conn);
+            let Some(stream) = stream else {
+                conn.send_error("not_attached", "attach before resizing");
+                return;
+            };
+            if stream.resize(cols, rows).is_err() {
+                conn.send_error("resize_failed", "resize failed");
+                return;
+            }
+            // The pane geometry changed: answer with a fresh snapshot.
+            match stream.snapshot_result(None) {
+                Ok((snap, epoch)) => {
+                    if stale(conn, gen_id) {
+                        return;
+                    }
+                    let sid = conn.inner.lock().unwrap().session_id.clone().unwrap_or_default();
+                    send_state(conn, &sid, &snap, epoch, false);
+                }
+                Err(e) => conn.send_error("resize_failed", &e),
+            }
+        }
+        "mouseclick" => {
+            let col = v.get("col").and_then(|x| x.as_u64());
+            let row = v.get("row").and_then(|x| x.as_u64());
+            let (Some(col), Some(row)) = (col, row) else {
+                conn.send_error("bad_cell", "invalid cell");
+                return;
+            };
+            let stream = active_stream(conn);
+            let Some(stream) = stream else {
+                conn.send_error("not_attached", "attach before clicking");
+                return;
+            };
+            match stream.snapshot_full() {
+                Ok(state) => {
+                    if !(state.mouse && state.mouse_sgr) {
+                        conn.send_error("no_mouse", "pane has not enabled SGR mouse reporting");
+                        return;
+                    }
+                    if crate::desktop::is_shell_foreground(&state.foreground) {
+                        conn.send_error(
+                            "shell_foreground",
+                            &format!("pane is at a shell prompt ({}), not a mouse-aware program", state.foreground),
+                        );
+                        return;
+                    }
+                    if col >= state.cols || row >= state.rows {
+                        conn.send_error("bad_cell", "cell outside the pane");
+                        return;
+                    }
+                    let _ = stream.mouse_click(col, row);
+                    conn.send_json(&serde_json::json!({
+                        "type": "mousedelivered", "col": col, "row": row
+                    }));
+                }
+                Err(e) => conn.send_error("handler_error", &e),
+            }
+        }
+        "input" => {
+            let text = v.get("data").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            if text.len() > MAX_INPUT_BYTES {
+                conn.send_error("input_too_large", &format!("input exceeds {MAX_INPUT_BYTES} bytes"));
+                return;
+            }
+            if let Some(stream) = active_stream(conn) {
+                let _ = stream.write(&text);
+            }
+        }
+        "key" => {
+            let keys: Vec<String> = v
+                .get("keys")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|k| k.as_str())
+                        .filter(|k| !k.is_empty() && !k.starts_with('-'))
+                        .take(MAX_KEYS)
+                        .map(|k| k.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(stream) = active_stream(conn) {
+                let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+                let _ = stream.send_key(&refs);
+            }
+        }
+        "copymode" => {
+            // tmux copy-mode has no keeper equivalent: the client scrolls its
+            // own buffer (plan §2.7). Accepted as a no-op so the client's
+            // scrollback gesture is not an error.
+        }
+        "follow" => {
+            // Client-owned scroll (ADR-0004): a no-op.
+        }
+        "scrollback" => {
+            let lines = v.get("lines").and_then(|x| x.as_u64()).unwrap_or(0);
+            let wants_history = lines > 0;
+            let (gen_id, sid) = {
+                let inner = conn.inner.lock().unwrap();
+                (inner.attach_gen, inner.session_id.clone().unwrap_or_default())
+            };
+            let stream = active_stream(conn);
+            let Some(stream) = stream else {
+                conn.send_error("not_attached", "attach before requesting scrollback");
+                return;
+            };
+            let hist = if wants_history { Some(lines) } else { None };
+            match stream.snapshot_result(hist) {
+                Ok((snap, epoch)) => {
+                    if stale(conn, gen_id) {
+                        return;
+                    }
+                    send_state(conn, &sid, &snap, epoch, wants_history);
+                }
+                Err(e) => conn.send_error("scrollback_failed", &e),
+            }
+        }
+        other => {
+            conn.send_error("bad_message", &format!("unknown type: {other}"));
+        }
+    }
+}
+
+/// The `attach` handler: claim, subscribe, snapshot, CAPS + SNAPSHOT, flush.
+async fn attach(
+    conn: &Arc<ConnShared>,
+    shared: &Arc<Shared>,
+    session_id: String,
+    takeover: bool,
+    cols: Option<u64>,
+    rows: Option<u64>,
+) {
+    // Resolve the record + claim under the daemon lock; remember any displaced
+    // device to notify after the lock is released.
+    let (record, displaced, stream) = {
+        let mut d = shared.daemon.lock().await;
+        let Some(record) = d.get_session(&session_id) else {
+            drop(d);
+            conn.send_error("unknown_session", &format!("no terminal-backed session: {session_id}"));
+            return;
+        };
+        if record.tmux_name.is_empty() {
+            drop(d);
+            conn.send_error("unknown_session", &format!("no terminal-backed session: {session_id}"));
+            return;
+        }
+        if record.status != "running" {
+            drop(d);
+            conn.send_error("session_dead", &format!("session is {}: {session_id}", record.status));
+            return;
+        }
+        let device = conn.inner.lock().unwrap().device.clone();
+        let mut displaced = None;
+        if let Some(device) = &device {
+            match d.claim(&session_id, device, takeover) {
+                crate::ownership::ClaimResult::Acquired { previous, .. } => {
+                    displaced = previous;
+                }
+                crate::ownership::ClaimResult::HeldBy { device: holder } => {
+                    drop(d);
+                    conn.send_json(&serde_json::json!({
+                        "type": "owned",
+                        "sessionId": session_id,
+                        "owner": SessionOwner {
+                            id: holder.id, name: holder.name, kind: holder.kind,
+                            since: now_ms(),
+                        }
+                    }));
+                    return;
+                }
+            }
+        }
+        let tmux_name = record.tmux_name.clone();
+        let stream = d.stream_for(&tmux_name).clone();
+        (record, displaced, stream)
+    };
+
+    // Bump the generation, clear the old subscription.
+    let gen_id = {
+        let mut inner = conn.inner.lock().unwrap();
+        inner.attach_gen += 1;
+        let gen_id = inner.attach_gen;
+        if let Some(unsub) = inner.unsubscribe.take() {
+            unsub();
+        }
+        inner.stream = None;
+        inner.session_id = Some(session_id.clone());
+        inner.record = Some(record.clone());
+        inner.live = false;
+        inner.resyncing = false;
+        inner.pending.clear();
+        inner.pending_bytes = 0;
+        gen_id
+    };
+
+    // Subscribe (queueing output until `live`).
+    let tx = conn.tx.clone();
+    let inner_for_cb = conn.clone();
+    let cb_gen = gen_id;
+    let sub = StreamSubscriber {
+        on_output: Box::new(move |bytes: &[u8]| {
+            let mut inner = inner_for_cb.inner.lock().unwrap();
+            if inner.attach_gen != cb_gen {
+                return;
+            }
+            if inner.live {
+                let _ = tx.send(Out::Output(bytes.to_vec()));
+            } else {
+                inner.pending.extend_from_slice(bytes);
+                inner.pending_bytes += bytes.len();
+                if inner.pending_bytes > MAX_PENDING_BYTES {
+                    inner.pending.clear();
+                    inner.pending_bytes = 0;
+                    let _ = tx.send(Out::Json(
+                        serde_json::json!({
+                            "type":"error","code":"resync",
+                            "message":"output backlog exceeded while attaching"
+                        })
+                        .to_string(),
+                    ));
+                }
+            }
+        }),
+        on_reset: Box::new({
+            let conn2 = conn.clone();
+            move |reason: &str| {
+                let ok = conn2.inner.lock().unwrap().attach_gen == cb_gen;
+                if ok {
+                    conn2.send_error("resync", reason);
+                }
+            }
+        }),
+    };
+    let (sub_id, unsubscribe) = stream.subscribe_owned(sub);
+    conn.inner.lock().unwrap().unsubscribe = Some(unsubscribe);
+    conn.inner.lock().unwrap().stream = Some(stream.clone());
+    let _ = sub_id;
+
+    // Resize before the snapshot so the screen we send already matches the grid
+    // the client is about to paint.
+    if let (Some(c), Some(r)) = (cols, rows) {
+        let _ = stream.resize(c, r);
+    }
+    let snap = stream.snapshot_result(None);
+
+    // A second attach (or a disconnect) may have superseded us while we awaited.
+    if conn.inner.lock().unwrap().attach_gen != gen_id {
+        return;
+    }
+
+    match snap {
+        Ok((snap, epoch)) => {
+            // Forward anything queued while snapshotting, then CAPS + SNAPSHOT.
+            let pending = {
+                let mut inner = conn.inner.lock().unwrap();
+                let p = std::mem::take(&mut inner.pending);
+                inner.pending_bytes = 0;
+                inner.live = true;
+                p
+            };
+            if !pending.is_empty() {
+                let _ = conn.tx.send(Out::Output(pending));
+            }
+            send_state(conn, &session_id, &snap, epoch, false);
+        }
+        Err(e) => {
+            conn.inner.lock().unwrap().live = false;
+            conn.send_error("attach_failed", &e);
+        }
+    }
+
+    // Tell a displaced device (and cut it off).
+    if let Some(prev) = displaced {
+        notify_displaced(shared, &prev.id, &session_id).await;
+    }
+}
+
+/// Notify every connection of `device_id` that it no longer holds `session_id`,
+/// and cut it off (the TS `notifyDisplaced`).
+async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &str) {
+    let conns: Vec<Arc<ConnShared>> = {
+        let map = shared.conns.lock().unwrap();
+        map.values().cloned().collect()
+    };
+    for c in conns {
+        let (is_holder, _sid) = {
+            let inner = c.inner.lock().unwrap();
+            (
+                inner.device.as_ref().map(|d| d.id == device_id).unwrap_or(false),
+                inner.session_id.clone(),
+            )
+        };
+        if !is_holder {
+            continue;
+        }
+        let viewing = { c.inner.lock().unwrap().session_id.as_deref() == Some(session_id) };
+        if !viewing {
+            continue;
+        }
+        c.send_json(&serde_json::json!({"type":"owned","sessionId":session_id,"owner":null}));
+        // Cut it off: unsubscribe and forget the stream.
+        let tmux_name = {
+            let mut inner = c.inner.lock().unwrap();
+            if let Some(unsub) = inner.unsubscribe.take() {
+                unsub();
+            }
+            inner.stream = None;
+            inner.session_id = None;
+            inner.live = false;
+            inner.record.as_ref().map(|r| r.tmux_name.clone())
+        };
+        if let Some(tmux) = tmux_name {
+            let mut d = shared.daemon.lock().await;
+            d.release_stream_if_idle(&tmux);
+        }
+    }
+}
+
+/// Send the session list to one connection.
+async fn send_sessions(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
+    let sessions = {
+        let mut d = shared.daemon.lock().await;
+        d.describe_sessions().await
+    };
+    conn.send_json(&sessions_message(&sessions));
+}
+
+/// Push the session list to every connected client.
+async fn broadcast_sessions(shared: &Arc<Shared>) {
+    let sessions = {
+        let mut d = shared.daemon.lock().await;
+        d.describe_sessions().await
+    };
+    let msg = sessions_message(&sessions).to_string();
+    let conns: Vec<Arc<ConnShared>> = {
+        let map = shared.conns.lock().unwrap();
+        map.values().cloned().collect()
+    };
+    for c in conns {
+        let _ = c.tx.send(Out::Json(msg.clone()));
+    }
+}
+
+fn sessions_message(sessions: &[ldmux_protocol::rpc::SessionInfo]) -> serde_json::Value {
+    serde_json::json!({"type":"sessions","sessions": sessions})
+}
+
+/// The `caps` + `snapshot` pair (the TS `sendState`).
+fn send_state(
+    conn: &Arc<ConnShared>,
+    session_id: &str,
+    snap: &ldmux_protocol::keeper::SnapshotResult,
+    epoch: u64,
+    history: bool,
+) {
+    conn.send_json(&serde_json::json!({
+        "type": "caps",
+        "protocolVersion": PROTOCOL_VERSION,
+        "sessionId": session_id,
+        "cols": snap.cols,
+        "rows": snap.rows,
+        "snapshotEpoch": epoch,
+        "capabilities": {"controlMode": true, "scrollback": true},
+    }));
+    let mut snapshot = serde_json::json!({
+        "type": "snapshot",
+        "sessionId": session_id,
+        "cols": snap.cols,
+        "rows": snap.rows,
+        "screen": snap.text,
+        "cursorX": snap.cursor_x,
+        "cursorY": snap.cursor_y,
+        "alternateOn": snap.alternate_on,
+        "paneInMode": snap.pane_in_mode,
+        "bracketedPaste": snap.bracketed_paste,
+        "mouse": snap.mouse,
+        "mouseSgr": snap.mouse_sgr,
+        "appCursor": snap.app_cursor,
+        "historySize": snap.history_size,
+        "snapshotEpoch": epoch,
+    });
+    if history {
+        snapshot["history"] = serde_json::Value::Bool(true);
+    }
+    conn.send_json(&snapshot);
+}
+
+/// Whether an attach was superseded.
+fn stale(conn: &Arc<ConnShared>, gen_id: u64) -> bool {
+    let inner = conn.inner.lock().unwrap();
+    inner.disposed || inner.attach_gen != gen_id
+}
+
+/// The connection's active stream (cloned).
+fn active_stream(conn: &Arc<ConnShared>) -> Option<Arc<PaneStream>> {
+    conn.inner.lock().unwrap().stream.clone()
+}
+
+/// Stop viewing the currently-attached session (a `close`/`kill` path).
+async fn stop_viewing(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
+    let tmux = {
+        let mut inner = conn.inner.lock().unwrap();
+        if let Some(unsub) = inner.unsubscribe.take() {
+            unsub();
+        }
+        inner.stream = None;
+        inner.session_id = None;
+        inner.live = false;
+        inner.record.take().map(|r| r.tmux_name)
+    };
+    if let Some(tmux) = tmux {
+        let mut d = shared.daemon.lock().await;
+        d.release_stream_if_idle(&tmux);
+    }
+}
+
+/// The connection ended: unsubscribe, release the stream, release claims.
+async fn disconnect(conn: Arc<ConnShared>, shared: Arc<Shared>) {
+    let (tmux, device, session) = {
+        let mut inner = conn.inner.lock().unwrap();
+        inner.disposed = true;
+        if let Some(unsub) = inner.unsubscribe.take() {
+            unsub();
+        }
+        (
+            inner.record.take().map(|r| r.tmux_name),
+            inner.device.clone(),
+            inner.session_id.clone(),
+        )
+    };
+    shared.conns.lock().unwrap().remove_by_ptr(&conn);
+    if let Some(tmux) = tmux {
+        let mut d = shared.daemon.lock().await;
+        d.release_stream_if_idle(&tmux);
+    }
+    if let Some(device) = device {
+        release_after_grace(&shared, device.id, session).await;
+    }
+}
+
+/// Release a closed socket's claims after the grace (a reconnect within it
+/// still holds; one that does not lets go).
+async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id: Option<String>) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(RELEASE_GRACE_MS)).await;
+        let (device_has_conns, still_viewing) = {
+            let map = shared.conns.lock().unwrap();
+            let has = map.values().any(|c| {
+                c.inner
+                    .lock()
+                    .unwrap()
+                    .device
+                    .as_ref()
+                    .map(|d| d.id == device_id)
+                    .unwrap_or(false)
+            });
+            let viewing = map.values().any(|c| {
+                let inner = c.inner.lock().unwrap();
+                inner
+                    .device
+                    .as_ref()
+                    .map(|d| d.id == device_id)
+                    .unwrap_or(false)
+                    && session_id.is_some()
+                    && inner.session_id == session_id
+            });
+            (has, viewing)
+        };
+        let mut freed = false;
+        if !device_has_conns {
+            let mut d = shared.daemon.lock().await;
+            freed = !d.release_device(&device_id).is_empty();
+        } else if let Some(sid) = &session_id {
+            if !still_viewing {
+                let mut d = shared.daemon.lock().await;
+                freed = d.release_claim(sid, &device_id);
+            }
+        }
+        if freed {
+            broadcast_sessions(&shared).await;
+        }
+    });
+}
+
+/// Reap connections silent for the idle deadline (the TS `sweep`).
+async fn sweep_once(shared: &Arc<Shared>) {
+    let now = now_ms();
+    let conns: Vec<Arc<ConnShared>> = {
+        let map = shared.conns.lock().unwrap();
+        map.values().cloned().collect()
+    };
+    for c in conns {
+        let (idle, disposed) = {
+            let inner = c.inner.lock().unwrap();
+            (now.saturating_sub(inner.last_seen_ms), inner.disposed)
+        };
+        if disposed {
+            continue;
+        }
+        if idle > WS_IDLE_MS {
+            let _ = c.tx.send(Out::Close);
+        }
+    }
+}
+
+/// The `live` result fields (ok + detail) out of a `handle` JSON value.
+fn live_result(result: Result<serde_json::Value, String>) -> (bool, Option<String>) {
+    match result {
+        Ok(v) => (
+            v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+            v.get("detail").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        ),
+        Err(e) => (false, Some(e)),
+    }
+}
+
+fn default_record(id: &str) -> SessionRecord {
+    SessionRecord {
+        id: id.into(),
+        tmux_name: String::new(),
+        kind: "shell".into(),
+        cwd: String::new(),
+        title: String::new(),
+        created_at: 0,
+        updated_at: 0,
+        created_by: String::new(),
+        status: "dead".into(),
+        exit_code: None,
+        exited_at: None,
+    }
+}
+
+// ── HTTP head parsing / responses ───────────────────────────────────────────
+
+/// The text of a WS message, if it is text or binary (a control message).
+fn message_text(msg: &Message) -> Option<String> {
+    match msg {
+        Message::Text(t) => Some(t.to_string()),
+        Message::Binary(b) => Some(String::from_utf8_lossy(b.as_ref()).to_string()),
+        _ => None,
+    }
+}
+
+/// Read the HTTP request head from the socket without consuming it (a
+/// non-destructive peek, so the WebSocket handshake still sees the request).
+async fn read_head(stream: &TcpStream) -> Option<String> {
+    let mut buf = vec![0u8; 16 * 1024];
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match stream.peek(&mut buf).await {
+            Ok(0) => return None,
+            Ok(n) => {
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") || n >= buf.len() {
+                    return Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+                }
+            }
+            Err(_) => return None,
+        }
+        if tokio::time::Instant::now() > deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+/// Parse the request line + headers from a head. Header names are lowercased.
+fn parse_request_head(head: &str) -> Option<(String, String, Vec<(String, String)>)> {
+    let mut lines = head.split("\r\n");
+    let request = lines.next()?;
+    let mut parts = request.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+        }
+    }
+    Some((method, target, headers))
+}
+
+/// The path of a request target (query removed).
+fn path_of(target: &str) -> String {
+    target.split('?').next().unwrap_or("/").to_string()
+}
+
+/// Whether the request is a WebSocket upgrade.
+fn is_ws_upgrade(headers: &[(String, String)]) -> bool {
+    let connection = headers
+        .iter()
+        .filter(|(k, _)| k == "connection")
+        .map(|(_, v)| v.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(",");
+    let upgrade = headers
+        .iter()
+        .find(|(k, _)| k == "upgrade")
+        .map(|(_, v)| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    connection
+        .split(',')
+        .any(|p| p.trim() == "upgrade")
+        && upgrade
+}
+
+/// Whether the request carries the bearer token (header or `?token=`) —
+/// the TS `authorized`.
+fn authorized(headers: &[(String, String)], target: &str, token: &str) -> bool {
+    let provided = headers
+        .iter()
+        .find(|(k, _)| k == "authorization")
+        .map(|(_, v)| {
+            if let Some(rest) = v.strip_prefix("Bearer ") {
+                rest.trim().to_string()
+            } else {
+                String::new()
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .or_else(|| query_param(target, "token"))
+        .unwrap_or_default();
+    crate::auth::token_matches(token, &provided)
+}
+
+/// The value of a query parameter in a request target.
+fn query_param(target: &str, name: &str) -> Option<String> {
+    let query = target.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == name {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+/// A minimal percent-decoder for the query token.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The plain-HTTP status + body for a non-upgrade request (the TS `handleRequest`).
+fn plain_response(path: &str, authed: bool) -> (u16, &'static str) {
+    if path == "/ws" {
+        if !authed {
+            (401, "unauthorized\n")
+        } else {
+            (400, "upgrade required\n")
+        }
+    } else {
+        (404, "ldmux remote: the endpoint is /ws\n")
+    }
+}
+
+/// Write a minimal HTTP response and close the connection.
+async fn write_http(stream: &mut TcpStream, status: u16, body: &str) {
+    let reason = match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        _ => "OK",
+    };
+    let text = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(text.as_bytes()).await;
+    let _ = stream.flush().await;
+    let _ = stream.shutdown().await;
+}
+
+/// Epoch milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Remove a connection from the table by pointer identity (the reader task
+/// still holds the `Arc`, so `Arc::ptr_eq` is the key).
+trait RemoveByPtr {
+    fn remove_by_ptr(&mut self, needle: &Arc<ConnShared>);
+}
+impl RemoveByPtr for HashMap<u64, Arc<ConnShared>> {
+    fn remove_by_ptr(&mut self, needle: &Arc<ConnShared>) {
+        let key = self
+            .iter()
+            .find(|(_, v)| Arc::ptr_eq(v, needle))
+            .map(|(k, _)| *k);
+        if let Some(k) = key {
+            self.remove(&k);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A helper: create a dummy `Arc<Mutex<LdmuxDaemon>>` for tests.
-    async fn dummy_daemon_arc() -> std::sync::Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>> {
-        let dir = std::env::temp_dir().join(format!("ldmux-remote-test-{}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let keeper_sock = dir.join("keeper.sock");
-        let fk = std::sync::Arc::new(crate::fake_keeper::FakeKeeper::new(keeper_sock.clone()));
-        let fk_serve = fk.clone();
-        let fk_sock = keeper_sock.clone();
-        tokio::spawn(async move {
-            crate::fake_keeper::FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+    #[test]
+    fn parses_a_request_head() {
+        let head = "GET /ws?token=abc HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+        let (m, t, h) = parse_request_head(head).unwrap();
+        assert_eq!(m, "GET");
+        assert_eq!(path_of(&t), "/ws");
+        assert!(is_ws_upgrade(&h));
+        assert!(authorized(&h, &t, "t"));
+    }
+
+    #[test]
+    fn authorized_accepts_the_query_token_and_rejects_others() {
+        let (_, target, headers) = parse_request_head(
+            "GET /ws?token=abc HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .unwrap();
+        assert!(authorized(&headers, &target, "abc"));
+        assert!(!authorized(&headers, &target, "zzz"));
+    }
+
+    #[test]
+    fn plain_get_answers_401_without_a_token() {
+        assert_eq!(plain_response("/ws", false), (401, "unauthorized\n"));
+        assert_eq!(plain_response("/ws", true).0, 400);
+        assert_eq!(plain_response("/", true).0, 404);
+    }
+
+    #[test]
+    fn a_non_upgrade_request_is_not_an_upgrade() {
+        let (_, _, headers) =
+            parse_request_head("GET /ws HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert!(!is_ws_upgrade(&headers));
+    }
+
+    #[test]
+    fn the_caps_and_snapshot_pair_has_the_client_fields() {
+        // Build a fake connection with a channel, then assert the two shapes.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+        let conn = Arc::new(ConnShared {
+            tx,
+            inner: Mutex::new(ConnInner {
+                disposed: false,
+                live: false,
+                attach_gen: 0,
+                session_id: None,
+                record: None,
+                stream: None,
+                unsubscribe: None,
+                device: None,
+                pending: Vec::new(),
+                pending_bytes: 0,
+                resyncing: false,
+                last_seen_ms: 0,
+            }),
+            outstanding: AtomicUsize::new(0),
         });
-        for _ in 0..50 {
-            if keeper_sock.exists() { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        let d = crate::daemon::LdmuxDaemon::new(dir, std::path::PathBuf::from("/nonexistent"));
-        std::sync::Arc::new(tokio::sync::Mutex::new(d))
-    }
-
-    /// A minimal `RemoteServer` test: start the server on a fixed port,
-    /// connect a WS client, send a `ping` (with the token), and get a `pong`.
-    ///
-    /// The test explicitly closes the WS connection and stops the server so
-    /// that the detached `tokio::spawn` tasks (the accept loop and the
-    /// `handle_connection`) exit before the test ends.
-    #[tokio::test]
-    async fn a_ws_client_gets_a_pong_over_the_tailnet_bind() {
-        const PORT: u16 = 49991;
-        let cfg = RemoteConfig::new("127.0.0.1", PORT, "test-token");
-        let mut server = RemoteServer::new(cfg);
-        let daemon_arc = dummy_daemon_arc().await;
-        let (_hostname, port) = server.start(&daemon_arc).await.expect("bind");
-        assert_eq!(port, PORT);
-
-        // Connect a WS client. The first message carries the token.
-        let uri = format!("ws://127.0.0.1:{PORT}/ws");
-        let (mut ws, _response) = tokio_tungstenite::connect_async(&uri)
-            .await
-            .expect("connect");
-
-        // Send a `ping` with the token.
-        let ping = serde_json::to_string(&serde_json::json!({
-            "type": "ping",
-            "id": "abc123",
-            "token": "test-token"
-        }))
-        .unwrap();
-        ws.send(Message::Text(ping.into())).await.unwrap();
-
-        // Read the `pong`.
-        let msg = ws.next().await.unwrap().unwrap();
-        let text = match msg {
-            Message::Text(t) => t,
-            _ => panic!("expected text"),
+        let snap = ldmux_protocol::keeper::SnapshotResult {
+            session_id: "s".into(),
+            cols: 80,
+            rows: 24,
+            history_lines: 0,
+            text: "screen".into(),
+            cursor_x: 1,
+            cursor_y: 2,
+            alternate_on: false,
+            pane_in_mode: false,
+            mouse: true,
+            mouse_sgr: true,
+            app_cursor: false,
+            bracketed_paste: true,
+            history_size: 0,
+            dead: false,
+            foreground: "bash".into(),
+            cwd: "/".into(),
         };
-        let resp: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(resp["type"], "pong");
-        assert_eq!(resp["id"], "abc123");
-
-        // Close the connection (the server's `handle_connection` exits when the
-        // client closes), then stop the server (the accept loop exits).
-        ws.close(None).await.ok();
-        server.stop();
-    }
-
-    /// The `hello` message sets the device identity (ADR-0010: identity, not
-    /// authentication).
-    #[tokio::test]
-    async fn a_hello_message_sets_the_device_identity() {
-        const PORT: u16 = 49992;
-        let cfg = RemoteConfig::new("127.0.0.1", PORT, "test-token");
-        let mut server = RemoteServer::new(cfg);
-        let daemon_arc = dummy_daemon_arc().await;
-        let (_hostname, port) = server.start(&daemon_arc).await.expect("bind");
-        assert_eq!(port, PORT);
-
-        let uri = format!("ws://127.0.0.1:{PORT}/ws");
-        let (mut ws, _response) = tokio_tungstenite::connect_async(&uri)
-            .await
-            .expect("connect");
-
-        // Send a `hello` with the device id and token.
-        let hello = serde_json::to_string(&serde_json::json!({
-            "type": "hello",
-            "token": "test-token",
-            "device": {
-                "id": "phone-123",
-                "name": "My Phone",
-                "kind": "phone"
-            }
-        }))
-        .unwrap();
-        ws.send(Message::Text(hello.into())).await.unwrap();
-
-        // Read the `hello_ack`.
-        let msg = ws.next().await.unwrap().unwrap();
-        let text = match msg {
-            Message::Text(t) => t,
-            _ => panic!("expected text"),
+        send_state(&conn, "s1", &snap, 7, false);
+        let a = rx.try_recv().unwrap();
+        let b = rx.try_recv().unwrap();
+        let (Out::Json(a), Out::Json(b)) = (a, b) else {
+            panic!("expected json");
         };
-        let resp: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(resp["type"], "hello_ack");
-
-        ws.close(None).await.ok();
-        server.stop();
+        let a: serde_json::Value = serde_json::from_str(&a).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(a["type"], "caps");
+        assert_eq!(a["protocolVersion"], 1);
+        assert_eq!(a["snapshotEpoch"], 7);
+        assert_eq!(b["type"], "snapshot");
+        assert_eq!(b["screen"], "screen");
+        assert_eq!(b["mouseSgr"], true);
+        assert!(b.get("history").is_none());
     }
 }
