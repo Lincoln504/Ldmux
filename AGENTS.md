@@ -63,6 +63,10 @@ is the findings + state record.
   or `tests/`; match the style of the surrounding crate.
 - **Daemon is a separate process.** Clients talk to it over the Unix socket; the
   daemon owns every long-lived resource.
+- **One resolver for every path.** The daemon, the CLI and the attach client all
+  resolve the socket through `protocol::paths`. A hand-rolled fallback (the CLI
+  had one: `$HOME/.ldmux/ldmuxd.sock`) looks somewhere the daemon never binds and
+  every command fails with "No such file or directory".
 - **Children are spawned detached, in their own process group, and killed by
   group.** Signalling only the process we know about leaves *its* children
   holding the pipes open.
