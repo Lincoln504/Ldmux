@@ -69,6 +69,13 @@ pub struct LdmuxDaemon {
     /// so the stream outlives the daemon's map entry (the poll thread keeps
     /// it alive until it exits).
     streams: HashMap<String, std::sync::Arc<PaneStream>>,
+    /// Sessions with a window open on the desktop's screen (the TS
+    /// `liveWindows`): one window per shell, recorded so the daemon can
+    /// close it and so a phone that opens it is asked first (ADR-0010).
+    live_windows: HashMap<String, (String, u64)>,
+    /// The desktop's device identity (the ADR-0010 claim source for desk
+    /// windows; the TS `desktopDevice`).
+    desktop_device: ldmux_protocol::rpc::DeviceInfo,
 }
 
 impl Drop for LdmuxDaemon {
@@ -99,6 +106,12 @@ impl LdmuxDaemon {
             remote: None,
             remote_cfg: None,
             streams: HashMap::new(),
+            live_windows: HashMap::new(),
+            desktop_device: ldmux_protocol::rpc::DeviceInfo {
+                id: "desktop".into(),
+                name: "desktop".into(),
+                kind: "desktop".into(),
+            },
         }
     }
 
@@ -662,15 +675,151 @@ impl LdmuxDaemon {
                 };
                 Ok(serde_json::to_value(&result).map_err(|e| e.to_string())?)
             }
-            // The remaining stream-dependent handlers (copyMode, makeLive,
-            // closeLive, attach, resize, mouseclick, input, key, follow,
-            // scrollback, remote_info, adopt, deskWindow, clipboardWrite) are
-            // stubbed as `not_implemented` (they require the desktop window
-            // lifecycle and the attach lifecycle, which are not yet ported).
-            "copyMode" | "makeLive" | "closeLive" | "attach" | "resize" | "mouseclick"
-            | "input" | "key" | "follow" | "scrollback" | "remote_info" | "adopt"
-            | "deskWindow" | "clipboardWrite" => {
-                Err(format!("not_implemented: {method}"))
+            // ── Desktop window lifecycle ──
+            "makeLive" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let workspace = params.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
+                let record = self.registry.get(id).cloned()
+                    .ok_or_else(|| format!("no such session: {id}"))?;
+                if record.status != "running" {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": format!("that shell is {}", record.status),
+                    }));
+                }
+                if self.live_windows.contains_key(id) {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": "that shell already has a desk window",
+                    }));
+                }
+                let tmux_socket = self.keeper_socket_path().to_string_lossy();
+                let tmux_bin = self.keeper_bin().to_string_lossy();
+                let result = crate::desktop::open_live(
+                    &tmux_socket, &record.tmux_name, id, workspace, &tmux_bin,
+                    &self.state_dir.to_string_lossy(),
+                ).await;
+                match result {
+                    Ok(lr) => {
+                        if lr.ok {
+                            self.live_windows.insert(id.to_string(), (workspace.to_string(), std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap().as_millis() as u64));
+                            let dd = self.desktop_device.clone();
+                            let _ = self.claim(id, &dd, true);
+                        }
+                        Ok(serde_json::json!({
+                            "ok": lr.ok,
+                            "detail": lr.detail,
+                        }))
+                    }
+                    Err(e) => Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": e,
+                    })),
+                }
+            }
+            "closeLive" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let result = crate::desktop::close_live(id).await;
+                self.live_windows.remove(id);
+                let dd_id = self.desktop_device.id.clone();
+                let _ = self.release_claim(id, &dd_id);
+                Ok(serde_json::json!({
+                    "ok": result.unwrap_or(false),
+                }))
+            }
+            "deskWindow" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let record = self.registry.get(id).cloned()
+                    .ok_or_else(|| format!("no such session: {id}"))?;
+                if record.status != "running" {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": format!("that shell is {}", record.status),
+                    }));
+                }
+                if self.live_windows.contains_key(id) {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": "that shell already has a desk window",
+                    }));
+                }
+                let tmux_socket = self.keeper_socket_path().to_string_lossy();
+                let tmux_bin = self.keeper_bin().to_string_lossy();
+                let result = crate::desktop::open_live(
+                    &tmux_socket, &record.tmux_name, id, "", &tmux_bin,
+                    &self.state_dir.to_string_lossy(),
+                ).await;
+                match result {
+                    Ok(lr) => {
+                        if lr.ok {
+                            self.live_windows.insert(id.to_string(), (String::new(), std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap().as_millis() as u64));
+                            let dd = self.desktop_device.clone();
+                            let _ = self.claim(id, &dd, true);
+                        }
+                        Ok(serde_json::json!({
+                            "ok": lr.ok,
+                        }))
+                    }
+                    Err(e) => Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": e,
+                    })),
+                }
+            }
+            "reclaim" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let device: ldmux_protocol::rpc::DeviceInfo = params
+                    .get("device")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .ok_or_else(|| "no device given".to_string())?;
+                let result = self.claim(&id, &device, true);
+                Ok(serde_json::json!({
+                    "ok": matches!(result, crate::ownership::ClaimResult::Acquired { .. }),
+                }))
+            }
+            // ── Remote info ──
+            "remote_info" => {
+                Ok(serde_json::json!({
+                    "hostname": self.remote_cfg.as_ref()
+                        .map(|c| c.hostname.clone())
+                        .unwrap_or_else(|| "127.0.0.1".to_string()),
+                    "port": self.remote_cfg.as_ref().map(|c| c.port).unwrap_or(0),
+                    "path": "/ws",
+                    "token": self.remote_cfg.as_ref()
+                        .map(|c| c.token.clone())
+                        .unwrap_or_default(),
+                    "listening": self.remote.is_some(),
+                }))
+            }
+            // ── Adopt ──
+            "adopt" => {
+                let tmux_name = params.get("tmuxName")
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                let session_id = tmux_name.strip_prefix("ldmux-")
+                    .unwrap_or(tmux_name).to_string();
+                let record = self.adopt(&session_id).await?;
+                Ok(serde_json::to_value(&record).map_err(|e| e.to_string())?)
+            }
+            // ── Clipboard write policy ──
+            "clipboardWrite" => {
+                let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+                let path = self.state_dir.join("clipboard-write");
+                let content = if on { "on\n" } else { "off\n" };
+                std::fs::write(&path, content)
+                    .map_err(|e| format!("write clipboard policy: {e}"))?;
+                Ok(serde_json::json!({ "on": on }))
+            }
+            // ── Copy mode (tmux-specific; no keeper equivalent) ──
+            "copyMode" => Err("not_implemented: copyMode (tmux-specific, no keeper equivalent)".to_string()),
+            // ── Stream-dependent handlers handled by the remote WS server ──
+            "attach" | "resize" | "mouseclick" | "input" | "key"
+            | "follow" | "scrollback" => {
+                Err(format!("not_implemented: {method} (handled by the remote WS server)"))
             }
             _ => Err(format!("unknown method: {method}")),
         }
