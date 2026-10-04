@@ -620,12 +620,16 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 conn.send_error("not_attached", "attach before resizing");
                 return;
             };
-            if stream.resize(cols, rows).is_err() {
+            if on_stream(&stream, move |s| s.resize(cols, rows))
+                .await
+                .unwrap_or_else(|| Err("resize task failed".to_string()))
+                .is_err()
+            {
                 conn.send_error("resize_failed", "resize failed");
                 return;
             }
             // The pane geometry changed: answer with a fresh snapshot.
-            match stream.snapshot_result(None) {
+            match on_stream(&stream, move |s| s.snapshot_result(None)).await.unwrap_or_else(|| Err("snapshot task failed".to_string())) {
                 Ok((snap, epoch)) => {
                     if stale(conn, gen_id) {
                         return;
@@ -648,7 +652,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 conn.send_error("not_attached", "attach before clicking");
                 return;
             };
-            match stream.snapshot_full() {
+            match on_stream(&stream, move |s| s.snapshot_full()).await.unwrap_or_else(|| Err("snapshot task failed".to_string())) {
                 Ok(state) => {
                     if !(state.mouse && state.mouse_sgr) {
                         conn.send_error("no_mouse", "pane has not enabled SGR mouse reporting");
@@ -665,7 +669,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                         conn.send_error("bad_cell", "cell outside the pane");
                         return;
                     }
-                    let _ = stream.mouse_click(col, row);
+                    let _ = on_stream(&stream, move |s| s.mouse_click(col, row)).await;
                     conn.send_json(&serde_json::json!({
                         "type": "mousedelivered", "col": col, "row": row
                     }));
@@ -680,7 +684,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             }
             if let Some(stream) = active_stream(conn) {
-                let _ = stream.write(&text);
+                let _ = on_stream(&stream, move |s| s.write(&text)).await;
             }
         }
         "key" => {
@@ -697,8 +701,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 })
                 .unwrap_or_default();
             if let Some(stream) = active_stream(conn) {
-                let refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-                let _ = stream.send_key(&refs);
+                let _ = on_stream(&stream, move |s| {
+                    let refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+                    s.send_key(&refs)
+                })
+                .await;
             }
         }
         "copymode" => {
@@ -722,7 +729,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             };
             let hist = if wants_history { Some(lines) } else { None };
-            match stream.snapshot_result(hist) {
+            match on_stream(&stream, move |s| s.snapshot_result(hist)).await.unwrap_or_else(|| Err("snapshot task failed".to_string())) {
                 Ok((snap, epoch)) => {
                     if stale(conn, gen_id) {
                         return;
@@ -856,9 +863,9 @@ async fn attach(
     // Resize before the snapshot so the screen we send already matches the grid
     // the client is about to paint.
     if let (Some(c), Some(r)) = (cols, rows) {
-        let _ = stream.resize(c, r);
+        let _ = on_stream(&stream, move |s| s.resize(c, r)).await;
     }
-    let snap = stream.snapshot_result(None);
+    let snap = on_stream(&stream, move |s| s.snapshot_result(None)).await.unwrap_or_else(|| Err("snapshot task failed".to_string()));
 
     // A second attach (or a disconnect) may have superseded us while we awaited.
     if conn.inner.lock().unwrap().attach_gen != gen_id {
@@ -1006,6 +1013,19 @@ fn send_state(
 fn stale(conn: &Arc<ConnShared>, gen_id: u64) -> bool {
     let inner = conn.inner.lock().unwrap();
     inner.disposed || inner.attach_gen != gen_id
+}
+
+/// Run a `PaneStream` call on the blocking pool. The stream's keeper connection
+/// is a **blocking** socket with no read timeout, so calling it directly from an
+/// async task would let a slow or wedged keeper stall the executor (and, under
+/// the daemon lock, every other RPC).
+async fn on_stream<T, F>(stream: &Arc<PaneStream>, f: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<PaneStream>) -> T + Send + 'static,
+{
+    let s = Arc::clone(stream);
+    tokio::task::spawn_blocking(move || f(s)).await.ok()
 }
 
 /// The connection's active stream (cloned).
