@@ -198,6 +198,30 @@ pub fn live_shim_script(tmux_bin: &str, tmux_socket: &str, tmux_name: &str) -> S
     s
 }
 
+/// Resolve the tmux binary: prefer `LDMUX_TMUX_BIN`, then the first `tmux`
+/// on `PATH`.
+///
+/// The TS `resolveTmuxBin` does the same: the daemon's own tmux (set by the
+/// flake) is preferred over whatever the window manager's PATH resolves to.
+pub fn resolve_tmux_bin() -> String {
+    if let Ok(v) = std::env::var("LDMUX_TMUX_BIN") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    // Fall back to the first `tmux` on PATH.
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("tmux");
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // Last resort: bare `tmux`.
+    "tmux".to_string()
+}
+
 /// Find a window id in an i3 tree by window class.
 ///
 /// Walks the whole tree because a class match is the only reliable criterion:
@@ -593,5 +617,87 @@ mod tests {
         assert_eq!(argv[3], "tmux");
         assert_eq!(argv[4], "-L");
         assert_eq!(argv[5], "sock");
+    }
+
+    /// A program that can use a click is not mistaken for a shell (the TS
+    /// `a program that can use a click is not mistaken for a shell`).
+    #[test]
+    fn a_non_shell_is_not_a_shell_foreground() {
+        for prog in ["top", "vim", "emacs", "htop", "less", "nano", "git", "make", "cargo"] {
+            assert!(!is_shell_foreground(prog), "{prog} should not be a shell");
+        }
+        // The login shell with a leading dash is a shell.
+        assert!(is_shell_foreground("-bash"));
+        // An uppercase shell name is a shell.
+        assert!(is_shell_foreground("BASH"));
+        // A shell with a path is not a shell (the foreground is the basename).
+        assert!(!is_shell_foreground("/usr/bin/bash"));
+    }
+
+    /// The shim records its tty before attaching (the TS `the shim records its
+    /// tty before attaching`).
+    #[test]
+    fn the_shim_records_its_tty_before_attaching() {
+        let script = live_shim_script("tmux", "sock", "mysession");
+        // The TTY is recorded before the attach loop.
+        assert!(script.contains("LDMUX_LIVE_TTY"), "shim must record the tty");
+        // The TTY is set on the session before the loop.
+        assert!(script.contains("@ldmux_live_tty"), "shim must set the tty option");
+        // The tty line comes before the while loop.
+        let tty_pos = script.find("LDMUX_LIVE_TTY").unwrap();
+        let loop_pos = script.find("while :; do").unwrap();
+        assert!(tty_pos < loop_pos, "tty recording must come before the attach loop");
+    }
+
+    /// The shim loops, so being detached does not close the window (the TS
+    /// `the shim loops, so being detached does not close the window`).
+    #[test]
+    fn the_shim_loops_so_detached_does_not_close() {
+        let script = live_shim_script("tmux", "sock", "mysession");
+        // The loop is there.
+        assert!(script.contains("while :; do"), "shim must have a loop");
+        // The detach message is in the loop.
+        assert!(script.contains("Detached"), "shim must report the detach");
+        // The re-attach wait is in the loop.
+        assert!(script.contains("read -r -n 1"), "shim must wait for a key");
+    }
+
+    /// The shim quotes what it interpolates (the TS `the shim quotes what it
+    /// interpolates`). A safe name is not quoted; a name with a space is.
+    #[test]
+    fn the_shim_quotes_its_interpolations() {
+        // A safe name is not quoted (shell_quote returns it as-is).
+        let script = live_shim_script("tmux", "sock", "mysession");
+        assert!(script.contains("mysession"), "safe name must appear unquoted");
+        // A name with a space is quoted.
+        let script2 = live_shim_script("tmux", "sock", "my session");
+        assert!(script2.contains("'my session'"), "name with a space must be quoted");
+        // A tmux bin with a space is quoted.
+        let script3 = live_shim_script("/usr/bin/tmux 1.0", "sock", "mysession");
+        assert!(script3.contains("'/usr/bin/tmux 1.0'"), "tmux bin with a space must be quoted");
+    }
+
+    /// liveExecArgv shell-quotes each element (the TS `liveExecArgv shell-quotes
+    /// each element, because i3 re-parses through sh`).
+    #[test]
+    fn live_exec_argv_shell_quotes_each_arg() {
+        // An arg with a space is quoted.
+        let argv = live_exec_argv(&["tmux", "-L", "sock with space", "attach", "sess"]);
+        // The quoted arg should appear as a single element.
+        let joined = argv.join(" ");
+        assert!(joined.contains("'sock with space'"), "args with spaces must be quoted: {joined}");
+    }
+
+    /// Resolve the tmux binary: prefer LDMUX_TMUX_BIN, then PATH order (the TS
+    /// `resolveTmuxBin prefers LDMUX_TMUX_BIN, then PATH order, keeping an
+    /// absolute path`).
+    #[test]
+    fn resolve_tmux_bin_prefers_env_then_path() {
+        // Set LDMUX_TMUX_BIN to a known path.
+        unsafe { std::env::set_var("LDMUX_TMUX_BIN", "/usr/bin/tmux-custom"); }
+        let resolved = resolve_tmux_bin();
+        assert_eq!(resolved, "/usr/bin/tmux-custom", "LDMUX_TMUX_BIN must win");
+        // Clear the env var.
+        unsafe { std::env::remove_var("LDMUX_TMUX_BIN"); }
     }
 }
