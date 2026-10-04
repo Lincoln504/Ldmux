@@ -728,8 +728,8 @@ race (two concurrent `stream_for` calls produce one stream), restart-survival
 e2e (real keeper, 3 sessions survive daemon restart), keeper-death e2e (kill
 keeper with 3 live sessions, daemon respawns, all sessions marked dead),
 `keeper_call` keeper-death detection (respawn + retry), `ensure_keeper_alive`
-(respawn + reconcile). Remaining: desktop attach e2e (requires Xvfb + i3),
-and the `copymode` handler (stubbed, tmux-specific).
+(respawn + reconcile). Remaining: desktop attach e2e (Xvfb + i3 + alacritty-stub;
+both Xvfb and i3 are available on this host).
 
 **Milestone: the daemon's single-instance lock (`ldmuxd.lock`) — §3.2.** A pid
 lockfile (distinct from the keeper's `flock`): the daemon's own `ldmuxd.lock` is
