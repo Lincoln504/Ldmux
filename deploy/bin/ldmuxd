@@ -1,6 +1,0 @@
-#!/bin/sh
-# ldmux daemon entry point, run by the systemd --user unit. Installed by
-# `just install`; node and tmux from the flake's runtime, as in `ldmux`.
-RUNTIME=${XDG_STATE_HOME:-$HOME/.local/state}/ldmux/runtime
-export LDMUX_TMUX_BIN="$RUNTIME/bin/tmux"
-exec "$RUNTIME/bin/node" @REPO@/packages/daemon/src/main.ts "$@"

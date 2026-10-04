@@ -5,7 +5,7 @@
 //! `ldmux code` shows it as a QR code; the app scans it (or the system camera
 //! opens it) and stores `host` and `token` exactly as they are here. It is a
 //! contract between the CLI and the app, so it is pinned from both sides by one
-//! fixture (`test/fixtures/pairing-links.json`, read by this package's tests and
+//! fixture (`crates/protocol/test/fixtures/pairing-links.json`, read by these tests and
 //! by the app's `PairingTest`).
 //!
 //! - `host` is the address the daemon *listens on* (`remote_info`), as
@@ -252,12 +252,12 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        // The fixture lives in the TS tree and is read by all three sides
-        // (the TS test, the app's PairingTest, and this one) — one corpus.
+        // One corpus, read by both surviving sides: the app's PairingTest and
+        // this one (the TS test went with the TS tree at D4).
         let raw = fs::read_to_string(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../packages/protocol/test/fixtures/pairing-links.json"
+                "/test/fixtures/pairing-links.json"
             ),
         )
         .unwrap();

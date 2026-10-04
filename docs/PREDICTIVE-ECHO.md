@@ -1,5 +1,9 @@
 # Remote-terminal practice: input latency, echo prediction, and key encoding
 
+> **Note (2026-10-04, D4).** Unchanged in substance. Its tmux references are about
+> where the echo comes from, which is now the keeper's PTY rather than tmux's.
+
+
 **Status:** research + design. Nothing in this document is implemented except
 where marked **Done**. Written 2026-09-14.
 

@@ -628,8 +628,11 @@ async fn main() {
             // nothing and cannot type.
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
+            // Absolute, because i3's exec has no ~/.local/bin on PATH.
             let _ = std::process::Command::new("alacritty")
-                .args(["--class", "ldmux-mirror", "-e", "ldmuxd", "attach", id, "--readonly"])
+                .args(["--class", "ldmux-mirror", "-e"])
+                .arg(ldmux_daemon::desktop::attach_bin())
+                .args(["attach", id, "--readonly"])
                 .spawn();
         }
         _ => {

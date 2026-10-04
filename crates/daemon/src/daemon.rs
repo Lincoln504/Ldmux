@@ -453,6 +453,13 @@ impl LdmuxDaemon {
             ("LDMUX_SESSION_ID".to_string(), id.clone()),
             ("LDMUX_KIND".to_string(), kind.to_string()),
             ("LDMUX_SOCKET".to_string(), self.socket_path().to_string_lossy().into_owned()),
+            // Truthful names. `tmuxName` is the wire/registry field name and cannot
+            // change without breaking the paired app, but the *value* is the keeper
+            // session id and the socket is the keeper's — say so.
+            ("LDMUX_SESSION_NAME".to_string(), tmux_name.clone()),
+            ("LDMUX_KEEPER_SOCK".to_string(), self.keeper_socket_path().to_string_lossy().into_owned()),
+            // Kept because a shell profile written against the tmux era reads them.
+            // They name the same two values; nothing here is a tmux server.
             ("LDMUX_TMUX_NAME".to_string(), tmux_name.clone()),
             ("LDMUX_TMUX_SOCK".to_string(), self.keeper_socket_path().to_string_lossy().into_owned()),
         ];

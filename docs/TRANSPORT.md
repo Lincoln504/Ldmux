@@ -1,5 +1,11 @@
 # ldmux — Transport deep-dive and decision
 
+> **Retired (2026-10-04, D4).** This is the control-mode deep-dive — the text protocol
+> the port most directly replaced. It is history: the transport is now one framed
+> binary protocol (`crates/protocol`), and there is no control-mode client, no
+> pipe mode, and no `capture-pane`. Kept as the record of what was learned.
+
+
 **Question:** Which mechanism should `ldmuxd` use to stream tmux pane output to
 mobile/desktop clients, and with which stack?
 

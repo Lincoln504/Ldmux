@@ -1,5 +1,13 @@
 # ADR-0001: Transport is tmux control mode `-C` over pipes (no PTY) + capture-pane snapshots
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> The replacement: one framed binary protocol the project owns (ADR-0016 for the
+> remote half), with the keeper speaking it over a Unix socket. Control mode's
+> 160-line text parser and the pipe∥control split are both gone; there is no
+> `capture-pane` any more, the emulator *is* the screen.
+
+
 **Status:** Accepted — **frozen** (verified by experiment on this machine: tmux 3.5a, Node 1.3.9)
 
 ## Context

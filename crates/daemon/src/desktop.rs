@@ -1,17 +1,11 @@
 //! Desktop windows (ADR-0010, `docs/DESKTOP-INTEGRATION.md`).
 //!
-//! Port of the pure functions from `packages/daemon/src/desktop.ts` (428 lines).
-//! The side-effect functions (`openMirror`, `openLive`, `closeLive`, `prepareLive`)
-//! spawn a terminal emulator (alacritty) and manage the desktop window; they are
-//! not yet ported (they are side-effect-heavy and hard to test headlessly).
+//! Port of the pure functions from `packages/daemon/src/desktop.ts`.
 //!
-//! The pure functions (command construction) are ported 1:1 and unit-tested.
-
-
-/// The default mirror workspace (the last one, 10).
-pub const DEFAULT_MIRROR_WORKSPACE: u32 = 10;
-/// The default mirror window class.
-pub const DEFAULT_MIRROR_CLASS: &str = "ldmux-mirror";
+//! **The tmux mirror is gone.** `mirror_argv` and its helpers built
+//! `tmux -L <sock> attach -r -t <name>`; with tmux removed there is nothing for
+//! them to build. `ldmux mirror <id>` now runs `ldmuxd attach <id> --readonly` —
+//! the same protocol client as a desk window, told not to take a claim.
 
 /// Shells that cannot use a mouse click.
 const SHELLS: &[&str] = &[
@@ -24,87 +18,6 @@ pub fn is_shell_foreground(command: &str) -> bool {
     let trimmed = command.trim().to_lowercase();
     let stripped = trimmed.strip_prefix('-').unwrap_or(&trimmed);
     SHELLS.iter().any(|s| *s == stripped)
-}
-
-/// Mirror options (the TS `MirrorOptions`).
-#[derive(Debug, Clone, Default)]
-pub struct MirrorOptions {
-    /// Read-only client (default true): mirror, never steal input.
-    pub read_only: bool,
-    /// i3 workspace number to place the mirror on (default 10).
-    pub workspace: u32,
-    /// Terminal emulator binary.
-    pub terminal: Option<String>,
-    /// X window class, so i3 can target/float it.
-    pub window_class: Option<String>,
-    /// The tmux binary to attach with.
-    pub tmux_bin: Option<String>,
-}
-
-impl MirrorOptions {
-    pub fn new() -> Self {
-        Self {
-            read_only: true,
-            workspace: DEFAULT_MIRROR_WORKSPACE,
-            terminal: None,
-            window_class: None,
-            tmux_bin: None,
-        }
-    }
-}
-
-/// tmux argv for a mirror client (no emulator wrapper).
-pub fn mirror_tmux_args(tmux_socket: &str, tmux_name: &str, opts: &MirrorOptions) -> Vec<String> {
-    let mut args = vec![
-        "-L".to_string(),
-        tmux_socket.to_string(),
-        "attach".to_string(),
-    ];
-    if opts.read_only {
-        args.push("-r".to_string());
-    }
-    args.push("-t".to_string());
-    args.push(tmux_name.to_string());
-    args
-}
-
-/// Quote an argument for a POSIX shell.
-pub fn shell_quote(a: &str) -> String {
-    // If the string is safe (no shell metacharacters), return it as-is.
-    let safe: Vec<bool> = a
-        .chars()
-        .map(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'))
-        .collect();
-    if !a.is_empty() && safe.iter().all(|&b| b) {
-        return a.to_string();
-    }
-    // Quote it (single-quoted, with embedded single quotes escaped).
-    format!("'{}'", a.replace('\'', "'\\''"))
-}
-
-/// Full shell-less argv: `<terminal> --class <class> -e <tmux> <args...>`.
-pub fn mirror_argv(tmux_socket: &str, tmux_name: &str, opts: &MirrorOptions) -> Vec<String> {
-    let terminal = opts.terminal.clone().unwrap_or_else(|| "alacritty".to_string());
-    let window_class = opts.window_class.clone().unwrap_or_else(|| DEFAULT_MIRROR_CLASS.to_string());
-    let tmux_bin = opts.tmux_bin.clone().unwrap_or_else(|| "tmux".to_string());
-    let mut args = vec![
-        terminal,
-        "--class".to_string(),
-        window_class,
-        "-e".to_string(),
-        tmux_bin,
-    ];
-    args.extend(mirror_tmux_args(tmux_socket, tmux_name, opts));
-    args
-}
-
-/// Human/machine readable command line (what the CLI prints).
-pub fn mirror_command(tmux_socket: &str, tmux_name: &str, opts: &MirrorOptions) -> String {
-    mirror_argv(tmux_socket, tmux_name, opts)
-        .iter()
-        .map(|a| shell_quote(a))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The i3 window class for a session's live window.
@@ -161,23 +74,41 @@ pub fn live_argv(_shim_path: &str, session_id: &str, terminal: &str) -> Vec<Stri
     ]
 }
 
-/// The absolute path to the attach client for a desk window.
+/// The absolute path to the attach client (`ldmuxd`).
 ///
 /// **Absolute, not `ldmuxd`.** A window is launched by `i3-msg exec`, and i3's
 /// own environment has no `~/.local/bin` on `PATH` — the same failure that once
-/// made every `$mod+Return` fall back to a bare shell (`node: not found`). The
-/// running daemon's own executable is this binary, so it is the attach client.
+/// made every `$mod+Return` fall back to a bare shell (`node: not found`) and
+/// then again put a window up that closed the instant it opened.
+///
+/// Resolution order: this executable when it *is* `ldmuxd` (the daemon's own
+/// case), then a `ldmuxd` beside it (the install layout puts all three binaries
+/// in `~/.local/bin`), then `$HOME/.local/bin/ldmuxd`. The last resort is this
+/// executable's own path, which is absolute — never a bare name.
 pub fn attach_bin() -> String {
     if let Ok(exe) = std::env::current_exe() {
+        if exe.file_name().and_then(|n| n.to_str()) == Some("ldmuxd") {
+            if let Some(s) = exe.to_str() {
+                return s.to_string();
+            }
+        }
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("ldmuxd");
+            if candidate.exists() {
+                if let Some(s) = candidate.to_str() {
+                    return s.to_string();
+                }
+            }
+        }
         if let Some(s) = exe.to_str() {
-            if !s.is_empty() {
+            if s.starts_with('/') {
                 return s.to_string();
             }
         }
     }
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => format!("{h}/.local/bin/ldmuxd"),
-        _ => "ldmuxd".to_string(),
+        _ => "/usr/local/bin/ldmuxd".to_string(),
     }
 }
 
@@ -250,6 +181,20 @@ fn visit(node: &serde_json::Value, class_name: &str) -> Option<String> {
 /// The argv that asks i3 to run a command.
 ///
 /// The command goes in as **separate arguments**, and that is not cosmetic.
+/// Quote an argument for a POSIX shell.
+pub fn shell_quote(a: &str) -> String {
+    // If the string is safe (no shell metacharacters), return it as-is.
+    let safe: Vec<bool> = a
+        .chars()
+        .map(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'))
+        .collect();
+    if !a.is_empty() && safe.iter().all(|&b| b) {
+        return a.to_string();
+    }
+    // Quote it (single-quoted, with embedded single quotes escaped).
+    format!("'{}'", a.replace('\'', "'\\''"))
+}
+
 pub fn live_exec_argv(command: &[&str]) -> Vec<String> {
     let mut argv = vec!["i3-msg".to_string(), "exec".to_string(), "--".to_string()];
     for arg in command {
@@ -443,58 +388,6 @@ mod tests {
         assert!(!is_shell_foreground("node"));
         assert!(!is_shell_foreground("vim"));
         assert!(!is_shell_foreground(""));
-    }
-
-    #[test]
-    fn mirror_tmux_args_read_only() {
-        let opts = MirrorOptions::new();
-        let args = mirror_tmux_args("sock", "session", &opts);
-        assert_eq!(
-            args,
-            vec!["-L", "sock", "attach", "-r", "-t", "session"]
-        );
-    }
-
-    #[test]
-    fn mirror_tmux_args_read_write() {
-        let mut opts = MirrorOptions::new();
-        opts.read_only = false;
-        let args = mirror_tmux_args("sock", "session", &opts);
-        assert_eq!(
-            args,
-            vec!["-L", "sock", "attach", "-t", "session"]
-        );
-    }
-
-    #[test]
-    fn mirror_argv_full_command() {
-        let opts = MirrorOptions::new();
-        let args = mirror_argv("sock", "session", &opts);
-        assert_eq!(
-            args,
-            vec![
-                "alacritty",
-                "--class",
-                "ldmux-mirror",
-                "-e",
-                "tmux",
-                "-L",
-                "sock",
-                "attach",
-                "-r",
-                "-t",
-                "session",
-            ]
-        );
-    }
-
-    #[test]
-    fn mirror_command_quoted() {
-        let opts = MirrorOptions::new();
-        let cmd = mirror_command("sock", "session", &opts);
-        assert!(cmd.contains("alacritty"));
-        assert!(cmd.contains("ldmux-mirror"));
-        assert!(cmd.contains("attach"));
     }
 
     #[test]

@@ -1,5 +1,10 @@
 # ADR-0015 — The session layer: tmux keeps the PTYs
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> Superseded by ADR-0018, which is the decision that replaced it.
+
+
 - **Status:** Accepted — **decision superseded 2026-09-28, per user direction:**
   the session layer is now built in Rust as part of the port (`docs/RUST-PORT-
   PLAN.md` §0/§3, D1 resolved 2026-09-27). This ADR's investigation (the

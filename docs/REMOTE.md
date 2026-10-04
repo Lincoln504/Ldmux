@@ -1,5 +1,11 @@
 # Remote transport
 
+> **Note (2026-10-04, D4).** The remote transport is unchanged in shape (WS on the
+> tailnet address, bearer token at the upgrade, ADR-0016). Everything it says
+> about how a session is *served* is now the keeper's; there is no tmux server
+> behind it.
+
+
 How a phone (or any remote client) reaches ldmux. Implements ADR-0016 (direct
 tailnet bind) and ADR-0017 (QR pairing) on top of the one canonical frame format
 (`frames.ts`) and the control-mode stream (`stream.ts`).

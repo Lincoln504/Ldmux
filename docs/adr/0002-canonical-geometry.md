@@ -1,5 +1,11 @@
 # ADR-0002: Canonical tmux geometry; clients never resize the pane
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> The keeper is now the canonical geometry: a claim hands the size to the device
+> that holds the shell, and `protocol::clamp_pane_size` bounds it.
+
+
 **Status:** Accepted (Phase 1 probe done: `daemon.test.ts` asserts a pinned
 `120x40` grid under `window-size manual`)
 

@@ -1,8 +1,0 @@
-{
-  "name": "@ldmux/testing",
-  "private": true,
-  "type": "module",
-  "exports": {
-    ".": "./src/expect.ts"
-  }
-}

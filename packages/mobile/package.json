@@ -1,0 +1,5 @@
+{
+  "//": "Not an npm package: it exists so Node runs packages/mobile/test/*.test.ts as ES modules. The root package.json that used to say this went with the TypeScript tree at D4.",
+  "private": true,
+  "type": "module"
+}

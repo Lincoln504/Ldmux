@@ -732,11 +732,19 @@ stream (retargeted), desktop-inventory, cli, daemon-lifecycle.
 > **Status, 2026-10-04:** phases 1–7 are implemented and the Rust daemon is
 > **deployed live** (systemd user unit, keeper auto-spawned, phone wire contract
 > verified against the running server). The table below is the plan as written;
-> `docs/RUST-PORT-LOG.md` ("Live deployment and the deep audit") is the record
-> of what was actually done and found. The **D4 window** is the one open item:
-> the tmux runtime package and the TypeScript tree are still present (tmux is no
-> longer used by the deployed daemon; the TS tree is the source of record and
-> the standing gate).
+> `docs/RUST-PORT-LOG.md` ("Live deployment and the deep audit", "D4") is the
+> record of what was actually done and found.
+>
+> **D4 is done (2026-10-04).** The TypeScript tree is deleted
+> (`packages/{daemon,protocol,testing}`, `package.json`, `tsconfig.json`,
+> `node_modules`), tmux is out of `flake.nix` and out of the deployment, tmux is
+> gone from the Rust sources, and the retirement is written up: ADR-0018 is the
+> decision, and the docs that described the tmux system carry a dated banner
+> (§9 of this plan is the checklist that was worked through). The snapshot-parity
+> harness is kept `#[ignore]`d as the R1 evidence artifact — the last green run
+> is in the log, because with tmux deleted there is nothing left to compare
+> against. The **D4 window** this plan recommended as a release cycle was closed
+> early, at the user's direction.
 
 Dependency graph: `protocol` → {pure modules ∥ keeper ∥ vt-sys ∥ attach} →
 `daemon` → integration/deploy.

@@ -1,13 +1,13 @@
 {
-  description = "ldmux — tmux-native remote terminal (daemon + CLI + mobile)";
+  description = "ldmux — remote terminal sessions (daemon + CLI + keeper + mobile)";
 
   # Main toolchain pin: the same nixpkgs-unstable revision used by the dooboxes
   # flake, so the source tree and binary cache are shared on this machine.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/6cdc7fc76e8bf7fde9fa43a849fcaaa70e230dee";
   # Second pin, for the Node runtime only. The revision above tops out at
-  # nodejs_24; Node 26 is the Current line (26.8.2) and is what the daemon and
-  # CLI run on. Pinning a second input keeps that upgrade from dragging the
-  # whole toolchain forward at the same time.
+  # nodejs_24; Node 26 is the Current line (26.8.2), and the dev scripts under
+  # `scripts/` run on it. Pinning a second input keeps that upgrade from dragging
+  # the whole toolchain forward at the same time.
   inputs.nixpkgs-node.url = "github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f";
 
   outputs = { self, nixpkgs, nixpkgs-node }:
@@ -20,11 +20,13 @@
         nodePkgs = import nixpkgs-node { inherit system; };
       });
 
-      # What the daemon *runs on*: exactly these, in the tests and in the
-      # deployment. They were different — the suite ran this tmux 3.7b and Node 26
-      # while the unit ran Debian's tmux 3.5a and an nvm Node 25 — and a profile
-      # option that crashes 3.5a passed every test and took the real daemon down.
-      runtime = pkgs: nodePkgs: [ nodePkgs.nodejs_26 pkgs.tmux ];
+      # What the deployed binaries link against *dynamically*: the C library and
+      # libgcc from this flake's toolchain. The daemon is a cargo build from this
+      # shell, so it links these exact store paths; `just install` links this
+      # derivation as a GC root so a `nix-collect-garbage` cannot delete them out
+      # from under the running daemon. tmux and Node used to be here — the daemon
+      # runs on neither any more (the keeper owns the PTYs, the daemon is Rust).
+      runtime = pkgs: _nodePkgs: [ pkgs.glibc pkgs.libgcc ];
 
       # The Rust toolchain (the cargo/rustc from nixpkgs, used by the Rust
       # port). The rustup toolchain in the devShell is the system one;
@@ -32,18 +34,14 @@
       # reproducible builds.
       rustToolchain = pkgs: with pkgs; [ rustfmt clippy rustc cargo ];
 
+      # Development-only extras: not part of what the daemon runs on.
+      devExtras = pkgs: nodePkgs: [ nodePkgs.nodejs_26 pkgs.just pkgs.jq pkgs.git pkgs.curl pkgs.sqlite pkgs.procps
+        # A QR *decoder*, for tests only: the Rust encoder behind `ldmux code`
+        # is judged by reading every code it makes back (crates/daemon/src/qr.rs).
+        pkgs.zbar ];
+
       # The dev toolchain: the runtime, plus conveniences.
-      toolchain = pkgs: nodePkgs: runtime pkgs nodePkgs ++ rustToolchain pkgs ++ (with pkgs; [
-        just
-        jq
-        git
-        curl
-        sqlite
-        procps
-        # A QR *decoder*, for tests only: the encoder behind `ldmux code` is judged
-        # by reading every code it makes back (packages/daemon/test/qr.test.ts).
-        zbar
-      ]);
+      toolchain = pkgs: nodePkgs: runtime pkgs nodePkgs ++ rustToolchain pkgs ++ devExtras pkgs nodePkgs;
     in
     {
       devShells = forAllSystems ({ pkgs, nodePkgs, ... }: {
@@ -53,7 +51,7 @@
             echo "ldmux devshell"
             echo "  node  $(node --version)"
             echo "  npm   $(npm --version)"
-            echo "  tmux  $(tmux -V)"
+            echo "  rustc $(rustc --version)"
           '';
         };
 
@@ -99,9 +97,9 @@
         };
       });
 
-      # `just install` builds this to ~/.local/state/ldmux/runtime and runs the
-      # daemon, CLI and desk windows from it. That link is also a GC root, so a
-      # `nix-collect-garbage` cannot take the running daemon's tmux away.
+      # `just install` builds this to ~/.local/state/ldmux/runtime and keeps it
+      # as a GC root, so `nix-collect-garbage` cannot take the C library the
+      # running daemon links against.
       packages = forAllSystems ({ pkgs, nodePkgs, ... }: {
         runtime = pkgs.buildEnv {
           name = "ldmux-runtime";
@@ -112,9 +110,5 @@
 
       # `nix fmt`
       formatter = forAllSystems ({ pkgs, ... }: pkgs.nixpkgs-fmt);
-
-      # NOTE: reproducible builds of ldmuxd/ldmux (via npm) and the KMP/Android
-      # app are added in later phases. Phase 1 only needs the devShell
-      # (node + tmux + tests), which is fully reproducible here.
     };
 }

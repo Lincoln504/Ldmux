@@ -1,7 +1,10 @@
-//! The ldmux daemon proper.
+//! The ldmux daemon: registry, ownership, remote WS, streams, desktop,
+//! inventory, the CLI (`bin/ldmux`), and the daemon entry (`bin/ldmuxd`).
 //!
-//! This crate is being built up phase by phase (AGENTS.md PORT MODE,
-//! `docs/RUST-PORT-LOG.md`). Phase 2 (the pure modules) has landed:
+//! Ported from `packages/daemon` (the TS source of record); each module names
+//! its TS source in its own doc comment. **Those files no longer exist** — the
+//! TypeScript tree was deleted at D4; read them at git commit `6b3efb8`, the
+//! last commit that carried the tree.
 //!
 //! - [`auth`] — the remote access token (0600 file, constant-time compare)
 //! - [`qr`] — the QR encoder for `ldmux code` (ISO/IEC 18004, v1–40)

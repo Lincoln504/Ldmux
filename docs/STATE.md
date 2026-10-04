@@ -8,9 +8,12 @@
 > used by the daemon. The mobile wire contract, the pairing, the ownership model
 > and the CLI are unchanged in behaviour. The port's own record — the wire-
 > protocol findings, the live-deploy results, and what is still open — is
-> `docs/RUST-PORT-LOG.md` ("Live deployment and the deep audit"). A full
-> SPEC/STATE pass over the tmux wording (§5.2 profile, the transport sections) is
-> still pending; treat every tmux claim below as historical.
+> `docs/RUST-PORT-LOG.md` ("Live deployment and the deep audit"). **D4 is done
+> (2026-10-04):** the TypeScript tree is deleted, tmux is out of the flake and out
+> of the deployment, and the docs that described the tmux system (this file, SPEC
+> §5.2, TMUX-DEPENDENCY, TRANSPORT, INVESTIGATION, and the affected ADRs) carry a
+> dated banner. Treat every banner-free tmux claim below as historical: the
+> sections are the record of how the system was built, not what it is.
 
 **As of 2026-09-26.** This file answers one question: *where does everything stand
 right now?* It is the register, not the specification. `docs/SPEC.md` says what the

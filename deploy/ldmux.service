@@ -5,12 +5,12 @@
 # that are running. That requires three things, and none is the default:
 #
 #   1. `KillMode=process` — see the note on it below. Without it a restart kills
-#      every session on the tmux server.
+#      the keeper, and every shell with it.
 #   2. `loginctl enable-linger $USER` — **not a setting in this file, and the one
 #      that is easiest to miss.** `WantedBy=default.target` starts the unit with the
 #      user manager, and the user manager *stops on the last logout* unless linger is
-#      on. Stopping it signals the whole user slice, which contains the tmux server,
-#      so every session dies, and `KillMode=process` does not help because the signal
+#      on. Stopping it signals the whole user slice, which contains the keeper, so
+#      every session dies, and `KillMode=process` does not help because the signal
 #      does not come from this unit. Measured on this machine: `Linger=yes`.
 #   3. Nothing else may stop the user manager: check `KillUserProcesses` in
 #      `/etc/systemd/logind.conf` is not enabled.
@@ -19,15 +19,13 @@
 # lines, each marked below. It used to be a template with those three commented out,
 # which was worse than useless: installing it gave a loopback-only daemon that
 # reported success and exited 0, so the phone could not connect and nothing said why.
-# Install with `just install`: it builds the runtime, writes the wrappers to
-# `~/.local/bin`, copies this file to `~/.config/systemd/user/ldmux.service` and
-# runs `systemctl --user daemon-reload`. It does not enable or restart the unit:
+# Install with `just install`: it installs the Rust binaries to `~/.local/bin`,
+# copies this file to `~/.config/systemd/user/ldmux.service` and runs
+# `systemctl --user daemon-reload`. It does not enable or restart the unit:
 # `systemctl --user enable --now ldmux` the first time, `restart` after that.
 [Unit]
-Description=ldmux daemon — remote terminal sessions over tmux
+Description=ldmux daemon — remote terminal sessions
 # A real path, rather than one an installer that does not exist would have created.
-# `install.sh` is unbuilt Phase-5 work (docs/SPEC.md §Phase 5) and this file used to
-# cite both it and a `/usr/local/share` path as though they were done.
 Documentation=file://%h/Documents/ldmux/docs/SPEC.md
 After=default.target
 
@@ -36,17 +34,17 @@ Type=simple
 
 # KillMode=process is the important line.
 #
-# The tmux server, and therefore every shell in it, is *not* a child of this
-# process — but it is in this unit's cgroup, because the daemon was what started
-# it. The default KillMode=control-group signals the whole cgroup on stop, which
-# kills the tmux server and every session with it: measured, all sessions gone on
-# a single `systemctl --user restart` (docs/DESKTOP-INTEGRATION.md). `process`
-# signals only the daemon, and the shells survive it — which is the entire point
-# of a tmux-backed session.
+# The keeper, and therefore every shell in it, is *not* a child of this process —
+# but it is in this unit's cgroup, because the daemon was what started it. The
+# default KillMode=control-group signals the whole cgroup on stop, which kills the
+# keeper and every session with it: measured, all sessions gone on a single
+# `systemctl --user restart` (docs/DESKTOP-INTEGRATION.md). `process` signals only
+# the daemon, and the shells survive it — which is the entire point of a
+# kept-alive session. The keeper re-attaches on the daemon's next start.
 KillMode=process
 
 # A restart is a daemon restart, not a session wipe, so it is always safe to
-# bring the daemon back: sessions are re-adopted from the tmux server on boot
+# bring the daemon back: sessions are re-adopted from the keeper on boot
 # (Registry.reconcile), never recreated.
 Restart=on-failure
 RestartSec=2
@@ -64,12 +62,6 @@ RestartSec=2
 # on this machine — measured: the session's DISPLAY is `:0.0`.
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=%h/.Xauthority
-# Node and tmux are the flake's runtime (`just install` links it at
-# %S/ldmux/runtime, which is also a nix GC root): the versions the suite runs, not
-# whatever the distribution or nvm happens to have. The wrapper sets
-# LDMUX_TMUX_BIN from the same place; it is repeated here so the unit says what it
-# runs.
-Environment=LDMUX_TMUX_BIN=%S/ldmux/runtime/bin/tmux
 
 Environment=LDMUX_STATE_DIR=%t/ldmux
 
@@ -77,6 +69,7 @@ Environment=LDMUX_STATE_DIR=%t/ldmux
 # a tmpfs, so a token kept there was minted afresh on every boot and every paired
 # phone was locked out. %S is ~/.local/state.
 Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
+
 
 # The daemon the phone talks to. Without these it answers on an unix socket only,
 # which is fine for the CLI and useless for a device.
@@ -86,15 +79,11 @@ Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 Environment=LDMUX_REMOTE_HOST=100.127.119.54
 Environment=LDMUX_REMOTE_PORT=7625
 
-# The runtime first on PATH, so anything the daemon spawns by name gets the same
-# versions. It used to name an nvm directory, which broke on every nvm upgrade.
-# `~/.local/bin` is where the Rust binaries (ldmuxd, ldmux, ldmux-keeper) are
-# installed by `just install-rust`. The Rust daemon auto-spawns the keeper by
-# name (`ldmux-keeper`), so it must be on PATH.
-Environment=PATH=%h/.local/bin:%S/ldmux/runtime/bin:/usr/local/bin:/usr/bin:/bin
-# `%h/.local/bin/ldmuxd` is the Rust daemon binary (installed by `just
-# install-rust`). During the A/B window (D4), the TS daemon can still be run via
-# the TS wrapper (kept as `ldmuxd-ts`).
+# `~/.local/bin` is where `just install` puts ldmuxd, ldmux and ldmux-keeper. The
+# daemon auto-spawns the keeper by name, so it must be on PATH. Nothing here comes
+# from a nix profile: the daemon is a cargo build, and `just install` keeps a GC
+# root for the C library it links against.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/ldmuxd
 
 [Install]

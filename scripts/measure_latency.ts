@@ -17,10 +17,87 @@
  * number. Run it against the real (tailnet) address for the figure that matters.
  */
 
-import { call } from "../packages/protocol/src/socket-client.ts";
-import { resolveSocketPath } from "../packages/protocol/src/paths.ts";
-import { decodeFrames, FrameType, type Frame } from "../packages/protocol/src/frames.ts";
+import { connect } from "node:net";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+
+// ── The wire codec, inlined ────────────────────────────────────────────────
+// This script used to import these from packages/protocol, the TypeScript tree
+// the daemon was ported out of and which was deleted at D4. The format is the
+// daemon's and is pinned by the Rust crates; only what this script needs is
+// repeated here. Frame: 8-byte header, u8 type / u8 flags / u16 reserved /
+// u32 length (little-endian).
+const HEADER_SIZE = 8;
+const TYPE_OUTPUT = 0x10;
+const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
+
+interface Frame {
+  type: number;
+  payload: Uint8Array;
+}
+
+/** Decode as many complete frames as `buf` contains; return the trailing partial. */
+function decodeFrames(buf: Uint8Array): { frames: Frame[]; rest: Uint8Array } {
+  const frames: Frame[] = [];
+  let offset = 0;
+  while (buf.length - offset >= HEADER_SIZE) {
+    const view = new DataView(buf.buffer, buf.byteOffset + offset, HEADER_SIZE);
+    const type = view.getUint8(0);
+    const length = view.getUint32(4);
+    if (length > MAX_FRAME_PAYLOAD) throw new RangeError(`frame payload too large: ${length}`);
+    if (buf.length - offset - HEADER_SIZE < length) break;
+    const start = offset + HEADER_SIZE;
+    frames.push({ type, payload: buf.subarray(start, start + length) });
+    offset = start + length;
+  }
+  return { frames, rest: buf.subarray(offset) };
+}
+
+/** The daemon's Unix socket. Same chain as the daemon resolves: never drift. */
+function resolveSocketPath(): string {
+  if (process.env.LDMUX_SOCK) return process.env.LDMUX_SOCK;
+  const state = process.env.LDMUX_STATE_DIR ?? `${process.env.XDG_RUNTIME_DIR ?? "/tmp"}/ldmux`;
+  return join(state, "ldmuxd.sock");
+}
+
+/** One newline-delimited JSON call on the daemon's socket: one connection each. */
+function call<T>(method: string, params: Record<string, unknown> = {}, timeoutMs = 8000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const sock = connect(resolveSocketPath());
+    let buf = "";
+    let done = false;
+    const decoder = new TextDecoder();
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      sock.destroy();
+      fn();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`ldmux request timed out: ${method}`))),
+      timeoutMs,
+    );
+    sock.on("connect", () => sock.write(JSON.stringify({ id: 1, method, params }) + "\n"));
+    sock.on("data", (chunk: Buffer) => {
+      buf += decoder.decode(chunk, { stream: true });
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      const line = buf.slice(0, nl);
+      finish(() => {
+        try {
+          const res = JSON.parse(line) as { ok: boolean; result?: T; error?: string };
+          if (res.ok) resolve(res.result as T);
+          else reject(new Error(res.error || "ldmux request failed"));
+        } catch (err) {
+          reject(err as Error);
+        }
+      });
+    });
+    sock.on("error", (err) => finish(() => reject(err)));
+    sock.on("close", () => finish(() => reject(new Error("ldmux socket closed"))));
+  });
+}
 
 interface RemoteInfo {
   hostname: string;
@@ -43,7 +120,7 @@ if (!sessionId && !explicitUrl) {
 }
 
 const wsUrl = explicitUrl ?? await (async () => {
-  const info = await call<RemoteInfo>(resolveSocketPath(), "remote_info");
+  const info = await call<RemoteInfo>("remote_info");
   return `ws://${info.hostname}:${info.port}${info.path}?token=${encodeURIComponent(info.token)}`;
 })();
 const socket = new WebSocket(wsUrl);
@@ -61,8 +138,8 @@ socket.addEventListener("message", (ev: any) => {
   merged.set(bytes, tail.length);
   const { frames, rest } = decodeFrames(merged);
   tail = rest;
-  for (const f of frames as Frame[]) {
-    if (f.type === FrameType.Output) onOutput?.(new TextDecoder().decode(f.payload));
+  for (const f of frames) {
+    if (f.type === TYPE_OUTPUT) onOutput?.(new TextDecoder().decode(f.payload));
   }
 });
 

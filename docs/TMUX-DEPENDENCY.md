@@ -1,5 +1,12 @@
 # The tmux dependency
 
+> **Closed — decided, done (2026-10-04, D4).** The second option in this document
+> won: the session layer is our own, `crates/keeper` (ADR-0018). tmux is not in
+> the flake, not in the deployment, and not in the repository any more. Nothing
+> below is a live dependency; it is the evidence base for the decision. The
+> ledger that tracked each tmux behaviour to its replacement is plan §2, and the
+> port's own record is `docs/RUST-PORT-LOG.md`.
+
 **Status: superseded as a decision doc (2026-09-28), by `docs/RUST-PORT-PLAN.md`.**
 Option (a) is moot (the pipe path was built and measured, and retires with tmux),
 and option (c) is decided — build, in the Rust port, per user direction (ADR-0015's

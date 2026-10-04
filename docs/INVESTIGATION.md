@@ -1,5 +1,10 @@
 # ldmux — Investigation Log
 
+> **Historical (2026-10-04, D4).** Written against the tmux implementation and left as
+> the evidence base it was. Do not read it as current design: the session layer is
+> the keeper (ADR-0018), and `docs/SPEC.md` is the authoritative design.
+
+
 **Purpose:** Record what exists on this machine, what the prior art says, and the
 evidence behind every load-bearing decision in [`SPEC.md`](SPEC.md). This is the
 "why" behind the spec.

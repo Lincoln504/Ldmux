@@ -1,5 +1,79 @@
 # Rust port log
 
+## D4 — tmux and the TypeScript tree are gone (2026-10-04)
+
+The last deliberate step of the port, done at the user's direction ahead of the
+one-release-cycle window this log recommended.
+
+**Evidence recorded before the deletion** (plan §7 step 2: "the evidence that
+makes deletion safe"):
+
+- `cargo test -p ldmux-daemon --test parity -- --ignored` → **1 passed**, the
+  §3.11 snapshot-parity gate against live tmux, cells compared cell by cell.
+  That harness is now `#[ignore]`d (it needs a tmux binary and the devShell no
+  longer ships one); it is kept as the R1 evidence artifact.
+- `cargo test --workspace` → 29 test binaries green.
+- Live: the phone-shaped end-to-end (hello → new → created+sessions → attach →
+  caps+snapshot → input → OUTPUT → kill), restart survival, and the desk window
+  — all against the Rust daemon.
+
+**Deleted:** `packages/{daemon,protocol,testing}`, `package.json`,
+`package-lock.json`, `tsconfig.json`, `node_modules`, `scripts/ab-transport.ts`,
+`deploy/bin/{ldmux,ldmuxd}` (the TS wrappers). tmux out of `flake.nix`
+(runtime and devShell) and out of `deploy/ldmux.service`; `LDMUX_TMUX_BIN` gone.
+
+**Moved rather than deleted:** the pairing-link fixture, read by both sides of
+that contract, went from `packages/protocol/test/fixtures/` to
+`crates/protocol/test/fixtures/pairing-links.json` (read by the Rust protocol
+tests and by the app's `PairingTest`).
+
+**Found while doing it — four things the port had left wrong**, all fixed:
+
+1. **No pane-size clamp.** The TS clamped a requested pane to cols 20..500 and
+   rows 5..**255**; the row ceiling is the client wire format's (a frame carries
+   a selection's rows in one byte, so a taller pane wraps them and moves the
+   handles to the top of the screen with no error). The Rust had no clamp at all,
+   and cast the size to `u16` without bounds. Now `protocol::{MIN,MAX}_PANE_*`
+   and `clamp_pane_size`, applied in the daemon's `PaneStream::resize` and again
+   at the keeper's `TIOCSWINSZ` — the last place a size can be corrected.
+2. **The mirror ran tmux.** `ldmux mirror` spawned `alacritty … -e tmux -L …` —
+   a binary that is not installed — and `desktop.rs` carried the tmux argv
+   builders as dead code. The CLI now runs `ldmuxd attach <id> --readonly`, with
+   an **absolute** binary path, and the builders are deleted.
+3. **The mirror and the desk window both used a bare `ldmuxd`.** `i3-msg exec`
+   has no `~/.local/bin` on `PATH`, so the window was `not found` and closed the
+   instant it opened. `desktop::attach_bin()` resolves absolutely now.
+4. **The mobile tree was wired into the deleted tree.** Its
+   `architecture.test.ts` read `MAX_PANE_ROWS` out of
+   `packages/daemon/src/tmux/control-plane.ts`, and `PairingTest.kt` read the
+   fixture from `packages/protocol`. Both retargeted; the three mobile TS tests
+   pass (13 assertions), via a new `just mobile-test`.
+
+**Also cleaned:** the dead tmux socket resolver in `protocol::paths`
+(`LDMUX_TMUX_SOCK=default` refusal and all), the tmux mirror argv builders, and
+the stale unit/prose. Two names are deliberately **kept** although they are now
+false, and ADR-0018 says why: the wire/registry field `tmuxName`/`tmuxSocket`
+(the installed app reads it) and `LDMUX_TMUX_NAME`/`LDMUX_TMUX_SOCK` in the spawn
+env (a shell profile written against the tmux era reads them). The truthful
+`LDMUX_SESSION_NAME` and `LDMUX_KEEPER_SOCK` are set alongside.
+
+**Docs:** ADR-0018 (new, the decision), superseded banners on ADRs 0001/0002/
+0003/0006/0008/0009/0010/0012/0014/0015, and dated banners on
+`TMUX-DEPENDENCY.md` (closed), `TRANSPORT.md` (retired), `INVESTIGATION.md`
+(historical), `DESKTOP-INTEGRATION.md`, `REMOTE.md`, `NATIVE-TERMINAL.md`,
+`PREDICTIVE-ECHO.md`. `SPEC.md` §4.4 has the real spawn-env table and §5.2 leads
+with what replaced each tmux mechanism. `README.md` and `AGENTS.md` were
+rewritten for the deployed architecture.
+
+**Gate after D4:** `cargo test --workspace` (29 binaries green, 2 ignored) +
+`just mobile-test` (13 pass). The clamp is pinned by
+`protocol::size_tests` and proved live: attaching to the deployed daemon with
+`cols: 80, rows: 300` answers `caps` with `rows: 255` and the `snapshot` with
+`rows: 255` — the pane the client is told about and the pane the PTY got agree. Rust doc comments still cite `packages/**` paths as
+the source of record: those name files deleted at D4, readable at git commit
+`6b3efb8`.
+
+
 The per-phase state/progress/findings record for the port (AGENTS.md PORT
 MODE). The user compacts between phases; a fresh session resumes by reading
 this file, then the plan §7 table, then the phase's source of record.

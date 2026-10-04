@@ -123,7 +123,15 @@ fn normalize(rows: Vec<Vec<Cell>>, width: usize) -> Vec<Vec<Cell>> {
         .collect()
 }
 
+// Status after D4: tmux is gone (deleted with the TypeScript tree), so
+// `parity_corpus_cells_match_tmux` is `#[ignore]`d — it needs a tmux binary, and
+// the devShell no longer ships one. It is kept because it *is* the R1 evidence
+// artifact: the last green run, and the corpus it drives, are recorded in
+// `docs/RUST-PORT-LOG.md`. Install tmux (or set `LDMUX_TMUX_BIN`) and run it with
+// `cargo test -p ldmux-daemon --test parity -- --ignored` to re-verify. The
+// format half below needs no tmux and still runs.
 #[tokio::test]
+#[ignore = "needs a tmux binary, removed at D4; see docs/RUST-PORT-LOG.md for the evidence run"]
 async fn parity_corpus_cells_match_tmux() {
     // The corpus file (the pane `cat`s it as its *output*).
     let corpus_path = std::env::temp_dir().join(format!(

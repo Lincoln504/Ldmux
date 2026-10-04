@@ -1,5 +1,11 @@
 # ADR-0008 — Mobile UI modes, and who owns the pane's geometry
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> The ownership rule (ADR-0010) survives unchanged in shape; what changed is who
+> sizes the pane: the keeper applies the holder's size, not tmux's `window-size`.
+
+
 **Status:** Accepted (2026-09-14). **§1 is superseded by
 [ADR-0011](0011-screen-orientation.md)** — read that instead, and read §1 below only as
 the reasoning that was later rejected. §2 and §3 still hold.

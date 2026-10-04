@@ -5,8 +5,8 @@ package dev.ldmux.mobile
  *
  *     ldmux://pair?v=1&host=100.127.119.54:7625&token=<64 hex>&name=debian
  *
- * The mirror of `packages/protocol/src/pairing.ts`, and held to it by the fixture
- * both sides read (`packages/protocol/test/fixtures/pairing-links.json`, see
+ * The mirror of `crates/protocol/src/pairing.rs`, and held to it by the fixture
+ * both sides read (`crates/protocol/test/fixtures/pairing-links.json`, see
  * `PairingTest`). Anything this refuses, the CLI cannot produce, and the reverse.
  *
  * Refusing is the point of most of this. A pairing replaces where every keystroke

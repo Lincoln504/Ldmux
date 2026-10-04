@@ -48,7 +48,7 @@ either. It is deliberately simple:
 | [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
 | [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
-| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | Historical: the decision about how much of the session layer should be tmux's (decided: none). |
+| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | Historical: the decision about how much of the session layer should be tmux's. Decided: none — closed 2026-10-04 (ADR-0018). |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
 
@@ -60,32 +60,30 @@ The user's working name for the old idea was "Doombox"/"Dooboxes"; the existing
 
 ## Development
 
-The project uses a **Nix flake** for a reproducible toolchain (Node 26 for the
-TypeScript source of record, rustup for the Rust workspace, tmux for the parity
-harness, just). `packages/mobile` additionally needs the Android/KMP toolchain
+The project uses a **Nix flake** for a reproducible toolchain (rustc/cargo for
+the workspace, Node 26 for the scripts and the mobile tree's own tests, just).
+`packages/mobile` additionally needs the Android/KMP toolchain
 (`nix develop .#mobile`).
 
 ```bash
-nix develop                  # node 26.8.2, rustc/cargo, tmux 3.7b, just, zbarimg
+nix develop                  # rustc/cargo, node 26.8.2, just, zbarimg
 cargo build --workspace      # build every Rust crate
-cargo test --workspace       # the Rust gate (keeper, daemon, protocol, vt-sys, attach)
-node --run test              # the TypeScript gate (the source of record)
-node --run typecheck         # tsc --noEmit (strict, no build step)
+cargo test --workspace       # the gate (keeper, daemon, protocol, vt-sys, attach)
+just test                    # the same, via the Justfile
 just install                 # build the release workspace and install ldmuxd/ldmux/ldmux-keeper
-just rust-daemon             # run the Rust daemon in the foreground
-just rust-cli list           # sessions, through the Rust CLI
+just daemon                  # run the daemon in the foreground
+just cli list                # sessions, through the CLI
 just cli run shell           # create a session and attach
 just remote                  # remote host, port, token, and whether it is listening
 just code                    # pairing QR code for the phone to scan (ADR-0017)
 just pair                    # the same pairing, as an ldmux:// link
 just latency <id>            # round-trip echo latency against a session
+just mobile-test             # the mobile tree's own TypeScript tests
 ```
 
-The TypeScript tree has **no build step** (Node strips the types; the source
-must stay *erasable*; `erasableSyntaxOnly` enforces it — see
-[ADR-0009](docs/adr/0009-node-runtime-and-no-pi-extension.md)). It is retained as
-the source of record and the parity corpus while the tmux removal completes; the
-deployed daemon is the Rust one.
+There is no TypeScript daemon any more: the tree was deleted at D4 (2026-10-04,
+[ADR-0018](docs/adr/0018-session-layer.md)) together with tmux. Node remains a
+dev tool.
 
 ## Status
 
@@ -119,9 +117,8 @@ and the commands that produce them):
   GET answers 401/400 so the phone's connection probe can tell a refused token
   from a machine that is off.
 
-Not yet: iOS (needs a macOS host for the xcframework), the mobile client's
-Compose renderer hardening (cursor blink, zoom), and the final tmux removal from
-the flake (the deployed daemon does not use it).
+Not yet: iOS (needs a macOS host for the xcframework) and the mobile client's
+Compose renderer hardening (cursor blink, zoom).
 
 Design divergences from dooboxes/gmux are recorded in
 [`docs/adr/0006-divergences.md`](docs/adr/0006-divergences.md).

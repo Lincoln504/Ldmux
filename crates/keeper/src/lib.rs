@@ -155,6 +155,11 @@ impl Keeper {
             }
             km::KeeperMessage::Resize(r) => {
                 use nix::libc as libc;
+                // Clamp at the PTY. This is the last place a size can be
+                // corrected, and the frame's selection rows are one byte, so a
+                // pane above 255 rows truncates them silently (protocol
+                // `MAX_PANE_ROWS`).
+                let (cols, rows) = ldmux_protocol::clamp_pane_size(r.cols, r.rows);
                 let m = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&r.session_id) {
@@ -164,8 +169,8 @@ impl Keeper {
                 };
                 let (m, m_tx) = m;
                 let ws = libc::winsize {
-                    ws_row: r.rows as u16,
-                    ws_col: r.cols as u16,
+                    ws_row: rows as u16,
+                    ws_col: cols as u16,
                     ws_xpixel: 0,
                     ws_ypixel: 0,
                 };
@@ -176,14 +181,14 @@ impl Keeper {
                 // Tell the emulator to resize its grid (FIFO: it applies this
                 // before answering a later `Snapshot`).
                 let _ = m_tx.send(emulator::EmuMsg::Resize {
-                    cols: r.cols as u16,
-                    rows: r.rows as u16,
+                    cols: cols as u16,
+                    rows: rows as u16,
                 });
                 {
                     let mut g = self.sessions.lock().unwrap();
                     if let Some(s) = g.get_mut(&r.session_id) {
-                        s.cols = r.cols as u16;
-                        s.rows = r.rows as u16;
+                        s.cols = cols as u16;
+                        s.rows = rows as u16;
                     }
                 }
                 self.state_of(&r.session_id).await

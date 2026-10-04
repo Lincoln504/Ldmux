@@ -1,5 +1,5 @@
 {
-  "//": "The pairing-link contract, pinned from both sides: packages/protocol/test/pairing.test.ts and the app's PairingTest read this file. Add a case here, not in one of them.",
+  "//": "The pairing-link contract, pinned from both sides: crates/protocol/src/pairing.rs and the app's PairingTest read this file. Add a case here, not in one of them.",
   "valid": [
     {
       "link": "ldmux://pair?v=1&host=100.127.119.54%3A7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian",

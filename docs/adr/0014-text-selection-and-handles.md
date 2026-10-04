@@ -1,5 +1,11 @@
 # ADR-0014 — Text selection, and the two-point handles
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> The selection format and the two-point handles are unchanged (they are the
+> client's, not the session layer's). Only its `capture-pane` provenance changed.
+
+
 **Status:** accepted (design). Implementation not started.
 **Supersedes:** nothing. **Relates to:** ADR-0007 (native engine), ADR-0013 (seams).
 

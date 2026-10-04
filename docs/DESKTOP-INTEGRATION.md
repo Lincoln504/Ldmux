@@ -1,5 +1,12 @@
 # Desktop integration: workspaces, windows and "make it live on the desktop"
 
+> **Partly historical (2026-10-04, D4).** The i3 rules, the workspace choice and the
+> ownership handover are still the design. The *mechanism* is not: there is no
+> shim script and no tmux client — a desk window is
+> `alacritty -e ldmuxd attach <id>`, a protocol client. See `crates/attach` and
+> ADR-0018.
+
+
 The phone is not the only place an ldmux shell should be able to exist. The plan
 of record is that a shell opened from the phone can be *made live on the desktop*
 — a real terminal window attached to the same tmux session, on a workspace the

@@ -1,5 +1,13 @@
 # ADR-0010: Exclusive session ownership, with consented handoff
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> The rule is unchanged and still implemented (`crates/daemon/src/ownership.rs`).
+> One sentence in it is now false — the note at line 116 about the *tmux* pane
+> size being the canonical one. The keeper is the canonical geometry now; the
+> claim still hands the size over, which was the point.
+
+
 **Status:** Accepted — **supersedes ADR-0006 §1**
 
 ## Context

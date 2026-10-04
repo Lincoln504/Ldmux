@@ -199,10 +199,10 @@ test("every Kotlin source on disk is tracked by git", () => {
 // truncated. Checked here rather than in either package, because this is the seam.
 test("the daemon's pane ceiling fits in the frame's one-byte selection rows", () => {
   const plane = readFileSync(
-    join(ROOT, "..", "daemon", "src", "tmux", "control-plane.ts"),
+    join(ROOT, "..", "..", "crates", "protocol", "src", "lib.rs"),
     "utf8",
   );
-  const m = /export const MAX_PANE_ROWS = (\d+);/.exec(plane);
+  const m = /pub const MAX_PANE_ROWS: u64 = (\d+);/.exec(plane);
   assert.ok(m, "MAX_PANE_ROWS is no longer a literal this test can read");
   const rows = Number(m[1]);
   assert.ok(

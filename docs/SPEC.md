@@ -271,7 +271,8 @@ pi() {
 }
 ```
 
-**Child env contract** (injected by `ldmux -- <cmd>` / `new-session`):
+**Child env contract** (injected by the keeper's `Spawn`, planned in plan §2.6 as
+what replaces the tmux server's option profile):
 
 | Var | Meaning |
 |-----|---------|
@@ -279,8 +280,10 @@ pi() {
 | `LDMUX_SESSION_ID` | ldmux session id (`<ulid>`). |
 | `LDMUX_SOCKET` | daemon Unix socket path for child reporting. |
 | `LDMUX_KIND` | `shell` \| `pi`. |
-| `LDMUX_TMUX_NAME` | the session's tmux session name (for `tmux -L $LDMUX_TMUX_SOCK`). |
-| `LDMUX_TMUX_SOCK` | the private tmux server socket name (`ldmux` by default). |
+| `LDMUX_SESSION_NAME` | the keeper session id (`ldmux-<session id>`). |
+| `LDMUX_KEEPER_SOCK` | the keeper's Unix socket path. |
+| `LDMUX_TMUX_NAME` | the same value as `LDMUX_SESSION_NAME`, kept because a shell profile written against the tmux era reads it. |
+| `LDMUX_TMUX_SOCK` | the same value as `LDMUX_KEEPER_SOCK`, kept for the same reason. Nothing here is a tmux server. |
 
 `LDMUX_DAEMON_TOKEN` is **not** implemented: children reach the daemon through
 the Unix socket, whose 0600 permission plus a 0700 state dir is the boundary.
@@ -341,6 +344,18 @@ under ldmux (`$LDMUX=1`).
 > `Peek`/`Snapshot`/`List`/`Close`. There is no control-mode parser, no
 > `capture-pane`, no tmux server, and no `-L` socket. The text below is the
 > record of the tmux design this replaced.
+>
+> What replaced each piece:
+>
+> | tmux mechanism | now |
+> |---|---|
+> | tmux server + `-L ldmux` socket | `ldmux-keeper`, one process, detached (ADR-0018) |
+> | server option profile (below) | the seven-variable spawn env (§4.4) |
+> | control mode `-C` + `%output` parsing | a framed binary protocol we own (`crates/protocol`) |
+> | `capture-pane` snapshots | the keeper's libghostty-vt grid |
+> | `capture-pane -S/-E` scrollback paging | the emulator's scrollback, paged by the same `snapshot` message |
+> | `send-keys` / `refresh-client` | `Write` / `Resize` keeper messages |
+> | `window-size manual` (canonical geometry) | the claim hands the size over; `protocol::clamp_pane_size` bounds it |
 
 **Canonical geometry (ADR-0002).** tmux has **one window size per window**. If a
 viewing client influences sizing, every other client (including the desktop

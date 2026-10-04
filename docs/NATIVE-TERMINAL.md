@@ -1,5 +1,9 @@
 # Native terminal rendering (replacing the WebView)
 
+> **Note (2026-10-04, D4).** Unchanged in substance: libghostty-vt is still the one
+> engine, now on both sides — the client renders with it and the keeper runs it.
+
+
 Status: **research / decision pending** (2026-09-14). The Android app currently
 renders each session with the native emulator inside a
 `WebView` — one terminal engine, per ADR-0006. This note records what it would

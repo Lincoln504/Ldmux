@@ -1,5 +1,13 @@
 # ADR-0006: Deliberate divergences from dooboxes and gmux
 
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+
+> **§2 in particular is inverted.** It said ldmux would not own a PTY layer and
+> would keep tmux's grid. The port does own both: `crates/keeper` allocates the
+> PTYs, and libghostty-vt holds the scrollback grid. The rest of the list still
+> describes the divergences from dooboxes/gmux and remains useful.
+
+
 **Status:** Accepted
 
 ## Context

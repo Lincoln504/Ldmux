@@ -15,14 +15,14 @@ import kotlin.test.assertTrue
  * The pairing link, from the app's side of the contract.
  *
  * The cases are not written here. They are read from the fixture the CLI's tests
- * read (`packages/protocol/test/fixtures/pairing-links.json`), so this parser and the
- * TypeScript one are held to the same list and cannot drift apart without one of
- * the two suites failing.
+ * read (`crates/protocol/test/fixtures/pairing-links.json`), so this parser and the
+ * Rust one are held to the same list and cannot drift apart without one of the
+ * two suites failing.
  */
 class PairingTest {
     private val fixture: JsonObject by lazy {
         // Unit tests run with the module directory as the working directory.
-        val file = File("../../protocol/test/fixtures/pairing-links.json")
+        val file = File("../../crates/protocol/test/fixtures/pairing-links.json")
         assertTrue(file.exists(), "the shared fixture is missing: ${file.absolutePath}")
         Json.parseToJsonElement(file.readText()).jsonObject
     }

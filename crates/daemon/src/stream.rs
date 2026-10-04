@@ -272,7 +272,12 @@ impl PaneStream {
 
     /// Resize the pane (the `resize` method): send a `Resize` keeper message.
     /// Returns the response, or an error.
+    ///
+    /// The size is clamped here and again in the keeper: the frame's selection
+    /// rows are one byte, so a pane above 255 rows silently wraps them, and the
+    /// daemon's own bookkeeping must not disagree with the grid the PTY gets.
     pub fn resize(&self, cols: u64, rows: u64) -> Result<KeeperMessage, String> {
+        let (cols, rows) = ldmux_protocol::clamp_pane_size(cols, rows);
         self.keeper.call(&KeeperMessage::Resize(ldmux_protocol::keeper::Resize {
             session_id: self.session_id.clone(),
             cols,
