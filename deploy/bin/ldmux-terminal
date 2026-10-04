@@ -3,18 +3,20 @@
 # ldmux for a desk window and falls back to a plain shell when it cannot have one
 # — a fresh boot before the unit is up, or a daemon that is down.
 #
-# A desk window (`ldmux window`), not `ldmux run`: a bare `tmux attach` made a
-# shell nobody held, so the phone opened it without asking, both typed into one
-# pty, and closing the window left the shell running (ADR-0010). The shim is
-# exec'd directly so no Node process stays behind per window.
+# A desk window (`ldmux window`), not `ldmux run`: a bare shell nobody held made
+# the phone open it without asking, both typed into one pty, and closing the
+# window left the shell running (ADR-0010). The daemon opens the window itself
+# (alacritty running `ldmuxd attach`), so this wrapper spawns no terminal of its
+# own on success.
 #
 # The fallback is logged. It used to be silent, and a wrapper that could not
-# find node made *every* window a plain shell for days with nothing saying so.
+# find the daemon made *every* window a plain shell for days with nothing saying
+# so.
 LDMUX="$HOME/.local/bin/ldmux"
 err=$(mktemp) || err=/dev/null
-if shim=$("$LDMUX" window "${PWD:-$HOME}" 2>"$err") && [ -n "$shim" ]; then
+if "$LDMUX" window "${PWD:-$HOME}" >/dev/null 2>"$err"; then
   rm -f "$err"
-  exec alacritty -e /bin/sh "$shim"
+  exit 0
 fi
 logger -t ldmux-terminal "no ldmux desk window, plain shell instead: $(head -c 300 "$err" 2>/dev/null)"
 [ "$err" = /dev/null ] || rm -f "$err"

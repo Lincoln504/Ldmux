@@ -553,9 +553,84 @@ async fn main() {
         // The desk window and mirror commands (the `run`/`shell`/`window`/`mirror`
         // lifecycle) are not yet ported: they depend on the shim script and the
         // desktop mirror (`openMirror`), which are in `desktop.ts`.
-        "run" | "shell" | "window" | "mirror" => {
-            eprintln!("ldmux {cmd}: not yet ported (desk window / desktop mirror)");
-            std::process::exit(1);
+        "window" => {
+            // Create a shell, then make it a desk window here (the daemon opens
+            // the window with the attach client and claims it to the desktop).
+            let pos = positional(rest, &[]);
+            let cwd_default = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+            let cwd: &str = pos.first().copied().unwrap_or(&cwd_default);
+            let created: Result<serde_json::Value, CallError> = daemon_call(
+                &sock,
+                "new",
+                &serde_json::json!({ "kind": "shell", "cwd": cwd, "createdBy": "local" }),
+            )
+            .await;
+            let id = match created {
+                Ok(v) => v
+                    .get("session")
+                    .and_then(|s| s.get("id"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                Err(e) => {
+                    eprintln!("ldmux: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let res: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "deskWindow", &serde_json::json!({ "id": id })).await;
+            match res {
+                Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {}
+                Ok(v) => {
+                    eprintln!(
+                        "ldmux: {}",
+                        v.get("detail").and_then(|x| x.as_str()).unwrap_or("could not make a desk window")
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("ldmux: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "run" | "shell" => {
+            // Create a shell and attach this terminal to it (the desk window of
+            // plan §3.9), then wait. The attach client claims the shell.
+            let pos = positional(rest, &[]);
+            let kind = if cmd == "run" { pos.first().copied().unwrap_or("shell") } else { "shell" };
+            let cwd_idx = if cmd == "run" { 1 } else { 0 };
+            let cwd_default = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+            let cwd: &str = pos.get(cwd_idx).copied().unwrap_or(&cwd_default);
+            let created: Result<serde_json::Value, CallError> = daemon_call(
+                &sock,
+                "new",
+                &serde_json::json!({ "kind": kind, "cwd": cwd, "createdBy": "local" }),
+            )
+            .await;
+            let id = match created {
+                Ok(v) => v
+                    .get("session")
+                    .and_then(|s| s.get("id"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                Err(e) => {
+                    eprintln!("ldmux: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let status = std::process::Command::new("ldmuxd").args(["attach", &id]).status();
+            std::process::exit(status.ok().and_then(|s| s.code()).unwrap_or(1));
+        }
+        "mirror" => {
+            // A read-only view: the attach client with no identity, so it holds
+            // nothing and cannot type.
+            let pos = positional(rest, &[]);
+            let id = pos.first().copied().unwrap_or("");
+            let _ = std::process::Command::new("alacritty")
+                .args(["--class", "ldmux-mirror", "-e", "ldmuxd", "attach", id, "--readonly"])
+                .spawn();
         }
         _ => {
             eprintln!("ldmux: unknown command {cmd}");
