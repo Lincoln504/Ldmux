@@ -20,6 +20,30 @@ use ldmux_protocol::net::is_tailnet_or_loopback;
 use tokio::signal::unix::SignalKind;
 
 fn main() {
+    // `ldmuxd attach <session> [--readonly]`: the desk-window entry point
+    // (plan §3.9). alacritty runs this, so its stdio is the window's pty.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("attach") {
+        let readonly = args.iter().any(|a| a == "--readonly" || a == "-r");
+        let session = args
+            .iter()
+            .skip(2)
+            .find(|a| !a.starts_with('-'))
+            .cloned();
+        let Some(session) = session else {
+            eprintln!("usage: ldmuxd attach <session-id> [--readonly]");
+            std::process::exit(2);
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match rt.block_on(attach::run(&session, readonly)) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("ldmuxd attach: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Last-resort backstops: an unhandled rejection or a stray exception is
     // logged loudly and survived. The daemon holds every client's terminal;
     // exiting because one request went wrong is the worst outcome available.

@@ -199,12 +199,14 @@ dependencies = [
 name = "ldmux-attach"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "ldmux-keeper",
  "ldmux-protocol",
  "nix",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -212,6 +214,7 @@ name = "ldmux-daemon"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "ldmux-attach",
  "ldmux-protocol",
  "ldmux-vt-sys",
  "nix",

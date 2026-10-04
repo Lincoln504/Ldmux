@@ -1,8 +1,13 @@
-//! Phase 6 desktop attach e2e (plan §6): Xvfb + i3 scratch; verify the
-//! live-window lifecycle functions work without panicking.
+//! Desktop live-window e2e (plan §6): Xvfb + i3 scratch; the live-window
+//! lifecycle functions (open/state/close) run against a real X server and WM
+//! without panicking.
 //!
-//! This test uses a real X server (Xvfb) and window manager (i3) to verify
-//! the live-window functions. It does not require a full terminal emulator.
+//! **Known weakness (recorded in docs/RUST-PORT-LOG.md):** the plan asks for a
+//! full handover test with an alacritty-stub (both directions, size-on-attach,
+//! wheel→history, close≠detach). This test only proves the i3-facing functions
+//! are callable on a scratch display; the attach client's own loop is covered
+//! by `attach_client.rs`. The display is random per run and the children are
+//! reaped on drop, so a failed run leaves nothing behind.
 
 use std::process::Command;
 
@@ -15,45 +20,51 @@ fn scratch_dir() -> std::path::PathBuf {
     p
 }
 
-/// Desktop attach e2e: start Xvfb + i3; verify open_live, live_window_state,
-/// and close_live work without panicking.
+/// Kill both children when the test ends, however it ends.
+struct Guard(Vec<std::process::Child>);
+impl Drop for Guard {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 #[tokio::test]
 async fn desktop_attach_e2e_functions_do_not_panic() {
-    // Start Xvfb on a virtual display.
-    let display = ":99";
-    let mut xvfb = Command::new("Xvfb")
-        .arg(display)
+    // A random display, so two runs (or a leftover) never collide on the
+    // X server's WM-selection atom.
+    let display = format!(":{}", 90 + (rand::random::<u8>() % 8));
+    let xvfb = Command::new("Xvfb")
+        .arg(&display)
         .arg("-screen")
         .arg("0")
         .arg("1024x768x24")
         .spawn()
         .expect("failed to start Xvfb");
-
-    // Wait for the X server to be ready.
+    let mut guard = Guard(vec![xvfb]);
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-    // Start i3 on the display.
-    let mut i3 = Command::new("i3")
-        .env("DISPLAY", display)
+    let i3 = Command::new("i3")
+        .env("DISPLAY", &display)
         .spawn()
         .expect("failed to start i3");
+    guard.0.push(i3);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    // Wait for i3 to be ready.
-    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-
-    // Set the DISPLAY env for the desktop functions.
-    unsafe { std::env::set_var("DISPLAY", display); }
+    unsafe { std::env::set_var("DISPLAY", &display) };
 
     let state_dir = scratch_dir();
     let tmux_sock = state_dir.join("keeper.sock");
     let session_id = "s1".to_string();
     let tmux_name = "ldmux-s1".to_string();
-    let tmux_bin = "/usr/bin/tmux".to_string();
+    let tmux_bin = "alacritty".to_string();
     let workspace = "1".to_string();
 
-    // Open a live window (may fail if tmux socket doesn't exist, but should
-    // not panic).
-    let result = desktop::open_live(
+    // Open a live window (the argv is what matters; without a real session the
+    // i3 exec may place nothing, which is fine).
+    let _ = desktop::open_live(
         tmux_sock.to_str().unwrap(),
         &tmux_name,
         &session_id,
@@ -62,27 +73,27 @@ async fn desktop_attach_e2e_functions_do_not_panic() {
         state_dir.to_str().unwrap(),
     )
     .await;
-    // The result may be an error (no tmux socket), but it should not panic.
-    let _ = result;
 
-    // Check the window state (should be "absent" or "unknown").
     let state = desktop::live_window_state(&session_id).await;
     assert!(
         matches!(state.unwrap_or("unknown"), "absent" | "unknown" | "present"),
-        "live_window_state should return a valid state"
+        "live_window_state returns a valid state"
     );
 
-    // Close the live window (should not panic).
     let _ = desktop::close_live(&session_id).await;
-
-    // The window should now be absent or unknown.
-    let state2 = desktop::live_window_state(&session_id).await.unwrap_or("unknown");
+    // i3 processes the kill asynchronously: poll briefly for the window to go.
+    let mut state2 = "present";
+    for _ in 0..40 {
+        state2 = desktop::live_window_state(&session_id).await.unwrap_or("unknown");
+        if state2 != "present" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     assert!(
         matches!(state2, "absent" | "unknown"),
-        "the window should be absent or unknown after close"
+        "the window is absent or unknown after close (got {state2})"
     );
 
-    // Cleanup: kill i3 and Xvfb.
-    let _ = i3.kill();
-    let _ = xvfb.kill();
+    let _ = std::fs::remove_dir_all(&state_dir);
 }
