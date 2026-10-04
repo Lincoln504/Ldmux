@@ -140,14 +140,54 @@ impl LdmuxDaemon {
     /// The same client protocol as the WS connection, minus auth (plan §3.5) —
     /// the [fake_keeper](crate::fake_keeper) answers it in tests, the real
     /// keeper in production. A keeper `Error` answer is a failure.
-    async fn keeper_call(&self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
-        ldmux_protocol::keeper_call::keeper_call(
+    ///
+    /// Keeper-death detection (plan §6): if the call fails with a connection
+    /// error (the keeper is dead), respawn it and retry once.
+    async fn keeper_call(&mut self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
+        match ldmux_protocol::keeper_call::keeper_call(
             self.keeper.socket_path().to_str().unwrap(),
             req,
             ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
         )
         .await
-        .map_err(|e| e.0)
+        .map_err(|e| e.0) {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                // Keeper-death detection: if the socket is gone, respawn.
+                if !self.keeper.is_alive().await {
+                    self.keeper.ensure().await.map_err(|e| {
+                        format!("keeper respawn failed: {e}")
+                    })?;
+                    // Small delay for the new keeper to bind the socket.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    // Retry the call against the new keeper.
+                    ldmux_protocol::keeper_call::keeper_call(
+                        self.keeper.socket_path().to_str().unwrap(),
+                        req,
+                        ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+                    )
+                    .await
+                    .map_err(|e| e.0)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Detect keeper death and respawn (plan §6): call the keeper; if it's
+    /// dead, respawn it and reconcile (mark all sessions dead).
+    async fn ensure_keeper_alive(&mut self) -> Result<(), String> {
+        if self.keeper.is_alive().await {
+            return Ok(());
+        }
+        self.keeper.ensure().await.map_err(|e| {
+            format!("keeper respawn failed: {e}")
+        })?;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Reconcile: the new keeper is empty, so all sessions are dead.
+        let _ = self.reconcile().await;
+        Ok(())
     }
 
     /// Reconcile the registry against the keeper's live sessions.
@@ -504,6 +544,9 @@ impl LdmuxDaemon {
                 }))
             }
             "list" => {
+                // Detect keeper death (plan §6): if the keeper is dead,
+                // respawn it and reconcile (mark all sessions dead).
+                self.ensure_keeper_alive().await?;
                 let sessions: Vec<SessionRecord> = self.registry.list();
                 Ok(serde_json::json!({ "sessions": sessions }))
             }
