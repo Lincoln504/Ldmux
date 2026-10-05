@@ -789,11 +789,16 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 })
                 .unwrap_or_default();
             if let Some(stream) = active_stream(conn) {
-                let _ = on_stream(&stream, move |s| {
+                // A name the table refuses is reported, not swallowed: the client
+                // logs the code, and nothing reaches the shell.
+                let sent = on_stream(&stream, move |s| {
                     let refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
                     s.send_key(&refs)
                 })
                 .await;
+                if let Some(Err(e)) = sent {
+                    conn.send_error("bad_key", &e);
+                }
             }
         }
         "follow" => {

@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
 class PairingTest {
     private val fixture: JsonObject by lazy {
         // Unit tests run with the module directory as the working directory.
-        val file = File("../../crates/protocol/test/fixtures/pairing-links.json")
+        val file = File("../../../crates/protocol/test/fixtures/pairing-links.json")
         assertTrue(file.exists(), "the shared fixture is missing: ${file.absolutePath}")
         Json.parseToJsonElement(file.readText()).jsonObject
     }

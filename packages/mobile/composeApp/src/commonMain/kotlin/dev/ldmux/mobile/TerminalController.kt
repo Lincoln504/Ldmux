@@ -556,6 +556,18 @@ class TerminalController(
         // nothing anchored to it, so nothing shifts. That is the honest answer; the
         // alternative is asserting a frame exists on a path where it may not.
         val moved = if (before == null || after == null) 0 else (after - before).toInt()
+        // The alternate screen has no scrollback: the engine declined, so a swipe
+        // goes to the program (wheel events or arrows), as a desktop wheel does.
+        if (moved == 0) {
+            val f = _frame.value
+            if (f != null) {
+                when (val a = planAltScroll(rows, f, mouseRefused)) {
+                    is AltScroll.Wheel -> attach.input(a.bytes)
+                    is AltScroll.Keys -> sendKeyBatches(a.keys)
+                    AltScroll.None -> {}
+                }
+            }
+        }
         // History arrives when it is asked for by the act of scrolling to the end
         // of what is already here. It used to be a button, which is the machine
         // showing its working: two controls whose difference ("show me history"

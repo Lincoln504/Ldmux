@@ -996,7 +996,7 @@ impl LdmuxDaemon {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let keys = params.get("keys").and_then(|v| v.as_array());
-                let record = self.registry.get(id).ok_or_else(|| format!("no such session: {id}"))?;
+                let record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
                 if record.keeper_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
                 }
@@ -1004,6 +1004,14 @@ impl LdmuxDaemon {
                 // name converted to its byte sequence (the TS `sendText` +
                 // `sendKey` are separate operations, but both write to the PTY;
                 // concatenating into one `Write` is equivalent).
+                // Cursor keys depend on the pane's DECCKM mode (`Read` answers it).
+                let app_cursor = match self
+                    .keeper_call(&km::KeeperMessage::Read(km::Read { session_id: record.keeper_name.clone() }))
+                    .await
+                {
+                    Ok(km::KeeperMessage::State(st)) => st.app_cursor,
+                    _ => false,
+                };
                 let mut input: Vec<u8> = Vec::new();
                 if !text.is_empty() {
                     input.extend_from_slice(text.as_bytes());
@@ -1013,7 +1021,7 @@ impl LdmuxDaemon {
                         let ks = k.as_str().unwrap_or("");
                         // An unknown name is refused rather than typed into the
                         // shell: see `key_name_to_bytes`.
-                        input.extend(crate::stream::key_name_to_bytes(ks)?);
+                        input.extend(crate::stream::key_name_to_bytes_in(ks, app_cursor)?);
                     }
                 }
                 let data = String::from_utf8(input).map_err(|e| format!("invalid input bytes: {e}"))?;

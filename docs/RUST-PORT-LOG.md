@@ -1787,3 +1787,31 @@ this change (file untouched); left alone as out of scope.
   `C-]` entries, but the mobile client sends them for Alt and punctuation-Ctrl
   chords (`Modifiers.kt`). The daemon answers `unknown key name`, so those chords do
   nothing on the phone. Predates this change.
+
+---
+
+## Phone/desktop key and scroll parity (2026-10-05)
+
+- **Modified keys were dead on the phone.** `stream.rs::key_name_to_bytes` knew
+  only bare keys and `C-a`..`C-z`; every `M-<x>`, `C-<punct>`, `M-C-<x>` and
+  `C-/M-/M-C-<Named>` the client's `Modifiers.kt` sends was answered
+  `unknown key name`. The table is now a prefix parser: Alt = `ESC` prefix,
+  Ctrl = C0 byte (`C-@`/`C-Space` 0, `C-[` 0x1b, `C-\` .. `C-_` 0x1c..0x1f,
+  `C-?` 0x7f), named keys use xterm's `CSI 1;m x` / `CSI n;m ~` with
+  `m = 1 + alt*2 + ctrl*4`. Encodings were checked against a terminal
+  multiplexer's `send-keys` as a reference only. Test
+  `every_name_modifiers_kt_can_produce_is_known` reads `NAMED_KEYS` and
+  `CTRL_BYTES` out of `Modifiers.kt`, so a key added there fails the Rust gate
+  until the table knows it.
+- **Application cursor keys.** With DECCKM on, unmodified Up/Down/Left/Right/
+  Home/End are `ESC O x` (`key_name_to_bytes_in`); the daemon asks the keeper's
+  `Read` for the mode per batch (remote `key`, CLI `send`). Before this,
+  curses programs that enabled keypad mode ignored the phone's arrows and the
+  tap-to-move keys.
+- **Remote `key` reports a refused name** (`bad_key`) instead of dropping it.
+- **Swipe on the alternate screen** did nothing (no scrollback to move). The
+  phone now sends SGR wheel events when the program asked for mouse reporting,
+  else Up/Down (`AltScroll.kt`, `AltScrollTest`).
+- `PairingTest` fixture path fixed (`../../../crates/...`).
+- Gate: `cargo test --workspace` 295 passed / 0 failed / 0 ignored; Kotlin
+  `testDebugUnitTest` 171 tests, 0 failures.

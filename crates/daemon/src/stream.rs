@@ -234,9 +234,18 @@ impl PaneStream {
     /// Send keys to the pane (the `sendKey` method): convert key names to
     /// their byte sequences and send a `Write` keeper message.
     pub fn send_key(&self, keys: &[&str]) -> Result<KeeperMessage, String> {
+        // Arrow keys depend on the pane's cursor-key mode (DECCKM), which only
+        // the keeper's emulator knows. One cheap `Read` per batch; if it fails
+        // the normal-mode encoding is the best guess.
+        let app_cursor = match self.keeper.call(&KeeperMessage::Read(ldmux_protocol::keeper::Read {
+            session_id: self.session_id.clone(),
+        })) {
+            Ok(KeeperMessage::State(st)) => st.app_cursor,
+            _ => false,
+        };
         let mut bytes: Vec<u8> = Vec::new();
         for key in keys {
-            bytes.extend(key_name_to_bytes(key)?);
+            bytes.extend(key_name_to_bytes_in(key, app_cursor)?);
         }
         let text = String::from_utf8(bytes).map_err(|e| format!("invalid key bytes: {e}"))?;
         self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
@@ -434,72 +443,125 @@ impl PaneStream {
 /// command line as words. Failing is the only safe answer — the caller can say
 /// so, and the shell never sees it.
 pub fn key_name_to_bytes(name: &str) -> Result<Vec<u8>, String> {
-    let bytes = match name {
-        "Enter" => vec![0x0D],
-        "Tab" => vec![0x09],
+    key_name_to_bytes_in(name, false)
+}
+
+/// [`key_name_to_bytes`] for a pane in a known cursor-key mode.
+///
+/// With application cursor keys on (DECCKM, `ESC[?1h` — vim, less, htop and
+/// every curses program that enabled keypad mode), an unmodified arrow,
+/// Home or End is `ESC O <x>`; a program in that mode matches terminfo's
+/// `kcuu1=\EOA` and ignores `ESC [ A`. Modified forms are `CSI 1;m x` in
+/// either mode.
+pub fn key_name_to_bytes_in(name: &str, app_cursor: bool) -> Result<Vec<u8>, String> {
+    let unknown = || format!("unknown key name: {name}");
+    // Modifier prefixes, in the order the client writes them: `M-` then `C-`.
+    let (alt, rest) = match name.strip_prefix("M-") {
+        Some(r) if !r.is_empty() => (true, r),
+        _ => (false, name),
+    };
+    let (ctrl, base) = match rest.strip_prefix("C-") {
+        Some(r) if !r.is_empty() => (true, r),
+        _ => (false, rest),
+    };
+    if base.is_empty() {
+        return Err(unknown());
+    }
+    // xterm's modifier parameter: 1 + alt(2) + ctrl(4). Shift is never sent.
+    let m = 1 + if alt { 2 } else { 0 } + if ctrl { 4 } else { 0 };
+    let modified = alt || ctrl;
+
+    // Keys that are one byte (or an escape-prefixed byte) whatever the modifier.
+    let simple = |byte: u8| -> Vec<u8> {
+        let mut v = Vec::new();
+        if alt {
+            v.push(0x1B);
+        }
+        v.push(byte);
+        v
+    };
+    // `CSI 1 ; m <final>` when modified, `CSI <final>` (or `SS3`) when not.
+    let csi_final = |fin: u8, ss3: bool| -> Vec<u8> {
+        if modified {
+            format!("\x1b[1;{m}{}", fin as char).into_bytes()
+        } else if ss3 {
+            vec![0x1B, b'O', fin]
+        } else {
+            vec![0x1B, b'[', fin]
+        }
+    };
+    // `CSI <num> ; m ~` when modified, `CSI <num> ~` when not.
+    let csi_tilde = |num: u8| -> Vec<u8> {
+        if modified {
+            format!("\x1b[{num};{m}~").into_bytes()
+        } else {
+            format!("\x1b[{num}~").into_bytes()
+        }
+    };
+
+    let bytes = match base {
+        "Enter" => simple(0x0D),
+        "Tab" => simple(0x09),
         "BTab" => vec![0x1B, b'[', b'Z'],
-        "Escape" => vec![0x1B],
+        "Escape" => simple(0x1B),
         // The protocol's own spelling, then the descriptive alias: both are in the wire.
-        "BSpace" | "Backspace" => vec![0x7F],
-        "Space" => vec![0x20],
-        // Arrow keys
-        "Up" => vec![0x1B, b'[', b'A'],
-        "Down" => vec![0x1B, b'[', b'B'],
-        "Right" => vec![0x1B, b'[', b'C'],
-        "Left" => vec![0x1B, b'[', b'D'],
+        // Ctrl+Backspace is BS (0x08); every other form is DEL.
+        "BSpace" | "Backspace" => simple(if ctrl { 0x08 } else { 0x7F }),
+        // Ctrl+Space is NUL, like every Ctrl+<char> below.
+        "Space" => simple(if ctrl { 0x00 } else { 0x20 }),
+        "Up" => csi_final(b'A', app_cursor),
+        "Down" => csi_final(b'B', app_cursor),
+        "Right" => csi_final(b'C', app_cursor),
+        "Left" => csi_final(b'D', app_cursor),
+        "Home" => csi_final(b'H', app_cursor),
+        "End" => csi_final(b'F', app_cursor),
         // Editing keys: the protocol's short names first (`DC`, `IC`, `PPage`,
         // `NPage`), then the descriptive aliases.
-        "Home" => vec![0x1B, b'[', b'H'],
-        "End" => vec![0x1B, b'[', b'F'],
-        "PageUp" | "PPage" => vec![0x1B, b'[', b'5', b'~'],
-        "PageDown" | "NPage" => vec![0x1B, b'[', b'6', b'~'],
-        "Delete" | "DC" => vec![0x1B, b'[', b'3', b'~'],
-        "Insert" | "IC" => vec![0x1B, b'[', b'2', b'~'],
-        // F-keys
-        "F1" => vec![0x1B, b'O', b'P'],
-        "F2" => vec![0x1B, b'O', b'Q'],
-        "F3" => vec![0x1B, b'O', b'R'],
-        "F4" => vec![0x1B, b'O', b'S'],
-        "F5" => vec![0x1B, b'[', b'1', b'5', b'~'],
-        "F6" => vec![0x1B, b'[', b'1', b'7', b'~'],
-        "F7" => vec![0x1B, b'[', b'1', b'8', b'~'],
-        "F8" => vec![0x1B, b'[', b'1', b'9', b'~'],
-        "F9" => vec![0x1B, b'[', b'2', b'0', b'~'],
-        "F10" => vec![0x1B, b'[', b'2', b'1', b'~'],
-        "F11" => vec![0x1B, b'[', b'2', b'3', b'~'],
-        "F12" => vec![0x1B, b'[', b'2', b'4', b'~'],
-        // Control + letter
-        "C-a" => vec![0x01],
-        "C-b" => vec![0x02],
-        "C-c" => vec![0x03],
-        "C-d" => vec![0x04],
-        "C-e" => vec![0x05],
-        "C-f" => vec![0x06],
-        "C-g" => vec![0x07],
-        "C-h" => vec![0x08],
-        "C-i" => vec![0x09],
-        "C-j" => vec![0x0A],
-        "C-k" => vec![0x0B],
-        "C-l" => vec![0x0C],
-        "C-m" => vec![0x0D],
-        "C-n" => vec![0x0E],
-        "C-o" => vec![0x0F],
-        "C-p" => vec![0x10],
-        "C-q" => vec![0x11],
-        "C-r" => vec![0x12],
-        "C-s" => vec![0x13],
-        "C-t" => vec![0x14],
-        "C-u" => vec![0x15],
-        "C-v" => vec![0x16],
-        "C-w" => vec![0x17],
-        "C-x" => vec![0x18],
-        "C-y" => vec![0x19],
-        "C-z" => vec![0x1A],
-        // Single character: the character itself.
-        _ if name.chars().count() == 1 => name.as_bytes().to_vec(),
+        "PageUp" | "PPage" => csi_tilde(5),
+        "PageDown" | "NPage" => csi_tilde(6),
+        "Delete" | "DC" => csi_tilde(3),
+        "Insert" | "IC" => csi_tilde(2),
+        "F1" => csi_final(b'P', true),
+        "F2" => csi_final(b'Q', true),
+        "F3" => csi_final(b'R', true),
+        "F4" => csi_final(b'S', true),
+        "F5" => csi_tilde(15),
+        "F6" => csi_tilde(17),
+        "F7" => csi_tilde(18),
+        "F8" => csi_tilde(19),
+        "F9" => csi_tilde(20),
+        "F10" => csi_tilde(21),
+        "F11" => csi_tilde(23),
+        "F12" => csi_tilde(24),
+        // A single ASCII character: itself, as a control byte under Ctrl, with
+        // an ESC prefix under Alt.
+        _ if base.len() == 1 && base.is_ascii() => {
+            let c = base.as_bytes()[0];
+            if ctrl {
+                let byte = match c {
+                    b'a'..=b'z' => c - b'a' + 1,
+                    b'@' | b' ' => 0x00,
+                    b'[' => 0x1B,
+                    b'\\' => 0x1C,
+                    b']' => 0x1D,
+                    b'^' => 0x1E,
+                    b'_' => 0x1F,
+                    b'?' => 0x7F,
+                    // No C0 code (`C-A`, `C-|`): refuse, never invent one.
+                    _ => return Err(unknown()),
+                };
+                simple(byte)
+            } else if (0x20..0x7F).contains(&c) {
+                simple(c)
+            } else {
+                return Err(unknown());
+            }
+        }
+        // A single non-ASCII character is text; it cannot carry a modifier.
+        _ if !modified && base.chars().count() == 1 => base.as_bytes().to_vec(),
         // Anything else is a name this table does not know. Sending it as text
         // would type the name into the user's shell, which is what `BSpace` did.
-        _ => return Err(format!("unknown key name: {name}")),
+        _ => return Err(unknown()),
     };
     Ok(bytes)
 }
@@ -558,6 +620,126 @@ mod key_name_tests {
         assert_eq!(key_name_to_bytes("Insert"), key_name_to_bytes("IC"));
         assert_eq!(key_name_to_bytes("PageUp"), key_name_to_bytes("PPage"));
         assert_eq!(key_name_to_bytes("PageDown"), key_name_to_bytes("NPage"));
+    }
+
+    fn esc(s: &str) -> Vec<u8> {
+        s.replace("ESC", "\x1b").into_bytes()
+    }
+
+    /// Reference encodings captured from a real terminal multiplexer on 2026-10-05
+    /// (only as a reference; nothing depends on it).
+    #[test]
+    fn modified_keys_have_their_xterm_encodings() {
+        for (name, want) in [
+            // Alt + character: ESC prefix.
+            ("M-b", esc("ESCb")), ("M-B", esc("ESCB")), ("M-|", esc("ESC|")),
+            ("M-Space", esc("ESC ")), ("M-@", esc("ESC@")),
+            // Ctrl + punctuation.
+            ("C-@", vec![0]), ("C-Space", vec![0]), ("C-[", vec![0x1B]),
+            ("C-\\", vec![0x1C]), ("C-]", vec![0x1D]), ("C-^", vec![0x1E]),
+            ("C-_", vec![0x1F]), ("C-?", vec![0x7F]),
+            // Alt + Ctrl + character.
+            ("M-C-c", vec![0x1B, 0x03]), ("M-C-Space", vec![0x1B, 0]), ("M-C-@", vec![0x1B, 0]),
+            // Modified arrows / Home / End.
+            ("M-Up", esc("ESC[1;3A")), ("C-Up", esc("ESC[1;5A")), ("M-C-Up", esc("ESC[1;7A")),
+            ("C-Left", esc("ESC[1;5D")), ("M-C-Right", esc("ESC[1;7C")),
+            ("C-Home", esc("ESC[1;5H")), ("C-End", esc("ESC[1;5F")),
+            // Modified editing keys.
+            ("C-Insert", esc("ESC[2;5~")), ("C-Delete", esc("ESC[3;5~")),
+            ("C-PageUp", esc("ESC[5;5~")), ("C-PageDown", esc("ESC[6;5~")),
+            ("M-Insert", esc("ESC[2;3~")), ("M-Delete", esc("ESC[3;3~")),
+            // Modified F-keys.
+            ("C-F1", esc("ESC[1;5P")), ("M-F1", esc("ESC[1;3P")),
+            ("C-F5", esc("ESC[15;5~")), ("M-F5", esc("ESC[15;3~")),
+            ("M-C-F12", esc("ESC[24;7~")),
+            // Whitespace-ish keys.
+            ("C-Tab", vec![0x09]), ("M-Tab", vec![0x1B, 0x09]),
+            ("C-BTab", esc("ESC[Z")), ("M-BTab", esc("ESC[Z")),
+            ("C-Enter", vec![0x0D]), ("M-Enter", vec![0x1B, 0x0D]),
+            ("C-Escape", vec![0x1B]), ("M-Escape", vec![0x1B, 0x1B]),
+            ("C-BSpace", vec![0x08]), ("M-BSpace", vec![0x1B, 0x7F]),
+            // Unmodified keys keep their encodings.
+            ("F1", esc("ESCOP")), ("Up", esc("ESC[A")), ("F5", esc("ESC[15~")),
+        ] {
+            assert_eq!(key_name_to_bytes(name), Ok(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn application_cursor_mode_uses_ss3_for_unmodified_cursor_keys() {
+        use super::key_name_to_bytes_in as k;
+        assert_eq!(k("Up", true), Ok(esc("ESCOA")));
+        assert_eq!(k("Left", true), Ok(esc("ESCOD")));
+        assert_eq!(k("Home", true), Ok(esc("ESCOH")));
+        assert_eq!(k("End", true), Ok(esc("ESCOF")));
+        assert_eq!(k("Up", false), Ok(esc("ESC[A")));
+        // Modified forms and non-cursor keys do not change with the mode.
+        assert_eq!(k("C-Up", true), Ok(esc("ESC[1;5A")));
+        assert_eq!(k("PageUp", true), Ok(esc("ESC[5~")));
+        assert_eq!(k("F5", true), Ok(esc("ESC[15~")));
+    }
+
+    #[test]
+    fn bad_modifier_forms_are_refused() {
+        for bad in ["C-|", "C-A", "M-", "C-", "M-C-", "M-NotAKey", "C-é", "M-é", "C-M-b", "M-\x01"] {
+            assert!(key_name_to_bytes(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Every name the Kotlin client can produce (derived from its source:
+    /// `NAMED_KEYS`, `CTRL_BYTES`, and the `M-`/`C-` prefixes) is accepted. The
+    /// sets are read out of `Modifiers.kt`, so a key added there fails here
+    /// until the table learns it.
+    #[test]
+    fn every_name_modifiers_kt_can_produce_is_known() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/mobile/composeApp/src/commonMain/kotlin/dev/ldmux/mobile/Modifiers.kt"
+        ))
+        .expect("Modifiers.kt");
+        // NAMED_KEYS: the quoted strings between `setOf(` and `)`.
+        let start = src.find("NAMED_KEYS: Set<String> = setOf(").expect("NAMED_KEYS");
+        let body = &src[start..];
+        let body = &body[..body.find("\n)").expect("end of NAMED_KEYS")];
+        let named: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
+        assert!(named.len() >= 25, "parsed {named:?}");
+        let mut count = 0;
+        for k in &named {
+            for prefix in ["", "C-", "M-", "M-C-"] {
+                let n = format!("{prefix}{k}");
+                assert!(key_name_to_bytes(&n).is_ok(), "{n}");
+                count += 1;
+            }
+        }
+        // Every printable ASCII character, under each modifier the client sends:
+        // Alt always resolves; Ctrl only where CTRL_BYTES has an entry.
+        let ctrl_src = &src[src.find("CTRL_BYTES").expect("CTRL_BYTES")..];
+        let ctrl_src = &ctrl_src[..ctrl_src.find("\n}").expect("end of CTRL_BYTES")];
+        let mut ctrl_chars: Vec<char> = Vec::new();
+        for line in ctrl_src.lines() {
+            if let Some(i) = line.find("put('") {
+                let rest = &line[i + 5..];
+                let c = if rest.starts_with("\\\\") { '\\' } else { rest.chars().next().unwrap() };
+                ctrl_chars.push(c);
+            }
+        }
+        assert!(ctrl_chars.contains(&'[') && ctrl_chars.contains(&'?') && ctrl_chars.contains(&'\\'));
+        for c in ctrl_chars {
+            // The client lowercases letters and writes a space as `Space`.
+            let b = if c == ' ' { "Space".to_string() } else { c.to_ascii_lowercase().to_string() };
+            for prefix in ["C-", "M-C-"] {
+                let n = format!("{prefix}{b}");
+                assert!(key_name_to_bytes(&n).is_ok(), "{n}");
+                count += 1;
+            }
+        }
+        for c in (0x20u8..0x7F).map(char::from) {
+            let b = if c == ' ' { "Space".to_string() } else { c.to_string() };
+            let n = format!("M-{b}");
+            assert!(key_name_to_bytes(&n).is_ok(), "{n}");
+            count += 1;
+        }
+        assert!(count > 150, "{count}");
     }
 }
 
