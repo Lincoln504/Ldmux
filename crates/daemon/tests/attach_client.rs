@@ -179,3 +179,150 @@ async fn attach_client_survives_the_idle_sweep() {
     let _ = keeper.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── helpers for the handover test ──
+
+type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+async fn connect_authed(port: u16, token: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let uri = format!("ws://127.0.0.1:{port}/ws");
+    let mut req = uri.into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws
+}
+
+async fn ws_send(ws: &mut Ws, msg: &serde_json::Value) {
+    use futures_util::sink::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+}
+
+/// Read until `needle` shows up, or give up (15 s at 50 ms a poll).
+async fn wait_for<R: tokio::io::AsyncReadExt + Unpin>(reader: &mut R, needle: &str) -> bool {
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 8192];
+    for _ in 0..300 {
+        match tokio::time::timeout(std::time::Duration::from_millis(50), reader.read(&mut buf)).await
+        {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                seen.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&seen).contains(needle) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The desk window takes the shell back **by itself** when the device holding it
+/// lets go.
+///
+/// A device that puts a shell down is not using it, so there is nothing to
+/// consent to and the window shows the shell again. The TypeScript shim did
+/// exactly this — its attach loop re-attached when the daemon cleared the
+/// session's "held elsewhere" note — and the port's client instead waited for a
+/// key, so a desk window stayed on the notice after the phone in its pocket had
+/// long since let go. Only the *free* case comes back on its own: a shell another
+/// device holds still waits for `r`, which is the consent.
+#[tokio::test]
+async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+    let mut keeper = std::process::Command::new(keeper_bin())
+        .arg(keeper_sock.to_string_lossy().as_ref())
+        .spawn()
+        .unwrap();
+    wait_socket(&keeper_sock).await;
+
+    let port: u16 = 49993;
+    let token = "holder-let-go-token";
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+    let daemon_sock = d.socket_path().to_string_lossy().into_owned();
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let id = arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, None, "local")
+        .await
+        .unwrap()
+        .id;
+
+    // The desk window.
+    let (desk_in, mut desk_typing) = tokio::io::duplex(8192);
+    let (desk_out, mut desk_view) = tokio::io::duplex(65536);
+    let desk = {
+        let daemon_sock = daemon_sock.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+    // A phone takes the shell.
+    let mut phone = connect_authed(port, token).await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({
+            "type": "hello",
+            "device": { "id": "phone-1", "name": "phone", "kind": "phone" }
+        }),
+    )
+    .await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({
+            "type": "attach", "sessionId": id, "cols": 80, "rows": 24, "takeover": true
+        }),
+    )
+    .await;
+
+    assert!(
+        wait_for(&mut desk_view, "open on another device").await,
+        "the desk window must be told the shell is held elsewhere"
+    );
+
+    // The phone puts the shell down. The daemon releases the claim after its
+    // grace and broadcasts the list; the window re-attaches on its own.
+    drop(phone);
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+
+    // Live again: what is typed into the window reaches the shell. (While the
+    // window is detached its input is swallowed, so this also proves the state.)
+    desk_typing.write_all(b"echo BACK_MARK_9\n").await.unwrap();
+    desk_typing.flush().await.unwrap();
+    let _ = desk_view.read(&mut [0u8; 4096]).await;
+    assert!(
+        wait_for(&mut desk_view, "BACK_MARK_9").await,
+        "the desk window must have re-attached without a key"
+    );
+
+    desk.abort();
+    arc.lock().await.stop();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}

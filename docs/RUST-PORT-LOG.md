@@ -1889,6 +1889,19 @@ window by class and two mirrors would otherwise move each other. Placement is
 exec-then-move-by-class, not the TS's `workspace number N` first — that moved the
 user's view, which the project's own rule forbids.
 
+### The desk window did not take the shell back when the phone let go
+
+The TS shim's loop re-attached by itself when the daemon cleared the session's
+"held elsewhere" note: a device that puts a shell down is not using it, so there
+was nothing to consent to. The port's attach client set `detached` on the `owned`
+message and waited for `r`, and it did not read the `sessions` broadcast at all —
+so a desk window stayed on the notice after the phone had let go, until somebody
+pressed a key. It now watches `sessions` and re-attaches when its session is
+running and *nobody* holds it (a shell another device still holds keeps waiting
+for `r`, which is the consent). Test
+`the_desk_window_takes_the_shell_back_when_the_holder_lets_go`, which was
+confirmed to fail without the change.
+
 ### Smaller
 
 - `ldmux desktop --json` printed the human format. The flag was read with the

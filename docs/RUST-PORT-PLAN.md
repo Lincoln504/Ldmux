@@ -434,7 +434,10 @@ records its tty in `@ldmux_live_tty`, records its pid in `@ldmux_live_pid`, loop
   to take it back" and waits (**r** = reclaim; any other byte is
   swallowed, so dictation cannot trigger the reclaim; the daemon sees the re-attach
   while another device holds the shell and takes it back — **the keystroke is the
-  consent**, exactly as today).
+  consent**, exactly as today). **It re-attaches on its own when the *holder* lets
+  go:** a device that puts a shell down is not using it, so there is nothing to
+  consent to (the shim's loop re-attached on the daemon clearing
+  `@ldmux_held_elsewhere`, which is what the `sessions` broadcast says now).
 - Window closed: attach client exits (SIGHUP/EOF on its pty) → daemon sees the
   connection die → "window closed" vs "shell taken" is now **known, not inferred**
   (today: tty-list polling + `@ldmux_live_pid` `/proc` check).
