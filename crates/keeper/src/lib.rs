@@ -60,6 +60,64 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The terminal type the keeper's emulator (libghostty-vt) actually implements.
+pub const CHILD_TERM: &str = "xterm-256color";
+/// The emulator renders 24-bit colour, so say so.
+pub const CHILD_COLORTERM: &str = "truecolor";
+
+/// The environment a session's child starts with: the keeper's own (which is
+/// the daemon's), then `TERM`/`COLORTERM` pinned to what the keeper's emulator
+/// is, then the `Spawn.env` overlay (the `LDMUX_*` set, plan §2.6), which wins.
+///
+/// `TERM` is **not** inherited: under systemd the daemon has none (bash then
+/// invents `dumb` and every program turns colour off), and when started from a
+/// terminal it carries that terminal's name, which is not the emulator the
+/// session runs in. The keeper must be right independent of its parent, since
+/// it outlives the daemon.
+pub fn child_env(
+    mut env: Vec<(String, String)>,
+    extra: Option<&[(String, String)]>,
+) -> Vec<(String, String)> {
+    let mut set = |k: &str, v: &str| {
+        env.retain(|(ek, _)| ek != k);
+        env.push((k.to_string(), v.to_string()));
+    };
+    set("TERM", CHILD_TERM);
+    set("COLORTERM", CHILD_COLORTERM);
+    for (k, v) in extra.unwrap_or(&[]) {
+        set(k, v);
+    }
+    env
+}
+
+#[cfg(test)]
+mod child_env_tests {
+    use super::*;
+    fn get<'a>(e: &'a [(String, String)], k: &str) -> Option<&'a str> {
+        e.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str())
+    }
+    #[test]
+    fn term_defaults_when_the_parent_has_none() {
+        let e = child_env(vec![("LANG".into(), "C".into())], None);
+        assert_eq!(get(&e, "TERM"), Some("xterm-256color"));
+        assert_eq!(get(&e, "COLORTERM"), Some("truecolor"));
+        assert_eq!(get(&e, "LANG"), Some("C"));
+    }
+    #[test]
+    fn an_inherited_term_is_replaced() {
+        let e = child_env(vec![("TERM".into(), "dumb".into())], None);
+        assert_eq!(get(&e, "TERM"), Some("xterm-256color"));
+        assert_eq!(e.iter().filter(|(k, _)| k == "TERM").count(), 1);
+    }
+    #[test]
+    fn spawn_env_wins() {
+        let x = vec![("TERM".to_string(), "vt100".to_string())];
+        let e = child_env(vec![], Some(&x));
+        assert_eq!(get(&e, "TERM"), Some("vt100"));
+    }
+}
+
+
 /// The keeper itself. `sessions` is the one shared map; every message handler
 /// takes it briefly. `shell` is the argv the keeper spawns per session (the
 /// user's shell; the daemon decides, the keeper runs it).
@@ -426,15 +484,7 @@ impl Keeper {
             .iter()
             .map(|a| std::ffi::CString::new(a.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}"))))
             .collect::<Result<_, _>>()?;
-        // The child's environment: the keeper's own (which is the daemon's),
-        // overlaid with the `Spawn.env` (the `LDMUX_*` set, plan §2.6).
-        let mut env: Vec<(String, String)> = std::env::vars().collect();
-        if let Some(extra) = &s.env {
-            for (k, v) in extra {
-                env.retain(|(ek, _)| ek != k);
-                env.push((k.clone(), v.clone()));
-            }
-        }
+        let env = child_env(std::env::vars().collect(), s.env.as_deref());
         let envp_cstrings: Vec<std::ffi::CString> = env
             .iter()
             .map(|(k, v)| std::ffi::CString::new(format!("{k}={v}")))

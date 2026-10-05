@@ -830,3 +830,60 @@ async fn spawn_runs_the_command_and_passes_the_env() {
         "the command's output with its env must appear; got {text:?}"
     );
 }
+
+/// Run `printf` of TERM/COLORTERM in a spawned session and return what it printed.
+async fn term_seen(id: &str, env: Option<Vec<(String, String)>>) -> String {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let _: KeeperMessage = keeper_call(
+        &socket.to_string_lossy(),
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.to_string(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'T=%s;C=%s;\\n' \"$TERM\" \"$COLORTERM\"; sleep 30".into(),
+            ]),
+            env,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..400 {
+        if let KeeperMessage::PeekResult(pr) = keeper_call(
+            &socket.to_string_lossy(),
+            &KeeperMessage::Peek(Peek { session_id: id.to_string() }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap()
+        {
+            seen.extend_from_slice(&pr.data);
+        }
+        if String::from_utf8_lossy(&seen).contains(";\n") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// A session's child sees a 256-colour TERM and a COLORTERM, never `dumb`, so
+/// programs turn colour on. (Bug found live 2026-10-05: the systemd unit has no
+/// TERM, so every shell ran with TERM=dumb.)
+#[tokio::test]
+async fn a_spawned_child_sees_a_colour_capable_term() {
+    let t = term_seen("term-1", None).await;
+    assert!(t.contains("T=xterm-256color;C=truecolor;"), "got {t:?}");
+}
+
+#[tokio::test]
+async fn spawn_env_overrides_term() {
+    let t = term_seen("term-2", Some(vec![("TERM".into(), "vt100".into())])).await;
+    assert!(t.contains("T=vt100;C=truecolor;"), "got {t:?}");
+}
