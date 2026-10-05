@@ -20,6 +20,22 @@ fn keeper_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper")
 }
 
+/// The port the daemon's remote actually bound.
+///
+/// The tests ask for port 0 — any free port the kernel has — so two test
+/// binaries running at once cannot collide on a fixed number. Two of them did
+/// (this file and `remote_e2e.rs` both chose 49997), which is a gate that fails
+/// on the schedule of the machine rather than on the code.
+async fn remote_port(arc: &Arc<tokio::sync::Mutex<LdmuxDaemon>>) -> u16 {
+    let v = arc
+        .lock()
+        .await
+        .handle("remote_info", serde_json::json!({}))
+        .await
+        .unwrap();
+    v["port"].as_u64().unwrap() as u16
+}
+
 async fn wait_socket(path: &std::path::Path) {
     for _ in 0..400 {
         if path.exists() {
@@ -43,10 +59,9 @@ async fn attach_client_streams_and_types_against_a_daemon() {
         .unwrap();
     wait_socket(&keeper_sock).await;
 
-    let port: u16 = 49998;
     let token = "attach-token";
     let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -133,11 +148,10 @@ async fn attach_client_survives_the_idle_sweep() {
         .unwrap();
     wait_socket(&keeper_sock).await;
 
-    let port: u16 = 49997;
     let token = "idle-token";
     let idle_ms = 200u64;
     let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), port, token.to_string())
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string())
         .with_remote_idle_ms(idle_ms);
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
@@ -256,16 +270,16 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
         .unwrap();
     wait_socket(&keeper_sock).await;
 
-    let port: u16 = 49993;
     let token = "holder-let-go-token";
     let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
         let mut d = arc.lock().await;
         d.start(&arc).await.unwrap();
     }
+    let port = remote_port(&arc).await;
     let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
     let id = arc
         .lock()
@@ -336,6 +350,106 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
         reattached,
         "the desk window must have re-attached without a key"
     );
+
+    desk.abort();
+    arc.lock().await.stop();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A desk window that was displaced ends when its shell does.
+///
+/// The notice ("open on another device, press r") is only ever replaced by an
+/// answer from the daemon, and a displaced window has stopped asking: it was cut
+/// off, so it saw neither the pane's exit nor the session's death. Live: the
+/// phone ended the shell and the desk window sat on that notice for the shell's
+/// whole afterlife — a window telling its user to press a key for a shell that
+/// no longer exists.
+///
+/// So the window asks. If the sessions it is told about no longer contain a
+/// running copy of its shell, it re-attaches and takes the daemon's verdict:
+/// `session_dead`, which prints "This shell has ended." and ends the window.
+#[tokio::test]
+async fn a_displaced_desk_window_ends_when_its_shell_does() {
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+    let mut keeper = std::process::Command::new(keeper_bin())
+        .arg(keeper_sock.to_string_lossy().as_ref())
+        .spawn()
+        .unwrap();
+    wait_socket(&keeper_sock).await;
+
+    let token = "displaced-death-token";
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let daemon_sock = d.socket_path().to_string_lossy().into_owned();
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+    let port = remote_port(&arc).await;
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let id = arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, None, "local")
+        .await
+        .unwrap()
+        .id;
+
+    let (desk_in, _desk_typing) = tokio::io::duplex(8192);
+    let (desk_out, mut desk_view) = tokio::io::duplex(65536);
+    let desk = {
+        let daemon_sock = daemon_sock.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+    let mut phone = connect_authed(port, token).await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({
+            "type": "hello",
+            "device": { "id": "phone-death", "name": "phone", "kind": "phone" }
+        }),
+    )
+    .await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({
+            "type": "attach", "sessionId": id, "cols": 80, "rows": 24, "takeover": true
+        }),
+    )
+    .await;
+    assert!(
+        wait_for(&mut desk_view, "open on another device").await,
+        "the desk window must be told the shell is held elsewhere"
+    );
+
+    // The phone ends the shell. Nothing about that reaches a displaced window
+    // directly: it hears it in the session list, or not at all.
+    ws_send(&mut phone, &serde_json::json!({"type": "kill", "sessionId": id})).await;
+
+    assert!(
+        wait_for(&mut desk_view, "This shell has ended.").await,
+        "a window whose shell is gone must say so rather than keep the notice"
+    );
+    for _ in 0..100 {
+        if desk.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(desk.is_finished(), "the attach client must end with its shell");
 
     desk.abort();
     arc.lock().await.stop();

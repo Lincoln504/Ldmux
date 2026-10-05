@@ -410,6 +410,19 @@ async fn open_window(
         None if workspace.trim().is_empty() => None,
         None => return Err("invalid workspace name".to_string()),
     };
+    // Refuse a terminal that cannot run, and refuse it *here* rather than in the
+    // CLI: `ldmux mirror --terminal` was the only path that checked, so a bad
+    // `LDMUX_TERMINAL` — which is what the daemon's own window paths use, the
+    // window manager's `$mod+Return`, `ldmux new`, a phone asking for a desk
+    // window — still put up a window that died in the same instant with nothing
+    // said. `i3-msg exec` answers success for a command it has merely queued, so
+    // there is nothing to notice afterwards. `argv[0]` is the terminal in both
+    // argv constructors above.
+    if let Some(terminal) = argv.first()
+        && let Some(problem) = terminal_problem(terminal)
+    {
+        return Err(problem);
+    }
     if std::env::var("DISPLAY").is_err() {
         return Err("no DISPLAY (not an X11 session)".to_string());
     }
@@ -661,6 +674,28 @@ mod tests {
         assert_eq!(argv[3], "ldmuxd");
         assert_eq!(argv[4], "-L");
         assert_eq!(argv[5], "sock");
+    }
+
+    /// A terminal that cannot run is refused before the window manager is asked,
+    /// and the refusal names it.
+    ///
+    /// The first assertion is the ordering: with no `DISPLAY` in the test process
+    /// a later check would answer with the display instead, which is the error
+    /// nobody can act on when the real problem is a terminal name.
+    #[tokio::test]
+    async fn a_terminal_that_cannot_run_is_refused_before_the_window_manager() {
+        let argv = vec![
+            "/nope/alacritty".to_string(),
+            "--class".to_string(),
+            "ldmux-live-x".to_string(),
+            "-e".to_string(),
+            "/bin/true".to_string(),
+        ];
+        let err = open_window(&argv, "ldmux-live-x", "")
+            .await
+            .err()
+            .expect("a terminal that is not there must be refused");
+        assert!(err.contains("no such terminal"), "the refusal names it: {err}");
     }
 
     /// A program that can use a click is not mistaken for a shell (the TS

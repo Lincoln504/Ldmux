@@ -32,6 +32,65 @@ fn window_manager_env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// The environment a desk-window test needs, and how to put it back.
+struct Stubs {
+    old_path: String,
+    old_terminal: Option<String>,
+    old_display: Option<String>,
+}
+
+impl Stubs {
+    fn restore(self) {
+        // SAFETY: the caller holds `window_manager_env_lock`.
+        unsafe { std::env::set_var("PATH", self.old_path) };
+        unsafe { std::env::remove_var("LDMUX_TERMINAL") };
+        if let Some(t) = self.old_terminal {
+            unsafe { std::env::set_var("LDMUX_TERMINAL", t) };
+        }
+        unsafe { std::env::remove_var("DISPLAY") };
+        if let Some(d) = self.old_display {
+            unsafe { std::env::set_var("DISPLAY", d) };
+        }
+    }
+}
+
+/// Put a stub window manager and a stub terminal on `PATH`.
+///
+/// The terminal is not decoration. `makeLive` asks `desktop::open_window` to open
+/// the window, and that refuses a terminal it cannot run before it bothers the
+/// window manager — because `i3-msg exec` reports success for a command it has
+/// only queued, so a wrong `LDMUX_TERMINAL` is a window that dies as it opens.
+/// A test that stubs only `i3-msg` therefore passes or fails on whether the
+/// *developer's* box happens to have the emulator installed, which is not
+/// something a test should be measuring.
+fn install_stubs(dir: &std::path::Path) -> Stubs {
+    use std::os::unix::fs::PermissionsExt;
+    let stub_dir = dir.join("bin");
+    std::fs::create_dir_all(&stub_dir).unwrap();
+    let write = |name: &str, body: &str| {
+        let p = stub_dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&p, perms).unwrap();
+    };
+    // `get_tree` answers the tree the test sets; everything else (the `exec`)
+    // succeeds, so the window can be "opened" for the pass to then not find.
+    write(
+        "i3-msg",
+        "#!/bin/sh\ncase \"$*\" in\n  *get_tree*) printf '%s' \"$I3_TREE\"; exit \"${I3_TREE_CODE:-0}\";;\n  *) exit 0;;\nesac\n",
+    );
+    write("alacritty", "#!/bin/sh\nexit 0\n");
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let old_terminal = std::env::var("LDMUX_TERMINAL").ok();
+    let old_display = std::env::var("DISPLAY").ok();
+    // SAFETY: the caller holds `window_manager_env_lock`.
+    unsafe { std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), old_path)) };
+    unsafe { std::env::set_var("LDMUX_TERMINAL", "alacritty") };
+    unsafe { std::env::set_var("DISPLAY", ":0") };
+    Stubs { old_path, old_terminal, old_display }
+}
+
 async fn wait_socket(path: &std::path::Path) {
     for _ in 0..400 {
         if path.exists() {
@@ -229,22 +288,7 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
     // `live_window_state` asks i3 over PATH, so a stub stands in for the window
     // manager and answers the two questions the pass asks: "is a window with
     // this class in the tree?"
-    let stub_dir = f.dir.join("bin");
-    std::fs::create_dir_all(&stub_dir).unwrap();
-    let stub = stub_dir.join("i3-msg");
-    std::fs::write(
-        &stub,
-        "#!/bin/sh\ncase \"$*\" in\n  *get_tree*) printf '%s' \"$I3_TREE\"; exit \"${I3_TREE_CODE:-0}\";;\n  *) exit 0;;\nesac\n",
-    )
-    .unwrap();
-    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&stub, perms).unwrap();
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    // SAFETY: single-threaded test process for this variable's lifetime here.
-    unsafe { std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), old_path)) };
-    unsafe { std::env::set_var("DISPLAY", ":0") };
+    let stubs = install_stubs(&f.dir);
 
     // A tree that DOES contain the window, so `makeLive` records it. The exit
     // code is set explicitly: these tests share the process environment, and a
@@ -287,7 +331,7 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
         "closing the desk window must end the shell"
     );
 
-    unsafe { std::env::set_var("PATH", old_path) };
+    stubs.restore();
     unsafe { std::env::remove_var("I3_TREE") };
     unsafe { std::env::remove_var("I3_TREE_CODE") };
     unsafe { std::env::remove_var("DISPLAY") };
@@ -303,23 +347,7 @@ async fn an_unanswered_window_manager_never_ends_a_session() {
     let f = Fixture::new().await;
     let id = f.new_session().await;
 
-    let stub_dir = f.dir.join("bin");
-    std::fs::create_dir_all(&stub_dir).unwrap();
-    let stub = stub_dir.join("i3-msg");
-    // `get_tree` exits non-zero: the window manager did not answer. `exec` still
-    // succeeds, so the window can be opened for the test to then not find.
-    std::fs::write(
-        &stub,
-        "#!/bin/sh\ncase \"$*\" in\n  *get_tree*) printf '%s' \"$I3_TREE\"; exit \"${I3_TREE_CODE:-0}\";;\n  *) exit 0;;\nesac\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&stub, perms).unwrap();
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    unsafe { std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), old_path)) };
-    unsafe { std::env::set_var("DISPLAY", ":0") };
+    let stubs = install_stubs(&f.dir);
     // No tree and a non-zero exit: the window manager is not answering.
     unsafe { std::env::set_var("I3_TREE", "{}") };
     unsafe { std::env::set_var("I3_TREE_CODE", "1") };
@@ -342,7 +370,7 @@ async fn an_unanswered_window_manager_never_ends_a_session() {
         "an unanswered window manager is not a closed window"
     );
 
-    unsafe { std::env::set_var("PATH", old_path) };
+    stubs.restore();
     unsafe { std::env::remove_var("I3_TREE") };
     unsafe { std::env::remove_var("I3_TREE_CODE") };
     unsafe { std::env::remove_var("DISPLAY") };

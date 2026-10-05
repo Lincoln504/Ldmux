@@ -1790,6 +1790,9 @@ this change (file untouched); left alone as out of scope.
   `C-]` entries, but the mobile client sends them for Alt and punctuation-Ctrl
   chords (`Modifiers.kt`). The daemon answers `unknown key name`, so those chords do
   nothing on the phone. Predates this change.
+  **[Fixed later the same day, in "Phone/desktop key and scroll parity" above — the
+  modifier prefixes and the punctuation chords are in the table now
+  (`crates/daemon/src/stream.rs:458`). This bullet was left standing after the fix.]**
 
 ---
 
@@ -2013,5 +2016,101 @@ confirmed to fail without the change.
   in the seam, and the CLI refuses before asking i3 (test
   `a_terminal_that_cannot_be_run_is_named`). The desk-window path is not checked
   there, so a bad `LDMUX_TERMINAL` is still discovered by the dead window.
+  **[Closed 2026-10-05, later the same day: the check is in `open_window` now, so the
+  daemon's own window paths refuse it too — see "A released shell is not a held shell".]**
 - `ldmux adopt` still has no test of its own; it is covered indirectly by the
   startup re-adoption (`adopt_own_sessions`) and the restart-survival tests.
+  **[Closed 2026-10-05: `crates/daemon/tests/adopt.rs`, both spellings, idempotence,
+  persistence on disk, and the two refusals.]**
+
+## A released shell is not a held shell, and a dead one is not either (2026-10-05)
+
+Reported from use: a desk window displaced by the phone stayed on "This shell is open on
+another device. Press r to take it back" after the phone had finished with it — after the
+phone ended the shell, after the app went away, after the phone moved to another shell.
+The window is the client that has to act on a release, and it was not being told.
+
+**The port dropped a check the shim had.** The TypeScript live window was a shell loop, and
+it re-checked after every detach (`packages/daemon/src/desktop.ts:205-218`, in the tree
+before this port):
+
+    while :; do
+      attach
+      if ! has-session; then printf 'This shell has ended.'; break; fi
+      printf 'This shell is open on another device. Press any key to take it back.'
+      ... wait for a key or for the daemon to clear held-elsewhere ...
+    done
+
+So the TS window said *the shell has ended* and **left**, and re-attached by itself when the
+daemon cleared the held flag. Its test names the first half: "A shell that ended says so and
+stops, rather than offering a reclaim that cannot work" (`packages/daemon/test/desktop.test.ts`,
+`the shim loops, so being detached does not close the window`). The attach client had both
+halves only for the *held* case, and only while the session was still `running`:
+
+- a displaced window is unsubscribed, so it never sees the pane's exit;
+- the notice is only ever replaced by an answer from the daemon;
+- the client's re-attach condition required `status == "running"`, which a dead shell is not,
+  so it did not even ask.
+
+A window whose shell was gone sat on that notice for the shell's whole afterlife.
+
+**Fixed:** the client acts on the session list whether or not it is displaced. If the list
+has no *running* copy of its shell, it re-attaches and takes the daemon's verdict —
+`session_dead` / `unknown_session` print "This shell has ended." and end the window, which is
+the TS's `has-session` branch. If the shell is running and free, it takes it back as before.
+Asking is also what makes a list the window misreads harmless: one round trip, and the
+daemon's own state decides.
+
+**Measured live, after the fix** (pty attach client + WS phone, the deployed build):
+
+| the phone… | desk window |
+|---|---|
+| ends the shell (`kill`) | printed "This shell has ended." and **exited in 0.2 s** |
+| closes the socket (app gone / page swiped) | repainted with the shell after the 3 s release grace |
+| moves to another shell (drops the first socket) | repainted after the grace |
+| puts a desk shell down (`close`) | repainted in **0.08 s** |
+
+**Two more holes in the same model, found while tracing it.**
+
+- *A claim now follows what the device is watching.* `attach` claimed the new shell and left
+  the old one claimed, so a client that moved between shells over one socket (the protocol
+  allows it) held its last shell for good: nobody could take it without a takeover, and the
+  desk window it had displaced waited for a key for a shell no device was looking at. The
+  previous shell is released when the connection attaches elsewhere, unless another
+  connection of the same device is still on it. Test
+  `a_connection_that_moves_to_another_shell_lets_the_first_one_go`.
+- *The session list is broadcast when it changes, not only to the client that changed it.*
+  `new`, `kill` and `close` sent it to the asking connection alone; every other client waited
+  for the maintenance pass, which broadcasts when anything has set `sessions_dirty` — and a
+  release does, every 2 s. That is why the put-down case *appeared* to work: measured, the
+  release took 2 s to reach the desk. It is 0.08 s now. Test
+  `putting_a_desk_shell_down_reaches_the_other_clients`, which anchors against the
+  maintenance pass first: it creates a shell through the daemon's own handle (no socket, so
+  no immediate broadcast), waits for the pass to announce it, and *then* releases — so a
+  release arriving inside a second was broadcast when it happened rather than swept up by
+  the next tick. Without the explicit broadcast it fails, twice out of two.
+
+**Closed the two gaps the previous section listed as open.**
+
+- *A terminal that cannot run is refused before the window manager is asked*, on the daemon's
+  window path too, not only in the CLI. `LDMUX_TERMINAL` is what `$mod+Return`, `ldmux new`
+  and a phone asking for a desk window all go through, and a bad value put up a window that
+  died in the same instant with nothing said. The check is in `open_window`, one place for
+  both window kinds. The two `maintenance.rs` tests that open a desk window now stub the
+  terminal alongside `i3-msg` — they were passing on whether the *developer's* box has the
+  emulator installed. Test `a_terminal_that_cannot_run_is_refused_before_the_window_manager`.
+- *`ldmux adopt` has tests of its own* (`crates/daemon/tests/adopt.rs`): a shell spawned
+  straight into the keeper that the daemon has never heard of, adopted by the keeper name and
+  by the bare id, idempotent (one shell is one row), written to `registry.json` (checked on
+  disk: a second daemon's `start` would adopt it all over again if the record were missing,
+  which is the one thing the assertion is trying to tell apart), and both refusals — a name
+  the keeper never had, and a shell that has exited (a dead pane is still in the keeper; its
+  emulator keeps the last grid). `forget` refusing a running shell is what makes spawning
+  into the keeper the only way to build the state.
+
+**A test collision fixed properly.** `attach_client.rs` and `remote_e2e.rs` both bound port
+49997; two test binaries run at once, so one of them failed to bind on the schedule of the
+machine. `RemoteServer` now reports the port it actually bound (a configured port of `0`
+means the kernel chose), and the daemon remembers it so `remote_info`, the pairing link and
+the QR all name the real one. The tests ask for 0 and read it back. The `deskWindow` variant
+of `ldmux live` was already gone.

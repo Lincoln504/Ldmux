@@ -91,7 +91,7 @@ Server → client:
 | `{type:"caps",...}` | negotiated geometry, `snapshotEpoch`, capabilities |
 | `{type:"snapshot",...}` | full visible screen + terminal state (repaint from this) |
 | `{type:"snapshot",history:true,...}` | answer to `scrollback`: the screen includes older lines |
-| `{type:"sessions",sessions:[...]}` | answer to `list`, `new`, `kill`, `close` |
+| `{type:"sessions",sessions:[...]}` | the session list: an answer to `list`, and pushed to **every** client whenever it changes (`new`, `kill`, `close`, a release, a window opening or closing, the maintenance pass) |
 | `{type:"created",sessionId,cwd}` | answer to `new`, before its `sessions` |
 | `{type:"owned",sessionId,owner}` | the shell is held by another device (attach refused), or was taken from this one |
 | `{type:"mousedelivered",col,row}` | the click reached a mouse-aware program |
@@ -99,16 +99,26 @@ Server → client:
 | `{type:"live",sessionId,ok,detail?}` | answer to `makelive` / `closelive` |
 | binary `Output` frame | live pane output (UTF-8) |
 
-Two things about `owned` and `sessions` that a client needs:
+Four things about `owned` and `sessions` that a client needs:
 
 - **A shell can have no owner.** `sessions` carries each shell's owner, so a client
   learns a shell was let go without having asked for anything. The desk attach client
   uses exactly that: it re-attaches by itself when its session is running and *nobody*
   holds it, because a device that puts a shell down is not using it. A shell another
   device still holds keeps waiting for the reclaim key (`r`).
+- **No running copy of its shell in the list means the shell is over.** A displaced
+  window is unsubscribed, so it sees neither the pane's exit nor the session's death;
+  the attach client re-attaches on that and lets the daemon's verdict —
+  `error{session_dead}` — say "This shell has ended." and end the window. A notice is
+  only ever replaced by an answer, so a client that stops asking keeps the notice for
+  good.
 - **`owned` is sent on a refusal *and* on a seizure.** `owner` names the holder when
   the attach was refused; it is `null` on the notice to a device that was displaced,
   whose connection the daemon then unsubscribes (it stays connected and idle).
+- **A claim goes with the shell being watched.** Attaching a connection to another
+  shell releases the claim it held on the previous one, unless another connection of
+  the same device is still on it. `close` from a phone on a shell the desk started is a
+  *release*, not an end: the shell keeps running and is broadcast as unowned.
 | `{type:"error",code,message}` | `unknown_session`, `session_dead`, `not_attached`, `bad_json`, `resync`, `too_far_behind`, `input_too_large`, `not_holder`, `no_mouse`, `shell_foreground`, `bad_cell`, `bad_size`, `resize_failed`, … |
 
 ### Attach ordering (why output is not lost)

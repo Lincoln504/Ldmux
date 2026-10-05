@@ -7,6 +7,24 @@
 > size being the canonical one. The keeper is the canonical geometry now; the
 > claim still hands the size over, which was the point.
 
+> **Amendment, 2026-10-05 — a released shell is not a held shell, and a dead one is not
+> held at all.** Three holes in the claiming model, found from one report (a displaced
+> desk window stayed on "press `r`" after the phone was done with the shell):
+>
+> 1. A claim follows what the device is **watching**. `attach` claimed the new shell and
+>    left the old one claimed, so a connection that moved between shells held its last one
+>    for good. The previous shell is released when a connection attaches elsewhere, unless
+>    another connection of the same device is still on it.
+> 2. A displaced window **asks** about its shell. The notice is only ever replaced by an
+>    answer, and a displaced window is unsubscribed, so it saw neither the pane's exit nor
+>    the session's death and offered a reclaim for a shell that no longer existed. It now
+>    re-attaches when the session list has no running copy of its shell, and takes the
+>    daemon's verdict (`session_dead` — "This shell has ended.", and the window ends). That
+>    is what the TypeScript shim's `has-session` branch did.
+> 3. The session list is **broadcast when it changes**, not only to the client that changed
+>    it. A release reached the other clients through the maintenance pass's 2 s tick, which
+>    is why this appeared to work; it is immediate now (measured: 0.08 s).
+
 > **Amendment, 2026-10-05 — the consent key is `r`, and only `r`.** It was "any
 > key", then Ctrl+R; the user asked for one key with no alias. The read must be
 > exactly one byte (`r`/`R`): a paste, an Alt chord, a function key, and a word

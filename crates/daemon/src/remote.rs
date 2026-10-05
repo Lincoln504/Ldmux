@@ -176,6 +176,8 @@ pub(crate) struct Shared {
 /// The remote server: the phone-facing WebSocket endpoint.
 pub struct RemoteServer {
     cfg: RemoteConfig,
+    /// The port actually bound, which is `cfg.port` unless that was 0.
+    bound_port: u16,
     shared: Option<Arc<Shared>>,
     accept: Option<tokio::task::JoinHandle<()>>,
     sweep: Option<tokio::task::JoinHandle<()>>,
@@ -184,6 +186,7 @@ pub struct RemoteServer {
 impl RemoteServer {
     pub fn new(cfg: RemoteConfig) -> Self {
         Self {
+            bound_port: cfg.port,
             cfg,
             shared: None,
             accept: None,
@@ -204,6 +207,15 @@ impl RemoteServer {
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| format!("bind {addr}: {e}"))?;
+        // The port the kernel actually gave us. A configured port of 0 means
+        // "any free one", so the configured number is not the answer to where
+        // this is listening — and reporting 0 to a pairing client would send the
+        // phone nowhere. It is also what lets a test ask for a port nobody else
+        // can have, rather than picking a number and hoping.
+        self.bound_port = listener
+            .local_addr()
+            .map(|a| a.port())
+            .unwrap_or(self.cfg.port);
         let shared = Arc::new(Shared {
             conns: Mutex::new(HashMap::new()),
             daemon: daemon_arc.clone(),
@@ -229,7 +241,12 @@ impl RemoteServer {
         self.shared = Some(shared);
         self.accept = Some(accept);
         self.sweep = Some(sweep);
-        Ok((self.cfg.hostname.clone(), self.cfg.port))
+        Ok((self.cfg.hostname.clone(), self.bound_port))
+    }
+
+    /// The port this server is listening on.
+    pub fn port(&self) -> u16 {
+        self.bound_port
     }
 
     /// Stop the server: mark stopped, tell every connection to close.
@@ -633,7 +650,14 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     conn.send_json(&serde_json::json!({
                         "type": "created", "sessionId": record.id, "cwd": record.cwd
                     }));
-                    send_sessions(conn, shared).await;
+                    // The list is news for every client, not just the one that
+                    // asked: a shell opened from the desk CLI has to appear on the
+                    // phone, and a phone that opened one has to appear on the
+                    // other phone. This used to go to the asking connection
+                    // alone, so everyone else waited for the next maintenance tick
+                    // (2 s) — and only then if some mutator had remembered to set
+                    // `sessions_dirty`.
+                    broadcast_sessions(shared).await;
                 }
                 Err(e) => conn.send_error("handler_error", &e),
             }
@@ -672,7 +696,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 let mut d = shared.daemon.lock().await;
                 let _ = d.kill_session(id).await;
             }
-            send_sessions(conn, shared).await;
+            broadcast_sessions(shared).await;
         }
         "close" => {
             let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -691,7 +715,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     d.release_claim(&id, &dev.id);
                 }
                 stop_viewing(conn, shared).await;
-                send_sessions(conn, shared).await;
+                broadcast_sessions(shared).await;
                 return;
             }
             let (ended, _) = {
@@ -704,7 +728,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     d.release_claim(&id, &dev.id);
                 }
             stop_viewing(conn, shared).await;
-            send_sessions(conn, shared).await;
+            broadcast_sessions(shared).await;
         }
         "attach" => {
             let session_id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -900,6 +924,52 @@ async fn attach(
         (record, displaced, stream, device)
     };
 
+    // A connection that attaches somewhere else has stopped watching where it
+    // was, so its claim on that shell goes with it. Otherwise a client that moves
+    // between shells over one socket (nothing in the protocol forbids it — the
+    // phone happens to use one socket per shell) holds its last one for good:
+    // nobody can take it without a takeover, and a desk window it displaced sits
+    // on "Press r to take it back" for a shell no device is actually looking at.
+    //
+    // Per *device*, not per connection: a device with two live sockets on the
+    // same shell keeps it, because one of them is still watching.
+    {
+        let previous = conn.inner.lock().unwrap().session_id.clone();
+        if let (Some(device), Some(previous)) = (&device, previous)
+            && previous != session_id
+        {
+            let still_watched = {
+                let conns: Vec<Arc<ConnShared>> = {
+                    let map = shared.conns.lock().unwrap();
+                    map.values().cloned().collect()
+                };
+                conns.iter().any(|c| {
+                    // Not this one: it is the connection that is moving, and its
+                    // `session_id` is only updated below.
+                    if Arc::ptr_eq(c, conn) {
+                        return false;
+                    }
+                    let inner = c.inner.lock().unwrap();
+                    inner.session_id.as_deref() == Some(previous.as_str())
+                        && inner
+                            .device
+                            .as_ref()
+                            .map(|d| d.id == device.id)
+                            .unwrap_or(false)
+                })
+            };
+            if !still_watched {
+                let freed = {
+                    let mut d = shared.daemon.lock().await;
+                    d.release_claim(&previous, &device.id)
+                };
+                if freed {
+                    broadcast_sessions(shared).await;
+                }
+            }
+        }
+    }
+
     // Bump the generation, clear the old subscription.
     let gen_id = {
         let mut inner = conn.inner.lock().unwrap();
@@ -1083,14 +1153,6 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
 }
 
 /// Send the session list to one connection.
-async fn send_sessions(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
-    let sessions = {
-        let mut d = shared.daemon.lock().await;
-        d.describe_sessions().await
-    };
-    conn.send_json(&sessions_message(&sessions));
-}
-
 /// Push the session list to every connected client.
 pub(crate) async fn broadcast_sessions(shared: &Arc<Shared>) {
     let sessions = {

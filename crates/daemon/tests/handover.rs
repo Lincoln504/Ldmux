@@ -195,3 +195,197 @@ async fn handover_size_and_close_does_not_detach() {
         d.stop();
     }
 }
+/// A daemon with a real keeper and a few shells to play with.
+///
+/// The port is asked for as 0 — whatever the kernel has free — and read back
+/// from `remote_info`, so no two tests in this workspace can collide on a
+/// fixed number.
+struct Harness {
+    port: u16,
+    token: String,
+    arc: Arc<tokio::sync::Mutex<LdmuxDaemon>>,
+    _keeper: KeeperGuard,
+    /// Last field: dropped last, on success and on panic.
+    _reaper: common::Reaper,
+}
+
+impl Harness {
+    async fn new(sessions: usize) -> (Self, Vec<String>) {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let _reaper = common::Reaper::new(&dir, &keeper_sock);
+        let keeper = std::process::Command::new(keeper_bin())
+            .arg(keeper_sock.to_string_lossy().as_ref())
+            .spawn()
+            .unwrap();
+        let _keeper = KeeperGuard(keeper);
+        wait_socket(&keeper_sock).await;
+
+        let token = format!("handover-{}", rand::random::<u32>());
+        let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+            .with_remote("127.0.0.1".to_string(), 0, token.clone());
+        let arc = Arc::new(tokio::sync::Mutex::new(d));
+        {
+            let mut d = arc.lock().await;
+            d.start(&arc).await.unwrap();
+        }
+        let port = arc
+            .lock()
+            .await
+            .handle("remote_info", serde_json::json!({}))
+            .await
+            .unwrap()["port"]
+            .as_u64()
+            .unwrap() as u16;
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let mut ids = Vec::new();
+        for _ in 0..sessions {
+            ids.push(
+                arc.lock()
+                    .await
+                    .create_session("shell", &cwd, None, "local")
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (Self { port, token, arc, _keeper, _reaper }, ids)
+    }
+}
+
+/// Read until any `sessions` message arrives, or give up.
+async fn wait_for_any_sessions(ws: &mut Ws) -> bool {
+    use futures_util::stream::StreamExt;
+    for _ in 0..300 {
+        let Some(Ok(m)) = ws.next().await else {
+            return false;
+        };
+        if let tokio_tungstenite::tungstenite::Message::Text(t) = m
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(t.as_ref())
+            && v["type"] == "sessions"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read until a `sessions` message says `id` has no owner, or give up.
+async fn wait_owner_cleared(ws: &mut Ws, id: &str) -> bool {
+    use futures_util::stream::StreamExt;
+    for _ in 0..300 {
+        let Some(Ok(m)) = ws.next().await else {
+            return false;
+        };
+        if let tokio_tungstenite::tungstenite::Message::Text(t) = m {
+            let v: serde_json::Value = serde_json::from_str(t.as_ref()).unwrap();
+            if v["type"] == "sessions"
+                && let Some(s) = v["sessions"]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|s| s["id"].as_str() == Some(id)))
+                && s.get("owner").map(|o| o.is_null()).unwrap_or(true)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A connection that moves to another shell lets the first one go.
+///
+/// A claim means "this device is watching this shell". Nothing released it when
+/// the connection attached somewhere else, so a client that moves between shells
+/// over one socket — which the protocol allows, and which is how the desktop
+/// shim worked — held its last shell for good. Nobody could take it without a
+/// takeover, and a desk window it had displaced sat on "Press r to take it back"
+/// for a shell no device was actually looking at.
+#[tokio::test]
+async fn a_connection_that_moves_to_another_shell_lets_the_first_one_go() {
+    let (h, ids) = Harness::new(2).await;
+    let (s1, s2) = (ids[0].clone(), ids[1].clone());
+
+    let mut c = connect(h.port, &h.token).await;
+    send(&mut c, serde_json::json!({"type":"hello","device":{"id":"mover","name":"desk","kind":"desktop"}})).await;
+    send(&mut c, serde_json::json!({"type":"attach","sessionId":s1,"cols":100,"rows":30})).await;
+    let _ = next_of_type(&mut c, "caps").await;
+    assert_eq!(h.arc.lock().await.ownership().owner(&s1).unwrap().device.id, "mover");
+
+    // The same connection attaches to the other shell.
+    send(&mut c, serde_json::json!({"type":"attach","sessionId":s2,"cols":100,"rows":30})).await;
+    let _ = next_of_type(&mut c, "caps").await;
+
+    assert_eq!(
+        h.arc.lock().await.ownership().owner(&s2).unwrap().device.id,
+        "mover",
+        "the shell it moved to is the one it holds"
+    );
+    assert!(
+        h.arc.lock().await.ownership().owner(&s1).is_none(),
+        "the shell it moved away from must not stay held by a device that is not watching it"
+    );
+}
+
+/// A phone putting a desk shell down is news for every client, not only the
+/// phone that did it.
+///
+/// `close` sent the session list back to the connection that asked, so the
+/// displaced desk window — the one client that needs to hear it — heard nothing
+/// directly. It usually heard it a couple of seconds later from the maintenance
+/// tick's "something changed" broadcast, which is a coincidence rather than a
+/// contract, and a client that is not in that broadcast's path waits forever.
+#[tokio::test]
+async fn putting_a_desk_shell_down_reaches_the_other_clients() {
+    let (h, ids) = Harness::new(1).await;
+    let id = ids[0].clone();
+
+    // The desk window holds its shell.
+    let mut desk = connect(h.port, &h.token).await;
+    send(&mut desk, serde_json::json!({"type":"hello","device":{"id":"desk-1","name":"desk","kind":"desktop"}})).await;
+    send(&mut desk, serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30})).await;
+    let _ = next_of_type(&mut desk, "caps").await;
+
+    // A phone takes it, so the desk window is displaced and waiting.
+    let mut phone = connect(h.port, &h.token).await;
+    send(&mut phone, serde_json::json!({"type":"hello","device":{"id":"phone-1","name":"phone","kind":"phone"}})).await;
+    send(&mut phone, serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24,"takeover":true})).await;
+    let _ = next_of_type(&mut phone, "caps").await;
+    let owned = next_of_type(&mut desk, "owned").await;
+    assert!(owned["owner"].is_null(), "the desk window is told it lost the shell");
+
+    // The phone puts it down. That is a release, and the desk window has to be
+    // told — it is the client that acts on it.
+    // Anchor against the maintenance pass first, because it is what makes this
+    // assertion hard to write honestly: it runs every 2 s and broadcasts when
+    // anything has set `sessions_dirty` — and a release sets it — so a release
+    // tested on its own is announced by the next pass whether or not it is
+    // announced when it happens. A change made through the daemon's own handle
+    // (no socket, so no immediate broadcast) is announced by the pass, and seeing
+    // that means the next pass is about two seconds away. A release that reaches
+    // the desk inside a second was therefore broadcast when it happened.
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    h.arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, None, "local")
+        .await
+        .unwrap();
+    assert!(
+        wait_for_any_sessions(&mut desk).await,
+        "the maintenance pass announces a new shell"
+    );
+
+    send(&mut phone, serde_json::json!({"type":"close","sessionId":id})).await;
+    let told = tokio::time::timeout(
+        Duration::from_millis(1000),
+        wait_owner_cleared(&mut desk, &id),
+    )
+    .await;
+    assert!(
+        matches!(told, Ok(true)),
+        "releasing a shell must reach the client waiting for it, not only the one that released it"
+    );
+    // Putting it down is not ending it: the shell is still there to be picked up.
+    assert_eq!(h.arc.lock().await.get_session(&id).unwrap().status, "running");
+}

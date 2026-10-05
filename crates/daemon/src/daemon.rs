@@ -729,6 +729,13 @@ impl LdmuxDaemon {
             match rs.start(arc).await {
                 Ok((host, port)) => {
                     eprintln!("ldmuxd: remote ws://{host}:{port}/ws");
+                    // Remember the port that was bound. A configured 0 means the
+                    // kernel chose, and every surface that tells a client where to
+                    // connect — `remote_info`, the pairing link, the QR code —
+                    // has to name the real one.
+                    if let Some(c) = self.remote_cfg.as_mut() {
+                        c.port = port;
+                    }
                     self.remote = Some(rs);
                 }
                 Err(e) => {
@@ -748,7 +755,11 @@ impl LdmuxDaemon {
                             match rs.start(&arc2).await {
                                 Ok((host, port)) => {
                                     eprintln!("ldmuxd: remote up ws://{host}:{port}/ws");
-                                    arc2.lock().await.remote = Some(rs);
+                                    let mut d = arc2.lock().await;
+                                    if let Some(c) = d.remote_cfg.as_mut() {
+                                        c.port = port;
+                                    }
+                                    d.remote = Some(rs);
                                     break;
                                 }
                                 Err(_) => continue,

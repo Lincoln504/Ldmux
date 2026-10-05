@@ -649,6 +649,22 @@ every VT mode — is closed.)
   persisted for the same reason `liveWorkspace` is — a stock terminal has no
   window class of ours, so after a restart the kernel's answer is the only one
   there is.
+- **A claim is on what the device is watching.** A connection that
+  attaches to another shell releases the one it was on, unless another connection
+  of the same device is still on it; a socket that closes releases after the
+  grace. So a shell that no device is watching is not held.
+- **A displaced window acts on the session list.** If its shell is running and
+  nobody holds it, it takes the shell back by itself — the device putting it down
+  *is* the consent (ADR-0010). If the list has no running copy of its shell, it
+  re-attaches to take the daemon's verdict, which is `error{session_dead}`:
+  "This shell has ended.", and the window ends. That last branch is the TypeScript
+  shim's `has-session` check, and its absence was the reported bug: a window whose
+  shell had been ended from the phone kept offering a reclaim that could not work.
+- **The session list is pushed when it changes.** `new`, `kill`, `close`, a
+  release, a window opening or closing, and the maintenance pass all broadcast it
+  to every connected client, so a waiting window does not have to poll. (`close`
+  from a phone on a shell the desk started is a release, not an end: the shell
+  keeps running and is broadcast as unowned.)
 
 ---
 

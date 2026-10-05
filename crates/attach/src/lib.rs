@@ -409,24 +409,49 @@ where
                                 let _ = output.flush().await;
                             }
                             Some("sessions") => {
-                                // The shell may have been let go while this window
-                                // waited. A device that puts a shell down is not
-                                // using it, so the window shows it again — the
-                                // TypeScript shim re-attached on exactly this, by
-                                // watching for the daemon to clear its "held
-                                // elsewhere" note. Only a shell *nobody* holds comes
-                                // back on its own: one another device holds keeps
-                                // waiting for `r`, which is the consent.
-                                if detached && let Some(s) = v["sessions"]
-                                    .as_array()
-                                    .and_then(|a| {
-                                        a.iter()
-                                            .find(|s| s["id"].as_str() == Some(session_id))
-                                    })
-                                {
-                                    let free = s.get("owner").map(|o| o.is_null()).unwrap_or(true);
-                                    let running = s["status"].as_str() == Some("running");
-                                    if free && running {
+                                let entry = v["sessions"].as_array().and_then(|a| {
+                                    a.iter().find(|s| s["id"].as_str() == Some(session_id))
+                                });
+                                let running = entry
+                                    .map(|s| s["status"].as_str() == Some("running"))
+                                    .unwrap_or(false);
+                                if !running {
+                                    // Gone, or no longer running: this shell is over
+                                    // (or the daemon does not know it). Ask, and let
+                                    // the verdict end the window — `session_dead` and
+                                    // `unknown_session` print "This shell has ended."
+                                    // and exit.
+                                    //
+                                    // A displaced window used to sit on its notice
+                                    // for a shell that no longer existed: the notice
+                                    // is only ever replaced by an answer, and once
+                                    // the phone took the shell this window had
+                                    // stopped asking. Asking is also what makes a
+                                    // list this window misreads harmless — one round
+                                    // trip, and the daemon's own state decides.
+                                    let _ = send(
+                                        &mut sink,
+                                        &serde_json::json!({
+                                            "type": "attach", "sessionId": session_id,
+                                            "cols": cols, "rows": rows
+                                        }),
+                                    )
+                                    .await;
+                                } else if detached {
+                                    // The shell may have been let go while this
+                                    // window waited. A device that puts a shell down
+                                    // is not using it, so the window shows it again —
+                                    // the TypeScript shim re-attached on exactly
+                                    // this, by watching for the daemon to clear its
+                                    // "held elsewhere" note. Only a shell *nobody*
+                                    // holds comes back on its own: one another device
+                                    // holds keeps waiting for `r`, which is the
+                                    // consent.
+                                    let free = entry
+                                        .and_then(|s| s.get("owner"))
+                                        .map(|o| o.is_null())
+                                        .unwrap_or(true);
+                                    if free {
                                         detached = false;
                                         let _ = send(
                                             &mut sink,
