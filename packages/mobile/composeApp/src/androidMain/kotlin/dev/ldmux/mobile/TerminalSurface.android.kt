@@ -319,6 +319,10 @@ actual fun rememberTerminalSurface(
             Key.PageUp -> "PageUp"
             Key.PageDown -> "PageDown"
             Key.Delete -> "DC"
+            Key.Insert -> "IC"
+            Key.F1 -> "F1"; Key.F2 -> "F2"; Key.F3 -> "F3"; Key.F4 -> "F4"
+            Key.F5 -> "F5"; Key.F6 -> "F6"; Key.F7 -> "F7"; Key.F8 -> "F8"
+            Key.F9 -> "F9"; Key.F10 -> "F10"; Key.F11 -> "F11"; Key.F12 -> "F12"
             else -> null
         }
         // Characters. The table above maps terminal *keys*, and everything else
@@ -339,8 +343,22 @@ actual fun rememberTerminalSurface(
                 return@onPreviewKeyEvent true
             }
         }
-        if (key == null) return@onPreviewKeyEvent false
-        controller.sendKey(key)
+        // A hardware Ctrl/Alt chord. It used to fall through here and be dropped:
+        // the character path above skips chords and the table has no letters.
+        if (key == null) {
+            if (native.isCtrlPressed || native.isAltPressed) {
+                val ch = native.getUnicodeChar(0)
+                val chord = if (ch in 0x20..0x7e) hardwareChord(ch.toChar(), native.isCtrlPressed, native.isAltPressed) else null
+                if (chord != null) {
+                    controller.sendKey(chord)
+                    return@onPreviewKeyEvent true
+                }
+            }
+            return@onPreviewKeyEvent false
+        }
+        // Shift+Tab is back-tab, not Tab.
+        val name = if (key == "Tab" && native.isShiftPressed) "BTab" else key
+        controller.sendKey(name)
         true
     }.focusRequester(surfaceFocus).focusable()) {
         Canvas(

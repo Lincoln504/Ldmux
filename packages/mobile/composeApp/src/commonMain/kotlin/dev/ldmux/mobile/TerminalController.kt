@@ -349,7 +349,8 @@ class TerminalController(
     override fun paste(text: String) {
         if (text.isEmpty()) return
         if (modes.bracketedPaste) {
-            sendTextRaw("\u001b[200~" + text + "\u001b[201~")
+            // ESC stripped: the clipboard must not be able to close the paste early.
+            sendTextRaw("\u001b[200~" + sanitizeBracketedPaste(text) + "\u001b[201~")
         } else {
             sendTextRaw(text)
         }
@@ -521,7 +522,8 @@ class TerminalController(
             armStaleCheck()
             _frame.value = engine.render()
         }
-        attach.input(text)
+        // Under the daemon's per-message cap, or a big paste is refused whole.
+        for (piece in chunkInput(text)) attach.input(piece)
     }
 
     /**
