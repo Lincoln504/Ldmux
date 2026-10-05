@@ -757,6 +757,12 @@ fn fork_shell(
         Ok(nix::unistd::ForkResult::Child) => {
             // Only async-signal-safe calls here, then exec.
             let _ = unsafe { libc::setsid() };
+            // Make the slave this session's controlling terminal. Without it the
+            // shell has tty descriptors but no controlling tty, so job control
+            // and the terminal's own signals (Ctrl+C to the foreground group)
+            // depend on the shell claiming it. Ignored on failure: the shell still
+            // runs, it just behaves like a non-interactive one.
+            let _ = unsafe { libc::ioctl(slave_in_raw, libc::TIOCSCTTY, 0) };
             let _ = unsafe { libc::dup2(slave_in_raw, 0) };
             let _ = unsafe { libc::dup2(slave_out_raw, 1) };
             let _ = unsafe { libc::dup2(slave_err_raw, 2) };

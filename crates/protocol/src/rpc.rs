@@ -82,6 +82,15 @@ pub struct SessionRecord {
     pub exit_code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exited_at: Option<i64>,
+    /// The desktop workspace this shell has a window on, when it has one.
+    ///
+    /// Persisted, not memory: the daemon cannot tell "its window was closed
+    /// while we were down" from "it never had one" after a restart otherwise,
+    /// and the TS relied on the live shim's pid for exactly that. Closing a desk
+    /// window ends its shell, so losing this fact leaves a shell no window and no
+    /// rule will ever end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_workspace: Option<String>,
 }
 
 /// A session as advertised to remote clients: the registry record minus the
@@ -263,6 +272,7 @@ mod tests {
             status: "running".into(),
             exit_code: None,
             exited_at: None,
+            live_workspace: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("exitCode"), "exitCode must be absent: {s}");
@@ -289,6 +299,7 @@ mod tests {
             status: "dead".into(),
             exit_code: Some(130),
             exited_at: Some(99),
+            live_workspace: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""exitCode":130"#), "got {s}");

@@ -311,6 +311,7 @@ mod tests {
             status: over.status.unwrap_or_else(|| "running".into()),
             exit_code: over.exit_code,
             exited_at: over.exited_at,
+            live_workspace: None,
         }
     }
 

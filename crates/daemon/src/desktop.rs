@@ -229,6 +229,60 @@ pub async fn live_window_state(session_id: &str) -> Result<&'static str, String>
     }
 }
 
+/// The session ids whose live window is currently mapped.
+///
+/// Used at startup: the live-window map is memory, so a daemon that has just
+/// started adopts the windows that are actually on screen instead of forgetting
+/// them (and then never ending their shells when they close).
+pub async fn live_window_ids() -> Vec<String> {
+    if std::env::var("DISPLAY").is_err() {
+        return Vec::new();
+    }
+    let result = crate::exec::run(
+        vec!["i3-msg".to_string(), "-t".to_string(), "get_tree".to_string()],
+        crate::exec::ExecOpts { timeout_ms: Some(3000), env: None },
+    )
+    .await;
+    if result.code != 0 {
+        return Vec::new();
+    }
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&result.out) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_live_ids(&root, &mut out);
+    out
+}
+
+fn collect_live_ids(node: &serde_json::Value, out: &mut Vec<String>) {
+    let Some(n) = node.as_object() else {
+        return;
+    };
+    if let Some(w) = n.get("window").and_then(|w| w.as_u64())
+        && w != 0 {
+            let cls = n
+                .get("app_id")
+                .and_then(|a| a.as_str())
+                .or_else(|| {
+                    n.get("window_properties")
+                        .and_then(|p| p.get("class"))
+                        .and_then(|c| c.as_str())
+                })
+                .unwrap_or("");
+            if let Some(id) = cls.strip_prefix("ldmux-live-")
+                && !id.is_empty() {
+                    out.push(id.to_string());
+                }
+        }
+    for key in ["nodes", "floating_nodes"] {
+        if let Some(children) = n.get(key).and_then(|x| x.as_array()) {
+            for c in children {
+                collect_live_ids(c, out);
+            }
+        }
+    }
+}
+
 /// Launch a session's live window and put it on a chosen workspace.
 ///
 /// The launch goes through `i3-msg exec` (which is how a window gets made at all

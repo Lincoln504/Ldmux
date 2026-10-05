@@ -1298,6 +1298,7 @@ fn default_record(id: &str) -> SessionRecord {
         status: "dead".into(),
         exit_code: None,
         exited_at: None,
+        live_workspace: None,
     }
 }
 
