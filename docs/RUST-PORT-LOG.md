@@ -1882,6 +1882,14 @@ with the record as the fallback (`eccb85a`, test
   modal let a tap through to the terminal underneath and moved a cursor in a shell the
   device does not hold.
 
+What was measured, rather than only built, on the phone (`adb`, screenshots, and staring
+at the result): the launcher rows (one line, the folder, the amber "no window" on a
+headless session, the phone glyph on a phone-opened one), switching between two open
+pages (the background page releases the shell, the shown page takes it), the reclaim key
+(above), and the key rows. **Not** measured on the device: tap-to-cursor, the selection
+handles' geometry, and natural scrolling inside a full-screen TUI — those are covered by
+the Kotlin suite and by hand, not by a scripted multi-touch run.
+
 ### The reclaim is one key
 
 `r`, and only `r`. Ctrl+R was an alias and is gone, at the user's request. The read must
