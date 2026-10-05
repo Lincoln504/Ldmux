@@ -38,7 +38,6 @@ pub mod method {
     pub const MAKE_LIVE: &str = "makeLive";
     pub const CLOSE_LIVE: &str = "closeLive";
     pub const DESK_WINDOW: &str = "deskWindow";
-    pub const COPY_MODE: &str = "copyMode";
     pub const CLIPBOARD_WRITE: &str = "clipboardWrite";
     pub const REMOTE_INFO: &str = "remote_info";
 }

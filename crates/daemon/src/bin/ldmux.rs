@@ -23,13 +23,10 @@
 //! - `desktop` — the desktop inventory.
 //! - `live <id> <workspace>` — make a session live.
 //! - `unlive <id>` — close a live session.
-//! - `copy <id> [on|off]` — toggle copy mode.
 //! - `clipboard-write on|off` — toggle clipboard write.
-//!
-//! ## What is NOT here yet
-//!
-//! - `run` / `shell` / `window` — the desk window lifecycle (the shim script).
-//! - `mirror` — the desktop mirror (the `openMirror` function).
+//! - `window [cwd]` — open a new shell in a desk window.
+//! - `run <shell|pi> [cwd]` / `shell` — run a session in this terminal (attach).
+//! - `mirror <id>` — a read-only desk window onto a session.
 
 use ldmux_protocol::socket::{self as ps, CallError};
 use ldmux_protocol::rpc::PingResult;
@@ -56,7 +53,7 @@ async fn daemon_call<R: serde::Serialize, T: serde::de::DeserializeOwned>(
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|code|pair|copy|clipboard-write> [args]"
+        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|code|pair|clipboard-write> [args]"
     );
 }
 
@@ -478,23 +475,6 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
-        }
-        "copy" => {
-            let pos = positional(rest, &[]);
-            let id = pos.first().copied().unwrap_or("");
-            let which = pos.get(1).copied();
-            let on = which.map(|w| w != "off").unwrap_or(true);
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "copyMode",
-                &serde_json::json!({ "id": id, "on": on }),
-            )
-            .await;
-            if let Err(e) = r {
-                eprintln!("ldmux: {e}");
-                std::process::exit(1);
-            }
-            println!("copy-mode {}", if on { "on" } else { "off" });
         }
         "clipboard-write" => {
             let pos = positional(rest, &[]);

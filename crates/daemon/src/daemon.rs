@@ -1202,8 +1202,6 @@ impl LdmuxDaemon {
                     .map_err(|e| format!("write clipboard policy: {e}"))?;
                 Ok(serde_json::json!({ "on": on }))
             }
-            // ── Copy mode (tmux-specific; no keeper equivalent) ──
-            "copyMode" => Err("not_implemented: copyMode (tmux-specific, no keeper equivalent)".to_string()),
             // ── Stream-dependent handlers handled by the remote WS server ──
             "attach" | "resize" | "mouseclick" | "input" | "key"
             | "follow" | "scrollback" => {
