@@ -1553,15 +1553,21 @@ private fun SidePanel(
             // shell. The clipboard is also where a program's own OSC 52 copy lands,
             // so without this a program's copy would have nowhere to be pasted.
             val clipboard = LocalClipboardManager.current
-            KeyRow(
-                listOf(
-                    "paste" to {
-                        val text = clipboard.getText()?.text
-                        if (!text.isNullOrEmpty()) handle?.paste(text)
-                    },
-                ),
-                active = emptyList(),
-            )
+            // Paste and the microphone share one row: both bring text into the
+            // shell from outside the keyboard, and the microphone used to sit alone
+            // in a bar below every key — a whole row for one button. Trailing, so
+            // the key keeps the width and the icon keeps its square.
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                KeyBtn("paste", Modifier.weight(1f)) {
+                    val text = clipboard.getText()?.text
+                    if (!text.isNullOrEmpty()) handle?.paste(text)
+                }
+                IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
+            }
             PanelDivider()
             // Backspace joins the keys a soft keyboard cannot send. Landscape has no
             // keyboard at all, so a dictated word that arrives wrong cannot be taken
@@ -1609,23 +1615,10 @@ private fun SidePanel(
             KeyRow(panelControlKeys(press))
         }
 
-        // Everything that acts on the *app* lives in this one bar, and nothing
-        // that acts on the shell does. That is the whole rule: the middle of the
-        // panel scrolls and holds keys, the ends are fixed and hold navigation
-        // and actions. It used to be neither — a flip button above the scroll, a
-        // settings cog below it, and no way to tell which was which.
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // No flip control here. The screen's shape is the device's now, so there
-            // is nothing to flip to, and landscape has no keyboard to put away —
-            // which is why the only control left in this row is the microphone.
-            // Portrait's bar carries its own, because the IME has one there anyway:
-            // two microphones is one too many.
-            IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
-        }
+        // The bar that held only the microphone is gone: the microphone is a way to
+        // put text into the shell, so it sits with `paste` at the top of the panel
+        // rather than in a row of its own at the bottom. Portrait carries no
+        // microphone, because the IME has one there anyway: two is one too many.
 
         // Diagnostics, not a control: the repaint cadence follows the round trip,
         // so this is the reason a slow link feels the way it does. It survives the

@@ -132,19 +132,6 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     private var wantTakeover = false
 
-    /**
-     * Whether this page has ever armed a takeover.
-     *
-     * Opening a shell on the phone is the consent to take it (2026-09-26), and the
-     * consent is for that opening. `start` is called on every *activation*, and
-     * activation is which page the pager is showing — the user swiping between
-     * shells calls `stop` and `start` on each. Arming on every one of those meant
-     * swiping away from a shell and back took it from the desk: no tap, no notice,
-     * mid-keystroke. It also made the notice unreachable for that case, since the
-     * notice is only drawn when the daemon *refuses* an attach. One arming per page,
-     * and `takeOver()` for every deliberate take-back after it.
-     */
-    private var armedOnce = false
 
     /** Reconnect without the backoff pause, once — a resync, not an outage. */
     private var skipBackoffOnce = false
@@ -173,20 +160,19 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
     fun start(scope: CoroutineScope) {
         if (job != null) return
-        // Opening a shell on the phone is the consent to take it: that is what the
-        // user opened it *for* (2026-09-26), and going back to the launcher gives it
-        // back. So the first attach of each activation takes over. A reconnect
-        // within the activation does not — a desk that took the shell back must not
-        // lose it again to a link that blinked — and the notice offers one tap.
+        // Taking the shell over is what opening it on the phone means, and it is
+        // every time the page comes to the front, not once per page. The page gives
+        // the shell back when it swipes away ([stop] closes the socket and the daemon
+        // releases the claim after its grace), so coming back is the same act as
+        // arriving: the swipe the user just made *is* the consent.
         //
-        // ...and it is the first attach of the *page*, not of every activation. That
-        // sentence was above this line while the code armed on each one, and
-        // activation is page visibility, so a swipe away and back stole the shell.
-        // See [armedOnce].
-        if (!armedOnce) {
-            armedOnce = true
-            wantTakeover = true
-        }
+        // This was once armed only on the first activation, on the argument that a
+        // swipe away and back should not steal a shell the desk had re-taken. That
+        // is the behaviour being asked for now (2026-10-05) — a swipe between pages
+        // that leaves a notice and a tap in the way is not the swipe the user made.
+        // A *reconnect* inside one activation still does not re-arm: the loop's
+        // retry does not call this, so a link that blinks cannot take a shell.
+        wantTakeover = true
         this.scope = scope
         job = scope.launch { loop() }
     }
