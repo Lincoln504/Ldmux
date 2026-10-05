@@ -366,8 +366,8 @@ Still open:
   port is not started.
 - **D-1 is the one in-scope fix that should land in the TS tree first:** the
   live-window reclaim fires on any byte (dictation into the focused window
-  mis-reclaims the shell). It is live in production; the fix is Ctrl+R +
-  echo + a recorded consent (RUST-PORT-PLAN §3.13).
+  mis-reclaims the shell). It is live in production; the fix was one named key (`r`) +
+  a recorded consent (RUST-PORT-PLAN §3.13).
 - The engine artefacts (host `.a` + headers, `prebuilt/`) are **not
   committed**; the port commits the headers and adds the engine-pin
   cross-check (§3.14/F4).

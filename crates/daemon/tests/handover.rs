@@ -134,7 +134,7 @@ async fn handover_size_and_close_does_not_detach() {
     assert_eq!(owned["owner"]["id"], "A", "B is told A holds it: {owned}");
     assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "A");
 
-    // B takes over (the phone's reclaim / the window's Ctrl+R): A is cut off.
+    // B takes over (the phone's reclaim / the window's r): A is cut off.
     send(&mut b, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":80,"rows":24})).await;
     let caps_b = next_of_type(&mut b, "caps").await;
     assert_eq!(caps_b["cols"], 80);
@@ -142,8 +142,8 @@ async fn handover_size_and_close_does_not_detach() {
     assert!(owned_a["owner"].is_null(), "A is told it lost the shell: {owned_a}");
     assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "B");
 
-    // A takes it back — the desk window's Ctrl+R, which is the one reclaim the
-    // spec allows. B is told it lost the shell, and A owns it again.
+    // A takes it back — the desk window's r, which is the one reclaim the spec
+    // allows. B is told it lost the shell, and A owns it again.
     send(&mut a, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":100,"rows":30})).await;
     let caps_a2 = next_of_type(&mut a, "caps").await;
     assert_eq!(caps_a2["cols"], 100);

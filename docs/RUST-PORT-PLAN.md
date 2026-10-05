@@ -430,9 +430,9 @@ records its tty in `@ldmux_live_tty`, records its pid in `@ldmux_live_pid`, loop
   to the daemon (attach = claim the shell, ADR-0010 handover), and pipes it ↔
   session bytes.
 - Detached (phone took it): the daemon closes our write side / sends `Detached` →
-  the attach client prints "this shell is open on another device — press Ctrl+R
-  to take it back" and waits (**Ctrl+R** = reclaim, per D-1: any other byte is
-  echoed, so dictation cannot trigger the reclaim; the daemon sees the re-attach
+  the attach client prints "this shell is open on another device — press r
+  to take it back" and waits (**r** = reclaim; any other byte is
+  swallowed, so dictation cannot trigger the reclaim; the daemon sees the re-attach
   while another device holds the shell and takes it back — **the keystroke is the
   consent**, exactly as today).
 - Window closed: attach client exits (SIGHUP/EOF on its pty) → daemon sees the
@@ -528,15 +528,19 @@ echo min 0 time 10` + `dd bs=1 count=1` — **any single byte** breaks the
 loop and re-attaches, which the daemon reads as consent. Dictation left
 running types into the focused window: the bytes are silently swallowed,
 one breaks the loop, the window re-attaches, and the phone shows
-held-elsewhere — without the user doing it. **Fix:** the reclaim key is a
-**control byte — Ctrl+R (0x12)**: never produced by text dictation. (The
+held-elsewhere — without the user doing it. **Fix:** the reclaim key was a
+**control byte — Ctrl+R (0x12)**: never produced by text dictation. **Amended
+2026-10-05:** the key is **`r`**, and only `r`, at the user's request. `r` can
+appear in dictated text, but the notice names it and it is one key to remember;
+an escape in the read (a paste, an Alt chord, a function key) still never
+counts, whatever the terminal emulator encodes. (The
 "Enter" proposal is the floor, not sufficient: dictation emits Enter/
 newlines, and Enter and Ctrl+Enter are indistinguishable on most terminals
 — both 0x0D.) Non-trigger bytes are **echoed back** (today they are
 swallowed with no feedback), and the prompt names the key. The shim also
 **records the consent** (a session option today; a `Reclaim` protocol
 message in the Rust design, D-2) so D-2 can tell "pressed the key" from
-"window is open" — and the option handshake is verified end-to-end: the daemon sets `@ldmux_held_elsewhere=1` (`daemon.ts:594`) and clears it (`:549`, `:588`, `:612`); the shim waits for the clear (`desktop.ts:231`). *Port:* the attach client inherits the Ctrl+R + echo + prompt logic; the consent becomes a protocol message.
+"window is open" — and the option handshake is verified end-to-end: the daemon sets `@ldmux_held_elsewhere=1` (`daemon.ts:594`) and clears it (`:549`, `:588`, `:612`); the shim waits for the clear (`desktop.ts:231`). *Port:* the attach client inherits the reclaim key + prompt logic; the consent becomes a protocol message.
 
 **D-2 — the daemon force-claims from an idle window (no keystroke involved).**
 `reconcileLivePass` (`daemon.ts:900-937`, ticked every ≤1 s by the 2 s

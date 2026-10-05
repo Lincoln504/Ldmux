@@ -6,7 +6,7 @@
 //! shell (ADR-0010 handover), streams the pane's output to its terminal, and
 //! forwards its input back. When another device takes the shell the daemon sends
 //! `owned` and cuts the stream; the client prints the notice and waits for
-//! Ctrl+R to take it back (the keystroke is the consent, plan §3.9 / D-1).
+//! `r` to take it back (the keystroke is the consent, plan §3.9 / D-1).
 //!
 //! Transport: the daemon's remote WebSocket (the same endpoint the phone uses),
 //! addressed via the `remote_info` control-socket call. The device identity is
@@ -404,7 +404,7 @@ where
                             Some("owned") => {
                                 detached = true;
                                 let _ = output
-                                    .write_all(b"\r\n  This shell is open on another device. Press Ctrl+R to take it back.\r\n")
+                                    .write_all(b"\r\n  This shell is open on another device. Press r to take it back.\r\n")
                                     .await;
                                 let _ = output.flush().await;
                             }
@@ -456,9 +456,10 @@ where
                 }
                 let bytes = &inbuf[..n];
                 if detached {
-                    // Only Ctrl+R is consent; any other byte is swallowed (so a
-                    // stream of dictation cannot steal the shell back).
-                    if bytes.contains(&0x12) {
+                    // One key is the consent: `r`, and nothing else. Every other
+                    // byte is swallowed, so a paste or a stream of dictation
+                    // cannot steal the shell back.
+                    if is_reclaim(bytes) {
                         detached = false;
                         let _ = send(
                             &mut sink,
@@ -509,6 +510,24 @@ where
             }
         }
     }
+}
+
+/// Whether these bytes are the user asking for the shell back.
+///
+/// `r` is the key, and the only key. One definition, so the notice and the check
+/// cannot drift apart.
+///
+/// **Robust across terminal emulators:** every emulator sends a bare `r` as the
+/// byte 0x72 — that is what a tty *is*, not a convention. What differs between
+/// emulators is how they encode everything *else* (a paste, an arrow, a function
+/// key, an Alt chord), and all of those carry an escape. So an escape in the read
+/// is never this consent, whatever the emulator calls it: a bracketed paste of a
+/// paragraph containing an `r` must not take a shell.
+fn is_reclaim(bytes: &[u8]) -> bool {
+    if bytes.contains(&0x1b) {
+        return false;
+    }
+    bytes.iter().any(|b| matches!(*b, b'r' | b'R'))
 }
 
 async fn send<S>(sink: &mut S, value: &serde_json::Value) -> Result<(), String>
@@ -634,6 +653,27 @@ mod render_tests {
 
     /// The visible screen is cleared, so a resync does not lay the new screen
     /// over the old one.
+    /// The reclaim is one named key, and nothing else takes a shell back.
+    #[test]
+    fn only_the_named_key_reclaims_a_shell() {
+        use super::is_reclaim;
+        assert!(is_reclaim(b"r"));
+        assert!(is_reclaim(b"R"));
+        assert!(!is_reclaim(b"\x12"), "there is no second key");
+        // The reason the consent is a named key at all: a paste, an escape
+        // sequence, or dictation must not take a shell nobody asked for.
+        assert!(!is_reclaim(b""));
+        assert!(!is_reclaim(b"hello"));
+        assert!(!is_reclaim(b"\x1b[200~pasted\x1b[201~"));
+        assert!(!is_reclaim(b"\r"));
+        // The emulator-independent rule: anything with an escape in it is not
+        // the consent, whatever the emulator encoded — a paste containing an `r`,
+        // an Alt-R chord, an arrow. Only a bare keypress is.
+        assert!(!is_reclaim(b"\x1b[200~remove the file\x1b[201~"));
+        assert!(!is_reclaim(b"\x1br"), "Alt-R is not the key");
+        assert!(!is_reclaim(b"\x1b[1;3C"));
+    }
+
     /// The reconnect backoff grows and then holds. A window must retry quickly
     /// after a one-second restart and must not hammer a daemon that is down.
     #[test]
