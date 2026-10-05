@@ -1450,11 +1450,22 @@ impl LdmuxDaemon {
                     kind: c.device.kind.clone(),
                     since: c.since.max(0) as u64,
                 });
+                // Some("") is a fact, not an absence: the window exists and the
+                // window manager did not say where it was placed (a `deskWindow`
+                // opens on whatever workspace is focused). Filtering the blank
+                // out made every `$mod+Return` window report "no window" on the
+                // phone while its window sat on the desk (2026-10-05). The
+                // clients already read a blank as "on desktop", no number.
+                //
+                // The live map is preferred because it is current; the record is
+                // the fallback for the moment after a restart before the map is
+                // rebuilt, and for a window opened by something other than this
+                // daemon and not yet adopted.
                 let live_workspace = self
                     .live_windows
                     .get(&record.id)
-                    .map(|(ws, _)| ws.clone())
-                    .filter(|w| !w.is_empty());
+                    .map(|(ws, _)| Some(ws.clone()))
+                    .unwrap_or_else(|| record.live_workspace.clone());
                 SessionInfo {
                     id: record.id.clone(),
                     kind: record.kind.clone(),
@@ -2408,6 +2419,39 @@ mod tests {
         );
         d.set_live_workspace("dead1", None);
         assert!(d.registry().get("dead1").unwrap().live_workspace.is_none());
+    }
+
+    /// A window whose workspace the window manager did not name is still a
+    /// window. `deskWindow` records exactly that (`""`), and the session list
+    /// filtered blanks out, so every `$mod+Return` window read "no window" on the
+    /// phone while its window sat on the desk (measured 2026-10-05).
+    #[tokio::test]
+    async fn a_desk_window_with_an_unnamed_workspace_is_still_reported() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+
+        // What `deskWindow` records: a window on whatever workspace was focused.
+        d.live_windows.insert(rec.id.clone(), (String::new(), 0));
+        d.set_live_workspace(&rec.id, Some(String::new()));
+        let info = d.describe_sessions().await.into_iter().find(|s| s.id == rec.id).unwrap();
+        assert_eq!(info.live_workspace.as_deref(), Some(""), "an unnamed workspace is a window");
+
+        // The moment after a restart, before the live map is rebuilt, the record
+        // alone must still answer: the window is not gone just because the map
+        // has not been filled yet.
+        d.live_windows.clear();
+        let info = d.describe_sessions().await.into_iter().find(|s| s.id == rec.id).unwrap();
+        assert_eq!(info.live_workspace.as_deref(), Some(""), "the record is the fallback");
     }
 }
 
