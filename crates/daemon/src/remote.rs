@@ -45,6 +45,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::daemon::now_ms;
 use crate::stream::{PaneStream, StreamSubscriber};
 
 /// The WS stream type (`accept_async` returns this).
@@ -1459,14 +1460,6 @@ async fn write_http(stream: &mut TcpStream, status: u16, body: &str) {
     let _ = stream.write_all(text.as_bytes()).await;
     let _ = stream.flush().await;
     let _ = stream.shutdown().await;
-}
-
-/// Epoch milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Remove a connection from the table by pointer identity (the reader task

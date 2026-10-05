@@ -132,10 +132,7 @@ impl FakeKeeper {
                 Some(s) if !s.dead => {
                     s.out.extend(w.data.bytes());
                     // Input is activity (the real keeper's rule).
-                    s.activity = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
+                    s.activity = crate::daemon::now_ms();
                     Ok(KeeperMessage::Ack(Ack {}))
                 }
                 Some(_) => Err(format!("no live session: {}", w.session_id)),
@@ -298,10 +295,7 @@ impl FakeKeeper {
             s.out.extend(data.iter().copied());
             // Output is activity (the real keeper stamps its clock in the reader
             // task, the one place every byte from the master passes).
-            s.activity = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            s.activity = crate::daemon::now_ms();
         }
     }
 

@@ -91,13 +91,7 @@ impl Ownership {
         takeover: bool,
         now: Option<i64>,
     ) -> ClaimResult {
-        let now = now.unwrap_or_else(|| {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0)
-        });
+        let now = now.unwrap_or_else(|| crate::daemon::now_ms() as i64);
         let existing: Option<Claim> = self.claims.get(session_id).cloned();
 
         if let Some(e) = existing {

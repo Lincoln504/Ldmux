@@ -1853,8 +1853,8 @@ private fun PairingRow(current: LdmuxConfig, onPaired: (Pairing) -> Unit, onUnpa
  * "Another device is using this shell."
  *
  * Opening a shell takes it, so this is only seen when somebody took it back while
- * it was open here — the desk pressing a key in its window, or another phone.
- * One tap takes it again: the tap is as deliberate as opening it was.
+ * it was open here — the desk pressing `r` in its window, or another phone. One
+ * tap takes it again: the tap is as deliberate as opening it was.
  */
 @Composable
 private fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {

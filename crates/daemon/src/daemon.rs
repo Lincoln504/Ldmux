@@ -64,6 +64,19 @@ const MAINTENANCE_INTERVAL_MS: u64 = 2000;
 /// user had just asked for, so a window younger than this is left alone.
 const LIVE_WINDOW_GRACE_MS: u64 = 5000;
 
+/// Epoch milliseconds.
+///
+/// One definition, in the crate's own module, and it does not panic: a clock
+/// before 1970 is the only way `duration_since` fails, and taking the daemon
+/// down over it would drop every session's stream with it. `remote.rs` had a
+/// second copy of this body and `daemon.rs` had ten copies of a panicking one.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// The row title for a session (the TS `sessionTitle`): the explicit title when
 /// it is more than the kind, else the directory's basename, else the record's.
 fn session_title(record: &SessionRecord, cwd: &str) -> String {
@@ -369,10 +382,7 @@ impl LdmuxDaemon {
             .filter(|s| !s.dead)
             .map(|s| s.session_id.clone())
             .collect();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = now_ms() as i64;
         let (dead, adopted) = self.registry.reconcile(Some(&live), now);
         let pruned = self.registry.prune(
             Some(self.dead_record_ttl_ms),
@@ -434,10 +444,7 @@ impl LdmuxDaemon {
     /// answer must never be read as a closed window.
     pub async fn reconcile_live(&mut self) -> bool {
         let mut changed = false;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = now_ms();
         for id in self.live_windows.keys().cloned().collect::<Vec<_>>() {
             let record = self.registry.get(&id).cloned();
             match record {
@@ -510,10 +517,7 @@ impl LdmuxDaemon {
             if rec.live_workspace.is_none() {
                 self.set_live_workspace(&id, Some(String::new()));
             }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
+            let now = now_ms();
             self.live_windows
                 .entry(id)
                 .or_insert((rec.live_workspace.unwrap_or_default(), now));
@@ -527,10 +531,7 @@ impl LdmuxDaemon {
                 changed = true;
                 continue;
             }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
+            let now = now_ms();
             match crate::desktop::live_window_state(&r.id).await.as_deref() {
                 Ok("absent") => {
                     // The window was closed while no daemon was watching.
@@ -826,10 +827,7 @@ impl LdmuxDaemon {
         let id = short_id();
         let keeper_name = format!("ldmux-{id}");
         let command: Vec<String> = if kind == "pi" { vec!["pi".to_string()] } else { vec![] };
-        let now: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now: u64 = now_ms();
         let record = SessionRecord {
             id: id.clone(),
             keeper_name: keeper_name.clone(),
@@ -886,10 +884,7 @@ impl LdmuxDaemon {
                 .await;
         }
         record.status = "dead".to_string();
-        let now: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now: u64 = now_ms();
         record.exited_at = Some(now as i64);
         record.updated_at = now;
         record.exit_code = None;
@@ -1195,9 +1190,7 @@ impl LdmuxDaemon {
                     Ok(lr) => {
                         if lr.ok {
                             self.sessions_dirty = true;
-                            self.live_windows.insert(id.to_string(), (workspace.to_string(), std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap().as_millis() as u64));
+                            self.live_windows.insert(id.to_string(), (workspace.to_string(), now_ms()));
                             self.set_live_workspace(id, Some(workspace.to_string()));
                             let dd = self.desktop_device.clone();
                             let _ = self.claim(id, &dd, true);
@@ -1246,9 +1239,7 @@ impl LdmuxDaemon {
                     Ok(lr) => {
                         if lr.ok {
                             self.sessions_dirty = true;
-                            self.live_windows.insert(id.to_string(), (String::new(), std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap().as_millis() as u64));
+                            self.live_windows.insert(id.to_string(), (String::new(), now_ms()));
                             self.set_live_workspace(id, Some(String::new()));
                             let dd = self.desktop_device.clone();
                             let _ = self.claim(id, &dd, true);
@@ -1383,10 +1374,7 @@ impl LdmuxDaemon {
             .strip_prefix("ldmux-")
             .unwrap_or(&keeper_name)
             .to_string();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = now_ms();
         let record = ldmux_protocol::rpc::SessionRecord {
             id,
             keeper_name,
@@ -1535,10 +1523,7 @@ impl LdmuxDaemon {
         device: &ldmux_protocol::rpc::DeviceInfo,
         takeover: bool,
     ) -> crate::ownership::ClaimResult {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = now_ms() as i64;
         let r = self.ownership.claim(session_id, device.clone(), takeover, Some(now));
         // Who holds a shell is on the wire (`owner`), so a claim is a change.
         self.sessions_dirty = true;
@@ -1686,10 +1671,7 @@ mod tests {
         .unwrap();
 
         // A registry record for the session (the terminal name `ldmux-s1`).
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let now = now_ms();
         d.registry().upsert(SessionRecord {
             id: "s1".into(),
             keeper_name: "ldmux-s1".into(),
