@@ -445,7 +445,11 @@ impl LdmuxDaemon {
                 // The record is gone, or its shell has ended: the window is not
                 // this daemon's business any more.
                 _ => {
+                    // The record is gone or the shell has ended: it has no window
+                    // any more, and saying otherwise would resurrect the window in
+                    // the list through the record fallback.
                     self.live_windows.remove(&id);
+                    self.set_live_workspace(&id, None);
                     changed = true;
                     continue;
                 }
@@ -945,6 +949,12 @@ impl LdmuxDaemon {
         if let Some(claim) = self.ownership.owner(id).cloned() {
             self.ownership.release(id, &claim.device.id);
         }
+        // A session that is over has no window. Doing it here rather than in each
+        // ending keeps the invariant in one place: `running` with a window record
+        // is the only state that has one, so nothing can report a window for a
+        // shell that is gone (the list falls back to the record).
+        self.live_windows.remove(id);
+        self.set_live_workspace(id, None);
     }
 
     /// Get or create the `PaneStream` for a session (the TS `streamFor`).
