@@ -637,18 +637,28 @@ impl Keeper {
     /// Reap any exited children (the authoritative death signal), marking the
     /// matching sessions dead. Non-blocking: `waitpid(-1, WNOHANG)`.
     fn reap(&self) {
+        use nix::errno::Errno;
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-        loop {
-            match waitpid(nix::unistd::Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) => break,
-                Ok(WaitStatus::Exited(pid, code)) => {
-                    self.mark_dead(pid.as_raw(), code);
-                }
-                Ok(WaitStatus::Signaled(pid, _sig, _core)) => {
-                    self.mark_dead(pid.as_raw(), -1);
-                }
+        // Only OUR children, by pid. `waitpid(-1)` reaps *any* child of the
+        // process, so a second keeper in the same process (every keeper test
+        // runs several) consumed another's exit status, and the keeper that
+        // owned the shell never learned it had died. One keeper per process is
+        // the deployed shape, but a reaper that cannot steal is also the one
+        // that cannot be surprised by a child spawned elsewhere (a `/proc`
+        // reader, a future helper).
+        let live: Vec<i32> = {
+            let g = self.sessions.lock().unwrap();
+            g.values().filter(|s| !s.dead).map(|s| s.pid).collect()
+        };
+        for pid in live {
+            match waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => {}
+                Ok(WaitStatus::Exited(p, code)) => self.mark_dead(p.as_raw(), code),
+                Ok(WaitStatus::Signaled(p, _sig, _core)) => self.mark_dead(p.as_raw(), -1),
                 Ok(_) => {}
-                Err(_) => break, // ECHILD: no children left
+                // Not our child any more (already reaped): it is gone.
+                Err(Errno::ECHILD) => self.mark_dead(pid, -1),
+                Err(_) => {}
             }
         }
     }

@@ -684,14 +684,13 @@ async fn the_state_query_carries_the_pane_state() {
 /// EOF, `dead` is reported, and the `/proc` fields are empty (a reaped pid
 /// may be recycled, so we don't read it).
 ///
-/// `#[ignore]`d: it is timing-sensitive. Run alone it passes in ~ms (the
-/// shell exits and is reaped on the first `Read`); but under the crate's
-/// concurrent test load (ten shells + ten emulator threads) the one shell
-/// under test is starved and `dead` is not detected within a sane bound, so
-/// it is flaky in the full gate. Verify it with:
-/// `cargo test -p ldmux-keeper --test keeper a_natural_shell_exit`.
+/// This test was `#[ignore]`d as "flaky under the crate's concurrent test load".
+/// It was not timing: `reap()` called `waitpid(-1)`, which reaps *any* child of
+/// the process, and every test here runs its own keeper in one process — so a
+/// neighbour's `reap()` consumed this shell's exit status and the keeper that
+/// owned it never saw it die. `reap()` now waits on its own sessions' pids, and
+/// this passes under full load (8/8 consecutive runs; 1/8 before).
 #[tokio::test]
-#[ignore = "timing-sensitive: flaky under the crate's concurrent test load; pass alone"]
 async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
     let socket = socket_path();
     let _k = boot(&socket).await;
