@@ -1046,6 +1046,7 @@ impl LdmuxDaemon {
                 let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
                     session_id: record.tmux_name.clone(),
                     history_lines: if history { Some(100) } else { None },
+            drain_output: false,
                 }))
                 .await?;
                 let text = match &resp {
@@ -1064,6 +1065,7 @@ impl LdmuxDaemon {
                 let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
                     session_id: record.tmux_name.clone(),
                     history_lines: None,
+            drain_output: false,
                 }))
                 .await?;
                 let result = match &resp {

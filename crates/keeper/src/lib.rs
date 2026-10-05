@@ -41,7 +41,7 @@ pub struct Session {
     /// The master's bytes, buffered as they arrive (the "always reads the
     /// master" stream). The emulator thread feeds the emulator from this
     /// stream; phase 5 streams it to attaching clients.
-    pub out: Arc<Mutex<VecDeque<u8>>>,
+    pub out: Arc<Mutex<OutBuf>>,
     /// The emulator thread's message sender (dropped with the session — the
     /// thread exits when it sees the disconnect).
     em_tx: mpsc::Sender<emulator::EmuMsg>,
@@ -49,6 +49,41 @@ pub struct Session {
     /// by the reader task (output) and by `Write` (input), read by `List`.
     /// tmux's `#{session_activity}`, which the TS read for `lastActivityAt`.
     activity: Arc<AtomicU64>,
+}
+
+/// The most output a session buffers for a reader that is not reading. Beyond
+/// it the buffer is emptied and `lost` is raised, so an unattended shell that
+/// prints forever (`yes`, a build log) costs a bounded amount of memory instead
+/// of growing for the life of the keeper. A viewer polls every few ms, so only a
+/// session nobody is watching can reach it.
+pub const OUT_CAP: usize = 4 * 1024 * 1024;
+
+/// A session's buffered, not-yet-peeked output.
+#[derive(Default)]
+pub struct OutBuf {
+    pub q: VecDeque<u8>,
+    /// Bytes were discarded at `OUT_CAP` since the last peek.
+    pub lost: bool,
+}
+
+impl OutBuf {
+    /// Append bytes read from the master, enforcing `OUT_CAP`.
+    pub fn push(&mut self, bytes: &[u8]) {
+        if self.q.len() + bytes.len() > OUT_CAP {
+            self.q.clear();
+            self.lost = true;
+            if bytes.len() > OUT_CAP {
+                return;
+            }
+        }
+        self.q.extend(bytes.iter().copied());
+    }
+
+    /// Take everything buffered (and whether any was lost before it).
+    pub fn take(&mut self) -> (Vec<u8>, bool) {
+        let data: Vec<u8> = self.q.drain(..).collect();
+        (data, std::mem::take(&mut self.lost))
+    }
 }
 
 /// Now, in unix milliseconds (0 if the clock is before the epoch — a clock that
@@ -88,6 +123,47 @@ pub fn child_env(
         set(k, v);
     }
     env
+}
+
+#[cfg(test)]
+mod out_buf_tests {
+    use super::*;
+
+    #[test]
+    fn bytes_are_taken_once_in_order() {
+        let mut o = OutBuf::default();
+        o.push(b"ab");
+        o.push(b"cd");
+        assert_eq!(o.take(), (b"abcd".to_vec(), false));
+        assert_eq!(o.take(), (Vec::new(), false));
+    }
+
+    #[test]
+    fn an_unread_buffer_is_bounded_and_reports_the_loss() {
+        let mut o = OutBuf::default();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..4 {
+            o.push(&chunk);
+        }
+        assert_eq!(o.q.len(), OUT_CAP, "exactly at the cap is kept");
+        assert!(!o.lost);
+        o.push(b"y");
+        // Over the cap: what was unread is discarded, the new bytes are kept,
+        // and the reader is told it missed something.
+        assert_eq!(o.q.len(), 1);
+        let (data, lost) = o.take();
+        assert_eq!(data, b"y");
+        assert!(lost);
+        assert!(!o.take().1, "the loss is reported once");
+    }
+
+    #[test]
+    fn one_oversized_push_cannot_grow_the_buffer() {
+        let mut o = OutBuf::default();
+        o.push(&vec![b'z'; OUT_CAP + 1]);
+        assert!(o.q.is_empty());
+        assert!(o.lost);
+    }
 }
 
 #[cfg(test)]
@@ -280,15 +356,11 @@ impl Keeper {
                         // Drain the buffer (the attach's stream pull). The reader
                         // task holds only the `out` lock, never the sessions
                         // lock, so this cannot deadlock with it.
-                        let data: Vec<u8> = {
-                            let mut out = s.out.lock().unwrap();
-                            let d: Vec<u8> = out.iter().copied().collect();
-                            *out = VecDeque::new();
-                            d
-                        };
+                        let (data, lost) = s.out.lock().unwrap().take();
                         Ok(KeeperMessage::PeekResult(PeekResult {
                             session_id: p.session_id.clone(),
                             data,
+                            lost,
                         }))
                     }
                     None => Err(format!("no such session: {}", p.session_id)),
@@ -313,6 +385,7 @@ impl Keeper {
                 let (rtx, rrx) = oneshot::channel();
                 tx.send(emulator::EmuMsg::Snapshot {
                     history_lines: s.history_lines.unwrap_or(0),
+                    drain_output: s.drain_output,
                     reply: rtx,
                 })
                 .map_err(|_| "the emulator is gone")?;
@@ -345,6 +418,7 @@ impl Keeper {
                     dead,
                     foreground,
                     cwd,
+                    tail: o.tail,
                 }))
             }
             km::KeeperMessage::List(_l) => {
@@ -511,7 +585,7 @@ impl Keeper {
         drop(slave);
 
         let master = Arc::new(master);
-        let out = Arc::new(Mutex::new(VecDeque::new()));
+        let out = Arc::new(Mutex::new(OutBuf::default()));
         // The session's activity clock, shared with its emulator thread (which
         // stamps it on every byte the master produces).
         let activity = Arc::new(AtomicU64::new(now_ms()));
@@ -593,7 +667,7 @@ impl Keeper {
     /// diagnostic: proves the keeper is reading the master).
     pub fn buffered_len(&self, id: &str) -> Option<usize> {
         let g = self.sessions.lock().unwrap();
-        g.get(id).map(|s| s.out.lock().unwrap().len())
+        g.get(id).map(|s| s.out.lock().unwrap().q.len())
     }
 }
 

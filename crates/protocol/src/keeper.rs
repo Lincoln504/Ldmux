@@ -127,6 +127,10 @@ pub struct Peek {
 pub struct PeekResult {
     pub session_id: String,
     pub data: Vec<u8>,
+    /// Output was discarded because nobody was reading it fast enough and the
+    /// keeper's buffer hit its cap. A viewer must resync from a snapshot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lost: bool,
 }
 
 /// Daemon → keeper: re-send the pane, optionally with paged scrollback
@@ -138,6 +142,13 @@ pub struct Snapshot {
     /// Lines of history to include. `0`/absent = visible screen only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_lines: Option<u64>,
+    /// Hand back (and clear) the session's not-yet-peeked output with the
+    /// render. Those bytes are already in the render — the emulator was fed
+    /// them — so a stream that has just taken a snapshot must not replay them
+    /// as live output. Off for every other caller (a CLI capture must not eat
+    /// a viewer's output).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drain_output: bool,
 }
 
 /// Keeper → daemon: the rendered snapshot (the answer to a `Snapshot`): the
@@ -179,6 +190,10 @@ pub struct SnapshotResult {
     pub foreground: String,
     /// The pane's working directory (`/proc/<pid>/cwd`).
     pub cwd: String,
+    /// The output that was buffered but not yet peeked when the render was taken
+    /// (only when the request set `drain_output`). Already part of `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tail: Vec<u8>,
 }
 
 /// Keeper → daemon: report state for a session (the answer to a Read/State
@@ -338,6 +353,7 @@ mod tests {
                 dead: false,
                 foreground: "dash".into(),
                 cwd: "/root".into(),
+                tail: Vec::new(),
             }))
             .unwrap();
         assert_eq!(v["type"], "snapshotresult");
@@ -356,6 +372,7 @@ mod tests {
             serde_json::to_value(KeeperMessage::Snapshot(Snapshot {
                 session_id: "s1".into(),
                 history_lines: None,
+            drain_output: false,
             }))
             .unwrap();
         assert_eq!(v["type"], "snapshot");

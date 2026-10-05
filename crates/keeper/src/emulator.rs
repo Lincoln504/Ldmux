@@ -28,7 +28,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::now_ms;
-use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{mpsc, Arc, Mutex};
 use std::sync::mpsc::TryRecvError;
@@ -48,7 +47,7 @@ pub(crate) enum EmuMsg {
     /// Render the screen: the `rows` live lines, plus `history_lines` of
     /// history above them when requested (the `capture-pane -S -N -E -`
     /// contract). `0` = live screen only.
-    Snapshot { history_lines: u64, reply: oneshot::Sender<Outcome> },
+    Snapshot { history_lines: u64, drain_output: bool, reply: oneshot::Sender<Outcome> },
     /// The pane's size changed. The handler has already done `TIOCSWINSZ`;
     /// the emulator must resize its grid.
     Resize { cols: u16, rows: u16 },
@@ -97,6 +96,9 @@ pub struct Outcome {
     pub app_cursor: bool,
     pub bracketed_paste: bool,
     pub history_size: u32,
+    /// The buffered, not-yet-peeked output taken at the instant of the render
+    /// (only when asked): exactly the bytes already reflected in `text`.
+    pub tail: Vec<u8>,
 }
 
 /// Start the session's emulator thread.
@@ -109,7 +111,7 @@ pub(crate) fn spawn(
     cols: u16,
     rows: u16,
     master: Arc<OwnedFd>,
-    out: Arc<Mutex<VecDeque<u8>>>,
+    out: Arc<Mutex<crate::OutBuf>>,
     activity: Arc<AtomicU64>,
     rx: mpsc::Receiver<EmuMsg>,
     boot: oneshot::Sender<bool>,
@@ -147,7 +149,7 @@ pub(crate) fn spawn(
             // 1. A waiting message is serviced before any I/O.
             match rx.try_recv() {
                 Ok(msg) => {
-                    service(msg, &mut term, &mut rs);
+                    service(msg, &mut term, &mut rs, &out);
                     continue;
                 }
                 Err(TryRecvError::Empty) => {}
@@ -183,10 +185,7 @@ pub(crate) fn spawn(
             }
             let bytes = &buf[..n as usize];
             term.write(bytes);
-            {
-                let mut o = out.lock().unwrap();
-                o.extend(bytes.iter().copied());
-            }
+            out.lock().unwrap().push(bytes);
             // The pane said something: this is the activity clock (tmux's
             // `#{session_activity}`). Stamped here — the one place every byte
             // from the master passes — and not where the buffer is drained,
@@ -198,9 +197,9 @@ pub(crate) fn spawn(
 }
 
 /// Service one message (called on the emulator thread).
-fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState) {
+fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<crate::OutBuf>) {
     match msg {
-        EmuMsg::Snapshot { history_lines, reply } => {
+        EmuMsg::Snapshot { history_lines, drain_output, reply } => {
             // Clamp to the available scrollback (a capture cannot exceed what
             // the grid retained).
             let n = (history_lines as usize).min(term.scrollback_rows());
@@ -225,6 +224,9 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState) {
             //    order the client replays into its own scrollback).
             let all: Vec<&[Cell]> = hist.iter().chain(live.iter()).map(|r| r.as_slice()).collect();
             let text = snapshot::render(&all, rs.cols() as usize);
+            // Taken here, on the thread that feeds both the emulator and `out`,
+            // so the tail is exactly the bytes the render already contains.
+            let tail = if drain_output { out.lock().unwrap().take().0 } else { Vec::new() };
             // The state reflects the live screen (we're back at `Bottom`).
             let _ = reply.send(Outcome {
                 cols: rs.cols(),
@@ -239,6 +241,7 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState) {
                 app_cursor: term.mode(MODE_APP_CURSOR),
                 bracketed_paste: term.mode(MODE_BRACKETED_PASTE),
                 history_size: term.scrollback_rows() as u32,
+                tail,
             });
         }
         EmuMsg::StateQuery { reply } => {

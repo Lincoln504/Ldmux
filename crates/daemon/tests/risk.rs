@@ -70,11 +70,14 @@ impl KeeperConn for FakeKeeperConn {
     }
 }
 
-/// Backpressure: flood a session at high rate while a subscriber is slow
-/// (drains nothing); assert the queue is bounded and the subscriber is
-/// dropped (forced resync, §3.7).
+/// Flood: a viewer that is slow to consume is NOT the stream's problem. The
+/// stream delivers synchronously to callbacks, so it neither buffers for a slow
+/// viewer nor resets one for the volume it has seen (it used to silence every
+/// viewer after 1 MiB of cumulative output). Backpressure lives at the
+/// connection (`remote.rs::queue_output`, pinned in its unit tests) and the
+/// keeper's bounded buffer (`OutBuf`, pinned in the keeper's tests).
 #[tokio::test]
-async fn backpressure_flood_bounded_queue_and_forced_resync() {
+async fn a_flood_is_delivered_in_full_without_a_spurious_resync() {
     let dir = scratch_dir();
     let keeper_sock = dir.join("keeper.sock");
     let fk = Arc::new(FakeKeeper::new(keeper_sock.clone()));
@@ -87,37 +90,24 @@ async fn backpressure_flood_bounded_queue_and_forced_resync() {
 
     let stream = PaneStream::new("s1".to_string(), Box::new(FakeKeeperConn::new(keeper_sock)));
 
-    // A counter for how many times on_reset fires (the forced resync).
     let reset_count = Arc::new(AtomicU64::new(0));
-    let rc = Arc::clone(&reset_count);
-
-    let sub = StreamSubscriber {
-        on_output: Box::new(|_text: &[u8]| {
-            // The subscriber is slow: it never drains.
+    let delivered = Arc::new(AtomicU64::new(0));
+    let (rc, dc) = (Arc::clone(&reset_count), Arc::clone(&delivered));
+    let _unsubscribe = stream.subscribe(StreamSubscriber {
+        on_output: Box::new(move |t: &[u8]| {
+            dc.fetch_add(t.len() as u64, Ordering::SeqCst);
         }),
         on_reset: Box::new(move |_reason: &str| {
             rc.fetch_add(1, Ordering::SeqCst);
         }),
-    };
-    let _unsubscribe = stream.subscribe(sub);
+    });
 
-    // Flood the stream with enough data to overflow the 1MB bound.
     let big = "x".repeat(2 * 1024 * 1024);
     stream.fanout(&big);
-
-    // The subscriber should have been dropped (the queue overflowed).
-    assert!(
-        reset_count.load(Ordering::SeqCst) >= 1,
-        "the forced resync should have fired (on_reset)"
-    );
-
-    // A new subscriber gets fresh output (the old one was dropped).
-    let sub2 = StreamSubscriber {
-        on_output: Box::new(|_text: &[u8]| {}),
-        on_reset: Box::new(|_reason: &str| {}),
-    };
-    let _unsubscribe2 = stream.subscribe(sub2);
     stream.fanout("hello");
+
+    assert_eq!(reset_count.load(Ordering::SeqCst), 0, "volume alone is not a resync");
+    assert_eq!(delivered.load(Ordering::SeqCst), 2 * 1024 * 1024 + 5, "every byte reached the viewer");
 
     drop(fk);
 }

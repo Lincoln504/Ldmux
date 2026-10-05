@@ -132,6 +132,9 @@ struct ConnInner {
     record: Option<SessionRecord>,
     stream: Option<Arc<PaneStream>>,
     unsubscribe: Option<Box<dyn Fn() + Send + Sync>>,
+    /// This connection's subscriber id on `stream` (so a snapshot can leave it
+    /// out of the output tail it already contains).
+    sub_id: Option<usize>,
     device: Option<DeviceInfo>,
     /// Output queued before `live` (bounded by `MAX_PENDING_BYTES`).
     pending: Vec<u8>,
@@ -344,6 +347,7 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
             record: None,
             stream: None,
             unsubscribe: None,
+            sub_id: None,
             device: None,
             pending: Vec::new(),
             pending_bytes: 0,
@@ -380,7 +384,7 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
                     Some(Ok(msg)) => {
                         // Flush buffered output before acting on the message, so a
                         // reply cannot overtake the output it should follow.
-                        flush_output(&mut ws, &mut pending).await;
+                        flush_output(&mut ws, &mut pending, &conn).await;
                         if let Some(text) = message_text(&msg) {
                             touch(&conn);
                             handle_message(&text, &conn, &shared).await;
@@ -395,18 +399,17 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
                     Some(Out::Output(b)) => {
                         pending.extend_from_slice(&b);
                         if pending.len() >= OUTPUT_FLUSH_BYTES {
-                            flush_output(&mut ws, &mut pending).await;
+                            flush_output(&mut ws, &mut pending, &conn).await;
                         }
                     }
                     Some(Out::Json(s)) => {
-                        flush_output(&mut ws, &mut pending).await;
+                        flush_output(&mut ws, &mut pending, &conn).await;
                         let _ = ws.send(Message::Text(s.into())).await;
-                        maybe_resync(&conn);
                     }
                 }
             }
             _ = &mut timer => {
-                flush_output(&mut ws, &mut pending).await;
+                flush_output(&mut ws, &mut pending, &conn).await;
             }
         }
     }
@@ -416,12 +419,14 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
     disconnect(conn, shared).await;
 }
 
-/// Send every buffered output frame.
-async fn flush_output(ws: &mut WsStream, pending: &mut Vec<u8>) {
+/// Send every buffered output frame, then release those bytes from the
+/// connection's `outstanding` count (they have left the daemon).
+async fn flush_output(ws: &mut WsStream, pending: &mut Vec<u8>, conn: &ConnShared) {
     if pending.is_empty() {
         return;
     }
     let data = std::mem::take(pending);
+    let n = data.len();
     match encode_frame(ft::OUTPUT, &data, 0) {
         Ok(frame) => {
             let _ = ws.send(Message::Binary(frame.into())).await;
@@ -436,6 +441,9 @@ async fn flush_output(ws: &mut WsStream, pending: &mut Vec<u8>) {
                 .await;
         }
     }
+    // Only now are the bytes off the daemon: a client that is not reading holds
+    // this await open, and `outstanding` must keep counting them meanwhile.
+    conn.outstanding.fetch_sub(n, Ordering::Relaxed);
 }
 
 /// Mark the connection seen (any inbound message counts).
@@ -443,21 +451,32 @@ fn touch(conn: &ConnShared) {
     conn.inner.lock().unwrap().last_seen_ms = now_ms();
 }
 
-/// If the connection has produced more output than the link can carry, ask it
-/// to resync once (the TS `queueOutput` backlog rule).
-fn maybe_resync(conn: &ConnShared) {
-    let outstanding = conn.outstanding.load(Ordering::Relaxed);
-    if outstanding > WS_BACKLOG_BYTES {
-        let mut inner = conn.inner.lock().unwrap();
-        if !inner.resyncing {
-            inner.resyncing = true;
-            inner.pending.clear();
-            inner.pending_bytes = 0;
-            let _ = conn.tx.send(Out::Json(
-                serde_json::json!({"type":"error","code":"resync","message":"client is behind the link"})
-                    .to_string(),
-            ));
-        }
+/// Hand pane output to the connection's writer, or — when the link is behind —
+/// refuse it and ask the client to resync (the TS `queueOutput` backlog rule).
+///
+/// `outstanding` is the bytes queued for this socket and not yet written. Past
+/// `WS_BACKLOG_BYTES` the client is not keeping up, and building a history it
+/// cannot display only grows memory: the queue is unbounded, so without this a
+/// phone on a bad link made the daemon buffer a busy shell's whole output. It is
+/// said once per backlog (`resyncing`), because a client that is already
+/// re-attaching must not be told again on every write; a fresh `attach` clears
+/// the flag and its snapshot is the recovery.
+fn queue_output(conn: &ConnShared, inner: &mut ConnInner, bytes: &[u8]) {
+    if inner.resyncing {
+        return;
+    }
+    if conn.outstanding.load(Ordering::Relaxed) > WS_BACKLOG_BYTES {
+        inner.resyncing = true;
+        let _ = conn.tx.send(Out::Json(
+            serde_json::json!({"type":"error","code":"resync","message":"client is behind the link"})
+                .to_string(),
+        ));
+        return;
+    }
+    conn.outstanding.fetch_add(bytes.len(), Ordering::Relaxed);
+    if conn.tx.send(Out::Output(bytes.to_vec())).is_err() {
+        // The writer is gone: nothing will ever drain this.
+        conn.outstanding.fetch_sub(bytes.len(), Ordering::Relaxed);
     }
 }
 
@@ -514,11 +533,27 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     } else {
                         "phone"
                     };
-                    conn.inner.lock().unwrap().device = Some(DeviceInfo {
-                        id,
+                    let previous = conn.inner.lock().unwrap().device.replace(DeviceInfo {
+                        id: id.clone(),
                         name: if name.is_empty() { "device".into() } else { name },
                         kind: kind.into(),
                     });
+                    // A second `hello` under a different id means this socket is
+                    // no longer the device it was. If no other socket still is,
+                    // that identity's claims have no holder and nothing else
+                    // would free them (they would block everyone else until the
+                    // daemon restarts).
+                    if let Some(prev) = previous.filter(|p| p.id != id) {
+                        let still_held = shared.conns.lock().unwrap().values().any(|c| {
+                            c.inner.lock().unwrap().device.as_ref().map(|d| d.id == prev.id).unwrap_or(false)
+                        });
+                        if !still_held {
+                            let freed = !shared.daemon.lock().await.release_device(&prev.id).is_empty();
+                            if freed {
+                                broadcast_sessions(shared).await;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -688,15 +723,10 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             }
             // The pane geometry changed: answer with a fresh snapshot.
-            match on_stream(&stream, move |s| s.snapshot_result(None)).await.unwrap_or_else(|| Err("snapshot task failed".to_string())) {
-                Ok((snap, epoch)) => {
-                    if stale(conn, gen_id) {
-                        return;
-                    }
-                    let sid = conn.inner.lock().unwrap().session_id.clone().unwrap_or_default();
-                    send_state(conn, &sid, &snap, epoch, false);
-                }
-                Err(e) => conn.send_error("resize_failed", &e),
+            let sid = conn.inner.lock().unwrap().session_id.clone().unwrap_or_default();
+            let sub = conn.inner.lock().unwrap().sub_id;
+            if let Err(e) = snapshot_and_go_live(conn, &stream, sub, None, gen_id, &sid, false).await {
+                conn.send_error("resize_failed", &e);
             }
         }
         "mouseclick" => {
@@ -788,14 +818,9 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             };
             let hist = if wants_history { Some(lines) } else { None };
-            match on_stream(&stream, move |s| s.snapshot_result(hist)).await.unwrap_or_else(|| Err("snapshot task failed".to_string())) {
-                Ok((snap, epoch)) => {
-                    if stale(conn, gen_id) {
-                        return;
-                    }
-                    send_state(conn, &sid, &snap, epoch, wants_history);
-                }
-                Err(e) => conn.send_error("scrollback_failed", &e),
+            let sub = conn.inner.lock().unwrap().sub_id;
+            if let Err(e) = snapshot_and_go_live(conn, &stream, sub, hist, gen_id, &sid, wants_history).await {
+                conn.send_error("scrollback_failed", &e);
             }
         }
         other => {
@@ -815,7 +840,7 @@ async fn attach(
 ) {
     // Resolve the record + claim under the daemon lock; remember any displaced
     // device to notify after the lock is released.
-    let (record, displaced, stream) = {
+    let (record, displaced, stream, device) = {
         let mut d = shared.daemon.lock().await;
         let Some(record) = d.get_session(&session_id) else {
             drop(d);
@@ -855,7 +880,7 @@ async fn attach(
         }
         let tmux_name = record.tmux_name.clone();
         let stream = d.stream_for(&tmux_name).clone();
-        (record, displaced, stream)
+        (record, displaced, stream, device)
     };
 
     // Bump the generation, clear the old subscription.
@@ -887,7 +912,7 @@ async fn attach(
                 return;
             }
             if inner.live {
-                let _ = tx.send(Out::Output(bytes.to_vec()));
+                queue_output(&inner_for_cb, &mut inner, bytes);
             } else {
                 inner.pending.extend_from_slice(bytes);
                 inner.pending_bytes += bytes.len();
@@ -907,7 +932,12 @@ async fn attach(
         on_reset: Box::new({
             let conn2 = conn.clone();
             move |reason: &str| {
-                let ok = conn2.inner.lock().unwrap().attach_gen == cb_gen;
+                // Not while attaching: the snapshot that is about to be sent
+                // repaints from scratch, which is all a resync asks for.
+                let ok = {
+                    let inner = conn2.inner.lock().unwrap();
+                    inner.attach_gen == cb_gen && inner.live
+                };
                 if ok {
                     conn2.send_error("resync", reason);
                 }
@@ -915,47 +945,83 @@ async fn attach(
         }),
     };
     let (sub_id, unsubscribe) = stream.subscribe_owned(sub);
-    conn.inner.lock().unwrap().unsubscribe = Some(unsubscribe);
-    conn.inner.lock().unwrap().stream = Some(stream.clone());
-    let _ = sub_id;
+    {
+        let mut inner = conn.inner.lock().unwrap();
+        inner.unsubscribe = Some(unsubscribe);
+        inner.sub_id = Some(sub_id);
+        inner.stream = Some(stream.clone());
+    }
 
     // Resize before the snapshot so the screen we send already matches the grid
     // the client is about to paint.
     if let (Some(c), Some(r)) = (cols, rows) {
         let _ = on_stream(&stream, move |s| s.resize(c, r)).await;
     }
-    let snap = on_stream(&stream, move |s| s.snapshot_result(None)).await.unwrap_or_else(|| Err("snapshot task failed".to_string()));
+    // The snapshot, cut from live output at one byte boundary. The fence runs
+    // with the stream's poll held off: whatever was queued while attaching is
+    // already in the snapshot (dropped), the snapshot goes out first, and
+    // everything after it is new output.
+    let fenced = snapshot_and_go_live(conn, &stream, Some(sub_id), None, gen_id, &session_id, false).await;
 
     // A second attach (or a disconnect) may have superseded us while we awaited.
     if conn.inner.lock().unwrap().attach_gen != gen_id {
         return;
     }
 
-    match snap {
-        Ok((snap, epoch)) => {
-            // Forward anything queued while snapshotting, then CAPS + SNAPSHOT.
-            let pending = {
-                let mut inner = conn.inner.lock().unwrap();
-                let p = std::mem::take(&mut inner.pending);
-                inner.pending_bytes = 0;
-                inner.live = true;
-                p
-            };
-            if !pending.is_empty() {
-                let _ = conn.tx.send(Out::Output(pending));
-            }
-            send_state(conn, &session_id, &snap, epoch, false);
+    if let Err(e) = fenced {
+        // Tear the half-made attach down and give the claim back: left alone,
+        // this connection holds a shell it is not looking at and the next attach
+        // to it (by this very device) is the one refused — the Stale State
+        // lockout ADR-0010 exists to prevent.
+        stop_viewing(conn, shared).await;
+        let freed = match &device {
+            Some(dev) => shared.daemon.lock().await.release_claim(&session_id, &dev.id),
+            None => false,
+        };
+        conn.send_error("attach_failed", &e);
+        if freed {
+            broadcast_sessions(shared).await;
         }
-        Err(e) => {
-            conn.inner.lock().unwrap().live = false;
-            conn.send_error("attach_failed", &e);
-        }
+        return;
     }
 
     // Tell a displaced device (and cut it off).
     if let Some(prev) = displaced {
         notify_displaced(shared, &prev.id, &session_id).await;
     }
+}
+
+/// Take a snapshot for this connection and, at the fence, send it and switch the
+/// connection to live output. The superseded check happens under the fence too,
+/// so a stale attach sends nothing. `history` is `Some(n)` for a scrollback page.
+async fn snapshot_and_go_live(
+    conn: &Arc<ConnShared>,
+    stream: &Arc<PaneStream>,
+    requester: Option<usize>,
+    history: Option<u64>,
+    gen_id: u64,
+    session_id: &str,
+    history_flag: bool,
+) -> Result<(), String> {
+    let conn2 = conn.clone();
+    let sid = session_id.to_string();
+    on_stream(stream, move |s| {
+        s.snapshot_fenced(requester, history, |snap, epoch| {
+            {
+                let mut inner = conn2.inner.lock().unwrap();
+                if inner.disposed || inner.attach_gen != gen_id {
+                    return;
+                }
+                inner.pending.clear();
+                inner.pending_bytes = 0;
+                inner.live = true;
+            }
+            send_state(&conn2, &sid, snap, epoch, history_flag);
+        })
+    })
+    .await
+    .unwrap_or_else(|| Err("snapshot task failed".to_string()))
+    .map(|_| ())
 }
 
 /// Notify every connection of `device_id` that it no longer holds `session_id`,
@@ -1066,12 +1132,6 @@ fn send_state(
         snapshot["history"] = serde_json::Value::Bool(true);
     }
     conn.send_json(&snapshot);
-}
-
-/// Whether an attach was superseded.
-fn stale(conn: &Arc<ConnShared>, gen_id: u64) -> bool {
-    let inner = conn.inner.lock().unwrap();
-    inner.disposed || inner.attach_gen != gen_id
 }
 
 /// Run a `PaneStream` call on the blocking pool. The stream's keeper connection
@@ -1449,6 +1509,71 @@ mod tests {
         assert!(!is_ws_upgrade(&headers));
     }
 
+    /// A connection whose writer never drains (a phone on a dead link).
+    fn undrained_conn() -> (Arc<ConnShared>, tokio::sync::mpsc::UnboundedReceiver<Out>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+        let conn = Arc::new(ConnShared {
+            tx,
+            inner: Mutex::new(ConnInner {
+                disposed: false,
+                live: true,
+                attach_gen: 1,
+                session_id: None,
+                record: None,
+                stream: None,
+                unsubscribe: None,
+                sub_id: None,
+                device: None,
+                pending: Vec::new(),
+                pending_bytes: 0,
+                resyncing: false,
+                last_seen_ms: 0,
+            }),
+            outstanding: AtomicUsize::new(0),
+        });
+        (conn, rx)
+    }
+
+    /// The backlog rule: a client that is not reading costs the daemon a bounded
+    /// amount, is told to resync exactly once, and is not buffered for after that.
+    /// (`outstanding` was never incremented, so this guard did nothing and the
+    /// writer's queue grew with the shell's whole output.)
+    #[test]
+    fn a_client_that_does_not_read_is_resynced_once_and_not_buffered() {
+        let (conn, mut rx) = undrained_conn();
+        let chunk = vec![b'x'; 4096];
+        for _ in 0..10_000 {
+            let mut inner = conn.inner.lock().unwrap();
+            queue_output(&conn, &mut inner, &chunk);
+        }
+        let mut output = 0usize;
+        let mut resyncs = 0usize;
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                Out::Output(b) => output += b.len(),
+                Out::Json(j) => {
+                    assert!(j.contains("\"resync\""));
+                    resyncs += 1;
+                }
+                Out::Close => panic!("no close"),
+            }
+        }
+        assert_eq!(resyncs, 1, "told once per backlog");
+        assert!(
+            output <= WS_BACKLOG_BYTES + 4096,
+            "queued {output} bytes against a {WS_BACKLOG_BYTES} byte bound"
+        );
+        assert_eq!(conn.outstanding.load(Ordering::Relaxed), output);
+
+        // A fresh attach clears the flag; once the writer has caught up output flows again.
+        conn.outstanding.store(0, Ordering::Relaxed);
+        conn.inner.lock().unwrap().resyncing = false;
+        let mut inner = conn.inner.lock().unwrap();
+        queue_output(&conn, &mut inner, b"hi");
+        drop(inner);
+        assert!(matches!(rx.try_recv(), Ok(Out::Output(b)) if b == b"hi"));
+    }
+
     #[test]
     fn the_caps_and_snapshot_pair_has_the_client_fields() {
         // Build a fake connection with a channel, then assert the two shapes.
@@ -1463,6 +1588,7 @@ mod tests {
                 record: None,
                 stream: None,
                 unsubscribe: None,
+                sub_id: None,
                 device: None,
                 pending: Vec::new(),
                 pending_bytes: 0,
@@ -1489,7 +1615,8 @@ mod tests {
             dead: false,
             foreground: "bash".into(),
             cwd: "/".into(),
-        };
+                tail: Vec::new(),
+            };
         send_state(&conn, "s1", &snap, 7, false);
         let a = rx.try_recv().unwrap();
         let b = rx.try_recv().unwrap();

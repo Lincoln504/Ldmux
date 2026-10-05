@@ -67,6 +67,10 @@ pub struct PaneStream {
     /// The sanitizer state (a partial OSC/DCS sequence can straddle chunks).
     sanitizer: Mutex<crate::sanitize::Sanitizer>,
     closed: AtomicBool,
+    /// Serialises `poll_once` against a snapshot, so a snapshot and the live
+    /// output that follows it are cut at exactly one byte boundary (see
+    /// `snapshot_fenced`).
+    gate: Mutex<()>,
     /// The poll-loop stop flag (set by `drop_stream`/`stop`).
     pub(crate) poll_stop: AtomicBool,
 }
@@ -134,6 +138,7 @@ impl PaneStream {
             epoch: AtomicU64::new(0),
             sanitizer: Mutex::new(crate::sanitize::Sanitizer::new(false)),
             closed: AtomicBool::new(false),
+            gate: Mutex::new(()),
             poll_stop: AtomicBool::new(false),
         }
     }
@@ -195,6 +200,11 @@ impl PaneStream {
 
     /// Deliver `text` to every subscriber (the fanout), through the sanitizer.
     pub fn fanout(&self, text: &str) {
+        self.fanout_except(None, text);
+    }
+
+    /// `fanout`, skipping one subscriber (the one a snapshot has just repainted).
+    fn fanout_except(&self, skip: Option<usize>, text: &str) {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
@@ -204,12 +214,11 @@ impl PaneStream {
         }
         let bytes = clean.as_bytes();
         let subs = self.subs.lock().unwrap();
-        for sub in subs.iter() {
+        for sub in subs.iter().filter(|s| Some(s.id) != skip) {
             (sub.sub.on_output)(bytes);
         }
     }
 
-    /// A snapshot (the full-screen capture, via the keeper's `Snapshot`).
     /// Send an SGR mouse click (the `mouseClick` method): a press + release
     /// at (col, row), both 0-based. The escape is `ESC [ < col+1 ; row+1 ; 0 M`
     /// (press) then `ESC [ < col+1 ; row+1 ; 0 m` (release).
@@ -261,71 +270,75 @@ impl PaneStream {
         }))
     }
 
-    ///
-    /// Returns the full `SnapshotResult` (the `getState` equivalent).
+    /// The pane's full state (the `getState` equivalent): a snapshot that does
+    /// not take the output tail, so reading state never eats a viewer's output.
     pub fn snapshot_full(&self) -> Result<ldmux_protocol::keeper::SnapshotResult, String> {
+        self.request_snapshot(None, false)
+    }
+
+    /// One keeper `Snapshot`, optionally taking the unread output tail with it.
+    fn request_snapshot(
+        &self,
+        history_lines: Option<u64>,
+        drain_output: bool,
+    ) -> Result<ldmux_protocol::keeper::SnapshotResult, String> {
         let req = KeeperMessage::Snapshot(Snapshot {
             session_id: self.session_id.clone(),
-            history_lines: None,
+            history_lines,
+            drain_output,
         });
-        let resp = self.keeper.call(&req)?;
-        match resp {
-            KeeperMessage::SnapshotResult(sr) => {
-                let _ = self.epoch.fetch_add(1, Ordering::SeqCst);
-                Ok(sr)
-            }
+        match self.keeper.call(&req)? {
+            KeeperMessage::SnapshotResult(sr) => Ok(sr),
             other => Err(format!("not a snapshotresult: {other:?}")),
         }
     }
 
-    /// A snapshot carrying **both** the full state and the delivered-snapshot
-    /// epoch, optionally including `history_lines` of paged scrollback. This is
-    /// the remote's `sendState` source: the TS `sendState` sends the state
-    /// fields *and* the screen for attach, resize and scrollback alike, so a
-    /// `snapshot()` that returned only text (as `snapshot_with_history` does)
-    /// could not build it.
+    /// Snapshot the pane for one subscriber and hand `fence` the result **at the
+    /// exact byte boundary** between "in the snapshot" and "live output".
+    ///
+    /// The keeper feeds every byte to the emulator and to a buffer that
+    /// `poll_once` later drains. A snapshot therefore already contains whatever
+    /// is still waiting in that buffer, and replaying it as live output paints
+    /// it twice (a fresh stream used to replay everything an unwatched shell had
+    /// printed on top of the screen it had just been sent). So: the poll is held
+    /// off (`gate`), the snapshot takes the waiting tail with it, the tail is
+    /// delivered to every subscriber *except* `requester` (who has it in the
+    /// render), and `fence` runs before the gate opens. `fence` must send the
+    /// snapshot and switch `requester` to live delivery; anything the poll
+    /// produces afterwards is genuinely new and follows it on the wire.
+    ///
+    /// Returns the epoch (count of delivered snapshots).
+    pub fn snapshot_fenced<F>(
+        &self,
+        requester: Option<usize>,
+        history_lines: Option<u64>,
+        fence: F,
+    ) -> Result<u64, String>
+    where
+        F: FnOnce(&ldmux_protocol::keeper::SnapshotResult, u64),
+    {
+        let _gate = self.gate.lock().unwrap();
+        let mut sr = self.request_snapshot(history_lines, true)?;
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let tail = std::mem::take(&mut sr.tail);
+        if !tail.is_empty() {
+            if let Some(text) = self.decode_chunk(tail) {
+                self.fanout_except(requester, &text);
+            }
+        }
+        fence(&sr, epoch);
+        Ok(epoch)
+    }
+
+    /// A plain snapshot of the pane's state for a one-off read (no tail is
+    /// taken, so a viewer's output is never eaten). Counts toward the epoch.
     pub fn snapshot_result(
         &self,
         history_lines: Option<u64>,
     ) -> Result<(ldmux_protocol::keeper::SnapshotResult, u64), String> {
-        let req = KeeperMessage::Snapshot(Snapshot {
-            session_id: self.session_id.clone(),
-            history_lines,
-        });
-        let resp = self.keeper.call(&req)?;
-        match resp {
-            KeeperMessage::SnapshotResult(sr) => {
-                let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                Ok((sr, epoch))
-            }
-            other => Err(format!("not a snapshotresult: {other:?}")),
-        }
-    }
-
-    ///
-    /// Returns the rendered screen + the epoch (count *delivered* snapshots).
-    pub fn snapshot(&self) -> Result<(String, u64), String> {
-        self.snapshot_with_history(None)
-    }
-
-    /// Take a snapshot with a history line count (the `scrollback` path).
-    /// `history_lines: 0`/`None` = visible screen only.
-    pub fn snapshot_with_history(
-        &self,
-        history_lines: Option<u64>,
-    ) -> Result<(String, u64), String> {
-        let req = KeeperMessage::Snapshot(Snapshot {
-            session_id: self.session_id.clone(),
-            history_lines,
-        });
-        let resp = self.keeper.call(&req)?;
-        match resp {
-            KeeperMessage::SnapshotResult(sr) => {
-                let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-                Ok((sr.text, epoch))
-            }
-            other => Err(format!("not a snapshotresult: {other:?}")),
-        }
+        let sr = self.request_snapshot(history_lines, false)?;
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok((sr, epoch))
     }
 
     /// Close the stream (the subscribers are told to resync).
@@ -349,12 +362,33 @@ impl PaneStream {
         if self.closed.load(Ordering::Relaxed) || self.poll_stop.load(Ordering::Relaxed) {
             return Ok(());
         }
+        // Held across the keeper call and the fanout: a snapshot must not slot
+        // between "bytes taken from the keeper" and "bytes delivered".
+        let _gate = self.gate.lock().unwrap();
         let req = KeeperMessage::Peek(ldmux_protocol::keeper::Peek {
             session_id: self.session_id.clone(),
         });
         let resp = self.keeper.call(&req)?;
         match resp {
             KeeperMessage::PeekResult(pr) => {
+                // Nobody is subscribed: this is backlog from before anyone was
+                // watching (a fresh stream's first poll). It is not live output
+                // for anyone, and whoever subscribes next is sent a snapshot that
+                // already contains it. Drop it, along with any half-sequence.
+                if self.subs.lock().unwrap().is_empty() {
+                    self.utf8_carry.lock().unwrap().clear();
+                    self.sanitizer.lock().unwrap().reset();
+                    return Ok(());
+                }
+                if pr.lost {
+                    // The keeper discarded output nobody was reading: whoever is
+                    // watching now has a stale picture and must resync.
+                    self.utf8_carry.lock().unwrap().clear();
+                    self.sanitizer.lock().unwrap().reset();
+                    for sub in self.subs.lock().unwrap().iter() {
+                        (sub.sub.on_reset)("output was discarded while unread; resync from a snapshot");
+                    }
+                }
                 if !pr.data.is_empty() {
                     if let Some(text) = self.decode_chunk(pr.data) {
                         self.fanout(&text);
@@ -592,7 +626,8 @@ mod tests {
                         dead: false,
                         foreground: "dash".into(),
                         cwd: "/".into(),
-                    },
+                tail: Vec::new(),
+            },
                 )),
                 other => Err(format!("not handled: {other:?}")),
             }
@@ -620,6 +655,119 @@ mod tests {
         PaneStream::new("s1".into(), Box::new(TestKeeper))
     }
 
+    /// A keeper double with a real output buffer, so the snapshot seam can be
+    /// pinned deterministically: `Peek` drains it, and a `Snapshot` with
+    /// `drain_output` hands the same buffer back as `tail`.
+    struct BufKeeper {
+        out: Mutex<Vec<u8>>,
+        lost: AtomicBool,
+    }
+    impl KeeperConn for BufKeeper {
+        fn call(&self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
+            match req {
+                KeeperMessage::Peek(p) => Ok(KeeperMessage::PeekResult(ldmux_protocol::keeper::PeekResult {
+                    session_id: p.session_id.clone(),
+                    data: std::mem::take(&mut *self.out.lock().unwrap()),
+                    lost: self.lost.swap(false, Ordering::SeqCst),
+                })),
+                KeeperMessage::Snapshot(s) => {
+                    let KeeperMessage::SnapshotResult(mut sr) = TestKeeper.call(req)? else { unreachable!() };
+                    if s.drain_output {
+                        sr.tail = std::mem::take(&mut *self.out.lock().unwrap());
+                    }
+                    Ok(KeeperMessage::SnapshotResult(sr))
+                }
+                other => Err(format!("not handled: {other:?}")),
+            }
+        }
+    }
+
+    fn collecting() -> (StreamSubscriber, Arc<Mutex<Vec<u8>>>, Arc<AtomicUsize>) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let (g, r) = (got.clone(), resets.clone());
+        (
+            StreamSubscriber {
+                on_output: Box::new(move |b: &[u8]| g.lock().unwrap().extend_from_slice(b)),
+                on_reset: Box::new(move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                }),
+            },
+            got,
+            resets,
+        )
+    }
+
+    /// The bytes still waiting in the keeper when a snapshot is taken are
+    /// already in that snapshot: the requester must not get them again, every
+    /// other viewer must, and the fence runs before any later output.
+    #[test]
+    fn a_snapshot_cuts_the_stream_at_one_byte_boundary() {
+        let keeper = Arc::new(BufKeeper { out: Mutex::new(Vec::new()), lost: AtomicBool::new(false) });
+        struct Shared(Arc<BufKeeper>);
+        impl KeeperConn for Shared {
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> { self.0.call(r) }
+        }
+        let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
+        let (a, a_got, _) = collecting();
+        let (b, b_got, _) = collecting();
+        let (a_id, _ua) = s.subscribe(a);
+        let (_b_id, _ub) = s.subscribe(b);
+
+        // Output the emulator has seen but nobody has polled yet.
+        *keeper.out.lock().unwrap() = b"in-the-snapshot".to_vec();
+        let fenced_at = Arc::new(AtomicUsize::new(usize::MAX));
+        let (f, ag) = (fenced_at.clone(), a_got.clone());
+        s.snapshot_fenced(Some(a_id), None, move |sr, epoch| {
+            assert_eq!(sr.text, "screen");
+            assert_eq!(epoch, 1);
+            f.store(ag.lock().unwrap().len(), Ordering::SeqCst);
+        })
+        .unwrap();
+        assert!(a_got.lock().unwrap().is_empty(), "the requester has it in the render");
+        assert_eq!(*b_got.lock().unwrap(), b"in-the-snapshot", "other viewers still get it");
+        assert_eq!(fenced_at.load(Ordering::SeqCst), 0, "the fence ran before any output reached the requester");
+
+        // Genuinely new output after the seam reaches both.
+        *keeper.out.lock().unwrap() = b"-new".to_vec();
+        s.poll_once().unwrap();
+        assert_eq!(*a_got.lock().unwrap(), b"-new");
+    }
+
+    /// With nobody subscribed, polled output is backlog from before anyone was
+    /// watching: dropped, not queued for the next subscriber.
+    #[test]
+    fn output_polled_with_no_subscriber_is_dropped() {
+        let keeper = Arc::new(BufKeeper { out: Mutex::new(b"old".to_vec()), lost: AtomicBool::new(true) });
+        struct Shared(Arc<BufKeeper>);
+        impl KeeperConn for Shared {
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> { self.0.call(r) }
+        }
+        let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
+        s.poll_once().unwrap();
+        let (sub, got, resets) = collecting();
+        let (_id, _u) = s.subscribe(sub);
+        s.poll_once().unwrap();
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(resets.load(Ordering::SeqCst), 0, "a lost flag with no viewer is not a resync");
+    }
+
+    /// A keeper that discarded unread output tells its viewers to resync.
+    #[test]
+    fn lost_output_resyncs_the_viewers() {
+        let keeper = Arc::new(BufKeeper { out: Mutex::new(Vec::new()), lost: AtomicBool::new(false) });
+        struct Shared(Arc<BufKeeper>);
+        impl KeeperConn for Shared {
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> { self.0.call(r) }
+        }
+        let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
+        let (sub, _got, resets) = collecting();
+        let (_id, _u) = s.subscribe(sub);
+        keeper.lost.store(true, Ordering::SeqCst);
+        s.poll_once().unwrap();
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+    }
+
     /// The fanout delivers to every subscriber (the §3.7 fan-out).
     #[test]
     fn the_fanout_delivers_to_every_subscriber() {
@@ -644,10 +792,10 @@ mod tests {
     #[test]
     fn a_snapshot_returns_the_screen_and_an_epoch() {
         let s = stream();
-        let (text, e1) = s.snapshot().unwrap();
-        assert_eq!(text, "screen");
+        let (sr, e1) = s.snapshot_result(None).unwrap();
+        assert_eq!(sr.text, "screen");
         assert_eq!(e1, 1);
-        let (_, e2) = s.snapshot().unwrap();
+        let (_, e2) = s.snapshot_result(None).unwrap();
         assert_eq!(e2, 2);
     }
 

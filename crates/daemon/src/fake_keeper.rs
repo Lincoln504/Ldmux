@@ -160,11 +160,12 @@ impl FakeKeeper {
                     Ok(KeeperMessage::PeekResult(PeekResult {
                         session_id: p.session_id.clone(),
                         data,
+                        lost: false,
                     }))
                 }
                 None => Err(format!("no such session: {}", p.session_id)),
             },
-            km::KeeperMessage::Snapshot(req) => match sessions.get(&req.session_id) {
+            km::KeeperMessage::Snapshot(req) => match sessions.get_mut(&req.session_id) {
                 Some(sess) => Ok(KeeperMessage::SnapshotResult(SnapshotResult {
                     session_id: sess.id.clone(),
                     cols: sess.cols as u64,
@@ -183,6 +184,7 @@ impl FakeKeeper {
                     dead: sess.dead,
                     foreground: if sess.dead { String::new() } else { sess.foreground.clone() },
                     cwd: if sess.dead { String::new() } else { sess.cwd.clone() },
+                    tail: if req.drain_output { sess.out.drain(..).collect() } else { Vec::new() },
                 })),
                 None => Err(format!("no such session: {}", req.session_id)),
             },
@@ -431,6 +433,7 @@ mod tests {
             .handle(&KeeperMessage::Snapshot(Snapshot {
                 session_id: "s1".into(),
                 history_lines: None,
+            drain_output: false,
             }))
             .unwrap();
         match &m {

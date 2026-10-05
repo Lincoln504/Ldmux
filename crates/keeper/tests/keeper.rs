@@ -243,6 +243,7 @@ async fn snapshot(socket: &str, id: &str) -> km::SnapshotResult {
         &KeeperMessage::Snapshot(km::Snapshot {
             session_id: id.to_string(),
             history_lines: None,
+            drain_output: false,
         }),
         DEFAULT_TIMEOUT_MS,
     )
@@ -523,7 +524,7 @@ async fn the_emulator_captures_history_above_the_screen() {
     for _ in 0..400 {
         let sr = keeper_call(
             &s,
-            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: Some(5) }),
+            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: Some(5), drain_output: false }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -584,7 +585,7 @@ async fn the_emulator_reports_the_pane_state() {
     for _ in 0..400 {
         if let Ok(KeeperMessage::SnapshotResult(sr)) = keeper_call(
             &s,
-            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None }),
+            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None, drain_output: false }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -744,7 +745,7 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
     for _ in 0..400 {
         if let Ok(KeeperMessage::SnapshotResult(x)) = keeper_call(
             &s,
-            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None }),
+            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None, drain_output: false }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -886,4 +887,77 @@ async fn a_spawned_child_sees_a_colour_capable_term() {
 async fn spawn_env_overrides_term() {
     let t = term_seen("term-2", Some(vec![("TERM".into(), "vt100".into())])).await;
     assert!(t.contains("T=vt100;C=truecolor;"), "got {t:?}");
+}
+
+/// A `Snapshot` with `drain_output` hands back the not-yet-peeked output and
+/// clears it (those bytes are already in the render); a plain `Snapshot` leaves
+/// the buffer for the viewer that is polling it.
+#[tokio::test]
+async fn a_snapshot_can_take_the_unpeeked_tail() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    let id = "tail-1".to_string();
+    let spawned = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: Some(vec!["/bin/sh".into(), "-c".into(), "printf 'TAIL-MARK\\n'; sleep 30".into()]),
+            env: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(spawned, KeeperMessage::State(_)));
+
+    // Let the output land in the render without peeking it.
+    let mut rendered = false;
+    for _ in 0..200 {
+        if snapshot(&s, &id).await.text.contains("TAIL-MARK") {
+            rendered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(rendered, "the output reached the emulator");
+
+    // A plain snapshot leaves the buffer alone.
+    assert!(snapshot(&s, &id).await.tail.is_empty());
+    let take = |drain: bool| {
+        let (s, id) = (s.clone(), id.clone());
+        async move {
+            match keeper_call(
+                &s,
+                &KeeperMessage::Snapshot(km::Snapshot { session_id: id, history_lines: None, drain_output: drain }),
+                DEFAULT_TIMEOUT_MS,
+            )
+            .await
+            .unwrap()
+            {
+                KeeperMessage::SnapshotResult(sr) => sr,
+                other => panic!("expected SnapshotResult, got {other:?}"),
+            }
+        }
+    };
+    let first = take(true).await;
+    assert!(
+        String::from_utf8_lossy(&first.tail).contains("TAIL-MARK"),
+        "the tail is exactly the bytes the render already shows: {:?}",
+        String::from_utf8_lossy(&first.tail)
+    );
+    assert!(first.text.contains("TAIL-MARK"));
+    // Taken once: a second drain and a Peek both come back empty.
+    assert!(take(true).await.tail.is_empty());
+    match keeper_call(&s, &KeeperMessage::Peek(Peek { session_id: id.clone() }), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap()
+    {
+        KeeperMessage::PeekResult(pr) => assert!(pr.data.is_empty() && !pr.lost),
+        other => panic!("expected PeekResult, got {other:?}"),
+    }
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
 }
