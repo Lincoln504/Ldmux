@@ -1183,8 +1183,8 @@ private fun TerminalArea(
                 // blank terminal with no reason on it is the failure this screen
                 // exists to prevent.
                 val madeVisitable by handle.ownedBy.collectAsState()
-                if (madeVisitable != null) {
-                    HeldElsewhere(holder = madeVisitable!!, onTakeOver = { handle.takeOver() })
+                madeVisitable?.let { holder ->
+                    HeldElsewhere(holder = holder, onTakeOver = { handle.takeOver() })
                 }
                 // The shell is gone: ended, or unknown to the daemon. Drop the page
                 // on the attach's own verdict rather than waiting for the session
