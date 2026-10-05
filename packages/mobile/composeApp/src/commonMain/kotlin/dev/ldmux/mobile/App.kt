@@ -94,6 +94,12 @@ import kotlinx.coroutines.launch
 val Bg = Color(0xFF0A0A0A)
 val Fg = Color(0xFFEDEDED)
 val Dim = Color(0xFF8C8C8C)
+/**
+ * An anomaly, not a mood: the amber the app uses to say something is wrong but
+ * recoverable. A shell with no window is the one such state a row can show, and
+ * it should be rare enough that the eye stops on it.
+ */
+val Warn = Color(0xFFE0B080)
 /** Nothing is tinted; "accent" is simply the lightest thing on screen. */
 val Accent = Color(0xFFD0D0D0)
 

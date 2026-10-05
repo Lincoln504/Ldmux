@@ -145,6 +145,7 @@ fun LauncherScreen(
                         title = e.label,
                         mobileShell = e.openedByPhone,
                         subtitle = rowSubtitle(e.cwd, e.state),
+                        stateWarn = e.state == NO_WINDOW_STATE,
                         inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
                         onClick = { chosen = toggle(chosen, e.key) },
@@ -329,8 +330,16 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
 internal fun shellStateLabel(liveWorkspace: String?, openedByPhone: Boolean): String = when {
     liveWorkspace != null -> liveWorkspaceOf(liveWorkspace)?.let { "on desktop $it" } ?: "on desktop"
     openedByPhone -> ""
-    else -> "no window"
+    else -> NO_WINDOW_STATE
 }
+
+/**
+ * The one state that is an anomaly rather than a resting place. A shell with no
+ * window should not exist while the daemon is healthy: every desktop shell has a
+ * window, and every phone shell has the phone. It is drawn in amber so the eye
+ * stops on it, which is the point of showing it at all.
+ */
+internal const val NO_WINDOW_STATE = "no window"
 
 /** The row's second line: where it is, then where the shell itself lives. */
 internal fun rowSubtitle(cwd: String, state: String): String =
@@ -362,6 +371,8 @@ private fun ChoiceRow(
     chosen: Boolean,
     onClick: () -> Unit,
     onKill: (() -> Unit)? = null,
+    /** The row's state is an anomaly (amber), not a resting place (grey). */
+    stateWarn: Boolean = false,
     /**
      * A shell this phone opened, marked beside its name.
      *
@@ -415,7 +426,7 @@ private fun ChoiceRow(
                     )
                 }
             }
-            Text(subtitle, color = Dim, fontSize = 11.sp, maxLines = 1, fontFamily = FontFamily.Monospace)
+            Text(subtitle, color = if (stateWarn) Warn else Dim, fontSize = 11.sp, maxLines = 1, fontFamily = FontFamily.Monospace)
         }
         trailing()
         if (onKill != null) {
