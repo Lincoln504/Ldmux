@@ -53,6 +53,10 @@ pub struct FakeSession {
     pub foreground: String,
     /// The pane's working directory (`/proc/<pid>/cwd`).
     pub cwd: String,
+    /// The pane's activity clock (unix ms), exactly as the real keeper's: the
+    /// time of the last input or output. `0` until the fake pane is used, so a
+    /// test that never writes sees "no activity" rather than a fabricated now.
+    pub activity: u64,
 }
 
 /// The fake keeper: a test double for the keeper.
@@ -127,6 +131,11 @@ impl FakeKeeper {
             km::KeeperMessage::Write(w) => match sessions.get_mut(&w.session_id) {
                 Some(s) if !s.dead => {
                     s.out.extend(w.data.bytes());
+                    // Input is activity (the real keeper's rule).
+                    s.activity = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
                     Ok(KeeperMessage::Ack(Ack {}))
                 }
                 Some(_) => Err(format!("no live session: {}", w.session_id)),
@@ -179,10 +188,12 @@ impl FakeKeeper {
             },
             km::KeeperMessage::List(_l) => {
                 let mut states = Vec::new();
+                let mut activity = std::collections::BTreeMap::new();
                 for s in sessions.values() {
                     states.push(Self::state_fields(s));
+                    activity.insert(s.id.clone(), s.activity);
                 }
-                Ok(KeeperMessage::ListResult(ListResult { sessions: states }))
+                Ok(KeeperMessage::ListResult(ListResult { sessions: states, activity }))
             }
             km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
             // The request-only shapes (`ChildInfo`, `ChildExited`, the result
@@ -285,6 +296,12 @@ impl FakeKeeper {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.get_mut(session_id) {
             s.out.extend(data.iter().copied());
+            // Output is activity (the real keeper stamps its clock in the reader
+            // task, the one place every byte from the master passes).
+            s.activity = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
         }
     }
 

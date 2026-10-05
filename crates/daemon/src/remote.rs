@@ -541,10 +541,36 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             let kind = if kind == "pi" { "pi" } else { "shell" };
             let cwd = v.get("cwd").and_then(|x| x.as_str());
             let title = v.get("title").and_then(|x| x.as_str());
+            // Who opened it: what the client says, else who the client is.
+            //
+            // This was the literal `"phone"` for **every** remote client, so a
+            // desktop that connected over the wire had its shells recorded as the
+            // phone's — and `createdBy` is not decoration: the launcher shows its
+            // per-shell menu (close, send to desktop) only for a shell it opened,
+            // and `seizing_closes_the_desk_window` is true only for `"phone"`. A
+            // desktop client's shells were therefore offered to the phone as its
+            // own. The connection already said what it was (`hello`), so the
+            // record now follows the connection: a client that sends `createdBy`
+            // still wins, and everything else falls back to its device kind.
+            let origin = v
+                .get("createdBy")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    conn.inner
+                        .lock()
+                        .unwrap()
+                        .device
+                        .as_ref()
+                        .map(|d| d.kind.clone())
+                        .filter(|k| !k.is_empty())
+                })
+                .unwrap_or_else(|| "local".to_string());
             let record = {
                 let mut d = shared.daemon.lock().await;
                 let fallback = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                d.create_session(kind, cwd.unwrap_or(&fallback), title, "phone")
+                d.create_session(kind, cwd.unwrap_or(&fallback), title, &origin)
                     .await
             };
             match record {

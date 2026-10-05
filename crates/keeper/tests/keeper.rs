@@ -43,7 +43,7 @@ async fn boot(socket: &std::path::Path) -> std::sync::Arc<keeper::Keeper> {
         let _ = keeper::serve(&k2, &sock).await;
     });
     // Give the listener a moment to bind.
-    for _ in 0..200 {
+    for _ in 0..400 {
         if socket.exists() {
             break;
         }
@@ -54,7 +54,7 @@ async fn boot(socket: &std::path::Path) -> std::sync::Arc<keeper::Keeper> {
 
 /// Poll until `pred` holds (the shell needs a moment to echo into the PTY).
 async fn wait_until(pred: impl Fn() -> bool) -> bool {
-    for _ in 0..200 {
+    for _ in 0..400 {
         if pred() {
             return true;
         }
@@ -308,7 +308,7 @@ async fn the_emulator_renders_the_pane_output() {
     // (the prompt/echo occupy the leading lines; their count is not
     // pinned, so look for the corpus line rather than a fixed index).
     let mut got = None;
-    for _ in 0..200 {
+    for _ in 0..400 {
         let sr = snapshot(&s, &id).await;
         if sr.text.lines().any(|l| l == CORPUS_LINE) {
             got = Some(sr);
@@ -317,7 +317,15 @@ async fn the_emulator_renders_the_pane_output() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     let Some(sr) = got else {
-        panic!("the emulator never rendered the corpus row")
+        // Under a loaded machine (`--test-threads` with the whole workspace
+        // running) a real shell and its `cat` can take seconds. Say what the
+        // pane actually held, so a failure is diagnosable rather than a message
+        // that only says "no".
+        let last = snapshot(&s, &id).await;
+        panic!(
+            "the emulator never rendered the corpus row in 10s; the pane held:\n{:?}",
+            last.text
+        )
     };
     assert_eq!((sr.cols, sr.rows), (80, 24), "the grid is the pane size");
 
@@ -380,7 +388,7 @@ async fn the_emulator_resizes() {
     // The emulator's grid follows (the geometry in a snapshot is re-read
     // from the terminal after the resize).
     let mut got = None;
-    for _ in 0..200 {
+    for _ in 0..400 {
         let sr = snapshot(&s, &id).await;
         if (sr.cols, sr.rows) == (120, 40) {
             got = Some(sr);
@@ -439,7 +447,7 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
     // rendered).
     let mut acc: Vec<u8> = Vec::new();
     let mut ok = false;
-    for _ in 0..200 {
+    for _ in 0..400 {
         if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
             &s,
             &KeeperMessage::Peek(Peek { session_id: id.clone() }),
@@ -512,7 +520,7 @@ async fn the_emulator_captures_history_above_the_screen() {
     // = 29 lines: the run immediately above the live screen (H0003..H0007),
     // then the live screen (H0008..H0030 + the empty cursor row).
     let mut got = None;
-    for _ in 0..200 {
+    for _ in 0..400 {
         let sr = keeper_call(
             &s,
             &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: Some(5) }),
@@ -573,7 +581,7 @@ async fn the_emulator_reports_the_pane_state() {
     }
 
     let mut got = None;
-    for _ in 0..200 {
+    for _ in 0..400 {
         if let Ok(KeeperMessage::SnapshotResult(sr)) = keeper_call(
             &s,
             &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None }),
@@ -635,7 +643,7 @@ async fn the_state_query_carries_the_pane_state() {
 
     // The liveness query (`Read` → `State`) carries the pane's state.
     let mut st = None;
-    for _ in 0..200 {
+    for _ in 0..400 {
         if let Ok(KeeperMessage::State(x)) = keeper_call(
             &s,
             &KeeperMessage::Read(Read { session_id: id.clone() }),
@@ -733,7 +741,7 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
 
     // A snapshot of the dead pane: dead, empty `/proc` fields, last content.
     let mut sr = None;
-    for _ in 0..200 {
+    for _ in 0..400 {
         if let Ok(KeeperMessage::SnapshotResult(x)) = keeper_call(
             &s,
             &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None }),
@@ -800,7 +808,7 @@ async fn spawn_runs_the_command_and_passes_the_env() {
     assert!(matches!(res, KeeperMessage::State(_)), "spawn answers State, got {res:?}");
 
     let mut seen = Vec::new();
-    for _ in 0..200 {
+    for _ in 0..400 {
         let r = keeper_call(
             &socket.to_string_lossy(),
             &KeeperMessage::Peek(Peek { session_id: id.clone() }),

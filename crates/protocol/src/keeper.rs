@@ -243,6 +243,20 @@ pub struct ChildExited {
 #[serde(rename_all = "camelCase")]
 pub struct ListResult {
     pub sessions: Vec<State>,
+    /// The pane's own activity clock, in unix milliseconds, keyed by session id.
+    ///
+    /// This is the keeper's replacement for tmux's `#{session_activity}`, which
+    /// the TS read to fill `lastActivityAt`: tmux stamped a session every time
+    /// its pane took input or produced output, and the launcher's notion of
+    /// "recent" came from it. The keeper reads the master for every session on
+    /// its own (plan §3.3 — the kernel buffer must never fill), so it is the
+    /// only thing in the system that knows when a shell last did anything.
+    ///
+    /// It rides on `List`, not on `State`: three callers ask `List` and nothing
+    /// asks a `State` for an activity clock, so the field goes where the demand
+    /// is. `#[serde(default)]` so a keeper and a daemon rolled apart still talk.
+    #[serde(default)]
+    pub activity: std::collections::BTreeMap<String, u64>,
 }
 
 /// A bare acknowledgement for a message that carries no meaningful result

@@ -16,6 +16,7 @@ mod emulator;
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,19 @@ pub struct Session {
     /// The emulator thread's message sender (dropped with the session — the
     /// thread exits when it sees the disconnect).
     em_tx: mpsc::Sender<emulator::EmuMsg>,
+    /// When this pane last took input or produced output, in unix ms. Written
+    /// by the reader task (output) and by `Write` (input), read by `List`.
+    /// tmux's `#{session_activity}`, which the TS read for `lastActivityAt`.
+    activity: Arc<AtomicU64>,
+}
+
+/// Now, in unix milliseconds (0 if the clock is before the epoch — a clock that
+/// wrong is not worth a panic).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The keeper itself. `sessions` is the one shared map; every message handler
@@ -140,6 +154,11 @@ impl Keeper {
                     }
                 };
                 let fd = m.as_raw_fd();
+                // Input is activity too: a client typing into a silent shell is
+                // the case the clock exists to catch.
+                if let Some(s) = self.sessions.lock().unwrap().get(&w.session_id) {
+                    s.activity.store(now_ms(), Ordering::Relaxed);
+                }
                 let bytes = w.data.as_bytes();
                 let mut off = 0usize;
                 while off < bytes.len() {
@@ -276,12 +295,19 @@ impl Keeper {
                     g.values().map(|s| s.id.clone()).collect()
                 };
                 let mut sessions = Vec::new();
+                let mut activity = std::collections::BTreeMap::new();
                 for id in ids {
                     if let Ok(KeeperMessage::State(st)) = self.state_of(&id).await {
                         sessions.push(st);
                     }
+                    // Read after the state, so a session that died between the
+                    // two is simply absent rather than a zero.
+                    let g = self.sessions.lock().unwrap();
+                    if let Some(sess) = g.get(&id) {
+                        activity.insert(id.clone(), sess.activity.load(Ordering::Relaxed));
+                    }
                 }
-                Ok(KeeperMessage::ListResult(ListResult { sessions }))
+                Ok(KeeperMessage::ListResult(ListResult { sessions, activity }))
             }
             km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
             // The keeper→daemon pushes (`ChildInfo`, `ChildExited`) and the
@@ -434,6 +460,9 @@ impl Keeper {
 
         let master = Arc::new(master);
         let out = Arc::new(Mutex::new(VecDeque::new()));
+        // The session's activity clock, shared with its emulator thread (which
+        // stamps it on every byte the master produces).
+        let activity = Arc::new(AtomicU64::new(now_ms()));
         let (em_tx, em_rx) = mpsc::channel();
         let (boot_tx, boot_rx) = oneshot::channel();
         // The emulator thread owns this session's ghostty-vt (the `!Send`
@@ -445,6 +474,7 @@ impl Keeper {
             s.rows as u16,
             master.clone(),
             out.clone(),
+            activity.clone(),
             em_rx,
             boot_tx,
         );
@@ -465,6 +495,7 @@ impl Keeper {
             exit_code: 0,
             out,
             em_tx,
+            activity,
         })
     }
 

@@ -25,6 +25,9 @@
 //! reading and services messages only — a snapshot of a dead pane is still
 //! valid (the grid keeps its last content).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::now_ms;
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{mpsc, Arc, Mutex};
@@ -107,6 +110,7 @@ pub(crate) fn spawn(
     rows: u16,
     master: Arc<OwnedFd>,
     out: Arc<Mutex<VecDeque<u8>>>,
+    activity: Arc<AtomicU64>,
     rx: mpsc::Receiver<EmuMsg>,
     boot: oneshot::Sender<bool>,
 ) {
@@ -183,6 +187,12 @@ pub(crate) fn spawn(
                 let mut o = out.lock().unwrap();
                 o.extend(bytes.iter().copied());
             }
+            // The pane said something: this is the activity clock (tmux's
+            // `#{session_activity}`). Stamped here — the one place every byte
+            // from the master passes — and not where the buffer is drained,
+            // because a `Peek` takes the bytes away and says nothing about
+            // whether they were new.
+            activity.store(now_ms(), Ordering::Relaxed);
         }
     });
 }

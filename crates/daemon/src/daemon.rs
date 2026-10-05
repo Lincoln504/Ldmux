@@ -93,6 +93,18 @@ pub struct LdmuxDaemon {
     ownership: Ownership,
     dead_record_ttl_ms: u64,
     max_records: usize,
+    /// Whether anything a client can *see* changed since the last broadcast.
+    ///
+    /// Set by every mutator, consumed by `maintain`. It exists because the daemon
+    /// has three doors — the control socket (the CLI), the remote WS, and its own
+    /// maintenance — and only the remote's handlers pushed a fresh list. So
+    /// `ldmux kill` marked a record dead, the next maintenance tick found it
+    /// *already* dead (`registry.reconcile` only reports a **transition**), no
+    /// change was detected, and no list was sent: measured, a connected client
+    /// received nothing for 8s after a kill and went on showing a shell that no
+    /// longer existed. The mutator marks the state it changed; whoever owns the
+    /// clients pushes it.
+    sessions_dirty: bool,
     /// The single-instance lock (the `ldmuxd.lock` pid lockfile); `Drop`
     /// releases it.
     lock: DaemonLock,
@@ -160,6 +172,7 @@ impl LdmuxDaemon {
             remote: None,
             remote_cfg: None,
             streams: HashMap::new(),
+            sessions_dirty: false,
             live_windows: HashMap::new(),
             desktop_device: ldmux_protocol::rpc::DeviceInfo {
                 id: "desktop".into(),
@@ -483,7 +496,15 @@ impl LdmuxDaemon {
         let r = self.apply_reconcile(states.clone());
         let live_changed = self.reconcile_live().await;
         let cwd_changed = self.check_cwd_drift(&states);
-        Ok(!r.dead.is_empty() || r.unknown_changed || !r.pruned.is_empty() || live_changed || cwd_changed)
+        // Anything a mutator touched since the last tick is news even when no
+        // *transition* is visible here (see `sessions_dirty`).
+        let dirty = std::mem::take(&mut self.sessions_dirty);
+        Ok(dirty
+            || !r.dead.is_empty()
+            || r.unknown_changed
+            || !r.pruned.is_empty()
+            || live_changed
+            || cwd_changed)
     }
 
     /// Start the daemon's main loop (the core of the TS `start`).
@@ -732,6 +753,7 @@ impl LdmuxDaemon {
         if let Err(e) = self.registry.save() {
             eprintln!("ldmuxd: registry save: {e}");
         }
+        self.sessions_dirty = true;
         Ok(record)
     }
 
@@ -758,6 +780,7 @@ impl LdmuxDaemon {
             eprintln!("ldmuxd: registry save: {e}");
         }
         self.forget_session_state(&record.id);
+        self.sessions_dirty = true;
         Ok(record)
     }
 
@@ -785,12 +808,19 @@ impl LdmuxDaemon {
         if let Err(e) = self.registry.save() {
             eprintln!("ldmuxd: registry save: {e}");
         }
+        self.sessions_dirty = true;
         Ok(true)
     }
 
     /// Forget a session's state (the TS `forgetSessionState`).
     /// Clears the ownership record for the session.
     pub fn forget_session_state(&mut self, id: &str) {
+        // Every ending funnels through here — kill, close, forget, a shell that
+        // exited, a window that closed — and each of them changes what a client
+        // is shown (a claim, a window record, a stream). One line here covers
+        // all of them, which is the point: the last three bugs of this kind were
+        // a path that forgot to.
+        self.sessions_dirty = true;
         if let Some(claim) = self.ownership.owner(id).cloned() {
             self.ownership.release(id, &claim.device.id);
         }
@@ -1025,6 +1055,7 @@ impl LdmuxDaemon {
                 match result {
                     Ok(lr) => {
                         if lr.ok {
+                            self.sessions_dirty = true;
                             self.live_windows.insert(id.to_string(), (workspace.to_string(), std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap().as_millis() as u64));
@@ -1045,6 +1076,7 @@ impl LdmuxDaemon {
             "closeLive" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let result = crate::desktop::close_live(id).await;
+                self.sessions_dirty = true;
                 self.live_windows.remove(id);
                 let dd_id = self.desktop_device.id.clone();
                 let _ = self.release_claim(id, &dd_id);
@@ -1077,6 +1109,7 @@ impl LdmuxDaemon {
                 match result {
                     Ok(lr) => {
                         if lr.ok {
+                            self.sessions_dirty = true;
                             self.live_windows.insert(id.to_string(), (String::new(), std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap().as_millis() as u64));
@@ -1254,28 +1287,39 @@ impl LdmuxDaemon {
     /// read `bash`/`pi` and match a desk `pi` by the directory it is in now,
     /// rather than the one it was created in.
     pub async fn describe_sessions(&mut self) -> Vec<SessionInfo> {
-        let mut facts: HashMap<String, (String, String)> = HashMap::new();
+        let mut facts: HashMap<String, (String, String, u64)> = HashMap::new();
         if let Ok(KeeperMessage::ListResult(lr)) =
             self.keeper_call(&KeeperMessage::List(km::List {})).await
         {
             for st in lr.sessions {
-                facts.insert(st.session_id.clone(), (st.foreground.clone(), st.cwd.clone()));
+                let activity = lr.activity.get(&st.session_id).copied().unwrap_or(0);
+                facts.insert(st.session_id.clone(), (st.foreground.clone(), st.cwd.clone(), activity));
             }
         }
         let records = self.registry.list();
-        records
+        let mut sessions: Vec<SessionInfo> = records
             .into_iter()
             .map(|record| {
                 let fact = facts.get(&record.tmux_name);
                 // `cwd` follows the pane when it is running and the keeper
                 // knows where it is; otherwise the record's creation directory.
                 let cwd = match fact {
-                    Some((_, path)) if record.status == "running" && !path.is_empty() => {
+                    Some((_, path, _)) if record.status == "running" && !path.is_empty() => {
                         path.clone()
                     }
                     _ => record.cwd.clone(),
                 };
-                let process = fact.map(|(cmd, _)| cmd.clone()).filter(|c| !c.is_empty());
+                let process = fact.map(|(cmd, _, _)| cmd.clone()).filter(|c| !c.is_empty());
+                // The pane's own clock where the keeper has one, else the record's
+                // last write. This was `Some(record.updated_at)` alone, which is
+                // only ever the *creation* or *death* time — so "last activity"
+                // was a timestamp that never moved while a shell was being used,
+                // and the launcher's notion of recent was a lie. tmux stamped
+                // every session on input and output; the keeper now does the same.
+                let last_activity_at = match fact {
+                    Some((_, _, a)) if *a > 0 => Some(*a),
+                    _ => Some(record.updated_at),
+                };
                 let owner = self.ownership.owner(&record.id).map(|c| SessionOwner {
                     id: c.device.id.clone(),
                     name: c.device.name.clone(),
@@ -1295,13 +1339,33 @@ impl LdmuxDaemon {
                     status: record.status.clone(),
                     tmux_name: record.tmux_name.clone(),
                     created_by: record.created_by.clone(),
-                    last_activity_at: Some(record.updated_at),
+                    last_activity_at,
                     process,
                     owner,
                     live_workspace,
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // **Running first, most recently used first.**
+        //
+        // The registry's own order is `updated_at` descending, and ending a
+        // session *writes* `updated_at` (to record when it died). So every shell
+        // a user closed jumped to the top of the list: measured, killing one put
+        // it first, above every live shell. The clients render these rows the
+        // same way, so the launcher led with shells that no longer existed and
+        // tapping one failed — the count looked wrong because the top of the
+        // list was the dead.
+        //
+        // A shell that is running sorts above one that is not, and within each
+        // group the most recently active comes first, which is what a launcher's
+        // order is for. The id breaks ties so two clients never disagree.
+        sessions.sort_by(|a, b| {
+            let alive = (b.status == "running").cmp(&(a.status == "running"));
+            alive
+                .then(b.last_activity_at.cmp(&a.last_activity_at))
+                .then(a.id.cmp(&b.id))
+        });
+        sessions
     }
 
     /// The sessions recorded as having a desk window, for tests and diagnostics.
@@ -1330,12 +1394,19 @@ impl LdmuxDaemon {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        self.ownership.claim(session_id, device.clone(), takeover, Some(now))
+        let r = self.ownership.claim(session_id, device.clone(), takeover, Some(now));
+        // Who holds a shell is on the wire (`owner`), so a claim is a change.
+        self.sessions_dirty = true;
+        r
     }
 
     /// Release a claim (the TS `releaseClaim`).
     pub fn release_claim(&mut self, session_id: &str, device_id: &str) -> bool {
-        self.ownership.release(session_id, device_id)
+        let r = self.ownership.release(session_id, device_id);
+        if r {
+            self.sessions_dirty = true;
+        }
+        r
     }
 
     /// Whether a device holds a session (the TS `holds`).
@@ -1649,6 +1720,125 @@ mod tests {
         assert!(removed);
         assert!(d.registry().get(&id).is_none());
         drop(fk);
+    }
+
+    /// Ending a shell is news even when the reconcile pass sees no *transition*.
+    ///
+    /// `registry.reconcile` reports a session in `dead` only when it **becomes**
+    /// dead. `kill_session` writes `status = "dead"` itself, so by the next
+    /// maintenance tick the record is already dead, nothing looks changed, and no
+    /// list is sent — measured on the live daemon: a connected client received
+    /// nothing for 8s after `ldmux kill` and went on showing a shell that was
+    /// gone. The mutator now marks the state, and the tick obeys the mark.
+    #[tokio::test]
+    async fn ending_a_shell_is_news_even_without_a_reconcile_transition() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        // The create is itself news: a client must hear about a new shell.
+        assert!(d.maintain().await.unwrap(), "creating a shell is news");
+        assert!(!d.maintain().await.unwrap(), "an idle tick is not news");
+        d.kill_session(&rec.id).await.unwrap();
+        assert!(
+            d.maintain().await.unwrap(),
+            "the kill must be reported, even though the record is already dead \
+             and `reconcile` therefore finds no transition"
+        );
+        assert!(!d.maintain().await.unwrap(), "and it is news only once");
+    }
+
+    /// The described list puts a running shell above one that is not, most
+    /// recently active first.
+    ///
+    /// This is the fix for a launcher whose leading rows were ghosts: the
+    /// registry orders by `updated_at` and ending a session *writes* it, so a
+    /// shell that had just been killed sorted above every live one. Measured on
+    /// the live daemon before the fix: after `kill`, rows 1 and 2 were both dead.
+    #[tokio::test]
+    async fn a_dead_shell_never_sorts_above_a_running_one() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let a = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let b = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let c = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        // Killed in an order that makes the *death* times the reverse of the
+        // creation times, so an `updated_at` order would lead with the dead.
+        // The sleeps are load-bearing: the death time and the activity fallback
+        // are milliseconds, and two kills inside one millisecond tie, at which
+        // point the id breaks the tie and the assertion below is a coin flip.
+        d.kill_session(&a.id).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        d.kill_session(&c.id).await.unwrap();
+        let described = d.describe_sessions().await;
+        let statuses: Vec<&str> = described.iter().map(|s| s.status.as_str()).collect();
+        assert_eq!(statuses, vec!["running", "dead", "dead"], "running leads: {statuses:?}");
+        assert_eq!(described[0].id, b.id, "the only running shell is first");
+        assert_eq!(described[1].id, c.id, "of the dead, the most recent leads");
+        assert_eq!(described[2].id, a.id);
+    }
+
+    /// `lastActivityAt` is the pane's own clock, not the record's creation time.
+    ///
+    /// It was `Some(record.updated_at)`, which is only ever the creation or the
+    /// death time, so a field documented as activity never moved while a shell
+    /// was being used. tmux stamped a session on input and output; the keeper now
+    /// does the same (its `List` carries the clock).
+    #[tokio::test]
+    async fn last_activity_is_the_pane_clock_not_the_creation_time() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let before = d
+            .describe_sessions()
+            .await
+            .into_iter()
+            .find(|s| s.id == rec.id)
+            .unwrap()
+            .last_activity_at
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        // Input to the pane is activity, and the fake keeper stamps its clock
+        // exactly as the real one does (input and output).
+        d.handle("send", serde_json::json!({ "id": rec.id, "text": "hi" }))
+            .await
+            .unwrap();
+        let after = d
+            .describe_sessions()
+            .await
+            .into_iter()
+            .find(|s| s.id == rec.id)
+            .unwrap()
+            .last_activity_at
+            .unwrap();
+        assert!(after > before, "activity must advance on pane output: {before} -> {after}");
+        assert!(after > rec.created_at, "and it is not simply the creation time");
     }
 
     /// The RPC dispatch (`handle`): `ping`, `list`, `new`, `kill`, `close`,

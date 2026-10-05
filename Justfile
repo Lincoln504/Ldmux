@@ -111,6 +111,64 @@ install-rust:
     chmod 755 "$HOME/.local/bin/.ldmux-keeper.new"
     mv "$HOME/.local/bin/.ldmux-keeper.new" "$HOME/.local/bin/ldmux-keeper"
     echo "installed Rust daemon + CLI + keeper ($(cargo --version | awk '{print $2}'))"
+    # **A running keeper is now OLD CODE, and nothing replaces it.**
+    #
+    # The keeper outlives the daemon on purpose (the ssh-agent pattern: restart
+    # the daemon and your shells are still there), so `systemctl --user restart
+    # ldmux` — the line this recipe prints — restarts *half* the system. The
+    # running keeper keeps executing the binary it started from: measured
+    # 2026-10-04, a keeper running since 13:39:30 served a keeper built at
+    # 23:02:49, its `List` had no field the new daemon expected, and the daemon
+    # silently fell back to a worse answer rather than failing. Every
+    # keeper-side fix since the keeper started was deployed and not running.
+    #
+    # It cannot be replaced quietly: the keeper owns the PTYs, so replacing it
+    # ends every shell (the documented single point of failure, plan R3). So say
+    # so, loudly, and name the target that does it.
+    live_keeper="$(pgrep -x ldmux-keeper | head -1 || true)"
+    if [ -n "$live_keeper" ]; then
+      started="$(ps -o lstart= -p "$live_keeper" 2>/dev/null | xargs || true)"
+      echo
+      echo "  WARNING: ldmux-keeper (pid $live_keeper) is STILL RUNNING THE OLD BINARY."
+      echo "           started: $started"
+      echo "           The keeper outlives \`systemctl --user restart ldmux\`, so the"
+      echo "           daemon you are about to start will talk to the old keeper."
+      echo "           Replacing it ENDS EVERY RUNNING SHELL. When that is what you"
+      echo "           want:  just restart-keeper"
+      echo
+    fi
+
+# Replace the running keeper with the installed binary.
+#
+# The keeper outlives the daemon, so nothing else replaces it and a deploy leaves
+# it running old code (see `install-rust`). Killing it is the only way to load new
+# keeper code, and it **ends every shell the keeper owns** — that is not a bug, it
+# is what a tmux-server restart means (plan R3). The daemon notices the dead
+# socket on its next tick and auto-spawns the new binary.
+#
+# `pgrep -x` matches the process NAME exactly: `pkill -f` on a keeper path can
+# match the daemon's own command line and kill the wrong thing (AGENTS.md).
+restart-keeper:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pid="$(pgrep -x ldmux-keeper | head -1 || true)"
+    if [ -z "$pid" ]; then
+      echo "no keeper is running (the daemon starts one on demand)"
+      exit 0
+    fi
+    echo "ending the keeper (pid $pid) and every shell it owns"
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 40); do
+      sleep 0.25
+      new="$(pgrep -x ldmux-keeper | head -1 || true)"
+      if [ -n "$new" ] && [ "$new" != "$pid" ]; then
+        echo "keeper restarted: pid $new"
+        exit 0
+      fi
+    done
+    echo "the keeper is gone but the daemon has not respawned one yet" >&2
+    echo "check: journalctl --user -u ldmux -n 40" >&2
+    exit 1
 
 # Keep both dev shells' toolchains as GC roots. Without this a `nix-collect-garbage`
 # (run for any reason, by anything) deletes the JDK, NDK tooling and Zig the mobile
