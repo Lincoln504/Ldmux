@@ -142,6 +142,26 @@ async fn handover_size_and_close_does_not_detach() {
     assert!(owned_a["owner"].is_null(), "A is told it lost the shell: {owned_a}");
     assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "B");
 
+    // A takes it back — the desk window's Ctrl+R, which is the one reclaim the
+    // spec allows. B is told it lost the shell, and A owns it again.
+    send(&mut a, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":100,"rows":30})).await;
+    let caps_a2 = next_of_type(&mut a, "caps").await;
+    assert_eq!(caps_a2["cols"], 100);
+    let owned_b = next_of_type(&mut b, "owned").await;
+    assert!(owned_b["owner"].is_null(), "B is told it lost the shell: {owned_b}");
+    assert_eq!(
+        arc.lock().await.ownership().owner(&id).unwrap().device.id,
+        "A",
+        "a displaced window reclaims with takeover"
+    );
+
+    // B takes it once more, so the rest of this test still describes B as the
+    // holder (the close/grace assertions below).
+    send(&mut b, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":80,"rows":24})).await;
+    let _ = next_of_type(&mut b, "caps").await;
+    let _ = next_of_type(&mut a, "owned").await;
+    assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "B");
+
     // Closing B is not detaching: the claim survives the socket for the grace.
     drop(b);
     tokio::time::sleep(Duration::from_millis(300)).await;
