@@ -620,12 +620,21 @@ impl Keeper {
     }
 
     /// Group-kill the session's process group (SIGTERM, grace, SIGKILL).
+    ///
+    /// The group alone is not enough: an interactive shell with job control
+    /// puts every foreground job in its *own* process group, so `kill(-pid)`
+    /// reaps the shell and orphans the job it was running (a `pi` agent left
+    /// with no controlling terminal, invisible to ldmux). The session is the
+    /// unit that must die, so both the group and every process whose session is
+    /// this one are signalled.
     fn group_kill(&self, pid: i32) {
         use nix::sys::signal::Signal;
         let g = nix::unistd::Pid::from_raw(-pid);
         let _ = nix::sys::signal::kill(g, Signal::SIGTERM);
+        signal_session(pid, Signal::SIGTERM);
         std::thread::sleep(std::time::Duration::from_millis(50));
         let _ = nix::sys::signal::kill(g, Signal::SIGKILL);
+        signal_session(pid, Signal::SIGKILL);
     }
 
     /// Reap any exited children (the authoritative death signal), marking the
@@ -659,11 +668,24 @@ impl Keeper {
 
     fn mark_dead(&self, pid: i32, code: i32) {
         let mut g = self.sessions.lock().unwrap();
+        let mut newly_dead = None;
         for s in g.values_mut() {
-            if s.pid == pid {
+            if s.pid == pid && !s.dead {
                 s.dead = true;
                 s.exit_code = code;
+                newly_dead = Some(s.pid);
             }
+        }
+        drop(g);
+        // The shell is gone and the session is over. A job it left in its own
+        // process group (pi, a server) would otherwise survive with no tty and
+        // cannot be reached or seen again, so tear the whole session down. This
+        // is the natural-exit path, which used to do nothing at all.
+        if let Some(sid) = newly_dead {
+            use nix::sys::signal::Signal;
+            signal_session(sid, Signal::SIGTERM);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            signal_session(sid, Signal::SIGKILL);
         }
     }
 
@@ -672,6 +694,42 @@ impl Keeper {
     pub fn buffered_len(&self, id: &str) -> Option<usize> {
         let g = self.sessions.lock().unwrap();
         g.get(id).map(|s| s.out.lock().unwrap().q.len())
+    }
+}
+
+/// Signal every process in the session `sid`.
+///
+/// `/proc/<pid>/stat` is `pid (comm) state ppid pgrp session ...`, and `comm`
+/// may itself contain spaces and `)`, so the fields after the *last* `)` are
+/// split rather than the whole line. Reading `session` here is the only way to
+/// reach a job that job control moved into its own process group.
+fn signal_session(sid: i32, sig: nix::sys::signal::Signal) {
+    use nix::sys::signal::kill;
+    let me = std::process::id() as i32;
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in dir.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pid == sid || pid == me {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let _state = fields.next();
+        let _ppid = fields.next();
+        let _pgrp = fields.next();
+        let session = fields.next().and_then(|s| s.parse::<i32>().ok());
+        if session == Some(sid) {
+            let _ = kill(nix::unistd::Pid::from_raw(pid), sig);
+        }
     }
 }
 

@@ -1008,3 +1008,90 @@ async fn a_request_line_without_a_newline_is_cut_off_at_the_cap() {
     .unwrap();
     assert!(matches!(res, KeeperMessage::ListResult(_)));
 }
+
+/// A job the shell leaves behind must die with the session, not survive as an
+/// orphan with no controlling terminal.
+///
+/// The shell exits on its own here (the natural-death path), which used to do
+/// nothing at all: the session was marked dead and every child of the shell
+/// kept running, unreachable and invisible. Job control can also put a
+/// foreground job in its own process group, where killing only the shell's
+/// group misses it, so the keeper tears the whole session down.
+#[tokio::test]
+async fn a_background_job_does_not_survive_the_shell() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let dir = std::env::temp_dir().join(format!("ldmux-orphan-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let pidfile = dir.join("child.pid");
+    let _ = std::fs::remove_file(&pidfile);
+    // `set -m` asks for job control, so the background job gets its own process
+    // group when the environment allows it. Either way the job outlives the
+    // `sleep 0.4` shell, and the keeper must not leave it behind.
+    let script = format!(
+        "set -m; sleep 300 & echo $! > {}; sleep 0.4",
+        pidfile.display()
+    );
+    let res: KeeperMessage = keeper_call(
+        &socket.to_string_lossy(),
+        &KeeperMessage::Spawn(Spawn {
+            session_id: "orphan-test".to_string(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: Some(vec![
+                "/bin/bash".to_string(),
+                "-c".to_string(),
+                script,
+            ]),
+            env: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(res, KeeperMessage::State(_)), "spawn failed: {res:?}");
+
+    let mut child_pid = 0i32;
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&pidfile) {
+            if let Ok(p) = s.trim().parse() {
+                child_pid = p;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(child_pid > 0, "the job never reported its pid");
+
+    // Let the shell exit, then make the keeper notice: it reaps on every
+    // message (the daemon polls List, which is how the real orphan was marked
+    // dead), and the natural-death path is what must take the session down.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let _ = keeper_call(
+        &socket.to_string_lossy(),
+        &KeeperMessage::List(List {}),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+
+    let mut gone = false;
+    for _ in 0..160 {
+        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(child_pid), None)
+            .is_err_and(|e| e == nix::errno::Errno::ESRCH)
+        {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    if !gone {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child_pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(gone, "a job outlived the shell that started it");
+}
