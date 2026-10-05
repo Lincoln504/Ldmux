@@ -24,9 +24,13 @@
 //! - `live <id> <workspace>` — make a session live.
 //! - `unlive <id>` — close a live session.
 //! - `clipboard-write on|off` — toggle clipboard write.
-//! - `window [cwd]` — open a new shell in a desk window.
-//! - `run <shell|pi> [cwd]` / `shell` — run a session in this terminal (attach).
-//! - `mirror <id>` — a read-only desk window onto a session.
+//! - `deskWindow`'s CLI forms: `window [cwd]` — open a new shell in a desk window
+//!   (what `$mod+Return` runs); `run <shell|pi> [cwd]` and
+//!   `shell [--name N] [--cwd DIR] [dir]` — become a desk window *in this
+//!   terminal*, reusing a shell already in that directory unless `--name` asks
+//!   for another.
+//! - `mirror <id> [--workspace N] [--rw] [--terminal T]` — a view of a session's
+//!   screen on the desktop, read-only unless `--rw`.
 
 use ldmux_protocol::socket::{self as ps, CallError};
 use ldmux_protocol::rpc::PingResult;
