@@ -40,6 +40,15 @@ class AltScrollTest {
     }
 
     @Test
+    fun `a large swipe moves as many rows as it travelled`() {
+        // The cap is 5 no longer: a flick that crosses the screen must scroll the
+        // screen, not five lines.
+        val k = planAltScroll(-20, frame(), false) as AltScroll.Keys
+        assertEquals(20, k.keys.size)
+        assertEquals(List(20) { "Up" }, k.keys)
+    }
+
+    @Test
     fun `the event count is capped`() {
         val a = planAltScroll(-100, frame(), false) as AltScroll.Keys
         assertEquals(ALT_SCROLL_MAX_EVENTS, a.keys.size)

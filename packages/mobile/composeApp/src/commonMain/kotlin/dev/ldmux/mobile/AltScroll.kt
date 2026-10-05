@@ -28,8 +28,16 @@ sealed interface AltScroll {
     data object None : AltScroll
 }
 
-/** One swipe step never turns into more than this many events. */
-internal const val ALT_SCROLL_MAX_EVENTS = 5
+/**
+ * One swipe step never turns into more than this many events.
+ *
+ * This used to be 5, and that was the clunkiness: a fast swipe produces few
+ * drag callbacks with a large row delta, so almost every flick of the finger
+ * was truncated to five lines no matter how far it travelled. One event per row
+ * moved (up to a screen and a half) is what a wheel does on a desktop, which is
+ * the behaviour this mirrors.
+ */
+internal const val ALT_SCROLL_MAX_EVENTS = 40
 
 fun planAltScroll(rows: Int, frame: TerminalFrame.Frame, mouseRefused: Boolean): AltScroll {
     if (rows == 0 || !frame.alternateOn || !frame.viewportActive || frame.passwordInput) return AltScroll.None

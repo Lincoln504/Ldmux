@@ -1332,6 +1332,18 @@ private fun PortraitBar(
             ),
             leading = menuHere,
         )
+        // Home/End and the page keys have no soft-keyboard equivalent and no
+        // gesture, so they need a row of their own here. Landscape keeps its own
+        // copy in the panel; neither mode has a scrollback that can stand in for
+        // PageUp/PageDown inside a full-screen program.
+        PortraitKeyRow(
+            listOf(
+                "Home" to { press("Home") },
+                "End" to { press("End") },
+                "PgUp" to { press("PageUp") },
+                "PgDn" to { press("PageDown") },
+            ),
+        )
         PortraitKeyRow(
             // From `Keys.kt`, so the list the user sees is the list the C/d guard
             // checks. It used to be written here, and the guard read a constant this
@@ -1573,6 +1585,15 @@ private fun SidePanel(
                     "↑" to { press("Up") },
                     "↓" to { press("Down") },
                     "→" to { press("Right") },
+                ),
+            )
+            PanelDivider()
+            KeyRow(
+                listOf(
+                    "Home" to { press("Home") },
+                    "End" to { press("End") },
+                    "PgUp" to { press("PageUp") },
+                    "PgDn" to { press("PageDown") },
                 ),
             )
             PanelDivider()
