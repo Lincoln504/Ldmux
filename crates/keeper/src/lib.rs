@@ -215,6 +215,34 @@ fn proc_cwd(pid: i32) -> String {
     std::fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// The pane's foreground command name, the way a terminal names it: the process
+/// group the tty has made foreground, then that leader's `comm`.
+///
+/// Reading the shell's own `comm` said `bash` forever, so every row read `bash`
+/// and "which of these is my editor" could not be answered. tmux answered with
+/// `pane_current_command`; this is the same fact from the same source.
+fn proc_foreground(pid: i32) -> String {
+    match proc_tpgid(pid) {
+        Some(pgrp) if pgrp > 0 && pgrp != pid => proc_comm(pgrp),
+        _ => proc_comm(pid),
+    }
+}
+
+/// `/proc/<pid>/stat` field 8: the foreground process group of the process's
+/// controlling terminal. Parsed after the last ')' because `comm` can contain
+/// spaces and parentheses.
+fn proc_tpgid(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_tpgid(&stat)
+}
+
+/// The stat parser on its own, so its one subtlety (the command name can hold
+/// spaces and parentheses) is testable without a live process.
+fn parse_tpgid(stat: &str) -> Option<i32> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    rest.split_whitespace().nth(5)?.parse().ok()
+}
+
 impl Keeper {
     /// A keeper that spawns `shell` (argv) per session.
     pub fn new(shell: Vec<String>) -> Self {
@@ -392,7 +420,7 @@ impl Keeper {
                     Err(_) => return Err("the emulator is gone".into()),
                 };
                 let (foreground, cwd) = if !dead {
-                    (proc_comm(pid), proc_cwd(pid))
+                    (proc_foreground(pid), proc_cwd(pid))
                 } else {
                     (String::new(), String::new())
                 };
@@ -474,7 +502,7 @@ impl Keeper {
             Err(_) => return Err(format!("no such session: {id}")),
         };
         let (foreground, cwd) = if !dead {
-            (proc_comm(pid), proc_cwd(pid))
+            (proc_foreground(pid), proc_cwd(pid))
         } else {
             (String::new(), String::new())
         };
@@ -863,4 +891,25 @@ async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::
     wr.write_all(resp_line.as_bytes()).await?;
     wr.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod proc_tests {
+    use super::parse_tpgid;
+
+    /// The command name is field 2 and can hold spaces and parentheses, so the
+    /// fields are counted from the *last* `)`. Getting this wrong reads a
+    /// neighbouring number as the foreground group and names the row after a pid.
+    #[test]
+    fn the_foreground_group_comes_from_the_field_after_the_command_name() {
+        // pid 42, comm "weird )name", state S, ppid 1, pgrp 42, session 42,
+        // tty_nr 34816, tpgid 99.
+        assert_eq!(parse_tpgid("42 (weird )name) S 1 42 42 34816 99 0 0"), Some(99));
+        // A plain one, and one with parens inside the name.
+        assert_eq!(parse_tpgid("7 (bash) S 1 7 7 34816 7 0 0"), Some(7));
+        assert_eq!(parse_tpgid("7 ((a)(b)) S 1 7 7 1 2"), Some(2));
+        // Garbage is not a panic and not a wrong number.
+        assert_eq!(parse_tpgid("no parens here"), None);
+        assert_eq!(parse_tpgid(""), None);
+    }
 }
