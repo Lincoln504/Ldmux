@@ -93,6 +93,16 @@ pub struct LdmuxDaemon {
     ownership: Ownership,
     dead_record_ttl_ms: u64,
     max_records: usize,
+    /// The control socket's accept loop.
+    ///
+    /// `tokio::spawn` starts it and returns a handle; the handle was dropped on
+    /// the floor with a comment saying so. Dropping a `JoinHandle` does not stop
+    /// the task — it *detaches* it — so `stop()` removed the socket file and
+    /// released the lock while the accept loop went on holding the bound
+    /// listener and serving it. Nothing in production noticed (the process
+    /// exits), but a stop that does not stop is the kind of thing that is only
+    /// discovered when a second daemon or a test starts in the same process.
+    control_handle: Option<tokio::task::JoinHandle<()>>,
     /// Whether anything a client can *see* changed since the last broadcast.
     ///
     /// Set by every mutator, consumed by `maintain`. It exists because the daemon
@@ -172,6 +182,7 @@ impl LdmuxDaemon {
             remote: None,
             remote_cfg: None,
             streams: HashMap::new(),
+            control_handle: None,
             sessions_dirty: false,
             live_windows: HashMap::new(),
             desktop_device: ldmux_protocol::rpc::DeviceInfo {
@@ -247,8 +258,17 @@ impl LdmuxDaemon {
     /// Keeper-death detection (plan §6): if the call fails with a connection
     /// error (the keeper is dead), respawn it and retry once.
     async fn keeper_call(&mut self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
+        // A path that is not valid UTF-8 is an error, not a panic: this runs on
+        // the request path, under the daemon lock, and a panic there takes the
+        // request with it (`to_str()` on a socket path built from `$HOME`).
+        let keeper_sock = self
+            .keeper
+            .socket_path()
+            .to_str()
+            .ok_or_else(|| "the keeper socket path is not valid UTF-8".to_string())?
+            .to_string();
         match ldmux_protocol::keeper_call::keeper_call(
-            self.keeper.socket_path().to_str().unwrap(),
+            &keeper_sock,
             req,
             ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
         )
@@ -265,7 +285,7 @@ impl LdmuxDaemon {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     // Retry the call against the new keeper.
                     ldmux_protocol::keeper_call::keeper_call(
-                        self.keeper.socket_path().to_str().unwrap(),
+                        &keeper_sock,
                         req,
                         ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
                     )
@@ -653,9 +673,9 @@ impl LdmuxDaemon {
                 }
             }
         });
-        // Store the handle so the daemon can be dropped cleanly.
-        // (For now, we just drop it; the accept loop runs until the process exits.)
-        let _ = handle;
+        // Kept, so `stop()` can end it. A detached task cannot be cancelled and
+        // a stopped daemon that is still accepting is not stopped.
+        self.control_handle = Some(handle);
         Ok(())
     }
 
@@ -665,6 +685,11 @@ impl LdmuxDaemon {
     pub fn stop(&mut self) {
         self.maintenance_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // End the accept loop, not merely its socket file: dropping the handle
+        // would leave the task running with the listener still bound.
+        if let Some(h) = self.control_handle.take() {
+            h.abort();
+        }
         if let Some(ref mut r) = self.remote {
             r.stop();
         }

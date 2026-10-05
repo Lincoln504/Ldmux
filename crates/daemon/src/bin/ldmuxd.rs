@@ -148,7 +148,7 @@ fn main() {
             }
         }
         let mut d2 = daemon_ref.lock().await;
-        let _ = d2.stop();
+        d2.stop();
         drop(d2);
     });
 }

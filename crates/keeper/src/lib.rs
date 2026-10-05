@@ -149,16 +149,18 @@ impl Keeper {
                 let m = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&w.session_id) {
-                        Some(s) if !s.dead => s.master.clone(),
+                        Some(s) if !s.dead => {
+                            // Input is activity too: a client typing into a
+                            // silent shell is the case the clock exists to catch.
+                            // Stamped under the lock we already hold, never a
+                            // second acquisition.
+                            s.activity.store(now_ms(), Ordering::Relaxed);
+                            s.master.clone()
+                        }
                         _ => return Err(format!("no live session: {}", w.session_id)),
                     }
                 };
                 let fd = m.as_raw_fd();
-                // Input is activity too: a client typing into a silent shell is
-                // the case the clock exists to catch.
-                if let Some(s) = self.sessions.lock().unwrap().get(&w.session_id) {
-                    s.activity.store(now_ms(), Ordering::Relaxed);
-                }
                 let bytes = w.data.as_bytes();
                 let mut off = 0usize;
                 while off < bytes.len() {
