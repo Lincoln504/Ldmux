@@ -145,9 +145,16 @@ back when a shell opens (`HoldOrientation`, ADR-0011 amendment).
 ### Two shapes, one terminal
 
 - **Landscape** — side panel (side is a setting), key matrix, `+ shell`, settings; the
-  keyboard is never up. The panel's bottom row is the microphone alone.
+  keyboard is never up. The panel is `paste` and the microphone at the top, then the key
+  rows. (The microphone used to have a bottom bar of its own; it joined `paste`, because
+  two bars were two things to learn for one job.)
 - **Portrait** — no panel, terminal fills the width, thin bar above the keyboard with
   `[menu]` on the first row and `[hide keyboard]` on the second, one row per key group.
+
+**One line per shell in the launcher.** The row is the process name, then the directory
+small and grey beside it, at the thickness the two-line row had. A desk window says
+nothing in words — the row implies it; a shell this phone opened carries the phone glyph.
+The only state put into words is **"no window"**, in amber: it is an anomaly, not a state.
 
 The terminal is resized to the viewport in both shapes: the client owns the geometry and
 the daemon sizes the session's pty to the grid the surface can actually paint (ADR-0008).

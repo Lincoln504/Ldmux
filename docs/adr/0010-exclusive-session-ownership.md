@@ -7,6 +7,21 @@
 > size being the canonical one. The keeper is the canonical geometry now; the
 > claim still hands the size over, which was the point.
 
+> **Amendment, 2026-10-05 — the consent key is `r`, and only `r`.** It was "any
+> key", then Ctrl+R; the user asked for one key with no alias. Input carrying an
+> escape (a paste, an Alt chord, a function key) is never the consent, whatever
+> the emulator encodes, so dictation cannot take a shell. The "press any key"
+> wording below is the earlier revision.
+
+> **Amendment, 2026-10-05 — a desk window may be the terminal that started it.**
+> `ldmux shell` and `ldmux run` become a desk window *in the terminal they were
+> started from*: the daemon is told `deskWindow {spawn: false, pid}`, so nothing is
+> launched here, and the window is that attach process — recorded in
+> `SessionRecord.livePid` and answered for by the kernel, exactly as the shim's pid
+> was ("the window is open while its process is", below). `ldmux window` — what
+> `$mod+Return` runs — is still the daemon opening the window itself, and its
+> window class is how that one is found.
+
 
 **Status:** Accepted — **supersedes ADR-0006 §1**
 
@@ -71,8 +86,9 @@ deliberate act:
 
 - the phone shows a dialog — *"open on Desktop. Take it over?"* — and sends
   `takeover: true` only if the user confirms;
-- the desktop's live window shows *"open on another device — press any key to take
-  it back"*, and the keystroke is the consent.
+- the desktop's live window shows *"open on another device — press `r` to take
+  it back"*, and the keystroke is the consent. ("Any key" until 2026-10-05; see
+  the amendment above.)
 
 Neither can steal silently, so a simultaneous race is not possible in a way that
 needs a rule. Reclaiming **always** goes through the user, on both sides.
@@ -179,17 +195,23 @@ under i3's PATH, and every window silently became a plain shell the phone could
 not open at all.)
 
 - **`ldmux window` / `run` / `shell` make the terminal a desk window.** The CLI
-  creates (or, for `shell`, reuses) a shell, calls `deskWindow`, and the terminal
-  execs the shim `makeLive` windows already run. The desk holds the shell from the
-  start, so the phone gets `owned` and asks.
+  creates (or, for `shell`, reuses) a shell and registers it as a desk window. It
+  was "the terminal execs the shim `makeLive` windows already run"; there is no
+  shim now: `window` has the daemon open the window, and `run`/`shell` *are* the
+  window (their `pid`). The desk holds the shell from the start, so the phone gets
+  `owned` and asks.
 - **A seizure detaches a desk-started window; it does not leave it attached.** The
   2026-09-18 amendment said the desk *keeps* its window, and the code kept it
   attached — a second writer — and the reconcile pass read that client as the user
-  taking the shell back and reclaimed it within a second. Detached, the shim shows
-  "open on another device — press any key", and that key is the taking back.
-- **The window is open exactly while its shim process is.** The shim records its
-  pid beside its tty; the daemon asks the kernel, not the window manager, and so
-  can tell a closed desk terminal (no window class of ours) from a detached one.
+  taking the shell back and reclaimed it within a second. Detached, the window shows
+  "open on another device — press `r`", and that key is the taking back. It also
+  takes the shell back **by itself** when the holder lets go: a device that puts a
+  shell down is not using it, so there is nothing to consent to.
+- **The window is open exactly while its process is.** For a window the daemon did
+  not open (`shell`/`run`), that process is the attach client, whose pid is in
+  `SessionRecord.livePid`; for one it did, the window manager is asked by class. The
+  kernel's answer is what lets the daemon tell a closed desk terminal (no window
+  class of ours) from a detached one.
 - **Closing the window ends the shell when the desk holds it.** When the phone has
   it, the window was only a notice, and closing it leaves the shell to the phone.
 - **A page's claim goes with the page's socket.** Claims were released only when a

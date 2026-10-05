@@ -970,7 +970,7 @@ ldmux is not a pi plugin.
 | R5 | ~~WebView WebGL2 availability.~~ Moot: the shipped renderer is native Compose Canvas over libghostty-vt, not a WebView (ADR-0007) — this row is kept to record that the risk was real for the design it was written against, not because it still applies. | ~~Fallback to canvas/DOM; test on the real device.~~ |
 | R6 | ~~tmux socket under `/tmp` / `TMUX_TMPDIR` nesting.~~ Moot: no tmux. | Tests use unique per-run keeper socket dirs and reap their keeper (`tests/common` `Reaper`). |
 | R7 | Split input with a desktop mirror. | Mirror read-only by default; explicit "take control". |
-| R8 | i3 placement races. | `for_window` rule keyed by `ldmux-mirror`. |
+| R8 | i3 placement races. | **Corrected 2026-10-05.** `for_window` is not an IPC command at all (`docs/DESKTOP-INTEGRATION.md`, measured), so the mitigation that stands is `exec` and then a criteria-targeted move, polling `i3-msg -t get_tree` for the window's class — `ldmux-live-<id>` for a desk window, `ldmux-mirror-<id>` for a mirror. This is what §9 and `crates/daemon/src/desktop.rs` do. |
 | R9 | Token/identity security. | Tailnet-or-loopback bind and peer check (ADR-0016), WireGuard encryption, token `0600` (plaintext at rest; its directory is `0700`). No identity allow list or per-device tokens yet. |
 | R10 | Language choice. | TS/Bun v1 with a `PaneStream` seam to Rust. |
 | R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |

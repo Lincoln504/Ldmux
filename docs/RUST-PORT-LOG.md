@@ -1459,7 +1459,10 @@ own claim was wrong.
   bypassing ownership and stealing the daemon poll thread's `Peek` bytes.
   Rewritten as a daemon remote-WS client (plan §3.9): attach claims the shell,
   streams OUTPUT frames to its terminal, forwards input, resizes on SIGWINCH,
-  handles `owned` with Ctrl+R to take over. `ldmuxd attach <id> [--readonly]`.
+  handles `owned` with `r` to take over. `ldmuxd attach <id> [--readonly]`.
+  (Recorded as Ctrl+R, the key at the time; it is `r` alone now, and the client
+  also re-attaches by itself when the holder lets go — see the 2026-10-05 audit
+  section below.)
   `desktop.rs` runs `alacritty -e ldmuxd attach <id>` (the tmux shim is gone).
 - **CLI `window`/`run`/`shell`/`mirror`** were "not yet ported"; implemented,
   so `ldmux-terminal` (`$mod+Return`) works instead of falling back.
@@ -1817,6 +1820,76 @@ this change (file untouched); left alone as out of scope.
   `testDebugUnitTest` 171 tests, 0 failures.
 
 ---
+
+## Shell lifecycle restored, and the phone surface reduced to one thing (2026-10-05)
+
+### A shell's background jobs die with it
+
+`group_kill` and `mark_dead` signalled only the process the keeper knew about, so a
+background job (`sleep 300 &`) outlived its shell and held the pty's pipes open. Both
+paths now call `signal_session(sid, sig)`, which scans `/proc/<pid>/stat` for every
+process whose session id is the shell's (field 4, after the last `)`) and signals the
+lot. Test `a_background_job_does_not_survive_the_shell`; verified live for both
+`ldmux kill` and a natural `exit`.
+
+### TIOCSCTTY after setsid
+
+`fork_shell` did `setsid()` and then `dup2`. That gives the child a new session but not
+necessarily a *controlling terminal*, which job control needs (`^Z`, `fg`, `SIGWINCH`
+to the foreground group). One `ioctl(slave, TIOCSCTTY, 0)` between them.
+
+### A shell is named by its foreground job, not by the shell
+
+The list said `bash` for vim, nano, micro, htop and pi alike. `proc_foreground(pid)`
+reads the tty's foreground process group (`/proc/<pid>/stat` field 8 after the last
+`)`) and then that process's `comm`. Verified live: vim, nano, micro, htop and pi all
+named correctly (`less` reads `bash` because it had exited by the time it was read).
+
+### A desk window survives a daemon restart; a closed one ends its shell
+
+`SessionRecord.liveWorkspace` is persisted (`Some("")` = a window whose placement is
+unknown, `None` = no window). `rebuild_live_windows` adopts the windows that are on
+screen and ends the shells whose window went while the daemon was down;
+`reconcile_live` ends a shell whose window is gone past a 5 s grace;
+`forget_session_state` and `reconcile_live` clear the record when a shell ends, so the
+list's record-fallback can never report a window for a shell that is gone. The desk
+window's attach client reconnects across a daemon restart (250 ms doubling to a 5 s
+cap; only an ended shell or a closed pty stops it). It used to exit, which left the
+shell with no window — and since closing a window ends the shell, a **deploy** closed
+every desk window. Verified live: a restart keeps both window and shell; closing the
+window ends the shell.
+
+`ldmux window` records a blank workspace deliberately (window placed wherever was
+focused), and the session list filtered blanks out, so every `$mod+Return` window read
+"no window" on the phone while its window sat on the desk. `Some("")` is now a fact,
+with the record as the fallback (`eccb85a`, test
+`a_desk_window_with_an_unnamed_workspace_is_still_reported`).
+
+### The phone surface: one line, one glyph, one anomaly
+
+- One line per shell, at the old two-line thickness: the process name, then the
+  directory small and grey beside it.
+- A desk window says nothing in words — no "on desktop"; the row implies it. A shell
+  this phone opened carries the phone glyph. The only state put into words is
+  **"no window"**, in amber: it is an anomaly, not a state.
+- The microphone joined `paste` at the top of the landscape panel; its own bottom bar is
+  gone.
+- A page takes the shell on **every** activation, not once per page (`armedOnce`
+  removed). The page gives the shell back when it swipes away, so the swipe back is the
+  consent. Home/End/PgUp/PgDn joined the key rows, and the alternate-screen swipe cap
+  went 5 → 40 events.
+- The held-elsewhere overlay consumes every pointer event; an overlay that only *looks*
+  modal let a tap through to the terminal underneath and moved a cursor in a shell the
+  device does not hold.
+
+### The reclaim is one key
+
+`r`, and only `r`. Ctrl+R was an alias and is gone, at the user's request. Anything
+carrying an escape (a bracketed paste, an Alt chord, a function key) is refused, so
+dictation cannot take a shell. Verified with the pty harness (writing to the attach
+client's own stdin, not through `xdotool`, which cannot inject Ctrl+R into alacritty at
+all): a paste containing an `r` leaves the shell with the other device, a bare `r` takes
+it, `0x12` does not.
 
 ## Audit against the TypeScript daemon: three surfaces restored (2026-10-05)
 

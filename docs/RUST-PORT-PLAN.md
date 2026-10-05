@@ -627,7 +627,7 @@ official libghostty-vt crate (community wrapper, same distribution model).
   production defect; `reconcileLivePass` still claims on presence; App.kt
   still latches `sawDrag`). §3.13 now says "root-caused; unimplemented".
 - F2 §3.9 "any key = reclaim" contradicted D-1's Ctrl+R; §3.9 now names
-  Ctrl+R.
+  Ctrl+R. (The key is **`r`** alone since 2026-10-05 — see the amendment in §3.9.)
 - F3 R3 "systemd auto-restarts it" contradicted D1 (the keeper is not a
   unit); now "the daemon auto-respawns it".
 - F4 §0/D2/§5 claimed the engine headers and host `.a` were vendored/checked

@@ -98,6 +98,17 @@ Server → client:
 | `{type:"desktop",inventory}` | answer to `desktop` |
 | `{type:"live",sessionId,ok,detail?}` | answer to `makelive` / `closelive` |
 | binary `Output` frame | live pane output (UTF-8) |
+
+Two things about `owned` and `sessions` that a client needs:
+
+- **A shell can have no owner.** `sessions` carries each shell's owner, so a client
+  learns a shell was let go without having asked for anything. The desk attach client
+  uses exactly that: it re-attaches by itself when its session is running and *nobody*
+  holds it, because a device that puts a shell down is not using it. A shell another
+  device still holds keeps waiting for the reclaim key (`r`).
+- **`owned` is sent on a refusal *and* on a seizure.** `owner` names the holder when
+  the attach was refused; it is `null` on the notice to a device that was displaced,
+  whose connection the daemon then unsubscribes (it stays connected and idle).
 | `{type:"error",code,message}` | `unknown_session`, `session_dead`, `not_attached`, `bad_json`, `resync`, `too_far_behind`, `input_too_large`, `not_holder`, `no_mouse`, `shell_foreground`, `bad_cell`, `bad_size`, `resize_failed`, … |
 
 ### Attach ordering (why output is not lost)
