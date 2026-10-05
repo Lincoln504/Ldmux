@@ -214,8 +214,60 @@ where
     run_with_ping(daemon_socket, session_id, readonly, input, output, PING_INTERVAL_MS).await
 }
 
+/// One connection's lifetime, from the caller's point of view.
+enum Outcome {
+    /// The shell is gone, or the window closed: stop, do not reconnect.
+    Ended,
+    /// The link dropped but the shell may still be there: reconnect.
+    Lost,
+}
+
+/// The daemon's remote endpoint, as the control socket reports it.
+struct RemoteInfo {
+    hostname: String,
+    port: u64,
+    path: String,
+    token: String,
+}
+
+async fn remote_info(daemon_socket: &str) -> Result<RemoteInfo, String> {
+    let info: serde_json::Value =
+        socket::call(daemon_socket, "remote_info", &serde_json::json!({}), 5000)
+            .await
+            .map_err(|e| e.0)?;
+    let hostname = info["hostname"].as_str().unwrap_or("").to_string();
+    let port = info["port"].as_u64().unwrap_or(0);
+    let path = info["path"].as_str().unwrap_or("/ws").to_string();
+    let token = info["token"].as_str().unwrap_or("").to_string();
+    if !info["listening"].as_bool().unwrap_or(false) {
+        return Err("the daemon's remote is not listening".to_string());
+    }
+    if hostname.is_empty() || port == 0 {
+        return Err("the daemon has no remote address".to_string());
+    }
+    Ok(RemoteInfo { hostname, port, path, token })
+}
+
+/// 250 ms doubling to 5 s. A daemon restart takes a second or two; a window must
+/// not hammer a socket that is not there, and must reconnect promptly when it is.
+fn reconnect_delay(attempt: u32) -> std::time::Duration {
+    let ms = 250u64.saturating_mul(1u64 << attempt.min(5));
+    std::time::Duration::from_millis(ms.min(5000))
+}
+
+async fn note<W: AsyncWriteExt + Unpin>(output: &mut W, text: &str) {
+    let _ = output.write_all(format!("\r\n  {text}\r\n").as_bytes()).await;
+    let _ = output.flush().await;
+}
+
 /// `run_with`, with the keep-alive interval injectable so a test can prove the
 /// contract in milliseconds instead of twenty seconds.
+///
+/// The window lives across a daemon restart. The socket is expected to blink
+/// (a restart, a `systemctl stop`, a deploy) and the window reconnects with
+/// backoff and re-attaches for a fresh snapshot. Exiting on the first close made
+/// every deploy close every desk window, which the daemon then read as "the user
+/// closed the window" and ended the shell.
 pub async fn run_with_ping<R, W>(
     daemon_socket: &str,
     session_id: &str,
@@ -228,29 +280,59 @@ where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    // Where is the daemon's remote? The control socket is the source of truth.
-    let info: serde_json::Value = socket::call(daemon_socket, "remote_info", &serde_json::json!({}), 5000)
-        .await
-        .map_err(|e| e.0)?;
-    let hostname = info["hostname"].as_str().unwrap_or("").to_string();
-    let port = info["port"].as_u64().unwrap_or(0);
-    let path = info["path"].as_str().unwrap_or("/ws").to_string();
-    let token = info["token"].as_str().unwrap_or("").to_string();
-    if !info["listening"].as_bool().unwrap_or(false) {
-        return Err("the daemon's remote is not listening".to_string());
+    // Raw mode for the whole window, across reconnects: the terminal must not go
+    // back to cooked mode when the link blinks.
+    let _raw = RawMode::enable();
+    let mut attempt: u32 = 0;
+    loop {
+        let info = match remote_info(daemon_socket).await {
+            Ok(i) => i,
+            Err(e) => {
+                note(&mut output, &format!("ldmux: {e}; retrying")).await;
+                attempt += 1;
+                tokio::time::sleep(reconnect_delay(attempt)).await;
+                continue;
+            }
+        };
+        match attach_once(&info, session_id, readonly, &mut input, &mut output, ping_ms).await {
+            // The shell ended, or the window closed: this process is done.
+            Ok(Outcome::Ended) => return Ok(()),
+            Ok(Outcome::Lost) => {
+                note(&mut output, "ldmux: link lost, reconnecting").await;
+                attempt = 0;
+            }
+            Err(e) => {
+                note(&mut output, &format!("ldmux: {e}")).await;
+            }
+        }
+        attempt += 1;
+        tokio::time::sleep(reconnect_delay(attempt)).await;
     }
-    if hostname.is_empty() || port == 0 {
-        return Err("the daemon has no remote address".to_string());
-    }
+}
 
-    let uri = format!("ws://{hostname}:{port}{path}");
+/// One WebSocket connection: connect, attach, pump until the link or the shell
+/// ends. Keeping raw mode and the retry policy out of here is what makes a
+/// reconnect a fresh call instead of a second copy of the loop.
+async fn attach_once<R, W>(
+    info: &RemoteInfo,
+    session_id: &str,
+    readonly: bool,
+    input: &mut R,
+    output: &mut W,
+    ping_ms: u64,
+) -> Result<Outcome, String>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    let uri = format!("ws://{}:{}{}", info.hostname, info.port, info.path);
     let mut req = {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         uri.clone().into_client_request().map_err(|e| e.to_string())?
     };
     req.headers_mut().insert(
         "Authorization",
-        format!("Bearer {token}")
+        format!("Bearer {}", info.token)
             .parse()
             .map_err(|_| "bad token header".to_string())?,
     );
@@ -258,7 +340,6 @@ where
         .await
         .map_err(|e| format!("connect {uri}: {e}"))?;
 
-    let _raw = RawMode::enable();
     let (mut cols, mut rows) = tty_size();
     let (mut sink, mut stream) = ws.split();
 
@@ -306,7 +387,7 @@ where
         tokio::select! {
             msg = stream.next() => {
                 match msg {
-                    None | Some(Err(_)) => break,
+                    None | Some(Err(_)) => return Ok(Outcome::Lost),
                     Some(Ok(Message::Text(t))) => {
                         let v: serde_json::Value = match serde_json::from_str(t.as_ref()) {
                             Ok(v) => v,
@@ -343,7 +424,8 @@ where
                                     let _ = output
                                         .write_all(b"\r\n  This shell has ended.\r\n")
                                         .await;
-                                    break;
+                                    let _ = output.flush().await;
+                                    return Ok(Outcome::Ended);
                                 }
                             }
                             Some("pong") => {
@@ -368,7 +450,9 @@ where
             n = input.read(&mut inbuf) => {
                 let n = n.map_err(|e| e.to_string())?;
                 if n == 0 {
-                    break; // the window closed (EOF on our pty)
+                    // The window closed (EOF on our pty). Reconnecting would be
+                    // pointless: there is no terminal left to paint.
+                    return Ok(Outcome::Ended);
                 }
                 let bytes = &inbuf[..n];
                 if detached {
@@ -416,16 +500,15 @@ where
             // exits about 20 s after it opens.
             _ = ping.tick() => {
                 if missed_pongs >= MAX_MISSED_PONGS {
-                    break;
+                    return Ok(Outcome::Lost);
                 }
                 missed_pongs += 1;
                 if send(&mut sink, &serde_json::json!({ "type": "ping" })).await.is_err() {
-                    break;
+                    return Ok(Outcome::Lost);
                 }
             }
         }
     }
-    Ok(())
 }
 
 async fn send<S>(sink: &mut S, value: &serde_json::Value) -> Result<(), String>
@@ -551,6 +634,23 @@ mod render_tests {
 
     /// The visible screen is cleared, so a resync does not lay the new screen
     /// over the old one.
+    /// The reconnect backoff grows and then holds. A window must retry quickly
+    /// after a one-second restart and must not hammer a daemon that is down.
+    #[test]
+    fn reconnect_delay_grows_to_a_cap() {
+        use super::reconnect_delay;
+        assert_eq!(reconnect_delay(1).as_millis(), 500);
+        assert_eq!(reconnect_delay(2).as_millis(), 1000);
+        assert_eq!(reconnect_delay(3).as_millis(), 2000);
+        assert_eq!(reconnect_delay(9).as_millis(), 5000);
+        let mut prev = 0u128;
+        for a in 1..10 {
+            let ms = reconnect_delay(a).as_millis();
+            assert!(ms >= prev, "backoff must not shrink at attempt {a}");
+            prev = ms;
+        }
+    }
+
     #[test]
     fn the_screen_is_cleared_and_homed_before_the_content() {
         let out = String::from_utf8(render_snapshot(&snap("x"))).unwrap();
