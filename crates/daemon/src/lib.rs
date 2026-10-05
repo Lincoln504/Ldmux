@@ -24,6 +24,7 @@
 //! See `docs/RUST-PORT-PLAN.md` and `docs/RUST-PORT-LOG.md`.
 
 pub mod auth;
+pub mod clipboard_policy;
 pub mod cwd;
 pub mod control_socket;
 pub mod remote;

@@ -879,7 +879,10 @@ impl LdmuxDaemon {
             let conn = Box::new(crate::stream::SocketKeeperConn::new(
                 self.keeper_socket_path().to_string_lossy().into_owned(),
             ));
-            let stream = std::sync::Arc::new(PaneStream::new(tmux_name.to_string(), conn));
+            let stream = std::sync::Arc::new(
+                PaneStream::new(tmux_name.to_string(), conn)
+                    .with_clipboard_write(crate::clipboard_policy::read(&self.state_dir)),
+            );
             // Spawn the poll thread (the §3.7 live stream: pulls the keeper's
             // buffered output and fans it out to subscribers).
             let poll_stream = stream.clone();
@@ -1193,9 +1196,7 @@ impl LdmuxDaemon {
             // ── Clipboard write policy ──
             "clipboardWrite" => {
                 let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
-                let path = self.state_dir.join("clipboard-write");
-                let content = if on { "on\n" } else { "off\n" };
-                std::fs::write(&path, content)
+                crate::clipboard_policy::write(&self.state_dir, on)
                     .map_err(|e| format!("write clipboard policy: {e}"))?;
                 Ok(serde_json::json!({ "on": on }))
             }

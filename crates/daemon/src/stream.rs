@@ -14,24 +14,23 @@
 //! queue); the remote (the phone-facing WS server) and the linger/reconnect
 //! lifecycle are layered on as they are ported.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ldmux_protocol::keeper::{KeeperMessage, Snapshot};
 
-/// One subscriber's bounded output queue (the §3.7 flow-control).
+/// One registered subscriber.
 ///
-/// The keeper always buffers the pane's output; each subscriber pulls from
-/// this queue. When it overflows (the subscriber is too slow), the subscriber
-/// is dropped and forced to resync from a snapshot — the pane never pauses.
-struct SubQueue {
+/// There is deliberately no per-subscriber byte queue here. An earlier version
+/// kept one (`q`, bounded at 1 MiB) and `extend`ed it on every fanout, but the
+/// only consumer is the callback below, so nothing ever drained it: after 1 MiB
+/// of *cumulative* output every subscriber was marked dropped, told to resync,
+/// and silenced. The flow control of plan §3.7 lives where the backlog actually
+/// is — the connection (`remote.rs`: `outstanding` vs `WS_BACKLOG_BYTES`,
+/// `MAX_PENDING_BYTES`) — and the keeper bounds its own buffer.
+struct Sub {
     /// The subscriber's unique id (for removal by id, not by position).
     id: usize,
-    /// The queued output bytes (the bytes the subscriber has not drained).
-    q: VecDeque<u8>,
-    /// Dropped because the queue overflowed (the subscriber must resync).
-    dropped: bool,
     /// The subscriber (the `on_output`/`on_reset` callbacks).
     sub: StreamSubscriber,
 }
@@ -56,7 +55,13 @@ pub struct PaneStream {
     session_id: String,
     keeper: Box<dyn KeeperConn>,
     /// The subscribers (the WebSocket clients).
-    subs: Mutex<Vec<SubQueue>>,
+    subs: Mutex<Vec<Sub>>,
+    /// The next subscriber id (a counter, so ids are never reused or raced).
+    next_sub_id: AtomicUsize,
+    /// The trailing bytes of a multi-byte UTF-8 character a `Peek` chunk ended
+    /// in the middle of; prepended to the next chunk. Without it the two halves
+    /// were each lossy-decoded to U+FFFD and the character was corrupted.
+    utf8_carry: Mutex<Vec<u8>>,
     /// The epoch counter (count *delivered* snapshots, not captures).
     epoch: AtomicU64,
     /// The sanitizer state (a partial OSC/DCS sequence can straddle chunks).
@@ -124,11 +129,21 @@ impl PaneStream {
             session_id,
             keeper,
             subs: Mutex::new(Vec::new()),
+            next_sub_id: AtomicUsize::new(1),
+            utf8_carry: Mutex::new(Vec::new()),
             epoch: AtomicU64::new(0),
             sanitizer: Mutex::new(crate::sanitize::Sanitizer::new(false)),
             closed: AtomicBool::new(false),
             poll_stop: AtomicBool::new(false),
         }
+    }
+
+    /// Whether programs in the pane may write the client's clipboard (OSC 52).
+    /// Chosen when the stream is made, from the persisted policy
+    /// (`clipboard_policy`), so changing it needs no daemon restart.
+    pub fn with_clipboard_write(self, on: bool) -> Self {
+        *self.sanitizer.lock().unwrap() = crate::sanitize::Sanitizer::new(on);
+        self
     }
 
     /// The session id.
@@ -173,25 +188,12 @@ impl PaneStream {
     /// Register a subscriber and return its id (the shared body of `subscribe`
     /// and `subscribe_owned`).
     fn register(&self, sub: StreamSubscriber) -> usize {
-        let id = {
-            let subs = self.subs.lock().unwrap();
-            subs.iter().map(|s| s.id).max().unwrap_or(0) + 1
-        };
-        let mut subs = self.subs.lock().unwrap();
-        subs.push(SubQueue {
-            id,
-            q: VecDeque::new(),
-            dropped: false,
-            sub,
-        });
+        let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
+        self.subs.lock().unwrap().push(Sub { id, sub });
         id
     }
 
     /// Deliver `text` to every subscriber (the fanout), through the sanitizer.
-    ///
-    /// The §3.7 flow-control: each subscriber's queue is bounded; a queue that
-    /// overflows (the subscriber is too slow) is dropped and its `on_reset`
-    /// fires (a forced resync). The pane never pauses.
     pub fn fanout(&self, text: &str) {
         if self.closed.load(Ordering::Relaxed) {
             return;
@@ -201,35 +203,9 @@ impl PaneStream {
             return;
         }
         let bytes = clean.as_bytes();
-        let mut subs = self.subs.lock().unwrap();
-        for sub in subs.iter_mut() {
-            if sub.dropped {
-                continue;
-            }
-            sub.q.extend(bytes);
-            // The bounded queue: a queue that grows past the bound is dropped and
-            // the subscriber is told to resync (the forced resync, §3.7).
-            if sub.q.len() > 1024 * 1024 {
-                sub.dropped = true;
-                sub.q.clear();
-                (sub.sub.on_reset)("output queue overflow; resync from a snapshot");
-                continue;
-            }
-            // Deliver the bytes to the subscriber.
+        let subs = self.subs.lock().unwrap();
+        for sub in subs.iter() {
             (sub.sub.on_output)(bytes);
-        }
-    }
-
-    /// Drain a subscriber's queued output (the drain is the pull).
-    /// `sub_id` is the id returned by `subscribe`.
-    pub fn drain(&self, sub_id: usize) -> Vec<u8> {
-        let mut subs = self.subs.lock().unwrap();
-        match subs.iter_mut().find(|s| s.id == sub_id) {
-            Some(sub) => {
-                let d: Vec<u8> = sub.q.drain(..).collect();
-                d
-            }
-            None => Vec::new(),
         }
     }
 
@@ -380,13 +356,32 @@ impl PaneStream {
         match resp {
             KeeperMessage::PeekResult(pr) => {
                 if !pr.data.is_empty() {
-                    let text = String::from_utf8_lossy(&pr.data);
-                    self.fanout(&text);
+                    if let Some(text) = self.decode_chunk(pr.data) {
+                        self.fanout(&text);
+                    }
                 }
                 Ok(())
             }
             other => Err(format!("unexpected keeper response to Peek: {other:?}")),
         }
+    }
+
+    /// Decode one `Peek` chunk, holding back a trailing incomplete UTF-8
+    /// character for the next chunk. Genuinely invalid bytes are still replaced
+    /// (the pipeline downstream is `&str`), but a character that merely
+    /// straddles two peeks is no longer corrupted.
+    fn decode_chunk(&self, data: Vec<u8>) -> Option<String> {
+        let mut carry = self.utf8_carry.lock().unwrap();
+        let mut buf = std::mem::take(&mut *carry);
+        buf.extend_from_slice(&data);
+        let keep = incomplete_utf8_tail(&buf);
+        let split = buf.len() - keep;
+        *carry = buf[split..].to_vec();
+        buf.truncate(split);
+        if buf.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&buf).into_owned())
     }
 
     /// Stop the poll loop (the `drop_stream`/`stop` path).
@@ -398,6 +393,27 @@ impl PaneStream {
     pub fn is_poll_stopped(&self) -> bool {
         self.poll_stop.load(Ordering::Relaxed)
     }
+}
+
+/// How many bytes at the end of `buf` are the *start* of a multi-byte UTF-8
+/// character whose remaining bytes have not arrived yet (0 when the buffer ends
+/// on a character boundary or in bytes that can never complete).
+fn incomplete_utf8_tail(buf: &[u8]) -> usize {
+    // A UTF-8 sequence is at most 4 bytes, so the lead byte is within the last 3.
+    for back in 1..=buf.len().min(3) {
+        let b = buf[buf.len() - back];
+        if b & 0xC0 == 0x80 {
+            continue; // a continuation byte: keep looking for its lead
+        }
+        let need = match b {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return 0, // ASCII or an invalid lead: nothing to wait for
+        };
+        return if back < need { back } else { 0 };
+    }
+    0
 }
 
 /// Convert a tmux key name to its byte sequence.
@@ -547,8 +563,7 @@ mod key_name_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     /// A `KeeperConn` test double: answers a `Snapshot` with a fixed screen.
@@ -636,19 +651,82 @@ mod tests {
         assert_eq!(e2, 2);
     }
 
-    /// A subscriber's bounded queue: bytes are queued and drained (the pull).
+    /// Regression: a subscriber used to be silenced after 1 MiB of *cumulative*
+    /// output because the queue it was bounded by was never drained.
     #[test]
-    fn a_subscribers_queue_is_bounded_and_drains() {
+    fn a_subscriber_keeps_receiving_past_a_megabyte_of_output() {
         let s = stream();
-        let (o, r) = cb();
-        let (sub_id, _) = s.subscribe(StreamSubscriber {
-            on_output: o,
-            on_reset: r,
+        let count = Arc::new(AtomicUsize::new(0));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let (c, r) = (count.clone(), resets.clone());
+        let (_id, _u) = s.subscribe(StreamSubscriber {
+            on_output: Box::new(move |b: &[u8]| {
+                c.fetch_add(b.len(), Ordering::SeqCst);
+            }),
+            on_reset: Box::new(move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            }),
         });
-        s.fanout("abc");
-        let d = s.drain(sub_id);
-        assert_eq!(d, b"abc");
-        // A second drain is empty (the queue is drained).
-        assert!(s.drain(sub_id).is_empty());
+        let chunk = "x".repeat(4096);
+        for _ in 0..600 {
+            s.fanout(&chunk); // 2.4 MiB in total
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 600 * 4096);
+        assert_eq!(resets.load(Ordering::SeqCst), 0, "no spurious resync");
+    }
+
+    /// Subscriber ids are unique even when registered concurrently.
+    #[test]
+    fn subscriber_ids_are_unique() {
+        let s = Arc::new(stream());
+        let mut hs = Vec::new();
+        for _ in 0..8 {
+            let s = s.clone();
+            hs.push(std::thread::spawn(move || {
+                (0..50)
+                    .map(|_| {
+                        let (o, r) = cb();
+                        s.subscribe(StreamSubscriber { on_output: o, on_reset: r }).0
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+        let mut ids: Vec<usize> = hs.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let n = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), n);
+    }
+
+    /// A multi-byte character split across two peeks survives intact.
+    #[test]
+    fn a_character_split_across_peeks_is_not_corrupted() {
+        let s = stream();
+        let got = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let g = got.clone();
+        let (_id, _u) = s.subscribe(StreamSubscriber {
+            on_output: Box::new(move |b: &[u8]| g.lock().unwrap().extend_from_slice(b)),
+            on_reset: Box::new(|_| {}),
+        });
+        let bytes = "a\u{e9}\u{1f600}z".as_bytes(); // é (2 bytes), 😀 (4 bytes)
+        for split in 1..bytes.len() {
+            got.lock().unwrap().clear();
+            for part in [&bytes[..split], &bytes[split..]] {
+                if let Some(t) = s.decode_chunk(part.to_vec()) {
+                    s.fanout(&t);
+                }
+            }
+            assert_eq!(*got.lock().unwrap(), bytes, "split at {split}");
+        }
+    }
+
+    #[test]
+    fn incomplete_tail_detection() {
+        assert_eq!(incomplete_utf8_tail(b"abc"), 0);
+        assert_eq!(incomplete_utf8_tail("\u{e9}".as_bytes()), 0);
+        assert_eq!(incomplete_utf8_tail(&"\u{e9}".as_bytes()[..1]), 1);
+        assert_eq!(incomplete_utf8_tail(&"\u{1f600}".as_bytes()[..3]), 3);
+        assert_eq!(incomplete_utf8_tail(&[0xff]), 0);
+        assert_eq!(incomplete_utf8_tail(&[0x80, 0x80, 0x80, 0x80]), 0);
     }
 }
