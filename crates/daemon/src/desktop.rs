@@ -50,7 +50,27 @@ pub fn safe_workspace(name: &str) -> Option<String> {
     }
 }
 
-/// The desk window's argv: alacritty running the attach client (plan §3.9).
+/// The terminal emulator a window is opened in.
+///
+/// `LDMUX_TERMINAL` overrides it. The argv below (`--class … -e …`) is alacritty's
+/// shape, and another emulator may spell it differently, so the default is the
+/// one the deployed unit has and the override is the escape hatch — one place to
+/// name the emulator rather than one per window kind.
+pub fn terminal() -> String {
+    terminal_from(std::env::var("LDMUX_TERMINAL").ok().as_deref())
+}
+
+/// The emulator name from an override value, or the default. Pure, so the rule is
+/// testable without mutating the process environment (which tests share).
+fn terminal_from(value: Option<&str>) -> String {
+    value
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("alacritty")
+        .to_string()
+}
+
+/// The desk window's argv: the terminal running the attach client (plan §3.9).
 ///
 /// The window is a protocol client of the daemon (`ldmuxd attach <id>`), not a
 /// multiplexer client: it claims the shell (ADR-0010), streams the pane, and handles
@@ -65,6 +85,25 @@ pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
         attach_bin(),
         "attach".to_string(),
         session_id.to_string(),
+    ]
+}
+
+/// The read-only mirror's argv: the same terminal and the same attach client, with
+/// no identity, so it holds nothing and cannot type.
+///
+/// One definition of how a window is launched, so the mirror cannot drift from the
+/// desk window (it did: the CLI built this argv itself, with its own class name
+/// and its own idea of where the attach client is).
+pub fn mirror_argv(session_id: &str, terminal: &str) -> Vec<String> {
+    vec![
+        terminal.to_string(),
+        "--class".to_string(),
+        "ldmux-mirror".to_string(),
+        "-e".to_string(),
+        attach_bin(),
+        "attach".to_string(),
+        session_id.to_string(),
+        "--readonly".to_string(),
     ]
 }
 
@@ -303,7 +342,7 @@ pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, 
     if std::env::var("DISPLAY").is_err() {
         return Err("no DISPLAY (not an X11 session)".to_string());
     }
-    let argv = live_argv(session_id, "alacritty");
+    let argv = live_argv(session_id, &terminal());
     let exec_argv = live_exec_argv(&argv.iter().map(|s| s.as_str()).collect::<Vec<&str>>());
     let result = crate::exec::run(
         exec_argv.clone(),
@@ -452,6 +491,38 @@ mod tests {
         );
         // The binary must be a path i3's exec can resolve without a PATH.
         assert!(args[4].starts_with('/'), "the attach binary must be absolute: {}", args[4]);
+    }
+
+    /// The mirror is the same window machinery with no identity: same terminal,
+    /// same attach client, `--readonly` so it holds nothing and cannot type.
+    #[test]
+    fn mirror_argv_runs_the_attach_client_read_only() {
+        let args = mirror_argv("abc123", "alacritty");
+        assert_eq!(
+            args,
+            vec![
+                "alacritty",
+                "--class",
+                "ldmux-mirror",
+                "-e",
+                &attach_bin(),
+                "attach",
+                "abc123",
+                "--readonly",
+            ]
+        );
+        assert!(args[4].starts_with('/'), "the attach binary must be absolute: {}", args[4]);
+    }
+
+    /// One emulator name for every window, overridable, with a blank override
+    /// treated as no override.
+    #[test]
+    fn the_terminal_defaults_and_is_overridable() {
+        assert_eq!(terminal_from(None), "alacritty");
+        assert_eq!(terminal_from(Some("foot")), "foot");
+        assert_eq!(terminal_from(Some("  wezterm ")), "wezterm");
+        assert_eq!(terminal_from(Some("")), "alacritty");
+        assert_eq!(terminal_from(Some("   ")), "alacritty");
     }
 
     #[test]

@@ -598,15 +598,12 @@ async fn main() {
         }
         "mirror" => {
             // A read-only view: the attach client with no identity, so it holds
-            // nothing and cannot type.
+            // nothing and cannot type. The argv comes from the desktop seam, which
+            // is the one place that knows how a window is launched.
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
-            // Absolute, because i3's exec has no ~/.local/bin on PATH.
-            let _ = std::process::Command::new("alacritty")
-                .args(["--class", "ldmux-mirror", "-e"])
-                .arg(ldmux_daemon::desktop::attach_bin())
-                .args(["attach", id, "--readonly"])
-                .spawn();
+            let argv = ldmux_daemon::desktop::mirror_argv(id, &ldmux_daemon::desktop::terminal());
+            let _ = std::process::Command::new(&argv[0]).args(&argv[1..]).spawn();
         }
         _ => {
             eprintln!("ldmux: unknown command {cmd}");

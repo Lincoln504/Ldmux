@@ -1,6 +1,12 @@
 //! The keeper boots, serves the protocol, and supervises a real shell in a
 //! real PTY — no live system, no live daemon: a scratch socket in a temp dir
 //! and a scratch PTY pair. This is the gate "keeper boots, serves List/Spawn".
+//!
+//! **The waits are generous on purpose.** Every poll below is bounded by an
+//! iteration count with a sleep, not by a wall clock, because `cargo test
+//! --workspace` runs these alongside every other crate on one machine: a real
+//! shell and a real `cat` that take milliseconds alone can take seconds when the
+//! whole workspace is running. A tight budget made this file flaky, not fast.
 
 use ldmux_protocol::keeper::{
     self as km, Kill, KeeperMessage, List, Peek, Read, Spawn,
@@ -43,7 +49,7 @@ async fn boot(socket: &std::path::Path) -> std::sync::Arc<keeper::Keeper> {
         let _ = keeper::serve(&k2, &sock).await;
     });
     // Give the listener a moment to bind.
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if socket.exists() {
             break;
         }
@@ -54,7 +60,7 @@ async fn boot(socket: &std::path::Path) -> std::sync::Arc<keeper::Keeper> {
 
 /// Poll until `pred` holds (the shell needs a moment to echo into the PTY).
 async fn wait_until(pred: impl Fn() -> bool) -> bool {
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if pred() {
             return true;
         }
@@ -309,7 +315,7 @@ async fn the_emulator_renders_the_pane_output() {
     // (the prompt/echo occupy the leading lines; their count is not
     // pinned, so look for the corpus line rather than a fixed index).
     let mut got = None;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         let sr = snapshot(&s, &id).await;
         if sr.text.lines().any(|l| l == CORPUS_LINE) {
             got = Some(sr);
@@ -324,7 +330,7 @@ async fn the_emulator_renders_the_pane_output() {
         // that only says "no".
         let last = snapshot(&s, &id).await;
         panic!(
-            "the emulator never rendered the corpus row in 10s; the pane held:\n{:?}",
+            "the emulator never rendered the corpus row in 30s; the pane held:\n{:?}",
             last.text
         )
     };
@@ -389,7 +395,7 @@ async fn the_emulator_resizes() {
     // The emulator's grid follows (the geometry in a snapshot is re-read
     // from the terminal after the resize).
     let mut got = None;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         let sr = snapshot(&s, &id).await;
         if (sr.cols, sr.rows) == (120, 40) {
             got = Some(sr);
@@ -448,7 +454,7 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
     // rendered).
     let mut acc: Vec<u8> = Vec::new();
     let mut ok = false;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
             &s,
             &KeeperMessage::Peek(Peek { session_id: id.clone() }),
@@ -521,7 +527,7 @@ async fn the_emulator_captures_history_above_the_screen() {
     // = 29 lines: the run immediately above the live screen (H0003..H0007),
     // then the live screen (H0008..H0030 + the empty cursor row).
     let mut got = None;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         let sr = keeper_call(
             &s,
             &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: Some(5), drain_output: false }),
@@ -582,7 +588,7 @@ async fn the_emulator_reports_the_pane_state() {
     }
 
     let mut got = None;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if let Ok(KeeperMessage::SnapshotResult(sr)) = keeper_call(
             &s,
             &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None, drain_output: false }),
@@ -643,7 +649,7 @@ async fn the_state_query_carries_the_pane_state() {
 
     // The liveness query (`Read` → `State`) carries the pane's state.
     let mut st = None;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if let Ok(KeeperMessage::State(x)) = keeper_call(
             &s,
             &KeeperMessage::Read(Read { session_id: id.clone() }),
@@ -720,7 +726,7 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
 
     // Wait for the keeper's raw `waitpid` to reap it and report dead.
     let mut dead = false;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if let Ok(KeeperMessage::State(st)) = keeper_call(
             &s,
             &KeeperMessage::Read(Read { session_id: id.clone() }),
@@ -739,7 +745,7 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
 
     // A snapshot of the dead pane: dead, empty `/proc` fields, last content.
     let mut sr = None;
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if let Ok(KeeperMessage::SnapshotResult(x)) = keeper_call(
             &s,
             &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None, drain_output: false }),
@@ -806,7 +812,7 @@ async fn spawn_runs_the_command_and_passes_the_env() {
     assert!(matches!(res, KeeperMessage::State(_)), "spawn answers State, got {res:?}");
 
     let mut seen = Vec::new();
-    for _ in 0..400 {
+    for _ in 0..1200 {
         let r = keeper_call(
             &socket.to_string_lossy(),
             &KeeperMessage::Peek(Peek { session_id: id.clone() }),
@@ -852,7 +858,7 @@ async fn term_seen(id: &str, env: Option<Vec<(String, String)>>) -> String {
     .await
     .unwrap();
     let mut seen = Vec::new();
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if let KeeperMessage::PeekResult(pr) = keeper_call(
             &socket.to_string_lossy(),
             &KeeperMessage::Peek(Peek { session_id: id.to_string() }),
@@ -863,7 +869,12 @@ async fn term_seen(id: &str, env: Option<Vec<(String, String)>>) -> String {
         {
             seen.extend_from_slice(&pr.data);
         }
-        if String::from_utf8_lossy(&seen).contains(";\n") {
+        // The line ends `;\r\n`, not `;\n`: the pty's ONLCR turns the child's
+        // newline into CRLF on the way out. Waiting for `;\n` therefore never
+        // matched, and the wait always ran out its whole budget instead of
+        // returning as soon as the child had printed — 30 s per call, twice.
+        let text = String::from_utf8_lossy(&seen);
+        if text.contains(";\r\n") || text.contains(";\n") {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
