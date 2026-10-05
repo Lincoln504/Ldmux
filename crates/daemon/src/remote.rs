@@ -287,51 +287,68 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             write_http(&mut stream, 403, "forbidden\n").await;
             continue;
         }
-        // Peek the request head (without consuming it) so a plain HTTP GET is
-        // answered rather than left to the WebSocket handshake to fail — the
-        // phone's `probe()` reads the status to tell a refused token (401) from
-        // a machine that is off.
-        let head = match read_head(&stream).await {
-            Some(h) => h,
-            None => continue,
-        };
-        let Some((_method, target, headers)) = parse_request_head(&head) else {
-            write_http(&mut stream, 400, "bad request\n").await;
-            continue;
-        };
-        let path = path_of(&target);
-        let authed = authorized(&headers, &target, &shared.token);
-        if !is_ws_upgrade(&headers) {
-            // The TS `handleRequest` statuses.
-            let (status, body) = plain_response(&path, authed);
-            eprintln!("ldmuxd: remote: {peer} {_method} {path} -> {status}");
-            write_http(&mut stream, status, body).await;
-            continue;
-        }
-        if path != "/ws" {
-            eprintln!("ldmuxd: remote: {peer} ws {path} -> 404");
-            write_http(&mut stream, 404, "ldmux remote: the endpoint is /ws\n").await;
-            continue;
-        }
-        if !authed {
-            eprintln!("ldmuxd: remote: {peer} ws /ws -> 401");
-            write_http(&mut stream, 401, "unauthorized\n").await;
-            continue;
-        }
-        let ws = match tokio_tungstenite::accept_async(stream).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                eprintln!("ldmuxd: remote: upgrade failed from {peer}: {e}");
-                continue;
-            }
-        };
-        eprintln!("ldmuxd: remote: connection from {peer}");
         conn_id += 1;
         let shared = shared.clone();
+        // Everything past the cheap peer check runs on its own task. The head
+        // read can block for its full deadline, and doing the pre-auth work
+        // inline in the accept loop let one silent peer stall every client
+        // behind it for that whole deadline.
         tokio::spawn(async move {
-            handle_connection(ws, shared, conn_id).await;
+            serve_accepted(stream, peer, shared, conn_id).await;
         });
     }
+}
+
+/// The pre-auth and upgrade half of a connection, on its own task.
+///
+/// Returns without ceremony when the peer is not a client: an unanswered head,
+/// a plain GET, a wrong path, a bad token, or a failed upgrade.
+async fn serve_accepted(
+    mut stream: TcpStream,
+    peer: std::net::SocketAddr,
+    shared: Arc<Shared>,
+    conn_id: u64,
+) {
+    // Peek the request head (without consuming it) so a plain HTTP GET is
+    // answered rather than left to the WebSocket handshake to fail — the
+    // phone's `probe()` reads the status to tell a refused token (401) from
+    // a machine that is off.
+    let head = match read_head(&stream).await {
+        Some(h) => h,
+        None => return,
+    };
+    let Some((_method, target, headers)) = parse_request_head(&head) else {
+        write_http(&mut stream, 400, "bad request\n").await;
+        return;
+    };
+    let path = path_of(&target);
+    let authed = authorized(&headers, &target, &shared.token);
+    if !is_ws_upgrade(&headers) {
+        // The TS `handleRequest` statuses.
+        let (status, body) = plain_response(&path, authed);
+        eprintln!("ldmuxd: remote: {peer} {_method} {path} -> {status}");
+        write_http(&mut stream, status, body).await;
+        return;
+    }
+    if path != "/ws" {
+        eprintln!("ldmuxd: remote: {peer} ws {path} -> 404");
+        write_http(&mut stream, 404, "ldmux remote: the endpoint is /ws\n").await;
+        return;
+    }
+    if !authed {
+        eprintln!("ldmuxd: remote: {peer} ws /ws -> 401");
+        write_http(&mut stream, 401, "unauthorized\n").await;
+        return;
+    }
+    let ws = match tokio_tungstenite::accept_async(stream).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("ldmuxd: remote: upgrade failed from {peer}: {e}");
+            return;
+        }
+    };
+    eprintln!("ldmuxd: remote: connection from {peer}");
+    handle_connection(ws, shared, conn_id).await;
 }
 
 /// The per-connection loop: read messages, enqueue responses, coalesce output.

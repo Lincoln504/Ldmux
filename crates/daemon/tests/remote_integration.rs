@@ -200,3 +200,27 @@ async fn remote_rejects_a_missing_token_and_answers_the_probe() {
     drop(arc);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A peer that connects and says nothing must not stall everyone else: the pre-auth
+/// work used to run inline in the accept loop, so an idle socket held the next
+/// client for the whole head-read deadline (5 s).
+#[tokio::test]
+async fn a_silent_peer_does_not_block_the_next_client() {
+    let dir = scratch();
+    let port: u16 = 49971;
+    let token = "right-token";
+    let arc = start_daemon(&dir, port, token).await;
+
+    let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let started = std::time::Instant::now();
+    let status = plain_get_status(port, Some(token)).await;
+    assert_eq!(status, 400);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "a probe took {:?} behind a silent peer",
+        started.elapsed()
+    );
+
+    drop(arc);
+    let _ = std::fs::remove_dir_all(&dir);
+}

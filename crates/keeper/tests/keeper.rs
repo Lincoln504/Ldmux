@@ -958,3 +958,53 @@ async fn a_snapshot_can_take_the_unpeeked_tail() {
     }
     let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
 }
+
+#[tokio::test]
+async fn the_socket_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    // `boot` returns once the path exists; the chmod follows the bind, so poll.
+    let ok = wait_until(|| {
+        std::fs::metadata(&socket)
+            .map(|m| m.permissions().mode() & 0o777 == 0o600)
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(ok, "the keeper socket must be 0600 whatever the umask");
+}
+
+#[tokio::test]
+async fn a_request_line_without_a_newline_is_cut_off_at_the_cap() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let mut c = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    // 5 MiB with no newline: past the 4 MiB cap the keeper must drop the connection
+    // rather than buffer until it is out of memory.
+    let chunk = vec![b'a'; 64 * 1024];
+    let mut dropped = false;
+    for _ in 0..80 {
+        if c.write_all(&chunk).await.is_err() {
+            dropped = true;
+            break;
+        }
+    }
+    if !dropped {
+        let mut b = [0u8; 1];
+        dropped = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), c.read(&mut b)).await,
+            Ok(Ok(0)) | Ok(Err(_))
+        );
+    }
+    assert!(dropped, "an unterminated oversized request must close the connection");
+    // And the keeper still serves.
+    let res: KeeperMessage = keeper_call(
+        &socket.to_string_lossy(),
+        &KeeperMessage::List(List {}),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(res, KeeperMessage::ListResult(_)));
+}

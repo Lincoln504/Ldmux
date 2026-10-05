@@ -56,7 +56,22 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> String
             let _ = std::fs::create_dir_all(parent);
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
-    let _ = std::fs::write(&path, token.as_bytes());
+    // Created 0600 from the first byte: `fs::write` then `chmod` left a window in
+    // which the credential existed with the umask's mode (0644), readable by any
+    // local user when the parent directory was not ours to tighten.
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            let _ = f.write_all(token.as_bytes());
+        }
+    }
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
 
     // Once the token has a path of its own, the legacy copy must go, so a

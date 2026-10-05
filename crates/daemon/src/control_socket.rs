@@ -20,6 +20,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 
+/// The largest request line the control socket will buffer.
+const MAX_REQUEST_LINE: usize = 4 * 1024 * 1024;
+/// How long a connection may take to deliver its one request line.
+const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The daemon's control socket (the `ldmuxd.sock` Unix socket).
 pub struct ControlSocketServer {
     socket_path: std::path::PathBuf,
@@ -101,17 +106,28 @@ impl ControlSocketServer {
         let mut stream = stream;
         let mut buf: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
-        loop {
-            match stream.read(&mut byte).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    if byte[0] == b'\n' {
-                        break;
+        // Bounded in size and time: a client that never sends the newline must not
+        // hold memory and a task for the life of the daemon.
+        let read_line = async {
+            loop {
+                match stream.read(&mut byte).await {
+                    Ok(0) => return Ok(()), // EOF
+                    Ok(_) => {
+                        if byte[0] == b'\n' {
+                            return Ok(());
+                        }
+                        if buf.len() >= MAX_REQUEST_LINE {
+                            return Err("request line too large".to_string());
+                        }
+                        buf.push(byte[0]);
                     }
-                    buf.push(byte[0]);
+                    Err(e) => return Err(format!("read request: {e}")),
                 }
-                Err(e) => return Err(format!("read request: {e}")),
             }
+        };
+        match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_line).await {
+            Ok(r) => r?,
+            Err(_) => return Err("timed out waiting for the request line".to_string()),
         }
         if buf.is_empty() {
             return Ok(());
@@ -299,6 +315,31 @@ mod tests {
         drop(wr);
         drop(rd);
         drop(accept_task);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unterminated request over the cap is refused, not buffered forever.
+    #[tokio::test]
+    async fn an_unterminated_oversized_request_is_refused() {
+        let dir = state_dir();
+        let server = ControlSocketServer::new(&dir);
+        let listener = server.bind().unwrap();
+        let socket_path = server.socket_path().to_path_buf();
+        let task = tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            server.serve_one(stream).await
+        });
+        let mut client = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let chunk = vec![b'a'; 64 * 1024];
+        // Past the cap the server stops reading and drops the connection, so a late
+        // write may fail: either outcome is the refusal.
+        for _ in 0..80 {
+            if client.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let r = task.await.unwrap();
+        assert_eq!(r, Err("request line too large".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

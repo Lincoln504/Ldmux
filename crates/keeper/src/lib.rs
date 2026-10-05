@@ -724,6 +724,12 @@ fn fork_shell(
 pub async fn serve(self_: &Arc<Keeper>, socket: &std::path::Path) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket);
     let listener = tokio::net::UnixListener::bind(socket)?;
+    // The keeper owns every PTY: its socket is owner-only whatever the umask, and
+    // not merely by the directory it happens to sit in.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    }
     loop {
         let (sock, _addr) = listener.accept().await?;
         let me = self_.clone();
@@ -735,21 +741,40 @@ pub async fn serve(self_: &Arc<Keeper>, socket: &std::path::Path) -> std::io::Re
     }
 }
 
+/// The largest request line the keeper will buffer (a Spawn with its env, or a Write).
+const MAX_REQUEST_LINE: usize = 4 * 1024 * 1024;
+/// How long a connection may take to deliver its one request line.
+const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let (mut rd, mut wr) = sock.into_split();
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 4096];
-    loop {
-        let n = rd.read(&mut tmp).await?;
-        if n == 0 {
-            return Ok(());
+    // A request is one line. Bounded in size and in time, so a client that never
+    // sends the newline (or never stops sending) cannot hold memory and a task for
+    // the life of the keeper.
+    let read_line = async {
+        loop {
+            let n = rd.read(&mut tmp).await?;
+            if n == 0 {
+                return Ok::<bool, std::io::Error>(false);
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.contains(&b'\n') {
+                return Ok(true);
+            }
+            if buf.len() > MAX_REQUEST_LINE {
+                return Err(std::io::Error::other("request line too large"));
+            }
         }
-        buf.extend_from_slice(&tmp[..n]);
-        if buf.contains(&b'\n') {
-            break;
-        }
+    };
+    match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_line).await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return Ok(()),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err(std::io::Error::other("timed out waiting for the request line")),
     }
     let nl = buf.iter().position(|&b| b == b'\n').unwrap();
     let line = String::from_utf8_lossy(&buf[..nl]).to_string();
