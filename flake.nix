@@ -24,7 +24,7 @@
       # libgcc from this flake's toolchain. The daemon is a cargo build from this
       # shell, so it links these exact store paths; `just install` links this
       # derivation as a GC root so a `nix-collect-garbage` cannot delete them out
-      # from under the running daemon. tmux and Node used to be here — the daemon
+      # from under the running daemon. Node used to be here — the daemon
       # runs on neither any more (the keeper owns the PTYs, the daemon is Rust).
       runtime = pkgs: _nodePkgs: [ pkgs.glibc pkgs.libgcc ];
 

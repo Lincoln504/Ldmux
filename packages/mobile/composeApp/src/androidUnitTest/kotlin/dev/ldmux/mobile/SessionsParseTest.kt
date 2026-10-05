@@ -28,7 +28,10 @@ class SessionsParseTest {
     private fun parse(json: String, deviceId: String = "me") =
         parseSessions(Json.parseToJsonElement(json).jsonObject["sessions"], deviceId)
 
-    /** The daemon's own output, captured 2026-09-20. */
+    /**
+     * The daemon's own output, captured 2026-09-20 (the session-layer name field
+     * was renamed `keeperName` on 2026-10-05 and the capture edited to match).
+     */
     private val real = """{"type":"sessions","sessions":[{"id":"e1b2f6f8f9","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"dead","keeperName":"ldmux-e1b2f6f8f9","createdBy":"local","lastActivityAt":1789919010983},{"id":"9bbe2eaf62","kind":"shell","title":"RCNT","cwd":"/home/ldeen/Documents/RCNT","status":"running","keeperName":"ldmux-9bbe2eaf62","createdBy":"phone","process":"bash","lastActivityAt":1789857207000},{"id":"0c4d7be073","kind":"shell","title":"nocira","cwd":"/home/ldeen/Documents/nocira","status":"running","keeperName":"ldmux-0c4d7be073","createdBy":"phone","process":"bash","lastActivityAt":1789857210000},{"id":"09207486a3","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"running","keeperName":"ldmux-09207486a3","createdBy":"local","process":"bash","lastActivityAt":1789831137000},{"id":"5dff7004ec","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"running","keeperName":"ldmux-5dff7004ec","createdBy":"local","process":"pi","lastActivityAt":1789832638000},{"id":"f1ffeb84cd","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"running","keeperName":"ldmux-f1ffeb84cd","createdBy":"local","process":"bash","lastActivityAt":1789826242000}]}"""
 
     @Test
@@ -63,6 +66,24 @@ class SessionsParseTest {
         assertEquals("desk", other.ownerName)
         assertEquals("desktop", other.ownerKind)
         assertTrue(!mine.heldElsewhere, "our own device id is not somebody else")
+    }
+
+    /**
+     * The wire contract with the daemon (`SessionInfo` in `crates/protocol`, pinned
+     * on the Rust side by `rpc.rs` and `remote_integration.rs`): the session-layer
+     * name is `keeperName`. A row carrying only the retired key reads as having no
+     * name, so it is not attachable, rather than being silently accepted.
+     */
+    @Test
+    fun `the session layer name is keeperName on the wire`() {
+        val sessions = parse("""{"sessions":[
+            {"id":"a","kind":"shell","title":"t","cwd":"/x","status":"running","keeperName":"ldmux-a","createdBy":"local"},
+            {"id":"b","kind":"shell","title":"t","cwd":"/y","status":"running","tmuxName":"ldmux-b","createdBy":"local"}
+        ]}""")
+        assertEquals("ldmux-a", sessions.first { it.id == "a" }.keeperName)
+        assertTrue(sessions.first { it.id == "a" }.attachable)
+        assertEquals("", sessions.first { it.id == "b" }.keeperName)
+        assertTrue(!sessions.first { it.id == "b" }.attachable)
     }
 
     @Test

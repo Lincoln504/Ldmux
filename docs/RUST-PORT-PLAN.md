@@ -1,5 +1,13 @@
 # ldmux Rust Port Plan — tmux removed, session layer becomes ours
 
+> **Historical plan (2026-10-05 banner).** This is the plan that removed tmux. tmux
+> is now removed from the software entirely, not only the runtime: the wire field
+> `tmuxName` is `keeperName` (and `tmuxSocket` is `keeperSocket`), `paneInMode` and
+> the `copymode` message are gone, `LDMUX_TMUX_NAME`/`LDMUX_TMUX_SOCK` are no longer
+> set, and §3.11's parity gate runs against committed goldens with no tmux at test
+> time (see §3.11 below and the commit that removed the semantics). Every other
+> tmux mention here describes the design being replaced.
+
 **Created:** 2026-09-27
 **Revised:** 2026-09-28 — tmux removal added after full investigation (this is the
 operative version; the original "keep tmux" plan is superseded); 2026-09-28 audit —
@@ -469,21 +477,29 @@ and no parser of an unversioned text format**.
 
 The client replays snapshot text into its emulator. Today that text is tmux's;
 tomorrow it is our render. The client's bytes-in must produce the same screen.
-The harness (built **before** any deletion, run against a live tmux server, then
-kept as a CI golden suite):
+**As built (2026-10-05): a committed golden corpus, no tmux at test time.** The
+harness was first run against a live tmux server (the reference), and its output
+is now committed as goldens that run in the normal gate:
 
-1. Scripted corpus: SGR (16/256/truecolor, all attributes), wide chars + emoji
-   (grapheme boundaries), alt-screen programs (micro/vim/htop), wrap + pending-wrap
-   rows, blank-cell rows (the `micro` 45/34/47-column measurement), OSC 8 links,
-   scroll + history paging (`-S -N -E -` at several N), cursor positions, modes
-   (bracketed paste, app cursor, mouse SGR).
-2. For each: same input bytes → (a) real tmux `capture-pane -p -e -N` (+ `-J`
-   for the text path) and state via `display-message`; (b) our keeper render +
-   `State`. **Byte-diff.** Any divergence is a defect with a reproducer.
-3. The one known suspect: full-width padding semantics on rows the engine treats
-   as short. If the engine's formatter cannot emit `-N`-identical rows, we emit
-   the format ourselves from the cell iterators (the cells are the source of
-   truth; the format is ours).
+1. Corpus (`crates/daemon/tests/parity/NN-name.bin`): basic SGR, every attribute,
+   16/256/truecolor, wide chars + emoji + combining marks, wrap, OSC 8, and scroll
+   (40 lines into 24 rows). Not yet in the corpus: alt-screen programs, cursor
+   positioning, terminal modes, and `-S -N -E -` history paging — those are pinned
+   by the keeper/snapshot tests, not by the golden. Overline (SGR 53) is excluded
+   because tmux 3.5a mis-serialises it (`ESC[5:3m`).
+2. Goldens (`NN-name.capture`): what tmux 3.5a showed for the same bytes,
+   `capture-pane -p -e -N`, captured 2026-10-05 by `scripts/regen_parity_golden.sh`
+   (the generator; manual, needs tmux, never run by `cargo test`).
+3. `crates/daemon/tests/parity.rs::golden_corpus_cells_match_the_reference_grids`
+   decodes each golden (`tests/sgrep`) and compares it **cell by cell** with our
+   engine's grid. The gate is on the cells, not the SGR bytes (the format is
+   ours); the format half is `round_trip_render_then_parse_is_identity`.
+   Provenance and regeneration: `crates/daemon/tests/parity/README.md`.
+
+The original plan text (byte-diff against a live tmux, kept for the record):
+the harness would be built before any deletion and run against a live tmux server,
+byte-diffing `capture-pane -p -e -N` against the keeper render; the cells are the
+source of truth and the format is ours.
 
 ### 3.12 New risks, honestly ranked
 

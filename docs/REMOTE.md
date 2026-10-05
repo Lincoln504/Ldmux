@@ -8,14 +8,15 @@
 
 How a phone (or any remote client) reaches ldmux. Implements ADR-0016 (direct
 tailnet bind) and ADR-0017 (QR pairing) on top of the one canonical frame format
-(`frames.ts`) and the control-mode stream (`stream.ts`).
+(`crates/protocol/src/frames.rs`) and the keeper-backed pane stream
+(`crates/daemon/src/stream.rs`).
 
 ## Topology
 
 ```
 phone ──Tailscale (WireGuard)── ws://100.127.119.54:7625/ws ──▶ ldmuxd
                                                                   │
-                                                        tmux -L ldmux
+                                                         ldmux-keeper
 ```
 
 - The daemon listens on **its tailnet address or loopback, and nothing else**
@@ -69,9 +70,8 @@ Client → server (JSON):
 | `{type:"ping",id?}` | liveness; server replies `{type:"pong",id?}` |
 | `{type:"hello",device}` | identify the device (id, name, kind); identity, not authentication (ADR-0010) |
 | `{type:"attach",sessionId,cols?,rows?,takeover?}` | subscribe this connection to a session; a shell held by another device is refused with `owned` unless `takeover` |
-| `{type:"resize",cols,rows}` | the client's grid changed; tmux is resized and a fresh snapshot follows |
+| `{type:"resize",cols,rows}` | the client's grid changed; the session's pty is resized and a fresh snapshot follows |
 | `{type:"mouseclick",col,row}` | a tap in a pane whose program enabled SGR mouse reporting |
-| `{type:"copymode",on}` | accepted and ignored: there is no tmux copy-mode, the client scrolls its own buffer |
 | `{type:"input",data}` | type literal text into the pane |
 | `{type:"key",keys:["Enter"]}` | send named keys |
 | `{type:"follow",mode}` | scroll intent; **client-owned** (ADR-0004) |
@@ -114,41 +114,35 @@ closes; the client reconnects and re-attaches, receiving a fresh snapshot. If
 the control stream dies, subscribers get `error{code:"resync"}` and the stream
 reconnects with bounded backoff (`stream.ts`).
 
-Writes (`input`, `key`, `mouseclick`, `copymode`) are the holder's only; from
+Writes (`input`, `key`, `mouseclick`) are the holder's only; from
 any other device they get `error{code:"not_holder"}`.
 
 Inbound payloads are capped: 16 KiB of `input` data (a typed paste), 32 keys per
 `key` message, and 64 KiB per WebSocket frame.
 
-### Paused panes (`%pause`)
+### Backpressure and resync
 
-tmux pauses a pane whose output is not being consumed (`refresh-client -f
-pause-after=2`). A paused pane's **queued output is discarded**, so the server
-treats `%pause` as a resync point: subscribers receive `error{code:"resync"}`
-(throttled to once a second) and the client re-attaches for a fresh snapshot.
-The server then resumes the pane with `refresh-client -A <pane>:continue`
-(throttled per pane).
+The keeper always reads the pty (the kernel buffer never fills) and holds at
+most 4 MiB of unread output per session; if a session is unwatched past that,
+the oldest output is dropped and the next poll reports it as lost. A connection
+that is more than 64 KiB behind the link is not buffered for: subscribers
+receive `error{code:"resync"}` once per backlog and the client re-attaches for a
+fresh snapshot. A subscriber is never silenced for the volume of output alone.
 
-### Stream modes
+### Streams
 
-A stream is in one of two modes:
-
-| mode | how output is produced | when |
-| --- | --- | --- |
-| `control` | `tmux -C` notifications (lowest latency, exact bytes) | normally |
-| `polling` | `capture-pane` at ~250 ms, diffed row-wise | when control mode cannot be established (3 failed reconnects) |
-
-Polling is a fallback, not a peer: it has no VT model, so it rewrites changed
-rows in place and repaints only when the row count changes. Control mode is
-retried every 30 s while polling. The selected mode is internal — the wire
-protocol is identical either way.
+A stream is one keeper session viewed by any number of connections: the daemon
+polls the keeper's `Peek`, fans the bytes out as binary `OUTPUT` frames
+(coalesced at 8 ms / 4 KiB), and a snapshot taken for an attach is cut at the
+same byte boundary as the live stream so no output is replayed or lost. There
+are no stream modes.
 
 ## Session listing
 
 `{type:"list"}` answers with `sessions[]`, each carrying `id`, `kind`, `title`
 (derived from the working directory when the record only has a default title),
-`cwd`, `status`, `keeperName`, and `lastActivityAt` (epoch ms, from tmux
-`session_activity` for terminal sessions) so a client can show an unread marker.
+`cwd`, `status`, `keeperName`, and `lastActivityAt` (epoch ms, the keeper's own
+per-session activity clock) so a client can show an unread marker.
 Listing is **read-only**: it reconciles without sweeping streams.
 
 ## Deliberately out of scope (v1)

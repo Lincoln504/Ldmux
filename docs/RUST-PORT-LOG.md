@@ -1,5 +1,13 @@
 # Rust port log
 
+> **Banner, 2026-10-05.** tmux is now fully removed from the software: the wire
+> field is `keeperName` (was `tmuxName`), `keeperSocket` (was `tmuxSocket`), `paneInMode`
+> and the `copymode` message are gone, and the parity gate uses committed goldens
+> (`crates/daemon/tests/parity/`). This record is not rewritten; every tmux name
+> below is as it was at the time it was written. See the log's 2026-10-05
+> "tmux semantics removed" entry.
+
+
 ## D4 — tmux and the TypeScript tree are gone (2026-10-04)
 
 The last deliberate step of the port, done at the user's direction ahead of the
@@ -1684,3 +1692,98 @@ loading the keeper changes needs `just restart-keeper`, which ends every shell.
 
 **Gate:** `cargo test --workspace` in `nix develop`: 288 passed, 0 failed, 1 ignored
 (`parity_corpus_cells_match_tmux`).
+
+---
+
+## tmux semantics removed from the software (2026-10-05)
+
+tmux was already gone from the runtime (D4). This change removes it from the
+names, the wire, the env, the tests and the docs. Commit `b34e040`
+(`refactor(protocol,daemon,mobile)!: remove tmux semantics …`) plus the docs
+commit that follows it on `port/rust`. **Not deployed**: the installed phone app
+must be rebuilt for the renamed field, and the live daemon is unchanged until
+`just install` + a daemon restart.
+
+### Wire diff (what the phone rebuild must match)
+
+| old | new | where |
+|---|---|---|
+| `SessionInfo.tmuxName` (JSON `"tmuxName"`) | `keeperName` | `crates/protocol/src/rpc.rs`, Kotlin `LdmuxClient.kt` `Session.keeperName` |
+| `SessionRecord.tmuxName` (registry file) | `keeperName` | same; the file is migrated, below |
+| `adopt` control param `tmuxName`; CLI `adopt <tmux-name>` | `keeperName`; `adopt <keeper-name>` | `daemon.rs`, `bin/ldmux.rs` |
+| `ping`/remote info `tmuxSocket` | `keeperSocket` | `daemon.rs`, `protocol/src/socket.rs` |
+| `snapshot`/`caps` field `paneInMode` | removed (was always `false`) | `protocol/messages.rs`, `keeper.rs`, `remote.rs`, Kotlin `AttachClient.kt` |
+| client message `copymode {on}` | removed | `messages.rs` (`CopyMode`, `COPY_MODE`), `remote.rs` handler + `WRITES` |
+| spawn env `LDMUX_TMUX_NAME`, `LDMUX_TMUX_SOCK` | removed (`LDMUX_SESSION_NAME`, `LDMUX_KEEPER_SOCK` stay) | `daemon.rs` `session_spawn_env` |
+
+Kotlin: `TerminalHandle.setCopyMode`/`inCopyMode` and `AttachClient.copyMode`
+deleted (no caller existed; grep before the change showed only the overrides).
+Pinned both sides: Rust `rpc.rs::session_record_omits_absent_exit_fields` and
+`remote_integration.rs` (the row has `keeperName` and no `tmuxName`); Kotlin
+`SessionsParseTest.the session layer name is keeperName on the wire`.
+
+### Key-name vocabulary — decision
+
+The universal tokens (`Enter`, `Tab`, `Escape`, `C-a`, `M-f`, arrows, `Home`,
+`End`, `F1`..) and the short coinages (`BSpace`, `DC`, `IC`, `PPage`, `NPage`,
+`BTab`) are **kept as the protocol's own vocabulary**: the installed client sends
+them, and `key_name_to_bytes` (`crates/daemon/src/stream.rs`) is the one table. Every
+comment that attributed the encoding to tmux was reworded (Rust and Kotlin).
+
+### Registry migration (live sessions survive)
+
+`Registry::load` (`crates/daemon/src/registry.rs`, `migrate_legacy_name_key`) renames
+a record's old key to `keeperName` once, then saves the file under the new key.
+`SessionRecord` has no serde alias; the old key is spelled in exactly one const.
+- Test: `a_registry_with_the_legacy_name_key_is_migrated_once` (both sessions kept,
+  file rewritten with `keeperName`, no old key, second load plain).
+- Real-data proof (2026-10-05): a copy of `/run/user/1000/ldmux/registry.json` (7
+  records, `grep -c tmuxName` = 7) loaded by a scratch `ldmuxd` (own
+  `LDMUX_STATE_DIR`, port 17999) gave `tmuxName` = 0, `keeperName` = 7 and all 7
+  listed (shown `dead` there only because the scratch keeper has no such shells).
+  Scratch daemon and its keeper (exact socket match) were removed; the live file
+  and the deployed keeper were not touched.
+
+### §3.11 parity gate: golden corpus, no tmux at test time
+
+`crates/daemon/tests/parity.rs::golden_corpus_cells_match_the_reference_grids`
+compares our engine's cells with committed goldens for 7 corpus files
+(`tests/parity/01-sgr-basic` … `07-scroll`: SGR, attributes, 16/256/RGB colours,
+wide + combining, wrap, OSC 8, scroll). Goldens were captured **once** from tmux
+3.5a on 2026-10-05 by `scripts/regen_parity_golden.sh` (documented in
+`tests/parity/README.md`; never run by `cargo test`). `sgrep` gained ANSI 16-colour
+codes, OSC skipping, wide-character spacers and combining marks. Mutating a
+golden makes each of the 7 cases fail (checked by hand for 03, 04, 05, 06, 07).
+The test is no longer `#[ignore]`d. SGR 53 (overline) is excluded: tmux 3.5a emits
+`ESC[5:3m` for it. `.gitattributes` marks the corpus `-text`: `core.autocrlf=input`
+here had turned the corpus's CRLF into LF in the index.
+
+### Other
+
+- `ldmux`'s `copy`, dead since the earlier audit, is gone from docs too.
+- Comments and docs: every remaining `tmux` hit under `crates/` and
+  `packages/mobile/composeApp` is gone except the registry migration key and its
+  test fixtures, the parity README/script/test header (provenance), and the test
+  that asserts no env var name contains it. Docs: SPEC, REMOTE, DESKTOP-INTEGRATION,
+  PREDICTIVE-ECHO, NATIVE-TERMINAL, README, mobile README, AGENTS, ADR-0018 and the
+  plan's §3.11 were rewritten where they described live behaviour; historical
+  records carry a dated banner (this log, the audit, the plan, STATE, TMUX-DEPENDENCY,
+  ADR-0014 §7).
+
+### Gate
+
+Rust: `cargo test --workspace` in `nix develop` = **291 passed, 0 failed, 0
+ignored**. Kotlin: `nix develop .#mobile --command bash -c 'cd packages/mobile &&
+./gradlew :composeApp:testDebugUnitTest --offline'` = 166 tests, **164 passed, 2
+failed** — `PairingTest` (both cases) fails at `PairingTest.kt:26` because it reads
+`../../crates/protocol/test/fixtures/pairing-links.json` relative to
+`packages/mobile/composeApp`, which resolves to a non-existent `packages/crates/…`
+(the fixture is at `crates/protocol/test/fixtures/`, three levels up). Not caused by
+this change (file untouched); left alone as out of scope.
+
+### Found, not fixed
+
+- `key_name_to_bytes` has no `M-<key>` / `M-C-<key>` / `C-[` / `C-?` / `C-@` / `C-\` /
+  `C-]` entries, but the mobile client sends them for Alt and punctuation-Ctrl
+  chords (`Modifiers.kt`). The daemon answers `unknown key name`, so those chords do
+  nothing on the phone. Predates this change.

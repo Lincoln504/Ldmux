@@ -2,14 +2,14 @@
 
 > **Partly historical (2026-10-04, D4).** The i3 rules, the workspace choice and the
 > ownership handover are still the design. The *mechanism* is not: there is no
-> shim script and no tmux client — a desk window is
+> shim script and no multiplexer client — a desk window is
 > `alacritty -e ldmuxd attach <id>`, a protocol client. See `crates/attach` and
 > ADR-0018.
 
 
 The phone is not the only place an ldmux shell should be able to exist. The plan
 of record is that a shell opened from the phone can be *made live on the desktop*
-— a real terminal window attached to the same tmux session, on a workspace the
+— a real terminal window attached to the same keeper session, on a workspace the
 user picks — and that the launcher can show the workstation's workspaces, the
 windows in them, and the pi sessions with their directories.
 
@@ -26,7 +26,7 @@ IPC command string. It exists only in the config file. The runtime equivalent is
 `exec`, then a criteria-targeted move:
 
 ```
-i3-msg 'exec -- alacritty --class ldmux-live-<id> -e tmux -L <sock> attach -t <session>'
+i3-msg 'exec -- alacritty --class ldmux-live-<id> -e <abs ldmuxd> attach <id>'
 # poll `i3-msg -t get_tree` for window_properties.class == ldmux-live-<id> (~1-2 s)
 i3-msg '[class="ldmux-live-<id>"] move to workspace number <N>'
 ```
@@ -52,7 +52,7 @@ from a window to its process, use X11: `xprop -id <winid> _NET_WM_PID` (or
 **`xdotool windowactivate` switches the visible workspace.** Using it to give a
 window focus moved the desktop from workspace 10 to 6. It is therefore unusable
 for programmatic control here — and unnecessary: interact with the session
-through tmux (`send-keys`), because the desktop window is only a viewer of it.
+through the daemon (`ldmux send` / `ldmux key`), because the desktop window is only a viewer of it.
 
 **`i3 --get-socketpath` must be called, not read from the environment.** `$I3SOCK`
 is unset in a plain shell; the socket is
@@ -68,7 +68,7 @@ assumed present.
 There is no library that covers i3 + Sway + Hyprland + GNOME + KDE + XFCE.
 PyWinCtl, CrossMacro and `ydotool` are the wrong tools to reach for: the first
 two are input-automation (`/dev/uinput`) and do not enumerate or move windows at
-all, and input injection is not needed here — the phone drives the tmux session,
+all, and input injection is not needed here — the phone drives the keeper session,
 never the desktop's input. So the abstraction is ours, as a per-backend adapter
 with declared capabilities, so the UI can hide an action rather than lie about it:
 
@@ -110,16 +110,14 @@ i3-msg's success reply is a parse acknowledgement. What proved the window had
 actually been created was polling `get_tree` for the class — which is why
 `openLive()` reports "the window did not appear" instead of trusting the reply.
 
-**2. The tmux binary must be an absolute path.** A live window is launched
-*through the window manager*, which has the session's `PATH`, not the daemon's.
-A bare `tmux` there resolves to the system one — Debian's 3.5a, where the daemon
-runs the flake's pinned 3.7b (`just install`) — and a window on a different tmux than
-the server's is not guaranteed to work, so every launched client uses the daemon's
-own path.
-`resolveTmuxBin()` resolves the daemon's own binary once (honouring
-`LDMUX_TMUX_BIN`) and every spawn and every launched client uses that path.
+**2. The launched client must be an absolute path.** A live window is launched
+*through the window manager*, which has the session's `PATH`, not the daemon's
+(no `~/.local/bin`). A bare `ldmuxd` there is `not found` and the window closes
+the instant it opens — it happened twice. `live_argv` therefore uses the running
+daemon's own executable (`std::env::current_exe()`): the daemon *is* the attach
+client, and a test asserts the path is absolute.
 
-**3. A dead session has a tmux name, so it must be checked.** `requireTerminal()`
+**3. A dead session has a keeper name, so it must be checked.** `requireTerminal()`
 accepts any record with a non-empty `keeperName`, and a dead record keeps its name
 until it is pruned. Attaching to it fails and the window closes the instant it
 opens. `makeLive` refuses a session that is not `running`, with a reason.
@@ -139,15 +137,15 @@ only for shells that report it.
 
 ## Sessions must outlive the daemon — and do not, under `systemd-run`
 
-Measured: stopping the test daemon's transient unit killed **every session on the
-tmux server**. The sessions are not children of the daemon, but they are in its
-**cgroup**, and a systemd unit's default `KillMode=control-group` sends the
-signal to everything in the cgroup — including the tmux server, which daemonizes
-but cannot leave the cgroup it was started in.
+Measured: stopping the test daemon's transient unit killed **every session**.
+The sessions are not children of the daemon, but they are in its **cgroup**, and
+a systemd unit's default `KillMode=control-group` sends the signal to everything
+in the cgroup — including the keeper (the same held for the tmux server before
+it), which is detached but cannot leave the cgroup it was started in.
 
 This contradicts the stated design ("the daemon outlives every session"). The fix
 is a property of the unit, not the code: `KillMode=process`, so stopping the
-service stops the service and leaves the tmux server (and every shell in it)
+service stops the service and leaves the keeper (and every shell in it)
 alone. `deploy/ldmux.service` carries it with the reason written next to it.
 
 ## Opening a shell in an arbitrary directory

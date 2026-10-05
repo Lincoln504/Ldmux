@@ -193,7 +193,7 @@ without a device.
 The first working native slice (JNI shim + Compose Canvas) surfaced two
 non-obvious facts, both confirmed on a real device:
 
-1. **Snapshots need CR+LF.** `tmux capture-pane` separates rows with a bare LF.
+1. **Snapshots need CR+LF.** A screen dump separates rows with a bare LF (the tmux-era `capture-pane` did; the keeper's snapshot separates rows with CR+LF itself, and the client normalises either).
    A VT treats LF as a line feed only — the column is preserved — so feeding the
    raw snapshot to a fresh `libghostty-vt` terminal staircases the screen
    diagonally. The snapshot must be normalised to CR+LF first. (Live PTY output
@@ -215,7 +215,7 @@ frame).
    program that asked for the mouse, strip motion for a wrapping prompt, grid
    motion for a full-screen program. The click path was dead on device: a
    program that had *just* enabled mouse reporting still got arrow keys. The mode
-   flags the daemon reads from tmux (`#{mouse_any_flag}`, `#{mouse_sgr_flag}`) are
+   flags the daemon reports (mouse tracking, SGR mouse) are
    accurate but only arrive with a **snapshot**, so the client's copy was stale
    for as long as the user stayed attached. The emulator had already parsed the
    enabling escape sequence, so it can answer for free and immediately:

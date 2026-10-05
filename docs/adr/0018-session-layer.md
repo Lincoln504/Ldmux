@@ -44,14 +44,14 @@ Unix socket using the same message vocabulary it speaks to clients.
 - The daemon clamping a requested pane size is load-bearing, not defensive: the
   client's frame carries a selection's rows in one byte, so a pane above 255 rows
   silently wraps them (`protocol::MAX_PANE_ROWS`).
-- **Two names are kept although they are now false, both deliberate:**
-  - the registry field `keeperName` and the wire field `keeperSocket` — they are the
-    pairing/session contract with the installed app, and the app reads
-    `keeperName` to decide whether a session is attachable. Renaming them is a
-    protocol change, not a cleanup.
-  - `LDMUX_TMUX_NAME` / `LDMUX_TMUX_SOCK` in the spawn env, because a shell
-    profile written against the tmux era reads them. The truthful
-    `LDMUX_SESSION_NAME` and `LDMUX_KEEPER_SOCK` are set alongside.
+- **Amendment, 2026-10-05: the two tmux-era names were renamed, not kept.** The
+  first version of this ADR kept the registry/wire field `tmuxName` and the ping
+  field `tmuxSocket` (renaming them is a protocol change) and the spawn env
+  `LDMUX_TMUX_NAME` / `LDMUX_TMUX_SOCK` (a tmux-era shell profile might read
+  them). All four are gone: the fields are `keeperName` and `keeperSocket`
+  (the installed app must be rebuilt; the registry migrates the old key once on
+  load) and the env aliases are no longer set (nothing on the box read them). The
+  `paneInMode` snapshot flag and the `copymode` message went with them.
 - The keeper is a new single point of failure where tmux was. It is ~2k lines
   we own, with a crash policy documented in the plan (§6 risk tests).
 
@@ -60,9 +60,10 @@ Unix socket using the same message vocabulary it speaks to clients.
 - The keeper's own tests (`crates/keeper`) cover PTY allocation, supervision,
   reaping, the emulator task, and the socket.
 - The daemon's suite runs against a real keeper and against a fake keeper.
-- The snapshot-parity harness against tmux is kept, `#[ignore]`d, as the R1
-  evidence artifact: with tmux deleted there is nothing to compare against, and
-  the last green run is recorded in `docs/RUST-PORT-LOG.md`.
+- The snapshot-parity gate (R1) runs in the normal suite against committed
+  goldens (`crates/daemon/tests/parity/`, captured once from a reference
+  emulator on 2026-10-05; regenerate with `scripts/regen_parity_golden.sh`).
+  Originally it was an `#[ignore]`d harness against a live tmux.
 
 ## What this does not decide
 

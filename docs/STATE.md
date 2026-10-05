@@ -1,5 +1,11 @@
 # ldmux — State of the project
 
+> **Update, 2026-10-05 — tmux semantics are removed from the software.** The wire
+> field `tmuxName` is `keeperName` (and `tmuxSocket` is `keeperSocket`), `paneInMode`
+> and the `copymode` message are gone, and the parity gate uses committed
+> goldens. Every tmux reference below describes the 2026-09-26 system as it
+> stood. The installed phone app must be rebuilt for the renamed field.
+
 > **Update, 2026-10-04 — the daemon is now the Rust one.** The sections below
 > describe the TypeScript/tmux system as it stood on 2026-09-26 and are kept as
 > the record of how it was built; they are **no longer the deployed

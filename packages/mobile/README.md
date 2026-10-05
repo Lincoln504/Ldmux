@@ -35,7 +35,7 @@ frame) -> `TerminalFrame.decode` -> `TerminalPainter` -> Compose `Canvas`.
 
 Two things worth knowing (both live gotchas):
 
-- **A tmux `capture-pane` snapshot separates rows with a bare LF.** A VT treats
+- **A screen snapshot may separate rows with a bare LF.** A VT treats
   LF as a line feed only (column preserved), so a snapshot must be handed
   CR+LF or the screen staircases. `TerminalController` normalises it.
 - **The native row/cell iterators may skip trailing blank cells.** The encoder
@@ -82,32 +82,33 @@ The portable half of the shim has its own tests, which need no device at all:
 just native-test   # builds a host libghostty-vt once, then runs native/test_engine.c
 ```
 
-## A test daemon, and the two ways it lies
+## A test daemon, and the way it lies
 
-The daemon talks to tmux in control mode. A dev daemon started outside the
-devShell uses the **system tmux (3.5a)** while the server was created by the
-devShell's **3.7b**, and the two cannot talk: the daemon starts, listens, accepts
-a WebSocket and serves nothing at all. The app shows a healthy `link 20 ms`
-readout over a black screen, which is indistinguishable from a rendering bug.
-Run the dev daemon on the devShell's own `node` and `tmux`:
+The daemon talks to a **keeper** (`ldmux-keeper`) that it auto-spawns by name from
+`PATH`. A dev daemon started outside the devShell can pick up an *older installed
+keeper* from `~/.local/bin` than the daemon it was built with, and the two can
+disagree about the keeper protocol: the daemon starts, listens, accepts a
+WebSocket and serves a degraded answer. The app shows a healthy `link 20 ms`
+readout over a wrong screen, which is indistinguishable from a rendering bug.
+Run the dev daemon with the workspace's own binaries first on `PATH`, and a
+scratch state directory so it cannot touch the real sessions:
 
 ```bash
-# resolve once, then paste the store paths into the launcher script
-nix develop --command bash -c 'readlink -f "$(command -v node)" "$(command -v tmux)"'
+D=$(mktemp -d /tmp/ldmux-test-XXXX)
+LDMUX_STATE_DIR=$D LDMUX_TOKEN_FILE=$D/token LDMUX_REMOTE_PORT=7630 \
+  PATH="$PWD/target/debug:$PATH" target/debug/ldmuxd
 ```
 
-`nix develop` itself cannot be used as the launcher: it does not survive being
-backgrounded from an agent shell (`nix` is then not on the unit's `PATH` either).
-A transient user unit does survive, and is how the daemon runs in production too:
+A transient user unit also works and is how the daemon runs in production:
 
 ```bash
 systemd-run --user --unit=ldmux-test-daemon --collect /tmp/ldmux-test/run.sh
 journalctl --user -u ldmux-test-daemon -n 20 --no-pager
 ```
 
-One more trap, for inspecting that server: the system tmux cannot see it either,
-so every query has to go through the devShell —
-`nix develop --command bash -c 'tmux -L ldmux-test list-sessions'`.
+To inspect the scratch sessions, point the CLI at the same state directory:
+`LDMUX_STATE_DIR=$D target/debug/ldmux list`. When done, stop the daemon and kill
+only the keeper whose socket is `$D/keeper.sock` (never a broad `pkill`).
 
 ## Pointing it at a daemon
 
@@ -149,7 +150,7 @@ back when a shell opens (`HoldOrientation`, ADR-0011 amendment).
   `[menu]` on the first row and `[hide keyboard]` on the second, one row per key group.
 
 The terminal is resized to the viewport in both shapes: the client owns the geometry and
-the daemon sizes the tmux pane to the grid the surface can actually paint (ADR-0008).
+the daemon sizes the session's pty to the grid the surface can actually paint (ADR-0008).
 
 ### Typing
 
@@ -217,11 +218,11 @@ pointed.
 - [x] **No top bar**: a slim side panel carries back/forward between open
       shells, the extra keys, `+shell` and settings.
 - [x] Session list + `new`/`kill` over the daemon's WebSocket; one page per live
-      tmux session in a `HorizontalPager` (swipe, or the panel arrows).
+      session in a `HorizontalPager` (swipe, or the panel arrows).
 - [x] **Native terminal rendering**: libghostty-vt via JNI, Compose Canvas
       renderer, live attach stream, 1:1 with the pane. Verified on device.
 - [x] **Client-driven pane resize**: the phone's viewport is the authority;
-      the daemon clamps and runs `tmux resize-window`.
+      the daemon clamps it and resizes the keeper session.
 - [x] **Landscape/portrait by device rotation** in the shell view (ADR-0011), keyboard
       portrait-only and dismissable without moving the screen. The launcher and its
       dialogs hold portrait (ADR-0011 amendment).

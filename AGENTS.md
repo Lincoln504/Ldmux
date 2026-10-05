@@ -6,8 +6,8 @@ allocates them and supervises the shells, running one **libghostty-vt** terminal
 emulator per session — the same engine the mobile client renders with, so the
 snapshot and the client share one cell model.
 
-The implementation is **Rust**, in `crates/`. tmux is **gone**: the keeper is the
-session layer, and the TypeScript tree that preceded it was deleted at D4 (the
+The implementation is **Rust**, in `crates/`. The keeper is the
+session layer (there is no terminal multiplexer), and the TypeScript tree that preceded it was deleted at D4 (the
 history of that tree is in git; `docs/RUST-PORT-PLAN.md` and
 `docs/RUST-PORT-LOG.md` are the record of the port).
 
@@ -23,8 +23,8 @@ history of that tree is in git; `docs/RUST-PORT-PLAN.md` and
 the port and is kept.
 
 `docs/SPEC.md` is the authoritative design. `docs/adr/` is the decision record.
-`docs/RUST-PORT-PLAN.md` is the design of the session-layer replacement (the tmux
-ledger, the keeper topology, the snapshot-parity gate) and `docs/RUST-PORT-LOG.md`
+`docs/RUST-PORT-PLAN.md` is the design of the session-layer replacement (the
+keeper topology, the snapshot-parity gate) and `docs/RUST-PORT-LOG.md`
 is the findings + state record.
 
 ## Status
@@ -90,7 +90,7 @@ is the findings + state record.
   `motorola-edge-2024`.
 - i3 4.24 / X11 (`DISPLAY=:0.0`); workspaces `1..10` (`Mod+0` → `10`).
 - The flake pins the devShell toolchain (Node 26 + cargo/rustc, from
-  `flake.nix`). tmux is no longer in it.
+  `flake.nix`).
 - **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the
   unit: `deploy/` is the source of truth for both.
 - iOS builds need a macOS host.

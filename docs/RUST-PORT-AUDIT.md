@@ -1,5 +1,13 @@
 # RUST-PORT-AUDIT.md — the critical audit of the Rust port (2026-09-28)
 
+> **Banner, 2026-10-05.** tmux is now fully removed from the software: the wire
+> field is `keeperName` (was `tmuxName`), `keeperSocket` (was `tmuxSocket`), `paneInMode`
+> and the `copymode` message are gone, and the parity gate uses committed goldens
+> (`crates/daemon/tests/parity/`). This record is not rewritten; every tmux name
+> below is as it was at the time it was written. See the log's 2026-10-05
+> "tmux semantics removed" entry.
+
+
 > **Correction, 2026-10-04.** This audit's remote/stream findings were
 > incomplete: it recorded "M7 FIXED — attach sends full state" when the attach
 > reply was a `{type:"state"}` envelope the Kotlin client cannot read, and it

@@ -1,5 +1,8 @@
 # The tmux dependency
 
+> **2026-10-05:** the last tmux *names* in the software (`tmuxName`, `tmuxSocket`,
+> `paneInMode`, `copymode`, `LDMUX_TMUX_*`) were also removed; see the log entry.
+
 > **Closed — decided, done (2026-10-04, D4).** The second option in this document
 > won: the session layer is our own, `crates/keeper` (ADR-0018). tmux is not in
 > the flake, not in the deployment, and not in the repository any more. Nothing

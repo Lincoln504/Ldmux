@@ -166,6 +166,8 @@ mouse does. If it is not, a double-tap is a word selection. No deferral, no new 
 
 ## 7. What it means for the `copy` button
 
+> **Removed 2026-10-05.** The copy-mode toggle (and the `copymode` message and `paneInMode` flag it drove) no longer exist; nothing in the client called the toggle. This section is the record of the tmux-era reasoning.
+
 `copy` toggles tmux copy-mode, and its documented reason to exist is that it is the only
 way to look at the history of a **full-screen** program. That reason survives local
 selection, because a program on the alternate screen has no local scrollback to select

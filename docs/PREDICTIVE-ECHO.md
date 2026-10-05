@@ -1,7 +1,8 @@
 # Remote-terminal practice: input latency, echo prediction, and key encoding
 
-> **Note (2026-10-04, D4).** Unchanged in substance. Its tmux references are about
-> where the echo comes from, which is now the keeper's PTY rather than tmux's.
+> **Note (2026-10-05).** Unchanged in substance. The echo comes from the keeper's
+> PTY; the tmux wording was removed. (Where the doc records a tmux-era
+> measurement it is dated.)
 
 
 **Status:** research + design. Nothing in this document is implemented except
@@ -31,14 +32,13 @@ In rough order of value per unit of work:
 
 1. **Client-driven pane geometry** — the phone tells the server how big the
    screen is, the server resizes the pane. **Done** (`Resize` in
-   `packages/protocol/src/messages.ts`; `resizeWindow` in
-   `packages/daemon/src/tmux/control-plane.ts`).
+   the `resize` message; the keeper's `Resize`).
 2. **Key encoding on the client** — turn key events into the byte sequence the
    *application* expects, which depends on terminal modes the pane is in (cursor
    keys application mode, bracketed paste, mouse). **Deliberately not done, and
    now judged unnecessary for the prediction work** — see §5.1. We send literal
-   text as bytes (`input`) and named keys (`key`), and tmux encodes the named
-   keys with full knowledge of the pane's real modes, which is strictly more
+   text as bytes (`input`) and named keys (`key`), and the daemon encodes the named
+   keys (`key_name_to_bytes`), which is strictly more
    information than our snapshot carries.
 3. **Predictive local echo** — show the keystroke before the echo returns.
    **Not done**; design in §5.
@@ -128,7 +128,7 @@ correction if a zoom gesture is ever added.
 - Client → server: JSON `input {data}` (literal text) and `key {keys[]}` (named
   keys). Server → client: binary `Output` frames plus `snapshot` repaints.
 - We have **no** server-side echo delay. mosh's 50 ms is a property of SSP's
-  state-synchronisation model; adding an artificial delay to tmux's output would
+  state-synchronisation model; adding an artificial delay to the server's output would
   slow every other client and is not worth it. Our equivalent is to reconcile
   *after* the fact (§5.2).
 - We do have something mosh does not: a cheap, exact **full snapshot on demand**.
@@ -143,8 +143,8 @@ An earlier draft of this document proposed moving key encoding into the shared
 core as a prerequisite for prediction. On inspection that is the wrong call, for
 two reasons:
 
-- tmux's `send-keys` with a *name* (`Up`, `C-c`, `Escape`) is encoded by tmux
-  against the pane's **real** current modes. Our snapshot carries `appCursor`
+- A key *name* (`Up`, `C-c`, `Escape`) is encoded by the daemon, which owns
+  the live pane (the keeper's emulator), not by a client working from a snapshot. Our snapshot carries `appCursor`
   and `bracketedPaste` but not the whole truth, so a client-side encoder would
   be encoding from stale, partial state and would be *less* correct, not more.
 - Prediction needs the **exact bytes** it is guessing ahead with. Our protocol
@@ -231,7 +231,7 @@ scrollback lives in the engine.
 ## 6. Measuring it (so "feels fast" is falsifiable)
 
 A harness now exists: `scripts/measure_latency.ts` (`just latency <sid> [runs]`).
-It types a unique marker through the real path (client → daemon → tmux → pty →
+It types a unique marker through the real path (client → daemon → keeper → pty →
 shell echo → back) and reports the distribution.
 
 **Measured 2026-09-14, over `adb reverse` (loopback): p50 1.0 ms, p95 3.3 ms,
@@ -254,7 +254,7 @@ None of this is implemented; there is no latency harness yet.
 
 - **Password/echo-off detection — SOLVED, and better than expected.** An earlier
   draft proposed a timing heuristic (no echo in N ms ⇒ stop predicting) because
-  a tmux capture cannot show the remote's ECHO flag. That turns out to be
+  a plain screen capture cannot show the remote's ECHO flag. That turns out to be
   unnecessary: libghostty-vt's render state exposes
   `GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT` (`render.h:187-188`), i.e.
   the emulator *already knows* when the cursor is at a field that will not echo.

@@ -91,7 +91,7 @@ install: install-rust
     mv "$HOME/.local/bin/.ldmux-terminal.new" "$HOME/.local/bin/ldmux-terminal"
     install -m 644 deploy/ldmux.service "$HOME/.config/systemd/user/ldmux.service"
     systemctl --user daemon-reload
-    echo "installed ldmuxd, ldmux, ldmux-keeper and ldmux-terminal (tmux-free; D4 done)"
+    echo "installed ldmuxd, ldmux, ldmux-keeper and ldmux-terminal (D4 done)"
     echo "apply with: systemctl --user restart ldmux"
 
 # Build the Rust workspace (release) and install the binaries. The daemon
@@ -143,7 +143,7 @@ install-rust:
 # The keeper outlives the daemon, so nothing else replaces it and a deploy leaves
 # it running old code (see `install-rust`). Killing it is the only way to load new
 # keeper code, and it **ends every shell the keeper owns** — that is not a bug, it
-# is what a tmux-server restart means (plan R3). The daemon notices the dead
+# is the keeper's documented single point of failure (plan R3). The daemon notices the dead
 # socket on its next tick and auto-spawns the new binary.
 #
 # `pgrep -x` matches the process NAME exactly: `pkill -f` on a keeper path can

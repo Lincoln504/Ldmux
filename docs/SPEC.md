@@ -28,6 +28,18 @@
 >   geometry (§7), the scroll model (§7.4), the desktop mirror (§9) and the
 >   tailnet/security model (§10) stand, with the keeper in place of tmux.
 >
+> - **tmux is removed from the software, not just the runtime** (added
+>   2026-10-05). The wire/registry field `tmuxName` is `keeperName` and the
+>   ping/remote field `tmuxSocket` is `keeperSocket` (the installed phone app
+>   must be rebuilt: `SessionInfo.keeperName`). `paneInMode` is gone from
+>   `snapshot`/`caps`, the `copymode` message is gone (the client scrolls its own
+>   buffer), and `LDMUX_TMUX_NAME`/`LDMUX_TMUX_SOCK` are no longer set. A registry
+>   written with the old key is migrated once on load. The key-name vocabulary
+>   (`Enter`, `C-a`, `M-f`, `BSpace`, `DC`, ...) is the protocol's own, owned by
+>   the daemon's `key_name_to_bytes`. The §3.11 parity gate compares the engine
+>   against committed goldens (`crates/daemon/tests/parity/`), not a live tmux.
+>   Sections still describing the tmux design are marked **historical** below.
+>
 > The rest of this document is still the design of record for the transport,
 > geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime", any
 > extension reference as historical, and the orientation sections as superseded.
@@ -37,6 +49,8 @@
 **Author:** Lincoln Deen (with the pi coding agent)
 **Status:** Phases 1–3 implemented (see README Status). This document remains the authoritative design; where it describes a *target* API or behaviour that is not built, that is called out inline, and `AGENTS.md` plus the tests are the statement of what exists.
 
+> **Revision notes v0.2 and v0.3 are historical (tmux-era).**
+>
 > **Revision note (v0.2):** An adversarial architecture review found three blocker
 > issues and several high issues in v0.1. This revision fixes them: canonical tmux
 > geometry (no per-viewer resize), reason-branched pi session lifecycle, a PTY-free
@@ -55,9 +69,10 @@
 
 ## 0. TL;DR
 
-`ldmux` is a **tmux-native remote terminal system**:
+`ldmux` is a **keeper-native remote terminal system**:
 
-- A long-lived **daemon** owns a private `tmux` server and exposes it over the
+- A long-lived **daemon** talks to a **keeper** process that owns every PTY and
+  runs libghostty-vt per session, and exposes the sessions over the
   **tailnet** via a WebSocket API.
 - A **native mobile client**: a KMP + Compose Multiplatform Android app
   (`packages/mobile`) that renders the terminal itself — libghostty-vt behind a
@@ -67,17 +82,21 @@
   no longer what the app hosts (ADR-0007).
 - **No pi extension.** ldmux is not a pi plugin; `pi` is simply a program one can
   run in a session (see the status note above and ADR-0009).
-- A thin **CLI** and an optional desktop **alacritty mirror** round it out.
-- **tmux itself** provides persistence, multi-client attach, and synchronized
-  phone+desktop viewing.
+- A thin **CLI** and an optional desktop **alacritty window** round it out.
+- **The keeper** provides persistence (it outlives the daemon), multi-client
+  attach through the daemon's ownership model, and synchronized phone+desktop
+  viewing.
 
 The primary design goal is to fix the **mobile terminal UX** that made gmux
 painful (scroll jumping, session switching, modifier keys) while staying far
-simpler than gmux because it is tmux-native and pi-native.
+simpler than gmux because it is keeper-native and pi-native.
 
 ---
 
 ## 1. Background and intent
+
+> *§1 is the background as of v0.1 and names tmux as the intended backbone; it is
+> kept as the record of intent. The built system uses the keeper (ADR-0018).*
 
 ### 1.1 What exists today
 
@@ -125,7 +144,7 @@ Tailscale only, and far less functionality than dooboxes.
 
 ### 2.1 Goals
 
-1. **G1 — tmux-native.** Every session is a tmux session on a private socket.
+1. **G1 — keeper-native.** Every session is a PTY owned by the keeper, behind a private Unix socket. (Originally "tmux-native"; tmux was replaced by the keeper, ADR-0018.)
 2. **G2 — withdrawn.** The original goal was "pi extension first": ldmux
    available whenever a pi session is active, registering pi sessions. ldmux is
    not a pi plugin (ADR-0009). What survives is the part that was never really
@@ -139,8 +158,8 @@ Tailscale only, and far less functionality than dooboxes.
    line was left behind by ADR-0008.)*
 4. **G4 — Open shells/pi in any directory from the phone**, optionally mirrored
    live into a desktop `alacritty` window on a chosen i3 workspace.
-5. **G5 — Synchronized multi-view is a nice-to-have**, achieved via tmux
-   multi-client attach; if it complicates anything, degrade gracefully.
+5. **G5 — Synchronized multi-view is a nice-to-have**, achieved via the
+   daemon's multi-client attach; if it complicates anything, degrade gracefully.
 6. **G6 — Tailnet only.** Reachable only over Tailscale; token auth in addition to
    WireGuard.
 7. **G7 — Robust and simple.** Reconnect/resync, no scroll jumping, clean session
@@ -168,7 +187,7 @@ Tailscale only, and far less functionality than dooboxes.
 - No hosted relay, billing, Supabase, Centrifugo, Play Integrity.
 - No public internet exposure (no Funnel by default).
 - No adapter zoo; only **shell** and **pi** session kinds.
-- No arbitrary command-wrapping; `ldmux` starts tmux sessions.
+- No arbitrary command-wrapping; `ldmux` starts keeper sessions.
 - No synchronous live typing requirement.
 - No Windows/macOS server support in v1; Linux (this machine) first.
 
@@ -180,7 +199,7 @@ Tailscale only, and far less functionality than dooboxes.
 |----|-------------|
 | FR-1 | pi sessions are discoverable and controllable through `ldmux` (within a defined scope — see §4.6). |
 | FR-2 | **Dropped** — `ldmux` is not a pi extension (ADR-0009). The daemon is still "up and ready" independent of any client, which is what this requirement was for. |
-| FR-3 | The backend must be **tmux-based**. |
+| FR-3 | The backend must be a persistent session layer that outlives clients. (Originally "tmux-based"; now the keeper, ADR-0018.) |
 | FR-4 | Remote access is **Tailscale-only**. |
 | FR-5 | A **multi-platform mobile app** exists (KMP/Compose preferred). |
 | FR-6 | The mobile app is **landscape-only**. |
@@ -214,15 +233,15 @@ Tailscale only, and far less functionality than dooboxes.
  │  MOBILE APP   │        │        ldmuxd daemon          │     │  DESKTOP     │
  │ KMP/Compose   │◄──────►│  • pane stream + snapshots    │     │  MIRROR      │
  │ landscape     │  WS    │  • session registry (JSON)    │     │ alacritty -e │
- │ libghostty-vt │        │  • WS+HTTP over tailnet       │     │ tmux attach  │
+ │ libghostty-vt │        │  • WS+HTTP over tailnet       │     │ ldmuxd attach│
  │ Compose Canvas│        │  • spawn/kill/list sessions   │     └──────┬───────┘
- │ side panel    │        │  • optional i3 mirror helper  │            │
+ │ side panel    │        │  • optional i3 window helper  │            │
  └───────────────┘        └───────┬───────────────────────┘            │
-                                  │ tmux commands + pane stream        │
+                                  │ keeper protocol (Unix socket)      │
                           ┌───────▼───────────────────────┐           │
-                          │  tmux server (-L ldmux)       │◄──────────┘
-                          │  session: ldmux-<ulid>        │  (native multi-client attach)
-                          │    pane 0: bash | pi          │
+                          │  ldmux-keeper                 │◄──────────┘
+                          │  session: ldmux-<ulid>        │  (protocol client of the daemon)
+                          │    pty: bash | pi             │
                           └───────────────────────────────┘
 ```
 
@@ -230,10 +249,10 @@ Tailscale only, and far less functionality than dooboxes.
 
 | Component | Language | Role |
 |-----------|----------|------|
-| **`ldmuxd`** (daemon) | TypeScript on Node 26 (types stripped, no build step) | Owns the private tmux server; pane streaming + snapshots; session registry; WS+HTTP over tailnet; spawn/kill; optional i3 mirror helper. |
-| **`ldmux`** (CLI) | TypeScript on Node 26 | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `close`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write` and `copy`). Unix-socket local control. (`attach` is `tmux attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
+| **`ldmuxd`** (daemon) | Rust (`crates/daemon`) | Talks to the keeper; pane streaming + snapshots; session registry; WS over tailnet; spawn/kill; optional i3 window helper. |
+| **`ldmux`** (CLI) | Rust (`crates/daemon`, `bin/ldmux`) | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `close`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write`). Unix-socket local control. (`attach` is `ldmuxd attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
 | **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the launcher holds portrait and the shell view follows the device's rotation, while the app owns the keyboard — no flip button (ADR-0011 and its amendment); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
-| **Desktop mirror / live window** | shell + WM | `i3-msg exec -- alacritty --class ldmux-live-<id> -e <abs tmux> -L ldmux attach -t <name>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. See docs/DESKTOP-INTEGRATION.md. |
+| **Desktop mirror / live window** | shell + WM | `i3-msg exec -- alacritty --class ldmux-live-<id> -e <abs ldmuxd> attach <id>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. See docs/DESKTOP-INTEGRATION.md. |
 
 ### 4.3 Why the daemon is a separate process
 
@@ -246,33 +265,32 @@ the separation is unchanged.
 
 ### 4.4 Session model
 
-A **session** is one tmux session on the private socket `-L ldmux`.
+A **session** is one keeper session (a PTY and its shell) on the keeper socket.
 
 - **Kind:** `shell` (default `$SHELL`) or `pi` (command `pi`, optional args/prompt).
-- **Name:** human label; the tmux session name is a stable machine id
-  `ldmux-<ulid>` (decoupled because tmux names forbid some characters).
+- **Name:** human label; the keeper session name (`keeperName`) is a stable machine id
+  `ldmux-<ulid>`.
 - **cwd:** arbitrary directory (FR-10).
 - **Created-by / owner:** which pi session or client created it (families, phase 2).
 - **State:** `starting | running | attached | detached | dead`.
-- **Persistence:** tmux keeps the pane alive across disconnects. A shell that
-  exits ends its session (`remain-on-exit off`): the row goes, and a desk window
+- **Persistence:** the keeper keeps the pty alive across disconnects. A shell that
+  exits ends its session: the row goes, and a desk window
   on it closes. Exit-status capture is not built.
 
-**Pi sessions** are ordinary tmux sessions whose pane runs `pi`. Interactive `pi`
-is launched into tmux by the shell wrapper:
+**Pi sessions** are ordinary keeper sessions whose pty runs `pi`. Interactive `pi`
+is launched into a session by the shell wrapper:
 
 ```bash
 # ~/.bashrc (new)
 pi() {
-  [[ -n "$LDMUX" || -n "$TMUX" ]] && { command pi "$@"; return; }   # never nest
+  [[ -n "$LDMUX" ]] && { command pi "$@"; return; }   # never nest
   case "$1" in -p|--print|--mode|--version|-h|--help|update|install|remove|uninstall)
        command pi "$@"; return;; esac
   ldmux -- pi "$@"
 }
 ```
 
-**Child env contract** (injected by the keeper's `Spawn`, planned in plan §2.6 as
-what replaces the tmux server's option profile):
+**Child env contract** (injected by the keeper's `Spawn`, plan §2.6):
 
 | Var | Meaning |
 |-----|---------|
@@ -282,8 +300,7 @@ what replaces the tmux server's option profile):
 | `LDMUX_KIND` | `shell` \| `pi`. |
 | `LDMUX_SESSION_NAME` | the keeper session id (`ldmux-<session id>`). |
 | `LDMUX_KEEPER_SOCK` | the keeper's Unix socket path. |
-| `LDMUX_TMUX_NAME` | the same value as `LDMUX_SESSION_NAME`, kept because a shell profile written against the tmux era reads it. |
-| `LDMUX_TMUX_SOCK` | the same value as `LDMUX_KEEPER_SOCK`, kept for the same reason. Nothing here is a tmux server. |
+| `TERM` / `COLORTERM` | `xterm-256color` / `truecolor`: what the keeper's emulator is (set by the keeper and stated again in the daemon's spawn env). |
 
 `LDMUX_DAEMON_TOKEN` is **not** implemented: children reach the daemon through
 the Unix socket, whose 0600 permission plus a 0700 state dir is the boundary.
@@ -305,10 +322,10 @@ Honest v1 scope:
 
 1. **ldmux-created sessions** (via `ldmux --`, the wrapper, the extension, the CLI,
    or the mobile app): full terminal control. These are the primary case.
-2. **Opt-in adoption** of pre-existing tmux sessions: `ldmux adopt <tmux-session>`
+2. **Opt-in adoption** of keeper sessions the registry does not know: `ldmux adopt <keeper-session>`
    registers the session and opens a pane stream. Adoption is explicit, never
    automatic.
-3. **Bare, non-tmux `pi` processes** (started outside ldmux): **not
+3. **Bare `pi` processes** (started outside ldmux): **not
    terminal-attachable in v1.** They are only reachable via the §4.5 RPC driver
    (future). This is a stated limitation, not a bug.
 
@@ -322,17 +339,15 @@ under ldmux (`$LDMUX=1`).
 
 ### 5.1 Responsibilities
 
-1. Own/monitor a private tmux server (`-L ldmux` — a bare socket *name*, so
-   tmux places it in its own directory, `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/`;
-   ldmux never sets `TMUX_TMPDIR`).
-2. Maintain a compact **session registry** reconciled against `tmux list-*`.
+1. Supervise the keeper (auto-spawned, detached, outlives the daemon).
+2. Maintain a compact **session registry** reconciled against the keeper's `List`.
 3. **Stream** pane output (see ADR-0001) and provide **snapshots**.
-4. Accept **input** (`send-keys`).
+4. Accept **input** (`Write` to the keeper).
 5. Serve the **API** (Unix socket locally; TLS/WSS on the tailnet).
 6. Spawn/kill sessions in arbitrary cwds (FR-10).
 7. Optionally launch the desktop mirror (FR-11).
 8. Emit **events** for reactive UI (in-protocol; see §5.4).
-9. Clean up; never leak processes; never `kill-server` on exit.
+9. Clean up; never leak processes; never kill the keeper on exit.
 
 ### 5.2 tmux interaction model — **historical; the session layer is the keeper**
 
@@ -356,6 +371,8 @@ under ldmux (`$LDMUX=1`).
 > | `capture-pane -S/-E` scrollback paging | the emulator's scrollback, paged by the same `snapshot` message |
 > | `send-keys` / `refresh-client` | `Write` / `Resize` keeper messages |
 > | `window-size manual` (canonical geometry) | the claim hands the size over; `protocol::clamp_pane_size` bounds it |
+>
+> **Everything between here and §5.3 is that historical tmux design, kept as a record.**
 
 **Canonical geometry (ADR-0002).** tmux has **one window size per window**. If a
 viewing client influences sizing, every other client (including the desktop
@@ -437,13 +454,16 @@ may be re-enabled by the host (`ldmux clipboard-write on`, off by default).
 **Multi-pane scope (v1):** one window, one pane per session. The mobile context
 menu can split/create windows via `send-keys`/tmux commands, but the client tracks
 only the *active* pane; the pane poller follows `display-message -p '#{pane_id}'`.
+(Historical: the keeper has one pty per session and no windows or panes to split.)
 
 ### 5.3 Session registry
 
-**tmux is authoritative.** v1 keeps a **compact JSON state file**
-(`<stateDir>/registry.json`, where `<stateDir>` is `$LDMUX_STATE_DIR`, else
-`${XDG_RUNTIME_DIR}/ldmux`, else `/tmp/ldmux`) for metadata tmux does not
-hold (kind, title, pi-session id, created-by, last-seen). SQLite is **deferred**
+**The keeper is authoritative** for what is running. v1 keeps a **compact JSON
+state file** (`<stateDir>/registry.json`, where `<stateDir>` is `$LDMUX_STATE_DIR`,
+else `${XDG_RUNTIME_DIR}/ldmux`, else `/tmp/ldmux`) for metadata the keeper does
+not hold (kind, title, pi-session id, created-by, last-seen). A file written
+before 2026-10-05 stored the keeper name under a different key; `Registry::load`
+migrates it once and rewrites the file under `keeperName`. SQLite is **deferred**
 until a proven need (it was over-engineered in v0.1).
 
 Per-session record:
@@ -458,7 +478,7 @@ Per-session record:
 }
 ```
 
-Reconciliation on start and periodically: `tmux list-sessions` → upsert; drop
+Reconciliation on start and periodically: keeper `List` → upsert; drop
 records for vanished sessions; adopt survivors. Dead-but-retained sessions keep
 metadata + scrollback reference for replay.
 
@@ -480,7 +500,7 @@ proxy (ADR-0016; see §10).
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/health` | liveness + tmux reachable + version + transport mode |
+| GET | `/api/health` | liveness + keeper reachable + version + transport mode |
 | GET | `/api/sessions` | list (alive first, newest first) |
 | POST | `/api/sessions` | create `{kind, cwd, cmd?, title?, mirror?}` |
 | GET | `/api/sessions/:id` | detail |
@@ -498,16 +518,14 @@ helper suffices), and owner/families.
 
 ### 5.5 Lifecycle and robustness
 
-- **Reconcile on start:** tmux wins; registry is a cache.
-- **Crash-only design:** restart rebuilds from tmux + registry JSON.
+- **Reconcile on start:** the keeper wins; registry is a cache.
+- **Crash-only design:** restart rebuilds from the keeper + registry JSON.
 - **Idempotent startup:** `flock`; refuse to run twice.
-- **Graceful shutdown:** stop pollers, flush registry, leave tmux alive.
-- **No blocking calls:** every tmux CLI call is async (Node's `child_process`,
-  both pipes drained concurrently) so the daemon's single event loop is never
-  stalled on a child process, and each call is bounded: SIGTERM at 15 s, SIGKILL
-  at +2 s, and a hard deadline past both, so a wedged tmux cannot pin a request or
-  the per-connection handler queue. A bounded call returns exit code `-1`, which is
-  reported as *unknown* liveness, never as "no sessions".
+- **Graceful shutdown:** stop pollers, flush registry, leave the keeper alive.
+- **No blocking calls on the async runtime:** keeper socket I/O that can block
+  runs on `spawn_blocking`, and each external command (i3, alacritty) is bounded
+  by a timeout, so a wedged child cannot pin a request or the per-connection
+  handler queue. A timed-out call is reported as *unknown*, never as "no sessions".
 - **The per-connection queue is unbounded, and a client can starve itself with it.**
   Inbound messages run through `data.queue = data.queue.then(...)`, so ordering is
   guaranteed and nothing is dropped. The consequence is that a client which asks
@@ -564,7 +582,7 @@ Everything below is a JSON **text** message except the last line.
 
 Client → server: `hello {device}`, `attach {sessionId, cols?, rows?, takeover?}`,
 `resize {cols, rows}`, `input {data}`, `key {keys}`, `mouseclick {col, row}`,
-`copymode {on}`, `follow {mode}`, `scrollback {sessionId, lines?}`, `list`,
+`follow {mode}`, `scrollback {sessionId, lines?}`, `list`,
 `new {kind?, cwd?, title?}`, `kill {sessionId}`, `close {sessionId}`, `desktop`,
 `makelive {sessionId, workspace}`, `closelive {sessionId}`, `ping {id?}`.
 
@@ -585,15 +603,16 @@ Deliberately **cut** from the v0.1 draft: `HELLO`/`resumeToken`,
 
 `snapshot`/`caps` state fields (fixes v0.1's fidelity gap — the client replays
 bracketed-paste, application-cursor and opt-in mouse from them): `cols`, `rows`,
-`cursorX`, `cursorY`, `alternateOn`, `paneInMode`, `bracketedPaste`, `mouse`,
-`appCursor`, `historySize`, `snapshotEpoch`, sourced from
-`tmux display-message -p '#{cursor_x} #{cursor_y} #{alternate_on} #{pane_in_mode} …'`.
+`cursorX`, `cursorY`, `alternateOn`, `bracketedPaste`, `mouse`,
+`appCursor`, `historySize`, `snapshotEpoch`, read directly from the keeper's
+libghostty-vt state. (`paneInMode`, a tmux copy-mode flag, was removed
+2026-10-05.)
 
 ### 6.3 Connection lifecycle (snapshot-then-stream)
 
-**Reconnect = snapshot, then stream.** The live stream is tmux control-mode
-`%output`/`%extended-output` (ADR-0001). The v0.1 seq-window replay is **cut**:
-tmux persists, so replaying a bounded frame window adds cache/eviction/desync bugs
+**Reconnect = snapshot, then stream.** The live stream is the keeper's pane output
+(binary `OUTPUT` frames). The v0.1 seq-window replay is **cut**:
+the keeper persists, so replaying a bounded frame window adds cache/eviction/desync bugs
 for marginal benefit.
 
 1. Client → `attach {sessionId}` (the handshake is attach-triggered; there is no
@@ -609,16 +628,18 @@ for marginal benefit.
    the client's own reconnect loop. The app must be a **foreground service** so
    the heartbeat is not suspended (Android).
 
-Known fidelity gap: `capture-pane` + state fields does not restore every VT mode
-(`bracketedPaste` is empty before tmux 3.8, so it reads as false); the optional
-server-side VT emulator seam would close it.
+Fidelity: the snapshot is rendered from the keeper's own emulator (the same
+libghostty-vt the phone paints with), so the screen and the replayed terminal
+modes come from one source. (The tmux-era gap — `capture-pane` could not restore
+every VT mode — is closed.)
 
-### 6.4 tmux attachment discipline (desktop mirror)
+### 6.4 Desktop window discipline (desktop mirror)
 
-- The desktop mirror uses a **real `tmux attach`** (not the daemon's poller).
-- **Canonical geometry is pinned** (ADR-0002), so the mirror and phone share the
-  window without reflow fights.
-- The mirror defaults to **read-only** (`tmux attach -r`) so a desktop "watch"
+- The desktop window is `ldmuxd attach <id>`, a protocol client of the daemon
+  (plan §3.9), not a separate terminal-multiplexer client.
+- **Geometry** is handed over by the claim (ADR-0010), so the window and phone
+  never fight over the size.
+- The mirror defaults to **read-only** (`ldmuxd attach --readonly`) so a desktop "watch"
   pane does not fight the phone for input; "take control" is explicit.
 - **Split input** is therefore avoided by default.
 
@@ -639,7 +660,7 @@ server-side VT emulator seam would close it.
   "please rotate" state and still function if the system forces portrait.
 - **Control quarter** (FR-7): `controlsSide = left | right`, width 20–35%.
   - Session pager (live activity dot), extra-keys row(s), actions
-    (`＋ shell`, `＋ pi`, `↓ jump-to-bottom`, `⌘ keyboard`, `⧉ mirror`, `⧉ copy-mode`, `⋮ settings`).
+    (`＋ shell`, `＋ pi`, `↓ jump-to-bottom`, `⌘ keyboard`, `⧉ mirror`, `⋮ settings`).
 - One-tap collapse hides controls (terminal full width) behind a slim edge handle.
 
 ### 7.2 Session switching (swipe)
@@ -653,19 +674,16 @@ server-side VT emulator seam would close it.
 
 - Extra-keys bar always visible (FR-15); **sticky modifiers** built — Ctrl/Alt
   latch for exactly one following key. Every modified key — characters included
-  — is sent as a tmux key name (`C-a`, `M-f`, `M-C-Left`), so tmux encodes it
-  for the pane's mode: the C0 byte for a legacy program, CSI-u for one that
-  enabled extended keys (pi, Claude Code). A literal control byte is dropped by
-  tmux in that mode (measured, 3.7b), so the byte is never computed client-side.
-- **Copy-mode toggle** built, for scrolling full-screen apps (`vim`, `htop`) whose
-  history is not in any buffer — their screen is the alternate one, which has no
-  scrollback, so what scrolls is tmux's own view of the pane. The button shows the
-  *pane's* state, not the client's last request, because copy-mode also ends on
-  its own.
-- **The tmux prefix is a button with those actions** (split-right, split-down,
-  new-window, rename). The prefix keystroke itself cannot be sent: `send-keys C-b`
-  writes 0x02 into the pane, where the *program* reads it — a prefix is only a
-  prefix to a tmux client, and the client is the daemon.
+  — is sent as a protocol key name (`C-a`, `M-f`, `M-C-Left`), and the daemon's
+  `key_name_to_bytes` (`crates/daemon/src/stream.rs`) is the one place that turns
+  a name into bytes, so the client never computes an encoding. The key-name
+  vocabulary is the protocol's own (`Enter`, `Tab`, `BSpace`, `DC`, `IC`,
+  `PPage`, `NPage`, `C-<letter>`, ...); an unknown name is an error, never typed
+  into the shell.
+- **There is no copy-mode.** The client scrolls its own buffer, and a full-screen
+  app on the alternate screen has no scrollback to page through. (The tmux-era
+  copy-mode toggle, its `copymode` message and the `paneInMode` flag were removed
+  2026-10-05; nothing in the client called the toggle.)
 - Gestures: two-finger drag → scroll; pinch → font size, **per shell and not
   persisted** — it lives in the composition for as long as that shell is open,
   and the settings dialog's text size is the default a *new* shell starts at
@@ -715,12 +733,12 @@ which delivers the property this section exists for without needing a line ident
 to do it. The superseded description is left in ADR-0004 as the record of what was
 planned.
 - Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; the browser client that measured it was deleted)
-  with a configurable max; server-side tmux `history-limit` is **10,000** lines
-  (~40 MB/pane) and the `scrollback` message serves older pages on demand.
+  with a configurable max; the keeper's per-session scrollback is bounded by the emulator
+  (10,000 lines was the tmux-era figure, ~40 MB/pane) and the `scrollback` message serves older pages on demand.
 
 ### 7.5 Session list semantics (FR-9)
 
-- Live list = sessions whose tmux session exists and status ≠ `dead`.
+- Live list = sessions the keeper still has and status ≠ `dead`.
 - A separate, clearly-marked "ended (recent)" section retains scrollback.
 - On the `dead` event, the session leaves the live pager with a brief toast +
   "view last output."
@@ -731,8 +749,8 @@ planned.
 
 `POST /api/sessions {kind, cwd, cmd?, title?, mirror?}`:
 
-- `shell` → `tmux -L ldmux new-session -d -c <cwd> -s ldmux-<ulid>`.
-- `pi` → `tmux -L ldmux new-session -d -c <cwd> -s ldmux-<ulid> pi [--name …] [prompt]`.
+- `shell` → keeper `Spawn` with `cwd`, session name `ldmux-<ulid>`, the login shell.
+- `pi` → keeper `Spawn` with `command: ["pi", …]` (`[--name …] [prompt]`).
 - `cmd` → run that command instead (still a shell session).
 - `cwd` validated; `GET /api/dirs` powers the picker (recent dirs from registry).
 
@@ -749,7 +767,7 @@ planned.
    (`ldmux-mirror`) over `sleep`+`move` to avoid races; otherwise
    `i3-msg 'workspace <ws>'` + move.
 3. `alacritty --class ldmux-mirror --title "ldmux: <title>" -e \
-      tmux -L ldmux attach-session [-r] -t <keeperName>`
+      ldmuxd attach <id> [--readonly]`
 4. Record the container id via `i3-msg -t get_tree` + `jq` for later focus/close
    (a shell helper; no dedicated API in v1).
 
@@ -887,6 +905,7 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon), `ldmux-keeper` (auto-spawned).
 > port (`docs/RUST-PORT-PLAN.md`, `docs/RUST-PORT-LOG.md`), and the tmux/TS tree
 > was deleted at D4 (ADR-0018). Kept as the record of how the product was built;
 > `packages/**` paths below no longer exist.
+> (§§13–17 still use tmux-era wording; they are the historical record.)
 
 **Phase 0 — spec (this doc).**
 
@@ -919,7 +938,7 @@ ldmux is not a pi plugin.
   paging, unread markers, offline app shell. Since superseded by the native
   KMP/Compose client (ADR-0007): KMP scaffold, `AttachClient`, the
   libghostty-vt/Compose Canvas renderer (not a `TerminalSurface` WebView host —
-  that plan changed, see ADR-0007), copy-mode, and the new-shell dialog
+  that plan changed, see ADR-0007), and the new-shell dialog
   (`NewShellModal`, `Modal.kt`) are all in place. This section used to list
   these under "Remaining (target)".
 - **Still open, as far as this correction pass checked:** foreground service
@@ -939,17 +958,17 @@ ldmux is not a pi plugin.
 | ID | Risk / question | Mitigation |
 |----|-----------------|------------|
 | R1 | Scroll fidelity is hard. | ~~Explicit `following`/`anchored` client state machine from day one~~; **built as the emulator's own viewport, with the property tested** (§7.4 correction, 2026-09-27). |
-| R2 | Snapshot fidelity (cursor/modes/alt-screen/soft-wrap). | v1: `capture-pane -e` + state fields; document limits; phase-3 optional server-side VT emulator. |
-| R3 | tmux version differences (3.5a here). | Conformance tests; feature-detect; probe before freezing ADRs. |
-| R4 | Android background kill severs the WS. | Foreground service, wake lock, backoff + jitter, tmux persistence, resync on resume. |
+| R2 | Snapshot fidelity (cursor/modes/alt-screen/soft-wrap). | **Closed**: the snapshot is rendered from the keeper's libghostty-vt; gated by the §3.11 golden parity corpus. (Tmux-era mitigation was `capture-pane -e` + state fields.) |
+| R3 | ~~tmux version differences.~~ Moot: no tmux. | Replaced by the keeper as the single point of failure (plan R3). |
+| R4 | Android background kill severs the WS. | Foreground service, wake lock, backoff + jitter, keeper persistence, resync on resume. |
 | R5 | ~~WebView WebGL2 availability.~~ Moot: the shipped renderer is native Compose Canvas over libghostty-vt, not a WebView (ADR-0007) — this row is kept to record that the risk was real for the design it was written against, not because it still applies. | ~~Fallback to canvas/DOM; test on the real device.~~ |
-| R6 | tmux socket under `/tmp` / `TMUX_TMPDIR` nesting. | A bare `-L ldmux` name (no `TMUX_TMPDIR` override); unique per-run socket names in tests, and `killTmuxServer` also unlinks the socket file, which `kill-server` leaves behind when the server already exited. |
+| R6 | ~~tmux socket under `/tmp` / `TMUX_TMPDIR` nesting.~~ Moot: no tmux. | Tests use unique per-run keeper socket dirs and reap their keeper (`tests/common` `Reaper`). |
 | R7 | Split input with a desktop mirror. | Mirror read-only by default; explicit "take control". |
 | R8 | i3 placement races. | `for_window` rule keyed by `ldmux-mirror`. |
 | R9 | Token/identity security. | Tailnet-or-loopback bind and peer check (ADR-0016), WireGuard encryption, token `0600` (plaintext at rest; its directory is `0700`). No identity allow list or per-device tokens yet. |
 | R10 | Language choice. | TS/Bun v1 with a `PaneStream` seam to Rust. |
 | R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |
-| R12 | Control-mode parser robustness (octal, split UTF-8, sequence correlation). | Robust parser + tests; capture-pane fallback; tmux owns state. |
+| R12 | ~~Control-mode parser robustness.~~ Moot: the keeper protocol is our own framed JSON/binary. | Split-UTF-8 carry (`protocol::utf8::Utf8Carry`) and frame tests. |
 | R13 | iOS scope creep. | v1 = Android; iOS is a documented target. |
 | Q1 | Wrapper attaches interactively? | Recommend yes (gmux parity). |
 | Q2 | ~~serve vs direct bind~~ | **Resolved (ADR-0016): direct tailnet bind**, superseding ADR-0005's `tailscale serve`. |
@@ -972,12 +991,14 @@ ldmux is not a pi plugin.
   read-only by default.
 - Reconnect after an airplane-mode toggle resumes with correct screen and anchor.
 - `/new`, `/resume`, `/quit` do **not** cause false session-ended events.
-- No leaked tmux servers/processes after `ldmuxd` restart; tmux sessions survive.
+- No leaked processes after `ldmuxd` restart; the keeper and its sessions survive.
 - Reached only over Tailscale; token required; nothing bound publicly.
 
 ---
 
 ## 16. Appendix — key prior art
+
+> *Historical: prior art that informed the tmux-era design.*
 
 See [`INVESTIGATION.md`](INVESTIGATION.md) for citations. Summary: gmux (runner/
 daemon/web; scroll-anchor PR #500; two-gate Tailscale auth); dooboxes (tmux
@@ -990,6 +1011,8 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 ---
 
 ## 17. Architecture Decision Records
+
+> *ADR-0001 to ADR-0003 below record tmux-era decisions; ADR-0018 is the session layer that replaced them.*
 
 | ADR | Decision |
 |-----|----------|

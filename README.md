@@ -38,8 +38,8 @@ either. It is deliberately simple:
 | Doc | Purpose |
 |-----|---------|
 | [`docs/STATE.md`](docs/STATE.md) | **Where everything stands**: what is verified and how, what is open, what is not known. Start here. |
-| [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification (its tmux sections are historical). |
-| [`docs/RUST-PORT-PLAN.md`](docs/RUST-PORT-PLAN.md) | The Rust port + tmux-removal plan, and its crate map. |
+| [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification (its tmux-era sections are marked historical). |
+| [`docs/RUST-PORT-PLAN.md`](docs/RUST-PORT-PLAN.md) | The Rust port and session-layer replacement plan, and its crate map. |
 | [`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md) | The port's continuity record: what was done, what was found, what is open. |
 | [`docs/RUST-PORT-AUDIT.md`](docs/RUST-PORT-AUDIT.md) | The critical audit of the port. |
 | [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
@@ -48,7 +48,7 @@ either. It is deliberately simple:
 | [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
 | [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
-| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | Historical: the decision about how much of the session layer should be tmux's. Decided: none — closed 2026-10-04 (ADR-0018). |
+| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | Historical: the decision about how much of the session layer should be a multiplexer's. Decided: none — closed 2026-10-04 (ADR-0018). |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
 
@@ -82,7 +82,7 @@ just mobile-test             # the mobile tree's own TypeScript tests
 ```
 
 There is no TypeScript daemon any more: the tree was deleted at D4 (2026-10-04,
-[ADR-0018](docs/adr/0018-session-layer.md)) together with tmux. Node remains a
+[ADR-0018](docs/adr/0018-session-layer.md)) together with the previous session layer. Node remains a
 dev tool.
 
 ## Status

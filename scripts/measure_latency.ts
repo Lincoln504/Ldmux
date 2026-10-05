@@ -3,7 +3,7 @@
  *
  * The perceived-latency number that matters: how long after a keystroke does the
  * *echo* come back? The tty echoes a typed line immediately, so this measures
- * client -> daemon -> tmux -> pty -> shell -> back without waiting for command
+ * client -> daemon -> keeper -> pty -> shell -> back without waiting for command
  * execution. See docs/PREDICTIVE-ECHO.md §6.
  *
  *   node scripts/measure_latency.ts --session <id> [--runs 20]
