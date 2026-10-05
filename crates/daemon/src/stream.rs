@@ -252,7 +252,7 @@ impl PaneStream {
     pub fn send_key(&self, keys: &[&str]) -> Result<KeeperMessage, String> {
         let mut bytes: Vec<u8> = Vec::new();
         for key in keys {
-            bytes.extend(key_name_to_bytes(key));
+            bytes.extend(key_name_to_bytes(key)?);
         }
         let text = String::from_utf8(bytes).map_err(|e| format!("invalid key bytes: {e}"))?;
         self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
@@ -402,27 +402,41 @@ impl PaneStream {
 
 /// Convert a tmux key name to its byte sequence.
 ///
-/// The TS `sendKey` uses tmux's `send-keys`, which converts key names to the
-/// appropriate escape sequences / control bytes. This is the Rust equivalent.
-pub fn key_name_to_bytes(name: &str) -> Vec<u8> {
-    match name {
+/// The TS `sendKey` used tmux's `send-keys`, which converts key names to the
+/// appropriate escape sequences / control bytes. This is the Rust equivalent,
+/// and it has to answer with the names tmux *defines* — not the ones this file
+/// happens to prefer — because the clients were written against tmux and send
+/// tmux's names. The mobile sends `BSpace` for the backspace key, the table had
+/// only `Backspace`, and the fallback below typed the name into the shell: the
+/// phone's backspace inserted the literal text `BSpace`.
+///
+/// **An unknown name is an error, never text.** The old fallback sent the name
+/// as-is, so every name missing from the table became input to the user's shell,
+/// silently: a typo, or a key a client added, landed in the middle of their
+/// command line as words. Failing is the only safe answer — the caller can say
+/// so, and the shell never sees it.
+pub fn key_name_to_bytes(name: &str) -> Result<Vec<u8>, String> {
+    let bytes = match name {
         "Enter" => vec![0x0D],
         "Tab" => vec![0x09],
+        "BTab" => vec![0x1B, b'[', b'Z'],
         "Escape" => vec![0x1B],
-        "Backspace" => vec![0x7F],
+        // tmux's name, then this file's older alias: both are in the wire.
+        "BSpace" | "Backspace" => vec![0x7F],
         "Space" => vec![0x20],
         // Arrow keys
         "Up" => vec![0x1B, b'[', b'A'],
         "Down" => vec![0x1B, b'[', b'B'],
         "Right" => vec![0x1B, b'[', b'C'],
         "Left" => vec![0x1B, b'[', b'D'],
-        // Editing keys
+        // Editing keys: tmux's names first (`DC` and `IC` are what a client that
+        // was written against tmux sends), then the descriptive aliases.
         "Home" => vec![0x1B, b'[', b'H'],
         "End" => vec![0x1B, b'[', b'F'],
-        "PageUp" => vec![0x1B, b'[', b'5'],
-        "PageDown" => vec![0x1B, b'[', b'6'],
-        "Delete" => vec![0x1B, b'[', b'3'],
-        "Insert" => vec![0x1B, b'[', b'2', b'h'],
+        "PageUp" | "PPage" => vec![0x1B, b'[', b'5', b'~'],
+        "PageDown" | "NPage" => vec![0x1B, b'[', b'6', b'~'],
+        "Delete" | "DC" => vec![0x1B, b'[', b'3', b'~'],
+        "Insert" | "IC" => vec![0x1B, b'[', b'2', b'~'],
         // F-keys
         "F1" => vec![0x1B, b'O', b'P'],
         "F2" => vec![0x1B, b'O', b'Q'],
@@ -463,10 +477,70 @@ pub fn key_name_to_bytes(name: &str) -> Vec<u8> {
         "C-x" => vec![0x18],
         "C-y" => vec![0x19],
         "C-z" => vec![0x1A],
-        // Single character: send as-is
-        _ if name.len() == 1 => name.as_bytes().to_vec(),
-        // Unknown: send as-is (literal)
-        _ => name.as_bytes().to_vec(),
+        // Single character: the character itself.
+        _ if name.chars().count() == 1 => name.as_bytes().to_vec(),
+        // Anything else is a name this table does not know. Sending it as text
+        // would type the name into the user's shell, which is what `BSpace` did.
+        _ => return Err(format!("unknown key name: {name}")),
+    };
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod key_name_tests {
+    use super::key_name_to_bytes;
+
+    /// The names the **mobile client actually sends**. It was written against
+    /// tmux's vocabulary, so these are tmux's names, and the daemon's table had
+    /// `Backspace` where the phone sends `BSpace` — the phone's backspace typed
+    /// the word into the shell.
+    #[test]
+    fn the_names_a_client_sends_are_known() {
+        for (name, want) in [
+            ("BSpace", vec![0x7F]),
+            ("DC", vec![0x1B, b'[', b'3', b'~']),
+            ("IC", vec![0x1B, b'[', b'2', b'~']),
+            ("NPage", vec![0x1B, b'[', b'6', b'~']),
+            ("PPage", vec![0x1B, b'[', b'5', b'~']),
+            ("BTab", vec![0x1B, b'[', b'Z']),
+            ("Enter", vec![0x0D]),
+            ("Tab", vec![0x09]),
+            ("Escape", vec![0x1B]),
+            ("Space", vec![0x20]),
+            ("Up", vec![0x1B, b'[', b'A']),
+            ("Home", vec![0x1B, b'[', b'H']),
+            ("End", vec![0x1B, b'[', b'F']),
+            ("F12", vec![0x1B, b'[', b'2', b'4', b'~']),
+            ("C-r", vec![0x12]),
+            ("a", b"a".to_vec()),
+        ] {
+            assert_eq!(key_name_to_bytes(name).as_deref(), Ok(want.as_slice()), "{name}");
+        }
+    }
+
+    /// An unknown name must never become shell input. The old fallback sent the
+    /// name as-is, so a name missing from the table was typed into the user's
+    /// command line as words — silently, and in the middle of what they were
+    /// typing.
+    #[test]
+    fn an_unknown_name_is_refused_not_typed() {
+        for bad in ["BSpace2", "NotAKey", "C-A", "PageUp2", ""] {
+            assert!(
+                key_name_to_bytes(bad).is_err(),
+                "{bad:?} must be refused, not sent to the shell"
+            );
+        }
+    }
+
+    /// The descriptive aliases the older table used still work: both spellings
+    /// are on the wire.
+    #[test]
+    fn both_spellings_are_accepted() {
+        assert_eq!(key_name_to_bytes("Backspace"), key_name_to_bytes("BSpace"));
+        assert_eq!(key_name_to_bytes("Delete"), key_name_to_bytes("DC"));
+        assert_eq!(key_name_to_bytes("Insert"), key_name_to_bytes("IC"));
+        assert_eq!(key_name_to_bytes("PageUp"), key_name_to_bytes("PPage"));
+        assert_eq!(key_name_to_bytes("PageDown"), key_name_to_bytes("NPage"));
     }
 }
 

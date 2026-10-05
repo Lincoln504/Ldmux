@@ -318,6 +318,8 @@ where
                                 let _ = output.flush().await;
                             }
                             Some("owned") => {
+                                let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/attach-debug.log")
+                                    .and_then(|mut f| { use std::io::Write; writeln!(f, "GOT owned") });
                                 detached = true;
                                 let _ = output
                                     .write_all(b"\r\n  This shell is open on another device. Press Ctrl+R to take it back.\r\n")
@@ -368,6 +370,12 @@ where
                     break; // the window closed (EOF on our pty)
                 }
                 let bytes = &inbuf[..n];
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/attach-debug.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "read n={} detached={} first={:?}", n, detached,
+                                 bytes.first().copied())
+                    });
                 if detached {
                     // Only Ctrl+R is consent; any other byte is swallowed (so a
                     // stream of dictation cannot steal the shell back).

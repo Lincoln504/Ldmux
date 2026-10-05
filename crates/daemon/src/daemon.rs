@@ -888,7 +888,17 @@ impl LdmuxDaemon {
                 // Detect keeper death (plan §6): if the keeper is dead,
                 // respawn it and reconcile (mark all sessions dead).
                 self.ensure_keeper_alive().await?;
-                let sessions: Vec<SessionRecord> = self.registry.list();
+                // The **described** view, not the raw registry — the same answer
+                // the launcher and the phone get. Handing back the stored records
+                // instead gave two views of one fact that disagreed: a shell
+                // opened in `~/Documents/RCNT` is *stored* with the title `pi`,
+                // and only `session_title` turns that into `RCNT`, so `ldmux
+                // list` showed one name and the phone showed another. It also
+                // dropped `owner`, `process` and the live workspace, so the CLI
+                // could not show who holds a shell. The TS fixed this and said
+                // why; the port went back to the registry. One view, and it is
+                // the richer one.
+                let sessions = self.describe_sessions().await;
                 Ok(serde_json::json!({ "sessions": sessions }))
             }
             "new" => {
@@ -937,7 +947,9 @@ impl LdmuxDaemon {
                 if let Some(keys) = keys {
                     for k in keys {
                         let ks = k.as_str().unwrap_or("");
-                        input.extend(crate::stream::key_name_to_bytes(ks));
+                        // An unknown name is refused rather than typed into the
+                        // shell: see `key_name_to_bytes`.
+                        input.extend(crate::stream::key_name_to_bytes(ks)?);
                     }
                 }
                 let data = String::from_utf8(input).map_err(|e| format!("invalid input bytes: {e}"))?;
