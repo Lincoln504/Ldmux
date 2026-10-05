@@ -1815,3 +1815,90 @@ this change (file untouched); left alone as out of scope.
 - `PairingTest` fixture path fixed (`../../../crates/...`).
 - Gate: `cargo test --workspace` 295 passed / 0 failed / 0 ignored; Kotlin
   `testDebugUnitTest` 171 tests, 0 failures.
+
+---
+
+## Audit against the TypeScript daemon: three surfaces restored (2026-10-05)
+
+The port was audited surface by surface against `origin/main` (the TS tree): every
+CLI command and option, the RPC method set, the WS message types, the key-name
+vocabulary, and the desktop-window lifecycle. Two matched exactly — the RPC
+methods (identical minus the deliberately removed `copyMode`) and the wire
+messages — and three did not.
+
+### `ldmux shell` / `ldmux run` were not desk windows at all
+
+The TS `runAsDeskWindow` called `deskWindow`, which recorded the session in
+`liveWindows` and claimed it for the desktop, then ran the shim in the current
+terminal. The port created the session and ran `ldmuxd attach` directly, telling
+the daemon nothing. Three consequences, all measured live on 2026-10-05 with a
+scratch shell killed by closing its pty:
+
+- the session was not in the live-window map, so its `liveWorkspace` was absent
+  and the phone showed the **"no window" anomaly while a desk window filled with
+  that shell**;
+- with nobody holding it, `ldmux close` would end it rather than let go (the TS
+  claimed it to the desktop up front, so it was held);
+- the shell was still `running` 15 s after its terminal was gone — the orphan
+  case the lifecycle work exists to remove, with nothing left that could end it.
+
+`deskWindow` now takes `spawn` (default true) and `pid`. `spawn: false` records
+the window and claims the desktop **without launching anything**: the caller is
+the window. `ldmux shell`/`run` spawn the attach client with
+`desktop::attach_bin()` (it was a bare `ldmuxd`, which is only whatever `PATH`
+holds — the failure the absolute-path rule exists for), register the child's pid,
+then wait on it. The pid is `SessionRecord.livePid`, persisted, and
+`reconcile_live`/`rebuild_live_windows` ask the kernel (`/proc/<pid>`) about it
+instead of the window manager — the same rule the TS shim's `@ldmux_live_pid`
+gave, and the only answer available for a stock terminal. An in-place window with
+no pid is refused: it could never be seen to close, so its shell could never end.
+Tests: `an_in_place_desk_window_is_the_process_it_was_given`,
+`an_in_place_desk_window_without_a_process_is_refused`.
+
+`ldmux shell` also regained `--name` and `--cwd` and the reuse rule (a shell
+already in that directory is reused, because the directory is the identity and a
+title is not). Both flags were accepted and ignored.
+
+### `ldmux code` printed the link instead of a QR code
+
+`crates/daemon/src/qr.rs` (a 400-line encoder + terminal renderer) and
+`crates/daemon/src/pairing.rs` (the listen-address validation ADR-0016/ADR-0017
+require) were wired to **nothing but their own tests**: the CLI hand-built
+`ldmux://host:port?token=…` and printed that for both `code` and `pair`. So the
+one output meant to connect a phone had nothing to scan, and a daemon listening
+on loopback or with its WebSocket down produced a link that goes nowhere instead
+of the message saying what to set.
+
+`code` and `pair` now go through `pairing_for` and print
+`pairing::code_text` (the QR block, then the machine's name and address) and the
+link respectively; the refusal exits 1 and names `LDMUX_REMOTE_HOST`. Tests:
+`code_text_is_a_qr_block_and_what_it_is_for`,
+`code_text_refuses_a_daemon_a_phone_cannot_reach`, and the CLI test
+`cli_code_and_pair_refuse_a_daemon_a_phone_cannot_reach` (the TS
+`cli.test.ts` case, ported).
+
+### `ldmux mirror` accepted `--rw`, `--workspace` and `--terminal`, and ignored all three
+
+It spawned the argv and returned, with no output and no error path, so a failure
+was silent. It now honours all three (read-only unless `--rw`, default workspace
+`10`, terminal from `--terminal`/`LDMUX_TERMINAL`/`alacritty`), reports
+`mirror of <name> on workspace <N>`, and exits 1 with the reason when the window
+cannot be opened. The window class is per session
+(`ldmux-mirror-<id>`, was a fixed `ldmux-mirror`) because placement moves a
+window by class and two mirrors would otherwise move each other. Placement is
+exec-then-move-by-class, not the TS's `workspace number N` first — that moved the
+user's view, which the project's own rule forbids.
+
+### Smaller
+
+- `ldmux desktop --json` printed the human format. The flag was read with the
+  value-taking helper, which reads the *next* argument, so `--json` as the last
+  argument never matched. (The TS had the same bug: `flag(rest, "--json")`.)
+  Test `cli_desktop_json_is_json`.
+- `desktop.rs` carried two doc comments left over from the deleted shim
+  (`open_live` had "Launch a session's live window…" merged into its own, and the
+  shim's "Write a session's live-window shim…" had become `close_live`'s), and
+  `live_argv`'s doc claimed `ldmuxd` is "resolved on PATH" while the code returns
+  an absolute path.
+- `now_ms` existed twelve times in the daemon with nine panicking `unwrap()`s;
+  one non-panicking definition now.

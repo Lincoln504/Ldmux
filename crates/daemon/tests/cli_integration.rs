@@ -172,3 +172,90 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     drop(fk);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ldmux code` and `ldmux pair` must refuse a daemon a phone cannot reach, and
+/// say what to set, rather than printing a link that goes nowhere. The port
+/// printed the bare link and exited 0 for both, ignoring the listen address
+/// entirely — the TS threw here, and printed a QR for `code` (the one output
+/// meant to connect a phone).
+#[tokio::test]
+async fn cli_code_and_pair_refuse_a_daemon_a_phone_cannot_reach() {
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+    let fk_serve = fk.clone();
+    let fk_sock = keeper_sock.clone();
+    tokio::spawn(async move {
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+    });
+    wait_socket(&keeper_sock).await;
+
+    ensure_cli_built();
+
+    // Loopback, which is exactly the case a phone cannot use. Port 0 lets the OS
+    // pick: the address is what the refusal is about.
+    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent")).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        "0123456789abcdef".repeat(4),
+    );
+    let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+
+    for verb in ["code", "pair"] {
+        let (code, out, err) = run_cli(&[verb], &dir.to_string_lossy()).await;
+        assert_eq!(code, 1, "{verb} must refuse: out={out} err={err}");
+        assert!(
+            err.contains("LDMUX_REMOTE_HOST"),
+            "{verb} must say what to set: {err}"
+        );
+        assert!(out.is_empty(), "{verb} printed a link anyway: {out}");
+    }
+
+    drop(fk);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ldmux desktop --json` must print JSON. It checked for the flag with the
+/// value-taking helper, which reads the *next* argument, so `--json` as the last
+/// argument never matched and the human format came out instead.
+#[tokio::test]
+async fn cli_desktop_json_is_json() {
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+    let fk_serve = fk.clone();
+    let fk_sock = keeper_sock.clone();
+    tokio::spawn(async move {
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+    });
+    wait_socket(&keeper_sock).await;
+
+    ensure_cli_built();
+
+    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+
+    let (code, out, err) = run_cli(&["desktop", "--json"], &dir.to_string_lossy()).await;
+    assert_eq!(code, 0, "desktop --json failed: {out} {err}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}"));
+    assert!(parsed.get("wm").is_some(), "no wm in {parsed}");
+
+    // Without the flag it is the human format, which is not JSON.
+    let (code, out, _err) = run_cli(&["desktop"], &dir.to_string_lossy()).await;
+    assert_eq!(code, 0);
+    assert!(out.trim_start().starts_with("wm:"), "human format changed: {out}");
+
+    drop(fk);
+    let _ = std::fs::remove_dir_all(&dir);
+}

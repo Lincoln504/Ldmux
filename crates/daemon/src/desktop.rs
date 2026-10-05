@@ -23,13 +23,29 @@ pub fn is_shell_foreground(command: &str) -> bool {
 /// Derived from the session id, and sanitised: the class is interpolated into an
 /// i3 criterion (`[class="…"]`), so anything outside `[A-Za-z0-9_-]` has to go.
 pub fn live_window_class(session_id: &str) -> String {
+    window_class("ldmux-live-", session_id)
+}
+
+/// The i3 window class for a session's mirror window.
+///
+/// Per session, not one shared `ldmux-mirror`: placement moves a window by
+/// class, so two mirrors of two shells would otherwise be indistinguishable and
+/// the second one could move the first.
+pub fn mirror_window_class(session_id: &str) -> String {
+    window_class("ldmux-mirror-", session_id)
+}
+
+fn window_class(prefix: &str, session_id: &str) -> String {
     let safe: String = session_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(40)
         .collect();
-    format!("ldmux-live-{safe}")
+    format!("{prefix}{safe}")
 }
+
+/// The workspace `ldmux mirror` opens on when none is named (the TS constant).
+pub const DEFAULT_MIRROR_WORKSPACE: u32 = 10;
 
 /// An i3 workspace target, or None when the name could be i3 syntax.
 ///
@@ -74,8 +90,9 @@ fn terminal_from(value: Option<&str>) -> String {
 ///
 /// The window is a protocol client of the daemon (`ldmuxd attach <id>`), not a
 /// multiplexer client: it claims the shell (ADR-0010), streams the pane, and handles
-/// the handover. `ldmuxd` is resolved on PATH (the unit puts `~/.local/bin`
-/// first).
+/// the handover. The attach binary is absolute (see [attach_bin]), because a
+/// window is launched by `i3-msg exec`, whose environment has no `~/.local/bin`
+/// on `PATH`.
 pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
     vec![
         terminal.to_string(),
@@ -88,23 +105,26 @@ pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
     ]
 }
 
-/// The read-only mirror's argv: the same terminal and the same attach client, with
-/// no identity, so it holds nothing and cannot type.
+/// The mirror's argv: the same terminal and the same attach client, with no
+/// identity unless asked for one, so it holds nothing and cannot type.
 ///
 /// One definition of how a window is launched, so the mirror cannot drift from the
 /// desk window (it did: the CLI built this argv itself, with its own class name
 /// and its own idea of where the attach client is).
-pub fn mirror_argv(session_id: &str, terminal: &str) -> Vec<String> {
-    vec![
+pub fn mirror_argv(session_id: &str, terminal: &str, read_only: bool) -> Vec<String> {
+    let mut argv = vec![
         terminal.to_string(),
         "--class".to_string(),
-        "ldmux-mirror".to_string(),
+        mirror_window_class(session_id),
         "-e".to_string(),
         attach_bin(),
         "attach".to_string(),
         session_id.to_string(),
-        "--readonly".to_string(),
-    ]
+    ];
+    if read_only {
+        argv.push("--readonly".to_string());
+    }
+    argv
 }
 
 /// The absolute path to the attach client (`ldmuxd`).
@@ -217,12 +237,6 @@ pub struct LiveResult {
     pub detail: Option<String>,
 }
 
-/// Write a session's live-window shim and return what to run.
-///
-/// Written with mode 700 and overwritten on every make-live: it embeds the keeper
-/// socket and session name, so a stale copy is a window that attaches to the
-/// wrong thing, and a world-writable one is a command somebody else can
-/// replace.
 /// Close a session's live window, if it is open.
 ///
 /// i3 answers an unmatched criterion with success too, so this says "asked",
@@ -322,18 +336,43 @@ fn collect_live_ids(node: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Launch a session's live window and put it on a chosen workspace.
+/// Open a session's desk window, on a chosen workspace.
 ///
-/// The launch goes through `i3-msg exec` (which is how a window gets made at all
-/// under i3) but the *placement* is `place_live`, so the user's view never moves.
-/// Open a session's desk window.
+/// An empty workspace means "leave it where it opens": that is the `$mod+Return`
+/// case, which must not move the user's view. A non-empty one must be a real i3
+/// workspace name.
 ///
 /// The window runs the attach client, which speaks the daemon's own protocol
 /// (plan §3.9): no shim script, no state dir, no socket or binary parameters.
 pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, String> {
-    // An empty workspace means "leave it where it opens" (the current one):
-    // that is the desk-window case (`$mod+Return`), which must not move the
-    // user's view. A non-empty value must be a real i3 workspace name.
+    let argv = live_argv(session_id, &terminal());
+    open_window(&argv, &live_window_class(session_id), workspace).await
+}
+
+/// Open a session's mirror window: the same machinery with a different argv and
+/// class, read-only unless `ldmux mirror --rw` asked otherwise (read-only is not
+/// a joke: a mirror that holds the shell would take it from whoever is typing).
+pub async fn open_mirror(
+    session_id: &str,
+    workspace: &str,
+    read_only: bool,
+    terminal: &str,
+) -> Result<LiveResult, String> {
+    let argv = mirror_argv(session_id, terminal, read_only);
+    open_window(&argv, &mirror_window_class(session_id), workspace).await
+}
+
+/// Launch a window through i3 and put it on a chosen workspace.
+///
+/// The launch goes through `i3-msg exec` (which is how a window gets made at all
+/// under i3) but the *placement* is `place_class`, so the user's view never
+/// moves — which is what the TS did with `workspace number N; exec …`, and why
+/// the mirror used to drag the user to workspace 10.
+async fn open_window(
+    argv: &[String],
+    class: &str,
+    workspace: &str,
+) -> Result<LiveResult, String> {
     let target = match safe_workspace(workspace) {
         Some(t) => Some(t),
         None if workspace.trim().is_empty() => None,
@@ -342,7 +381,6 @@ pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, 
     if std::env::var("DISPLAY").is_err() {
         return Err("no DISPLAY (not an X11 session)".to_string());
     }
-    let argv = live_argv(session_id, &terminal());
     let exec_argv = live_exec_argv(&argv.iter().map(|s| s.as_str()).collect::<Vec<&str>>());
     let result = crate::exec::run(
         exec_argv.clone(),
@@ -353,7 +391,7 @@ pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, 
         return Err("i3-msg not available".to_string());
     }
     let placed = match &target {
-        Some(t) => place_live(session_id, t, 5000).await,
+        Some(t) => place_class(class, t, 5000).await,
         None => (true, None, Some("left on the current workspace".to_string())),
     };
     Ok(LiveResult {
@@ -365,11 +403,20 @@ pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, 
 }
 
 /// Place a session's live window on a chosen workspace.
+pub async fn place_live(
+    session_id: &str,
+    workspace: &str,
+    timeout_ms: u64,
+) -> (bool, Option<String>, Option<String>) {
+    place_class(&live_window_class(session_id), workspace, timeout_ms).await
+}
+
+/// Place a window on a chosen workspace, found by its class.
 ///
 /// Polls for the window rather than sleeping a guessed interval: a terminal can
 /// take a moment to map, and the move is a no-op until it exists.
-pub async fn place_live(
-    session_id: &str,
+async fn place_class(
+    class: &str,
     workspace: &str,
     timeout_ms: u64,
 ) -> (bool, Option<String>, Option<String>) {
@@ -380,7 +427,6 @@ pub async fn place_live(
     if std::env::var("DISPLAY").is_err() {
         return (false, None, Some("no DISPLAY (not an X11 session)".to_string()));
     }
-    let class = live_window_class(session_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
         if std::time::Instant::now() >= deadline {
@@ -392,7 +438,7 @@ pub async fn place_live(
         )
         .await;
         if result.code == 0 {
-            if let Some(window_id) = find_window_id_by_class(&result.out, &class) {
+            if let Some(window_id) = find_window_id_by_class(&result.out, class) {
                 let moved = crate::exec::run(
                     vec![
                         "i3-msg".to_string(),
@@ -497,13 +543,13 @@ mod tests {
     /// same attach client, `--readonly` so it holds nothing and cannot type.
     #[test]
     fn mirror_argv_runs_the_attach_client_read_only() {
-        let args = mirror_argv("abc123", "alacritty");
+        let args = mirror_argv("abc123", "alacritty", true);
         assert_eq!(
             args,
             vec![
                 "alacritty",
                 "--class",
-                "ldmux-mirror",
+                "ldmux-mirror-abc123",
                 "-e",
                 &attach_bin(),
                 "attach",
@@ -512,6 +558,21 @@ mod tests {
             ]
         );
         assert!(args[4].starts_with('/'), "the attach binary must be absolute: {}", args[4]);
+        // `--rw` is the same window without the read-only promise.
+        let rw = mirror_argv("abc123", "foot", false);
+        assert_eq!(rw[0], "foot");
+        assert!(!rw.contains(&"--readonly".to_string()), "{rw:?}");
+    }
+
+    /// Two mirrors of two shells are two different windows: placement moves a
+    /// window by class, so one shared name would let the second mirror move the
+    /// first.
+    #[test]
+    fn a_mirror_window_class_names_its_own_session() {
+        assert_eq!(mirror_window_class("abc123"), "ldmux-mirror-abc123");
+        assert_ne!(mirror_window_class("a"), mirror_window_class("b"));
+        // Same sanitising as the live class: the class goes into an i3 criterion.
+        assert_eq!(mirror_window_class("a\"b c"), "ldmux-mirror-abc");
     }
 
     /// One emulator name for every window, overridable, with a blank override

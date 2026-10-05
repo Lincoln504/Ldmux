@@ -50,6 +50,22 @@ async fn daemon_call<R: serde::Serialize, T: serde::de::DeserializeOwned>(
     ps::call(sock, method, params, 5000).await
 }
 
+/// This machine's name, for the pairing: what the app calls the host it is
+/// talking to. `os.hostname()` in the TS, and the kernel's own file is where
+/// that reads from.
+fn machine_hostname() -> String {
+    if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    match std::env::var("HOSTNAME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => "ldmux".to_string(),
+    }
+}
+
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
@@ -382,7 +398,7 @@ async fn main() {
             let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "desktop", &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
-                    if flag(rest, "--json").is_some() {
+                    if rest.iter().any(|a| a == "--json") {
                         println!("{}", serde_json::to_string_pretty(&v).unwrap());
                     } else {
                         let wm = v.get("wm").and_then(|t| t.as_str()).unwrap_or("unknown");
@@ -500,31 +516,44 @@ async fn main() {
                 }
             }
         }
-        "code" => {
+        "code" | "pair" => {
+            // The pairing for the address this daemon actually listens on, and
+            // the one place that knows how to validate it: a QR code the phone
+            // can scan (`code`), or the same pairing as a link (`pair`). Both
+            // refuse a daemon a phone cannot reach instead of printing a link
+            // that goes nowhere (the TS rule, ADR-0016/ADR-0017).
             let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
-            if let Err(e) = r {
-                eprintln!("ldmux: {e}");
-                std::process::exit(1);
+            let v = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("ldmux: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let info = ldmux_daemon::pairing::ListenInfo {
+                hostname: v.get("hostname").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                port: v.get("port").and_then(|t| t.as_u64()).unwrap_or(0) as u16,
+                token: v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                listening: v.get("listening").and_then(|t| t.as_bool()).unwrap_or(false),
+            };
+            let name = machine_hostname();
+            if cmd == "code" {
+                match ldmux_daemon::pairing::code_text(&info, &name) {
+                    Ok(text) => print!("{text}"),
+                    Err(problem) => {
+                        eprintln!("ldmux: {}", problem.message(&info.hostname));
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                match ldmux_daemon::pairing::pairing_for(&info, &name) {
+                    Ok((_pairing, link)) => println!("{link}"),
+                    Err(problem) => {
+                        eprintln!("ldmux: {}", problem.message(&info.hostname));
+                        std::process::exit(1);
+                    }
+                }
             }
-            let v = r.unwrap();
-            let host = v.get("hostname").and_then(|t| t.as_str()).unwrap_or("");
-            let port = v.get("port").and_then(|t| t.as_u64()).unwrap_or(0);
-            let token = v.get("token").and_then(|t| t.as_str()).unwrap_or("");
-            let link = format!("ldmux://{host}:{port}?token={token}");
-            println!("{link}");
-        }
-        "pair" => {
-            let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
-            if let Err(e) = r {
-                eprintln!("ldmux: {e}");
-                std::process::exit(1);
-            }
-            let v = r.unwrap();
-            let host = v.get("hostname").and_then(|t| t.as_str()).unwrap_or("");
-            let port = v.get("port").and_then(|t| t.as_u64()).unwrap_or(0);
-            let token = v.get("token").and_then(|t| t.as_str()).unwrap_or("");
-            let link = format!("ldmux://{host}:{port}?token={token}");
-            println!("{link}");
         }
         "window" => {
             // Create a shell, then make it a desk window here (the daemon opens
@@ -568,42 +597,195 @@ async fn main() {
             }
         }
         "run" | "shell" => {
-            // Create a shell and attach this terminal to it (the desk window of
-            // plan §3.9), then wait. The attach client claims the shell.
-            let pos = positional(rest, &[]);
-            let kind = if cmd == "run" { pos.first().copied().unwrap_or("shell") } else { "shell" };
-            let cwd_idx = if cmd == "run" { 1 } else { 0 };
+            // `run <kind> [cwd]` creates a shell and becomes its desk window in
+            // this terminal. `shell [--name N] [--cwd DIR] [dir]` is the same
+            // for a shell, except that it reuses one already in that directory:
+            // running `ldmux shell` twice in one place is "get me back to it",
+            // not "give me a second one". The directory is the identity — a
+            // title is not stable, and matching on one made the whole rule dead
+            // once the phone titled a shell by its process name — so `--name` is
+            // the escape hatch for wanting a second one on purpose.
+            //
+            // This terminal *is* the window, so the daemon is told the window is
+            // the attach client's process (`spawn: false`, and the pid). Without
+            // that the daemon knows nothing about the window: the shell would
+            // report "no window" while it filled one, and closing the terminal
+            // would leave the shell running with nothing left to end it.
+            let pos = positional(rest, &["--name", "--cwd"]);
+            let (kind, positional_cwd) = if cmd == "run" {
+                (
+                    pos.first().copied().unwrap_or("shell").to_string(),
+                    pos.get(1).copied().map(|s| s.to_string()),
+                )
+            } else {
+                ("shell".to_string(), pos.first().copied().map(|s| s.to_string()))
+            };
             let cwd_default = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-            let cwd: &str = pos.get(cwd_idx).copied().unwrap_or(&cwd_default);
-            let created: Result<serde_json::Value, CallError> = daemon_call(
+            let want_cwd: String = flag(rest, "--cwd")
+                .map(|s| s.to_string())
+                .or(positional_cwd)
+                .unwrap_or(cwd_default);
+            let name = flag(rest, "--name").map(|s| s.to_string());
+
+            let mut reused: Option<String> = None;
+            if cmd == "shell" {
+                let listed: Result<serde_json::Value, CallError> =
+                    daemon_call(&sock, "list", &serde_json::json!({})).await;
+                match listed {
+                    Ok(v) => {
+                        let empty = Vec::new();
+                        let sessions = v.get("sessions").and_then(|s| s.as_array()).unwrap_or(&empty);
+                        for s in sessions {
+                            let is_shell = s.get("kind").and_then(|t| t.as_str()) == Some("shell");
+                            let alive = s.get("status").and_then(|t| t.as_str()) != Some("dead");
+                            let backed = s
+                                .get("keeperName")
+                                .and_then(|t| t.as_str())
+                                .map(|k| !k.is_empty())
+                                .unwrap_or(false);
+                            if !(is_shell && alive && backed) {
+                                continue;
+                            }
+                            let matches = match &name {
+                                Some(n) => {
+                                    s.get("title").and_then(|t| t.as_str()) == Some(n.as_str())
+                                }
+                                None => {
+                                    s.get("cwd").and_then(|t| t.as_str()) == Some(want_cwd.as_str())
+                                }
+                            };
+                            if matches {
+                                reused = s.get("id").and_then(|t| t.as_str()).map(|x| x.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("ldmux: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let id: String = match reused {
+                Some(id) => id,
+                None => {
+                    let created: Result<serde_json::Value, CallError> = daemon_call(
+                        &sock,
+                        "new",
+                        &serde_json::json!({
+                            "kind": kind,
+                            "cwd": want_cwd,
+                            "title": name,
+                            "createdBy": "local",
+                        }),
+                    )
+                    .await;
+                    match created {
+                        Ok(v) => v
+                            .get("session")
+                            .and_then(|s| s.get("id"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        Err(e) => {
+                            eprintln!("ldmux: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            };
+
+            // The attach client is the window, so it starts first and its pid is
+            // what the daemon records. An absolute binary: a bare `ldmuxd` is
+            // whatever `PATH` happens to hold.
+            let mut child = match std::process::Command::new(ldmux_daemon::desktop::attach_bin())
+                .args(["attach", &id])
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("ldmux: could not start the attach client: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let reg: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
-                "new",
-                &serde_json::json!({ "kind": kind, "cwd": cwd, "createdBy": "local" }),
+                "deskWindow",
+                &serde_json::json!({ "id": id, "spawn": false, "pid": child.id() as i32 }),
             )
             .await;
-            let id = match created {
+            let registered =
+                matches!(&reg, Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false));
+            if !registered {
+                let _ = child.kill();
+                let _ = child.wait();
+                match reg {
+                    Ok(v) => eprintln!(
+                        "ldmux: {}",
+                        v.get("detail")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("could not make a desk window")
+                    ),
+                    Err(e) => eprintln!("ldmux: {e}"),
+                }
+                std::process::exit(1);
+            }
+            let status = child.wait();
+            std::process::exit(status.ok().and_then(|s| s.code()).unwrap_or(1));
+        }
+        "mirror" => {
+            // A view of a shell's screen on a chosen workspace, in a chosen
+            // terminal, read-only unless `--rw`. The argv comes from the desktop
+            // seam, the one place that knows how a window is launched, and the
+            // placement is the same exec-then-move the desk window uses — the TS
+            // mirror ran `workspace number N` first, which dragged the user to
+            // workspace 10.
+            let pos = positional(rest, &["--workspace", "--terminal"]);
+            let id = pos.first().copied().unwrap_or("");
+            let listed: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "list", &serde_json::json!({})).await;
+            let keeper = match listed {
                 Ok(v) => v
-                    .get("session")
-                    .and_then(|s| s.get("id"))
+                    .get("sessions")
+                    .and_then(|s| s.as_array())
+                    .and_then(|a| {
+                        a.iter()
+                            .find(|s| s.get("id").and_then(|t| t.as_str()) == Some(id))
+                    })
+                    .and_then(|s| s.get("keeperName"))
                     .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                    .filter(|k| !k.is_empty())
+                    .map(|k| k.to_string()),
                 Err(e) => {
                     eprintln!("ldmux: {e}");
                     std::process::exit(1);
                 }
             };
-            let status = std::process::Command::new("ldmuxd").args(["attach", &id]).status();
-            std::process::exit(status.ok().and_then(|s| s.code()).unwrap_or(1));
-        }
-        "mirror" => {
-            // A read-only view: the attach client with no identity, so it holds
-            // nothing and cannot type. The argv comes from the desktop seam, which
-            // is the one place that knows how a window is launched.
-            let pos = positional(rest, &[]);
-            let id = pos.first().copied().unwrap_or("");
-            let argv = ldmux_daemon::desktop::mirror_argv(id, &ldmux_daemon::desktop::terminal());
-            let _ = std::process::Command::new(&argv[0]).args(&argv[1..]).spawn();
+            let Some(keeper) = keeper else {
+                eprintln!("ldmux: no terminal-backed session {id}");
+                std::process::exit(1);
+            };
+            let workspace = flag(rest, "--workspace")
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| ldmux_daemon::desktop::DEFAULT_MIRROR_WORKSPACE.to_string());
+            let terminal_name = flag(rest, "--terminal")
+                .map(|t| t.to_string())
+                .unwrap_or_else(ldmux_daemon::desktop::terminal);
+            let read_only = !rest.iter().any(|a| a == "--rw");
+            match ldmux_daemon::desktop::open_mirror(id, &workspace, read_only, &terminal_name).await {
+                Ok(lr) if lr.ok => println!("mirror of {keeper} on workspace {workspace}"),
+                Ok(lr) => {
+                    eprintln!(
+                        "ldmux: mirror not opened ({})",
+                        lr.detail.unwrap_or_else(|| "failed".to_string())
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("ldmux: mirror not opened ({e})");
+                    std::process::exit(1);
+                }
+            }
         }
         _ => {
             eprintln!("ldmux: unknown command {cmd}");

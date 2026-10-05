@@ -91,6 +91,20 @@ pub struct SessionRecord {
     /// rule will ever end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_workspace: Option<String>,
+
+    /// The process a desk window *is*, when the daemon did not launch it.
+    ///
+    /// `ldmux shell` and `ldmux run` become a desk window in the terminal they
+    /// were started from, so there is no window of ours to look for by class —
+    /// the terminal is a stock one. The window is open while this process is,
+    /// which the kernel answers exactly, and that is the same rule the
+    /// TypeScript shim's recorded pid gave. `None` for a window the daemon
+    /// opened through i3, which the window manager can be asked about.
+    ///
+    /// Persisted for the same reason as `live_workspace`: after a restart the
+    /// daemon must still know this shell has a window, or it ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_pid: Option<i32>,
 }
 
 /// A session as advertised to remote clients: the registry record minus the
@@ -273,6 +287,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            live_pid: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("exitCode"), "exitCode must be absent: {s}");
@@ -300,6 +315,7 @@ mod tests {
             exit_code: Some(130),
             exited_at: Some(99),
             live_workspace: None,
+            live_pid: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""exitCode":130"#), "got {s}");

@@ -642,6 +642,13 @@ every VT mode — is closed.)
 - The mirror defaults to **read-only** (`ldmuxd attach --readonly`) so a desktop "watch"
   pane does not fight the phone for input; "take control" is explicit.
 - **Split input** is therefore avoided by default.
+- **`shell`/`run` are a desk window in the terminal they were started in.** They
+  do not open one: the daemon is told that the window is the attach process
+  (`deskWindow {spawn: false, pid}`), so the shell is not a windowless session
+  and it ends when that terminal does. The pid is `SessionRecord.livePid`,
+  persisted for the same reason `liveWorkspace` is — a stock terminal has no
+  window class of ours, so after a restart the kernel's answer is the only one
+  there is.
 
 ---
 
@@ -758,22 +765,21 @@ planned.
 
 ## 9. Desktop mirror (FR-11)
 
-`POST /api/sessions/:id/mirror {workspace?, readOnly?}`:
+`ldmux mirror <id> [--workspace N] [--rw] [--terminal T]`:
 
-1. Resolve workspace: explicit, else config, else "last". On this machine i3 uses
-   `1..10` and `Mod+0 → 10`, so the default is **`10`**; the setting accepts a
-   number or `last`.
-2. Prefer a `for_window` rule keyed by the mirror window class
-   (`ldmux-mirror`) over `sleep`+`move` to avoid races; otherwise
-   `i3-msg 'workspace <ws>'` + move.
-3. `alacritty --class ldmux-mirror --title "ldmux: <title>" -e \
-      ldmuxd attach <id> [--readonly]`
-4. Record the container id via `i3-msg -t get_tree` + `jq` for later focus/close
-   (a shell helper; no dedicated API in v1).
+1. Workspace: `--workspace`, else **`10`** (`desktop::DEFAULT_MIRROR_WORKSPACE`).
+   Terminal: `--terminal`, else `LDMUX_TERMINAL`, else `alacritty`.
+2. Launch through `i3-msg exec`, then move the window by its class
+   (`ldmux-mirror-<id>`) once i3 reports it. **Never** `workspace N; exec …` —
+   that moves the user's view, which is what the tmux-era mirror did. The class
+   is per session so two mirrors of two shells cannot move each other.
+3. `alacritty --class ldmux-mirror-<id> -e ldmuxd attach <id> [--readonly]`,
+   read-only unless `--rw`. The argv is `desktop::mirror_argv`, one definition
+   with the desk window's (`live_argv`), so the two cannot drift.
 
-Environment: a `systemd --user` daemon lacks `DISPLAY`/`XAUTHORITY`; the i3 config
-already runs `systemctl --user import-environment DISPLAY XAUTHORITY
-XDG_RUNTIME_DIR`, and the helper exports `DISPLAY=:0`/`XAUTHORITY` as fallback.
+Environment: the daemon is a `systemd --user` service and the unit sets
+`DISPLAY`/`XAUTHORITY` (`deploy/ldmux.service`); without them `desktop.rs` reports
+"no DISPLAY (not an X11 session)" rather than guessing.
 
 ---
 

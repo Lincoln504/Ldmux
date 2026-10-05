@@ -53,6 +53,24 @@ impl PairingProblem {
     }
 }
 
+/// What `ldmux code` prints: the pairing as a QR code a phone can scan, then
+/// the machine's name and the address, so a human can check it is the right box.
+///
+/// Here rather than in the CLI so the rendering is testable without a daemon:
+/// the CLI's whole job is to print this (the TS `encodeQr` +
+/// `renderQrTerminal`).
+pub fn code_text(info: &ListenInfo, name: &str) -> Result<String, PairingProblem> {
+    let (pairing, link) = pairing_for(info, name)?;
+    let code = crate::qr::encode_qr(&link, crate::qr::Ecc::L)
+        .map_err(PairingProblem::LinkRejected)?;
+    Ok(format!(
+        "{}{}  {}\n",
+        crate::qr::render_qr_terminal(&code, 1),
+        pairing.name,
+        pairing.host
+    ))
+}
+
 /// The pairing a phone should use, or a problem saying what to fix.
 pub fn pairing_for(info: &ListenInfo, name: &str) -> Result<(Pairing, String), PairingProblem> {
     if !info.listening {
@@ -171,5 +189,28 @@ mod tests {
         let (_, link) = pairing_for(&live("100.127.255.254", 65535), "debian").unwrap();
         let code = crate::qr::encode_qr(&link, crate::qr::Ecc::L).unwrap();
         assert!(code.version <= 6);
+    }
+
+    /// `ldmux code` is the QR, not the link: a phone scans it. It printed the
+    /// bare link (identical to `ldmux pair`) after the port, which left the
+    /// documented way to pair a phone with nothing to scan.
+    #[test]
+    fn code_text_is_a_qr_block_and_what_it_is_for() {
+        let text = code_text(&live("100.127.119.54", 7625), "debian").unwrap();
+        // A QR drawn with the half-block character and 256-colour escapes, not a
+        // line of text: many rows of it, and the link itself absent.
+        assert!(text.contains('\u{2580}'), "no QR block in: {text}");
+        assert!(text.contains("\u{1b}[38;5;16;48;5;231m"), "no QR colours in: {text}");
+        assert!(text.lines().count() > 5, "too few rows to be a QR: {text}");
+        assert!(text.contains("debian  100.127.119.54:7625"), "{text}");
+        assert!(!text.contains("ldmux://"), "code printed the link: {text}");
+    }
+
+    #[test]
+    fn code_text_refuses_a_daemon_a_phone_cannot_reach() {
+        match code_text(&live("127.0.0.1", 7625), "d") {
+            Err(PairingProblem::LoopbackOnly) => {}
+            other => panic!("expected LoopbackOnly, got {other:?}"),
+        }
     }
 }

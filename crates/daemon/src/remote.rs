@@ -1300,6 +1300,7 @@ fn default_record(id: &str) -> SessionRecord {
         exit_code: None,
         exited_at: None,
         live_workspace: None,
+        live_pid: None,
     }
 }
 

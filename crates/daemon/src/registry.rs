@@ -312,6 +312,7 @@ mod tests {
             exit_code: over.exit_code,
             exited_at: over.exited_at,
             live_workspace: None,
+            live_pid: None,
         }
     }
 

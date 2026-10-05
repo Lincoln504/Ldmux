@@ -77,6 +77,28 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The session's desk window, as the daemon remembers it.
+///
+/// `pid` is set exactly when the daemon did *not* launch the window: `ldmux
+/// shell` and `ldmux run` become one in the terminal they were started from,
+/// so there is no window of ours to find by class and the process is the
+/// window. A missing `pid` means an i3 window the daemon opened, which the
+/// window manager answers for.
+struct LiveWindow {
+    workspace: String,
+    since: u64,
+    pid: Option<i32>,
+}
+
+/// Is the process still there? The kernel's answer, and the only one for a
+/// window that is not ours (the TS `processAlive`).
+fn process_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 /// The row title for a session (the TS `sessionTitle`): the explicit title when
 /// it is more than the kind, else the directory's basename, else the record's.
 fn session_title(record: &SessionRecord, cwd: &str) -> String {
@@ -145,7 +167,7 @@ pub struct LdmuxDaemon {
     /// Sessions with a window open on the desktop's screen (the TS
     /// `liveWindows`): one window per shell, recorded so the daemon can
     /// close it and so a phone that opens it is asked first (ADR-0010).
-    live_windows: HashMap<String, (String, u64)>,
+    live_windows: HashMap<String, LiveWindow>,
     /// The desktop's device identity (the ADR-0010 claim source for desk
     /// windows; the TS `desktopDevice`).
     desktop_device: ldmux_protocol::rpc::DeviceInfo,
@@ -456,39 +478,51 @@ impl LdmuxDaemon {
                     // any more, and saying otherwise would resurrect the window in
                     // the list through the record fallback.
                     self.live_windows.remove(&id);
-                    self.set_live_workspace(&id, None);
+                    self.set_live_window(&id, None, None);
                     changed = true;
                     continue;
                 }
             }
             // A window that was just opened is not on screen yet.
-            let opened_at = self.live_windows.get(&id).map(|(_, t)| *t).unwrap_or(0);
+            let (opened_at, pid) = match self.live_windows.get(&id) {
+                Some(w) => (w.since, w.pid),
+                None => (0, None),
+            };
             if now.saturating_sub(opened_at) < self.live_window_grace_ms {
                 continue;
             }
-            if crate::desktop::live_window_state(&id).await.as_deref() != Ok("absent") {
+            let present = match pid {
+                // The window is a process: the kernel answers, and it answers
+                // immediately. This is the `ldmux shell`/`run` case, where there
+                // is no window of ours for the window manager to find.
+                Some(p) => process_alive(p),
+                None => crate::desktop::live_window_state(&id).await.as_deref() != Ok("absent"),
+            };
+            if present {
                 continue;
             }
             self.live_windows.remove(&id);
             changed = true;
-            self.set_live_workspace(&id, None);
+            self.set_live_window(&id, None, None);
             let _ = self.handle("kill", serde_json::json!({ "id": id })).await;
         }
         changed
     }
 
-    /// Record, in the registry, that a session has a desk window on `workspace`
-    /// (or `None` when it no longer has one).
+    /// Record, in the registry, the desk window a session has (or `None` when it
+    /// no longer has one), and the pid of the process that window is when the
+    /// daemon did not launch it.
     ///
     /// The live-window map is memory and the windows are not, so a daemon
     /// restart needs this to tell "its window was closed while we were down"
     /// from "it never had one". See [Self::rebuild_live_windows].
-    fn set_live_workspace(&mut self, id: &str, workspace: Option<String>) {
+    fn set_live_window(&mut self, id: &str, workspace: Option<String>, pid: Option<i32>) {
         if let Some(mut r) = self.registry.get(id).cloned() {
-            if r.live_workspace == workspace {
+            if r.live_workspace == workspace && r.live_pid == pid {
                 return;
             }
             r.live_workspace = workspace;
+            r.live_pid = pid;
             self.registry.upsert(r);
             let _ = self.registry.save();
         }
@@ -501,6 +535,14 @@ impl LdmuxDaemon {
     /// been closed while the daemon was down, so its shell was ended. The port
     /// has no shim, so the registry records the workspace and the window manager
     /// is asked directly. Only a definite "absent" ends a shell.
+    /// Recover which sessions have desk windows after a restart.
+    ///
+    /// The TS rebuilt the live map from the pid its shim wrote into the session:
+    /// a window still running was re-adopted, and one whose pid was gone had
+    /// been closed while the daemon was down, so its shell was ended. The port
+    /// keeps that pid in the record for a window the daemon did not launch
+    /// (`ldmux shell`/`run`), and asks the window manager by class for one it
+    /// did. Only a definite "absent" ends a shell.
     pub async fn rebuild_live_windows(&mut self) -> bool {
         let mut changed = false;
         // Adopt the windows that are actually on screen. The map is memory and a
@@ -515,42 +557,48 @@ impl LdmuxDaemon {
                 continue;
             }
             if rec.live_workspace.is_none() {
-                self.set_live_workspace(&id, Some(String::new()));
+                self.set_live_window(&id, Some(String::new()), None);
             }
             let now = now_ms();
-            self.live_windows
-                .entry(id)
-                .or_insert((rec.live_workspace.unwrap_or_default(), now));
+            self.live_windows.entry(id).or_insert(LiveWindow {
+                workspace: rec.live_workspace.unwrap_or_default(),
+                since: now,
+                pid: None,
+            });
         }
         for r in self.registry.list() {
             let Some(workspace) = r.live_workspace.clone() else {
                 continue;
             };
             if r.status != "running" {
-                self.set_live_workspace(&r.id, None);
+                self.set_live_window(&r.id, None, None);
                 changed = true;
                 continue;
             }
             let now = now_ms();
-            match crate::desktop::live_window_state(&r.id).await.as_deref() {
-                Ok("absent") => {
-                    // The window was closed while no daemon was watching.
-                    // Closing a desk window ends its shell.
-                    eprintln!(
-                        "ldmuxd: {}'s desk window closed while the daemon was down; ending it",
-                        r.id
-                    );
-                    self.set_live_workspace(&r.id, None);
-                    let _ = self.handle("kill", serde_json::json!({ "id": r.id })).await;
-                    changed = true;
+            let present = match r.live_pid {
+                Some(pid) => process_alive(pid),
+                None => {
+                    crate::desktop::live_window_state(&r.id).await.as_deref() != Ok("absent")
                 }
-                // "present", or "unknown" (no window-manager answer): keep
-                // believing there is a window. The next reconcile pass decides,
-                // and a missing answer must never be read as a closed window.
-                _ => {
-                    self.live_windows.entry(r.id.clone()).or_insert((workspace, now));
-                }
+            };
+            if present {
+                self.live_windows.entry(r.id.clone()).or_insert(LiveWindow {
+                    workspace,
+                    since: now,
+                    pid: r.live_pid,
+                });
+                continue;
             }
+            // The window was closed while no daemon was watching. Closing a
+            // desk window ends its shell.
+            eprintln!(
+                "ldmuxd: {}'s desk window closed while the daemon was down; ending it",
+                r.id
+            );
+            self.set_live_window(&r.id, None, None);
+            let _ = self.handle("kill", serde_json::json!({ "id": r.id })).await;
+            changed = true;
         }
         changed
     }
@@ -843,6 +891,7 @@ impl LdmuxDaemon {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            live_pid: None,
         };
         let env = session_spawn_env(
             &id,
@@ -949,7 +998,7 @@ impl LdmuxDaemon {
         // is the only state that has one, so nothing can report a window for a
         // shell that is gone (the list falls back to the record).
         self.live_windows.remove(id);
-        self.set_live_workspace(id, None);
+        self.set_live_window(id, None, None);
     }
 
     /// Get or create the `PaneStream` for a session (the TS `streamFor`).
@@ -1190,8 +1239,10 @@ impl LdmuxDaemon {
                     Ok(lr) => {
                         if lr.ok {
                             self.sessions_dirty = true;
-                            self.live_windows.insert(id.to_string(), (workspace.to_string(), now_ms()));
-                            self.set_live_workspace(id, Some(workspace.to_string()));
+                            self.live_windows.insert(id.to_string(), LiveWindow {
+                                workspace: workspace.to_string(), since: now_ms(), pid: None,
+                            });
+                            self.set_live_window(id, Some(workspace.to_string()), None);
                             let dd = self.desktop_device.clone();
                             let _ = self.claim(id, &dd, true);
                         }
@@ -1211,7 +1262,7 @@ impl LdmuxDaemon {
                 let result = crate::desktop::close_live(id).await;
                 self.sessions_dirty = true;
                 self.live_windows.remove(id);
-                self.set_live_workspace(id, None);
+                self.set_live_window(id, None, None);
                 let dd_id = self.desktop_device.id.clone();
                 let _ = self.release_claim(id, &dd_id);
                 Ok(serde_json::json!({
@@ -1234,25 +1285,47 @@ impl LdmuxDaemon {
                         "detail": "that shell already has a desk window",
                     }));
                 }
-                let result = crate::desktop::open_live(id, "").await;
-                match result {
-                    Ok(lr) => {
-                        if lr.ok {
-                            self.sessions_dirty = true;
-                            self.live_windows.insert(id.to_string(), (String::new(), now_ms()));
-                            self.set_live_workspace(id, Some(String::new()));
-                            let dd = self.desktop_device.clone();
-                            let _ = self.claim(id, &dd, true);
-                        }
-                        Ok(serde_json::json!({
-                            "ok": lr.ok,
-                        }))
+                // `spawn` defaults to true: the daemon opens the window, which
+                // is what the window manager runs (`$mod+Return`). `spawn: false`
+                // is the caller *being* the window in the terminal it is already
+                // in — `ldmux shell` and `ldmux run` — so the daemon launches
+                // nothing and the window is the caller's process, whose pid it
+                // is given. That pid is also the model's `live_pid`, and the
+                // daemon asks the kernel about it, because a stock terminal has
+                // no window class of ours to find.
+                let spawn = params.get("spawn").and_then(|v| v.as_bool()).unwrap_or(true);
+                let pid = params
+                    .get("pid")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32);
+                let (ok, detail) = if spawn {
+                    match crate::desktop::open_live(id, "").await {
+                        Ok(lr) => (lr.ok, None),
+                        Err(e) => (false, Some(e)),
                     }
-                    Err(e) => Ok(serde_json::json!({
-                        "ok": false,
-                        "detail": e,
-                    })),
+                } else if pid.is_some() {
+                    (true, None)
+                } else {
+                    (
+                        false,
+                        Some("an in-place desk window needs the pid of the process it is".to_string()),
+                    )
+                };
+                if ok {
+                    self.sessions_dirty = true;
+                    self.live_windows.insert(id.to_string(), LiveWindow {
+                        workspace: String::new(),
+                        since: now_ms(),
+                        pid,
+                    });
+                    self.set_live_window(id, Some(String::new()), pid);
+                    let dd = self.desktop_device.clone();
+                    let _ = self.claim(id, &dd, true);
                 }
+                Ok(serde_json::json!({
+                    "ok": ok,
+                    "detail": detail,
+                }))
             }
             "reclaim" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1388,6 +1461,7 @@ impl LdmuxDaemon {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            live_pid: None,
         };
         self.registry.upsert(record.clone());
         let _ = self.registry.save();
@@ -1462,7 +1536,7 @@ impl LdmuxDaemon {
                 let live_workspace = self
                     .live_windows
                     .get(&record.id)
-                    .map(|(ws, _)| Some(ws.clone()))
+                    .map(|w| Some(w.workspace.clone()))
                     .unwrap_or_else(|| record.live_workspace.clone());
                 SessionInfo {
                     id: record.id.clone(),
@@ -1685,6 +1759,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            live_pid: None,
         });
 
         // Pass 1: the session is live, so nothing is marked dead.
@@ -2370,6 +2445,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: Some("1".into()),
+            live_pid: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"liveWorkspace\":\"1\""), "{json}");
@@ -2398,19 +2474,108 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: Some("1".into()),
+            live_pid: None,
         });
         let _ = d.rebuild_live_windows().await;
         assert!(d.registry().get("dead1").unwrap().live_workspace.is_none());
         assert!(!d.live_windows.contains_key("dead1"));
 
-        // set_live_workspace records and clears, persisting both.
-        d.set_live_workspace("dead1", Some("2".into()));
+        // set_live_window records and clears both halves, persisting them.
+        d.set_live_window("dead1", Some("2".into()), Some(4242));
         assert_eq!(
             d.registry().get("dead1").unwrap().live_workspace.as_deref(),
             Some("2")
         );
-        d.set_live_workspace("dead1", None);
+        assert_eq!(d.registry().get("dead1").unwrap().live_pid, Some(4242));
+        d.set_live_window("dead1", None, None);
         assert!(d.registry().get("dead1").unwrap().live_workspace.is_none());
+        assert_eq!(d.registry().get("dead1").unwrap().live_pid, None);
+    }
+
+    /// `ldmux shell` and `ldmux run` become a desk window in the terminal they
+    /// were started from, so the daemon is told the window is the attach
+    /// process (`spawn: false`, with its pid). Without that the shell had no
+    /// window as far as the daemon knew: the phone showed the "no window"
+    /// anomaly while the shell filled a window, and closing the terminal left
+    /// the shell running with nothing left to end it (measured live
+    /// 2026-10-05).
+    #[tokio::test]
+    async fn an_in_place_desk_window_is_the_process_it_was_given() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        // The window-close rule, without the real five seconds.
+        d.live_window_grace_ms = 0;
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+
+        // A pid that is certainly alive: this test process.
+        let me = std::process::id() as i32;
+        let res = d
+            .handle(
+                "deskWindow",
+                serde_json::json!({ "id": rec.id, "spawn": false, "pid": me }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["ok"], true, "{res}");
+        // Recorded in both places, because the map is memory and the list is not.
+        assert_eq!(d.registry().get(&rec.id).unwrap().live_pid, Some(me));
+        assert_eq!(
+            d.registry().get(&rec.id).unwrap().live_workspace.as_deref(),
+            Some("")
+        );
+
+        // A window whose process is alive survives a reconcile pass.
+        assert!(!d.reconcile_live().await);
+        assert_eq!(d.registry().get(&rec.id).unwrap().status, "running");
+
+        // A window whose process is gone ends its shell.
+        let gone = {
+            let mut c = std::process::Command::new("true").spawn().unwrap();
+            let pid = c.id() as i32;
+            let _ = c.wait();
+            pid
+        };
+        d.live_windows.get_mut(&rec.id).unwrap().pid = Some(gone);
+        assert!(d.reconcile_live().await);
+        assert_eq!(d.registry().get(&rec.id).unwrap().status, "dead");
+        assert!(d.registry().get(&rec.id).unwrap().live_workspace.is_none());
+        drop(fk);
+    }
+
+    /// An in-place desk window with no process is refused. There would be no way
+    /// to tell whether it is still there, so it would be a window that never
+    /// closes, and a shell that therefore never ends.
+    #[tokio::test]
+    async fn an_in_place_desk_window_without_a_process_is_refused() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let res = d
+            .handle("deskWindow", serde_json::json!({ "id": rec.id, "spawn": false }))
+            .await
+            .unwrap();
+        assert_eq!(res["ok"], false, "{res}");
+        assert!(!d.live_windows.contains_key(&rec.id));
+        assert!(d.registry().get(&rec.id).unwrap().live_workspace.is_none());
+        drop(fk);
     }
 
     /// A window whose workspace the window manager did not name is still a
@@ -2433,8 +2598,11 @@ mod tests {
         let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
 
         // What `deskWindow` records: a window on whatever workspace was focused.
-        d.live_windows.insert(rec.id.clone(), (String::new(), 0));
-        d.set_live_workspace(&rec.id, Some(String::new()));
+        d.live_windows.insert(
+            rec.id.clone(),
+            LiveWindow { workspace: String::new(), since: 0, pid: None },
+        );
+        d.set_live_window(&rec.id, Some(String::new()), None);
         let info = d.describe_sessions().await.into_iter().find(|s| s.id == rec.id).unwrap();
         assert_eq!(info.live_workspace.as_deref(), Some(""), "an unnamed workspace is a window");
 
