@@ -52,17 +52,13 @@ pub fn safe_workspace(name: &str) -> Option<String> {
     }
 }
 
-/// argv for a session's live window.
-///
-/// It runs the shim (the shim path) rather than tmux directly, because a live
-/// window has to survive being detached to say who took the shell.
 /// The desk window's argv: alacritty running the attach client (plan §3.9).
 ///
 /// The window is a protocol client of the daemon (`ldmuxd attach <id>`), not a
 /// tmux client: it claims the shell (ADR-0010), streams the pane, and handles
 /// the handover. `ldmuxd` is resolved on PATH (the unit puts `~/.local/bin`
 /// first).
-pub fn live_argv(_shim_path: &str, session_id: &str, terminal: &str) -> Vec<String> {
+pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
     vec![
         terminal.to_string(),
         "--class".to_string(),
@@ -194,19 +190,6 @@ pub struct LiveResult {
 /// socket and session name, so a stale copy is a window that attaches to the
 /// wrong thing, and a world-writable one is a command somebody else can
 /// replace.
-pub async fn prepare_live(
-    _state_dir: &str,
-    _tmux_socket: &str,
-    _tmux_name: &str,
-    session_id: &str,
-    _tmux_bin: &str,
-) -> Result<(String, Vec<String>), String> {
-    // No shim any more: the window runs the attach client, which talks the
-    // daemon's protocol directly (plan §3.9). The empty first element is the
-    // (now unused) shim path the caller ignores.
-    Ok((String::new(), live_argv("", session_id, "alacritty")))
-}
-
 /// Close a session's live window, if it is open.
 ///
 /// i3 answers an unmatched criterion with success too, so this says "asked",
@@ -256,14 +239,16 @@ pub async fn live_window_state(session_id: &str) -> Result<&'static str, String>
 ///
 /// The launch goes through `i3-msg exec` (which is how a window gets made at all
 /// under i3) but the *placement* is `place_live`, so the user's view never moves.
-pub async fn open_live(
-    tmux_socket: &str,
-    tmux_name: &str,
-    session_id: &str,
-    workspace: &str,
-    tmux_bin: &str,
-    state_dir: &str,
-) -> Result<LiveResult, String> {
+/// Open a session's desk window.
+///
+/// It used to take the whole tmux-era apparatus — the state dir, the tmux
+/// socket, the tmux name, the tmux binary — and thread it through a
+/// `prepare_live` that wrote a shim script into `<state_dir>/live/` for the
+/// window to run. There is no shim and no tmux: the window runs the attach
+/// client, which speaks the daemon's own protocol (plan §3.9), so every one of
+/// those parameters was dead. The stale shims and `tmux-server.conf` those calls
+/// left behind were still sitting in the live state directory.
+pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, String> {
     // An empty workspace means "leave it where it opens" (the current one):
     // that is the desk-window case (`$mod+Return`), which must not move the
     // user's view. A non-empty value must be a real i3 workspace name.
@@ -275,8 +260,7 @@ pub async fn open_live(
     if std::env::var("DISPLAY").is_err() {
         return Err("no DISPLAY (not an X11 session)".to_string());
     }
-    let (_shim_path, argv) = prepare_live(state_dir, tmux_socket, tmux_name, session_id, tmux_bin)
-        .await?;
+    let argv = live_argv(session_id, "alacritty");
     let exec_argv = live_exec_argv(&argv.iter().map(|s| s.as_str()).collect::<Vec<&str>>());
     let result = crate::exec::run(
         exec_argv.clone(),
@@ -410,7 +394,7 @@ mod tests {
 
     #[test]
     fn live_argv_runs_the_attach_client() {
-        let args = live_argv("", "abc123", "alacritty");
+        let args = live_argv("abc123", "alacritty");
         assert_eq!(
             args,
             vec![

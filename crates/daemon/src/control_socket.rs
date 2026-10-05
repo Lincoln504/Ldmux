@@ -150,10 +150,12 @@ impl ControlSocketServer {
 
     /// Dispatch a request to a handler.
     ///
-    /// The method table grows as the daemon's API is ported; for now only
-    /// `ping` is served (the parity test's echo), and unknown methods are an
-    /// `error` response. The shape mirrors the TS `RpcRequest`/`RpcResponse`:
-    /// `{ id, ok, result }` on success, `{ id, ok: false, error }` on failure.
+    /// A standalone `ping` echo, kept because the parity test drives it. The
+    /// daemon itself does not go through here: `serve_accept_with` takes the
+    /// daemon's `handle` as its handler, so every real method is served by the
+    /// daemon and not by this table. The shape mirrors the TS
+    /// `RpcRequest`/`RpcResponse`: `{ id, ok, result }` on success,
+    /// `{ id, ok: false, error }` on failure.
     fn dispatch(req: &Value) -> Value {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let method = req

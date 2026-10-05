@@ -547,9 +547,6 @@ async fn main() {
             let link = format!("ldmux://{host}:{port}?token={token}");
             println!("{link}");
         }
-        // The desk window and mirror commands (the `run`/`shell`/`window`/`mirror`
-        // lifecycle) are not yet ported: they depend on the shim script and the
-        // desktop mirror (`openMirror`), which are in `desktop.ts`.
         "window" => {
             // Create a shell, then make it a desk window here (the daemon opens
             // the window with the attach client and claims it to the desktop).

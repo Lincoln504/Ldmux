@@ -54,23 +54,12 @@ async fn desktop_attach_e2e_functions_do_not_panic() {
     unsafe { std::env::set_var("DISPLAY", &display) };
 
     let state_dir = scratch_dir();
-    let tmux_sock = state_dir.join("keeper.sock");
     let session_id = "s1".to_string();
-    let tmux_name = "ldmux-s1".to_string();
-    let tmux_bin = "alacritty".to_string();
     let workspace = "1".to_string();
 
     // Open a live window (the argv is what matters; without a real session the
     // i3 exec may place nothing, which is fine).
-    let _ = desktop::open_live(
-        tmux_sock.to_str().unwrap(),
-        &tmux_name,
-        &session_id,
-        &workspace,
-        &tmux_bin,
-        state_dir.to_str().unwrap(),
-    )
-    .await;
+    let _ = desktop::open_live(&session_id, &workspace).await;
 
     let state = desktop::live_window_state(&session_id).await;
     assert!(

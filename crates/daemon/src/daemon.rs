@@ -1087,12 +1087,7 @@ impl LdmuxDaemon {
                         "detail": "that shell already has a desk window",
                     }));
                 }
-                let tmux_socket = self.keeper_socket_path().to_string_lossy();
-                let tmux_bin = self.keeper_bin().to_string_lossy();
-                let result = crate::desktop::open_live(
-                    &tmux_socket, &record.tmux_name, id, workspace, &tmux_bin,
-                    &self.state_dir.to_string_lossy(),
-                ).await;
+                let result = crate::desktop::open_live(id, workspace).await;
                 match result {
                     Ok(lr) => {
                         if lr.ok {
@@ -1141,12 +1136,7 @@ impl LdmuxDaemon {
                         "detail": "that shell already has a desk window",
                     }));
                 }
-                let tmux_socket = self.keeper_socket_path().to_string_lossy();
-                let tmux_bin = self.keeper_bin().to_string_lossy();
-                let result = crate::desktop::open_live(
-                    &tmux_socket, &record.tmux_name, id, "", &tmux_bin,
-                    &self.state_dir.to_string_lossy(),
-                ).await;
+                let result = crate::desktop::open_live(id, "").await;
                 match result {
                     Ok(lr) => {
                         if lr.ok {
