@@ -74,10 +74,15 @@ fn print_usage() {
 }
 
 /// The first option no command knows, or None.
+///
+/// Every flag here is one a command actually reads. The list is closed on
+/// purpose: a flag that is accepted and ignored is worse than an unknown one,
+/// because the command runs and does something other than what was asked.
+/// `--dry-run` was in this list in the TS and here, read by no command at all.
 fn reject_unknown_flag(rest: &[String]) -> Option<String> {
     const KNOWN_FLAGS: &[&str] = &[
-        "--cwd", "--dry-run", "--history", "--json", "--name",
-        "--rw", "--terminal", "--title", "--workspace",
+        "--cwd", "--history", "--json", "--name", "--rw", "--terminal", "--title",
+        "--workspace",
     ];
     for arg in rest {
         if arg == "--" {
@@ -771,6 +776,13 @@ async fn main() {
             let terminal_name = flag(rest, "--terminal")
                 .map(|t| t.to_string())
                 .unwrap_or_else(ldmux_daemon::desktop::terminal);
+            // `i3-msg exec` says success for a command it merely queued, so a
+            // mistyped terminal would otherwise be a window that dies in the same
+            // instant, with nothing said.
+            if let Some(problem) = ldmux_daemon::desktop::terminal_problem(&terminal_name) {
+                eprintln!("ldmux: {problem}");
+                std::process::exit(1);
+            }
             let read_only = !rest.iter().any(|a| a == "--rw");
             match ldmux_daemon::desktop::open_mirror(id, &workspace, read_only, &terminal_name).await {
                 Ok(lr) if lr.ok => println!("mirror of {keeper} on workspace {workspace}"),

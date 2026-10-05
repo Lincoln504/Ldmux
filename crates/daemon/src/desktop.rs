@@ -86,6 +86,38 @@ fn terminal_from(value: Option<&str>) -> String {
         .to_string()
 }
 
+/// Why `terminal` cannot be launched, or None when it looks runnable.
+///
+/// `i3-msg exec` answers success for a command it has merely queued, so a
+/// mistyped terminal — `ldmux mirror --terminal /nope`, or an `LDMUX_TERMINAL`
+/// that is not installed — puts up a window that dies in the same instant, with
+/// nothing said. That is the failure this project has paid for twice (`node: not
+/// found`, and a window that closed as it opened). A PATH lookup, not a spawn:
+/// the window manager still runs it.
+pub fn terminal_problem(terminal: &str) -> Option<String> {
+    let t = terminal.trim();
+    if t.is_empty() {
+        return Some("no terminal given".to_string());
+    }
+    if t.starts_with('/') {
+        return if std::path::Path::new(t).is_file() {
+            None
+        } else {
+            Some(format!("no such terminal: {t}"))
+        };
+    }
+    if t.contains('/') {
+        return Some(format!("the terminal must be a name on PATH or an absolute path: {t}"));
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(':').filter(|d| !d.is_empty()) {
+        if std::path::Path::new(dir).join(t).is_file() {
+            return None;
+        }
+    }
+    Some(format!("no such terminal on PATH: {t}"))
+}
+
 /// The desk window's argv: the terminal running the attach client (plan §3.9).
 ///
 /// The window is a protocol client of the daemon (`ldmuxd attach <id>`), not a
@@ -562,6 +594,20 @@ mod tests {
         let rw = mirror_argv("abc123", "foot", false);
         assert_eq!(rw[0], "foot");
         assert!(!rw.contains(&"--readonly".to_string()), "{rw:?}");
+    }
+
+    /// A terminal the window manager cannot run is refused before it is asked
+    /// to: `i3-msg exec` reports success for a command it merely queued.
+    #[test]
+    fn a_terminal_that_cannot_be_run_is_named() {
+        assert!(terminal_problem("").is_some());
+        assert!(terminal_problem("   ").is_some());
+        assert!(terminal_problem("/nonexistent-terminal-xyz").is_some());
+        assert!(terminal_problem("definitely-not-a-real-binary-xyz").is_some());
+        assert!(terminal_problem("bin/sh").is_some(), "a relative path is not a name on PATH");
+        assert!(terminal_problem("/bin/sh").is_none());
+        // A bare name is looked for on PATH.
+        assert!(terminal_problem("sh").is_none(), "PATH must be searched");
     }
 
     /// Two mirrors of two shells are two different windows: placement moves a

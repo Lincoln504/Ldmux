@@ -1915,3 +1915,14 @@ confirmed to fail without the change.
   an absolute path.
 - `now_ms` existed twelve times in the daemon with nine panicking `unwrap()`s;
   one non-panicking definition now.
+- `--dry-run` was in the CLI's known-flag list and read by no command, in the TS
+  and here both: accepted, ignored, and therefore a command that runs and does
+  something other than what was asked. Removed, so it is refused as unknown.
+- `ldmux mirror --terminal /nope` printed "mirror of … on workspace 10" and put
+  up a window that died in the same instant: `i3-msg exec` reports success for a
+  command it has merely queued. `desktop::terminal_problem` is now a PATH lookup
+  in the seam, and the CLI refuses before asking i3 (test
+  `a_terminal_that_cannot_be_run_is_named`). The desk-window path is not checked
+  there, so a bad `LDMUX_TERMINAL` is still discovered by the dead window.
+- `ldmux adopt` still has no test of its own; it is covered indirectly by the
+  startup re-adoption (`adopt_own_sessions`) and the restart-survival tests.
