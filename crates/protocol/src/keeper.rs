@@ -54,6 +54,14 @@ pub mod k {
     pub const ERROR: &str = "error";
 }
 
+/// The terminal type the session's emulator actually implements
+/// (libghostty-vt is an xterm-256color-compatible terminal). Both the keeper
+/// (which pins it onto every child) and the daemon (which states it in the
+/// `Spawn.env` it sends) resolve it from here, so the two can never drift.
+pub const CHILD_TERM: &str = "xterm-256color";
+/// The emulator renders 24-bit colour, so say so.
+pub const CHILD_COLORTERM: &str = "truecolor";
+
 /// Daemon → keeper: spawn a session (a PTY + shell + one emulator task).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

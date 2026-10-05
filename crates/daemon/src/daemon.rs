@@ -753,21 +753,13 @@ impl LdmuxDaemon {
             exit_code: None,
             exited_at: None,
         };
-        let env: Vec<(String, String)> = vec![
-            ("LDMUX".to_string(), "1".to_string()),
-            ("LDMUX_SESSION_ID".to_string(), id.clone()),
-            ("LDMUX_KIND".to_string(), kind.to_string()),
-            ("LDMUX_SOCKET".to_string(), self.socket_path().to_string_lossy().into_owned()),
-            // Truthful names. `tmuxName` is the wire/registry field name and cannot
-            // change without breaking the paired app, but the *value* is the keeper
-            // session id and the socket is the keeper's — say so.
-            ("LDMUX_SESSION_NAME".to_string(), tmux_name.clone()),
-            ("LDMUX_KEEPER_SOCK".to_string(), self.keeper_socket_path().to_string_lossy().into_owned()),
-            // Kept because a shell profile written against the tmux era reads them.
-            // They name the same two values; nothing here is a tmux server.
-            ("LDMUX_TMUX_NAME".to_string(), tmux_name.clone()),
-            ("LDMUX_TMUX_SOCK".to_string(), self.keeper_socket_path().to_string_lossy().into_owned()),
-        ];
+        let env = session_spawn_env(
+            &id,
+            kind.as_str(),
+            &tmux_name,
+            self.socket_path().to_string_lossy().as_ref(),
+            self.keeper_socket_path().to_string_lossy().as_ref(),
+        );
         // Call the keeper's `Spawn` (the equivalent of the TS `cp.newSession`,
         // retargeted onto the keeper: a `Spawn` creates a new emulator session).
         // The `pi` kind runs `pi`; every session gets the `LDMUX_*` spawn env
@@ -1456,6 +1448,41 @@ impl LdmuxDaemon {
     }
 }
 
+/// The environment every session's child starts with (plan §2.6).
+///
+/// Two groups, both load-bearing:
+///
+/// 1. `TERM`/`COLORTERM` pinned to what the emulator actually is. The daemon's
+///    unit has no `TERM`, so a child that inherited one would get bash's
+///    invented `dumb` and every colour-capable program would switch off. The
+///    keeper pins the same default (`child_env`) for keepers started before
+///    this entry existed, and `Spawn.env` wins there, so a session is
+///    colour-correct whether or not the running keeper knows about it.
+/// 2. The `LDMUX_*` identity set: the session id, kind, and both socket paths,
+///    under truthful names plus the two tmux-era aliases a shell profile from
+///    that period reads (`tmuxName` is the wire/registry field name and cannot
+///    change without breaking the paired app).
+fn session_spawn_env(
+    id: &str,
+    kind: &str,
+    tmux_name: &str,
+    daemon_sock: &str,
+    keeper_sock: &str,
+) -> Vec<(String, String)> {
+    vec![
+        ("TERM".to_string(), km::CHILD_TERM.to_string()),
+        ("COLORTERM".to_string(), km::CHILD_COLORTERM.to_string()),
+        ("LDMUX".to_string(), "1".to_string()),
+        ("LDMUX_SESSION_ID".to_string(), id.to_string()),
+        ("LDMUX_KIND".to_string(), kind.to_string()),
+        ("LDMUX_SOCKET".to_string(), daemon_sock.to_string()),
+        ("LDMUX_SESSION_NAME".to_string(), tmux_name.to_string()),
+        ("LDMUX_KEEPER_SOCK".to_string(), keeper_sock.to_string()),
+        ("LDMUX_TMUX_NAME".to_string(), tmux_name.to_string()),
+        ("LDMUX_TMUX_SOCK".to_string(), keeper_sock.to_string()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,6 +1497,20 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// A session's spawn env pins the colour terminal, so a keeper that does
+    /// not itself default `TERM` still hands the shell a colour-capable one.
+    /// Without this the daemon's unit supplies no `TERM`, bash invents `dumb`,
+    /// and every program turns colour off (observed 2026-10-05).
+    #[test]
+    fn the_spawn_env_pins_a_colour_terminal() {
+        let env = session_spawn_env("id", "shell", "ldmux-id", "/d.sock", "/k.sock");
+        let get = |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("TERM"), Some(km::CHILD_TERM));
+        assert_eq!(get("COLORTERM"), Some(km::CHILD_COLORTERM));
+        assert_eq!(get("LDMUX_SESSION_ID"), Some("id"));
+        assert_eq!(get("LDMUX_KEEPER_SOCK"), Some("/k.sock"));
     }
 
     /// Wait for the fake keeper's socket to exist (the bind→connect race the

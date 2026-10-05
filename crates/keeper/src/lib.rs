@@ -96,9 +96,8 @@ fn now_ms() -> u64 {
 }
 
 /// The terminal type the keeper's emulator (libghostty-vt) actually implements.
-pub const CHILD_TERM: &str = "xterm-256color";
-/// The emulator renders 24-bit colour, so say so.
-pub const CHILD_COLORTERM: &str = "truecolor";
+/// Defined in `protocol` so the daemon's `Spawn.env` states the same value.
+pub use ldmux_protocol::keeper::{CHILD_COLORTERM, CHILD_TERM};
 
 /// The environment a session's child starts with: the keeper's own (which is
 /// the daemon's), then `TERM`/`COLORTERM` pinned to what the keeper's emulator
