@@ -245,7 +245,7 @@ async fn wait_for_ms<R: tokio::io::AsyncReadExt + Unpin>(
 /// device holds still waits for `r`, which is the consent.
 #[tokio::test]
 async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let dir = scratch();
     let keeper_sock = dir.join("keeper.sock");
