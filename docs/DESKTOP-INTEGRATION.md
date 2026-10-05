@@ -3,8 +3,10 @@
 > **Partly historical (2026-10-04, D4).** The i3 rules, the workspace choice and the
 > ownership handover are still the design. The *mechanism* is not: there is no
 > shim script and no multiplexer client — a desk window is
-> `alacritty -e ldmuxd attach <id>`, a protocol client. See `crates/attach` and
-> ADR-0018.
+> `<terminal> -e ldmuxd attach <id>`, a protocol client. See `crates/attach` and
+> ADR-0018. `alacritty` below is the default, not a hardcoding: the terminal is
+> `desktop::terminal()` (`LDMUX_TERMINAL`), and `ldmux mirror` uses the same argv
+> with `--readonly`.
 
 
 The phone is not the only place an ldmux shell should be able to exist. The plan
