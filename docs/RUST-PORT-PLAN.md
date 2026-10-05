@@ -534,9 +534,14 @@ one breaks the loop, the window re-attaches, and the phone shows
 held-elsewhere — without the user doing it. **Fix:** the reclaim key was a
 **control byte — Ctrl+R (0x12)**: never produced by text dictation. **Amended
 2026-10-05:** the key is **`r`**, and only `r`, at the user's request. `r` can
-appear in dictated text, but the notice names it and it is one key to remember;
-an escape in the read (a paste, an Alt chord, a function key) still never
-counts, whatever the terminal emulator encodes. (The
+appear in dictated text, but the notice names it and it is one key to remember.
+The read must be **exactly one byte** (`r`/`R`): a paste of a paragraph, an Alt
+chord, a function key, and a word inserted at once are all several bytes and
+never count, whatever the emulator encodes. (Counted as "a read containing an
+`r`", typing `echo BACK_MARK` into a detached window took the shell back —
+measured. A human typing an `r` one key at a time still takes it; that is what
+choosing a printable key means, and it is the original "interacting with it
+takes it back" behaviour narrowed to one key.) (The
 "Enter" proposal is the floor, not sufficient: dictation emits Enter/
 newlines, and Enter and Ctrl+Enter are indistinguishable on most terminals
 — both 0x0D.) Non-trigger bytes are **echoed back** (today they are

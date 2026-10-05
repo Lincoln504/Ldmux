@@ -105,12 +105,31 @@ async fn an_unwatched_shells_output_is_in_the_snapshot_and_not_replayed() {
         .handle("send", serde_json::json!({"id": id, "text": "printf 'BACKLOG-%s\\n' MARK", "keys": ["Enter"]}))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Wait for the shell to have actually printed, rather than for a number of
+    // milliseconds to pass: the whole workspace gate runs on one machine, and a
+    // fixed wait sized for an idle box is a test that fails when the box is busy.
+    // `capture` asks the keeper directly and creates no stream, so the premise
+    // (nobody is watching) still holds.
+    let mut printed = false;
+    for _ in 0..100 {
+        let cap = arc
+            .lock()
+            .await
+            .handle("capture", serde_json::json!({"id": id}))
+            .await
+            .unwrap();
+        if cap["screen"].as_str().unwrap_or("").contains("BACKLOG-MARK") {
+            printed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(printed, "the shell never printed the marker (10 s)");
 
     let mut ws = connect(port, token).await;
     send(&mut ws, serde_json::json!({"type":"hello","device":{"id":"A","name":"a","kind":"phone"}})).await;
     send(&mut ws, serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30})).await;
-    let items = collect(&mut ws, 1500).await;
+    let items = collect(&mut ws, 2500).await;
 
     assert!(snapshot_screen(&items).contains("BACKLOG-MARK"), "the snapshot has what was printed");
     let live = output_after_snapshot(&items);

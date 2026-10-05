@@ -8,10 +8,10 @@
 > claim still hands the size over, which was the point.
 
 > **Amendment, 2026-10-05 — the consent key is `r`, and only `r`.** It was "any
-> key", then Ctrl+R; the user asked for one key with no alias. Input carrying an
-> escape (a paste, an Alt chord, a function key) is never the consent, whatever
-> the emulator encodes, so dictation cannot take a shell. The "press any key"
-> wording below is the earlier revision.
+> key", then Ctrl+R; the user asked for one key with no alias. The read must be
+> exactly one byte (`r`/`R`): a paste, an Alt chord, a function key, and a word
+> inserted at once are all several bytes and are never the consent, whatever the
+> emulator encodes. The "press any key" wording below is the earlier revision.
 
 > **Amendment, 2026-10-05 — a desk window may be the terminal that started it.**
 > `ldmux shell` and `ldmux run` become a desk window *in the terminal they were

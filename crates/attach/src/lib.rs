@@ -548,17 +548,18 @@ where
 /// `r` is the key, and the only key. One definition, so the notice and the check
 /// cannot drift apart.
 ///
-/// **Robust across terminal emulators:** every emulator sends a bare `r` as the
-/// byte 0x72 — that is what a tty *is*, not a convention. What differs between
-/// emulators is how they encode everything *else* (a paste, an arrow, a function
-/// key, an Alt chord), and all of those carry an escape. So an escape in the read
-/// is never this consent, whatever the emulator calls it: a bracketed paste of a
-/// paragraph containing an `r` must not take a shell.
+/// **A bare keypress, and nothing else:** the read must be exactly one byte and
+/// that byte an `r` or `R`. Every emulator sends a bare `r` as the byte 0x72 —
+/// that is what a tty *is*, not a convention — and a single keystroke arrives as
+/// a single read.
+///
+/// Anything longer is text, not a keypress. A paste arrives as one read
+/// (`\x1b[200~remove the file\x1b[201~`), and so does a word typed quickly
+/// enough. Counting "a read that contains an `r`" as the consent meant typing
+/// **`echo BACK_MARK`** into a detached window took the shell back — measured,
+/// by a test that was trying to prove the opposite.
 fn is_reclaim(bytes: &[u8]) -> bool {
-    if bytes.contains(&0x1b) {
-        return false;
-    }
-    bytes.iter().any(|b| matches!(*b, b'r' | b'R'))
+    matches!(bytes, [b'r'] | [b'R'])
 }
 
 async fn send<S>(sink: &mut S, value: &serde_json::Value) -> Result<(), String>
@@ -697,9 +698,11 @@ mod render_tests {
         assert!(!is_reclaim(b"hello"));
         assert!(!is_reclaim(b"\x1b[200~pasted\x1b[201~"));
         assert!(!is_reclaim(b"\r"));
-        // The emulator-independent rule: anything with an escape in it is not
-        // the consent, whatever the emulator encoded — a paste containing an `r`,
-        // an Alt-R chord, an arrow. Only a bare keypress is.
+        // Text is not a keypress, however short, and whether or not it holds an
+        // `r`: this is what a word typed into a detached window looks like, and
+        // what a paste looks like.
+        assert!(!is_reclaim(b"echo BACK_MARK"));
+        assert!(!is_reclaim(b"rs"));
         assert!(!is_reclaim(b"\x1b[200~remove the file\x1b[201~"));
         assert!(!is_reclaim(b"\x1br"), "Alt-R is not the key");
         assert!(!is_reclaim(b"\x1b[1;3C"));

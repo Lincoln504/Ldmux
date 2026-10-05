@@ -205,11 +205,19 @@ async fn ws_send(ws: &mut Ws, msg: &serde_json::Value) {
     .unwrap();
 }
 
-/// Read until `needle` shows up, or give up (15 s at 50 ms a poll).
+/// Read until `needle` shows up, or give up after `ms`.
 async fn wait_for<R: tokio::io::AsyncReadExt + Unpin>(reader: &mut R, needle: &str) -> bool {
+    wait_for_ms(reader, needle, 15_000).await
+}
+
+async fn wait_for_ms<R: tokio::io::AsyncReadExt + Unpin>(
+    reader: &mut R,
+    needle: &str,
+    ms: u64,
+) -> bool {
     let mut seen = Vec::new();
     let mut buf = [0u8; 8192];
-    for _ in 0..300 {
+    for _ in 0..(ms / 50).max(1) {
         match tokio::time::timeout(std::time::Duration::from_millis(50), reader.read(&mut buf)).await
         {
             Ok(Ok(0)) => break,
@@ -303,17 +311,29 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
     );
 
     // The phone puts the shell down. The daemon releases the claim after its
-    // grace and broadcasts the list; the window re-attaches on its own.
+    // grace (3 s) and broadcasts the list; the window re-attaches on its own.
+    //
+    // Polled rather than slept through: the whole workspace gate runs on one
+    // machine, and a fixed wait sized for an idle box is a test that fails when
+    // the box is busy. While the window is detached its input is swallowed, so
+    // typing into it repeatedly is harmless and the first echo that lands is the
+    // proof it is live again.
     drop(phone);
-    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-
-    // Live again: what is typed into the window reaches the shell. (While the
-    // window is detached its input is swallowed, so this also proves the state.)
-    desk_typing.write_all(b"echo BACK_MARK_9\n").await.unwrap();
-    desk_typing.flush().await.unwrap();
-    let _ = desk_view.read(&mut [0u8; 4096]).await;
+    let mut reattached = false;
+    for attempt in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if attempt < 6 {
+            continue; // before the release grace has expired
+        }
+        desk_typing.write_all(b"echo LANDED_9\n").await.unwrap();
+        desk_typing.flush().await.unwrap();
+        if wait_for_ms(&mut desk_view, "LANDED_9", 700).await {
+            reattached = true;
+            break;
+        }
+    }
     assert!(
-        wait_for(&mut desk_view, "BACK_MARK_9").await,
+        reattached,
         "the desk window must have re-attached without a key"
     );
 

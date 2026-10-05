@@ -1884,12 +1884,20 @@ with the record as the fallback (`eccb85a`, test
 
 ### The reclaim is one key
 
-`r`, and only `r`. Ctrl+R was an alias and is gone, at the user's request. Anything
-carrying an escape (a bracketed paste, an Alt chord, a function key) is refused, so
-dictation cannot take a shell. Verified with the pty harness (writing to the attach
-client's own stdin, not through `xdotool`, which cannot inject Ctrl+R into alacritty at
-all): a paste containing an `r` leaves the shell with the other device, a bare `r` takes
-it, `0x12` does not.
+`r`, and only `r`. Ctrl+R was an alias and is gone, at the user's request. The read must
+be **exactly one byte** (`r`/`R`); every longer read is text, not a keypress.
+
+That last clause is the correction of a real bug found by a test that was trying to prove
+the opposite. The rule was "a read containing an `r` that carries no escape", and a
+bracketed paste is not the only multi-byte read: typing `echo BACK_MARK` into a detached
+window was **one read**, it contained an `R`, and it took the shell back — the
+re-attach test's own probe command was doing the thing it was testing for.
+
+Verified with the pty harness (writing to the attach client's own stdin; `xdotool` cannot
+inject Ctrl+R into alacritty at all): a bracketed paste full of `r`s leaves the shell with
+the other device, `0x12` does not take it, a bare `r` takes it, and typing `mark` one key
+at a time takes it **on the lone `r`** — which is what choosing a printable key means, and
+is the original "interacting with it takes it back" narrowed to one key.
 
 ## Audit against the TypeScript daemon: three surfaces restored (2026-10-05)
 
