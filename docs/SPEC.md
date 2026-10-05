@@ -550,8 +550,11 @@ helper suffices), and owner/families.
 - **Framing:** terminal data is **binary**; control/handshake is **JSON text**
   frames. `protocolVersion` is negotiated in the handshake; enforces max frame
   sizes: 16 MiB absolute frame ceiling, 16 KiB of `input` data, 32 keys per
-  message, 64 KiB per inbound WebSocket frame, and a 1 MiB cap on the output
-  buffered while a client is attaching (exceeding it forces a resync).
+  message, 64 KiB per inbound WebSocket frame, a 1 MiB cap on the output
+  buffered while a client is attaching, and a 64 KiB cap on output queued for a
+  socket that is not reading (`WS_BACKLOG_BYTES`; exceeding either sends one
+  `resync` error and drops output until the client re-attaches and is sent a
+  snapshot).
 
 ### 6.2 Message types (implemented)
 

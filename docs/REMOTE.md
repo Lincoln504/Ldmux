@@ -71,7 +71,7 @@ Client → server (JSON):
 | `{type:"attach",sessionId,cols?,rows?,takeover?}` | subscribe this connection to a session; a shell held by another device is refused with `owned` unless `takeover` |
 | `{type:"resize",cols,rows}` | the client's grid changed; tmux is resized and a fresh snapshot follows |
 | `{type:"mouseclick",col,row}` | a tap in a pane whose program enabled SGR mouse reporting |
-| `{type:"copymode",on}` | enter or leave tmux copy-mode (scrolling the alternate screen) |
+| `{type:"copymode",on}` | accepted and ignored: there is no tmux copy-mode, the client scrolls its own buffer |
 | `{type:"input",data}` | type literal text into the pane |
 | `{type:"key",keys:["Enter"]}` | send named keys |
 | `{type:"follow",mode}` | scroll intent; **client-owned** (ADR-0004) |

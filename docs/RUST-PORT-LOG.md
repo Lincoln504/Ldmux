@@ -1574,3 +1574,112 @@ running (close ≠ detach).
 - Cleaned the 41 leaked keepers by exact pid (command line contained
   `/ldmux-maint-`); deployed keeper untouched; count 42 → 1. A full
   `cargo test -p ldmux-daemon --tests` run leaves the count at 1.
+
+### Broad audit (second pass, 2026-10-05)
+
+Adversarial pass over the areas the first pass listed as un-audited. Every fix has
+a test that pins it; "VERIFIED" means a test or command below shows it, "CLAIMED"
+means read from code only.
+
+**Fixed (VERIFIED):**
+
+1. **Every viewer was silenced after 1 MiB of cumulative output** (high).
+   `PaneStream::fanout` appended each chunk to a per-subscriber queue
+   (`SubQueue.q`) that nothing drained, then marked the subscriber `dropped` past
+   1 MiB and called `on_reset` -> the client got `resync` and reconnected
+   (`AttachClient.kt` `"resync" -> reconnectNow()`). Removed the queue; flow control
+   lives at the connection. Test `stream::tests::a_subscriber_keeps_receiving_past_a_megabyte_of_output`;
+   `tests/risk.rs` `backpressure_flood_bounded_queue_and_forced_resync` encoded the
+   bug and is now `a_flood_is_delivered_in_full_without_a_spurious_resync`.
+2. **The connection backlog guard never fired** (high). `ConnShared.outstanding`
+   was read in `maybe_resync` and never incremented, and `maybe_resync` ran only
+   after a JSON send. A phone on a bad link made the daemon queue the whole output
+   of a busy shell in an unbounded channel (the unit showed 2.5G, peak 4G on
+   2026-10-05). `queue_output` now counts bytes until `flush_output` has written
+   them and resyncs once past `WS_BACKLOG_BYTES`. Test
+   `remote::tests::a_client_that_does_not_read_is_resynced_once_and_not_buffered`.
+3. **A character split across two keeper peeks was corrupted** (medium).
+   `poll_once` lossy-decoded each `Peek` chunk, so a split UTF-8 character became two
+   U+FFFD. Shared `protocol::utf8::Utf8Carry`; tests in `protocol/src/utf8.rs` and
+   `stream::tests::a_character_split_across_peeks_is_not_corrupted`. The attach
+   client had the same bug on stdin (a large non-ASCII paste) and now uses it too.
+4. **The snapshot dropped blank columns** (high, visible). A never-written cell has
+   empty text and `snapshot::render` emitted nothing for it, so `a<5 cols>b`
+   rendered `ab` and any cleared-then-positioned screen lost its offsets (measured
+   with `tests/render_fidelity.rs`, 4 of 5 cases failed before). `RenderState::row`
+   now reads each cell's wide attribute (`ghostty_cell_get(.., CELL_DATA_WIDE)`):
+   spacer tails stay empty, any other empty cell is a space. Trailing default blanks
+   are trimmed, styled ones kept. The mobile client replays the string into a fresh
+   engine (`snapshotReplay`), so it needs no change.
+5. **A row ending in a styled cell bled its style into the next row** (medium):
+   `render` tracked style per row and never reset at the end. Now resets.
+6. **Snapshot and live output were not cut at one byte boundary** (medium). The
+   keeper feeds each byte to the emulator and to a buffer polled every 10 ms, so a
+   snapshot already contained what was still waiting there and it was then replayed
+   as live output. `Snapshot.drain_output` returns that tail with the render
+   (`SnapshotResult.tail`), `PaneStream::snapshot_fenced` holds the poll off while
+   it does and runs a fence that sends the snapshot and flips the connection live;
+   the requester is left out of the tail. Tests
+   `stream::tests::a_snapshot_cuts_the_stream_at_one_byte_boundary`, keeper
+   `a_snapshot_can_take_the_unpeeked_tail`, `tests/stream_continuity.rs`.
+   (The integration test is a regression net, not a reproduction: the old code
+   mostly hid the replay behind a poll-thread race.)
+7. **The keeper buffered an unread session's output without limit** (medium). Now
+   `OutBuf`, capped at `OUT_CAP` (4 MiB), reports `PeekResult.lost` -> viewers
+   resync. Output polled while nobody is subscribed is dropped (the next viewer is
+   sent a snapshot that has it). Tests `out_buf_tests::*`,
+   `stream::tests::{output_polled_with_no_subscriber_is_dropped, lost_output_resyncs_the_viewers}`.
+8. **`ldmux clipboard-write on` did nothing** (medium). The daemon wrote
+   `<state>/clipboard-write` and nothing read it; every stream was built with the
+   sanitizer's OSC 52 policy off. `clipboard_policy` reads it when a stream is made
+   (so no restart is needed) and writes it 0600.
+9. **A failed attach kept its claim** (medium, TS parity `releaseFailedClaim`).
+   On a snapshot error the connection stayed subscribed with `live=false` and the
+   device kept the shell, so its own next attach was refused. It is now torn down
+   and the claim released, and `attach_failed` is sent.
+10. **A second `hello` under another id left the old identity's claims** (medium,
+    TS parity). Now released when no other socket carries that id. Test
+    `tests/ownership_races.rs::a_second_hello_frees_the_old_identitys_claims`.
+11. **`subscribe` ids were allocated under two lock acquisitions** (low): a counter now
+    (`stream::tests::subscriber_ids_are_unique`).
+12. **`Keeper::reap` used `waitpid(-1)`** (medium for tests, low in production). It
+    reaps any child of the process, so one keeper stole another's exit status; this
+    was the real cause of `a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots`
+    being `#[ignore]`d as "flaky under load" (it failed 7 of 8 full runs, 0 of 8
+    after). Now per-pid; the test is un-ignored.
+
+**Races probed, no defect (VERIFIED):** two devices attaching at once give exactly
+one winner and the loser is told the real holder
+(`ownership_races::simultaneous_attaches_have_exactly_one_winner`). Takeover, the
+release grace and `close != detach` are covered by `handover.rs`. `Registry.reconcile`
+/ `adopt` use the keeper `session_id` verbatim (no sibling of the double-`ldmux-`
+bug). `Ownership` is a faithful port (read in full).
+
+**Open items, dispositions:**
+
+- `copymode`: stays an accepted no-op on the wire (the Kotlin client sends it and
+  scrolls its own buffer); the dead `ldmux copy` CLI command, the `copyMode` control
+  method and the `rpc::COPY_MODE` constant are deleted.
+- M3 (`ConnData`) and M4 (`by_device`): already gone from the tree (grep clean).
+- M5 (idle sweep): exists (`sweep_once`, `WS_IDLE_MS`), pinned by the existing keep-alive tests.
+- M6 (attach generation): exists (`attach_gen`), now also checked under the snapshot fence.
+- tmux: no invocation on the deployed path. It remains only in comments and in
+  `parity_corpus_cells_match_tmux`, which stays `#[ignore]`d (needs a tmux binary,
+  which the flake no longer provides).
+- `screen_diff.rs` (the tmux polling fallback, no caller) deleted.
+- Clippy: the two `MutexGuard held across an await` are test-only
+  (`maintenance.rs`, a std mutex serialising window-manager env between tests that
+  each run on their own thread/runtime): no deadlock path, left. About 40 mechanical
+  lints applied by `cargo clippy --fix`; the rest are style (loop indexing, type
+  complexity, constant assertions) and left.
+
+**CLAIMED, not verified:** `RenderState::row` is O(row index) per row (re-walks the
+iterator), O(rows^2) per snapshot; not measured, small at 24-255 rows. OSC 8
+hyperlinks are not carried by the cell model (`Cell` has no link field), so a
+snapshot loses them; the sanitizer passes them in live output. Not fixed.
+
+**Deployment:** none of this is live. The deployed daemon and keeper are old code;
+loading the keeper changes needs `just restart-keeper`, which ends every shell.
+
+**Gate:** `cargo test --workspace` in `nix develop`: 288 passed, 0 failed, 1 ignored
+(`parity_corpus_cells_match_tmux`).

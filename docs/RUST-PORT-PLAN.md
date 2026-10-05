@@ -347,6 +347,13 @@ engine's formatter output diverges from `capture-pane` format, we emit the forma
 ourselves from the cell iterators (it is ours to write; the cells are the data).
 §3.11 is the test that makes this safe.
 
+> **Amended 2026-10-05.** "Full-width" means *every column is accounted for*, not
+> "padded with spaces to the edge". A never-written cell is a space (it used to
+> be empty text and was emitted as nothing, so everything right of a gap slid
+> left); only the second half of a wide character is empty. Default-style blanks
+> at the right edge are not emitted (every replaying client starts a repaint from
+> a clear screen), styled blanks are, and each row ends with the style reset.
+
 ### 3.5 The keeper protocol
 
 Framing: the existing 8-byte frame header (`protocol::frames`) — unchanged, already
