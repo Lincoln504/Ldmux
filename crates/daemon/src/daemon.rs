@@ -386,6 +386,15 @@ impl LdmuxDaemon {
         // owner until the record was pruned a day later.
         for id in &dead {
             self.forget_session_state(id);
+            // A shell that ended on its own is as over as one that was killed,
+            // and the client watching it has to be told. `kill_session` drops the
+            // stream; this path did not, so a desk window whose shell exited sat
+            // on a dead pane for good — measured after typing `exit`: the window
+            // still on screen with its three attach processes alive, while the
+            // registry said `dead`.
+            if let Some(name) = self.registry.get(id).map(|r| r.tmux_name.clone()) {
+                self.drop_stream(&name);
+            }
         }
         // Only a *change* in the adopted set is news. Reacting to it being
         // non-empty made one stray session an endless loop: save, broadcast, and
@@ -805,6 +814,13 @@ impl LdmuxDaemon {
             eprintln!("ldmuxd: registry save: {e}");
         }
         self.forget_session_state(&record.id);
+        // Tell whoever is watching that it is over. The TS dropped the stream
+        // here and the port did not: measured, after `ldmux kill` the session's
+        // desk window and its `ldmuxd attach` were both still alive, the client
+        // holding a subscription to a pane that no longer existed. `drop_stream`
+        // closes the stream, which resets every subscriber — that is the signal
+        // the attach client exits on.
+        self.drop_stream(&record.tmux_name);
         self.sessions_dirty = true;
         Ok(record)
     }
@@ -1864,6 +1880,67 @@ mod tests {
             .unwrap();
         assert!(after > before, "activity must advance on pane output: {before} -> {after}");
         assert!(after > rec.created_at, "and it is not simply the creation time");
+    }
+
+    /// Ending a shell drops its stream, so the client watching it is told.
+    ///
+    /// The subscriber is reset by `drop_stream`; without it an attached desk
+    /// window kept its subscription to a pane that no longer existed. Measured
+    /// live: after `ldmux kill`, the window and its three `ldmuxd attach`
+    /// processes were all still alive.
+    #[tokio::test]
+    async fn a_killed_shell_drops_its_stream() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        d.stream_for(&rec.tmux_name);
+        assert!(d.get_stream(&rec.tmux_name).is_some(), "the stream exists to be dropped");
+        d.kill_session(&rec.id).await.unwrap();
+        assert!(
+            d.get_stream(&rec.tmux_name).is_none(),
+            "a killed shell must drop its stream, or its window never hears"
+        );
+    }
+
+    /// And so does a shell that ended on its own — the `exit` path.
+    ///
+    /// The two paths are different code (`kill_session` vs the reconcile pass)
+    /// and only the first dropped the stream. Measured after typing `exit`: the
+    /// window stayed on screen with its attach processes alive while the registry
+    /// already said `dead`.
+    #[tokio::test]
+    async fn a_shell_that_exits_drops_its_stream() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        d.stream_for(&rec.tmux_name);
+        // The shell exits: the keeper marks the pane dead (its authoritative
+        // death signal is `waitpid`, which is what `kill` models here).
+        fk.kill(&rec.tmux_name);
+        d.reconcile().await.unwrap();
+        assert_eq!(d.registry().get(&rec.id).unwrap().status, "dead");
+        assert!(
+            d.get_stream(&rec.tmux_name).is_none(),
+            "a shell that exited must drop its stream too, or its window sits on a dead pane"
+        );
     }
 
     /// The RPC dispatch (`handle`): `ping`, `list`, `new`, `kill`, `close`,
