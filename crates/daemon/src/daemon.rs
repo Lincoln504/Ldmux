@@ -44,7 +44,26 @@ pub struct ReconcileResult {
     pub adopted: Vec<String>,
     /// Records pruned (past their dead TTL, over the cap).
     pub pruned: Vec<String>,
+    /// The adopted-session set changed since the last pass. It is reported on
+    /// every pass and never recorded, so only a change is news (the TS
+    /// `unknownChanged`).
+    pub unknown_changed: bool,
 }
+
+/// How often the daemon reconciles the world against the keeper and the window
+/// manager (the TS `setInterval(..., 2000)`).
+///
+/// Without this pass a shell that typed `exit` stays `running` in the registry
+/// until the daemon restarts, a `cd` never reaches a client that is not polling
+/// `list`, and a desk window the user closed stays recorded for good.
+const MAINTENANCE_INTERVAL_MS: u64 = 2000;
+
+/// How long a desk window may be missing before it counts as closed.
+///
+/// A window is not on screen the instant `makeLive` returns: i3 maps it a beat
+/// later. A pass that landed in that gap would read "absent" and end a shell the
+/// user had just asked for, so a window younger than this is left alone.
+const LIVE_WINDOW_GRACE_MS: u64 = 5000;
 
 /// The row title for a session (the TS `sessionTitle`): the explicit title when
 /// it is more than the kind, else the directory's basename, else the record's.
@@ -96,6 +115,21 @@ pub struct LdmuxDaemon {
     /// The desktop's device identity (the ADR-0010 claim source for desk
     /// windows; the TS `desktopDevice`).
     desktop_device: ldmux_protocol::rpc::DeviceInfo,
+    /// Each running session's pane directory at the last maintenance pass: the
+    /// only way to notice a `cd` and tell a client that is not polling (the TS
+    /// `lastCwds`).
+    last_cwds: HashMap<String, String>,
+    /// The adopted-session set as of the last pass. Only a *change* is news:
+    /// reacting to the set being non-empty made one stray session an endless
+    /// loop of save-broadcast-reconcile (the TS `unknownSessionsKey`).
+    unknown_sessions_key: String,
+    /// Set by `stop`: the maintenance loop exits rather than keeping the daemon
+    /// (and its keeper, and its state dir) alive after a test is done with it.
+    maintenance_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// How long a recorded desk window may be missing before it counts as
+    /// closed. A field so the window-close rule can be tested without waiting
+    /// the real five seconds for a window that is never going to appear.
+    live_window_grace_ms: u64,
 }
 
 impl Drop for LdmuxDaemon {
@@ -132,12 +166,23 @@ impl LdmuxDaemon {
                 name: "desktop".into(),
                 kind: "desktop".into(),
             },
+            last_cwds: HashMap::new(),
+            unknown_sessions_key: String::new(),
+            maintenance_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            live_window_grace_ms: LIVE_WINDOW_GRACE_MS,
         }
     }
 
     /// Configure the remote (the hostname, port, token) before `start`.
     pub fn with_remote(mut self, hostname: String, port: u16, token: String) -> Self {
         self.remote_cfg = Some(crate::remote::RemoteConfig::new(hostname, port, token));
+        self
+    }
+
+    /// Shorten the live-window grace period. A test hook: the rule it guards is
+    /// real, and five seconds per assert is not.
+    pub fn with_live_window_grace_ms(mut self, ms: u64) -> Self {
+        self.live_window_grace_ms = ms;
         self
     }
 
@@ -250,37 +295,195 @@ impl LdmuxDaemon {
             KeeperMessage::ListResult(lr) => lr.sessions,
             _ => return Err("keeper did not answer a ListResult".into()),
         };
+        self.kill_dead_keeper_sessions(&states).await;
+        Ok(self.apply_reconcile(states))
+    }
+
+    /// End a keeper session whose shell has exited.
+    ///
+    /// A shell that exits ends its session (`remain-on-exit off`, SPEC §5.2), so
+    /// the keeper should not hold the pane afterwards — but it does: it marks the
+    /// session `dead` and keeps the record so `/proc` reads do not go stale. The
+    /// emulator, the master pty and the child's slot all stay allocated, and
+    /// **nothing ever released them**, so every shell that had ever exited stayed
+    /// in the keeper for the life of the process. The keeper has reaped the child
+    /// and this is the authority on the death, so the daemon releases what is
+    /// left: the terminal is the expensive part.
+    ///
+    /// Idempotent and self-healing: it runs on every pass, so a pane leaked
+    /// before this existed is collected on the next tick.
+    pub async fn kill_dead_keeper_sessions(&mut self, states: &[ldmux_protocol::keeper::State]) {
+        for st in states.iter().filter(|s| s.dead) {
+            let _ = self
+                .keeper_call(&KeeperMessage::Kill(km::Kill { session_id: st.session_id.clone() }))
+                .await;
+        }
+    }
+
+    /// The reconcile pass against a keeper listing already in hand, so a
+    /// maintenance tick pays for one `List` and not three.
+    pub fn apply_reconcile(&mut self, states: Vec<ldmux_protocol::keeper::State>) -> ReconcileResult {
         // The live set, as terminal names (`ldmux-<id>`), the registry's key.
         // The keeper's `session_id` IS that name (the daemon passes the tmux
         // name at Spawn), so it is used verbatim — re-prefixing it made every
         // session look dead on restart and duplicated it via `adopt`.
-        let live: std::collections::BTreeSet<String> =
-            states.iter().map(|s| s.session_id.clone()).collect();
+        //
+        // **`dead` is the point.** The keeper keeps a pane whose shell has exited
+        // so its last screen stays readable, and reports it `dead: true`. Counting
+        // it live is what left a shell that typed `exit` reading `running` until
+        // the daemon was restarted.
+        let live: std::collections::BTreeSet<String> = states
+            .iter()
+            .filter(|s| !s.dead)
+            .map(|s| s.session_id.clone())
+            .collect();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        // Reconcile the registry (the dead/adopted sets).
         let (dead, adopted) = self.registry.reconcile(Some(&live), now);
-        // Prune the registry (the dead TTL, the cap).
         let pruned = self.registry.prune(
             Some(self.dead_record_ttl_ms),
             Some(self.max_records),
             now,
         );
-        if !dead.is_empty() || !pruned.is_empty() {
+        // A shell that ended on its own (`exit`, killed outside ldmux) has to lose
+        // its claim and its window record exactly as one killed through ldmux
+        // does. Only the killing paths did this, so a shell that exited kept its
+        // owner until the record was pruned a day later.
+        for id in &dead {
+            self.forget_session_state(id);
+        }
+        // Only a *change* in the adopted set is news. Reacting to it being
+        // non-empty made one stray session an endless loop: save, broadcast, and
+        // the broadcast's own listing found it again.
+        let unknown_key = adopted.join("\n");
+        let unknown_changed = unknown_key != self.unknown_sessions_key;
+        self.unknown_sessions_key = unknown_key;
+        if !dead.is_empty() || unknown_changed || !pruned.is_empty() {
             let _ = self.registry.save();
         }
-        // Claims for sessions that no longer exist are dropped (a session killed
-        // outside ldmux must not leave an owner pointing at nothing).
-        let known: HashSet<String> = self
+        // Claims for sessions that no longer exist are the other half of stale
+        // state: a session killed outside ldmux leaves an owner pointing at
+        // nothing, and a later session reusing that id inherits it (ADR-0010).
+        let known: HashSet<String> = self.registry.list().into_iter().map(|r| r.id).collect();
+        self.ownership.retain(&known);
+        for id in self.live_windows.keys().cloned().collect::<Vec<_>>() {
+            if !known.contains(&id) {
+                self.live_windows.remove(&id);
+            }
+        }
+        ReconcileResult { dead, adopted, pruned, unknown_changed }
+    }
+
+    /// Reconcile the desk windows against reality: is each recorded window still
+    /// on screen?
+    ///
+    /// `live_windows` is written by `makeLive`/`deskWindow` and, until this pass
+    /// existed, cleared only by `closeLive`. A user closes a window with the
+    /// window manager, not with the CLI, so the record outlived the window for
+    /// good: `makeLive` then refused with "that shell already has a desk window"
+    /// and the shell could never be made live again.
+    ///
+    /// Closing a desk window **ends the shell**, everywhere — including under a
+    /// phone that has it, which is told the shell is gone and goes back to its
+    /// launcher. That is the user's rule, stated twice (2026-09-17, 2026-09-26).
+    ///
+    /// Only an explicit "absent" may end anything: a window manager that does not
+    /// answer must never be read as a closed window.
+    pub async fn reconcile_live(&mut self) -> bool {
+        let mut changed = false;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        for id in self.live_windows.keys().cloned().collect::<Vec<_>>() {
+            let record = self.registry.get(&id).cloned();
+            match record {
+                Some(r) if r.status == "running" => {}
+                // The record is gone, or its shell has ended: the window is not
+                // this daemon's business any more.
+                _ => {
+                    self.live_windows.remove(&id);
+                    changed = true;
+                    continue;
+                }
+            }
+            // A window that was just opened is not on screen yet.
+            let opened_at = self.live_windows.get(&id).map(|(_, t)| *t).unwrap_or(0);
+            if now.saturating_sub(opened_at) < self.live_window_grace_ms {
+                continue;
+            }
+            if crate::desktop::live_window_state(&id).await.as_deref() != Ok("absent") {
+                continue;
+            }
+            self.live_windows.remove(&id);
+            changed = true;
+            let _ = self.handle("kill", serde_json::json!({ "id": id })).await;
+        }
+        changed
+    }
+
+    /// Notice a pane that changed directory (the TS `checkCwdDrift`).
+    ///
+    /// A client that is not asking — the mobile app sends `list` once, at
+    /// connect — would otherwise see a `cd` only on the next unrelated
+    /// broadcast. This is what turns that poll into one.
+    pub fn check_cwd_drift(&mut self, states: &[ldmux_protocol::keeper::State]) -> bool {
+        let running: Vec<String> = self
             .registry
             .list()
             .into_iter()
+            .filter(|r| r.status == "running" && !r.tmux_name.is_empty())
             .map(|r| r.id)
             .collect();
-        self.ownership.retain(&known);
-        Ok(ReconcileResult { dead, adopted, pruned })
+        if running.is_empty() {
+            let had = !self.last_cwds.is_empty();
+            self.last_cwds.clear();
+            return had;
+        }
+        let mut paths: HashMap<&str, &str> = HashMap::new();
+        for st in states {
+            if !st.dead {
+                paths.insert(st.session_id.as_str(), st.cwd.as_str());
+            }
+        }
+        let mut changed = false;
+        let mut seen: HashSet<String> = HashSet::new();
+        for id in running {
+            let Some(record) = self.registry.get(&id) else { continue };
+            let Some(path) = paths.get(record.tmux_name.as_str()) else { continue };
+            seen.insert(id.clone());
+            if self.last_cwds.get(&id).map(String::as_str) != Some(*path) {
+                self.last_cwds.insert(id.clone(), (*path).to_string());
+                changed = true;
+            }
+        }
+        // A session that stopped running leaves a stale entry otherwise: an
+        // unbounded map in a daemon meant to run for days is not a habit worth
+        // keeping.
+        for id in self.last_cwds.keys().cloned().collect::<Vec<_>>() {
+            if !seen.contains(&id) {
+                self.last_cwds.remove(&id);
+            }
+        }
+        changed
+    }
+
+    /// One maintenance tick: reconcile the registry, the desk windows and the
+    /// pane directories against the keeper and the window manager. Returns
+    /// whether anything a client can see changed, which is the signal to push a
+    /// fresh session list.
+    pub async fn maintain(&mut self) -> Result<bool, String> {
+        let states = match self.keeper_call(&KeeperMessage::List(km::List {})).await? {
+            KeeperMessage::ListResult(lr) => lr.sessions,
+            _ => Vec::new(),
+        };
+        self.kill_dead_keeper_sessions(&states).await;
+        let r = self.apply_reconcile(states.clone());
+        let live_changed = self.reconcile_live().await;
+        let cwd_changed = self.check_cwd_drift(&states);
+        Ok(!r.dead.is_empty() || r.unknown_changed || !r.pruned.is_empty() || live_changed || cwd_changed)
     }
 
     /// Start the daemon's main loop (the core of the TS `start`).
@@ -364,6 +567,43 @@ impl LdmuxDaemon {
                 }
             }
         }
+        // The maintenance loop (the TS `liveTimer`, every 2s): reconcile the
+        // registry against the keeper, the desk windows against the window
+        // manager, and the pane directories against the last pass. A change is
+        // pushed to every connected client, because a pager whose session died
+        // is a page that silently does nothing.
+        //
+        // The pass is one keeper `List`, taken under the daemon lock; the
+        // broadcast is outside it, since it needs the lock itself to describe
+        // the sessions.
+        {
+            let maint_arc = arc.clone();
+            let stop = self.maintenance_stop.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(MAINTENANCE_INTERVAL_MS))
+                        .await;
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let (changed, shared) = {
+                        let mut d = maint_arc.lock().await;
+                        let changed = match d.maintain().await {
+                            Ok(c) => c,
+                            // A keeper that is restarting is not news.
+                            Err(_) => false,
+                        };
+                        let shared = d.remote.as_ref().and_then(|r| r.shared());
+                        (changed, shared)
+                    };
+                    if changed {
+                        if let Some(shared) = shared {
+                            crate::remote::broadcast_sessions(&shared).await;
+                        }
+                    }
+                }
+            });
+        }
         // Start the control socket (the `ldmuxd.sock` Unix socket).
         // The daemon's `handle` method is the handler: each RPC call locks the
         // mutex and calls `handle`.
@@ -402,6 +642,8 @@ impl LdmuxDaemon {
     /// removes the socket, releases the lock. Tolerates a partially-started
     /// daemon (a signal during startup).
     pub fn stop(&mut self) {
+        self.maintenance_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(ref mut r) = self.remote {
             r.stop();
         }
@@ -1048,6 +1290,11 @@ impl LdmuxDaemon {
                 }
             })
             .collect()
+    }
+
+    /// The sessions recorded as having a desk window, for tests and diagnostics.
+    pub fn live_window_ids(&self) -> Vec<String> {
+        self.live_windows.keys().cloned().collect()
     }
 
     /// Read the desktop inventory (the TS `desktopInventory`).

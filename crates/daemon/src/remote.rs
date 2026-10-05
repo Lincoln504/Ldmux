@@ -161,7 +161,7 @@ impl ConnShared {
 }
 
 /// The server-shared state: the connections table + the daemon + the token.
-struct Shared {
+pub(crate) struct Shared {
     conns: Mutex<HashMap<u64, Arc<ConnShared>>>,
     daemon: DaemonArc,
     token: String,
@@ -229,6 +229,16 @@ impl RemoteServer {
     }
 
     /// Stop the server: mark stopped, tell every connection to close.
+    /// The connections, for the daemon's maintenance loop to push through.
+    pub(crate) fn shared(&self) -> Option<Arc<Shared>> {
+        self.shared.clone()
+    }
+
+    /// The remote's live state, for tests.
+    pub fn is_listening(&self) -> bool {
+        self.shared.is_some()
+    }
+
     pub fn stop(&mut self) {
         if let Some(shared) = &self.shared {
             shared.stopped.store(true, Ordering::Relaxed);
@@ -973,7 +983,7 @@ async fn send_sessions(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
 }
 
 /// Push the session list to every connected client.
-async fn broadcast_sessions(shared: &Arc<Shared>) {
+pub(crate) async fn broadcast_sessions(shared: &Arc<Shared>) {
     let sessions = {
         let mut d = shared.daemon.lock().await;
         d.describe_sessions().await
