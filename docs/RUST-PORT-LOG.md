@@ -1594,8 +1594,9 @@ means read from code only.
 2. **The connection backlog guard never fired** (high). `ConnShared.outstanding`
    was read in `maybe_resync` and never incremented, and `maybe_resync` ran only
    after a JSON send. A phone on a bad link made the daemon queue the whole output
-   of a busy shell in an unbounded channel (the unit showed 2.5G, peak 4G on
-   2026-10-05). `queue_output` now counts bytes until `flush_output` has written
+   of a busy shell in an unbounded channel (CLAIMED as a contributor to the unit's
+   2.5G / 4G peak memory seen on 2026-10-05: the leak path is real, the share is not
+   measured). `queue_output` now counts bytes until `flush_output` has written
    them and resyncs once past `WS_BACKLOG_BYTES`. Test
    `remote::tests::a_client_that_does_not_read_is_resynced_once_and_not_buffered`.
 3. **A character split across two keeper peeks was corrupted** (medium).
