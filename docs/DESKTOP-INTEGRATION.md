@@ -120,7 +120,7 @@ own path.
 `LDMUX_TMUX_BIN`) and every spawn and every launched client uses that path.
 
 **3. A dead session has a tmux name, so it must be checked.** `requireTerminal()`
-accepts any record with a non-empty `tmuxName`, and a dead record keeps its name
+accepts any record with a non-empty `keeperName`, and a dead record keeps its name
 until it is pruned. Attaching to it fails and the window closes the instant it
 opens. `makeLive` refuses a session that is not `running`, with a reason.
 

@@ -26,9 +26,9 @@ impl std::error::Error for FfiError {}
 ///
 /// `MODE_APP_CURSOR` is DECCKM (mode 1), *not* the plan's "DECTCEM" (mode 25):
 /// the plan's label was wrong, and the empirical gate caught it — mode 25 is
-/// "cursor *visible*" (on by default, stays on), which is not tmux's
-/// `keypad_cursor_flag` (application cursor-key mode, off by default, tracks
-/// `?1h`/`?1l`). Mode 1 is the faithful source.
+/// "cursor *visible*" (on by default, stays on), which is not application
+/// cursor-key mode (off by default, tracks `?1h`/`?1l`). Mode 1 is the faithful
+/// source.
 pub const MODE_APP_CURSOR: u16 = 1; // `appCursor` (DECCKM, application cursor keys)
 pub const MODE_SGR_MOUSE: u16 = 1006; // `mouseSgr`
 pub const MODE_BRACKETED_PASTE: u16 = 2004; // `bracketedPaste`

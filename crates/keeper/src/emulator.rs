@@ -186,8 +186,8 @@ pub(crate) fn spawn(
             let bytes = &buf[..n as usize];
             term.write(bytes);
             out.lock().unwrap().push(bytes);
-            // The pane said something: this is the activity clock (tmux's
-            // `#{session_activity}`). Stamped here — the one place every byte
+            // The pane said something: this is the activity clock
+            // (`lastActivityAt`). Stamped here — the one place every byte
             // from the master passes — and not where the buffer is drained,
             // because a `Peek` takes the bytes away and says nothing about
             // whether they were new.

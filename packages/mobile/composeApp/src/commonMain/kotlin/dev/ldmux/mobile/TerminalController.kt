@@ -115,8 +115,8 @@ class TerminalController(
      * so arming Ctrl and then typing `q` sent a plain `q` and left Ctrl armed for
      * the next bar key — which is both halves of the reported bug at once.
      *
-     * Same shape as [inCopyMode]: input state the session owns and the chrome reads
-     * back. `modes` above is the same pattern.
+     * Input state the session owns and the chrome reads back (`modes` above is
+     * the same pattern).
      */
     override var modifiers by mutableStateOf(Modifiers())
         private set
@@ -393,7 +393,7 @@ class TerminalController(
     /**
      * Repaint at most once per frame.
      *
-     * Output arrives per write() from tmux, which under a flood (`cat` a big
+     * Output arrives per write() from the server, which under a flood (`cat` a big
      * file, `yes`) is far faster than the display: rendering each frame would
      * burn the main thread on work nobody can see, and a saturated main thread
      * delays *input*, which is the one thing that must stay responsive. The
@@ -454,10 +454,9 @@ class TerminalController(
     /**
      * Send one key with the sticky modifiers applied.
      *
-     * Every modified key goes as a tmux key name (`C-a`, `M-f`), characters
-     * included: tmux then encodes it for whatever the program asked for — the C0
-     * byte for readline, `CSI 97;5u` for pi or Claude Code with extended keys on. A
-     * literal control byte is dropped by tmux in that mode (see `Modifiers.kt`).
+     * Every modified key goes as a protocol key name (`C-a`, `M-f`), characters
+     * included: the daemon turns the name into bytes in one place (see
+     * `Modifiers.kt`).
      */
     override fun sendModifiedKey(key: String, modifiers: Modifiers) {
         when (val k = modifiedKey(key, modifiers)) {
@@ -469,21 +468,6 @@ class TerminalController(
             }
         }
     }
-
-    override fun setCopyMode(on: Boolean) {
-        attach.copyMode(on)
-    }
-
-    /**
-     * Whether the pane is in a tmux mode.
-     *
-     * Both the server's reading and the engine's are consulted: the server knows
-     * for certain, but it only speaks on a state push, while the engine sees the
-     * screen change immediately. Taking either means the button reflects the
-     * terminal rather than the last thing we asked for.
-     */
-    override val inCopyMode: Boolean
-        get() = modes.paneInMode
 
     override fun sendText(text: String) {
         if (text.isEmpty()) return
@@ -827,7 +811,7 @@ class TerminalController(
 
     /**
      * The grid the surface can paint. This is the resize request: the daemon
-     * sizes the tmux pane to it, so the shell is always the right size for the
+     * sizes the session's pty to it, so the shell is always the right size for the
      * screen showing it rather than fixed at creation.
      */
     fun setGrid(cols: Int, rows: Int) {
@@ -943,7 +927,7 @@ internal fun snapshotReplay(screen: String): String {
  * screen was right, the cell the client computed was right (`col=41 row=2`) — the
  * mode was missing, and the mode is what chose the branch.
  *
- * `?1000` and not `?1002`/`?1003`: tmux reports only that *some* mouse mode is on,
+ * `?1000` and not `?1002`/`?1003`: the server reports only that *some* mouse mode is on,
  * and this client synthesises presses alone, so the press-reporting mode is the
  * one it needs. A program that wanted drag reporting loses nothing it does not
  * get back the next time it enables it.

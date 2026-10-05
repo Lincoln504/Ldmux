@@ -16,7 +16,7 @@
 //! - `kill <id>` — kill a session.
 //! - `close <id>` — close a session (unless a desktop window holds it).
 //! - `forget <id>` — drop a record without touching the keeper.
-//! - `adopt <tmux-name>` — adopt a keeper session.
+//! - `adopt <keeper-name>` — adopt a keeper session.
 //! - `remote` — the remote endpoint info.
 //! - `code` — the pairing QR code.
 //! - `pair` — the pairing link.
@@ -166,8 +166,8 @@ async fn main() {
                             let kind = s.get("kind").and_then(|t| t.as_str()).unwrap_or("");
                             let cwd = s.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
                             let title = s.get("title").and_then(|t| t.as_str()).unwrap_or("");
-                            let tmux_name = s.get("tmuxName").and_then(|t| t.as_str()).unwrap_or("");
-                            let attach = if tmux_name.is_empty() { "[rpc]".to_string() } else { format!("[{tmux_name}]") };
+                            let keeper_name = s.get("keeperName").and_then(|t| t.as_str()).unwrap_or("");
+                            let attach = if keeper_name.is_empty() { "[rpc]".to_string() } else { format!("[{keeper_name}]") };
                             println!("{id}  {status:7} {kind:5} {cwd}  \"{title}\"  {attach}");
                         }
                     }
@@ -338,18 +338,18 @@ async fn main() {
         }
         "adopt" => {
             let pos = positional(rest, &[]);
-            let tmux_name = pos.first().copied().unwrap_or("");
+            let keeper_name = pos.first().copied().unwrap_or("");
             let r: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
                 "adopt",
-                &serde_json::json!({ "tmuxName": tmux_name }),
+                &serde_json::json!({ "keeperName": keeper_name }),
             )
             .await;
             match r {
                 Ok(v) => {
                     let id = v.get("session").and_then(|s| s.get("id")).and_then(|t| t.as_str()).unwrap_or("");
-                    let tmux_name = v.get("session").and_then(|s| s.get("tmuxName")).and_then(|t| t.as_str()).unwrap_or("");
-                    println!("{id}  {tmux_name}");
+                    let keeper_name = v.get("session").and_then(|s| s.get("keeperName")).and_then(|t| t.as_str()).unwrap_or("");
+                    println!("{id}  {keeper_name}");
                 }
                 Err(e) => {
                     eprintln!("ldmux: {e}");

@@ -9,7 +9,6 @@
 //! Environment:
 //! - `LDMUX_STATE_DIR` — the state directory (default: `~/.ldmux`).
 //! - `LDMUX_SOCK` — the control socket path (default: `<state_dir>/ldmuxd.sock`).
-//! - `LDMUX_TMUX_SOCK` — the tmux socket path (resolved via the protocol).
 //! - `LDMUX_REMOTE_HOST` — the tailnet or loopback address (default: `127.0.0.1`).
 //! - `LDMUX_REMOTE_PORT` — the remote port (default: `7623`).
 //! - `LDMUX_TOKEN_FILE` — where the bearer token persists (default: `<state_dir>/token`).

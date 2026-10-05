@@ -2,94 +2,44 @@
 //!
 //! **The gate is on the cells, not the SGR bytes.** Plan §3.11(3) is explicit:
 //! "the cells are the source of truth; the format is ours." So this harness
-//! pins the two halves separately:
+//! pins two halves separately, and **neither needs tmux (or any other external
+//! program) at test time**:
 //!
-//! 1. `parity_corpus_cells_match_tmux` — the *engine* half: the same input
-//!    bytes → (a) a real tmux pane's grid, decoded from
-//!    `capture-pane -p -e -N` by `sgrep`, and (b) our engine's cells (the
-//!    `RenderState` walk). Compared cell by cell. A divergence here is a real
-//!    engine defect (R1: a wrong screen with no error).
+//! 1. `golden_corpus_cells_match_the_reference_grids` — the *engine* half: for
+//!    every `parity/NN-name.bin` corpus file, the same input bytes fed to our
+//!    engine (the `RenderState` walk) must produce the grid recorded in the
+//!    committed golden `parity/NN-name.capture`, compared cell by cell. A
+//!    divergence is a real engine defect (R1: a wrong screen with no error).
 //! 2. `round_trip_render_then_parse_is_identity` — the *format* half: our SGR
 //!    spelling (`sgr.rs`, a reset-then-re-issue encoding) is faithful to the
 //!    cells — parsing what `snapshot::render` emits recovers the cells.
 //!
-//! (Decision recorded in `docs/RUST-PORT-LOG.md`: the earlier byte-identical
-//! reading of §3.11(2) is superseded by §3.11(3)'s own words — tmux's SGR
-//! spelling (a transition encoder) is a *moving* reference across tmux
-//! versions, while the cells are the stable truth both engines must match.
-//! `sgr.rs` keeps its re-issue encoding: it is a valid SGR, and its
-//! fidelity is pinned by the round-trip.)
+//! **Provenance of the goldens** (`parity/README.md`): each `.capture` is what
+//! an independent terminal emulator (tmux 3.5a) showed for the matching
+//! `.bin`, captured once on 2026-10-05 with `capture-pane -p -e -N` by
+//! `scripts/regen_parity_golden.sh`. Regenerating is deliberate and manual;
+//! `cargo test` never runs it. The goldens are decoded by `sgrep`, a narrow
+//! SGR-dump → cells decoder.
 //!
-//! **The pane design** (resolves the open design question): a tmux pane runs
-//! a *shell*, so feeding the corpus as the pane's *input* would put the
-//! shell's echo + prompt in the grid, not just the corpus. So the corpus is
-//! fed as the pane's **output**: the pane runs `clear; cat <corpus-file>;
-//! exec sleep 9999`, where `clear` erases the echoed command text, `cat`
-//! emits the corpus as the pane's *output* (so the **emulator** parses it,
-//! not the shell), and `exec sleep` suppresses the prompt. The grid is then
-//! *just* the corpus — the same scope as our engine fed the same bytes
-//! directly.
-//!
-//! This drives a **scratch** tmux server (a unique `-L` socket), never the
-//! live box. The tmux binary is resolved `LDMUX_TMUX_BIN` before PATH (the
-//! same order as `packages/daemon/src/tmux/control-plane.ts:44`).
-//!
-//! Known version quirk (observed 2026-09-28, tmux 3.5a on this box):
-//! `capture-pane -N` pads short rows to 20 columns and long rows to the
-//! window width (80) — not a uniform 80. The cell gate does not depend on it:
-//! `normalize` pads every row to the pinned width on both sides.
+//! The corpus: basic SGR, every attribute (bold/faint/italic/underline/blink/
+//! inverse/strike), the 16 ANSI + 256 + 24-bit colours, wide (CJK/emoji) and
+//! combining characters, line wrap, OSC 8 hyperlinks, and scroll (40 lines
+//! into a 24-row grid, so only the visible tail is compared). Overline (SGR 53)
+//! is deliberately absent: tmux 3.5a mis-serialises it (`ESC[5:3m`), so it has
+//! no trustworthy reference; it is pinned by the render round-trip instead.
 
 mod sgrep;
 
-use ldmux_daemon::exec::{run, ExecOpts};
 use ldmux_vt_sys::{Cell, RenderState, Terminal};
 
-/// The pinned corpus (plan §3.11). A set of SGR sequences + text:
-/// bold "B", underline "U", 256-colour "C", 24-bit "D", then a newline.
-///
-/// Pinned: any change here changes the golden. Extend deliberately (the plan
-/// names the full corpus — all attributes, wide/emoji, wrap, OSC 8, scroll —
-/// but the first pin is this minimal set).
-const CORPUS: &[u8] = b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m\n";
-
-/// The viewport geometry, pinned (the pane and the engine must match).
+/// The viewport geometry, pinned (the reference pane and the engine match).
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
 
-/// Resolve the tmux binary: `LDMUX_TMUX_BIN` before PATH, bare `tmux` as the
-/// last resort (the TS `resolveTmuxBin` order).
-fn tmux_bin() -> String {
-    let explicit = std::env::var("LDMUX_TMUX_BIN").unwrap_or_default();
-    if !explicit.is_empty() && std::path::Path::new(&explicit).exists() {
-        return explicit;
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            let candidate = std::path::Path::new(&dir).join("tmux");
-            if candidate.exists() {
-                return candidate.to_string_lossy().into_owned();
-            }
-        }
-    }
-    "tmux".to_string()
-}
-
-/// Run a tmux command against the scratch server, capturing its output.
-async fn tm(socket: &str, args: &[&str]) -> ldmux_daemon::exec::ExecResult {
-    let mut argv: Vec<String> = vec![tmux_bin(), "-L".into(), socket.to_string()];
-    for a in args {
-        argv.push((*a).to_string());
-    }
-    run(argv, ExecOpts::default()).await
-}
-
-/// Our engine's grid for the corpus: feed the bytes, walk the rows.
-fn our_cells() -> Vec<Vec<Cell>> {
+/// Our engine's grid for a corpus: feed the bytes, walk the rows.
+fn our_cells(corpus: &[u8]) -> Vec<Vec<Cell>> {
     let mut term = Terminal::new(COLS, ROWS).expect("the engine allocates");
-    term.write(CORPUS);
+    term.write(corpus);
     let rs = RenderState::new().expect("the render state allocates");
     rs.update(&term).expect("the render state updates from the terminal");
     let mut rows: Vec<Vec<Cell>> = Vec::new();
@@ -123,90 +73,34 @@ fn normalize(rows: Vec<Vec<Cell>>, width: usize) -> Vec<Vec<Cell>> {
         .collect()
 }
 
-// Status after D4: tmux is gone (deleted with the TypeScript tree), so
-// `parity_corpus_cells_match_tmux` is `#[ignore]`d — it needs a tmux binary, and
-// the devShell no longer ships one. It is kept because it *is* the R1 evidence
-// artifact: the last green run, and the corpus it drives, are recorded in
-// `docs/RUST-PORT-LOG.md`. Install tmux (or set `LDMUX_TMUX_BIN`) and run it with
-// `cargo test -p ldmux-daemon --test parity -- --ignored` to re-verify. The
-// format half below needs no tmux and still runs.
-#[tokio::test]
-#[ignore = "needs a tmux binary, removed at D4; see docs/RUST-PORT-LOG.md for the evidence run"]
-async fn parity_corpus_cells_match_tmux() {
-    // The corpus file (the pane `cat`s it as its *output*).
-    let corpus_path = std::env::temp_dir().join(format!(
-        "ldmux-parity-corpus-{}.bin",
-        std::process::id()
-    ));
-    std::fs::write(&corpus_path, CORPUS).expect("write the corpus file");
-
-    // A scratch socket (never the live box), unique per run.
-    let socket = format!("ldmux-parity-{}", std::process::id());
-
-    // Start a scratch server with a pane that runs `clear; cat <file>; exec
-    // sleep 9999`: the `clear` erases the echoed command text, `cat` emits
-    // the corpus as the pane's *output* (the emulator parses it, not the
-    // shell), and `exec sleep` suppresses the prompt — so the grid is
-    // *just* the corpus.
-    let emitter = format!("clear; cat {}; exec sleep 9999", corpus_path.to_string_lossy());
-    let r = tm(
-        &socket,
-        &[
-            "new-session",
-            "-d",
-            "-s",
-            "s1",
-            "-x",
-            &COLS.to_string(),
-            "-y",
-            &ROWS.to_string(),
-            &emitter,
-        ],
-    )
-    .await;
-    assert_eq!(r.code, 0, "new-session failed: {}", r.err);
-
-    // Give the pane a moment to run `clear` + `cat` (the grid is then
-    // stable: `exec sleep` means no further output).
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    // (a) tmux: the grid, in SGR form, decoded to cells.
-    let cap = tm(&socket, &["capture-pane", "-p", "-e", "-N", "-t", "s1"]).await;
-    assert_eq!(cap.code, 0, "capture-pane failed: {}", cap.err);
-    // Clean up the scratch server (reap the socket file).
-    let _ = tm(&socket, &["kill-server"]).await;
-    let _ = std::fs::remove_file(&corpus_path);
-    let tmux_grid = sgrep::parse(&cap.out, COLS as usize);
-
-    // (b) our engine: the cells, straight from the render state.
-    let ours = our_cells();
-
-    let (t, o) = (
-        normalize(tmux_grid, COLS as usize),
-        normalize(ours, COLS as usize),
-    );
-    assert_eq!(t.len(), o.len(), "row count: tmux {} vs ours {}", t.len(), o.len());
-    let mut divergence: Option<(usize, usize, &Cell, &Cell)> = None;
-    for (y, (tr, or_)) in t.iter().zip(&o).enumerate() {
-        assert_eq!(tr.len(), or_.len(), "row {y} width");
-        for (x, (tc, oc)) in tr.iter().zip(or_).enumerate() {
-            if tc != oc {
-                divergence = Some((y, x, tc, oc));
-                break;
+#[test]
+fn golden_corpus_cells_match_the_reference_grids() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
+    let mut corpora: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the parity directory exists")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "bin"))
+        .collect();
+    corpora.sort();
+    assert!(corpora.len() >= 7, "the corpus is missing files: {corpora:?}");
+    for bin in corpora {
+        let name = bin.file_stem().unwrap().to_string_lossy().into_owned();
+        let golden = std::fs::read_to_string(bin.with_extension("capture"))
+            .unwrap_or_else(|e| panic!("{name}: golden missing ({e}); run scripts/regen_parity_golden.sh"));
+        let corpus = std::fs::read(&bin).unwrap();
+        let want = normalize(sgrep::parse(&golden, COLS as usize), COLS as usize);
+        let got = normalize(our_cells(&corpus), COLS as usize);
+        assert_eq!(want.len(), got.len(), "{name}: row count");
+        for (y, (wr, gr)) in want.iter().zip(&got).enumerate() {
+            assert_eq!(wr.len(), gr.len(), "{name}: row {y} width");
+            for (x, (wc, gc)) in wr.iter().zip(gr).enumerate() {
+                assert_eq!(
+                    wc, gc,
+                    "§3.11 engine divergence in {name} at row {y} col {x}.\n  golden: {wc:?}\n  ours:   {gc:?}\n(a divergence means the engines parsed the same bytes differently — an R1 defect)"
+                );
             }
         }
-        if divergence.is_some() {
-            break;
-        }
     }
-    assert!(
-        divergence.is_none(),
-        "§3.11 engine divergence at row {} col {}.\n  tmux cell: {:?}\n  ours cell: {:?}\n(corpus: the same bytes into both; a divergence means the engines parsed them differently — an R1 defect)",
-        divergence.as_ref().map(|d| d.0).unwrap_or(0),
-        divergence.as_ref().map(|d| d.1).unwrap_or(0),
-        divergence.as_ref().map(|d| d.2).unwrap(),
-        divergence.as_ref().map(|d| d.3).unwrap(),
-    );
 }
 
 #[test]

@@ -3,9 +3,8 @@
 //! fallback chain can never drift between components.
 //!
 //! Port of `packages/protocol/src/paths.ts` (the source of record, deleted at
-//! D4: read it at git commit `6b3efb8`). The env names are the same. The tmux
-//! socket resolver that used to live here was deleted with tmux itself — the
-//! A/B window it was kept for is over.
+//! D4: read it at git commit `6b3efb8`). The env names are the same. There is
+//! no multiplexer-socket resolver: the keeper socket is the only session socket.
 //!
 //! The pure cores take the env values as arguments so tests never race on the
 //! process environment; the `resolve_*` wrappers read it.

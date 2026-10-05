@@ -11,13 +11,12 @@
 //! The spelling is ours (plan §3.11(3): "the cells are the source of truth;
 //! the format is ours"): a changed cell re-issues the whole style (a `0`,
 //! then every "on" attribute + colour). That is valid SGR, not
-//! byte-identical to tmux's transition spelling (a `\x1b[1m` where we emit
-//! a `\x1b[0;1m`); the fidelity to the cells is what the §3.11 round-trip
-//! test pins (`parse(render(cells)) == cells`, in
+//! a transition encoder (a `\x1b[1m` where we emit a `\x1b[0;1m`); the
+//! fidelity to the cells is what the §3.11 round-trip test pins (`parse(render(cells)) == cells`, in
 //! `crates/daemon/tests/parity.rs`).
 //!
-//! The mapping is the standard SGR parameter table (the same codes tmux and
-//! every xterm-family terminal understand):
+//! The mapping is the standard SGR parameter table (the codes every xterm-family
+//! terminal understands):
 //!
 //! | attribute     | on            | off          |
 //! |---------------|---------------|--------------|
@@ -76,10 +75,10 @@ pub fn transition(from: &CellStyle, to: &CellStyle) -> String {
     // New attributes: emit the "on" codes.
     //
     // A full re-issue when the styles differ (a `0` then every "on" attribute
-    // of `to`). This is *not* what tmux emits — tmux emits a transition
-    // (`\x1b[1m` where we emit `\x1b[0;1m`); the §3.11 run proved the two
-    // spellings diverge, and plan §3.11(3) settles it: the cells are the
-    // source of truth, the format is ours. The re-issue is what we keep: it
+    // of `to`). This is not a transition encoder (`\x1b[1m` where we emit
+    // `\x1b[0;1m`); the §3.11 run showed the two spellings diverge, and plan
+    // §3.11(3) settles it: the cells are the source of truth, the format is
+    // ours. The re-issue is what we keep: it
     // is valid SGR, and it is the only encoding that is byte-stable across
     // the corpus (a diff would depend on the order of the changes, which the
     // corpus does not pin).

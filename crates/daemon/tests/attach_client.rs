@@ -1,7 +1,6 @@
 //! The desktop attach client against a real daemon: `attach::run_with`
 //! connects to the daemon's remote, attaches, streams the pane, and forwards
-//! input. This is the desk-window path of plan §3.9 (a protocol client, not a
-//! tmux client).
+//! input. This is the desk-window path of plan §3.9 (a protocol client of the daemon).
 
 mod common;
 

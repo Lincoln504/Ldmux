@@ -444,7 +444,7 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     //
     // Leaving the terminal (back to the launcher) stops it, because nothing is
     // being watched then — and the shells themselves are unharmed either way:
-    // they live in tmux on the host, not in this process.
+    // they live in the keeper on the host, not in this process.
     // **The shape of the screen is the window's, not ours.**
     //
     // The device rotates, the platform reports the new size, and this reads it. No
@@ -488,7 +488,7 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // The alternative — holding the sockets, the wake lock and the claims for as
     // long as the app is installed — costs a radio wakeup every four seconds per
     // open shell and a CPU that never suspends, to keep a *view* of a shell alive.
-    // The view is the cheap part: the shell lives in tmux on the host, and a
+    // The view is the cheap part: the shell lives in the keeper on the host, and a
     // client that reconnects gets a full snapshot of the terminal state by
     // construction. So there is nothing to preserve by staying awake.
     //
@@ -1548,7 +1548,7 @@ private fun SidePanel(
             // Backspace joins the keys a soft keyboard cannot send. Landscape has no
             // keyboard at all, so a dictated word that arrives wrong cannot be taken
             // back: Esc, Tab and Enter were here, and the one key that undoes a
-            // character was not. `BSpace` is tmux's name for erase-to-the-left and it
+            // character was not. `BSpace` is the protocol's name for erase-to-the-left and it
             // is what the hardware path already sends (TerminalSurface.android.kt:277),
             // so there is one definition of this key rather than two.
             //

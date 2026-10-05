@@ -1,0 +1,3 @@
+# The parity corpus is raw terminal bytes (CRLF line ends are data), and the
+# goldens carry significant trailing spaces: never normalise either.
+crates/daemon/tests/parity/* -text

@@ -6,7 +6,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * The sticky modifiers produce tmux key names, so these check the exact name, not
+ * The sticky modifiers produce protocol key names, so these check the exact name, not
  * that a string came out. A Ctrl-C that is not `C-c` is a bug no amount of "it
  * sent something" will catch.
  */
@@ -38,14 +38,12 @@ class ModifiersTest {
     /**
      * A modified character goes by name, never as the byte.
      *
-     * The byte (0x01 for Ctrl-a) is dropped by tmux when the program has turned on
-     * extended keys, which pi and Claude Code do: Ctrl chords worked in the shell and
-     * did nothing there. By name, tmux sends the byte to a program that wants the
-     * byte and `CSI 97;5u` to one that asked for that. Nothing here may regress to a
-     * [ModifiedKey.Literal] for a chord.
+     * The client cannot know which encoding the program on the pty wants (the
+     * legacy byte, or an extended-key form), so the daemon owns the name-to-bytes
+     * table. Nothing here may regress to a [ModifiedKey.Literal] for a chord.
      */
     @Test
-    fun `ctrl on a letter is the tmux name, not the C0 byte`() {
+    fun `ctrl on a letter is the key name, not the C0 byte`() {
         assertEquals("C-a", named("a", Modifiers(ctrl = true)))
         assertEquals("C-c", named("c", Modifiers(ctrl = true)))
         assertEquals("C-z", named("z", Modifiers(ctrl = true)))
@@ -56,7 +54,7 @@ class ModifiersTest {
 
     @Test
     fun `the punctuation control chords keep their classic keys`() {
-        // tmux turns these into ESC, DEL, NUL, 0x1c-0x1f for a legacy program.
+        // The daemon turns these into ESC, DEL, NUL, 0x1c-0x1f.
         assertEquals("C-[", named("[", Modifiers(ctrl = true)))
         assertEquals("C-?", named("?", Modifiers(ctrl = true)))
         assertEquals("C-@", named("@", Modifiers(ctrl = true)))
@@ -78,7 +76,7 @@ class ModifiersTest {
 
     @Test
     fun `ctrl and alt together are one name, meta first`() {
-        // tmux accepts `M-C-c`; it is what sends ESC 0x03 to a legacy program.
+        // `M-C-c` is the protocol name for ESC 0x03.
         assertEquals("M-C-c", named("c", Modifiers(ctrl = true, alt = true)))
     }
 
@@ -107,7 +105,7 @@ class ModifiersTest {
     @Test
     fun `a key that is already modified is rebuilt, not stacked`() {
         // The sidebar ships `C-c` as a key in its own right. With Alt armed that
-        // should be M-C-c — `C-C-c` is not a key and tmux would reject it.
+        // should be M-C-c — `C-C-c` is not a key and the daemon would reject it.
         assertEquals("M-C-c", named("C-c", Modifiers(ctrl = true, alt = true)))
         assertEquals("C-c", named("C-c", Modifiers(ctrl = true)))
         assertEquals("M-c", named("C-c", Modifiers(alt = true)))
@@ -132,7 +130,7 @@ class ModifiersTest {
     /**
      * A control key is written `C/c`.
      *
-     * `C-c` is tmux's name for the key, not a way to write it down: the dash reads as
+     * `C-c` is the protocol's name for the key, not a way to write it down: the dash reads as
      * a range or a minus, and the key is "control, then c". Both bars show these, so
      * the label is derived from the name in one place rather than typed beside it in
      * two — which is how the panel and the portrait bar came to disagree.

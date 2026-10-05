@@ -24,7 +24,7 @@
 //! `byDevice` maps a device id to its live connections; a claim is released
 //! after a grace on disconnect (a reconnect within the grace still holds the
 //! shell). A displaced device is told `owned` and cut off. Only the holder may
-//! write (`input`/`key`/`mouseclick`/`copymode`).
+//! write (`input`/`key`/`mouseclick`).
 //!
 //! ## Flow control
 //!
@@ -55,7 +55,7 @@ type DaemonArc = Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>;
 
 /// Messages that change what is in a shell, and so are only the holder's to
 /// send (the TS `WRITES`).
-const WRITES: [&str; 4] = ["input", "key", "mouseclick", "copymode"];
+const WRITES: [&str; 3] = ["input", "key", "mouseclick"];
 
 /// Per-type caps (the TS `MAX_INPUT_BYTES` / `MAX_KEYS`).
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -796,11 +796,6 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 .await;
             }
         }
-        "copymode" => {
-            // tmux copy-mode has no keeper equivalent: the client scrolls its
-            // own buffer (plan §2.7). Accepted as a no-op so the client's
-            // scrollback gesture is not an error.
-        }
         "follow" => {
             // Client-owned scroll (ADR-0004): a no-op.
         }
@@ -846,7 +841,7 @@ async fn attach(
             conn.send_error("unknown_session", &format!("no terminal-backed session: {session_id}"));
             return;
         };
-        if record.tmux_name.is_empty() {
+        if record.keeper_name.is_empty() {
             drop(d);
             conn.send_error("unknown_session", &format!("no terminal-backed session: {session_id}"));
             return;
@@ -877,8 +872,8 @@ async fn attach(
                 }
             }
         }
-        let tmux_name = record.tmux_name.clone();
-        let stream = d.stream_for(&tmux_name).clone();
+        let keeper_name = record.keeper_name.clone();
+        let stream = d.stream_for(&keeper_name).clone();
         (record, displaced, stream, device)
     };
 
@@ -1047,7 +1042,7 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
         }
         c.send_json(&serde_json::json!({"type":"owned","sessionId":session_id,"owner":null}));
         // Cut it off: unsubscribe and forget the stream.
-        let tmux_name = {
+        let keeper_name = {
             let mut inner = c.inner.lock().unwrap();
             if let Some(unsub) = inner.unsubscribe.take() {
                 unsub();
@@ -1055,11 +1050,11 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
             inner.stream = None;
             inner.session_id = None;
             inner.live = false;
-            inner.record.as_ref().map(|r| r.tmux_name.clone())
+            inner.record.as_ref().map(|r| r.keeper_name.clone())
         };
-        if let Some(tmux) = tmux_name {
+        if let Some(keeper_name) = keeper_name {
             let mut d = shared.daemon.lock().await;
-            d.release_stream_if_idle(&tmux);
+            d.release_stream_if_idle(&keeper_name);
         }
     }
 }
@@ -1119,7 +1114,6 @@ fn send_state(
         "cursorX": snap.cursor_x,
         "cursorY": snap.cursor_y,
         "alternateOn": snap.alternate_on,
-        "paneInMode": snap.pane_in_mode,
         "bracketedPaste": snap.bracketed_paste,
         "mouse": snap.mouse,
         "mouseSgr": snap.mouse_sgr,
@@ -1153,7 +1147,7 @@ fn active_stream(conn: &Arc<ConnShared>) -> Option<Arc<PaneStream>> {
 
 /// Stop viewing the currently-attached session (a `close`/`kill` path).
 async fn stop_viewing(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
-    let tmux = {
+    let keeper_name = {
         let mut inner = conn.inner.lock().unwrap();
         if let Some(unsub) = inner.unsubscribe.take() {
             unsub();
@@ -1161,32 +1155,32 @@ async fn stop_viewing(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
         inner.stream = None;
         inner.session_id = None;
         inner.live = false;
-        inner.record.take().map(|r| r.tmux_name)
+        inner.record.take().map(|r| r.keeper_name)
     };
-    if let Some(tmux) = tmux {
+    if let Some(keeper_name) = keeper_name {
         let mut d = shared.daemon.lock().await;
-        d.release_stream_if_idle(&tmux);
+        d.release_stream_if_idle(&keeper_name);
     }
 }
 
 /// The connection ended: unsubscribe, release the stream, release claims.
 async fn disconnect(conn: Arc<ConnShared>, shared: Arc<Shared>) {
-    let (tmux, device, session) = {
+    let (keeper_name, device, session) = {
         let mut inner = conn.inner.lock().unwrap();
         inner.disposed = true;
         if let Some(unsub) = inner.unsubscribe.take() {
             unsub();
         }
         (
-            inner.record.take().map(|r| r.tmux_name),
+            inner.record.take().map(|r| r.keeper_name),
             inner.device.clone(),
             inner.session_id.clone(),
         )
     };
     shared.conns.lock().unwrap().remove_by_ptr(&conn);
-    if let Some(tmux) = tmux {
+    if let Some(keeper_name) = keeper_name {
         let mut d = shared.daemon.lock().await;
-        d.release_stream_if_idle(&tmux);
+        d.release_stream_if_idle(&keeper_name);
     }
     if let Some(device) = device {
         release_after_grace(&shared, device.id, session).await;
@@ -1272,7 +1266,7 @@ fn live_result(result: Result<serde_json::Value, String>) -> (bool, Option<Strin
 fn default_record(id: &str) -> SessionRecord {
     SessionRecord {
         id: id.into(),
-        tmux_name: String::new(),
+        keeper_name: String::new(),
         kind: "shell".into(),
         cwd: String::new(),
         title: String::new(),
@@ -1604,7 +1598,6 @@ mod tests {
             cursor_x: 1,
             cursor_y: 2,
             alternate_on: false,
-            pane_in_mode: false,
             mouse: true,
             mouse_sgr: true,
             app_cursor: false,

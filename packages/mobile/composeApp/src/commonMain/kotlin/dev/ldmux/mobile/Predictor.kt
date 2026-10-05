@@ -9,7 +9,7 @@ package dev.ldmux.mobile
  * terminal feel local.
  *
  * Only *literal text* is ever predicted (our `input` message). Named keys
- * (`key`) are resolved by tmux against the pane's real modes and are never
+ * (`key`) are resolved by the server against the pane's real modes and are never
  * predicted, so control characters, arrows, function keys and terminal queries
  * still take the honest round trip. That is the predictable/unpredictable gate
  * dooboxes recorded, enforced by the message split rather than by a table.

@@ -1,6 +1,6 @@
 //! The ldmux keeper: the process that owns the PTYs and the shells.
 //!
-//! It is the tmux-server position (plan §3): it allocates a PTY per session,
+//! It is the session layer (plan §3): it allocates a PTY per session,
 //! spawns the shell into it, supervises it (the authoritative death signal is
 //! `waitpid`, not the master EOF), **always reads the master** (so the kernel
 //! pty buffer never fills from a slow reader), and serves the keeper protocol
@@ -47,7 +47,7 @@ pub struct Session {
     em_tx: mpsc::Sender<emulator::EmuMsg>,
     /// When this pane last took input or produced output, in unix ms. Written
     /// by the reader task (output) and by `Write` (input), read by `List`.
-    /// tmux's `#{session_activity}`, which the TS read for `lastActivityAt`.
+    /// This is the wire's `lastActivityAt`.
     activity: Arc<AtomicU64>,
 }
 
@@ -267,7 +267,6 @@ impl Keeper {
                     cursor_x: 0,
                     cursor_y: 0,
                     alternate_on: false,
-                    pane_in_mode: false,
                     mouse: false,
                     mouse_sgr: false,
                     app_cursor: false,
@@ -406,9 +405,6 @@ impl Keeper {
                     cursor_x: o.cursor_x as u64,
                     cursor_y: o.cursor_y as u64,
                     alternate_on: o.alternate_on,
-                    // No tmux "pane in a mode" concept in ghostty-vt, and no
-                    // client reads the field: report false (documented).
-                    pane_in_mode: false,
                     mouse: o.mouse,
                     mouse_sgr: o.mouse_sgr,
                     app_cursor: o.app_cursor,
@@ -490,7 +486,6 @@ impl Keeper {
             cursor_x: st.cursor_x as u64,
             cursor_y: st.cursor_y as u64,
             alternate_on: st.alternate_on,
-            pane_in_mode: false,
             mouse: st.mouse,
             mouse_sgr: st.mouse_sgr,
             app_cursor: st.app_cursor,

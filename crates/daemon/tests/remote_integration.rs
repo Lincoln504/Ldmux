@@ -158,7 +158,8 @@ async fn remote_contract_list_new_kill_close() {
     // camelCase, and the fields the Kotlin `parseSessions` reads.
     let row = &sessions["sessions"][0];
     assert_eq!(row["id"], session_id);
-    assert!(row.get("tmuxName").is_some(), "camelCase tmuxName: {row}");
+    assert!(row.get("keeperName").is_some(), "camelCase keeperName: {row}");
+    assert!(row.get("tmuxName").is_none(), "the legacy key must not be on the wire: {row}");
     assert_eq!(row["createdBy"], "phone");
     assert!(row.get("lastActivityAt").is_some());
 

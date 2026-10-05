@@ -12,7 +12,7 @@ import androidx.compose.runtime.setValue
  * forever". A phone in a pocket with a shell open used to keep a socket, a
  * partial wake lock and a claim on somebody else's shell for as long as the
  * battery lasted, which is a cost with no reader: nobody is looking at a terminal
- * that is not on screen, and the shell is safe in tmux on the host regardless.
+ * that is not on screen, and the shell is safe in the keeper on the host regardless.
  *
  * So the app is on screen or it is not, and that fact is stated once, here, where
  * the platform can set it. What the app *does* about it is [App]'s business.

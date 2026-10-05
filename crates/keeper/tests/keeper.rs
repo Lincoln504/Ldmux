@@ -603,7 +603,6 @@ async fn the_emulator_reports_the_pane_state() {
     // A fresh shell is on the primary screen, not in a mode, and has not
     // negotiated mouse / bracketed paste.
     assert!(!sr.alternate_on);
-    assert!(!sr.pane_in_mode);
     assert!(!sr.mouse && !sr.mouse_sgr && !sr.app_cursor && !sr.bracketed_paste);
     // The cursor is inside the grid; nothing has scrolled yet.
     assert!(sr.cursor_x < 80 && sr.cursor_y < 24);
@@ -664,7 +663,6 @@ async fn the_state_query_carries_the_pane_state() {
     assert!(!st.dead, "a fresh pane is alive");
     // A fresh shell: primary screen, no mode, no negotiated mouse / paste.
     assert!(!st.alternate_on);
-    assert!(!st.pane_in_mode);
     assert!(!st.mouse && !st.mouse_sgr && !st.app_cursor && !st.bracketed_paste);
     // The cursor is inside the grid; nothing has scrolled.
     assert!(st.cursor_x < 80 && st.cursor_y < 24);
@@ -781,7 +779,7 @@ async fn an_unknown_session_is_an_error_answer() {
 
 /// The `Spawn.command` + `Spawn.env` (plan §2.6): the command is what runs, and
 /// the child sees the `LDMUX_*` variables the daemon sets. This is the
-/// replacement for tmux's per-session `-e K=V`.
+/// per-session environment (`K=V`) overlay.
 #[tokio::test]
 async fn spawn_runs_the_command_and_passes_the_env() {
     let socket = socket_path();

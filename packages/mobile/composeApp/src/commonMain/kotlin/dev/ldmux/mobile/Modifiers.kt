@@ -10,21 +10,16 @@ package dev.ldmux.mobile
  *
  * ## How a modified key is delivered: always by name
  *
- * A modified key goes to tmux as a **key name** (`C-a`, `M-f`, `M-C-Left`), never
- * as the bytes we think it should produce, and that includes plain characters.
+ * A modified key goes to the daemon as a **key name** (`C-a`, `M-f`,
+ * `M-C-Left`), never as the bytes we think it should produce, and that includes
+ * plain characters.
  *
- * It used to send Ctrl and Alt on a character as literal bytes (0x01, ESC `f`),
- * reasoning that those are what a keyboard sends. They are only what a keyboard
- * sends to a program that has not asked for anything better. pi and Claude Code
- * ask for extended keys (modifyOtherKeys), and tmux then encodes keys itself —
- * `C-a` becomes `CSI 97;5u` — but only keys it *knows are keys*. A literal 0x01
- * handed to `send-keys -l` in that mode is dropped outright (measured, tmux 3.7b),
- * which is why Ctrl chords worked in the shell and in micro and did nothing in pi,
- * while the C/c button, already a name, worked everywhere.
- *
- * By name, tmux produces the legacy byte for a program that wants it (identical to
- * what the old table computed) and the extended form for one that asked for it.
- * The encoding belongs to the terminal, and tmux is the terminal here.
+ * The client does not know what the program on the pty asked for (legacy bytes,
+ * extended keys), and the daemon is the one place that owns the name-to-bytes
+ * table (`key_name_to_bytes` in the daemon's `stream.rs`). A name is a request
+ * the daemon can answer correctly in one place; literal bytes sent from here
+ * would freeze one encoding into the client. The C/c button was already a name,
+ * so every Ctrl chord now takes the same path.
  */
 
 /** Which modifiers are armed. Both may be armed at once. */
@@ -52,7 +47,7 @@ enum class StickyKey { Ctrl, Alt }
  * What to do with a key press once the modifiers are known.
  *
  * - [Literal] carries bytes to write to the pty as-is (the `input` path).
- * - [Named] carries a tmux key name (the `key` path).
+ * - [Named] carries a protocol key name (the `key` path).
  * - [None] means nothing should be sent.
  */
 sealed interface ModifiedKey {
@@ -67,7 +62,7 @@ sealed interface ModifiedKey {
  *
  * These are the classic C0 assignments, and they are not guessable from the
  * letter's position: Ctrl-`[` is ESC (0x1b), Ctrl-`?` is DEL (0x7f), and Ctrl-`@`
- * is NUL. The byte itself is tmux's to produce now (the key goes by name); this
+ * is NUL. The byte itself is the daemon's to produce (the key goes by name); this
  * decides only whether a Ctrl chord exists for the character at all.
  */
 private val CTRL_BYTES: Map<Char, Char> = buildMap {
@@ -84,10 +79,10 @@ private val CTRL_BYTES: Map<Char, Char> = buildMap {
 }
 
 /**
- * tmux names for the keys that are not single characters.
+ * Protocol names for the keys that are not single characters.
  *
  * Only these can carry a modifier as a *name*; everything else is a character,
- * and tmux key names for punctuation with a modifier (`C-|`) are not valid — which
+ * and key names for punctuation with a modifier (`C-|`) are not valid — which
  * is why the character path exists rather than this handling everything.
  */
 private val NAMED_KEYS: Set<String> = setOf(
@@ -101,7 +96,7 @@ private val NAMED_KEYS: Set<String> = setOf(
  * Turn a key press into something the daemon can deliver.
  *
  * [key] is either a single character (what the on-screen keys send, and what a
- * physical key would produce) or one of tmux's key names.
+ * physical key would produce) or one of the protocol's key names.
  *
  * A modified *character* always resolves, even when the exact byte is unknown
  * (Ctrl-`|` has no C0 code): in that case the Ctrl is dropped rather than the
@@ -118,7 +113,7 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
 
     if (single) {
         val ch = key[0]
-        // Outside ASCII there are no control codes and no tmux names to carry a
+        // Outside ASCII there are no control codes and no key names to carry a
         // modifier; the character goes out as itself.
         if (ch.code !in 0x20..0x7e) return ModifiedKey.Literal(key)
         // Ctrl only exists where there is a C0 code for it (Ctrl-| has none):
@@ -138,7 +133,7 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
         return ModifiedKey.Named(prefix + base)
     }
 
-    // A named key carries its modifier *in the name*, and tmux knows which
+    // A named key carries its modifier *in the name*, and the daemon knows which
     // sequence that is. Some of the sidebar's own keys are already named that
     // way (`C-c`), so any existing prefix is stripped and rebuilt rather than
     // stacked into `C-C-c`, which is not a key.

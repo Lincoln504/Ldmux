@@ -8,14 +8,14 @@ import kotlin.test.assertTrue
 /**
  * Which sessions become pages in the pager.
  *
- * A dead session keeps its tmux name in the registry until the record is pruned,
- * so "has a tmux name" was not the same question as "can be opened". The pager
+ * A dead session keeps its keeper name in the registry until the record is pruned,
+ * so "has a keeper name" was not the same question as "can be opened". The pager
  * spent pages on corpses, and a tap on one went nowhere with no explanation.
  */
 class SessionAttachableTest {
 
-    private fun session(status: String, tmuxName: String = "ldmux-abc") =
-        Session(id = "abc", kind = "shell", title = "shell", cwd = "/tmp", status = status, tmuxName = tmuxName)
+    private fun session(status: String, keeperName: String = "ldmux-abc") =
+        Session(id = "abc", kind = "shell", title = "shell", cwd = "/tmp", status = status, keeperName = keeperName)
 
     @Test
     fun `a running shell is a page`() {
@@ -35,7 +35,7 @@ class SessionAttachableTest {
     @Test
     fun `a session with no terminal is not a page even while running`() {
         // An RPC-only session has nothing to attach to.
-        assertFalse(session("running", tmuxName = "").attachable)
+        assertFalse(session("running", keeperName = "").attachable)
     }
 
     @Test

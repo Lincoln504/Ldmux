@@ -172,15 +172,6 @@ interface TerminalHandle {
     fun tapCell(col: Int, row: Int): Boolean = false
 
     /**
-     * Enter or leave tmux copy-mode.
-     *
-     * The only way to scroll a full-screen program: its output is on the
-     * alternate screen, which has no scrollback, so what you scroll is tmux's own
-     * view of the pane.
-     */
-    fun setCopyMode(on: Boolean) {}
-
-    /**
      * Another device holds this shell, named when known (ADR-0010).
      *
      * A state rather than a one-shot event, because the screen it produces is
@@ -212,9 +203,6 @@ interface TerminalHandle {
      * no new snapshot was ever sent.
      */
     fun repaint() {}
-
-    /** Whether the pane is in a tmux mode right now, as last reported. */
-    val inCopyMode: Boolean get() = false
 
     /**
      * How the link is behaving, so the chrome can show it. The frame cadence is

@@ -450,7 +450,7 @@ Per-session record:
 
 ```json
 {
-  "id": "01a09c54-…", "tmuxName": "ldmux-01a09c54", "kind": "pi",
+  "id": "01a09c54-…", "keeperName": "ldmux-01a09c54", "kind": "pi",
   "cwd": "/home/ldeen", "title": "ldmux investigation",
   "createdAt": 1789…, "updatedAt": 1789…, "createdBy": "mobile",
   "piSessionId": "01a09c54-…", "status": "running|dead",
@@ -749,7 +749,7 @@ planned.
    (`ldmux-mirror`) over `sleep`+`move` to avoid races; otherwise
    `i3-msg 'workspace <ws>'` + move.
 3. `alacritty --class ldmux-mirror --title "ldmux: <title>" -e \
-      tmux -L ldmux attach-session [-r] -t <tmuxName>`
+      tmux -L ldmux attach-session [-r] -t <keeperName>`
 4. Record the container id via `i3-msg -t get_tree` + `jq` for later focus/close
    (a shell helper; no dedicated API in v1).
 

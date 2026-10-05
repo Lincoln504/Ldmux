@@ -41,8 +41,8 @@ data class Session(
     val title: String,
     val cwd: String,
     val status: String,
-    /** Empty for an RPC-only pi session (nothing to attach to in tmux). */
-    val tmuxName: String,
+    /** Empty for an RPC-only pi session (nothing to attach to in the keeper). */
+    val keeperName: String,
     /** Who opened it: "phone", "local", "cli", "adopt". */
     val createdBy: String = "",
     /**
@@ -76,13 +76,13 @@ data class Session(
     /**
      * Can this session be opened as a terminal page?
      *
-     * Not merely "has a tmux name": a session that has **died** keeps its name in
+     * Not merely "has a keeper name": a session that has **died** keeps its name in
      * the registry until the record is pruned, so the pager used to spend pages
      * on corpses — and since the page you were looking at could be one of them,
      * taps and keys went nowhere with no explanation. Only a running session is
      * a page; `starting` counts, because it is on its way.
      */
-    val attachable: Boolean get() = tmuxName.isNotEmpty() && status != "dead"
+    val attachable: Boolean get() = keeperName.isNotEmpty() && status != "dead"
     val label: String get() = if (title.isNotEmpty()) title else id
 
     /**
@@ -680,7 +680,7 @@ internal fun parseSessions(element: JsonElement?, deviceId: String): List<Sessio
             title = o.text("title"),
             cwd = o.text("cwd"),
             status = o.text("status"),
-            tmuxName = o.text("tmuxName"),
+            keeperName = o.text("keeperName"),
             createdBy = o.text("createdBy"),
             process = o.text("process"),
             liveWorkspace = o.optionalText("liveWorkspace"),

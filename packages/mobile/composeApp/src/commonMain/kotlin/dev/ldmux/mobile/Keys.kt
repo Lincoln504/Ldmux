@@ -3,7 +3,7 @@ package dev.ldmux.mobile
 /**
  * A control key as a person writes it: `C/c`, never `C-c`.
  *
- * `C-c` is tmux's name for the key and is what has to go on the wire, so the
+ * `C-c` is the protocol's name for the key and is what has to go on the wire, so the
  * label is derived from the name rather than typed out next to it. Two bars show
  * these keys and only one of them used to be right, which is what typing a label
  * beside a key gets you.

@@ -2,9 +2,7 @@
 //!
 //! Port of the pure functions from `packages/daemon/src/desktop.ts`.
 //!
-//! **The tmux mirror is gone.** `mirror_argv` and its helpers built
-//! `tmux -L <sock> attach -r -t <name>`; with tmux removed there is nothing for
-//! them to build. `ldmux mirror <id>` now runs `ldmuxd attach <id> --readonly` —
+//! **There is no terminal-multiplexer mirror.** `ldmux mirror <id>` runs `ldmuxd attach <id> --readonly` —
 //! the same protocol client as a desk window, told not to take a claim.
 
 /// Shells that cannot use a mouse click.
@@ -55,7 +53,7 @@ pub fn safe_workspace(name: &str) -> Option<String> {
 /// The desk window's argv: alacritty running the attach client (plan §3.9).
 ///
 /// The window is a protocol client of the daemon (`ldmuxd attach <id>`), not a
-/// tmux client: it claims the shell (ADR-0010), streams the pane, and handles
+/// multiplexer client: it claims the shell (ADR-0010), streams the pane, and handles
 /// the handover. `ldmuxd` is resolved on PATH (the unit puts `~/.local/bin`
 /// first).
 pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
@@ -182,7 +180,7 @@ pub struct LiveResult {
 
 /// Write a session's live-window shim and return what to run.
 ///
-/// Written with mode 700 and overwritten on every make-live: it embeds the tmux
+/// Written with mode 700 and overwritten on every make-live: it embeds the keeper
 /// socket and session name, so a stale copy is a window that attaches to the
 /// wrong thing, and a world-writable one is a command somebody else can
 /// replace.
@@ -237,13 +235,8 @@ pub async fn live_window_state(session_id: &str) -> Result<&'static str, String>
 /// under i3) but the *placement* is `place_live`, so the user's view never moves.
 /// Open a session's desk window.
 ///
-/// It used to take the whole tmux-era apparatus — the state dir, the tmux
-/// socket, the tmux name, the tmux binary — and thread it through a
-/// `prepare_live` that wrote a shim script into `<state_dir>/live/` for the
-/// window to run. There is no shim and no tmux: the window runs the attach
-/// client, which speaks the daemon's own protocol (plan §3.9), so every one of
-/// those parameters was dead. The stale shims and `tmux-server.conf` those calls
-/// left behind were still sitting in the live state directory.
+/// The window runs the attach client, which speaks the daemon's own protocol
+/// (plan §3.9): no shim script, no state dir, no socket or binary parameters.
 pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, String> {
     // An empty workspace means "leave it where it opens" (the current one):
     // that is the desk-window case (`$mod+Return`), which must not move the
@@ -429,11 +422,11 @@ mod tests {
 
     #[test]
     fn live_exec_argv_quits_each_arg() {
-        let argv = live_exec_argv(&["tmux", "-L", "sock", "attach", "sess"]);
+        let argv = live_exec_argv(&["ldmuxd", "-L", "sock", "attach", "sess"]);
         assert_eq!(argv[0], "i3-msg");
         assert_eq!(argv[1], "exec");
         assert_eq!(argv[2], "--");
-        assert_eq!(argv[3], "tmux");
+        assert_eq!(argv[3], "ldmuxd");
         assert_eq!(argv[4], "-L");
         assert_eq!(argv[5], "sock");
     }
@@ -458,7 +451,7 @@ mod tests {
     #[test]
     fn live_exec_argv_shell_quotes_each_arg() {
         // An arg with a space is quoted.
-        let argv = live_exec_argv(&["tmux", "-L", "sock with space", "attach", "sess"]);
+        let argv = live_exec_argv(&["ldmuxd", "-L", "sock with space", "attach", "sess"]);
         // The quoted arg should appear as a single element.
         let joined = argv.join(" ");
         assert!(joined.contains("'sock with space'"), "args with spaces must be quoted: {joined}");

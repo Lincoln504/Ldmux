@@ -22,9 +22,9 @@ use tokio_tungstenite::tungstenite::Message;
 /// The screen state a snapshot restores into a terminal.
 ///
 /// The wire carries this state, not the previous implementation's assumption
-/// that the content was the only thing that mattered. The desktop client is the
-/// replacement for `tmux attach`, which restored a screen *and* the terminal
-/// modes around it, so it has to restore both.
+/// that the content was the only thing that mattered. A window is a fresh
+/// terminal, so the client must restore a screen *and* the terminal modes
+/// around it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Snapshot<'a> {
     pub screen: &'a str,
@@ -76,8 +76,8 @@ impl<'a> Snapshot<'a> {
 ///     shell had just printed slides off the top and reappears at the bottom.
 ///   * **The modes must be re-established.** A window is a fresh terminal: the
 ///     alternate screen, mouse reporting, application-cursor and bracketed
-///     paste are all off, whatever the pane's program has set. This is what
-///     `tmux attach` did for the old client and nobody did for this one.
+///     paste are all off, whatever the pane's program has set. A window
+///     is a fresh terminal, so the client has to establish this itself.
 ///
 /// The mobile client documents the first two from measurement
 /// (`snapshotReplay` in `TerminalController.kt`); this is the same contract.
@@ -519,8 +519,8 @@ mod render_tests {
     }
 
     /// A window is a fresh terminal, so everything the pane's program set is off
-    /// unless the snapshot says otherwise. `tmux attach` restored this; the port
-    /// did not, and a full-screen program lost its mouse mode.
+    /// unless the snapshot says otherwise. Without this a
+    /// full-screen program loses its mouse mode.
     #[test]
     fn the_screen_and_the_modes_are_established() {
         let out = String::from_utf8(render_snapshot(&Snapshot {

@@ -45,9 +45,9 @@ Unix socket using the same message vocabulary it speaks to clients.
   client's frame carries a selection's rows in one byte, so a pane above 255 rows
   silently wraps them (`protocol::MAX_PANE_ROWS`).
 - **Two names are kept although they are now false, both deliberate:**
-  - the registry field `tmuxName` and the wire field `tmuxSocket` — they are the
+  - the registry field `keeperName` and the wire field `keeperSocket` — they are the
     pairing/session contract with the installed app, and the app reads
-    `tmuxName` to decide whether a session is attachable. Renaming them is a
+    `keeperName` to decide whether a session is attachable. Renaming them is a
     protocol change, not a cleanup.
   - `LDMUX_TMUX_NAME` / `LDMUX_TMUX_SOCK` in the spawn env, because a shell
     profile written against the tmux era reads them. The truthful

@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 class LauncherTest {
 
     private fun shell(id: String, cwd: String, title: String = "") =
-        Session(id = id, kind = "shell", title = title, cwd = cwd, status = "running", tmuxName = "ldmux-$id")
+        Session(id = id, kind = "shell", title = title, cwd = cwd, status = "running", keeperName = "ldmux-$id")
 
     @Test
     fun `desk pi processes are not rows, only shells that can be opened are`() {
@@ -157,7 +157,7 @@ class LauncherTest {
     // ── the button's verb ───────────────────────────────────────────────────
     //
     // The launcher said `open` over a row that could not be opened. A desktop
-    // `pi` with no tmux behind it is a *directory intention* — `sessionId` is
+    // `pi` with no keeper session behind it is a *directory intention* — `sessionId` is
     // null for exactly those rows — and tapping `open` on one started a
     // phone-owned shell while reading as "go to my session on the computer".
     // The word now follows what was actually chosen.

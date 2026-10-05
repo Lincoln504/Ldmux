@@ -70,7 +70,7 @@ pub struct SessionOwner {
 pub struct SessionRecord {
     pub id: String,
     /// Empty string when the session is not terminal-attached (RPC-only).
-    pub tmux_name: String,
+    pub keeper_name: String,
     pub kind: String,
     pub cwd: String,
     pub title: String,
@@ -95,7 +95,7 @@ pub struct SessionInfo {
     pub title: String,
     pub cwd: String,
     pub status: String,
-    pub tmux_name: String,
+    pub keeper_name: String,
     pub created_by: String,
     /// Last observed activity, epoch ms — the freshness signal for unread
     /// markers. Absent when unknown.
@@ -145,7 +145,7 @@ pub struct DesktopPiSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The ldmux session this desk `pi` runs inside, found by walking its
-    /// process ancestry up to a tmux pane. Null when the pi was started in a
+    /// process ancestry up to an ldmux session's shell. Null when the pi was started in a
     /// terminal that is not an ldmux session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ldmux_session_id: Option<String>,
@@ -181,7 +181,6 @@ pub struct PaneState {
     pub cursor_x: u64,
     pub cursor_y: u64,
     pub alternate_on: bool,
-    pub pane_in_mode: bool,
     pub mouse: bool,
     /// The running program negotiated SGR mouse reporting (1006).
     pub mouse_sgr: bool,
@@ -202,7 +201,7 @@ pub struct PingResult {
     /// Always `true` on the wire.
     pub pong: bool,
     pub version: u32,
-    pub tmux_socket: String,
+    pub keeper_socket: String,
 }
 
 /// Params for `new`.
@@ -254,7 +253,7 @@ mod tests {
     fn session_record_omits_absent_exit_fields() {
         let r = SessionRecord {
             id: "s1".into(),
-            tmux_name: "s1".into(),
+            keeper_name: "s1".into(),
             kind: "shell".into(),
             cwd: "/".into(),
             title: "t".into(),
@@ -269,15 +268,18 @@ mod tests {
         assert!(!s.contains("exitCode"), "exitCode must be absent: {s}");
         assert!(!s.contains("exitedAt"), "exitedAt must be absent: {s}");
         // The wire is camelCase: every multi-word field matches the TS object.
-        assert!(s.contains(r#""tmuxName":"s1""#), "got {s}");
+        assert!(s.contains(r#""keeperName":"s1""#), "got {s}");
         assert!(s.contains(r#""createdBy":"d""#), "got {s}");
+        // The wire contract the Kotlin client pins (`SessionsParseTest`): the
+        // session-layer name is `keeperName`, and nothing on it says tmux.
+        assert!(!s.to_ascii_lowercase().contains("tmux"), "got {s}");
     }
 
     #[test]
     fn session_record_serializes_exit_fields_when_present() {
         let mut r = SessionRecord {
             id: "s1".into(),
-            tmux_name: "s1".into(),
+            keeper_name: "s1".into(),
             kind: "shell".into(),
             cwd: "/".into(),
             title: "t".into(),

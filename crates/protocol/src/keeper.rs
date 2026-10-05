@@ -182,7 +182,6 @@ pub struct SnapshotResult {
     /// On the alternate screen (DEC 1047) — no scrollback, so `history_lines`
     /// is meaningless here and the client must not request it.
     pub alternate_on: bool,
-    pub pane_in_mode: bool,
     /// Any mouse-tracking mode active (`mouse_any_flag`).
     pub mouse: bool,
     /// SGR (1006) mouse reporting negotiated — the only mouse encoding we
@@ -221,14 +220,11 @@ pub struct State {
     pub cursor_y: u64,
     /// The alternate screen is active (from `active_screen`).
     pub alternate_on: bool,
-    /// No ghostty-vt source (the tmux "pane in a mode" concept); reported
-    /// `false` (documented choice; no client reads it).
-    pub pane_in_mode: bool,
     /// The pane negotiated mouse reporting (from `mouse_tracking`).
     pub mouse: bool,
     /// The pane negotiated SGR mouse (DEC 1006).
     pub mouse_sgr: bool,
-    /// Application cursor keys (DECCKM, DEC 1) — tmux `keypad_cursor_flag`.
+    /// Application cursor keys (DECCKM, DEC 1).
     pub app_cursor: bool,
     /// Bracketed paste (DEC 2004) is on.
     pub bracketed_paste: bool,
@@ -252,8 +248,8 @@ pub struct ChildInfo {
     pub pid: u64,
 }
 
-/// Keeper → daemon: the shell exited. (A keeper crash — the documented single
-/// point of failure, plan R3 — is the same event as a tmux-server crash.)
+/// Keeper → daemon: the shell exited. (A keeper crash is the documented single
+/// point of failure, plan R3.)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildExited {
@@ -268,9 +264,8 @@ pub struct ListResult {
     pub sessions: Vec<State>,
     /// The pane's own activity clock, in unix milliseconds, keyed by session id.
     ///
-    /// This is the keeper's replacement for tmux's `#{session_activity}`, which
-    /// the TS read to fill `lastActivityAt`: tmux stamped a session every time
-    /// its pane took input or produced output, and the launcher's notion of
+    /// It fills `lastActivityAt`: a session is stamped every time its pane
+    /// takes input or produces output, and the launcher's notion of
     /// "recent" came from it. The keeper reads the master for every session on
     /// its own (plan §3.3 — the kernel buffer must never fill), so it is the
     /// only thing in the system that knows when a shell last did anything.
@@ -352,7 +347,6 @@ mod tests {
                 cursor_x: 3,
                 cursor_y: 7,
                 alternate_on: false,
-                pane_in_mode: false,
                 mouse: false,
                 mouse_sgr: false,
                 app_cursor: false,

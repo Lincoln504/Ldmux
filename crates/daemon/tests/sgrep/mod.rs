@@ -1,16 +1,17 @@
-//! A test-only decoder for tmux `capture-pane -e` output: an SGR-annotated
-//! row stream → a grid of `Cell`s, the same shape the engine's
-//! `RenderState` walk returns.
+//! A test-only decoder for a captured, SGR-annotated screen dump (the
+//! goldens in `tests/parity/*.capture`, and the output of
+//! `ldmux_vt_sys::snapshot::render`): a row stream → a grid of `Cell`s, the
+//! same shape the engine's `RenderState` walk returns.
 //!
 //! It exists so the §3.11 gate compares *cells*, not SGR bytes (plan
 //! §3.11(3): "the cells are the source of truth; the format is ours"). It is
-//! deliberately narrow — the corpus emits only SGR (`m`) sequences, one
-//! character per column — and panics on anything else: an unsupported escape
-//! is a harness defect (the corpus emits none), not data to guess at.
+//! deliberately narrow — SGR (`m`) sequences, plus OSC strings which are
+//! skipped (a hyperlink is not part of a `Cell`) — and panics on any other
+//! escape: an unsupported escape is a harness defect, not data to guess at.
 //!
-//! Wide/emoji cells are deferred with the corpus: every character here is
-//! one column, and the plan's full corpus (wide chars, emoji) is what will
-//! extend that.
+//! Column width: a wide character (CJK, emoji) occupies two columns and
+//! leaves a spacer cell with no text of its own; a zero-width combining mark
+//! joins the previous cell's text.
 
 use ldmux_vt_sys::sgr::BLANK;
 use ldmux_vt_sys::{Cell, CellStyle, StyleColor};
@@ -18,7 +19,8 @@ use ldmux_vt_sys::{Cell, CellStyle, StyleColor};
 /// Parse a full `capture-pane -p -e` output into rows of `Cell`s, each row
 /// padded to `width` with empty cells.
 ///
-/// - one character = one column (single-width only — see the module note);
+/// - one character = one column, except wide characters (two) and combining
+///   marks (zero) — see the module note;
 /// - an SGR sequence restyles from the *next* character on (the terminal
 ///   rule);
 /// - a newline ends a row (padded to `width`);
@@ -31,7 +33,20 @@ pub fn parse(out: &str, width: usize) -> Vec<Vec<Cell>> {
 
     let mut chars = out.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' {
+        if c == '\x1b' && chars.peek() == Some(&']') {
+            // An OSC string (e.g. an OSC 8 hyperlink): terminated by ST
+            // (`ESC \`) or BEL. It carries no cell content.
+            chars.next();
+            while let Some(oc) = chars.next() {
+                if oc == '\x07' {
+                    break;
+                }
+                if oc == '\x1b' {
+                    chars.next(); // the `\` of ST
+                    break;
+                }
+            }
+        } else if c == '\x1b' {
             // A CSI sequence: expect '[' then parameters then a terminator.
             let bracket = chars.next();
             let mut params = String::new();
@@ -53,6 +68,15 @@ pub fn parse(out: &str, width: usize) -> Vec<Vec<Cell>> {
             pad_row(&mut row, &mut col, width);
             rows.push(std::mem::take(&mut row));
             col = 0;
+        } else if width_of(c) == 0 {
+            // A combining mark joins the cell before it.
+            if let Some(last) = row.iter_mut().rev().find(|cell| !cell.text.is_empty()) {
+                last.text.push(c);
+            }
+        } else if width_of(c) == 2 {
+            row.push(Cell { text: c.to_string(), style });
+            row.push(Cell { text: String::new(), style });
+            col += 2;
         } else {
             row.push(Cell { text: c.to_string(), style });
             col += 1;
@@ -67,6 +91,18 @@ pub fn parse(out: &str, width: usize) -> Vec<Vec<Cell>> {
     rows
 }
 
+/// Terminal column width of a character, for the ranges the corpus uses
+/// (combining marks 0, CJK / emoji 2, everything else 1).
+fn width_of(c: char) -> usize {
+    match c as u32 {
+        0x0300..=0x036F => 0,
+        0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
 /// Pad the current row to `width` with empty cells.
 fn pad_row(row: &mut Vec<Cell>, col: &mut usize, width: usize) {
     while *col < width {
@@ -75,8 +111,7 @@ fn pad_row(row: &mut Vec<Cell>, col: &mut usize, width: usize) {
     }
 }
 
-/// Apply one SGR parameter string to a style (the SGR table the codes tmux
-/// `capture-pane -e` come from). Unknown codes are ignored (forward-compat;
+/// Apply one SGR parameter string to a style (the standard SGR table). Unknown codes are ignored (forward-compat;
 /// the corpus emits none).
 fn apply(params: &[u8], s: &mut CellStyle) {
     let toks: Vec<String> = params
@@ -140,6 +175,11 @@ fn apply(params: &[u8], s: &mut CellStyle) {
                     _ => {}
                 }
             }
+            // The 16 ANSI colours are palette entries 0-15.
+            30..=37 => s.fg = Some(StyleColor::Palette((v - 30) as u8)),
+            90..=97 => s.fg = Some(StyleColor::Palette((v - 90 + 8) as u8)),
+            40..=47 => s.bg = Some(StyleColor::Palette((v - 40) as u8)),
+            100..=107 => s.bg = Some(StyleColor::Palette((v - 100 + 8) as u8)),
             39 => s.fg = None,
             49 => s.bg = None,
             _ => {}

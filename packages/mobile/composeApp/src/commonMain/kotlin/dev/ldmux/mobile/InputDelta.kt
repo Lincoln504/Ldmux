@@ -56,8 +56,8 @@ internal fun inputOpsFor(previous: String, next: String): List<InputOp> {
                 flush()
                 ops += InputOp.Keys(listOf("Enter"))
             }
-            // Tab is a named key, not text: it must reach tmux as Tab so completion
-            // and tmux's own bindings see a real TAB, and so it can never be
+            // Tab is a named key, not text: it must reach the shell as Tab so completion
+            // and the program's own bindings see a real TAB, and so it can never be
             // predicted.
             '\t' -> {
                 flush()

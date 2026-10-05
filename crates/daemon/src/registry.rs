@@ -30,6 +30,21 @@
 use ldmux_protocol::rpc::SessionRecord;
 use std::collections::HashMap;
 
+/// One-time migration of a registry written before the session layer was
+/// renamed: the keeper session id was stored under the key `LEGACY_NAME_KEY`
+/// and is now `keeperName`. Moves the value across when the record has the old
+/// key and no new one; returns whether it changed anything. This is the ONLY
+/// place the old key is spelled out; `SessionRecord` itself has no alias, and
+/// `load` rewrites the file under the new key straight after.
+const LEGACY_NAME_KEY: &str = "tmuxName";
+
+fn migrate_legacy_name_key(record: &mut serde_json::Value) -> bool {
+    let Some(obj) = record.as_object_mut() else { return false };
+    let Some(v) = obj.remove(LEGACY_NAME_KEY) else { return false };
+    obj.entry("keeperName").or_insert(v);
+    true
+}
+
 #[derive(serde::Serialize)]
 struct RegistryFile {
     version: u32,
@@ -73,7 +88,10 @@ impl Registry {
         };
         self.sessions.clear();
         self.order.clear();
+        let mut migrated = false;
         for record in sessions {
+            let mut record = record.clone();
+            migrated |= migrate_legacy_name_key(&mut record);
             // A record that cannot be named is not one that can be shown.
             let Some(_id) = record
                 .get("id")
@@ -94,10 +112,15 @@ impl Registry {
             // not shape into it is dropped at the same boundary. Files the
             // daemon itself wrote always shape: this only bites on hand-edited
             // or older files, where dropping is the safe direction.
-            let Ok(r) = serde_json::from_value::<SessionRecord>(record.clone()) else {
+            let Ok(r) = serde_json::from_value::<SessionRecord>(record) else {
                 continue;
             };
             self.upsert(r);
+        }
+        // Persist under the current key right away, so the migration runs once
+        // and the file on disk never carries the legacy name again.
+        if migrated && let Err(e) = self.save() {
+            eprintln!("ldmuxd: registry migration save: {e}");
         }
     }
 
@@ -127,14 +150,14 @@ impl Registry {
     }
 
     /// The record with this terminal name, if any (first in insertion order).
-    pub fn by_tmux_name(&self, name: &str) -> Option<&SessionRecord> {
+    pub fn by_keeper_name(&self, name: &str) -> Option<&SessionRecord> {
         if name.is_empty() {
             return None;
         }
         self.order
             .iter()
             .filter_map(|id| self.sessions.get(id))
-            .find(|r| r.tmux_name == name)
+            .find(|r| r.keeper_name == name)
     }
 
     /// All records, most-recently-updated first (stable: ties keep insertion
@@ -239,10 +262,10 @@ impl Registry {
                 Some(r) => r,
                 None => continue,
             };
-            if r.tmux_name.is_empty() {
+            if r.keeper_name.is_empty() {
                 continue;
             } // RPC-only: liveness is the pi process, not the terminal layer.
-            let name = r.tmux_name.clone();
+            let name = r.keeper_name.clone();
             known.insert(name.clone());
             if live.contains(&name) {
                 if r.status != "running" {
@@ -278,7 +301,7 @@ mod tests {
         let now: i64 = 1_700_000_000_000;
         SessionRecord {
             id: over.id.unwrap_or_else(|| format!("r-{}", uuid::Uuid::new_v4())),
-            tmux_name: over.tmux_name.unwrap_or_default(),
+            keeper_name: over.keeper_name.unwrap_or_default(),
             kind: "shell".into(),
             cwd: over.cwd.unwrap_or_else(|| "/tmp".into()),
             title: "t".into(),
@@ -293,7 +316,7 @@ mod tests {
 
     struct Over {
         id: Option<String>,
-        tmux_name: Option<String>,
+        keeper_name: Option<String>,
         cwd: Option<String>,
         status: Option<String>,
         updated_at: Option<i64>,
@@ -305,7 +328,7 @@ mod tests {
         fn new() -> Self {
             Over {
                 id: None,
-                tmux_name: None,
+                keeper_name: None,
                 cwd: None,
                 status: None,
                 updated_at: None,
@@ -317,8 +340,8 @@ mod tests {
             self.id = Some(v.into());
             self
         }
-        fn tmux_name(mut self, v: &str) -> Self {
-            self.tmux_name = Some(v.into());
+        fn keeper_name(mut self, v: &str) -> Self {
+            self.keeper_name = Some(v.into());
             self
         }
         fn cwd(mut self, v: &str) -> Self {
@@ -402,12 +425,12 @@ mod tests {
         let now: i64 = 1_700_000_000_000;
         reg.upsert(
             record(
-                Over::new().id("term").tmux_name("ldmux-x").status("running"),
+                Over::new().id("term").keeper_name("ldmux-x").status("running"),
             ),
         );
         reg.upsert(
             record(
-                Over::new().id("rpc").tmux_name("").status("running"),
+                Over::new().id("rpc").keeper_name("").status("running"),
             ),
         );
         let live: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -440,7 +463,7 @@ mod tests {
         let now: i64 = 1_700_000_000_000;
         reg.upsert(
             record(
-                Over::new().id("term").tmux_name("ldmux-x").status("running"),
+                Over::new().id("term").keeper_name("ldmux-x").status("running"),
             ),
         );
         let (dead, adopted) = reg.reconcile(None, now);
@@ -507,6 +530,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A registry written before the rename carries `tmuxName`. Loading it keeps
+    /// every session and rewrites the file under `keeperName` (the shape of a
+    /// copy of the real `/run/user/1000/ldmux/registry.json`, 2026-10-05).
+    #[test]
+    fn a_registry_with_the_legacy_name_key_is_migrated_once() {
+        let root = temp_dir();
+        let p = path(&root, "legacy.json");
+        std::fs::write(
+            &p,
+            r#"{"version":1,"sessions":[
+              {"createdAt":1791205161439,"createdBy":"local","cwd":"/home/ldeen","id":"d9f93a03d4","kind":"shell","status":"running","title":"shell","tmuxName":"ldmux-d9f93a03d4","updatedAt":1791205161439},
+              {"createdAt":1,"createdBy":"phone","cwd":"/tmp","id":"aaaaaaaaaa","kind":"shell","status":"dead","title":"shell","tmuxName":"ldmux-aaaaaaaaaa","updatedAt":2,"exitedAt":2}
+            ]}"#,
+        )
+        .unwrap();
+        let mut r = Registry::new(&p);
+        r.load();
+        assert_eq!(r.list().len(), 2, "both sessions survive");
+        assert_eq!(r.get("d9f93a03d4").unwrap().keeper_name, "ldmux-d9f93a03d4");
+        let on_disk = std::fs::read_to_string(&p).unwrap();
+        assert!(on_disk.contains("\"keeperName\": \"ldmux-d9f93a03d4\""), "{on_disk}");
+        assert!(!on_disk.contains("tmuxName"), "the legacy key is gone: {on_disk}");
+        // A second load is a plain load.
+        let mut again = Registry::new(&p);
+        again.load();
+        assert_eq!(again.list().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn reconcile_revives_a_dead_record_the_terminal_still_has_and_reports_orphans() {
         let root = temp_dir();
@@ -517,7 +569,7 @@ mod tests {
             record(
                 Over::new()
                     .id("revive")
-                    .tmux_name("tmux-revive")
+                    .keeper_name("keeper-revive")
                     .status("dead")
                     .exited_at(Some(5)),
             ),
@@ -525,10 +577,10 @@ mod tests {
         // A session the terminal has but the registry does not is an adoption
         // candidate.
         let live: std::collections::BTreeSet<String> =
-            ["tmux-revive".to_string(), "tmux-orphan".to_string()].into_iter().collect();
+            ["keeper-revive".to_string(), "keeper-orphan".to_string()].into_iter().collect();
         let (dead, adopted) = r.reconcile(Some(&live), now);
         assert!(dead.is_empty());
-        assert_eq!(adopted, ["tmux-orphan"]);
+        assert_eq!(adopted, ["keeper-orphan"]);
         let revived = r
             .list()
             .into_iter()

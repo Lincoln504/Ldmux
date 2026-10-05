@@ -1,8 +1,7 @@
 //! The `PaneStream`: one live keeper stream per viewed session, fanned out to
 //! any number of subscribers (the WebSocket clients).
 //!
-//! The retarget of record (plan §3.5): the TS `PaneStream` holds a live tmux
-//! control-mode client (`%output`); the Rust `PaneStream` holds a keeper
+//! The `PaneStream` holds a keeper
 //! connection (a `Read`/`Peek` poll loop that pulls the pane's output and fans
 //! it out). The plan §3.7 flow-control is the new piece: the keeper never stops
 //! reading (it always buffers the master), and each subscriber pulls from a
@@ -418,15 +417,16 @@ impl PaneStream {
     }
 }
 
-/// Convert a tmux key name to its byte sequence.
+/// Convert a protocol key name to its byte sequence.
 ///
-/// The TS `sendKey` used tmux's `send-keys`, which converts key names to the
-/// appropriate escape sequences / control bytes. This is the Rust equivalent,
-/// and it has to answer with the names tmux *defines* — not the ones this file
-/// happens to prefer — because the clients were written against tmux and send
-/// tmux's names. The mobile sends `BSpace` for the backspace key, the table had
-/// only `Backspace`, and the fallback below typed the name into the shell: the
-/// phone's backspace inserted the literal text `BSpace`.
+/// The wire's `key` message carries *names* (`Enter`, `C-c`, `BSpace`, `DC`),
+/// and this table is the one place that turns them into the escape sequences /
+/// control bytes the shell sees. The vocabulary is the protocol's own: the
+/// mobile client sends `BSpace` for backspace and `DC`/`IC` for delete/insert,
+/// so those are the primary spellings and the descriptive names (`Backspace`,
+/// `Delete`, ...) are accepted aliases. A name missing from the table once
+/// fell through and typed the name into the shell (the phone's backspace
+/// inserted the literal text `BSpace`).
 ///
 /// **An unknown name is an error, never text.** The old fallback sent the name
 /// as-is, so every name missing from the table became input to the user's shell,
@@ -439,7 +439,7 @@ pub fn key_name_to_bytes(name: &str) -> Result<Vec<u8>, String> {
         "Tab" => vec![0x09],
         "BTab" => vec![0x1B, b'[', b'Z'],
         "Escape" => vec![0x1B],
-        // tmux's name, then this file's older alias: both are in the wire.
+        // The protocol's own spelling, then the descriptive alias: both are in the wire.
         "BSpace" | "Backspace" => vec![0x7F],
         "Space" => vec![0x20],
         // Arrow keys
@@ -447,8 +447,8 @@ pub fn key_name_to_bytes(name: &str) -> Result<Vec<u8>, String> {
         "Down" => vec![0x1B, b'[', b'B'],
         "Right" => vec![0x1B, b'[', b'C'],
         "Left" => vec![0x1B, b'[', b'D'],
-        // Editing keys: tmux's names first (`DC` and `IC` are what a client that
-        // was written against tmux sends), then the descriptive aliases.
+        // Editing keys: the protocol's short names first (`DC`, `IC`, `PPage`,
+        // `NPage`), then the descriptive aliases.
         "Home" => vec![0x1B, b'[', b'H'],
         "End" => vec![0x1B, b'[', b'F'],
         "PageUp" | "PPage" => vec![0x1B, b'[', b'5', b'~'],
@@ -508,10 +508,9 @@ pub fn key_name_to_bytes(name: &str) -> Result<Vec<u8>, String> {
 mod key_name_tests {
     use super::key_name_to_bytes;
 
-    /// The names the **mobile client actually sends**. It was written against
-    /// tmux's vocabulary, so these are tmux's names, and the daemon's table had
-    /// `Backspace` where the phone sends `BSpace` — the phone's backspace typed
-    /// the word into the shell.
+    /// The names the **mobile client actually sends** (the protocol's own
+    /// vocabulary). The daemon's table once had `Backspace` where the phone
+    /// sends `BSpace` — the phone's backspace typed the word into the shell.
     #[test]
     fn the_names_a_client_sends_are_known() {
         for (name, want) in [
@@ -585,7 +584,6 @@ mod tests {
                         cursor_x: 0,
                         cursor_y: 0,
                         alternate_on: false,
-                        pane_in_mode: false,
                         mouse: false,
                         mouse_sgr: false,
                         app_cursor: false,

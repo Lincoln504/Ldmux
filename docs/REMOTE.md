@@ -147,7 +147,7 @@ protocol is identical either way.
 
 `{type:"list"}` answers with `sessions[]`, each carrying `id`, `kind`, `title`
 (derived from the working directory when the record only has a default title),
-`cwd`, `status`, `tmuxName`, and `lastActivityAt` (epoch ms, from tmux
+`cwd`, `status`, `keeperName`, and `lastActivityAt` (epoch ms, from tmux
 `session_activity` for terminal sessions) so a client can show an unread marker.
 Listing is **read-only**: it reconciles without sweeping streams.
 

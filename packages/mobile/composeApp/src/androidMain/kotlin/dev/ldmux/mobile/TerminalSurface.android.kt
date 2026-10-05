@@ -94,7 +94,7 @@ private val TermBg = Color(0xFF000000)
  *
  * The grid is *not* scaled to fit a fixed pane any more. The surface measures
  * its own viewport, works out how many cells fit, and tells the daemon — which
- * resizes the tmux pane to match. The shell is therefore always exactly the size
+ * resizes the session's pty to match. The shell is therefore always exactly the size
  * of the screen showing it, and the canvas draws at 1:1 with only the leftover
  * sliver centred.
  */

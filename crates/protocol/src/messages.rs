@@ -44,7 +44,6 @@ pub enum Message {
     MouseClick(MouseClick),
     Input(Input),
     Key(Key),
-    CopyMode(CopyMode),
     Scrollback(Scrollback),
     List(List),
     New(New),
@@ -74,7 +73,6 @@ pub mod m {
     pub const MOUSE_CLICK: &str = "mouseclick";
     pub const INPUT: &str = "input";
     pub const KEY: &str = "key";
-    pub const COPY_MODE: &str = "copymode";
     pub const SCROLLBACK: &str = "scrollback";
     pub const LIST: &str = "list";
     pub const NEW: &str = "new";
@@ -119,7 +117,6 @@ pub struct Snapshot {
     pub cursor_x: u64,
     pub cursor_y: u64,
     pub alternate_on: bool,
-    pub pane_in_mode: bool,
     pub bracketed_paste: bool,
     pub mouse: bool,
     /// The program negotiated SGR mouse reporting, so a synthesized click is
@@ -231,15 +228,6 @@ pub struct Input {
 #[serde(rename_all = "camelCase")]
 pub struct Key {
     pub keys: Vec<String>,
-}
-
-/// Enter or leave tmux copy-mode for a session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CopyMode {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    pub on: bool,
 }
 
 /// Remote client → server: re-send the pane including paged scrollback.
@@ -420,7 +408,6 @@ mod tests {
             cursor_x: 0,
             cursor_y: 0,
             alternate_on: false,
-            pane_in_mode: false,
             bracketed_paste: true,
             mouse: false,
             mouse_sgr: false,
@@ -463,7 +450,6 @@ mod tests {
             cursor_x: 1,
             cursor_y: 2,
             alternate_on: false,
-            pane_in_mode: false,
             bracketed_paste: true,
             mouse: false,
             mouse_sgr: true,
@@ -475,7 +461,7 @@ mod tests {
         let v: serde_json::Value = serde_json::to_value(Message::Snapshot(snap)).unwrap();
         let keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
         let want = ["type", "sessionId", "cols", "rows", "screen", "cursorX", "cursorY",
-            "alternateOn", "paneInMode", "bracketedPaste", "mouse", "mouseSgr",
+            "alternateOn", "bracketedPaste", "mouse", "mouseSgr",
             "appCursor", "historySize", "snapshotEpoch", "history"];
         for k in want {
             assert!(v.get(k).is_some(), "missing key {k} in {v:?}");

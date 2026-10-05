@@ -41,7 +41,7 @@ problem, it is a process-topology problem (§3.2).
 
 | Component | Why |
 |---|---|
-| The wire protocol (frames, messages, RPC) | The mobile app speaks it. The Rust stack emits the same bytes. Field names that said "tmux" (`tmuxName`, `tmuxSocket`, `tmuxBin`) stay as wire names for compatibility; their meaning becomes "session name", "daemon socket", "(n/a)". |
+| The wire protocol (frames, messages, RPC) | The mobile app speaks it. The Rust stack emits the same bytes. Field names that said "tmux" (`keeperName`, `keeperSocket`, `tmuxBin`) stay as wire names for compatibility; their meaning becomes "session name", "daemon socket", "(n/a)". |
 | The mobile app (Kotlin + Compose + libghostty-vt + JNI + C) | Zero changes. The phone cannot tell the difference — the bytes are the same bytes. |
 | The `following`/`anchored` scroll-fidelity model (SPEC §7.4) | It lives in the client's emulator fed by the same byte stream. Unchanged. |
 | The ldmux sanitizer | It is ours, not tmux's; it stays between the PTY stream and the clients. |

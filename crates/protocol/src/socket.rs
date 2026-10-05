@@ -153,7 +153,7 @@ mod tests {
         let served = std::sync::Arc::new(std::sync::Mutex::new(Some(Served {
             respond: true,
             ok: true,
-            result: serde_json::json!({ "pong": true, "version": 1, "tmuxSocket": "ldmux" }),
+            result: serde_json::json!({ "pong": true, "version": 1, "keeperSocket": "ldmux" }),
             error: String::new(),
         })));
         let srv = tokio::spawn(async move { serve(listener, served).await });

@@ -177,7 +177,7 @@ impl Ownership {
     /// Drop claims for sessions that no longer exist.
     ///
     /// The session-level half of the Stale State problem: a session killed
-    /// outside ldmux (`exit`, a hand-run `tmux kill-session`) leaves a claim
+    /// outside ldmux (`exit`, a hand-run kill of the shell) leaves a claim
     /// pointing at nothing, and a later session reusing that id would inherit
     /// it.
     pub fn retain(&mut self, live_session_ids: &std::collections::HashSet<String>) -> Vec<String> {
