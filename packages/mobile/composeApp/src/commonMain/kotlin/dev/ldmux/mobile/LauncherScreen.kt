@@ -318,17 +318,17 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
     }
 
 /**
- * One short statement of where a shell lives, decided in one place so the list and
- * any future caller cannot drift.
+ * One statement of where a shell lives, and almost always nothing.
  *
- *   - a desk window: `on desktop 2` (the workspace is worth naming, because it is
- *     where you would go looking for it)
- *   - a phone shell: blank — the phone icon beside the name already says it
- *   - neither: `no window`, which is what a detached `ldmux new` is, and the state
- *     the list was silently not stating (a pile of headless shells read as a bug).
+ *   - a desk window: blank. A shell on the desk is the ordinary state, and the
+ *     row itself is the statement; naming it on every row was noise (the user
+ *     asked for the text to go, 2026-10-05).
+ *   - a phone shell: blank, with the phone icon beside the name saying it.
+ *   - neither: `no window` — the one state that is news, because a shell nothing
+ *     is showing means something went wrong.
  */
 internal fun shellStateLabel(liveWorkspace: String?, openedByPhone: Boolean): String = when {
-    liveWorkspace != null -> liveWorkspaceOf(liveWorkspace)?.let { "on desktop $it" } ?: "on desktop"
+    liveWorkspace != null -> ""
     openedByPhone -> ""
     else -> NO_WINDOW_STATE
 }
@@ -410,23 +410,35 @@ private fun ChoiceRow(
             if (chosen) IconCheck(Bg, box = LocalTouch.current.check - 6.dp)
         }
         Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, color = Fg, fontSize = 14.sp, maxLines = 1, fontWeight = FontWeight.Medium)
-                if (mobileShell) {
-                    // One space after the name, in the grey the line beneath it uses:
-                    // a fact about this row rather than a control, so it is not a
-                    // button and must not look like one. Described as well as drawn —
-                    // a picture is not a description.
-                    Spacer(Modifier.width(5.dp))
-                    IconPhone(
-                        tint = Dim,
-                        box = 12.dp,
-                        modifier = Modifier.semantics { contentDescription = "opened on this phone" },
-                    )
-                }
+        // One line: what it is, then where it is, then (only if it is news) its
+        // state. The row is a name; the folder is its address, small and grey
+        // beside it. Two lines said the same thing twice and made every shell two
+        // rows tall.
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Fg, fontSize = 14.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+            if (mobileShell) {
+                // One space after the name, in the grey the address uses: a fact
+                // about this row rather than a control, so it is not a button and
+                // must not look like one. Described as well as drawn — a picture is
+                // not a description.
+                Spacer(Modifier.width(5.dp))
+                IconPhone(
+                    tint = Dim,
+                    box = 12.dp,
+                    modifier = Modifier.semantics { contentDescription = "opened on this phone" },
+                )
             }
-            Text(subtitle, color = if (stateWarn) Warn else Dim, fontSize = 11.sp, maxLines = 1, fontFamily = FontFamily.Monospace)
+            if (subtitle.isNotBlank()) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    subtitle,
+                    color = if (stateWarn) Warn else Dim,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
         }
         trailing()
         if (onKill != null) {

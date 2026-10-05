@@ -47,11 +47,11 @@ class LauncherTest {
     }
 
     @Test
-    fun `every row states where the shell lives`() {
-        // A desk window is a fact the phone cannot otherwise see, and a shell with
-        // no window was the one state the list never stated: a pile of them read as
-        // a bug (2026-10-05). A phone shell says it with the icon, so its words are
-        // blank rather than repeated.
+    fun `only a shell with nothing showing it says so`() {
+        // A desk window is the ordinary state and the row itself says it, so the
+        // words are blank. A phone shell says it with the icon. Only a shell that
+        // nothing is showing is news, and it is the one thing the list used to
+        // stay silent about, so a pile of them read as a bug (2026-10-05).
         val rows = launcherEntries(
             listOf(
                 shell("desk", "/x").copy(liveWorkspace = "2"),
@@ -60,7 +60,7 @@ class LauncherTest {
                 shell("headless", "/x"),
             ),
         )
-        assertEquals(listOf("on desktop 2", "on desktop", "", "no window"), rows.map { it.state })
+        assertEquals(listOf("", "", "", "no window"), rows.map { it.state })
     }
 
     @Test
