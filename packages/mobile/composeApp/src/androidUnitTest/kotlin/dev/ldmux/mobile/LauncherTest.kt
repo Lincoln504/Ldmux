@@ -47,6 +47,29 @@ class LauncherTest {
     }
 
     @Test
+    fun `every row states where the shell lives`() {
+        // A desk window is a fact the phone cannot otherwise see, and a shell with
+        // no window was the one state the list never stated: a pile of them read as
+        // a bug (2026-10-05). A phone shell says it with the icon, so its words are
+        // blank rather than repeated.
+        val rows = launcherEntries(
+            listOf(
+                shell("desk", "/x").copy(liveWorkspace = "2"),
+                shell("unplaced", "/x").copy(liveWorkspace = ""),
+                shell("phone", "/x").copy(createdBy = "phone"),
+                shell("headless", "/x"),
+            ),
+        )
+        assertEquals(listOf("on desktop 2", "on desktop", "", "no window"), rows.map { it.state })
+    }
+
+    @Test
+    fun `the row's second line is the folder and then the state`() {
+        assertEquals("~/proj", rowSubtitle("/home/ldeen/proj", ""))
+        assertEquals("~/proj  \u00b7  on desktop 2", rowSubtitle("/home/ldeen/proj", "on desktop 2"))
+    }
+
+    @Test
     fun `a shell a phone is using is marked, and one the desk holds is not`() {
         // The shade says "connected"; the desk holding its own shell is the normal
         // state and says nothing.

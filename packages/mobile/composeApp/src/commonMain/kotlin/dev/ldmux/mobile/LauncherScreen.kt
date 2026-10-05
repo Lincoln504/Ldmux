@@ -144,7 +144,7 @@ fun LauncherScreen(
                         // shells of the same kind apart. The process is the name.
                         title = e.label,
                         mobileShell = e.openedByPhone,
-                        subtitle = tildify(e.cwd),
+                        subtitle = rowSubtitle(e.cwd, e.state),
                         inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
                         onClick = { chosen = toggle(chosen, e.key) },
@@ -278,6 +278,13 @@ data class LauncherEntry(
     val inUseOnPhone: Boolean = false,
     val openedByPhone: Boolean = false,
     val liveWorkspace: String? = null,
+    /**
+     * Where the shell itself lives, in words, on every row. A desk window is a
+     * fact the phone cannot otherwise see, and a shell with no window is the one
+     * state that used to be invisible (a pile of them looked like a bug). Blank
+     * means the phone icon beside the name already says it.
+     */
+    val state: String = "",
 ) {
     val label: String get() = process.ifEmpty { "shell" }
 }
@@ -305,8 +312,29 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
             inUseOnPhone = shell.ownerKind == "phone",
             openedByPhone = shell.openedByPhone,
             liveWorkspace = shell.liveWorkspace,
+            state = shellStateLabel(shell.liveWorkspace, shell.openedByPhone),
         )
     }
+
+/**
+ * One short statement of where a shell lives, decided in one place so the list and
+ * any future caller cannot drift.
+ *
+ *   - a desk window: `on desktop 2` (the workspace is worth naming, because it is
+ *     where you would go looking for it)
+ *   - a phone shell: blank — the phone icon beside the name already says it
+ *   - neither: `no window`, which is what a detached `ldmux new` is, and the state
+ *     the list was silently not stating (a pile of headless shells read as a bug).
+ */
+internal fun shellStateLabel(liveWorkspace: String?, openedByPhone: Boolean): String = when {
+    liveWorkspace != null -> liveWorkspaceOf(liveWorkspace)?.let { "on desktop $it" } ?: "on desktop"
+    openedByPhone -> ""
+    else -> "no window"
+}
+
+/** The row's second line: where it is, then where the shell itself lives. */
+internal fun rowSubtitle(cwd: String, state: String): String =
+    if (state.isBlank()) tildify(cwd) else "${tildify(cwd)}  \u00b7  $state"
 
 /**
  * The workspace a shell's live window is on, or null when there is not a usable one.
