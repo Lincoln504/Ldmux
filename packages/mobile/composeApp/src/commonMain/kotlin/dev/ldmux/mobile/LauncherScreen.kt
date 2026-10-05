@@ -394,7 +394,10 @@ private fun ChoiceRow(
             // row's own shade is reserved for "a phone is using this".
             .background(if (inUse) Accent.copy(alpha = 0.09f) else Surface)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
+            // The folder moved up beside the name, but the row keeps the height it
+            // had with two lines: the list's rhythm must not change under the
+            // finger. The 8.dp is the removed line's height, split over both sides.
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad + 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // A tick box, because these *are* the multi-select: several become the set
