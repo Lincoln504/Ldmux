@@ -4,6 +4,8 @@
 //! This test uses a **real keeper** (the `ldmux-keeper` binary), not the
 //! fake keeper, because the sessions must survive the daemon restart.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,6 +34,7 @@ async fn wait_socket(path: &std::path::Path) {
 async fn restart_survival_three_sessions_survive_daemon_restart() {
     let dir = scratch_dir();
     let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
 
     // Start a real keeper (the `ldmux-keeper` binary).
     let keeper_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -123,7 +126,5 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
 
     // Belt-and-braces: reap any keeper still bound to this scratch socket (a
     // daemon `start()` can respawn one), then remove the scratch dir.
-    let sock = keeper_sock.to_string_lossy().into_owned();
-    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
     let _ = std::fs::remove_dir_all(&dir);
 }

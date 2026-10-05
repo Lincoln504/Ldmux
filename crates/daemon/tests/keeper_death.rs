@@ -2,6 +2,8 @@
 //! assert the shells die, the daemon detects the death, respawns an empty
 //! keeper, and leaves zero zombies.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,6 +32,7 @@ async fn wait_socket(path: &std::path::Path) {
 async fn keeper_death_three_sessions_die_and_daemon_respawns() {
     let dir = scratch_dir();
     let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
 
     // Start a real keeper.
     let keeper_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -103,7 +106,5 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
     // design), so this test must reap the keeper it caused the daemon to spawn,
     // or every run leaks one holding PTYs and a socket. Kill by the keeper socket
     // path (unique per scratch dir), then remove the scratch dir.
-    let sock = keeper_sock.to_string_lossy().into_owned();
-    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
     let _ = std::fs::remove_dir_all(&dir);
 }

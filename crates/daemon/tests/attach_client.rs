@@ -3,6 +3,8 @@
 //! input. This is the desk-window path of plan §3.9 (a protocol client, not a
 //! tmux client).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,6 +37,7 @@ async fn attach_client_streams_and_types_against_a_daemon() {
 
     let dir = scratch();
     let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
     let mut keeper = std::process::Command::new(keeper_bin())
         .arg(keeper_sock.to_string_lossy().as_ref())
         .spawn()
@@ -108,8 +111,6 @@ async fn attach_client_streams_and_types_against_a_daemon() {
         .arg(keeper.id().to_string())
         .output();
     let _ = keeper.wait();
-    let sock = keeper_sock.to_string_lossy().into_owned();
-    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
     let _ = std::fs::remove_dir_all(&dir);
 }
 /// The desk window must survive the daemon's idle sweep.
@@ -126,6 +127,7 @@ async fn attach_client_streams_and_types_against_a_daemon() {
 async fn attach_client_survives_the_idle_sweep() {
     let dir = scratch();
     let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
     let mut keeper = std::process::Command::new(keeper_bin())
         .arg(keeper_sock.to_string_lossy().as_ref())
         .spawn()
@@ -176,7 +178,5 @@ async fn attach_client_survives_the_idle_sweep() {
         .arg(keeper.id().to_string())
         .output();
     let _ = keeper.wait();
-    let sock = keeper_sock.to_string_lossy().into_owned();
-    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
     let _ = std::fs::remove_dir_all(&dir);
 }

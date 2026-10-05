@@ -1525,3 +1525,52 @@ running (close ≠ detach).
 - The parity harness (§3.11) and the tmux removal from the flake (D4) are
   pending; tmux is no longer used by the deployed daemon but the TS tree and
   the parity corpus remain.
+
+---
+
+## No colour in any session, and 41 leaked test keepers (2026-10-05)
+
+### TERM / COLORTERM (the reported "no colour in desktop terminals")
+
+- **Cause.** The systemd unit has no `TERM`/`COLORTERM`
+  (`tr '\0' '\n' < /proc/$(pgrep -x ldmuxd)/environ` → only `LANG`;
+  `systemctl --user show-environment` has no `TERM`). The keeper inherits the
+  daemon's environment and passed it to the shell (`spawn_session`), so bash
+  invented `TERM=dumb` (`env -u TERM bash -c 'echo $TERM'` → `dumb`) and
+  programs turned colour off. **The render path was never the problem:** a
+  live `printf '\033[31mRED'` captured as `^[[0;38;5;1mRED`.
+- **Fix.** `crates/keeper/src/lib.rs` `child_env()`: the child env is the
+  keeper's, then `TERM=xterm-256color` and `COLORTERM=truecolor` are *set*
+  (an inherited `TERM` is replaced, not kept: `dumb`, or the name of whatever
+  terminal the daemon was started from, is not the emulator the session runs
+  in), then `Spawn.env` is applied and wins. Self-contained in the keeper (it
+  outlives the daemon), so no `Environment=TERM` in the unit.
+- **Tests.** `keeper` unit tests `child_env_tests::{term_defaults_when_the_parent_has_none,
+  an_inherited_term_is_replaced, spawn_env_wins}`; integration
+  `crates/keeper/tests/keeper.rs` `a_spawned_child_sees_a_colour_capable_term`,
+  `spawn_env_overrides_term`.
+- **Live check (scratch daemon, started `env -u TERM -u COLORTERM`):** the
+  shell printed `TERM=[xterm-256color] COLORTERM=[truecolor]` and its prompt
+  came back coloured (`^[[0;1;38;5;2m`).
+- **Mobile is not affected.** It paints cells from the engine's snapshot
+  (`composeApp/.../TerminalPainter.android.kt`); `grep -rn TERM packages/mobile`
+  finds nothing. The phone sees the colour once the child emits it.
+- **Deployment caveat.** The running keeper is old code and a fix to the keeper
+  only applies to a keeper started after it: `just restart-keeper`, which ends
+  every shell. Existing sessions keep `TERM=dumb`.
+
+### Leaked keepers
+
+- `pgrep -x ldmux-keeper | wc -l` was 42 (1 deployed + 41 leaked), all on
+  `/tmp/ldmux-maint-*/keeper.sock`, i.e. `maintenance.rs`: its `Fixture` had
+  no `Drop`, so any assertion failure skipped `teardown` and the detached
+  keeper lived on. `/tmp` also held ~2000 stale scratch dirs/sockets.
+- **Fix.** `crates/daemon/tests/common/mod.rs` `Reaper`: dropped last, on
+  success and on panic, SIGKILLs every process whose `argv[0]` basename is
+  `ldmux-keeper` and `argv[1]` is **exactly** the test's own socket (read from
+  `/proc`, no substring match), then removes the scratch dir. Used by
+  `maintenance`, `remote_e2e`, `restart_survival`, `keeper_death`,
+  `attach_client` (both tests), `handover`. The `pkill -f <sock>` calls are gone.
+- Cleaned the 41 leaked keepers by exact pid (command line contained
+  `/ldmux-maint-`); deployed keeper untouched; count 42 → 1. A full
+  `cargo test -p ldmux-daemon --tests` run leaves the count at 1.

@@ -5,6 +5,8 @@
 //! keeper for the life of the process, and a desk window the user had closed
 //! stayed recorded for good. These tests pin each of those.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -70,6 +72,8 @@ struct Fixture {
     keeper_sock: PathBuf,
     arc: Arc<tokio::sync::Mutex<LdmuxDaemon>>,
     keeper: std::process::Child,
+    /// Last field: dropped last, on success and on panic (see `common`).
+    _reaper: common::Reaper,
 }
 
 impl Fixture {
@@ -80,6 +84,7 @@ impl Fixture {
             .arg(keeper_sock.to_string_lossy().as_ref())
             .spawn()
             .unwrap();
+        let _reaper = common::Reaper::new(&dir, &keeper_sock);
         wait_socket(&keeper_sock).await;
         let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
             // No remote: the maintenance pass is the daemon's, not the socket's.
@@ -90,7 +95,7 @@ impl Fixture {
             let mut d = arc.lock().await;
             d.start(&arc).await.unwrap();
         }
-        Self { dir, daemon_sock, keeper_sock, arc, keeper }
+        Self { dir, daemon_sock, keeper_sock, arc, keeper, _reaper }
     }
 
     async fn new_session(&self) -> String {
@@ -138,8 +143,6 @@ impl Fixture {
             .output();
         let mut k = self.keeper;
         let _ = k.wait();
-        let sock = self.keeper_sock.to_string_lossy().into_owned();
-        let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

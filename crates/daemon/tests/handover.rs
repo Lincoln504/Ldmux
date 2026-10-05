@@ -6,6 +6,8 @@
 //!
 //! The attach client's own loop is covered by `attach_client.rs`.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,6 +87,7 @@ impl Drop for KeeperGuard {
 async fn handover_size_and_close_does_not_detach() {
     let dir = scratch();
     let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
     let keeper = std::process::Command::new(keeper_bin())
         .arg(keeper_sock.to_string_lossy().as_ref())
         .spawn()

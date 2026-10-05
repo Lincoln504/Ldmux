@@ -5,6 +5,8 @@
 //! This is the deployment gate: it exercises the whole chain (daemon → keeper →
 //! PTY → ghostty-vt → stream poll → OUTPUT frame → WS), not a fake.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -114,6 +116,7 @@ async fn read_until(ws: &mut Ws, out: &mut Vec<u8>, needle: &str) -> bool {
 async fn remote_end_to_end_attach_and_type() {
     let dir = scratch();
     let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
     let mut keeper = std::process::Command::new(keeper_bin())
         .arg(keeper_sock.to_string_lossy().as_ref())
         .spawn()
@@ -186,7 +189,5 @@ async fn remote_end_to_end_attach_and_type() {
         .arg(keeper.id().to_string())
         .output();
     let _ = keeper.wait();
-    let sock = keeper_sock.to_string_lossy().into_owned();
-    let _ = std::process::Command::new("pkill").args(["-f", &sock]).output();
     let _ = std::fs::remove_dir_all(&dir);
 }
