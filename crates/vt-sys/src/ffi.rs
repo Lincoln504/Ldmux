@@ -272,10 +272,22 @@ pub const ROW_ITERATOR: u32 = 4;
 
 pub const ROW_DATA_CELLS: u32 = 3;
 
+pub const ROW_CELLS_DATA_RAW: u32 = 1;
 pub const ROW_CELLS_DATA_STYLE: u32 = 2;
 pub const ROW_CELLS_DATA_GRAPHEMES_UTF8: u32 = 9;
 
+// ── screen.h: the raw cell (`GhosttyCell`, a packed u64) and its fields ────
+pub const CELL_DATA_WIDE: u32 = 3;
+/// `GhosttyCellWide`: the second column of a wide character (render nothing).
+pub const CELL_WIDE_SPACER_TAIL: u32 = 2;
+/// `GhosttyCellWide`: the blank at the end of a soft-wrapped line whose next
+/// character was too wide to fit.
+pub const CELL_WIDE_SPACER_HEAD: u32 = 3;
+
 unsafe extern "C" {
+    /// Read one field of a raw cell (e.g. `CELL_DATA_WIDE`).
+    pub fn ghostty_cell_get(cell: u64, data: u32, out: *mut c_void) -> c_int;
+
     /// Create an empty render state (the per-session renderer's state).
     pub fn ghostty_render_state_new(
         allocator: *const GhosttyAllocator,

@@ -61,7 +61,7 @@ pub struct PaneStream {
     /// The trailing bytes of a multi-byte UTF-8 character a `Peek` chunk ended
     /// in the middle of; prepended to the next chunk. Without it the two halves
     /// were each lossy-decoded to U+FFFD and the character was corrupted.
-    utf8_carry: Mutex<Vec<u8>>,
+    utf8_carry: Mutex<ldmux_protocol::utf8::Utf8Carry>,
     /// The epoch counter (count *delivered* snapshots, not captures).
     epoch: AtomicU64,
     /// The sanitizer state (a partial OSC/DCS sequence can straddle chunks).
@@ -134,7 +134,7 @@ impl PaneStream {
             keeper,
             subs: Mutex::new(Vec::new()),
             next_sub_id: AtomicUsize::new(1),
-            utf8_carry: Mutex::new(Vec::new()),
+            utf8_carry: Mutex::new(ldmux_protocol::utf8::Utf8Carry::new()),
             epoch: AtomicU64::new(0),
             sanitizer: Mutex::new(crate::sanitize::Sanitizer::new(false)),
             closed: AtomicBool::new(false),
@@ -405,17 +405,8 @@ impl PaneStream {
     /// (the pipeline downstream is `&str`), but a character that merely
     /// straddles two peeks is no longer corrupted.
     fn decode_chunk(&self, data: Vec<u8>) -> Option<String> {
-        let mut carry = self.utf8_carry.lock().unwrap();
-        let mut buf = std::mem::take(&mut *carry);
-        buf.extend_from_slice(&data);
-        let keep = incomplete_utf8_tail(&buf);
-        let split = buf.len() - keep;
-        *carry = buf[split..].to_vec();
-        buf.truncate(split);
-        if buf.is_empty() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&buf).into_owned())
+        let text = self.utf8_carry.lock().unwrap().decode(&data);
+        (!text.is_empty()).then_some(text)
     }
 
     /// Stop the poll loop (the `drop_stream`/`stop` path).
@@ -427,27 +418,6 @@ impl PaneStream {
     pub fn is_poll_stopped(&self) -> bool {
         self.poll_stop.load(Ordering::Relaxed)
     }
-}
-
-/// How many bytes at the end of `buf` are the *start* of a multi-byte UTF-8
-/// character whose remaining bytes have not arrived yet (0 when the buffer ends
-/// on a character boundary or in bytes that can never complete).
-fn incomplete_utf8_tail(buf: &[u8]) -> usize {
-    // A UTF-8 sequence is at most 4 bytes, so the lead byte is within the last 3.
-    for back in 1..=buf.len().min(3) {
-        let b = buf[buf.len() - back];
-        if b & 0xC0 == 0x80 {
-            continue; // a continuation byte: keep looking for its lead
-        }
-        let need = match b {
-            0xC2..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF4 => 4,
-            _ => return 0, // ASCII or an invalid lead: nothing to wait for
-        };
-        return if back < need { back } else { 0 };
-    }
-    0
 }
 
 /// Convert a tmux key name to its byte sequence.
@@ -866,15 +836,5 @@ mod tests {
             }
             assert_eq!(*got.lock().unwrap(), bytes, "split at {split}");
         }
-    }
-
-    #[test]
-    fn incomplete_tail_detection() {
-        assert_eq!(incomplete_utf8_tail(b"abc"), 0);
-        assert_eq!(incomplete_utf8_tail("\u{e9}".as_bytes()), 0);
-        assert_eq!(incomplete_utf8_tail(&"\u{e9}".as_bytes()[..1]), 1);
-        assert_eq!(incomplete_utf8_tail(&"\u{1f600}".as_bytes()[..3]), 3);
-        assert_eq!(incomplete_utf8_tail(&[0xff]), 0);
-        assert_eq!(incomplete_utf8_tail(&[0x80, 0x80, 0x80, 0x80]), 0);
     }
 }

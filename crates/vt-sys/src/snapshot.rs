@@ -94,8 +94,20 @@ pub fn render(rows: &[&[Cell]], width: usize) -> String {
             out.push('\n');
         }
         let fwr = FullWidthRow::new(row, width);
+        // Default-style blanks at the right edge are the same on screen as
+        // nothing, and a replaying client starts each repaint from a clear
+        // screen, so they are not emitted. A *styled* blank is content (a status
+        // bar's background, an inverse space) and is kept, as is every blank
+        // that has something to its right.
+        let end = (0..fwr.len())
+            .rev()
+            .find(|&x| {
+                let cv = fwr.cell(x);
+                !(cv.style() == sgr::BLANK && (cv.text().is_empty() || cv.text() == " "))
+            })
+            .map_or(0, |x| x + 1);
         let mut current = sgr::BLANK;
-        for x in 0..fwr.len() {
+        for x in 0..end {
             let cv = fwr.cell(x);
             let style = cv.style();
             if style != current {
@@ -103,6 +115,11 @@ pub fn render(rows: &[&[Cell]], width: usize) -> String {
                 current = style;
             }
             out.push_str(cv.text());
+        }
+        // Style is stream state, not row state: leave it reset so the next row
+        // (which starts from the default) is not painted with this one's tail.
+        if current != sgr::BLANK {
+            out.push_str(&sgr::transition(&current, &sgr::BLANK));
         }
     }
     out
@@ -159,6 +176,6 @@ mod tests {
         let mut red = Cell { text: "B".into(), style: sgr::BLANK };
         red.style.fg = Some(StyleColor::Palette(1));
         let row = [plain("A"), red];
-        assert_eq!(render(&[&row], 2), "A\x1b[0;38;5;1mB");
+        assert_eq!(render(&[&row], 2), "A\x1b[0;38;5;1mB\x1b[0m");
     }
 }

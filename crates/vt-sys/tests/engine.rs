@@ -189,8 +189,10 @@ fn render_state_wrapper_renders_a_full_width_row() {
     assert_eq!(row.len(), 80, "a row is full width (one Cell per column)");
     assert_eq!(row[0].text, "h");
     assert_eq!(row[1].text, "i");
-    // A trailing empty cell: no text.
-    assert_eq!(row[7].text, "");
+    // A cell the program never wrote is a blank *column* (a space), not "no text":
+    // only the second half of a wide character has no text, and dropping an
+    // unwritten cell slides everything to its right left.
+    assert_eq!(row[7].text, " ");
     // An SGR colour IS reflected per cell (the `ROW_CELLS_DATA_STYLE` carries
     // the fg/bg colours); the bytes before the SGR have no explicit colour.
     let mut t2 = Terminal::new(80, 24).unwrap();

@@ -38,6 +38,7 @@ pub fn clamp_pane_size(cols: u64, rows: u64) -> (u64, u64) {
 }
 
 pub mod frames;
+pub mod utf8;
 pub mod keeper;
 pub mod keeper_call;
 pub mod messages;

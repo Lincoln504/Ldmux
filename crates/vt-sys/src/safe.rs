@@ -428,10 +428,30 @@ impl RenderState {
                 )
             };
             let style_bytes = unsafe { std::slice::from_raw_parts(style_buf as *const u8, STYLE_C_SIZE) };
-            out.push(Cell {
-                text: String::from_utf8_lossy(&text_buf[..buffer.len]).into_owned(),
-                style: style_to_plain(style_bytes),
-            });
+            // A cell with no text is either the second half of a wide character
+            // (it must render as nothing: the wide glyph already covers the
+            // column) or a blank the program never wrote (it MUST render as a
+            // column, or everything to its right slides left). The cell's
+            // `wide` attribute tells them apart.
+            let mut raw: u64 = 0;
+            let mut wide: u32 = 0;
+            let have_wide = unsafe {
+                ffi::ghostty_render_state_row_cells_get(
+                    cells,
+                    ffi::ROW_CELLS_DATA_RAW,
+                    &mut raw as *mut _ as *mut c_void,
+                ) == ffi::SUCCESS
+                    && ffi::ghostty_cell_get(raw, ffi::CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void)
+                        == ffi::SUCCESS
+            };
+            let spacer = have_wide
+                && (wide == ffi::CELL_WIDE_SPACER_TAIL || wide == ffi::CELL_WIDE_SPACER_HEAD);
+            let text = if buffer.len == 0 && !spacer {
+                " ".to_string()
+            } else {
+                String::from_utf8_lossy(&text_buf[..buffer.len]).into_owned()
+            };
+            out.push(Cell { text, style: style_to_plain(style_bytes) });
             unsafe { std::alloc::dealloc(style_buf, style_layout) };
         }
         unsafe {

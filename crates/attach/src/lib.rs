@@ -297,6 +297,9 @@ where
     let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
         .map_err(|e| e.to_string())?;
     let mut inbuf = [0u8; 4096];
+    // A multi-byte character can straddle two reads (a large paste): decoding
+    // each read alone turned both halves into U+FFFD in the user's shell.
+    let mut in_utf8 = ldmux_protocol::utf8::Utf8Carry::new();
     let mut detached = false;
 
     loop {
@@ -387,7 +390,10 @@ where
                 if readonly {
                     continue;
                 }
-                let text = String::from_utf8_lossy(bytes).to_string();
+                let text = in_utf8.decode(bytes);
+                if text.is_empty() {
+                    continue; // only the start of a character so far
+                }
                 let _ = send(
                     &mut sink,
                     &serde_json::json!({ "type": "input", "data": text }),
