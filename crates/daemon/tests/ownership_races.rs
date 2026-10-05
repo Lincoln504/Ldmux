@@ -34,7 +34,7 @@ async fn first_of(ws: &mut Ws, types: &[&str]) -> Option<serde_json::Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
     while let Ok(Some(Ok(m))) = tokio::time::timeout_at(deadline, ws.next()).await {
         if let Message::Text(t) = m {
-            let v: serde_json::Value = serde_json::from_str(&t.to_string()).unwrap();
+            let v: serde_json::Value = serde_json::from_str(t.as_ref()).unwrap();
             if types.iter().any(|ty| v["type"] == *ty) {
                 return Some(v);
             }

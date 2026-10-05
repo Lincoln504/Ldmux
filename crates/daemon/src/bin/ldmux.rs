@@ -402,8 +402,8 @@ async fn main() {
                                 println!("  {marker} {name:12} {count} window{plural}");
                             }
                         }
-                        if let Some(pi) = v.get("piSessions").and_then(|s| s.as_array()) {
-                            if !pi.is_empty() {
+                        if let Some(pi) = v.get("piSessions").and_then(|s| s.as_array())
+                            && !pi.is_empty() {
                                 println!("pi sessions:");
                                 for p in pi {
                                     let label = p.get("label").and_then(|t| t.as_str()).unwrap_or("");
@@ -414,7 +414,6 @@ async fn main() {
                                     println!("  {label:18} {where_str:10} pid {pid}  {cwd}");
                                 }
                             }
-                        }
                     }
                 }
                 Err(e) => {

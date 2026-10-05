@@ -158,14 +158,11 @@ pub fn spawn_captured(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    match &opts.env {
-        Some(env) => {
-            cmd.env_clear();
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
+    if let Some(env) = &opts.env {
+        cmd.env_clear();
+        for (k, v) in env {
+            cmd.env(k, v);
         }
-        None => {}
     }
     if let Some(cwd) = &opts.cwd {
         cmd.current_dir(cwd);

@@ -9,7 +9,6 @@
 //! - [`auth`] — the remote access token (0600 file, constant-time compare)
 //! - [`qr`] — the QR encoder for `ldmux code` (ISO/IEC 18004, v1–40)
 //! - [`sanitize`] — the stateful pane-byte sanitizer (OSC 52, DCS/APC, DA/DSR)
-//! - [`screen_diff`] — "what changed on screen" from two captures
 //! - [`ownership`] — who is looking at a session (ADR-0010)
 //! - [`registry`] — the durable session index
 //! - [`cwd`] — where a session's directory comes from
@@ -40,7 +39,6 @@ pub mod proc;
 pub mod qr;
 pub mod registry;
 pub mod sanitize;
-pub mod screen_diff;
 pub mod ownership;
 pub mod desktop_inventory;
 

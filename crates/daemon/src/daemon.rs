@@ -646,11 +646,10 @@ impl LdmuxDaemon {
                         let shared = d.remote.as_ref().and_then(|r| r.shared());
                         (changed, shared)
                     };
-                    if changed {
-                        if let Some(shared) = shared {
+                    if changed
+                        && let Some(shared) = shared {
                             crate::remote::broadcast_sessions(&shared).await;
                         }
-                    }
                 }
             });
         }
@@ -1169,7 +1168,7 @@ impl LdmuxDaemon {
                     .cloned()
                     .and_then(|v| serde_json::from_value(v).ok())
                     .ok_or_else(|| "no device given".to_string())?;
-                let result = self.claim(&id, &device, true);
+                let result = self.claim(id, &device, true);
                 Ok(serde_json::json!({
                     "ok": matches!(result, crate::ownership::ClaimResult::Acquired { .. }),
                 }))

@@ -64,7 +64,7 @@ async fn next_of_type(ws: &mut Ws, ty: &str, out: &mut Vec<u8>) -> serde_json::V
         };
         match m {
             tokio_tungstenite::tungstenite::Message::Text(t) => {
-                let v: serde_json::Value = serde_json::from_str(&t.to_string()).unwrap();
+                let v: serde_json::Value = serde_json::from_str(t.as_ref()).unwrap();
                 if v["type"] == ty {
                     return v;
                 }

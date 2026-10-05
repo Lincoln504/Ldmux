@@ -66,7 +66,7 @@ async fn next_json(ws: &mut Ws) -> serde_json::Value {
             panic!("connection closed");
         };
         if let tokio_tungstenite::tungstenite::Message::Text(t) = &m {
-            return serde_json::from_str(&t.to_string()).unwrap();
+            return serde_json::from_str(t.as_ref()).unwrap();
         }
     }
 }
@@ -94,12 +94,12 @@ async fn plain_get_status(port: u16, token: Option<&str>) -> u16 {
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.ok();
     let head = String::from_utf8_lossy(&buf);
-    let status = head
+    
+    head
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
-    status
+        .unwrap_or(0)
 }
 
 async fn start_daemon(dir: &std::path::Path, port: u16, token: &str) -> std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> {

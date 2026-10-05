@@ -65,7 +65,7 @@ async fn next_of_type(ws: &mut Ws, ty: &str) -> serde_json::Value {
             panic!("connection closed waiting for {ty}");
         };
         if let tokio_tungstenite::tungstenite::Message::Text(t) = m {
-            let v: serde_json::Value = serde_json::from_str(&t.to_string()).unwrap();
+            let v: serde_json::Value = serde_json::from_str(t.as_ref()).unwrap();
             if v["type"] == ty {
                 return v;
             }

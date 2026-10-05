@@ -42,7 +42,7 @@ async fn collect(ws: &mut Ws, ms: u64) -> Vec<Item> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
     while let Ok(Some(Ok(m))) = tokio::time::timeout_at(deadline, ws.next()).await {
         match m {
-            Message::Text(t) => items.push(Item::Json(serde_json::from_str(&t.to_string()).unwrap())),
+            Message::Text(t) => items.push(Item::Json(serde_json::from_str(t.as_ref()).unwrap())),
             Message::Binary(b) if b.len() >= 8 && b[0] == 0x10 => {
                 items.push(Item::Output(String::from_utf8_lossy(&b[8..]).into_owned()))
             }

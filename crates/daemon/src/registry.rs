@@ -103,11 +103,10 @@ impl Registry {
 
     /// Save atomically: write `<path>.tmp`, rename over `<path>`.
     pub fn save(&self) -> std::io::Result<()> {
-        if let Some(parent) = std::path::Path::new(&self.path).parent() {
-            if parent != std::path::Path::new("") {
+        if let Some(parent) = std::path::Path::new(&self.path).parent()
+            && parent != std::path::Path::new("") {
                 std::fs::create_dir_all(parent)?;
             }
-        }
         let mut file = RegistryFile {
             version: 1,
             sessions: Vec::new(),
@@ -185,7 +184,7 @@ impl Registry {
                     return false;
                 };
                 r.status == "dead"
-                    && r.exited_at.map_or(false, |e| now - e > max_dead_age_ms as i64)
+                    && r.exited_at.is_some_and(|e| now - e > max_dead_age_ms as i64)
             })
             .cloned()
             .collect();

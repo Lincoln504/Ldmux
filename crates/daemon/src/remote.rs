@@ -680,12 +680,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 let mut d = shared.daemon.lock().await;
                 d.close_session(&id).await.unwrap_or((true, default_record(&id)))
             };
-            if let Some(dev) = &device {
-                if !ended {
+            if let Some(dev) = &device
+                && !ended {
                     let mut d = shared.daemon.lock().await;
                     d.release_claim(&id, &dev.id);
                 }
-            }
             stop_viewing(conn, shared).await;
             send_sessions(conn, shared).await;
         }
@@ -1227,12 +1226,11 @@ async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id
         if !device_has_conns {
             let mut d = shared.daemon.lock().await;
             freed = !d.release_device(&device_id).is_empty();
-        } else if let Some(sid) = &session_id {
-            if !still_viewing {
+        } else if let Some(sid) = &session_id
+            && !still_viewing {
                 let mut d = shared.daemon.lock().await;
                 freed = d.release_claim(sid, &device_id);
             }
-        }
         if freed {
             broadcast_sessions(&shared).await;
         }

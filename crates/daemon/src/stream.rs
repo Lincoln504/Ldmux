@@ -321,11 +321,10 @@ impl PaneStream {
         let mut sr = self.request_snapshot(history_lines, true)?;
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let tail = std::mem::take(&mut sr.tail);
-        if !tail.is_empty() {
-            if let Some(text) = self.decode_chunk(tail) {
+        if !tail.is_empty()
+            && let Some(text) = self.decode_chunk(tail) {
                 self.fanout_except(requester, &text);
             }
-        }
         fence(&sr, epoch);
         Ok(epoch)
     }
@@ -389,11 +388,10 @@ impl PaneStream {
                         (sub.sub.on_reset)("output was discarded while unread; resync from a snapshot");
                     }
                 }
-                if !pr.data.is_empty() {
-                    if let Some(text) = self.decode_chunk(pr.data) {
+                if !pr.data.is_empty()
+                    && let Some(text) = self.decode_chunk(pr.data) {
                         self.fanout(&text);
                     }
-                }
                 Ok(())
             }
             other => Err(format!("unexpected keeper response to Peek: {other:?}")),

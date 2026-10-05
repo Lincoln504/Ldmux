@@ -17,7 +17,7 @@ const SHELLS: &[&str] = &[
 pub fn is_shell_foreground(command: &str) -> bool {
     let trimmed = command.trim().to_lowercase();
     let stripped = trimmed.strip_prefix('-').unwrap_or(&trimmed);
-    SHELLS.iter().any(|s| *s == stripped)
+    SHELLS.contains(&stripped)
 }
 
 /// The i3 window class for a session's live window.
@@ -83,24 +83,21 @@ pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
 /// executable's own path, which is absolute — never a bare name.
 pub fn attach_bin() -> String {
     if let Ok(exe) = std::env::current_exe() {
-        if exe.file_name().and_then(|n| n.to_str()) == Some("ldmuxd") {
-            if let Some(s) = exe.to_str() {
+        if exe.file_name().and_then(|n| n.to_str()) == Some("ldmuxd")
+            && let Some(s) = exe.to_str() {
                 return s.to_string();
             }
-        }
         if let Some(parent) = exe.parent() {
             let candidate = parent.join("ldmuxd");
-            if candidate.exists() {
-                if let Some(s) = candidate.to_str() {
+            if candidate.exists()
+                && let Some(s) = candidate.to_str() {
                     return s.to_string();
                 }
-            }
         }
-        if let Some(s) = exe.to_str() {
-            if s.starts_with('/') {
+        if let Some(s) = exe.to_str()
+            && s.starts_with('/') {
                 return s.to_string();
             }
-        }
     }
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => format!("{h}/.local/bin/ldmuxd"),
@@ -120,8 +117,8 @@ pub fn find_window_id_by_class(tree_json: &str, class_name: &str) -> Option<Stri
 
 fn visit(node: &serde_json::Value, class_name: &str) -> Option<String> {
     let n = node.as_object()?;
-    if let Some(w) = n.get("window").and_then(|w| w.as_u64()) {
-        if w != 0 {
+    if let Some(w) = n.get("window").and_then(|w| w.as_u64())
+        && w != 0 {
             let cls = n
                 .get("app_id")
                 .and_then(|a| a.as_str())
@@ -135,7 +132,6 @@ fn visit(node: &serde_json::Value, class_name: &str) -> Option<String> {
                 return Some(format!("0x{:x}", w));
             }
         }
-    }
     let mut children = Vec::new();
     if let Some(nodes) = n.get("nodes").and_then(|n| n.as_array()) {
         children.extend(nodes.iter());

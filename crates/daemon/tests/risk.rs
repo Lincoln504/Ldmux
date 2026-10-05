@@ -61,7 +61,7 @@ impl KeeperConn for FakeKeeperConn {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
-            if buf.iter().any(|&b| b == b'\n') {
+            if buf.contains(&b'\n') {
                 break;
             }
         }

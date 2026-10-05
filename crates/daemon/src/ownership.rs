@@ -53,19 +53,12 @@ pub enum ClaimResult {
 /// rather than O(all claims). Keeping the two maps in step is the only
 /// invariant here, and it is why every mutation goes through the private index
 /// helpers.
+#[derive(Default)]
 pub struct Ownership {
     claims: std::collections::BTreeMap<String, Claim>,
     held: std::collections::HashMap<String, Vec<String>>,
 }
 
-impl Default for Ownership {
-    fn default() -> Self {
-        Ownership {
-            claims: std::collections::BTreeMap::new(),
-            held: std::collections::HashMap::new(),
-        }
-    }
-}
 
 impl Ownership {
     pub fn new() -> Self {

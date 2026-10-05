@@ -275,10 +275,10 @@ fn draw_format(g: &mut Grid, ecc: Ecc, mask: u32) {
         g.set((14 - i) as usize, 8, bit(i));
     }
     for i in 0..8 {
-        g.set(size as usize - 1 - i as usize, 8, bit(i));
+        g.set(size - 1 - i as usize, 8, bit(i));
     }
     for i in 8..15 {
-        g.set(8, size as usize - 15 + i as usize, bit(i));
+        g.set(8, size - 15 + i as usize, bit(i));
     }
     // The dark module.
     g.set(8, size - 8, true);
@@ -335,7 +335,7 @@ fn draw_function_patterns(g: &mut Grid, ver: u32) {
         let bits = (ver << 12) | rem;
         for i in 0..18u32 {
             let dark = (bits >> i) & 1 != 0;
-            let a = size as usize - 11 + (i % 3) as usize;
+            let a = size - 11 + (i % 3) as usize;
             let b = (i / 3) as usize;
             g.set(a, b, dark);
             g.set(b, a, dark);
@@ -374,14 +374,14 @@ fn draw_codewords(g: &mut Grid, data: &[u8]) {
 
 fn mask_hit(mask: u32, x: u32, y: u32) -> bool {
     match mask {
-        0 => (x + y) % 2 == 0,
-        1 => y % 2 == 0,
-        2 => x % 3 == 0,
-        3 => (x + y) % 3 == 0,
-        4 => (x / 3 + y / 2) % 2 == 0,
+        0 => (x + y).is_multiple_of(2),
+        1 => y.is_multiple_of(2),
+        2 => x.is_multiple_of(3),
+        3 => (x + y).is_multiple_of(3),
+        4 => (x / 3 + y / 2).is_multiple_of(2),
         5 => ((x * y) % 2) + ((x * y) % 3) == 0,
-        6 => (((x * y) % 2) + ((x * y) % 3)) % 2 == 0,
-        _ => (((x + y) % 2) + ((x * y) % 3)) % 2 == 0,
+        6 => (((x * y) % 2) + ((x * y) % 3)).is_multiple_of(2),
+        _ => (((x + y) % 2) + ((x * y) % 3)).is_multiple_of(2),
     }
 }
 
@@ -804,7 +804,7 @@ mod tests {
         let mut px: Vec<String> = vec![];
         for r in &rows {
             // Horizontal: each character repeated `scale` times.
-            let s: String = r.chars().flat_map(|c| std::iter::repeat(c).take(scale as usize)).collect();
+            let s: String = r.chars().flat_map(|c| std::iter::repeat_n(c, scale as usize)).collect();
             // Vertical: `scale` copies of that line.
             for _ in 0..scale {
                 px.push(s.clone());

@@ -308,7 +308,7 @@ where
                 match msg {
                     None | Some(Err(_)) => break,
                     Some(Ok(Message::Text(t))) => {
-                        let v: serde_json::Value = match serde_json::from_str(&t.to_string()) {
+                        let v: serde_json::Value = match serde_json::from_str(t.as_ref()) {
                             Ok(v) => v,
                             Err(_) => continue,
                         };

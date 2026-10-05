@@ -30,11 +30,10 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> String
     if !existing.is_empty() {
         // A copy left at the old place would be adopted again if the real one
         // were deleted to rotate it — silently bringing the old token back.
-        if let Some(p) = token_path {
-            if p != legacy_path.as_str() {
+        if let Some(p) = token_path
+            && p != legacy_path.as_str() {
                 let _ = std::fs::remove_file(&legacy_path);
             }
-        }
         return existing;
     }
 
@@ -52,22 +51,20 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> String
     // mkdir -p the parent 0700 (only when we create it: the TS mode applies to
     // created directories), then write 0600 and chmod, so umask cannot widen
     // it: the token is a credential even though it lives in a 0700 dir.
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        if parent != std::path::Path::new("") && !parent.exists() {
+    if let Some(parent) = std::path::Path::new(&path).parent()
+        && parent != std::path::Path::new("") && !parent.exists() {
             let _ = std::fs::create_dir_all(parent);
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
-    }
     let _ = std::fs::write(&path, token.as_bytes());
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
 
     // Once the token has a path of its own, the legacy copy must go, so a
     // deletion of the real token really rotates it.
-    if let Some(p) = token_path {
-        if p != legacy_path.as_str() {
+    if let Some(p) = token_path
+        && p != legacy_path.as_str() {
             let _ = std::fs::remove_file(&legacy_path);
         }
-    }
     token
 }
 

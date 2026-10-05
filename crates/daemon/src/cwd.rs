@@ -36,17 +36,17 @@ pub fn home_dir() -> Result<String, String> {
 pub fn resolve(cwd: Option<&str>, home: &str) -> String {
     let raw = cwd.map(str::trim).filter(|s| !s.is_empty());
     match raw {
-        None => return home.to_string(),
-        Some(r) if r == "~" => return home.to_string(),
+        None => home.to_string(),
+        Some(r) if r == "~" => home.to_string(),
         Some(r) if let Some(rest) = r.strip_prefix("~/") => {
             let rest = rest.trim_start_matches('/');
-            return if rest.is_empty() {
+            if rest.is_empty() {
                 home.to_string()
             } else {
                 format!("{home}/{rest}")
-            };
+            }
         }
-        Some(r) => return r.to_string(),
+        Some(r) => r.to_string(),
     }
 }
 
