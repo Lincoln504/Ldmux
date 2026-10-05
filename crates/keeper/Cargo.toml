@@ -2,7 +2,7 @@
 name = "ldmux-keeper"
 version = "0.1.0"
 edition = "2024"
-description = "The ldmux keeper: allocates PTYs, owns the shell pids, supervises them, and serves the keeper protocol over a Unix socket (the tmux-server position, plan §3)"
+description = "The ldmux keeper: allocates PTYs, owns the shell pids, supervises them, and serves the keeper protocol over a Unix socket (plan §3)"
 license = "MIT"
 
 [lib]
