@@ -100,9 +100,23 @@ async fn an_unwatched_shells_output_is_in_the_snapshot_and_not_replayed() {
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     // Output while nobody is watching: no stream exists, the keeper buffers it.
+    //
+    // The screen is cleared first. The shell's own startup noise is around
+    // twenty-five lines here (a nix-shell `bashrc` printing
+    // `bash: complete: command not found`), so on a 30-row grid a marker printed
+    // after it can scroll out of the *visible* screen — which is all a snapshot
+    // carries — and the test then failed depending on how much noise the shell
+    // had managed to print. Measured, in a full workspace run.
     arc.lock()
         .await
-        .handle("send", serde_json::json!({"id": id, "text": "printf 'BACKLOG-%s\\n' MARK", "keys": ["Enter"]}))
+        .handle(
+            "send",
+            serde_json::json!({
+                "id": id,
+                "text": "printf '\\033[2J\\033[H'; printf 'BACKLOG-%s\\n' MARK",
+                "keys": ["Enter"],
+            }),
+        )
         .await
         .unwrap();
     // Wait for the shell to have actually printed, rather than for a number of

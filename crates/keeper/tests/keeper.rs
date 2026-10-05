@@ -317,7 +317,14 @@ async fn the_emulator_renders_the_pane_output() {
     let mut got = None;
     for _ in 0..1200 {
         let sr = snapshot(&s, &id).await;
-        if sr.text.lines().any(|l| l == CORPUS_LINE) {
+        // `ends_with`, not `==`: the row carries the shell prompt when the
+        // corpus happens to be printed on the prompt's own line, which is a
+        // matter of what the shell had already written when the `cat` ran. The
+        // equality check made this test depend on that, and it failed in a full
+        // workspace run for exactly that reason (the pane held
+        // `$ \x1b[0;1mB\x1b[0;4mU…`). What is being tested is that the emulator
+        // rendered the corpus in our format, not where the prompt was.
+        if sr.text.lines().any(|l| l.ends_with(CORPUS_LINE)) {
             got = Some(sr);
             break;
         }
