@@ -58,7 +58,8 @@ data class TerminalModes(
  * client must keep working against it.
  */
 internal sealed interface AttachMessage {
-    data object Caps : AttachMessage
+    /** The daemon is attached; [shiftKeys] says it understands the `S-` key modifier. */
+    data class Caps(val shiftKeys: Boolean) : AttachMessage
     data class Pong(val id: Int?) : AttachMessage
     data class Snapshot(
         val cols: Int,
@@ -77,7 +78,7 @@ internal sealed interface AttachMessage {
 internal fun parseAttachMessage(text: String): AttachMessage? {
     val root = parseJsonObject(text) ?: return null
     return when (root.text("type")) {
-        "caps" -> AttachMessage.Caps
+        "caps" -> AttachMessage.Caps(root.obj("capabilities")?.flag("shiftKeys") == true)
         "pong" -> AttachMessage.Pong(root.number("id"))
         "snapshot" -> {
             val cols = root.number("cols") ?: return null
@@ -151,6 +152,14 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      * [InputGate]): a keystroke sent into nothing used to vanish without a trace.
      */
     val isConnected: Boolean get() = ws != null
+
+    /**
+     * The daemon understands the `S-` key modifier (its `caps` says so). An older daemon
+     * refuses a whole `key` message it does not know, so Shift on a named key is only
+     * sent when this is true.
+     */
+    var shiftKeys = false
+        private set
 
     var onSnapshot: ((cols: Int, rows: Int, screen: String, history: Boolean, modes: TerminalModes) -> Unit)? = null
     var onOutput: ((ByteArray) -> Unit)? = null
@@ -456,8 +465,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             // The daemon has answered, so the link works and the next failure is
             // a new one: the backoff starts over rather than staying where the
             // last outage left it.
-            AttachMessage.Caps -> {
+            is AttachMessage.Caps -> {
                 attempt = 0
+                shiftKeys = msg.shiftKeys
                 appLog("page $sessionId: attached")
                 guarded("attached") { onAttached?.invoke() }
             }

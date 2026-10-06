@@ -16,6 +16,9 @@ import androidx.compose.ui.graphics.nativeCanvas
  */
 private const val SELECTION_WASH = 0x44EDEDED
 
+/** Alpha of the dotted underline that marks an OSC 8 link, in the top byte. */
+private const val LINK_ALPHA = 0xA0 shl 24
+
 /** Android renderer: draws the grid straight onto the Compose canvas. */
 actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
 
@@ -26,6 +29,14 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
     private val bgPaint = Paint()
     private val selPaint = Paint()
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    // Underline strokes: one reusable segment buffer and paint, so the 20 fps grid
+    // loop allocates nothing per cell (the shapes come from UnderlineGeometry).
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.BUTT
+    }
+    private val lineBuf = FloatArray(UnderlineGeometry.MAX_SEGMENTS * 4)
     private val fgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
         textSize = fontSizePx
@@ -70,21 +81,67 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 // reversal — so this looks like a selection instead of like damage. The
                 // text keeps its own colour, which is the property that makes a
                 // selection readable.
-                bgPaint.color = bg
-                nc.drawRect(x, y, x + m.width, y + m.height, bgPaint)
+                val col = i % cols
+                // A double-width glyph is one drawing over two columns. The head
+                // paints a background two cells wide; the spacer tail then paints no
+                // background (it would cover the right half of the glyph the head
+                // just drew) and no text. A tail with no wide head before it is
+                // malformed or scrolled-off context, and is painted as a plain cell.
+                val tailOfWide = cell.spacerTail && col > 0 && frame.cells[i - 1].wide
+                val span = if (cell.wide && col + 1 < cols) 2 else 1
+                if (!tailOfWide) {
+                    bgPaint.color = bg
+                    nc.drawRect(x, y, x + span * m.width, y + m.height, bgPaint)
+                }
                 if (cell.selected) {
                     selPaint.color = SELECTION_WASH
                     nc.drawRect(x, y, x + m.width, y + m.height, selPaint)
                 }
+                if (tailOfWide) continue
+                drawUnderline(nc, cell, x, y, span * m.width, m)
                 if (cell.text.isBlank()) continue
                 fgPaint.color = argb(cell.drawnFg)
                 fgPaint.isFakeBoldText = cell.bold
                 fgPaint.textSkewX = if (cell.italic) -0.25f else 0f
-                fgPaint.isUnderlineText = cell.underline
+                fgPaint.isUnderlineText = false
                 val baseline = y + m.baseline
                 nc.drawText(cell.text, x, baseline, fgPaint)
             }
         }
+    }
+
+    /**
+     * The cell's underline, in its style and colour, or the link affordance.
+     *
+     * A cell with an underline style gets that style in its own underline colour
+     * (else the text colour). A hyperlinked cell without an underline gets a dotted
+     * underline in the text colour at reduced alpha: visibly "something here", quiet
+     * enough not to read as an ordinary underline. Links are never followed from
+     * here; the URI is untrusted program output.
+     */
+    private fun drawUnderline(
+        nc: android.graphics.Canvas,
+        cell: TerminalFrame.Cell,
+        x: Float,
+        y: Float,
+        w: Float,
+        m: CellMetrics,
+    ) {
+        var style = cell.underlineStyle
+        var color = 0
+        if (style != TerminalFrame.UNDERLINE_NONE) {
+            color = argb(cell.drawnUnderlineColor)
+        } else if (cell.hyperlink != null) {
+            style = TerminalFrame.UNDERLINE_DOTTED
+            color = (argb(cell.drawnFg) and 0x00FFFFFF) or LINK_ALPHA
+        } else {
+            return
+        }
+        val n = UnderlineGeometry.segments(style, x, y, w, m.height, m.baseline, lineBuf)
+        if (n == 0) return
+        linePaint.color = color
+        linePaint.strokeWidth = UnderlineGeometry.thickness(m.height)
+        nc.drawLines(lineBuf, 0, n * 4, linePaint)
     }
 
     /**

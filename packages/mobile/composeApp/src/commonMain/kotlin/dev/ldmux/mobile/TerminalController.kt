@@ -96,6 +96,9 @@ class TerminalController(
 
     private val attach = AttachClient(config, sessionId)
 
+    /** Whether the daemon this page is attached to understands `S-` on named keys. */
+    val shiftKeys: Boolean get() = attach.shiftKeys
+
     /**
      * Predictive echo, live: a display setting, so it changes on this controller
      * rather than rebuilding it (a rebuild reconnects, see [LdmuxConfig.connectionKey]).

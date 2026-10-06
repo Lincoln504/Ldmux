@@ -79,23 +79,6 @@ object NativeTerminal {
         screenH: Int,
     )
 
-    /** Pointer down on a viewport cell. Returns whether the selection changed. */
-    external fun selectionPress(handle: Long, col: Int, row: Int, timeMs: Long): Boolean
-
-    /** Long press: the word under the finger. */
-    external fun selectionDeepPress(handle: Long, timeMs: Long): Boolean
-
-    external fun selectionDrag(handle: Long, col: Int, row: Int, timeMs: Long): Boolean
-
-    /** `valid` is false when the pointer left the grid entirely. */
-    external fun selectionRelease(
-        handle: Long,
-        col: Int,
-        row: Int,
-        valid: Boolean,
-        timeMs: Long,
-    ): Boolean
-
     /**
      * Set the selection to an explicit inclusive range of viewport cells.
      *

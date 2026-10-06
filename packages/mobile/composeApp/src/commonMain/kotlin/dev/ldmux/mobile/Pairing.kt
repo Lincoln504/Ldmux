@@ -3,7 +3,7 @@ package dev.ldmux.mobile
 /**
  * The pairing link, read (ADR-0017).
  *
- *     ldmux://pair?v=1&host=100.127.119.54:7625&token=<64 hex>&name=debian
+ *     ldmux://pair?v=1&host=100.100.0.1:7625&token=<64 hex>&name=debian
  *
  * The mirror of `crates/protocol/src/pairing.rs`, and held to it by the fixture
  * both sides read (`crates/protocol/test/fixtures/pairing-links.json`, see

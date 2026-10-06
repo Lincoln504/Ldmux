@@ -32,7 +32,6 @@ static uint32_t clamp_u16(jint v) {
 
 static uint32_t clamp_px(jint v) { return v < 0 ? 0u : (uint32_t)v; }
 
-static uint64_t clock_ms(jlong v) { return v < 0 ? 0u : (uint64_t)v; }
 
 /* A grid is at least 1x1 and at most LDMUX_MAX_DIM on a side. The core clamps as
  * well; this keeps the jint -> u16 narrowing from wrapping first. */
@@ -140,9 +139,8 @@ Java_dev_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
 }
 
 /*
- * Selection. The core owns the gesture semantics, so these are thin: they hand a
- * cell and a clock down and answer whether anything changed, which is all the
- * client needs to decide to redraw.
+ * Selection. Thin: they hand cells down and answer whether anything changed,
+ * which is all the client needs to decide to redraw.
  *
  * The text comes back as bytes rather than as a JNI string for the same reason
  * the clipboard does: a JNI string built from UTF-8 has to be *modified* UTF-8,
@@ -158,48 +156,6 @@ Java_dev_ldmux_mobile_term_NativeTerminal_setGeometry(JNIEnv *env, jclass cls,
   ldmux_terminal_set_geometry(handle_of(handle), clamp_px(columns), clamp_px(cell_w),
                               clamp_px(cell_h), clamp_px(pad_left),
                               clamp_px(screen_h));
-}
-
-JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionPress(JNIEnv *env, jclass cls,
-                                                         jlong handle, jint col,
-                                                         jint row, jlong time_ms) {
-  (void)env; (void)cls;
-  return ldmux_terminal_select_press(handle_of(handle), clamp_u16(col), clamp_u16(row),
-                                     clock_ms(time_ms)) ? JNI_TRUE
-                                                        : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionDeepPress(JNIEnv *env, jclass cls,
-                                                             jlong handle,
-                                                             jlong time_ms) {
-  (void)env; (void)cls;
-  return ldmux_terminal_select_deep_press(handle_of(handle), clock_ms(time_ms))
-             ? JNI_TRUE
-             : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionDrag(JNIEnv *env, jclass cls,
-                                                        jlong handle, jint col,
-                                                        jint row, jlong time_ms) {
-  (void)env; (void)cls;
-  return ldmux_terminal_select_drag(handle_of(handle), clamp_u16(col), clamp_u16(row),
-                                    clock_ms(time_ms)) ? JNI_TRUE
-                                                       : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionRelease(JNIEnv *env, jclass cls,
-                                                            jlong handle, jint col,
-                                                            jint row, jboolean valid,
-                                                            jlong time_ms) {
-  (void)env; (void)cls;
-  return ldmux_terminal_select_release(handle_of(handle), clamp_u16(col), clamp_u16(row),
-                                       valid == JNI_TRUE ? 1 : 0, clock_ms(time_ms))
-             ? JNI_TRUE
-             : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL

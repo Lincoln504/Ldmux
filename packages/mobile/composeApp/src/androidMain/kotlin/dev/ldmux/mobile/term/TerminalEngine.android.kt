@@ -62,18 +62,6 @@ actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
         native.use(Unit) { NativeTerminal.setGeometry(it, columns, cellW, cellH, padLeft, screenH) }
     }
 
-    actual fun selectionPress(col: Int, row: Int, timeMs: Long): Boolean =
-        native.use(false) { NativeTerminal.selectionPress(it, col, row, timeMs) }
-
-    actual fun selectionDeepPress(timeMs: Long): Boolean =
-        native.use(false) { NativeTerminal.selectionDeepPress(it, timeMs) }
-
-    actual fun selectionDrag(col: Int, row: Int, timeMs: Long): Boolean =
-        native.use(false) { NativeTerminal.selectionDrag(it, col, row, timeMs) }
-
-    actual fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean =
-        native.use(false) { NativeTerminal.selectionRelease(it, col, row, valid, timeMs) }
-
     actual fun selectionSet(
         startCol: Int,
         startRow: Int,

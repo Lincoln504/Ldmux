@@ -355,6 +355,7 @@ actual fun rememberTerminalSurface(
                 charWithoutAlt = native.getUnicodeChar(meta and (ctrlBits or altBits).inv()),
                 softKeyboardUp = typing,
             ),
+            shiftKeys = controller.shiftKeys,
         )
         when (action) {
             HardwareAction.Pass -> false

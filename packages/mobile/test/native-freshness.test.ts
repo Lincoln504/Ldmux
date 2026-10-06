@@ -54,7 +54,7 @@ function nativeSources(): string[] {
  * neither stamped nor named here is a file somebody added and did not classify,
  * and that is exactly when silence is expensive.
  */
-const HOST_ONLY = new Set(["test_engine.c"]);
+const HOST_ONLY = new Set(["test_engine.c", "test_jni.c"]);
 
 /** The libraries Gradle will package, one per ABI. */
 function packagedLibs(): string[] {

@@ -461,19 +461,11 @@ static void test_pi_style_cursor_is_hidden_and_inverted(void) {
   ldmux_terminal_free(t);
 }
 
-static void test_drag_selects_text(void) {
+static void test_set_selects_text(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
   feed(t, "hello world");
-  /* A press on its own is not yet a selection: the engine is still deciding
-   * whether a second tap is coming, so the first press has nothing to draw.
-   * Measured, not assumed. */
-  CHECK_EQ_INT(ldmux_terminal_select_press(t, 0, 0, 1000), 0);
-  /* Dragging to column N covers up to N-1. Measured across five endpoints
-   * (8,9,10,11,12) rather than reasoned about, because the alternative reading
-   * — that the drag cell is included — is just as plausible on paper. */
-  CHECK(ldmux_terminal_select_drag(t, 11, 0, 1010));
-  ldmux_terminal_select_release(t, 11, 0, 1, 1050);
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 10, 0));
   const char *s = selection_cstr(t);
   CHECK(s != NULL);
   if (s) CHECK_EQ_INT(strcmp(s, "hello world"), 0);
@@ -486,9 +478,7 @@ static void test_frame_marks_selected_cells(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
   feed(t, "hello world");
-  ldmux_terminal_select_press(t, 0, 0, 1000);
-  ldmux_terminal_select_drag(t, 5, 0, 1010);
-  ldmux_terminal_select_release(t, 5, 0, 1, 1050);
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 4, 0));
   const uint8_t *buf = NULL;
   size_t len = 0;
   CHECK(ldmux_terminal_render(t, &buf, &len));
@@ -506,9 +496,7 @@ static void test_clear_removes_the_flag_and_the_text(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
   feed(t, "hello world");
-  ldmux_terminal_select_press(t, 0, 0, 1000);
-  ldmux_terminal_select_drag(t, 11, 0, 1010);
-  ldmux_terminal_select_release(t, 11, 0, 1, 1050);
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 10, 0));
   CHECK(selection_cstr(t) != NULL);
   CHECK(ldmux_terminal_select_clear(t));
   CHECK(selection_cstr(t) == NULL);
@@ -519,53 +507,11 @@ static void test_clear_removes_the_flag_and_the_text(void) {
   ldmux_terminal_free(t);
 }
 
-/* Two taps in the same place, close together in time, do NOT select a word.
- *
- * This is a record of measured behaviour, and it is here so that it cannot be
- * quietly assumed either way: the engine's press path returns "no value" for
- * every click count this test drives it with, including the second press of a
- * double-tap, while a long press on the same cell does produce the word. The
- * client therefore uses long-press for word selection, which is also the
- * standard gesture on both platforms (ADR-0014 §6).
- *
- * If a later engine starts honouring the click count, this test fails and the
- * better gesture can be adopted deliberately. Until then the assertion is what
- * the engine actually does, not what it looked like it should do. Every event
- * still carries the clock, including the release: a release timestamped zero
- * makes the sequence look like it travelled backwards in time. */
-static void test_double_press_does_not_yet_select_a_word(void) {
-  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
-  use_geometry(t);
-  feed(t, "hello world");
-  CHECK_EQ_INT(ldmux_terminal_select_press(t, 3, 0, 1000), 0);
-  ldmux_terminal_select_release(t, 3, 0, 1, 1050);
-  CHECK_EQ_INT(ldmux_terminal_select_press(t, 3, 0, 1100), 0);
-  ldmux_terminal_select_release(t, 3, 0, 1, 1150);
-  CHECK(selection_cstr(t) == NULL);
-  ldmux_terminal_free(t);
-}
-
-/* A long press is a press that has not moved for long enough, which is a
- * different event to the engine rather than a timer in the client. */
-static void test_long_press_selects_the_word(void) {
-  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
-  use_geometry(t);
-  feed(t, "hello world");
-  ldmux_terminal_select_press(t, 3, 0, 1000);
-  CHECK(ldmux_terminal_select_deep_press(t, 2000));
-  const char *s = selection_cstr(t);
-  CHECK(s != NULL);
-  if (s) CHECK_EQ_INT(strcmp(s, "hello"), 0);
-  ldmux_terminal_free(t);
-}
-
 static void test_selection_spans_lines(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
   feed(t, "one\r\ntwo");
-  ldmux_terminal_select_press(t, 0, 0, 1000);
-  ldmux_terminal_select_drag(t, 3, 1, 1010);
-  ldmux_terminal_select_release(t, 3, 1, 1, 1050);
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 2, 1));
   const char *s = selection_cstr(t);
   CHECK(s != NULL);
   if (s) CHECK_EQ_INT(strcmp(s, "one\ntwo"), 0);
@@ -589,26 +535,10 @@ static void test_select_all_covers_the_screen(void) {
   ldmux_terminal_free(t);
 }
 
-/* Releasing outside the grid is recorded as exactly that. It must not re-anchor
- * the selection somewhere the finger never was. */
-static void test_release_outside_the_grid_keeps_the_selection(void) {
-  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
-  use_geometry(t);
-  feed(t, "hello world");
-  ldmux_terminal_select_press(t, 0, 0, 1000);
-  ldmux_terminal_select_drag(t, 6, 0, 1010);
-  ldmux_terminal_select_release(t, 6, 0, 0, 1050);
-  const char *s = selection_cstr(t);
-  CHECK(s != NULL);
-  if (s) CHECK_EQ_INT(strcmp(s, "hello"), 0);
-  ldmux_terminal_free(t);
-}
-
 /* An empty screen has nothing to select, and asking must answer "nothing"
  * rather than an empty string the caller would put on the clipboard. */
 /* ---------------------------------------------------------------------------
- * The handle API. The gesture entry points above are for a finger; these are for
- * the two handles the user drags afterwards, where the ends are independent.
+ * The handle API: the two handles the user drags, where the ends are independent.
  * ------------------------------------------------------------------------- */
 
 static void test_set_round_trips_through_bounds(void) {
@@ -645,22 +575,12 @@ static void test_set_orders_an_inverted_range(void) {
   ldmux_terminal_free(t);
 }
 
-static void test_set_replaces_what_the_gesture_chose(void) {
+static void test_set_replaces_an_earlier_selection(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
   feed(t, "hello world");
-  /* A long press picks the word; the handles then have to be able to widen it,
-   * which is the case the phone reported as impossible. */
-  /* The phone presses and *then* deep-presses; a deep press with no press under it
-   * has no position to select around, which is what this test learned.
-   *
-   * The press is deliberately not checked: a press on its own reports no change,
-   * because the engine is still deciding whether a second tap is coming. It is
-   * setup here, not the assertion. */
-  (void)ldmux_terminal_select_press(t, 0, 0, 1000);
-  // The app's gap, not a 10 ms one: the phone presses at the moment the long-press
-  // timeout elapsed, which is half a second after the touch.
-  CHECK(ldmux_terminal_select_deep_press(t, 1500));
+  /* A word, then the handles widen it. */
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 4, 0));
   int sc = -1, sr = -1, ec = -1, er = -1;
   CHECK(ldmux_terminal_selection_bounds(t, &sc, &sr, &ec, &er));
   CHECK_EQ_INT(sc, 0);
@@ -978,9 +898,7 @@ static void test_clear_zeroes_the_frame_bits(void) {
 static void test_empty_screen_has_no_selection(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
-  ldmux_terminal_select_press(t, 10, 10, 1000);
-  ldmux_terminal_select_drag(t, 21, 10, 1010);
-  ldmux_terminal_select_release(t, 21, 10, 1, 1050);
+  CHECK(ldmux_terminal_selection_set(t, 10, 10, 20, 10));
   /* No text: an empty range is not a clipboard value, so the caller cannot put
    * "" on the clipboard and call it a copy. */
   CHECK(selection_cstr(t) == NULL);
@@ -1003,9 +921,7 @@ static void test_free_with_a_live_selection(void) {
   LdmuxTerminal *t = ldmux_terminal_new(80, 24);
   use_geometry(t);
   feed(t, "hello world\r\nsecond line");
-  ldmux_terminal_select_press(t, 0, 0, 1000);
-  ldmux_terminal_select_drag(t, 12, 1, 1010);
-  ldmux_terminal_select_release(t, 12, 1, 1, 1050);
+  CHECK(ldmux_terminal_selection_set(t, 0, 0, 11, 1));
   CHECK(selection_cstr(t) != NULL);
   ldmux_terminal_free(t);
   CHECK(1); /* reached only if free did not trip anything */
@@ -1364,17 +1280,14 @@ int main(void) {
        test_pi_style_cursor_is_hidden_and_inverted},
       {"alternate screen bit", test_alternate_screen_bit},
       {"cursor advances one column", test_cursor_advances_one_column},
-      {"drag selects text", test_drag_selects_text},
+      {"set selects text", test_set_selects_text},
       {"frame marks selected cells", test_frame_marks_selected_cells},
       {"clear removes flag and text", test_clear_removes_the_flag_and_the_text},
-      {"double press does not yet select a word", test_double_press_does_not_yet_select_a_word},
-      {"long press selects the word", test_long_press_selects_the_word},
       {"selection spans lines", test_selection_spans_lines},
       {"select all covers the screen", test_select_all_covers_the_screen},
-      {"release outside keeps selection", test_release_outside_the_grid_keeps_the_selection},
       {"set round-trips through bounds", test_set_round_trips_through_bounds},
       {"set orders an inverted range", test_set_orders_an_inverted_range},
-      {"set replaces what the gesture chose", test_set_replaces_what_the_gesture_chose},
+      {"set replaces an earlier selection", test_set_replaces_an_earlier_selection},
       {"bounds is zero without a selection", test_bounds_is_zero_without_a_selection},
       {"endpoints land on the right row after scrolling", test_endpoints_land_on_the_right_row_after_scrolling},
     {"the scroll offset is what actually moved", test_the_scroll_offset_is_what_actually_moved},

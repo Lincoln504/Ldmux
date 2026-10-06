@@ -26,10 +26,6 @@ JNIEXPORT jlong JNICALL JNI(create)(JNIEnv *, jclass, jint, jint);
 JNIEXPORT void JNICALL JNI(destroy)(JNIEnv *, jclass, jlong);
 JNIEXPORT void JNICALL JNI(write)(JNIEnv *, jclass, jlong, jbyteArray, jint);
 JNIEXPORT void JNICALL JNI(resize)(JNIEnv *, jclass, jlong, jint, jint);
-JNIEXPORT jboolean JNICALL JNI(selectionPress)(JNIEnv *, jclass, jlong, jint, jint, jlong);
-JNIEXPORT jboolean JNICALL JNI(selectionDrag)(JNIEnv *, jclass, jlong, jint, jint, jlong);
-JNIEXPORT jboolean JNICALL JNI(selectionRelease)(JNIEnv *, jclass, jlong, jint, jint,
-                                                 jboolean, jlong);
 JNIEXPORT jbyteArray JNICALL JNI(selectionText)(JNIEnv *, jclass, jlong);
 JNIEXPORT jboolean JNICALL JNI(selectionSet)(JNIEnv *, jclass, jlong, jint, jint, jint, jint);
 JNIEXPORT void JNICALL JNI(setGeometry)(JNIEnv *, jclass, jlong, jint, jint, jint, jint, jint);
@@ -174,11 +170,9 @@ static void test_negative_coordinates_clamp_to_the_first_cell(void) {
   JNI(write)(ENV, NULL, h, (jbyteArray)a, a->len);
   drop(a);
   JNI(setGeometry)(ENV, NULL, h, 80, 10, 20, 0, 480);
-  /* A finger dragged off the top-left: negative cell coordinates. They used to
+  /* A handle dragged off the top-left: negative cell coordinates. They used to
    * become huge uint32 values and truncate to an arbitrary u16 column. */
-  JNI(selectionPress)(ENV, NULL, h, -5, -3, 1000);
-  JNI(selectionDrag)(ENV, NULL, h, 3, 0, 1010); /* a drag to column N covers up to N-1 */
-  JNI(selectionRelease)(ENV, NULL, h, 3, 0, JNI_TRUE, 1020);
+  JNI(selectionSet)(ENV, NULL, h, -5, -3, 2, 0);
   FakeBytes *t = (FakeBytes *)JNI(selectionText)(ENV, NULL, h);
   CHECK(t != NULL);
   if (t) {
@@ -191,7 +185,7 @@ static void test_negative_coordinates_clamp_to_the_first_cell(void) {
   CHECK(t != NULL && t->len == 5 && memcmp(t->data, "hello", 5) == 0);
   if (t) drop(t);
   JNI(selectionSet)(ENV, NULL, h, 70000, 0, 70001, 0); /* off the grid: refused, no crash */
-  JNI(selectionPress)(ENV, NULL, h, 2147483647, 2147483647, -1);
+  JNI(selectionSet)(ENV, NULL, h, 2147483647, 2147483647, 2147483647, 2147483647);
   JNI(destroy)(ENV, NULL, h);
 }
 

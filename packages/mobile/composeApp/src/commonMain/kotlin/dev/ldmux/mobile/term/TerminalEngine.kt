@@ -42,16 +42,6 @@ expect class TerminalEngine(cols: Int, rows: Int) {
      */
     fun setGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int)
 
-    /** Pointer down on a viewport cell. Answers whether the selection changed. */
-    fun selectionPress(col: Int, row: Int, timeMs: Long): Boolean
-
-    /** Long press, which the engine turns into "the word under the finger". */
-    fun selectionDeepPress(timeMs: Long): Boolean
-
-    fun selectionDrag(col: Int, row: Int, timeMs: Long): Boolean
-
-    fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean
-
     /**
      * Set the selection to an explicit inclusive range of viewport cells, for the
      * handles the user drags rather than for a finger.

@@ -194,11 +194,9 @@ int ldmux_terminal_take_clipboard(LdmuxTerminal *t, const uint8_t **out,
 /* ---------------------------------------------------------------------------
  * Selection
  *
- * The gesture state machine belongs to the engine, not to this file and not to
- * the client: click counting, the cell/word/line behaviours, the anchor and the
- * soft-wrap arithmetic are all terminal semantics, and the engine already
- * implements them. What the client actually has is three pointer events and a
- * cell size, so that is the whole interface below.
+ * The client drives the selection through its two handles (selection_set), a
+ * range of viewport cells. The engine's own pointer-gesture entry points (press,
+ * deep press, drag, release) were removed: nothing called them.
  *
  * Coordinates are 0-based VIEWPORT cells, which is what a tap resolves to: the
  * anchor must be a cell on the screen the user is looking at, not a row index
@@ -223,31 +221,6 @@ int ldmux_terminal_set_geometry(LdmuxTerminal *t, uint32_t columns,
                                 uint32_t cell_w, uint32_t cell_h,
                                 uint32_t pad_left, uint32_t screen_h);
 
-/** Pointer down on a cell. `time_ms` is a monotonic clock: the engine compares
- *  it with the previous press to decide whether this is a second click of the
- *  same word or the start of a new selection. */
-int ldmux_terminal_select_press(LdmuxTerminal *t, uint32_t col, uint32_t row,
-                                uint64_t time_ms);
-
-/** Pointer held still on the same cell long enough to mean "this word".
- *  Without it a long press is just a press that has not moved yet. */
-int ldmux_terminal_select_deep_press(LdmuxTerminal *t, uint64_t time_ms);
-
-/** Pointer moved while down. `col`/`row` are clamped to the grid by the core. */
-int ldmux_terminal_select_drag(LdmuxTerminal *t, uint32_t col, uint32_t row,
-                               uint64_t time_ms);
-
-/** Pointer up. `valid_cell` is 0 when the pointer left the grid entirely, which
- *  the engine records as "released off the terminal" rather than guessing.
- *
- *  Every one of these takes the time, not just the press: the engine measures the
- *  gap between events, and a sequence whose clock goes backwards at release is a
- *  sequence it is right to distrust. (Learned by getting it wrong: a release
- *  timestamped 0 silently discarded the click count, so a double-tap selected
- *  nothing at all.) */
-int ldmux_terminal_select_release(LdmuxTerminal *t, uint32_t col, uint32_t row,
-                                  int valid_cell, uint64_t time_ms);
-
 /** Drop the selection and any in-flight gesture. */
 int ldmux_terminal_select_clear(LdmuxTerminal *t);
 
@@ -269,11 +242,9 @@ const uint8_t *ldmux_terminal_selection_text(LdmuxTerminal *t, size_t *len);
  * Set the selection to an explicit range of viewport cells, inclusive on both
  * ends, and answer whether it changed.
  *
- * The gesture entry points above are for a *finger*: they carry a clock, they
- * decide for themselves whether two taps are a word, and their drag always moves
- * the end endpoint. This is for the *handles* the user drags afterwards, where the
- * two ends are independent, the range may be inverted by dragging one past the
- * other, and there is no gesture left to interpret. A negative column or row is
+ * This is for the *handles* the user drags, where the two ends are independent
+ * and the range may be inverted by dragging one past the other. A negative column
+ * or row is
  * clamped to zero; the engine is asked for the reference and a refusal is a
  * refusal, not a crash.
  */

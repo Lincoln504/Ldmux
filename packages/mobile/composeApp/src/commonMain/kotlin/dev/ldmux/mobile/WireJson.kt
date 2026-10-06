@@ -45,6 +45,8 @@ internal fun JsonObject.number(key: String): Int? = text(key).toIntOrNull()
 
 internal fun JsonObject.flag(key: String): Boolean = text(key) == "true"
 
+internal fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
+
 internal fun JsonObject.objects(key: String): List<JsonObject> =
     (this[key] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
 

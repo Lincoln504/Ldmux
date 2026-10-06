@@ -420,77 +420,6 @@ static GhosttyPoint viewport_point(uint32_t col, uint32_t row) {
   return p;
 }
 
-/*
- * The one path every selection event takes. `have_cell` is what separates "the
- * pointer is on this cell" from "the pointer is off the grid", which the engine
- * records rather than guessing: a drag that leaves the terminal and comes back
- * must not silently re-anchor somewhere else.
- */
-static int selection_event(LdmuxTerminal *t, GhosttySelectionGestureEventType type,
-                           int have_cell, uint32_t col, uint32_t row,
-                           uint64_t time_ns) {
-  if (!t || !t->gesture || !t->terminal) return 0;
-  ensure_screen(t);
-
-  GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
-  if (have_cell) {
-    if (ghostty_terminal_grid_ref(t->terminal, viewport_point(col, row), &ref) !=
-        GHOSTTY_SUCCESS) {
-      have_cell = 0;
-    }
-  }
-
-  GhosttySelectionGestureEvent ev = NULL;
-  if (ghostty_selection_gesture_event_new(NULL, &ev, type) != GHOSTTY_SUCCESS) {
-    return 0;
-  }
-
-  /* Options persist on a reused event, so every one that matters is set (or
-   * deliberately cleared) on every call. The slop that decides whether two taps
-   * are one word is generous on purpose: a finger is not a mouse, and a
-   * double-tap that misses by a few pixels should still select the word. */
-  ghostty_selection_gesture_event_set(
-      ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF, have_cell ? (const void *)&ref : NULL);
-  if (have_cell) {
-    GhosttySurfacePosition pos;
-    pos.x = (double)(t->geo_pad_left + col * t->geo_cell_w) + (double)t->geo_cell_w / 2.0;
-    pos.y = (double)(row * t->geo_cell_h) + (double)t->geo_cell_h / 2.0;
-    ghostty_selection_gesture_event_set(
-        ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, &pos);
-  } else {
-    ghostty_selection_gesture_event_set(
-        ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_POSITION, NULL);
-  }
-  ghostty_selection_gesture_event_set(ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS,
-                                      &time_ns);
-  double slop = (double)(t->geo_cell_w ? t->geo_cell_w : 24u) * 2.0;
-  ghostty_selection_gesture_event_set(
-      ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE, &slop);
-
-  if (type == GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG ||
-      type == GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_AUTOSCROLL_TICK) {
-    GhosttySelectionGestureGeometry geo;
-    memset(&geo, 0, sizeof(geo));
-    geo.columns = t->geo_columns ? t->geo_columns : 1;
-    geo.cell_width = t->geo_cell_w ? t->geo_cell_w : 1;
-    geo.padding_left = t->geo_pad_left;
-    geo.screen_height = t->geo_screen_h ? t->geo_screen_h : 1;
-    ghostty_selection_gesture_event_set(
-        ev, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_GEOMETRY, &geo);
-  }
-
-  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
-  GhosttyResult r = ghostty_selection_gesture_event(t->gesture, t->terminal, ev, &sel);
-  ghostty_selection_gesture_event_free(ev);
-
-  /* A release updates the gesture but produces no selection, and a press whose
-   * click count is still being decided can do the same. Both are successes, so
-   * only a real failure is reported as one. */
-  if (r == GHOSTTY_SUCCESS) return install_selection(t, &sel);
-  if (r == GHOSTTY_NO_VALUE) return 0;
-  return 0;
-}
-
 int ldmux_terminal_set_geometry(LdmuxTerminal *t, uint32_t columns, uint32_t cell_w,
                                 uint32_t cell_h, uint32_t pad_left,
                                 uint32_t screen_h) {
@@ -504,12 +433,6 @@ int ldmux_terminal_set_geometry(LdmuxTerminal *t, uint32_t columns, uint32_t cel
   t->geo_pad_left = pad_left;
   t->geo_screen_h = screen_h;
   return changed;
-}
-
-int ldmux_terminal_select_press(LdmuxTerminal *t, uint32_t col, uint32_t row,
-                                uint64_t time_ms) {
-  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS, 1, col, row,
-                         time_ms * 1000000ull);
 }
 
 int ldmux_terminal_selection_set(LdmuxTerminal *t, int start_col, int start_row,
@@ -542,27 +465,6 @@ int ldmux_terminal_selection_bounds(LdmuxTerminal *t, int *start_col, int *start
     return 0;
   ensure_screen(t);
   return selection_endpoints(t, start_col, start_row, end_col, end_row) ? 1 : 0;
-}
-
-int ldmux_terminal_select_deep_press(LdmuxTerminal *t, uint64_t time_ms) {
-  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DEEP_PRESS, 0, 0, 0,
-                         time_ms * 1000000ull);
-}
-
-int ldmux_terminal_select_drag(LdmuxTerminal *t, uint32_t col, uint32_t row,
-                               uint64_t time_ms) {
-  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG, 1, col, row,
-                         time_ms * 1000000ull);
-}
-
-int ldmux_terminal_select_release(LdmuxTerminal *t, uint32_t col, uint32_t row,
-                                  int valid_cell, uint64_t time_ms) {
-  /* The release carries the cell it happened on, like every other event. It is
-   * the last position the engine hears about, so reporting (0,0) here tells it
-   * the finger travelled back to the first cell of the screen and the click it
-   * was counting never happened. */
-  return selection_event(t, GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE,
-                         valid_cell != 0, col, row, time_ms * 1000000ull);
 }
 
 int ldmux_terminal_select_clear(LdmuxTerminal *t) {
