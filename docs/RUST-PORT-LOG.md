@@ -2197,6 +2197,24 @@ Tests: `the_sessions_emulator_retains_history` (the constructor the sessions use
 against a terminal made without the caps), `capture_history_asks_for_the_plans_cap`
 (the daemon's request, through a fake keeper that echoes it; **fails with 100**).
 
+**And a third one, found by looking at what came back.** Raising the caps made the
+CLI return 1,018 lines, of which **48 were not blank**: the render read row `y` of
+the render state for `y` up to the requested count, and the render state holds one
+screen — so a 60-line history capture answered with the 24 lines above the live
+screen and 36 empty ones. It was invisible while the cap was ~1,000 rows and the
+request was 100: the two errors cancelled, because the daemon asked for less than a
+screenful more than the pane could give. Measured against the old code, verbatim:
+
+```
+K0038 … K0061, "" ×36, K0098 … K0120     # 60 asked for
+```
+
+The capture walks the window a screenful at a time now (`scroll_viewport(Top)` then
+`Delta(skip)` then page down), and the test asserts every requested history line is
+content, in order, ending where the live screen begins
+(`a_history_capture_longer_than_the_screen_is_all_lines`; **fails against the old
+render**, which is how the array above was produced).
+
 ## An ending was silent (2026-10-05)
 
 Found while chasing a report: two shells showed `dead` in the registry and nothing

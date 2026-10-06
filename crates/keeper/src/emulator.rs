@@ -242,12 +242,38 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
             let _ = rs.update(term);
             let rows = rs.rows();
             let live: Vec<Vec<Cell>> = (0..rows).map(|y| rs.row(y)).collect();
-            // 2. The last `n` history lines: scroll up `n`, read the top `n`
-            //    rows (the run immediately above the live screen), restore.
+            // 2. The last `n` history lines, **a screenful at a time**. The
+            //    render state holds one screen, so reading row indices past it
+            //    returned blanks: a 60-line history capture answered with the 24
+            //    lines above the live screen and 36 empty ones (measured
+            //    2026-10-05). The TypeScript's `capture-pane -S -N -E -` returned
+            //    the lines themselves, so this walks the window instead of
+            //    indexing into a screen it does not have.
             let hist: Vec<Vec<Cell>> = if n > 0 {
-                term.scroll_viewport(ScrollViewport::Delta(-(n as i32)));
+                let rows = rs.rows() as usize;
+                // Absolute top, then down to the first wanted history row: that
+                // row is `scrollback_rows - n` above the live screen.
+                term.scroll_viewport(ScrollViewport::Top);
                 let _ = rs.update(term);
-                let h: Vec<Vec<Cell>> = (0..n).map(|y| rs.row(y as u16)).collect();
+                let skip = term.scrollback_rows().saturating_sub(n);
+                if skip > 0 {
+                    term.scroll_viewport(ScrollViewport::Delta(skip as i32));
+                    let _ = rs.update(term);
+                }
+                let mut h: Vec<Vec<Cell>> = Vec::with_capacity(n);
+                while h.len() < n {
+                    let take = (n - h.len()).min(rows);
+                    for y in 0..take {
+                        h.push(rs.row(y as u16));
+                    }
+                    if h.len() >= n {
+                        break;
+                    }
+                    // The next screenful down (a zero-row screen cannot happen:
+                    // the emulator is created with the pane's rows).
+                    term.scroll_viewport(ScrollViewport::Delta(rows.max(1) as i32));
+                    let _ = rs.update(term);
+                }
                 term.scroll_viewport(ScrollViewport::Bottom);
                 let _ = rs.update(term);
                 h

@@ -568,6 +568,106 @@ async fn the_emulator_captures_history_above_the_screen() {
     let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
 }
 
+/// A history capture that is longer than the screen is lines, not blanks.
+///
+/// The render state holds one screen, so a capture that indexed row `y` for `y`
+/// up to the requested count read past it: 60 asked for, 24 answered with content
+/// and 36 with empties (measured 2026-10-05 against the running keeper). The
+/// capture walks the window a screenful at a time instead.
+#[tokio::test]
+async fn a_history_capture_longer_than_the_screen_is_all_lines() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let id = "s11".to_string();
+    let s = socket.to_string_lossy();
+
+    let res = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: None,
+            env: None,
+            }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    match res {
+        KeeperMessage::State(st) => assert!(!st.dead),
+        other => panic!("expected State, got {other:?}"),
+    }
+
+    // 120 numbered lines: far more than the 24-row screen, so the history holds
+    // a hundred-odd of them.
+    let data = "i=1; while [ $i -le 120 ]; do printf \"K%04d\\n\" $i; i=$((i+1)); done\n";
+    keeper_call(
+        &s,
+        &KeeperMessage::Write(km::Write { session_id: id.clone(), data: data.to_string() }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    // Ask for 60 history lines: more than one screen, fewer than the history.
+    let mut got = None;
+    for _ in 0..80 {
+        let res = keeper_call(
+            &s,
+            &KeeperMessage::Snapshot(km::Snapshot {
+                session_id: id.clone(),
+                history_lines: Some(60),
+                drain_output: false,
+            }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+        if let KeeperMessage::SnapshotResult(sr) = res
+            && sr.history_lines == 60
+            && sr.text.lines().count() == 84
+        {
+            got = Some(sr);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let Some(sr) = got else { panic!("the emulator never returned a 60-history, 84-line capture") };
+
+    let lines: Vec<&str> = sr.text.lines().collect();
+    assert_eq!(lines.len(), 84, "60 history + 24 live");
+    // Every history line is a line of output, not an empty row: the count asked
+    // for is the count delivered.
+    let blank = lines[..60].iter().filter(|l| l.is_empty()).count();
+    assert_eq!(blank, 0, "history lines must be content: {lines:?}");
+    // And they are the run immediately above the live screen, oldest first.
+    let nums: Vec<u32> = lines[..60]
+        .iter()
+        .filter_map(|l| l.trim().strip_prefix('K')?.parse::<u32>().ok())
+        .collect();
+    assert_eq!(nums.len(), 60, "history is numbered output: {:?}", &lines[..60]);
+    assert!(
+        nums.windows(2).all(|w| w[1] == w[0] + 1),
+        "and in order, oldest first: {nums:?}"
+    );
+    // The history ends where the live screen begins: the last history line is the
+    // one immediately above the screen's first numbered line.
+    let live_first = lines[60..]
+        .iter()
+        .find_map(|l| l.trim().strip_prefix('K')?.parse::<u32>().ok())
+        .expect("the live screen holds numbered output");
+    assert_eq!(
+        nums[59] + 1,
+        live_first,
+        "the history ends where the screen begins: {nums:?}"
+    );
+
+    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+}
+
 /// A `Snapshot` reports the pane's state (plan §3.4 — the `display-message`
 /// fields, read direct from ghostty-vt, not a parsed format string): the
 /// cursor, the terminal modes (off in a fresh shell), the alternate screen,
