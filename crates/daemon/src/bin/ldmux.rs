@@ -193,7 +193,13 @@ async fn main() {
                             let title = s.get("title").and_then(|t| t.as_str()).unwrap_or("");
                             let keeper_name = s.get("keeperName").and_then(|t| t.as_str()).unwrap_or("");
                             let attach = if keeper_name.is_empty() { "[rpc]".to_string() } else { format!("[{keeper_name}]") };
-                            println!("{id}  {status:7} {kind:5} {cwd}  \"{title}\"  {attach}");
+                            // An ending says why, on the line, for the shells that
+                            // ended: `dead` alone sends you looking for a cause.
+                            let why = match s.get("endedReason").and_then(|t| t.as_str()) {
+                                Some(r) if status == "dead" => format!("  ({r})"),
+                                _ => String::new(),
+                            };
+                            println!("{id}  {status:7} {kind:5} {cwd}  \"{title}\"  {attach}{why}");
                         }
                     }
                 }

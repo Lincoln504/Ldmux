@@ -2115,6 +2115,35 @@ means the kernel chose), and the daemon remembers it so `remote_info`, the pairi
 the QR all name the real one. The tests ask for 0 and read it back. The `deskWindow` variant
 of `ldmux live` was already gone.
 
+## An ending was silent (2026-10-05)
+
+Found while chasing a report: two shells showed `dead` in the registry and nothing
+anywhere said why. One (`240aa3f276`, 19:32) was a shell whose window was closed; the
+other (`6c65160e9a`, 20:45) was the phone's own shell, closed from the app. Neither
+conclusion came from a record or a log line. It came from ruling everything else out,
+which is not a diagnostic.
+
+| what the daemon had | before | after |
+|---|---|---|
+| the registry record | `status: "dead"`, `exitedAt` | + `endedReason` |
+| the journal | nothing at all | `ldmuxd: session 6c65160e9a ended: closed from motorola edge 2024` |
+| `ldmux list` | `dead` | `dead  (closed from motorola edge 2024)` |
+| the wire (`SessionInfo`) | — | `endedReason`, absent while running |
+
+There are four ways a session ends and each now names itself: its shell exited (the
+keeper still has the pane, `dead: true`), the keeper came back without it, its desk
+window closed (`reconcile_live`), a device killed or closed it. `kill_session` and
+`close_session` **take the reason as an argument** — the point is that a new ending
+path cannot compile without saying why, and the reason the last three bugs of this
+shape happened is a path that forgot to do the shared thing.
+
+Tests: `an_ending_says_why` (the record and the advertised session), `a_shell_that_exited
+_and_one_the_keeper_lost_read_differently` (the keeper's own report is what tells the
+two apart), `a_reason_comes_from_the_device_that_ended_it` (and does not invent a device
+when none was announced), plus the reason asserted in
+`an_in_place_desk_window_is_the_process_it_was_given` and the wire shape in
+`session_info_carries_the_reason_only_when_it_has_one`.
+
 ## A claim with no connection behind it, and an app nobody is looking at (2026-10-05)
 
 Reported from use, after the release fixes above: a desk window still sat on "This shell is

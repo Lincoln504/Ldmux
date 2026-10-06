@@ -474,13 +474,24 @@ Per-session record:
   "cwd": "/home/ldeen", "title": "ldmux investigation",
   "createdAt": 1789…, "updatedAt": 1789…, "createdBy": "mobile",
   "piSessionId": "01a09c54-…", "status": "running|dead",
-  "exitCode": null, "exitedAt": null
+  "exitCode": null, "exitedAt": null, "endedReason": null
 }
 ```
 
 Reconciliation on start and periodically: keeper `List` → upsert; drop
 records for vanished sessions; adopt survivors. Dead-but-retained sessions keep
 metadata + scrollback reference for replay.
+
+**Every ending says why.** `endedReason` is a short phrase written where the
+session ends and required by the signature of the one method that ends one, so a
+new ending path cannot compile without saying how: `its shell exited`, `the
+keeper no longer has it` (it came back without the pane), `its desk window
+closed`, `its desk window closed while the daemon was down`, `killed from
+motorola edge 2024`, `closed from …`. It is carried on `SessionInfo` as
+`endedReason`, so `ldmux list` prints it beside `dead`, and the daemon logs
+`session <id> ended: <reason>` on the same path. Until 2026-10-05 a record said
+`dead` and nothing else and the journal said nothing at all — two shells ended
+during an evening of use and the only way to explain either was elimination.
 
 ### 5.4 API surface (v1)
 

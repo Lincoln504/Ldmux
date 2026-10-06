@@ -434,15 +434,32 @@ impl LdmuxDaemon {
         // its claim and its window record exactly as one killed through ldmux
         // does. Only the killing paths did this, so a shell that exited kept its
         // owner until the record was pruned a day later.
+        //
+        // Which ending it is comes from the keeper: a pane still there and marked
+        // `dead` is a shell that exited and whose last screen is being kept, and
+        // a name the keeper does not have at all came back without it (a keeper
+        // restart, or a pane its own reaper collected). Both were silent before.
+        let gone_from_keeper: std::collections::HashSet<String> = states
+            .iter()
+            .filter(|s| s.dead)
+            .map(|s| s.session_id.clone())
+            .collect();
         for id in &dead {
             self.forget_session_state(id);
+            let name = self.registry.get(id).map(|r| r.keeper_name.clone()).unwrap_or_default();
+            let reason = if gone_from_keeper.contains(&name) {
+                "its shell exited"
+            } else {
+                "the keeper no longer has it"
+            };
+            self.note_ended(id, reason);
             // A shell that ended on its own is as over as one that was killed,
             // and the client watching it has to be told. `kill_session` drops the
             // stream; this path did not, so a desk window whose shell exited sat
             // on a dead pane for good — measured after typing `exit`: the window
             // still on screen with its three attach processes alive, while the
             // registry said `dead`.
-            if let Some(name) = self.registry.get(id).map(|r| r.keeper_name.clone()) {
+            if !name.is_empty() {
                 self.drop_stream(&name);
             }
         }
@@ -523,7 +540,7 @@ impl LdmuxDaemon {
             self.live_windows.remove(&id);
             changed = true;
             self.set_live_window(&id, None, None);
-            let _ = self.handle("kill", serde_json::json!({ "id": id })).await;
+            let _ = self.kill_session(&id, "its desk window closed").await;
         }
         changed
     }
@@ -616,7 +633,7 @@ impl LdmuxDaemon {
                 r.id
             );
             self.set_live_window(&r.id, None, None);
-            let _ = self.handle("kill", serde_json::json!({ "id": r.id })).await;
+            let _ = self.kill_session(&r.id, "its desk window closed while the daemon was down").await;
             changed = true;
         }
         changed
@@ -922,6 +939,7 @@ impl LdmuxDaemon {
             exited_at: None,
             live_workspace: None,
             live_pid: None,
+            ended_reason: None,
         };
         let env = session_spawn_env(
             &id,
@@ -953,7 +971,12 @@ impl LdmuxDaemon {
     }
 
     /// Kill a session (the TS `handleKill`).
-    pub async fn kill_session(&mut self, id: &str) -> Result<SessionRecord, String> {
+    ///
+    /// `reason` is how it ended, in words — it lands in the record and in the
+    /// journal. It is a required argument on purpose: a new ending path cannot
+    /// compile without saying why, and before this existed no path said why at
+    /// all. See [`Self::note_ended`].
+    pub async fn kill_session(&mut self, id: &str, reason: &str) -> Result<SessionRecord, String> {
         let mut record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
         if !record.keeper_name.is_empty() {
             let _ = self
@@ -967,6 +990,8 @@ impl LdmuxDaemon {
         record.exited_at = Some(now as i64);
         record.updated_at = now;
         record.exit_code = None;
+        record.ended_reason = Some(reason.to_string());
+        self.note_ended(&record.id, reason);
         self.registry.upsert(record.clone());
         if let Err(e) = self.registry.save() {
             eprintln!("ldmuxd: registry save: {e}");
@@ -984,13 +1009,40 @@ impl LdmuxDaemon {
     }
 
     /// Close a session (the TS `handleClose`).
-    pub async fn close_session(&mut self, id: &str) -> Result<(bool, SessionRecord), String> {
+    pub async fn close_session(&mut self, id: &str, reason: &str) -> Result<(bool, SessionRecord), String> {
         let record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
         if self.ownership.owner(id).is_some() {
             return Ok((false, record));
         }
-        let record = self.kill_session(id).await?;
+        let record = self.kill_session(id, reason).await?;
         Ok((true, record))
+    }
+
+    /// Say why a session ended, on the record and in the journal.
+    ///
+    /// The record used to say `dead` and nothing else, and the daemon's log was
+    /// silent: two shells ended during an evening of use on 2026-10-05 and the
+    /// only way to explain either was to rule everything else out. Every ending
+    /// funnels through here, like `forget_session_state` does for the claim and
+    /// the window record, for the same reason — a reason a path forgets to write
+    /// is a reason nobody has later.
+    ///
+    /// Called from `kill_session` (which every explicit ending uses) and from the
+    /// two ending paths that do not kill: the keeper reporting a session gone,
+    /// and the daemon starting up without a window its record promised.
+    fn note_ended(&mut self, id: &str, reason: &str) {
+        println!("ldmuxd: session {id} ended: {reason}");
+        let Some(mut r) = self.registry.get(id).cloned() else {
+            return;
+        };
+        if r.ended_reason.as_deref() == Some(reason) {
+            return;
+        }
+        r.ended_reason = Some(reason.to_string());
+        self.registry.upsert(r);
+        if let Err(e) = self.registry.save() {
+            eprintln!("ldmuxd: registry save: {e}");
+        }
     }
 
     /// Forget a session (the TS `forget`).
@@ -1149,12 +1201,12 @@ impl LdmuxDaemon {
             }
             "kill" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let record = self.kill_session(id).await?;
+                let record = self.kill_session(id, "killed").await?;
                 Ok(serde_json::json!({ "ok": true, "session": record }))
             }
             "close" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let (ended, record) = self.close_session(id).await?;
+                let (ended, record) = self.close_session(id, "closed").await?;
                 Ok(serde_json::json!({ "ok": true, "ended": ended, "session": record }))
             }
             "forget" => {
@@ -1492,6 +1544,7 @@ impl LdmuxDaemon {
             exited_at: None,
             live_workspace: None,
             live_pid: None,
+            ended_reason: None,
         };
         self.registry.upsert(record.clone());
         let _ = self.registry.save();
@@ -1580,6 +1633,7 @@ impl LdmuxDaemon {
                     process,
                     owner,
                     live_workspace,
+                    ended_reason: record.ended_reason.clone(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1853,6 +1907,7 @@ mod tests {
             exited_at: None,
             live_workspace: None,
             live_pid: None,
+            ended_reason: None,
         });
 
         // Pass 1: the session is live, so nothing is marked dead.
@@ -1989,7 +2044,7 @@ mod tests {
         let id = record.id.clone();
         let _keeper_name = record.keeper_name.clone();
         // Kill the session.
-        let killed = d.kill_session(&id).await.unwrap();
+        let killed = d.kill_session(&id, "killed").await.unwrap();
         assert_eq!(killed.status, "dead");
         assert!(killed.exited_at.is_some());
         // The registry has the dead record.
@@ -2017,7 +2072,7 @@ mod tests {
         let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
         let id = record.id.clone();
         // No one holds it: close kills it.
-        let (ended, _) = d.close_session(&id).await.unwrap();
+        let (ended, _) = d.close_session(&id, "closed").await.unwrap();
         assert!(ended);
         assert_eq!(d.registry().get(&id).unwrap().status, "dead");
         // Create another, claim it, and close: it is let go, not killed.
@@ -2029,9 +2084,101 @@ mod tests {
             kind: "phone".into(),
         };
         d.claim(&id2, &device, false);
-        let (ended2, _) = d.close_session(&id2).await.unwrap();
+        let (ended2, _) = d.close_session(&id2, "closed").await.unwrap();
         assert!(!ended2);
         assert_eq!(d.registry().get(&id2).unwrap().status, "running");
+        drop(fk);
+    }
+
+    /// Every ending says why, on the record and in the list the CLI prints.
+    ///
+    /// Before this the record said `dead` and nothing else and the journal said
+    /// nothing at all: two shells ended during an evening of use (2026-10-05) and
+    /// the only way to explain either was elimination.
+    #[tokio::test]
+    async fn an_ending_says_why() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let killed = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let closed = d.create_session("shell", &cwd, None, "local").await.unwrap();
+
+        d.kill_session(&killed.id, "killed from the test").await.unwrap();
+        let (ended, _) = d.close_session(&closed.id, "closed from the test").await.unwrap();
+        assert!(ended);
+
+        // On the record, where `ldmux list` reads it.
+        assert_eq!(
+            d.registry().get(&killed.id).unwrap().ended_reason.as_deref(),
+            Some("killed from the test")
+        );
+        assert_eq!(
+            d.registry().get(&closed.id).unwrap().ended_reason.as_deref(),
+            Some("closed from the test")
+        );
+        // And on the advertised session, which is what the CLI prints.
+        let listed = d.describe_sessions().await;
+        let info = listed.iter().find(|s| s.id == killed.id).unwrap();
+        assert_eq!(info.status, "dead");
+        assert_eq!(info.ended_reason.as_deref(), Some("killed from the test"));
+        // A running session has no reason to give.
+        let live = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let listed = d.describe_sessions().await;
+        let info = listed.iter().find(|s| s.id == live.id).unwrap();
+        assert_eq!(info.ended_reason, None);
+        drop(fk);
+    }
+
+    /// A shell that exited on its own and one the keeper came back without read
+    /// differently, and the difference is the keeper's own report: a pane still
+    /// there marked `dead` is a shell that exited and whose last screen is being
+    /// kept, and a name the keeper does not have at all came back without it.
+    #[tokio::test]
+    async fn a_shell_that_exited_and_one_the_keeper_lost_read_differently() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let exited = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        // The pane stays, marked dead: the shell exited.
+        fk.kill(&exited.keeper_name);
+        // A record whose keeper never had it: the keeper came back without it.
+        let mut ghost = exited.clone();
+        ghost.id = "ghost1".into();
+        ghost.keeper_name = "ldmux-ghost1".into();
+        ghost.status = "running".into();
+        ghost.exited_at = None;
+        ghost.ended_reason = None;
+        d.registry().upsert(ghost);
+
+        let r = d.reconcile().await.unwrap();
+        assert!(r.dead.contains(&exited.id), "both are dead: {:?}", r.dead);
+        assert!(r.dead.contains(&"ghost1".to_string()), "both are dead: {:?}", r.dead);
+        assert_eq!(
+            d.registry().get(&exited.id).unwrap().ended_reason.as_deref(),
+            Some("its shell exited")
+        );
+        assert_eq!(
+            d.registry().get("ghost1").unwrap().ended_reason.as_deref(),
+            Some("the keeper no longer has it")
+        );
         drop(fk);
     }
 
@@ -2158,7 +2305,7 @@ mod tests {
         let err = d.forget_session(&id).await.unwrap_err();
         assert!(err.contains("running"));
         // Kill it, then forget it.
-        d.kill_session(&id).await.unwrap();
+        d.kill_session(&id, "killed").await.unwrap();
         let removed = d.forget_session(&id).await.unwrap();
         assert!(removed);
         assert!(d.registry().get(&id).is_none());
@@ -2190,7 +2337,7 @@ mod tests {
         // The create is itself news: a client must hear about a new shell.
         assert!(d.maintain().await.unwrap(), "creating a shell is news");
         assert!(!d.maintain().await.unwrap(), "an idle tick is not news");
-        d.kill_session(&rec.id).await.unwrap();
+        d.kill_session(&rec.id, "killed").await.unwrap();
         assert!(
             d.maintain().await.unwrap(),
             "the kill must be reported, even though the record is already dead \
@@ -2227,9 +2374,9 @@ mod tests {
         // The sleeps are load-bearing: the death time and the activity fallback
         // are milliseconds, and two kills inside one millisecond tie, at which
         // point the id breaks the tie and the assertion below is a coin flip.
-        d.kill_session(&a.id).await.unwrap();
+        d.kill_session(&a.id, "killed").await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        d.kill_session(&c.id).await.unwrap();
+        d.kill_session(&c.id, "killed").await.unwrap();
         let described = d.describe_sessions().await;
         let statuses: Vec<&str> = described.iter().map(|s| s.status.as_str()).collect();
         assert_eq!(statuses, vec!["running", "dead", "dead"], "running leads: {statuses:?}");
@@ -2306,7 +2453,7 @@ mod tests {
         let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
         d.stream_for(&rec.keeper_name);
         assert!(d.get_stream(&rec.keeper_name).is_some(), "the stream exists to be dropped");
-        d.kill_session(&rec.id).await.unwrap();
+        d.kill_session(&rec.id, "killed").await.unwrap();
         assert!(
             d.get_stream(&rec.keeper_name).is_none(),
             "a killed shell must drop its stream, or its window never hears"
@@ -2440,7 +2587,7 @@ mod tests {
         assert!(d.streams.contains_key(&keeper_name));
 
         // Kill the session, then `sweep_streams` drops the stream.
-        d.kill_session(&record.id).await.unwrap();
+        d.kill_session(&record.id, "killed").await.unwrap();
         d.sweep_streams();
         assert!(!d.streams.contains_key(&keeper_name));
 
@@ -2640,6 +2787,7 @@ mod tests {
             exited_at: None,
             live_workspace: Some("1".into()),
             live_pid: None,
+            ended_reason: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"liveWorkspace\":\"1\""), "{json}");
@@ -2669,6 +2817,7 @@ mod tests {
             exited_at: None,
             live_workspace: Some("1".into()),
             live_pid: None,
+            ended_reason: None,
         });
         let _ = d.rebuild_live_windows().await;
         assert!(d.registry().get("dead1").unwrap().live_workspace.is_none());
@@ -2742,6 +2891,13 @@ mod tests {
         assert!(d.reconcile_live().await);
         assert_eq!(d.registry().get(&rec.id).unwrap().status, "dead");
         assert!(d.registry().get(&rec.id).unwrap().live_workspace.is_none());
+        // And it says why, which is the whole point of the record's reason: a
+        // shell that ended because its window closed reads differently from one
+        // whose shell exited.
+        assert_eq!(
+            d.registry().get(&rec.id).unwrap().ended_reason.as_deref(),
+            Some("its desk window closed")
+        );
         drop(fk);
     }
 

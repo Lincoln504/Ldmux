@@ -105,6 +105,17 @@ pub struct SessionRecord {
     /// daemon must still know this shell has a window, or it ends it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_pid: Option<i32>,
+
+    /// Why it ended, when it did, in words.
+    ///
+    /// Four different things end a session — its shell exits, its desk window
+    /// closes, someone kills it, the keeper comes back without it — and the
+    /// record said only `dead`. The journal said nothing at all: an evening of
+    /// use ended two shells and the only way to explain either was elimination.
+    /// Every ending now goes through one place that writes this, so "why did my
+    /// shell die" has an answer in `ldmux list` and in the journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_reason: Option<String>,
 }
 
 /// A session as advertised to remote clients: the registry record minus the
@@ -133,6 +144,10 @@ pub struct SessionInfo {
     /// The desktop workspace this shell has a window on, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_workspace: Option<String>,
+
+    /// Why it ended, when it has. Absent while it is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_reason: Option<String>,
 }
 
 /// The desktop inventory: what the launcher shows *before* a terminal.
@@ -272,6 +287,38 @@ mod tests {
         assert_eq!(d, back);
     }
 
+    /// The reason a shell ended is on the wire in camelCase, and absent while it
+    /// is running — the Kotlin client's `SessionsParseTest` pins the shape of
+    /// this struct, so a field that appears when it should not is a contract
+    /// break, not a detail.
+    #[test]
+    fn session_info_carries_the_reason_only_when_it_has_one() {
+        let info = SessionInfo {
+            id: "s1".into(),
+            kind: "shell".into(),
+            title: "t".into(),
+            cwd: "/".into(),
+            status: "dead".into(),
+            keeper_name: "ldmux-s1".into(),
+            created_by: "local".into(),
+            last_activity_at: None,
+            process: None,
+            owner: None,
+            live_workspace: None,
+            ended_reason: Some("its shell exited".into()),
+        };
+        let s = serde_json::to_string(&info).unwrap();
+        assert!(s.contains(r#""endedReason":"its shell exited""#), "got {s}");
+        let mut live = info.clone();
+        live.status = "running".into();
+        live.ended_reason = None;
+        let s = serde_json::to_string(&live).unwrap();
+        assert!(!s.contains("endedReason"), "a running shell has no reason: {s}");
+        // Round-trips, so an older writer and a newer reader agree.
+        let back: SessionInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, live);
+    }
+
     #[test]
     fn session_record_omits_absent_exit_fields() {
         let r = SessionRecord {
@@ -288,6 +335,7 @@ mod tests {
             exited_at: None,
             live_workspace: None,
             live_pid: None,
+            ended_reason: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("exitCode"), "exitCode must be absent: {s}");
@@ -316,6 +364,7 @@ mod tests {
             exited_at: Some(99),
             live_workspace: None,
             live_pid: None,
+            ended_reason: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""exitCode":130"#), "got {s}");

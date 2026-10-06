@@ -707,13 +707,13 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
         }
         "kill" => {
             let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
+            let reason = ended_by("killed", device_of(conn).as_ref());
             {
                 let mut d = shared.daemon.lock().await;
-                let _ = d.kill_session(id).await;
+                let _ = d.kill_session(id, &reason).await;
             }
             broadcast_sessions(shared).await;
-        }
-        "close" => {
+        }        "close" => {
             let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let device = conn.inner.lock().unwrap().device.clone();
             // A shell opened at the desk belongs to the desk: closing it from a
@@ -733,9 +733,10 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 broadcast_sessions(shared).await;
                 return;
             }
+            let reason = ended_by("closed", device_of(conn).as_ref());
             let (ended, _) = {
                 let mut d = shared.daemon.lock().await;
-                d.close_session(&id).await.unwrap_or((true, default_record(&id)))
+                d.close_session(&id, &reason).await.unwrap_or((true, default_record(&id)))
             };
             if let Some(dev) = &device
                 && !ended {
@@ -1405,7 +1406,24 @@ fn default_record(id: &str) -> SessionRecord {
         exited_at: None,
         live_workspace: None,
         live_pid: None,
+        ended_reason: None,
     }
+}
+
+/// How an ending reads when the device behind it is known: `killed from motorola
+/// edge 2024`. A connection that announced no device (a bare socket, the CLI over
+/// RPC) leaves the bare verb — a reason that guessed at a device would be worse
+/// than one that does not name it.
+fn ended_by(verb: &str, device: Option<&ldmux_protocol::rpc::DeviceInfo>) -> String {
+    match device {
+        Some(dev) if !dev.name.is_empty() => format!("{verb} from {}", dev.name),
+        _ => verb.to_string(),
+    }
+}
+
+/// The device behind a connection, for [`ended_by`], without holding the lock.
+fn device_of(conn: &ConnShared) -> Option<ldmux_protocol::rpc::DeviceInfo> {
+    conn.inner.lock().unwrap().device.clone()
 }
 
 // ── HTTP head parsing / responses ───────────────────────────────────────────
@@ -1744,5 +1762,28 @@ mod tests {
         assert_eq!(b["screen"], "screen");
         assert_eq!(b["mouseSgr"], true);
         assert!(b.get("history").is_none());
+    }
+
+    /// A reason names the device when the connection announced one, and does not
+    /// invent one when it did not. The device is how "why did my shell die"
+    /// answers "because the phone closed it" rather than "closed".
+    #[test]
+    fn a_reason_comes_from_the_device_that_ended_it() {
+        let phone = ldmux_protocol::rpc::DeviceInfo {
+            id: "d1".into(),
+            name: "motorola edge 2024".into(),
+            kind: "phone".into(),
+        };
+        assert_eq!(ended_by("killed", Some(&phone)), "killed from motorola edge 2024");
+        assert_eq!(ended_by("closed", Some(&phone)), "closed from motorola edge 2024");
+        // A connection with no device (a bare socket, the CLI over RPC), and one
+        // that announced itself without a name, both leave the bare verb.
+        assert_eq!(ended_by("killed", None), "killed");
+        let unnamed = ldmux_protocol::rpc::DeviceInfo {
+            id: "d2".into(),
+            name: String::new(),
+            kind: "phone".into(),
+        };
+        assert_eq!(ended_by("killed", Some(&unnamed)), "killed");
     }
 }

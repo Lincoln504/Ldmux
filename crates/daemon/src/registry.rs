@@ -313,6 +313,7 @@ mod tests {
             exited_at: over.exited_at,
             live_workspace: None,
             live_pid: None,
+            ended_reason: None,
         }
     }
 
