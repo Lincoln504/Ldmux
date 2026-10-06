@@ -35,11 +35,17 @@
 # the user manager for them when it has none of its own, so no restart is needed
 # after the import. Without them `ldmux window` says there is no graphical session.
 #
-# Install with `just install`: it installs the Rust binaries to `~/.local/bin`
-# and the launcher, and puts this file at `~/.config/systemd/user/ldmux.service`
-# (beside it as `ldmux.service.new` when one is already there, unless FORCE=1),
-# then runs `systemctl --user daemon-reload`. It does not enable or restart the
-# unit: `systemctl --user enable --now ldmux` the first time, `restart` after that.
+# **This file is a template.** `@BIN_DIR@` is replaced by scripts/install.sh with the
+# absolute path of `~/.local/state/ldmux/current/bin`, a stable link to the installed
+# binaries (a nix GC root when they came from `nix build`). The keeper is started by the
+# daemon from the binary beside it, so all three binaries live in that one directory.
+#
+# Install with `nix run .#install` (nix-built binaries) or `scripts/install.sh [BIN_DIR]`
+# (any directory holding ldmuxd, ldmux and ldmux-keeper): it links the binaries into
+# `~/.local/bin`, and puts the rendered unit at `~/.config/systemd/user/ldmux.service`
+# (beside it as `ldmux.service.new` when one is already there, unless FORCE=1), then
+# runs `systemctl --user daemon-reload`. It does not enable or restart the unit:
+# `systemctl --user enable --now ldmux` the first time, `restart` after that.
 [Unit]
 Description=ldmux daemon — remote terminal sessions
 After=default.target
@@ -78,12 +84,11 @@ Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 # it can override any of them.
 EnvironmentFile=-%h/.config/ldmux/env
 
-# `~/.local/bin` is where `just install` puts ldmuxd, ldmux and ldmux-keeper. The
-# daemon auto-spawns the keeper by name, so it must be on PATH. Nothing here comes
-# from a nix profile: the daemon is a cargo build, and `just install` keeps a GC
-# root for the C library it links against.
+# The binaries are named by absolute path (a window manager or the user manager may
+# have no useful PATH), and the daemon finds its keeper beside itself. PATH here is only
+# what the shells the daemon spawns see; `~/.local/bin` is first so `ldmux` is on it.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/ldmuxd
+ExecStart=@BIN_DIR@/ldmuxd
 
 [Install]
 WantedBy=default.target

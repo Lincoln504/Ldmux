@@ -1,0 +1,16 @@
+# The ONE pin for the terminal engine (libghostty-vt). Read by:
+#   - flake.nix (engine derivation for the Rust workspace and the devShells)
+#   - packages/mobile/scripts/build-libghostty-vt.sh and test-native.sh (Android + host shim)
+# Format: "key value" per line; '#' starts a comment.
+#
+# commit       full 40-char Ghostty commit (ghostty-org/ghostty). Abbreviations are not accepted.
+# source-hash  Nix fixed-output hash of the GitHub source archive of that commit.
+# zig          Zig version the engine builds with (flake pins nixpkgs zig_0_16; Ghostty
+#              requires minimum_zig_version 0.16.0). Informational + asserted by the scripts.
+#
+# To bump: change commit, set source-hash to a bogus value, run: nix build .#libghostty-vt,
+# paste the hash nix reports. Ghostty's own build.zig.zon.nix at that commit supplies the
+# per-dependency hashes (read from the fetched source), so nothing else needs editing.
+commit d5eba8d169545cc29d5ee9796ba37ff29759f4db
+source-hash sha256-cUWEhZfXljiHTaftS14/zxmZ5jRy7x8FEzRr9FXYJOY=
+zig 0.16.0

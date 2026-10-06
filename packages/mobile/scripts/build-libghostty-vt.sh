@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Build libghostty-vt for Android and link the ldmux JNI shim against it.
 #
-# Reproducible: takes Zig from the `mobile` devShell, the NDK from
-# ANDROID_NDK_HOME, and a pinned Ghostty commit. Produces, per ABI:
+# Reproducible: takes Zig (pinned version) from the `mobile` devShell, the NDK from
+# ANDROID_NDK_HOME, and the Ghostty commit pinned in native/ghostty.pin (the same pin the
+# Rust build uses through nix). The checkout is asserted to be exactly the pin, and the
+# zig dependency cache comes from the flake (LDMUX_GHOSTTY_ZIG_DEPS) when set. Produces,
+# per ABI:
 #   native/prebuilt/<abi>/lib/libghostty-vt.a
 #   native/prebuilt/<abi>/include/ghostty/**.h
 #   composeApp/src/androidMain/jniLibs/<abi>/libldmux_terminal.so
@@ -13,16 +16,15 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MOBILE="$(cd "$HERE/.." && pwd)"
 
-# Pin the engine. This is the commit verified on 2026-09-14 with Zig 0.16.0.
-GHOSTTY_REPO="${GHOSTTY_REPO:-https://github.com/ghostty-org/ghostty}"
-GHOSTTY_COMMIT="${GHOSTTY_COMMIT:-d5eba8d}"
-GHOSTTY_SRC="${GHOSTTY_SRC:-$HOME/build/ghostty}"
+# shellcheck source=ghostty-pin.sh
+source "$HERE/ghostty-pin.sh"
 
 ZIG="${ZIG:-$(command -v zig || true)}"
 : "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME (the mobile devShell does this)}"
 : "${JAVA_HOME:?set JAVA_HOME (the mobile devShell does this)}"
 
-[[ -n "$ZIG" ]] || { echo "zig not found" >&2; exit 1; }
+[[ -n "$ZIG" ]] || { echo "zig not found (run inside: nix develop .#mobile)" >&2; exit 1; }
+ghostty_check_zig
 # Derived, not hardcoded. The flake advertises x86_64-linux, aarch64-linux and
 # aarch64-darwin, and the NDK names its toolchain directory per host — so the old
 # `HOST_TAG="linux-x86_64"` built on exactly one of the three and failed with a
@@ -68,12 +70,8 @@ abi_to_clang() {
   esac
 }
 
-if [[ ! -d "$GHOSTTY_SRC/.git" ]]; then
-  echo "==> cloning Ghostty into $GHOSTTY_SRC"
-  git clone --depth 1 "$GHOSTTY_REPO" "$GHOSTTY_SRC"
-fi
-git -C "$GHOSTTY_SRC" fetch --depth 1 origin "$GHOSTTY_COMMIT" >/dev/null 2>&1 || true
-git -C "$GHOSTTY_SRC" checkout --quiet "$GHOSTTY_COMMIT"
+ghostty_checkout
+mapfile -t ZIG_SYSTEM < <(ghostty_zig_system_flags)
 
 ABIS=("$@")
 [[ ${#ABIS[@]} -gt 0 ]] || ABIS=(arm64-v8a x86_64)
@@ -91,6 +89,7 @@ for ABI in "${ABIS[@]}"; do
       -Demit-lib-vt \
       -Dtarget="$TARGET" \
       -Doptimize=ReleaseSafe \
+      "${ZIG_SYSTEM[@]}" \
       --prefix "$OUT" )
 
   echo "==> linking libldmux_terminal.so for $ABI"
@@ -132,7 +131,14 @@ echo "==> source stamp: $STAMP"
 BUILD_INPUTS="$MOBILE/native/prebuilt/build-inputs.txt"
 {
   printf 'engine-commit %s\n' "$GHOSTTY_COMMIT"
+  printf 'zig %s\n' "$GHOSTTY_ZIG_VERSION"
   printf 'api-level %s\n' "$ANDROID_API"
+  # The archives themselves, so "built from the pinned engine" is checkable from the
+  # recorded bytes and not only from the recorded intent.
+  for ABI in "${ABIS[@]}"; do
+    printf 'archive-sha256 %s %s\n' "$ABI" \
+      "$(sha256sum "$MOBILE/native/prebuilt/$ABI/lib/libghostty-vt.a" | cut -d' ' -f1)"
+  done
 } > "$BUILD_INPUTS"
 echo "==> build inputs: $BUILD_INPUTS"
 
