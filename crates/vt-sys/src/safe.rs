@@ -92,6 +92,27 @@ impl Terminal {
         debug_assert_eq!(r, ffi::SUCCESS, "set_max_scrollback");
     }
 
+    /// Cap the retained scrollback to `bytes` (the `scrollback-limit` byte
+    /// budget, the other half of the pair above).
+    ///
+    /// **Both are needed.** The line cap alone does not decide what is retained:
+    /// the byte budget binds first — measured 2026-10-05, a terminal created with
+    /// the C API's own defaults retained 995 rows after 12,000 lines, and one with
+    /// `set_max_scrollback(10_000)` alone retained 913 of 1,500 (a megabyte or so
+    /// either way). Raising the line cap without this one changes nothing.
+    /// `bytes == 0` disables scrollback.
+    pub fn set_max_scrollback_bytes(&self, bytes: usize) {
+        let v = bytes;
+        let r = unsafe {
+            ffi::ghostty_terminal_set(
+                self.ptr,
+                ffi::OPT_SCROLLBACK_MAX_BYTES,
+                &v as *const _ as *const c_void,
+            )
+        };
+        debug_assert_eq!(r, ffi::SUCCESS, "set_max_scrollback_bytes");
+    }
+
     /// Scroll the terminal viewport (the history-page mechanism, plan §3.4).
     /// The live pane always sits at `Bottom`; a snapshot with history
     /// scrolls up, renders, and scrolls back — all on the owning thread.

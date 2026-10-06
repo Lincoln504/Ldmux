@@ -502,7 +502,9 @@ during an evening of use and the only way to explain either was elimination.
 > (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`). The daemon serves
 > no static files. No REST layer and no `/api/dirs`; a client creates sessions
 > with the `new` WebSocket message. Scrollback paging **is** implemented, as the `scrollback` WebSocket
-> message (a snapshot carrying `history: true`, up to 5,000 lines) rather than
+> message (a snapshot carrying `history: true`, up to 5,000 lines — the
+TypeScript's `HISTORY_CAPTURE_LINES`; the keeper retains up to 10,000, the
+`history-limit` analogue) rather than
 > the REST route below. The table records original intent, not the contract.
 
 Local: Unix socket `$XDG_RUNTIME_DIR/ldmux/ldmuxd.sock`.

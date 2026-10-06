@@ -2155,6 +2155,48 @@ session` (the RPC, end to end, with a fake keeper reporting the pid; **fails
 with the link disabled**), and the CLI's rendering is exercised in the audit run
 recorded below.
 
+## Scrollback was a tenth of what it was (2026-10-05)
+
+Found by asking the daemon a question and getting a smaller answer than the plan
+promises: after 12,000 lines through a session, `historySize` was **995**.
+
+Two independent causes, both a deviation from the record.
+
+- **The keeper never set a scrollback cap.** The plan says `max_scrollback` is the
+  `history-limit 10000` analogue (§3.4/§3.7), and `Terminal::new` was called with
+  no configuration at all, so libghostty's own default applied: ~1 MB, which is
+  **995 rows** of a pane that had scrolled 11,977. tmux had a history limit, so
+  this was the port's to lose, and `set_max_scrollback` sat unused in `vt-sys`.
+- **`capture --history` asked for 100 lines.** The TypeScript captured with
+  `HISTORY_CAPTURE_LINES = 5000`
+  (`origin/main:packages/daemon/src/tmux/control-plane.ts:200`, used at `:901`),
+  which is the number the plan's port table records. The port hard-coded `Some(100)`,
+  so the CLI showed a hundred lines of a history of a thousand.
+
+This is what "the page retained nothing" would have looked like from the app: the
+`scrollback` message the phone pages history with asks for `lines` and got whatever
+the keeper had, which was a tenth of what the same pane would have had under tmux.
+
+Measured, before and after the daemon-side fix (the keeper side needs a keeper
+restart, which ends every running shell — the reason the deployed keeper is not
+necessarily the built one):
+
+| | before | after the daemon fix | after a keeper restart |
+|---|---|---|---|
+| rows retained by the pane (12,000 lines written) | 995 | 995 | 10,000 cap / 40 MB budget |
+| `ldmux capture --history` lines | 123 | ~1,019 | up to 5,000 |
+| requested history lines | 100 | 5,000 | 5,000 |
+
+**Both caps are needed.** Setting the line cap alone changed nothing (913 rows of
+1,500 written): the byte budget binds first. `set_max_scrollback_bytes` is the other
+half, and it exists in the FFI as `OPT_SCROLLBACK_MAX_BYTES`, which nothing had
+used. The unit test asserts the difference against a bare `Terminal::new`, so a
+libghostty default that moves is caught rather than assumed.
+
+Tests: `the_sessions_emulator_retains_history` (the constructor the sessions use,
+against a terminal made without the caps), `capture_history_asks_for_the_plans_cap`
+(the daemon's request, through a fake keeper that echoes it; **fails with 100**).
+
 ## An ending was silent (2026-10-05)
 
 Found while chasing a report: two shells showed `dead` in the registry and nothing

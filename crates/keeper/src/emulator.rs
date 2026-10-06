@@ -42,6 +42,40 @@ use tokio::sync::oneshot;
 
 use ldmux_vt_sys::snapshot;
 
+/// The grid history a session retains: the `history-limit 10000` analogue the
+/// plan calls for (plan §3.7/§3.4), and the ceiling a `snapshot --history`
+/// request is clamped to.
+///
+/// **It has to be set.** A `Terminal` created without it retains nothing — the
+/// C API's default cap is the viewport — so every session had zero scrollback:
+/// `ldmux capture --history` returned the live screen, the `scrollback` message
+/// the phone pages history with had nothing to page, and `historySize` was 0
+/// after 300 lines of output (measured 2026-10-05). tmux had a history limit, so
+/// this was the port's to lose.
+pub(crate) const MAX_SCROLLBACK_LINES: usize = 10_000;
+
+/// The byte budget that goes with [`MAX_SCROLLBACK_LINES`].
+///
+/// The line cap alone retains nothing more than the C API's own default, because
+/// its byte budget binds first (measured: ~1 MB, ~995 rows of 12,000 lines, and
+/// 913 rows of 1,500 even with the line cap raised). The TypeScript's equivalent
+/// history was "10,000 lines, ~40 MB/pane" (`docs/SPEC.md`, tmux `history-limit`),
+/// so this is the same history at the same order of cost — and it only fills up
+/// on a session that has actually printed that much.
+pub(crate) const MAX_SCROLLBACK_BYTES: usize = 40 * 1024 * 1024;
+
+/// The session's emulator, with its history cap applied.
+///
+/// One function so the cap cannot be forgotten by a second caller, and so it is
+/// testable without a pty: an emulator that does not retain history is a
+/// scrollback that does not exist.
+fn new_terminal(cols: u16, rows: u16) -> Result<Terminal, ldmux_vt_sys::FfiError> {
+    let term = Terminal::new(cols, rows)?;
+    term.set_max_scrollback(MAX_SCROLLBACK_LINES);
+    term.set_max_scrollback_bytes(MAX_SCROLLBACK_BYTES);
+    Ok(term)
+}
+
 /// One unit of work the request handlers hand the emulator thread.
 pub(crate) enum EmuMsg {
     /// Render the screen: the `rows` live lines, plus `history_lines` of
@@ -119,7 +153,7 @@ pub(crate) fn spawn(
     tokio::task::spawn_blocking(move || {
         // Created here: the values are `!Send`, so they cannot be moved into
         // this closure from the caller.
-        let mut term = match Terminal::new(cols, rows) {
+        let mut term = match new_terminal(cols, rows) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("ldmux-keeper: emulator: {e}");
@@ -259,5 +293,42 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
         EmuMsg::Resize { cols, rows } => {
             term.resize(cols, rows);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The constructor the session uses retains history, and the cap it sets is
+    /// what makes that true: a `Terminal` made without it keeps only what the
+    /// plan calls the C API's own default, which is a viewport's worth — the
+    /// state every session was in until this was set.
+    #[test]
+    fn the_sessions_emulator_retains_history() {
+        // Past the C API's own default (a thousand rows, measured), so the cap is
+        // what the assertion is against.
+        const LINES: usize = 1500;
+        let mut t = new_terminal(80, 10).expect("terminal");
+        for i in 0..LINES {
+            t.write(format!("L{i:04}\r\n").as_bytes());
+        }
+        let retained = t.scrollback_rows();
+        assert!(
+            retained >= LINES - 10,
+            "the session's emulator must retain history: {retained} rows of {LINES}"
+        );
+
+        // And the default, which is why the cap is not optional. If libghostty
+        // raises its own default past the cap, this is what says so.
+        let mut bare = Terminal::new(80, 10).expect("terminal");
+        for i in 0..LINES {
+            bare.write(format!("L{i:04}\r\n").as_bytes());
+        }
+        assert!(
+            bare.scrollback_rows() < retained,
+            "the cap is what buys the difference: {} against {retained}",
+            bare.scrollback_rows()
+        );
     }
 }

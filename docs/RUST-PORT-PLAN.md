@@ -398,7 +398,10 @@ unchanged). Strictly better on the measured failure mode (no pane stalls on a ba
 link), at a cost of daemon memory under flood — bounded by the same caps, and
 `max_scrollback` bounds the grid history (the `history-limit 10000` analogue;
 ghostty's scrollback **compression** mode is available if memory matters — measure,
-don't guess).
+don't guess). It is set as a **pair**: 10,000 lines *and* a 40 MB byte budget, because
+the line cap alone retains no more than libghostty's own default — the byte budget
+binds first (measured 2026-10-05: ~1 MB, 995 rows of 12,000 lines; 913 of 1,500 with
+the line cap raised and the budget left alone).
 
 ### 3.8 Environment and the dead 20-line profile
 

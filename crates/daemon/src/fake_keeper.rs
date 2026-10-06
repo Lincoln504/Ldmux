@@ -71,6 +71,9 @@ pub struct FakeSession {
 pub struct FakeKeeper {
     socket_path: std::path::PathBuf,
     sessions: Mutex<HashMap<String, FakeSession>>,
+    /// The history count of the last `Snapshot` request, so a test can see what
+    /// a caller asked for (the response carries the count *returned*).
+    last_history_request: Mutex<Option<u64>>,
 }
 
 impl FakeKeeper {
@@ -79,6 +82,7 @@ impl FakeKeeper {
         Self {
             socket_path,
             sessions: Mutex::new(HashMap::new()),
+            last_history_request: Mutex::new(None),
         }
     }
 
@@ -96,6 +100,9 @@ impl FakeKeeper {
     /// `List` answers a `ListResult` (one `State` per session), a `Kill`
     /// answers a dead `State`, and a `Write`/`Close` answers an `Ack`.
     pub fn handle(&self, msg: &KeeperMessage) -> Result<KeeperMessage, String> {
+        if let km::KeeperMessage::Snapshot(req) = msg {
+            *self.last_history_request.lock().unwrap() = req.history_lines;
+        }
         let mut sessions = self.sessions.lock().unwrap();
         match msg {
             km::KeeperMessage::Spawn(s) => {
@@ -170,7 +177,10 @@ impl FakeKeeper {
                     session_id: sess.id.clone(),
                     cols: sess.cols as u64,
                     rows: sess.rows as u64,
-                    history_lines: 0,
+                    // The real keeper clamps the request to the rows it actually
+                    // retains; echoing it here is what makes a caller's request
+                    // observable to a test.
+                    history_lines: req.history_lines.unwrap_or(0).min(sess.history_size as u64),
                     text: sess.snapshot_text.clone(),
                     cursor_x: sess.cursor_x as u64,
                     cursor_y: sess.cursor_y as u64,
@@ -316,6 +326,11 @@ impl FakeKeeper {
 
     /// Set a session's rendered content (a test hook: the fake pane's
     /// "rendered screen", what a `Snapshot` returns).
+    /// The history count of the last `Snapshot` request (`None` = the live screen).
+    pub fn last_history_request(&self) -> Option<u64> {
+        *self.last_history_request.lock().unwrap()
+    }
+
     /// Set the shell pid the fake reports (a test that needs an ancestry walk).
     pub fn set_pid(&self, session_id: &str, pid: i32) {
         if let Some(s) = self.sessions.lock().unwrap().get_mut(session_id) {

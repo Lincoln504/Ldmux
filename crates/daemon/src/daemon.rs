@@ -71,6 +71,13 @@ const MAINTENANCE_INTERVAL_MS: u64 = 2000;
 /// and one answer.
 pub(crate) const CLAIM_GRACE_MS: u64 = 3_000;
 
+/// How much history `capture --history` asks for: the TypeScript's own cap
+/// (`HISTORY_CAPTURE_LINES`, `origin/main:packages/daemon/src/tmux/control-plane.ts:200`),
+/// which is what a client paging a pane's scrollback expects to be able to reach.
+/// The port hard-coded 100, so the CLI showed a hundred lines of a history the
+/// pane had thousands of (measured 2026-10-05: 995 rows retained, 123 returned).
+pub(crate) const HISTORY_CAPTURE_LINES: u64 = 5000;
+
 /// How long a desk window may be missing before it counts as closed.
 ///
 /// A window is not on screen the instant `makeLive` returns: i3 maps it a beat
@@ -1266,7 +1273,7 @@ impl LdmuxDaemon {
                 // Take a snapshot (the keeper's `Snapshot` message).
                 let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
                     session_id: record.keeper_name.clone(),
-                    history_lines: if history { Some(100) } else { None },
+                    history_lines: if history { Some(HISTORY_CAPTURE_LINES) } else { None },
             drain_output: false,
                 }))
                 .await?;
@@ -2129,6 +2136,42 @@ mod tests {
         let (ended2, _) = d.close_session(&id2, "closed").await.unwrap();
         assert!(!ended2);
         assert_eq!(d.registry().get(&id2).unwrap().status, "running");
+        drop(fk);
+    }
+
+    /// `capture --history` asks the keeper for the pre-migration cap.
+    ///
+    /// The TS captured with `HISTORY_CAPTURE_LINES = 5000`; the port asked for
+    /// 100, so the CLI showed a hundred lines of a history the pane had
+    /// thousands of (measured 2026-10-05: 995 rows retained, 123 returned).
+    #[tokio::test]
+    async fn capture_history_asks_for_the_plans_cap() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+
+        // Without `history` the request is the live screen: no history asked for.
+        d.handle("capture", serde_json::json!({ "id": rec.id })).await.unwrap();
+        assert_eq!(fk.last_history_request(), None, "a live capture asks for no history");
+
+        d.handle("capture", serde_json::json!({ "id": rec.id, "history": true }))
+            .await
+            .unwrap();
+        assert_eq!(
+            fk.last_history_request(),
+            Some(crate::daemon::HISTORY_CAPTURE_LINES),
+            "`--history` asks for the plan's cap"
+        );
         drop(fk);
     }
 
