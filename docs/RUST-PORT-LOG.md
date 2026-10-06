@@ -98,6 +98,116 @@ this file, then the plan §7 table, then the phase's source of record.
 | 6 desktop/restart/backpressure e2e | not started | §6 risk tests green | — |
 | 7 build/deploy + D4 | not started | deploy green | — |
 
+## Audit pass: the pty descriptors, the blocked write, and the 1 ms poll (2026-10-05)
+
+A deliberate pass over the whole system — intent, design, architecture,
+implementation — reading the design of record against the code and then measuring.
+Everything below is measured on this box, and every fix has a test that was checked
+to **fail** without it.
+
+**The pty descriptors had no `FD_CLOEXEC`, so every shell inherited every earlier
+session's master.** `openpty(3)` does not set the flag and nothing else did, and the
+keeper forks its shells by hand, so the fds survived `exec`. Measured on the deployed
+keeper: a shell spawned after four sessions held four `/dev/ptmx` descriptors that
+were not its own — the descriptors a keeper holds for N sessions become N(N-1)/2 in
+the children, so the fd cost of the system was quadratic in sessions. Two
+consequences, and the second is the one that bit:
+
+- A shell could read a sibling session's output off its master. The fd is in
+  `/proc/<pid>/fd`, which is proof of the capability, not of intent.
+- A keeper that died did not reliably take its shells with it. `SIGHUP` on a pty
+  fires when the last descriptor for the master closes, and the last holder was a
+  *later* shell, so the death travelled backwards along a chain: the final shell
+  died, which closed the master it held for the previous one, and so on. One shell
+  that ignores `SIGHUP` (permitted, and a thing programs do) snapped the chain and
+  left every session spawned before it alive with its master held open by a
+  stranger. This is the plausible origin of the orphan shells found on this box, and
+  it is why "a keeper restart ends every running shell" was only usually true.
+
+Fixed by setting `FD_CLOEXEC` on the pty descriptors at creation (the child's 0/1/2
+survive `exec` because `dup2` clears the flag on the new descriptor) **and** by
+closing every descriptor above the standard three in the forked child (`close_range`,
+with a bounded loop as the fallback) so correctness does not depend on every future
+descriptor remembering. Two tests, both verified failing against the unfixed keeper:
+`a_shell_inherits_no_other_sessions_pty` (the shell's `/proc/<pid>/fd` has no
+`/dev/ptmx`) and
+`a_killed_keeper_ends_its_shells_even_when_a_later_one_ignores_hup` (two normal
+shells and then one that traps `HUP`; before the fix the two normal shells are still
+running after the keeper is killed, because the trap shell holds their masters).
+
+**A write to a pane whose program is not reading blocked the whole keeper.** The
+`Write` handler called `write(2)` inline, and the keeper's runtime is
+`#[tokio::main(flavor = "current_thread")]`: one paste into one such pane stopped
+every session's `List`, `Snapshot` and `Peek` for as long as the program did not
+read. Measured with the deployed keeper: 1.6 MB of lines into a `sleep 60` and the
+keeper answered **nothing for 20 s, including a `Kill`**, when the client gave up.
+The pty's input capacity was measured too, because it decides whether a write blocks
+at all: 1.6 MB of complete lines (`"x"*79 + "\n"`) blocked for exactly as long as the
+program slept (10.34 s against a `sleep 10`), while 1.6 MB of one unbroken line was
+accepted in 0.82 s — the canonical line buffer overruns and the tty discards the
+tail, which is the kernel's rule and not ours.
+
+Fixed by moving the write to `spawn_blocking` (which is what SPEC §5.5 already
+required) and bounding the wait at 5 s — inside the daemon's 8 s keeper-call timeout,
+so the caller gets "the pane is not reading" rather than a bare timeout, and the
+blocked task is not cancelled, so the bytes are late rather than lost. Test:
+`a_write_that_blocks_does_not_block_the_keeper`, verified failing against the
+unfixed keeper. It runs the keeper in its own process on purpose — inside the test's
+own runtime a stall freezes the client too, the client's timeout never fires, and the
+test passes whatever the keeper does. The first version of this test did exactly
+that and was worthless.
+
+**The emulator polled at 1 ms, which cost ~1% of a core per session, idle.** The
+per-session emulator thread multiplexes the master and its message queue with
+`poll(2)`, and it used a 1 ms timeout so a snapshot was never queued behind a silent
+pane — 1000 wakeups a second per session, for nothing. Measured: the deployed keeper
+with four sessions burned **5.5% of a core**; a rebuilt keeper with **five** idle
+sessions burned **0 ticks in 10 seconds**. Replaced with an `eventfd` in the poll
+set, written whenever a message is queued: the thread waits unbounded while the pane
+is silent and is woken at once when a message arrives, so it is both free and
+*quicker* than the poll it replaced.
+
+The first version of that change hung the keeper test suite, and the reason is worth
+keeping: a thread that waits unbounded must be woken when its work disappears. The
+loop leaves on a disconnected channel, but while it is parked in `poll` it never
+checks, so the emulator thread outlived its session and the runtime's shutdown waited
+for it for ever. The 1 ms poll had hidden that by re-checking a thousand times a
+second. Fixed by waking on the last drop of the handle (`impl Drop for Emu`), which
+is exact instead of lucky.
+
+**Smaller findings, fixed in the same pass:**
+
+- `Registry::save` unwrapped the map lookup and the serialisation. It runs on the
+  maintenance tick, so a panic there poisons the registry mutex and every later pass
+  with it. Both are now handled; the test constructs the disagreement the public API
+  cannot, and fails with the `unwrap` restored.
+- **`controlMode` was the last live tmux name on the wire.** `caps.capabilities`
+  carried `{controlMode, scrollback}`; `controlMode` named a tmux mechanism that no
+  longer exists and nothing read it. Removed. (The app's `SessionsParseTest` still
+  contains a `tmuxName` row on purpose — it is the fixture that proves the legacy key
+  is *ignored* — and changing it broke the test, which is how the fixture was
+  explained. Left alone.)
+- **The inbound frame cap the TypeScript had was lost in the port.** The TS server
+  was `new WebSocketServer({ maxPayload: 64 * 1024 })`; the port inherited
+  tungstenite's 64 MiB default, so one client message could make the daemon buffer
+  64 MiB. The cap is back (64 KiB, on reads only, so a large server→client snapshot
+  is unaffected — `input` is already capped at 16 KiB and `key` at 32 names). Test:
+  `a_client_message_over_the_cap_closes_the_connection`, verified failing without the
+  config.
+- **Three test files still used fixed ports** (49995, 49996, 49971, 49997) where
+  `attach_client.rs` had already been fixed to bind port 0 and read the bound port
+  back. All of them do now.
+
+**Audited and found sound** (so the next pass does not re-derive it): the token path
+(32 random bytes hex, `0600` in a `0700` dir, constant-time compare, adopted rather
+than overwritten, replaced when empty); the tailnet/loopback peer gate; the frame
+codec's ceiling; the keeper's `fork`/`setsid`/`TIOCSCTTY` and its `WNOHANG` reaper
+with its per-pid `waitpid`; the group-and-session kill; the `OutBuf` cap; the
+`unbacked_since` claim timer (bounded and cleaned); `sweep_streams`; and the whole
+of `docs/SPEC.md` against the code, which turned up the three stale statements
+corrected in that file (the idle-client rule, the per-connection queue, and the two
+"still open" phase-4 items).
+
 ## Findings log (durable, dated)
 
 - **2026-09-28, port opened.** Plan committed as operative (16cd5bf);

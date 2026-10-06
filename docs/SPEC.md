@@ -539,16 +539,19 @@ helper suffices), and owner/families.
   runs on `spawn_blocking`, and each external command (i3, alacritty) is bounded
   by a timeout, so a wedged child cannot pin a request or the per-connection
   handler queue. A timed-out call is reported as *unknown*, never as "no sessions".
-- **The per-connection queue is unbounded, and a client can starve itself with it.**
-  Inbound messages run through `data.queue = data.queue.then(...)`, so ordering is
-  guaranteed and nothing is dropped. The consequence is that a client which asks
-  for more than the daemon can answer — spamming `list`, say — puts real work ahead
-  of its own *attach*, which then waits behind all of it. It was found that way: a
-  test polling `list` every 40 ms while waiting for a claim to be released left
-  roughly two hundred requests queued, and the attach that followed timed out.
-  Nothing here is broken by a slow client, and the fix is not a bigger queue: `list`
-  is a request for *current state*, so a queued one is worthless the moment a newer
-  one exists and should be dropped rather than served. Recorded, not yet changed.
+- **A client that floods the daemon waits for its own requests.** The TypeScript
+  had an in-process per-connection queue (`data.queue = data.queue.then(...)`) and
+  this section recorded, in that era, that a client spamming `list` put roughly two
+  hundred real requests ahead of its own *attach*, which then timed out. The Rust
+  port has no queue at all: `handle_connection` reads one message, awaits its
+  handler, and reads the next, so the socket's own buffer is the queue and every
+  message is served in order. The consequence is the same shape and much smaller —
+  a client that sends two hundred `list`s waits about one keeper round trip each
+  (single-digit milliseconds), not a timed-out attach — and nothing is dropped.
+  Nothing here is broken by a slow client. Recorded rather than changed: the
+  message that would fix it properly is the one that makes `list` a
+  *current-state* request whose queued copies are worthless, and at this cost it
+  does not earn its complexity.
 - **Pane death ends the session** (`remain-on-exit off`); reconcile marks it
   `dead`, releases its claim, window record and shim, and broadcasts. Recording
   `exit_code` and keeping the final scrollback is not built.
@@ -600,7 +603,7 @@ Client → server: `hello {device}`, `attach {sessionId, cols?, rows?, takeover?
 `makelive {sessionId, workspace}`, `closelive {sessionId}`, `ping {id?}`.
 
 Server → client: `caps {protocolVersion, sessionId, cols, rows, snapshotEpoch,
-capabilities {controlMode, scrollback}}`, `snapshot {…state fields…, history?}`,
+capabilities {scrollback}}`, `snapshot {…state fields…, history?}`,
 `sessions {sessions[]}` (the answer to `list`/`new`/`kill`/`close`),
 `created {sessionId, cwd}`, `owned {sessionId, owner}`, `mousedelivered {col, row}`,
 `desktop {inventory}`, `live {sessionId, ok, detail?}`, `pong {id?}`,
@@ -635,11 +638,17 @@ for marginal benefit.
    live `OUTPUT` stream. The server subscribed to the pane *before* capturing the
    snapshot and queues the overlap, so no output is lost in the gap.
 4. Client → `input`/`key`.
-5. Heartbeats: the client sends an application-level `PING` every **20 s** and
-   the server answers `PONG` (implemented). The server does **not** track missed
-   beats or drop idle clients; a dead socket is detected by the write failing or
-   the client's own reconnect loop. The app must be a **foreground service** so
-   the heartbeat is not suspended (Android).
+5. Heartbeats: the client sends an application-level `PING` and the server
+   answers `PONG`. Both shipped clients ping every **4 s** (`PING_INTERVAL_MS`
+   in `crates/attach`; the same in the app), and the server **closes a
+   connection that has said nothing for `idle_ms`** (20 s by default, swept every
+   `idle_ms/4`). That is a correction to this section, which said the server
+   never drops an idle client: it does, and it should. A socket that dies
+   without a FIN — a phone that walks out of range — is otherwise
+   indistinguishable from a quiet one, and the connection it left behind holds a
+   claim and a pane subscription for the life of the daemon. Five missed beats is
+   the margin, and the app must be a **foreground service** so the beat is not
+   suspended (Android).
 
 Fidelity: the snapshot is rendered from the keeper's own emulator (the same
 libghostty-vt the phone paints with), so the screen and the replayed terminal
@@ -986,10 +995,13 @@ ldmux is not a pi plugin.
   that plan changed, see ADR-0007), and the new-shell dialog
   (`NewShellModal`, `Modal.kt`) are all in place. This section used to list
   these under "Remaining (target)".
-- **Still open, as far as this correction pass checked:** foreground service
-  so the heartbeat survives Doze (`packages/mobile/README.md` still lists this
-  unchecked), and a directory browser was not confirmed either way and needs
-  its own check. E2E over Tailscale from the phone was not re-verified here.
+- **Both of the items this note called open are built.** The foreground service
+  is `BackgroundSession.android.kt` (declared `specialUse`, with a notification
+  and a `Disconnect` action, a partial wake lock, and a `NetworkCallback` that
+  cuts the retry backoff short), and the directory browser is the folder picker in
+  the launcher's new-shell dialog. E2E over Tailscale from the phone has since
+  been run repeatedly (the 2026-10-05 measurements in
+  `docs/RUST-PORT-LOG.md`).
 
 **Phase 5 — desktop mirror + polish.**
 - i3 + alacritty mirror (read-only default), focus/close helper.
