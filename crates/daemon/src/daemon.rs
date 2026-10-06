@@ -315,8 +315,26 @@ impl LdmuxDaemon {
     /// the [fake_keeper](crate::fake_keeper) answers it in tests, the real
     /// keeper in production. A keeper `Error` answer is a failure.
     ///
-    /// Keeper-death detection (plan §6): if the call fails with a connection
-    /// error (the keeper is dead), respawn it and retry once.
+    /// Keeper-death detection (plan §6): a call that could not **connect** is
+    /// retried once after `ensure` has respawned (or waited for) the keeper.
+    ///
+    /// Only a connect failure is retried, and that is the point of the kind:
+    /// a connect failure means the request never reached the keeper, so the
+    /// retry cannot apply it twice. A timeout or a read failure means the
+    /// keeper may have run it already, so retrying could type a paste twice or
+    /// open two shells.
+    ///
+    /// This used to be gated on `!is_alive()`, i.e. it retried only when the
+    /// keeper looked dead. That gate was wrong in exactly the case that
+    /// mattered: a daemon started next to a **stale keeper socket** (the file
+    /// a killed keeper leaves behind) failed its first connect with
+    /// `ECONNREFUSED`, then the fresh keeper bound the socket within the
+    /// liveness probe's 500 ms of retries, so the probe said "alive" and the
+    /// original refused connect was returned as fatal. The daemon exited, and
+    /// systemd restarted it two seconds later. Measured on this box on
+    /// 2026-10-06: `ldmuxd: connect: Connection refused (os error 111)` at
+    /// 02:41:07, restart at 02:41:09. The window is a `ldmux-terminal`
+    /// fallback away from a plain, session-less terminal.
     async fn keeper_call(&mut self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
         // A path that is not valid UTF-8 is an error, not a panic: this runs on
         // the request path, under the daemon lock, and a panic there takes the
@@ -333,28 +351,25 @@ impl LdmuxDaemon {
             ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
         )
         .await
-        .map_err(|e| e.0) {
+        {
             Ok(resp) => Ok(resp),
-            Err(e) => {
-                // Keeper-death detection: if the socket is gone, respawn.
-                if !self.keeper.is_alive().await {
-                    self.keeper.ensure().await.map_err(|e| {
-                        format!("keeper respawn failed: {e}")
-                    })?;
-                    // Small delay for the new keeper to bind the socket.
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    // Retry the call against the new keeper.
-                    ldmux_protocol::keeper_call::keeper_call(
-                        &keeper_sock,
-                        req,
-                        ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
-                    )
-                    .await
-                    .map_err(|e| e.0)
-                } else {
-                    Err(e)
-                }
+            Err(e) if e.is_connect() => {
+                // Nothing was sent. Respawn a dead keeper (or wait for one that
+                // is binding) and try once more.
+                self.keeper.ensure().await.map_err(|e| {
+                    format!("keeper respawn failed: {e}")
+                })?;
+                // Small delay for a fresh keeper to bind the socket.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                ldmux_protocol::keeper_call::keeper_call(
+                    &keeper_sock,
+                    req,
+                    ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
+            Err(e) => Err(e.to_string()),
         }
     }
 

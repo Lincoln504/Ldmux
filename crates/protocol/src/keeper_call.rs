@@ -12,13 +12,54 @@
 
 use crate::keeper::KeeperMessage;
 
-/// A keeper-call error (connect/read/parse/timeout).
+/// What went wrong in a keeper call.
+///
+/// The kind is not decoration: the daemon retries a `Connect` failure, because
+/// the request never left this process and retrying cannot apply it twice, and
+/// it must **not** retry a timeout or a read failure, because the keeper may
+/// have run the request already (a duplicated `Write` types the bytes twice, a
+/// duplicated `New` leaves two shells). A string that says "connect: " and a
+/// caller that greps it would be the same rule with no type to hold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeeperCallKind {
+    /// The socket could not be connected (dead keeper, or a socket file with
+    /// no one accepting on it yet).
+    Connect,
+    /// The request could not be written.
+    Write,
+    /// The response could not be read.
+    Read,
+    /// The response was not a [`crate::keeper::KeeperMessage`].
+    Protocol,
+    /// The keeper answered an `Error` message.
+    Keeper,
+    /// No answer inside the timeout. The keeper may have run the request.
+    Timeout,
+}
+
+/// A keeper-call error: what kind, and the sentence explaining it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeeperCallError(pub String);
+pub struct KeeperCallError {
+    pub kind: KeeperCallKind,
+    pub message: String,
+}
+
+impl KeeperCallError {
+    /// A new error of `kind`.
+    pub fn new(kind: KeeperCallKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+
+    /// True when the request never reached the keeper, so a retry cannot
+    /// apply it twice.
+    pub fn is_connect(&self) -> bool {
+        self.kind == KeeperCallKind::Connect
+    }
+}
 
 impl std::fmt::Display for KeeperCallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.message)
     }
 }
 impl std::error::Error for KeeperCallError {}
@@ -42,20 +83,20 @@ pub async fn keeper_call(
         let mut sock =
             tokio::net::UnixStream::connect(socket)
                 .await
-                .map_err(|e| KeeperCallError(format!("connect: {e}")))?;
+                .map_err(|e| KeeperCallError::new(KeeperCallKind::Connect, format!("connect: {e}")))?;
         let line = format!("{}\n", serde_json::to_string(req).unwrap());
         sock.write_all(line.as_bytes())
             .await
-            .map_err(|e| KeeperCallError(format!("write: {e}")))?;
+            .map_err(|e| KeeperCallError::new(KeeperCallKind::Write, format!("write: {e}")))?;
         let mut buf: Vec<u8> = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
             let n = sock
                 .read(&mut tmp)
                 .await
-                .map_err(|e| KeeperCallError(format!("read: {e}")))?;
+                .map_err(|e| KeeperCallError::new(KeeperCallKind::Read, format!("read: {e}")))?;
             if n == 0 {
-                return Err(KeeperCallError("keeper closed the connection".into()));
+                return Err(KeeperCallError::new(KeeperCallKind::Read, "keeper closed the connection"));
             }
             buf.extend_from_slice(&tmp[..n]);
             if buf.contains(&b'\n') {
@@ -65,16 +106,16 @@ pub async fn keeper_call(
         let nl = buf.iter().position(|&b| b == b'\n').unwrap();
         let line = String::from_utf8_lossy(&buf[..nl]).to_string();
         let res: KeeperMessage =
-            serde_json::from_str(&line).map_err(|e| KeeperCallError(format!("parse: {e}")))?;
+            serde_json::from_str(&line).map_err(|e| KeeperCallError::new(KeeperCallKind::Protocol, format!("parse: {e}")))?;
         // A keeper `Error` answer is a failure, not a result.
         match res {
-            crate::keeper::KeeperMessage::Error(e) => Err(KeeperCallError(e.error)),
+            crate::keeper::KeeperMessage::Error(e) => Err(KeeperCallError::new(KeeperCallKind::Keeper, e.error)),
             other => Ok(other),
         }
     };
 
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), result).await {
         Ok(r) => r,
-        Err(_) => Err(KeeperCallError("keeper call timed out".into())),
+        Err(_) => Err(KeeperCallError::new(KeeperCallKind::Timeout, "keeper call timed out")),
     }
 }

@@ -105,8 +105,8 @@ impl KeeperSupervisor {
             self.spawn_detached().await?;
         }
         drop(_lock);
-        // Wait for the socket (the keeper binds it on start).
-        self.wait_for_socket().await?;
+        // Wait for the keeper to answer (it binds the socket on start).
+        self.wait_for_keeper().await?;
         Ok(())
     }
 
@@ -161,15 +161,23 @@ impl KeeperSupervisor {
         Ok(())
     }
 
-    /// Wait for the keeper to create its socket (it binds it on start).
-    async fn wait_for_socket(&self) -> Result<(), String> {
+    /// Wait until the keeper **answers** on its socket, not merely until the
+    /// socket file exists.
+    ///
+    /// The file is the wrong test twice over: a keeper that was killed leaves
+    /// its socket file behind, so "exists" is true before the fresh keeper has
+    /// bound anything, and the first caller then connects into a file nobody
+    /// is listening on. `is_alive` is the connect that answers the real
+    /// question, and it already retries briefly for a keeper that has bound
+    /// but not yet reached its accept loop.
+    async fn wait_for_keeper(&self) -> Result<(), String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if self.socket_path.exists() {
+            if self.is_alive().await {
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
-                return Err("keeper did not create its socket within 5 s".into());
+                return Err("keeper did not answer on its socket within 5 s".into());
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

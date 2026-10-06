@@ -885,7 +885,7 @@ async fn an_unknown_session_is_an_error_answer() {
     )
     .await;
     match res {
-        Err(e) => assert!(!e.0.is_empty(), "a failure is reported: {e}"),
+        Err(e) => assert!(!e.message.is_empty(), "a failure is reported: {e}"),
         Ok(m) => panic!("expected an error, got {m:?}"),
     }
 }

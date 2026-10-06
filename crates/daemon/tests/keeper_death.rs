@@ -108,3 +108,71 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
     // path (unique per scratch dir), then remove the scratch dir.
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A daemon started beside a **stale keeper socket** must come up.
+///
+/// The stale file is what a killed keeper leaves behind, and the terminal
+/// keybinding at login is what makes it matter: `ldmux window` either gets a
+/// session or `ldmux-terminal` falls back to a plain shell with no session at
+/// all, invisible to the phone.
+///
+/// The keeper here is deliberately slow to start (a stub that sleeps before
+/// exec'ing the real one), which is what makes the old failure deterministic
+/// rather than a race: startup checked that the socket *file exists* — true
+/// the whole time — connected into the dead file, and then found the keeper
+/// "alive" by the time its liveness probe had retried, so it returned the
+/// refused connect as fatal and exited. Measured on this box on 2026-10-06:
+/// `ldmuxd: connect: Connection refused (os error 111)` at 02:41:07, systemd
+/// restart at 02:41:09, and a plain session-less terminal at 02:41:00.
+#[tokio::test]
+async fn a_daemon_starts_next_to_a_stale_keeper_socket() {
+    let dir = scratch_dir();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+
+    // The stale socket (a killed keeper's leftover). A plain file is the
+    // strongest form: nothing can connect to it by accident.
+    std::fs::write(&keeper_sock, b"").unwrap();
+
+    // A slow keeper: sleep, then become the real one (same argv, so the
+    // Reaper still matches this test's keeper by its socket path).
+    let real_keeper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/ldmux-keeper");
+    let stub = dir.join("ldmux-keeper");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\nsleep 3\nexec {} \"$1\"\n", real_keeper.display()),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let d = LdmuxDaemon::new(dir.clone(), stub);
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    let started = {
+        let mut d = arc.lock().await;
+        d.start(&Arc::clone(&arc)).await
+    };
+    assert!(
+        started.is_ok(),
+        "the daemon must come up beside a stale keeper socket, got {started:?}"
+    );
+
+    // And it works: a session can be created through the keeper it waited for.
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let id = arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, Some("after-a-stale-socket"), "local")
+        .await
+        .unwrap()
+        .id;
+    assert!(!id.is_empty());
+    let _ = arc
+        .lock()
+        .await
+        .handle("kill", serde_json::json!({ "id": id }))
+        .await;
+}
