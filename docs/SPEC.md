@@ -908,7 +908,7 @@ alive to reconnect. Measured as a deadlock before it was fixed.
 
 ```
 ldmux/
-├─ README.md · AGENTS.md · Justfile · flake.nix · Cargo.toml
+├─ README.md · AGENTS.md · scripts/ · flake.nix · Cargo.toml
 ├─ crates/
 │  ├─ protocol/       # frames, messages, keeper messages, rpc, pairing, net,
 │  │                  # paths, socket — the wire contract, one implementation
@@ -995,7 +995,7 @@ ldmux is not a pi plugin.
 **Phase 5 — desktop mirror + polish.**
 - i3 + alacritty mirror (read-only default), focus/close helper.
 - Settings, theming, `install.sh`, `ldmux doctor`. The `systemd --user` unit
-  (`deploy/ldmux.service`) and `just install` exist.
+  (`deploy/ldmux.service`) and `nix run .#install` exist.
 
 ---
 
@@ -1069,6 +1069,7 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0016** | **Direct tailnet bind:** listen only on the tailnet address or loopback, `403` for any other peer, plain `ws://` under WireGuard, bearer token. |
 | **ADR-0017** | **QR pairing:** `ldmux code` shows `ldmux://pair?v=1&host=…&token=…&name=…` as a QR code; the app scans it from Settings; no manual host/token entry. |
 | **ADR-0018** | **Session layer:** `crates/keeper` owns the PTYs and runs libghostty-vt; supersedes ADR-0001, ADR-0015 and ADR-0006 §2; tmux and TypeScript removed. |
+| **ADR-0020** | **Mesh link security (Proposed):** end-to-end Noise IKpsk2 session (X25519, ChaCha20-Poly1305, 256-bit PSK from the QR; optional ML-KEM stage) inside MeshCore, which is treated as an untrusted transport. Design only. |
 
 ADR-0006 to ADR-0015 (divergences, native engine, UI modes, the Node runtime,
 exclusive ownership, orientation, background/sleep, cross-platform seams, text

@@ -230,7 +230,7 @@ scrollback lives in the engine.
 
 ## 6. Measuring it (so "feels fast" is falsifiable)
 
-A harness now exists: `scripts/measure_latency.ts` (`just latency <sid> [runs]`, needs Node; it speaks the daemon's Unix-socket RPC and the remote WebSocket, so it works against the Rust daemon).
+A harness now exists: `scripts/measure_latency.ts` (`nix develop -c node scripts/measure_latency.ts --session <sid> --runs <n>`, needs Node; it speaks the daemon's Unix-socket RPC and the remote WebSocket, so it works against the Rust daemon).
 It types a unique marker through the real path (client → daemon → keeper → pty →
 shell echo → back) and reports the distribution.
 

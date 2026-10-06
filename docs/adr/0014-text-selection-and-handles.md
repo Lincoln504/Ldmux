@@ -149,7 +149,7 @@ rather than once per cell — about 40 calls on a phone's grid.
 
 The frame's flags field is read as a full 16 bits and the shim sets bits 0-8 only. So
 `FLAG_SELECTED = 1 shl 9` is free: **no header change, no format version bump, no change
-to `CELL_RECORD_MAX`.** The painter gains one branch where it already chooses a
+to `LDMUX_CELL_RECORD_MAX`.** The painter gains one branch where it already chooses a
 background colour.
 
 ## 6. Double-tap versus tap-to-cursor

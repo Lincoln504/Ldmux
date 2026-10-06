@@ -12,8 +12,8 @@ This is the matrix of what exists, not a promise. Anything not listed is unsuppo
 | Target | Status | Basis |
 |---|---|---|
 | Linux x86_64, glibc (daemon, keeper, CLI) | **Supported** | Verified: the one machine it is developed and deployed on (Debian 13). |
-| Linux aarch64 | **Not buildable today** | Read: `crates/vt-sys/build.rs` vendors a libghostty-vt archive for `x86_64-unknown-linux-gnu` only and panics for any other target. The flake lists `aarch64-linux` but the Rust workspace will not link there. |
-| Linux musl | **Not supported** | Read: the same `build.rs` accepts the gnu triple only; the deployment also links glibc dynamically (the GC-rooted `runtime` derivation in `flake.nix`). |
+| Linux aarch64 | **Evaluates, not built** | Read: the flake defines the engine and the workspace for `aarch64-linux` (libghostty-vt is built by nix from the pinned commit, `LDMUX_VT_LIB_DIR`), and the derivations evaluate; nothing has been built or run on aarch64 hardware or under emulation. |
+| Linux musl | **Not supported** | Read: the flake builds for glibc targets only; the `nix build` binaries link glibc dynamically and `scripts/install.sh` roots them as a nix GC root. |
 | macOS daemon | **Not supported yet** | Read: see "macOS" below. |
 | Windows | **Not supported, not planned** | SPEC §2.2. |
 | Android client | **Done** | Verified on a device (the phone named in AGENTS.md, Environment facts); suites in `docs/archive/STATE.md` §4 are the older record. |
@@ -23,7 +23,7 @@ This is the matrix of what exists, not a promise. Anything not listed is unsuppo
 ## Linux host
 
 **Init system.** The deployed form is a `systemd --user` unit (`deploy/ldmux.service`),
-installed by `just install`. It depends on two systemd properties that are load-bearing
+installed by `nix run .#install`. It depends on two systemd properties that are load-bearing
 for the product (the unit header explains each): `KillMode=process`, so stopping the
 daemon does not kill the keeper and every shell, and `loginctl enable-linger`, so the
 user manager (and the keeper in its cgroup) survives logout. **Verified** on the
@@ -46,7 +46,7 @@ address and refuses anything else (ADR-0016). It does not require the `tailscale
 binary at runtime, only an address in `100.64.0.0/10` or `fd7a:115c:a1e0::/48` (or
 loopback). Verified on the one tailnet it runs on.
 
-**Toolchain.** `nix develop` provides rustc/cargo/just (+ Node for the dev-only mobile
+**Toolchain.** `nix develop` provides rustc/cargo (+ Node for the dev-only mobile
 tests and scripts, + zbar for the QR tests). The gate is `cargo test --workspace`. A
 non-nix build needs a Rust toolchain supporting edition 2024; **not tested**.
 
@@ -86,8 +86,9 @@ reading the source:
   (`crates/keeper/src/lib.rs`); the daemon checks liveness by `/proc/<pid>` existing
   (`daemon.rs`, `daemon_lock.rs`) and walks `/proc` for the desktop inventory.
   macOS needs `proc_pidinfo`/`sysctl` equivalents.
-- **The vendored libghostty-vt archive is x86_64 Linux only** (`crates/vt-sys/build.rs`).
-  Building for macOS needs a macOS build of the engine and a new arm in that match.
+- **The libghostty-vt build is nix-on-Linux only** (`flake.nix`, `systems`; `crates/vt-sys/build.rs`
+  takes the archive from `LDMUX_VT_LIB_DIR`). Building for macOS needs the engine derivation proven
+  on darwin (not evaluated or built) and the systems list extended.
 - **systemd** is the deployed supervisor, `loginctl linger` the persistence story; macOS
   would need a launchd agent and its own answer to "does the keeper outlive the daemon".
 - **Runtime directory.** `protocol::paths` uses `$XDG_RUNTIME_DIR`, falling back to a
@@ -123,8 +124,8 @@ arbitrary binary, the regional duty-cycle that decides viability).
 
 ## What would move a row from "read" or "intended" to "verified"
 
-- aarch64 Linux: vendor an aarch64 libghostty-vt archive, add it to `build.rs`, run the
-  gate on real hardware.
+- aarch64 Linux: `nix build` and `nix flake check` on real aarch64 hardware (the engine derivation
+  is defined for it but unbuilt).
 - Non-systemd Linux: run the daemon under runit/OpenRC/s6 on a test host, restart it, and
   confirm the shells survive (the `restart_survival` integration test models this
   against the keeper but not against a supervisor).

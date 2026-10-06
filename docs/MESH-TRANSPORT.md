@@ -5,6 +5,11 @@ Status: **investigated, not implemented.** This records what is known, what it c
 and what is still unanswered. It is not a plan of record and nothing reads it at
 runtime.
 
+> **Reviewed 2026-10-06.** See "Review (2026-10-06)" at the end: several claims below
+> were corrected (security model, the `caps` profile field, timers, regulatory
+> wording), and the link-security design is in
+> [ADR-0020](adr/0020-mesh-link-security.md).
+
 The question asked was narrow: could ldmux, at a low enough frame rate, be usable over
 MeshCore? The short answer is that a **grid** never can be, a **line** can, and the
 gap between those two is a different transport rather than a tuning of this one.
@@ -37,8 +42,10 @@ Regulatory, and this is the number that decides the question:
 
 - **EU868: 1% duty cycle** — 36 s of transmit per hour. At 354 ms airtime that is
   **~101 packets per hour**, about one every 36 s.
-- **US915: no duty cycle**, a 400 ms dwell limit per transmission instead, plus
-  frequency hopping. This is the region ldmux's own mesh plan targets.
+- **US915: no duty cycle** in the LoRaWAN sense. The "400 ms dwell limit plus frequency
+  hopping" sometimes quoted with it is a LoRaWAN US915 rule, and nothing read for this
+  document says a MeshCore node hops or is held to it; treat it as unverified for
+  MeshCore (see Review). This is the region ldmux's own mesh plan targets.
 
 ## The arithmetic
 
@@ -98,8 +105,10 @@ would turn on:
   priority, and only repeaters/room servers relay, which should be *better* than
   Meshtastic's managed flooding — but no measurement was found. This is an
   expectation, not a result.
-- **Whether real hardware sustains ~2 packets/s** in the US without the mesh
-  collapsing into collisions. Absence of a duty cycle is not the same as capacity.
+- **Whether real hardware sustains any particular packet rate** in the US without the
+  mesh collapsing into collisions. An earlier draft said "~2 packets/s"; that figure
+  was not derived from airtime and is withdrawn (see Review). Absence of a duty cycle is
+  not the same as capacity.
 - **MeshCore's region/preset in this deployment.** the mesh project's own plan (`docs/01-PLAN.md` there, not in this repo; unverified here) targets US 902–928,
   which is the region that makes this viable. In EU868 the same idea is 1 packet per
   36 s and this document's verdict changes to "no".
@@ -121,9 +130,9 @@ A summary of this kind is worth correcting before it shapes a design, because th
 its claims are LoRaWAN-isms that would rule out work that is legal where this is going.
 
 - **"1% duty cycle, so one packet every 50 seconds."** That is the **EU868** rule.
-  **US915 has no duty cycle at all**, only a 400 ms dwell limit and a frequency-hopping
-  requirement — and US915 is what this document already targets, at MeshCore's **184-byte
-  payload ceiling**. Adopting the EU figure would abandon a design that is legal here.
+  **US915 has no duty cycle**; the dwell/hopping wording is addressed in Review. US915
+  is what this document already targets, at MeshCore's **184-byte payload ceiling**.
+  Adopting the EU figure would abandon a design that is legal here.
 - **"Tokenise commands with a shared dictionary, so `systemctl restart nginx` becomes
   three bytes."** Rejected, and this is the important one. A measured keystroke echo on
   this protocol is **9 bytes** ("The arithmetic" above). The command text is not the cost and never was. A
@@ -139,7 +148,11 @@ ARQ rather than LoRaWAN, and that SSH or telnet over LoRa is not a thing.
 
 ### The two profiles
 
-Not a build variant. One client binary, one daemon, a profile that would be announced in `caps` (today `caps.capabilities` carries only `scrollback`; no profile field exists).
+Not a build variant. One client binary, one daemon, and a profile that does not exist
+on the wire today: `caps.capabilities` carries only `scrollback`, so no `caps` profile
+field is claimed here. If a profile is ever announced, that is a new protocol field to
+be designed, and over the mesh the profile is implied by the gateway (see Review), not
+negotiated through `caps`.
 
 | | `direct` (tailnet, LAN, cellular) | `mesh` |
 |---|---|---|
@@ -149,7 +162,8 @@ Not a build variant. One client binary, one daemon, a profile that would be anno
 | backlog | full, coalesced at 4 KB | never replayed; state of now only |
 | compression | permessage-deflate (14.8x measured on the old TS daemon; **not implemented in the Rust daemon**, see `WIRE-COST.md`) | not worth it at these sizes |
 | client engine | libghostty-vt | **not used at all** |
-| ownership, `new`, `close`, `list`, security | shared | shared |
+| ownership, `new`, `close`, `list` | shared | shared (through the gateway) |
+| link security | WireGuard (tailnet) + bearer token | **not shared**: end-to-end Noise session, [ADR-0020](adr/0020-mesh-link-security.md) |
 
 The reason `mesh` is a mode and not a flag on the existing path is the last row of the
 second column: in mesh mode the client's terminal engine is not merely slower, it is
@@ -158,9 +172,15 @@ one that owns the screen.
 
 ### What does not change
 
-Session model, registry, ownership and claims, the launcher, `new`/`close`/`list`, and
-the entire security model. The profile changes the payload's shape and nothing about
-what the payload means.
+Session model, registry, ownership and claims, the launcher, and `new`/`close`/`list`.
+The profile changes the payload's shape and nothing about what the payload means.
+
+**The security model does not carry over.** An earlier version of this section said it
+did. It cannot: the WebSocket path's confidentiality and peer authentication come from
+the tailnet (WireGuard, ADR-0016) and the bearer token only selects among tailnet peers;
+a radio link has neither, and the mesh and its repeaters see every packet. MeshCore's
+own AES-128-ECB layer with a 2-byte MAC is not a substitute. The mesh path has its own
+end-to-end security design in ADR-0020.
 
 ### What this asks of the direct path
 
@@ -168,3 +188,57 @@ Nothing, and that is the point of separating them. `direct` keeps getting the tr
 that its own measurements justify — 4 KB coalescing, threshold-gated deflate, backlog to
 snapshot on a stalled client, Nagle off. The mesh profile is not allowed to justify
 making `direct` worse, and `direct` is not allowed to justify making mesh mode heavier.
+
+---
+
+## Review (2026-10-06)
+
+Conclusions of a design review. Nothing here is implemented.
+
+1. **Line mode is not a general terminal.** The `mesh` profile as written (plain lines,
+   one uplink per command) ignores programs that use the alternate screen (editors,
+   pagers, `top`) and readline behaviour including tab completion and history editing,
+   which need the byte stream and an emulator. The profile suits command-and-output
+   work only; whether it falls back to a byte stream for those programs is undecided.
+2. **The mesh transport is a separate gateway process**, not a mode on the WebSocket
+   path. It bridges the daemon's Unix control socket (AGENTS.md: the daemon is a separate
+   process and clients talk to it over that socket) to MeshCore, speaks the ADR-0020 session on the
+   radio side, and holds exactly a paired phone's authority. This is why the profile is
+   implied by the gateway rather than negotiated in `caps`, and why the `direct` path
+   needs no change.
+3. **The security model is not shared** with the WebSocket path (corrected above): see
+   ADR-0020.
+4. **US915 wording.** "400 ms dwell plus hopping" is a LoRaWAN US915 rule, not
+   something established for MeshCore, and is withdrawn as a constraint. The "~2
+   packets/s" figure was not derived. A real figure needs airtime per preset: as an
+   illustration, computed here with the Semtech time-on-air formula (coding rate 4/5,
+   8-symbol preamble, explicit header, CRC; **not measured, formula recalled from
+   memory**), a 189-byte-on-air packet takes about 0.08 s at SF7/500 kHz, 0.3 s at
+   SF7/125 kHz, 0.9 s at SF10/250 kHz and 7.5 s at SF11/62.5 kHz; the rate follows from
+   the preset and is measured, not assumed.
+5. **Packet and companion limits.** 184 B is the *packet* payload ceiling; the companion
+   text command is capped at **160 B**, and a text message carries 5 B of
+   timestamp/type overhead (whether that 5 B counts against the 160 is unmeasured).
+   Raw/custom packets (type `0x0F`) have no MeshCore cipher; whether the companion API
+   can send them is unmeasured. Per-packet budget after the ADR-0020 record layer (24 B
+   of overhead): **160** application bytes over raw/custom, 136 over text with binary,
+   96 over text with Base64.
+6. **ARQ, ordering and de-duplication are unspecified.** MeshCore flood routing
+   duplicates and reorders; acknowledgement, fragmentation and retransmission need a
+   design of their own, above the authenticated record (seam named in ADR-0020 section 5).
+7. **Timers are over budget.** The direct-path values are tuned for a link whose round
+   trip is tens of milliseconds. Each needs a per-profile value:
+
+| Timer | Where | `direct` (today) | `mesh` (proposed; judgement call, to be measured) |
+|---|---|---|---|
+| client ping | mobile client | 4 s | none or at least 60 s; every ping is a packet of airtime, and a round trip can exceed 8 s |
+| idle sweep | `WS_IDLE_MS`, `crates/daemon/src/remote.rs` | 20 s | at least 5 minutes, and a multiple of the ping interval |
+| claim grace (`CLAIM_GRACE_MS`, also `RELEASE_GRACE_MS`) | `crates/daemon/src/daemon.rs`, `remote.rs` | 3 s | about 60 s: a reconnect needs a handshake (ADR-0020) and a slow round trip before the claim is backed again; the ADR-0010 amendment's logic stays |
+
+8. **Unmeasured.** MeshCore latency and throughput on the target hardware and preset; the
+   regional preset in use; raw/custom support and repeater forwarding; binary in
+   companion text; the 160 B cap versus the 5 B overhead; addressing for raw packets;
+   real airtime; the ML-KEM stage's cost on the chosen preset.
+9. **Security design:** [ADR-0020](adr/0020-mesh-link-security.md) (Noise IKpsk2 end-to-end
+   inside MeshCore, which is treated as an untrusted transport). The 0.3 kbps to 21.9 kbps
+   preset range in the table above is from a proposal issue, not a shipped setting.

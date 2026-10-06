@@ -37,10 +37,10 @@ phone ──Tailscale (WireGuard)── ws://<tailnet-address>:7625/ws ──▶
 ## Wiring it up
 
 ```sh
-# the daemon runs as the systemd user unit (`just install`), or: just daemon
-just remote                     # host, port, path, token, and whether it is listening
-just code                       # the pairing QR code; scan it from the app's Settings
-just pair                       # the same pairing, as an ldmux:// link
+# the daemon runs as the systemd user unit (`nix run .#install`), or: cargo run -p ldmux-daemon --bin ldmuxd
+ldmux remote                    # host, port, path, token, and whether it is listening
+ldmux code                      # the pairing QR code; scan it from the app's Settings
+ldmux pair                      # the same pairing, as an ldmux:// link
 ```
 
 `code` and `pair` print `ldmux://pair?v=1&host=<addr:port>&token=<64 hex>&name=<machine>`

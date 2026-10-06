@@ -32,16 +32,15 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
 - The Rust daemon **is** the deployed daemon (`systemctl --user restart ldmux`
   runs `~/.local/bin/ldmuxd`). The keeper is auto-spawned by the daemon (the
   ssh-agent pattern) and survives a daemon restart. One unit.
-- `cargo test --workspace` is the gate. The exact commands are the `Justfile`
-  (`just test`, `just lint`) and the README's Development section; open items are
-  in `docs/STATE.md`.
+- `cargo test --workspace` is the gate. The exact commands are in the README's
+  Development section; open items are in `docs/STATE.md`.
 
 ## Rules
 
 - **Tests are the gate.** `cargo test --workspace`, inside `nix develop` (the QR
-  decode tests need `zbarimg`, which only the devShell has). `just test` is the
-  shorthand.
-- **`just lint` is clean.** `cargo clippy --workspace --all-targets -- -D warnings`,
+  decode tests need `zbarimg`, which only the devShell has). `nix flake check`
+  runs the same gate in the nix sandbox.
+- **Lint is clean.** `cargo clippy --workspace --all-targets -- -D warnings`,
   zero warnings: a lint that is tolerated is a lint nobody reads.
 - **Tailnet only.** Never bind a public interface; never disable auth.
 - **Scroll fidelity is sacred.** Any terminal UI change must preserve the
@@ -58,12 +57,12 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
 
 ## Conventions
 
-- **Nix toolchain.** Develop and test inside `nix develop` (cargo + rustc + just
-  + zbar come from `flake.nix`; Node 26 is there too, dev-only, for `just mobile-test`
+- **Nix toolchain.** Develop and test inside `nix develop` (cargo + rustc
+  + zbar come from `flake.nix`; Node 26 is there too, dev-only, for `nix run .#mobile-test`
   and `scripts/`). Do not add unpinned system dependencies.
 - **Rust**: workspace under `crates/`, no code-generation, std + the plan §0
-  allowlist (`tokio`, `tokio-tungstenite`, `serde`, `clap`, `thiserror`, `ring`,
-  `uuid`, `nix`, `rand`, `fs2`); edition 2024; tests in-crate (`#[cfg(test)]`)
+  allowlist (`tokio`, `tokio-tungstenite`, `serde`, `serde_json`, `futures-util`,
+  `uuid`, `nix`, `rand`, `flate2` with the pure-Rust `miniz_oxide` backend); edition 2024; tests in-crate (`#[cfg(test)]`)
   or `tests/`; match the style of the surrounding crate.
 - **Daemon is a separate process.** Clients talk to it over the Unix socket; the
   daemon owns every long-lived resource.
@@ -95,7 +94,7 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
 - i3 4.24 / X11 (`DISPLAY=:0.0`); workspaces `1..10` (`Mod+0` → `10`).
 - The flake pins the devShell toolchain (cargo/rustc, plus a second pin for dev-only
   Node 26, from `flake.nix`).
-- **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the
+- **Deploy with `nix run .#install`** (or `scripts/install.sh <bindir>`), never by hand-editing `~/.local/bin` or the
   unit: `deploy/` is the source of truth for both.
 - iOS builds need a macOS host.
 - gh authed as `Lincoln504`.

@@ -24,7 +24,7 @@ either. It is deliberately simple:
 > (`ldmuxd`) is the live daemon under the systemd user unit; the keeper owns the
 > PTYs and runs libghostty-vt; the native mobile client is done and
 > device-verified for Android, with iOS not started. The one gate is the Rust
-> workspace (`cargo test --workspace`, inside `nix develop`; `just test`). The
+> workspace (`cargo test --workspace`, inside `nix develop`). The
 > authoritative design is [`docs/SPEC.md`](docs/SPEC.md); historical records (the
 > port, the tmux study, the old state register) are in
 > [`docs/archive/`](docs/archive/).
@@ -58,27 +58,35 @@ The user's working name for the old idea was "Doombox"/"Dooboxes"; the existing
 ## Development
 
 The project uses a **Nix flake** for a reproducible toolchain (rustc/cargo for
-the workspace, just, zbar for the QR tests). Node 26 is also in the dev shell, but
-only for `just mobile-test` (the mobile tree's `.ts` tests) and the two scripts
+the workspace, zbar for the QR tests). Node 26 is also in the dev shell, but
+only for `nix run .#mobile-test` (the mobile tree's `.ts` tests) and the two scripts
 under `scripts/`; the Rust gate does not need it. `packages/mobile` additionally
 needs the Android/KMP toolchain (`nix develop .#mobile`). Supported platforms:
 [`docs/PLATFORMS.md`](docs/PLATFORMS.md) (today: x86_64 Linux for the host).
 
 ```bash
-nix develop                  # rustc/cargo, just, zbarimg (+ node, dev-only)
-cargo build --workspace      # build every Rust crate
+nix develop                  # rustc/cargo, zbarimg (+ node, dev-only); builds the engine once
+cargo build --workspace      # build every Rust crate (LDMUX_VT_LIB_DIR is set by the shell)
 cargo test --workspace       # the gate (keeper, daemon, protocol, vt-sys, attach)
-just test                    # the same, via the Justfile
-just install                 # build the release workspace and install ldmuxd/ldmux/ldmux-keeper
-just daemon                  # run the daemon in the foreground
-just cli list                # sessions, through the CLI
-just cli run shell           # create a session and attach
-just remote                  # remote host, port, token, and whether it is listening
-just code                    # pairing QR code for the phone to scan (ADR-0017)
-just pair                    # the same pairing, as an ldmux:// link
-just latency <id>            # round-trip echo latency against a session (needs node)
-just mobile-test             # the mobile tree's own TypeScript tests (needs node)
+cargo clippy --workspace --all-targets -- -D warnings   # lint; must be clean
+cargo run -p ldmux-daemon --bin ldmuxd                  # the daemon, in the foreground
+cargo run -q -p ldmux-daemon --bin ldmux -- list        # the CLI: list | run shell | remote | code | pair
+nix build                    # the release binaries in ./result/bin (self-contained, own glibc)
+nix flake check              # build + the test gate + clippy + fmt + mobile TS tests, in the sandbox
+nix run .#install            # install the nix-built binaries + unit (FORCE=1 overwrites the unit)
+nix run .#restart-keeper     # replace the running keeper (ENDS every shell)
+nix run .#mobile-test        # the mobile tree's own TypeScript tests (needs node)
+nix develop -c node scripts/measure_latency.ts --session <id> --runs 20   # round-trip echo latency
 ```
+
+`remote` prints host, port, token and whether the daemon is listening; `code` is the
+pairing QR code for the phone (ADR-0017); `pair` is the same pairing as an `ldmux://` link.
+
+**A fresh clone builds with nix alone.** The terminal engine (libghostty-vt) is built by
+a nix derivation from the single Ghostty commit pinned in
+`packages/mobile/native/ghostty.pin`; `nix develop` exports `LDMUX_VT_LIB_DIR` pointing at
+it, so plain `cargo` works inside the shell. Outside nix, set `LDMUX_VT_LIB_DIR` to a
+directory holding `libghostty-vt.a` (the build script's error says how).
 
 There is no TypeScript daemon any more: the tree was deleted at D4 (2026-10-04,
 [ADR-0018](docs/adr/0018-session-layer.md)) together with the previous session

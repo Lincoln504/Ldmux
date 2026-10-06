@@ -15,26 +15,26 @@ desk-window client, and a native mobile client.
 |---|---|---|
 | Wire contract (frames, messages, keeper messages, rpc, pairing, net, paths) | `crates/protocol` | Implemented, unit-tested. |
 | Keeper: PTYs, child supervision and reaping, one libghostty-vt per session | `crates/keeper` | Implemented. Auto-spawned by the daemon, outlives it. |
-| FFI to libghostty-vt (vendored static archive) | `crates/vt-sys` | Implemented. x86_64 Linux (glibc) only. |
+| FFI to libghostty-vt (static archive built by nix from the pinned commit) | `crates/vt-sys` | Implemented. Verified on x86_64 Linux (glibc); aarch64 Linux evaluates, unbuilt. |
 | Daemon: registry, ownership, remote WebSocket, streams, desktop + inventory, CLI | `crates/daemon` (`ldmuxd`, `ldmux`) | Implemented and deployed. |
 | Desk-window client (`ldmuxd attach`) | `crates/attach` | Implemented. |
 | Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. iOS not started. |
 
 There is no tmux and no TypeScript daemon: both were removed at D4 (2026-10-04,
 ADR-0018). tmux survives only as a dev-time reference in
-`scripts/regen_parity_golden.sh`. Node is a dev tool for `just mobile-test` and two
+`scripts/regen_parity_golden.sh`. Node is a dev tool for `nix run .#mobile-test` and two
 scripts, not for the Rust gate.
 
 ## What is deployed
 
 - `systemctl --user` unit `ldmux` (source `deploy/ldmux.service`) runs
   `~/.local/bin/ldmuxd`; the keeper is the binary beside it, spawned by the daemon.
-- Installed with `just install` (never by hand-editing `~/.local/bin` or the unit).
+- Installed with `nix run .#install` (never by hand-editing `~/.local/bin` or the unit).
   The install and terminal-launcher flow is being changed on this branch; see
   `docs/PLATFORMS.md`.
 - **A deploy does not replace a running keeper.** The keeper outlives the daemon on
-  purpose, so after `just install` it keeps executing old code until
-  `just restart-keeper`, which ends every shell. `install-rust` prints a warning.
+  purpose, so after an install it keeps executing old code until
+  `nix run .#restart-keeper`, which ends every shell. The install prints a warning.
 - Remote listener: the tailnet address from `LDMUX_REMOTE_HOST`, port 7625, bearer
   token, `GET /ws` only (ADR-0016). Pairing is `ldmux code` (ADR-0017).
 - Machine facts (host, tailnet address, phone) live in `AGENTS.md`, not here.
@@ -43,14 +43,15 @@ scripts, not for the Rust gate.
 
 ```
 nix develop
-just test        # cargo test --workspace  (the gate)
-just lint        # cargo clippy --workspace --all-targets -- -D warnings  (must be clean)
-just mobile-test # node --test packages/mobile/test/*.test.ts  (dev-only; needs Node)
+cargo test --workspace                                  # the gate
+cargo clippy --workspace --all-targets -- -D warnings   # must be clean
+nix run .#mobile-test                                   # node --test packages/mobile/test/*.test.ts (dev-only; needs Node)
+nix flake check                                         # all of the above, in the nix sandbox
 ```
 
-`just android-test` and `just native-test` cover the mobile JVM logic and the JNI
-shim and need `nix develop .#mobile`. The authoritative gate definition is the
-`Justfile` plus the rules in `AGENTS.md`. This file deliberately carries no test
+`scripts/android.sh test` and `scripts/android.sh native-test` cover the mobile JVM
+logic and the JNI shim and need `nix develop .#mobile`. The authoritative gate
+definition is this section plus the rules in `AGENTS.md`. This file deliberately carries no test
 counts: they go stale; run the command. The QR tests need `zbarimg`, which only the
 dev shell provides.
 
@@ -80,8 +81,9 @@ Daemon and protocol:
 - `snapshotEpoch` is sent in `caps` and never read by the client; `follow` is never sent.
 
 Platforms (see `docs/PLATFORMS.md`):
-- Only x86_64 Linux builds today; aarch64 Linux and macOS need a vendored engine archive
-  and, for macOS, replacements for the `/proc` reads.
+- Only x86_64 Linux is built and run today; aarch64 Linux evaluates in the flake but is
+  unbuilt, and macOS needs the engine derivation proven on darwin plus replacements for
+  the `/proc` reads.
 - Non-systemd Linux is intended to work, untested.
 
 Repository hygiene:
