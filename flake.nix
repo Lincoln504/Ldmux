@@ -152,7 +152,7 @@
       devShells = forAllSystems ({ pkgs, nodePkgs, ... }:
         let
           engine = engineFor pkgs;
-          common = toolchainTools pkgs ++ testTools pkgs ++ [ nodePkgs.nodejs_26 pkgs.jq pkgs.curl pkgs.sqlite ];
+          common = toolchainTools pkgs ++ testTools pkgs ++ [ nodePkgs.nodejs_26 pkgs.jq pkgs.curl pkgs.sqlite pkgs.cargo-deny pkgs.cargo-audit ];
         in
         {
           # `nix develop` + plain `cargo build/test/clippy`. The engine is a nix build
@@ -225,13 +225,30 @@
         # they skip (desktop_e2e names the missing tool) or use loopback only.
         tests = cargoCheck pkgs "ldmux-tests" ''
           cargo build --workspace --offline
-          # Three unit tests start a desk-window emulator stub with PATH=/usr/bin:/bin and
-          # need tools such as `sleep` from an FHS /usr/bin, which the sandbox lacks
-          # (exit 127). They are skipped here and run in the dev-shell gate.
-          cargo test --workspace --offline --no-fail-fast -- \
-            --skip the_desktop_inventory_links_a_running_pi_to_its_session \
-            --skip a_window_opens_without_any_window_manager \
-            --skip the_emulator_has_its_own_process_group
+          # Tests that need an FHS root (/usr/bin, /bin/bash, /usr, populated /usr/lib):
+          # the build sandbox has only /bin/sh and /usr/bin/env. They are skipped here BY
+          # NAME and run in the dev-shell gate and in CI (`cargo test` on a real host).
+          # `--skip` is a substring match, so the guard below lists every test first and
+          # fails the check unless each name below matches exactly ONE test: a rename or
+          # a new test sharing a prefix cannot silently widen or void the skip set.
+          skips="
+            the_desktop_inventory_links_a_running_pi_to_its_session
+            a_window_opens_without_any_window_manager
+            the_emulator_has_its_own_process_group
+            a_background_job_does_not_survive_the_shell
+            a_killed_keeper_ends_its_shells_even_when_a_later_one_ignores_hup
+            a_valid_cwd_is_entered
+            compression_cuts_the_wire_cost_of_every_real_workload
+          "
+          cargo test --workspace --offline -- --list 2>/dev/null | grep ': test$' > all-tests.txt
+          args=""
+          for s in $skips; do
+            n=$(grep -c "$s: test" all-tests.txt || true)
+            if [ "$n" != 1 ]; then echo "skip '$s' matches $n tests (want exactly 1)" >&2; exit 1; fi
+            args="$args --skip $s"
+          done
+          echo "SKIPPED (FHS-only): $skips"
+          cargo test --workspace --offline --no-fail-fast -- $args
         '' { nativeBuildInputs = [ pkgs.rustPlatform.cargoSetupHook pkgs.cargo pkgs.rustc ] ++ testTools pkgs; };
 
         # `cargo clippy --workspace --all-targets -- -D warnings`
