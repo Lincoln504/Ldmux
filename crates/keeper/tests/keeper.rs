@@ -2175,3 +2175,78 @@ async fn a_dead_pane_reports_its_exit_status_or_signal() {
         assert_eq!((st.exit_code, st.exit_signal), (code, sig), "{id}");
     }
 }
+
+/// An OSC 8 hyperlink survives into the snapshot, on the live screen and after it
+/// has scrolled into history: the replay a reconnecting client reads must link the
+/// same text to the same target, or the link is lost on every reconnect.
+#[tokio::test]
+async fn a_hyperlink_survives_into_the_snapshot_live_and_in_history() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    let id = "link-1".to_string();
+    let script = "printf '\\033]8;;https://example.com/a\\033\\\\LINKTEXT\\033]8;;\\033\\\\ plain\\n'; \
+                  i=1; while [ $i -le 40 ]; do printf 'row%03d\\n' $i; i=$((i+1)); done; sleep 30";
+    let spawned = keeper_call(
+        &s,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 10,
+            cwd: None,
+            command: Some(vec!["/bin/sh".into(), "-c".into(), script.into()]),
+            env: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(spawned, KeeperMessage::State(_)));
+
+    // The output has landed once the last row is on screen.
+    let mut landed = false;
+    for _ in 0..200 {
+        if snapshot(&s, &id).await.text.contains("row040") {
+            landed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(landed, "the output reached the emulator");
+
+    // The link scrolled off a 10-row screen into history: ask for the history.
+    let with_history = match keeper_call(
+        &s,
+        &KeeperMessage::Snapshot(km::Snapshot {
+            session_id: id.clone(),
+            history_lines: Some(100),
+            drain_output: false,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap()
+    {
+        KeeperMessage::SnapshotResult(sr) => sr,
+        other => panic!("expected SnapshotResult, got {other:?}"),
+    };
+    let open = "\x1b]8;;https://example.com/a\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let at = with_history.text.find(open).unwrap_or_else(|| {
+        panic!(
+            "the link target is in the snapshot: {:?}",
+            with_history.text
+        )
+    });
+    let linked = &with_history.text[at + open.len()..];
+    assert!(
+        linked.starts_with("LINKTEXT"),
+        "the link wraps its own text: {linked:?}"
+    );
+    assert!(
+        linked["LINKTEXT".len()..].starts_with(close),
+        "the link is closed right after its text: {linked:?}"
+    );
+    // A row with no link carries no OSC 8 at all.
+    assert_eq!(with_history.text.matches(open).count(), 1);
+}

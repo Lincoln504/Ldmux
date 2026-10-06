@@ -11,12 +11,13 @@ license = "MIT"
 publish = false
 
 # `unsafe_code = "deny"` is deliberately not set here: every crate except
-# protocol (which uses #![forbid(unsafe_code)]) contains unsafe, and a deny
-# would need per-site #[allow] edits. Follow-up once the unsafe is annotated.
-# Enabling `undocumented_unsafe_blocks = "warn"` today turns
-# `clippy -D warnings` red (113 sites across attach/daemon/keeper/vt-sys), so
-# it stays off until those blocks get SAFETY comments. Then add it here.
+# protocol (which uses #![forbid(unsafe_code)]) contains unsafe (FFI, fork/exec,
+# ioctl, flock), and a workspace-wide deny would need an #[allow] per site.
+# Instead every unsafe block must carry a `// SAFETY:` comment naming the
+# invariant; `cargo clippy -- -D warnings` (just lint) turns a missing one into
+# an error.
 [workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 strip = "symbols"

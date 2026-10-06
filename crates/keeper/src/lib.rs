@@ -133,6 +133,9 @@ fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
     use nix::libc;
     let mut off = 0usize;
     while off < bytes.len() {
+        // SAFETY: `off < bytes.len()` (loop condition), so `bytes[off..]` is a
+        // valid non-empty slice and the length passed is exactly its length;
+        // `write` only reads it. The caller keeps `fd` open for the call.
         let n = unsafe { libc::write(fd, bytes[off..].as_ptr() as *const _, bytes.len() - off) };
         if n < 0 {
             let e = std::io::Error::last_os_error();
@@ -144,6 +147,8 @@ fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
                         events: libc::POLLOUT,
                         revents: 0,
                     };
+                    // SAFETY: `p` is one initialised `pollfd` on this stack frame
+                    // and the count passed is 1.
                     unsafe { libc::poll(&mut p, 1, 1000) };
                     continue;
                 }
@@ -228,6 +233,8 @@ impl OutBuf {
 /// descriptor, so the child's 0/1/2 survive exec (POSIX).
 fn set_cloexec(fd: std::os::fd::RawFd) {
     use nix::libc;
+    // SAFETY: `fcntl(F_SETFD)` takes integers only; a bad `fd` yields EBADF
+    // (ignored), never undefined behaviour.
     unsafe {
         libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
@@ -249,6 +256,9 @@ fn close_above_std(keep: std::os::fd::RawFd) {
         if lo > hi {
             return true;
         }
+        // SAFETY: `close_range(lo, hi, 0)` takes three integers and no
+        // pointers; it is async-signal-safe (the caller is a forked child) and
+        // only closes descriptors, which the caller wants closed.
         unsafe { libc::syscall(libc::SYS_close_range, lo, hi, 0 as libc::c_uint) == 0 }
     };
     let keep = keep as libc::c_uint;
@@ -257,6 +267,9 @@ fn close_above_std(keep: std::os::fd::RawFd) {
     }
     for fd in 3..4096 {
         if fd != keep as i32 {
+            // SAFETY: `close` takes an integer; closing an unopened number is
+            // EBADF, ignored. Only called in the forked child, where every
+            // descriptor above 2 (but `keep`) is meant to be shut.
             unsafe {
                 libc::close(fd);
             }
@@ -585,6 +598,9 @@ impl Keeper {
                     ws_ypixel: 0,
                 };
                 let fd = m.as_raw_fd();
+                // SAFETY: TIOCSWINSZ reads one `winsize` through the pointer; `ws`
+                // is a live, initialised local. `fd` is the master `m` owns for
+                // this scope.
                 if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } < 0 {
                     return Err(format!("TIOCSWINSZ failed on session {}", r.session_id));
                 }
@@ -871,9 +887,12 @@ impl Keeper {
         // exec closes the child's end and the parent reads EOF; a failure (chdir,
         // exec) writes what went wrong first.
         let mut pipe_fds = [0 as libc::c_int; 2];
+        // SAFETY: `pipe_fds` is a writable `[c_int; 2]`, the array `pipe2` fills.
         if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: `pipe2` succeeded, so both descriptors are open and
+        // exclusively ours; each is wrapped exactly once, so each is closed once.
         let (err_rd, err_wr) = unsafe {
             (
                 <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(pipe_fds[0]),
@@ -1121,6 +1140,9 @@ fn read_exec_report(rd: &OwnedFd) -> ExecReport {
     let mut buf = [0u8; 5];
     let mut got = 0usize;
     while got < buf.len() {
+        // SAFETY: `buf[got..]` is a valid writable slice (`got < buf.len()` by
+        // the loop condition) and the length passed is exactly its length; `rd`
+        // is an open descriptor borrowed for the call.
         let n = unsafe {
             libc::read(
                 rd.as_raw_fd(),
@@ -1210,26 +1232,45 @@ fn fork_shell(
     argv_ptrs.push(std::ptr::null()); // execve's argv is NULL-terminated
     let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|c| c.as_ptr()).collect();
     envp_ptrs.push(std::ptr::null()); // execve's envp is NULL-terminated
+    // SAFETY: the keeper is multi-threaded, so the child may only call
+    // async-signal-safe functions until exec. Everything it needs (the C
+    // strings, `argv_ptrs`, `envp_ptrs`) was built above and is only read; the
+    // child never allocates, takes a lock or returns into Rust code, it ends in
+    // `execvpe` or `child_fail` (`_exit`). (`execvpe` is not on POSIX's
+    // async-signal-safe list, but glibc's implementation does not allocate.)
     match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Child) => {
             // Only async-signal-safe calls here, then exec.
+            // SAFETY: `setsid` takes no arguments and is async-signal-safe.
             let _ = unsafe { libc::setsid() };
             // Make the slave this session's controlling terminal. Without it the
             // shell has tty descriptors but no controlling tty, so job control
             // and the terminal's own signals (Ctrl+C to the foreground group)
             // depend on the shell claiming it. Ignored on failure: the shell still
             // runs, it just behaves like a non-interactive one.
+            // SAFETY: integer-only arguments (TIOCSCTTY with arg 0 takes no
+            // pointer); `slave_in_raw` is the open slave the parent passed in.
             let _ = unsafe { libc::ioctl(slave_in_raw, libc::TIOCSCTTY, 0) };
-            if unsafe { libc::dup2(slave_in_raw, 0) } < 0
-                || unsafe { libc::dup2(slave_out_raw, 1) } < 0
-                || unsafe { libc::dup2(slave_err_raw, 2) } < 0
-            {
+            // SAFETY: `dup2` takes integers only; the three slave descriptors are
+            // open in this (forked, single-threaded) child.
+            if unsafe {
+                libc::dup2(slave_in_raw, 0) < 0
+                    || libc::dup2(slave_out_raw, 1) < 0
+                    || libc::dup2(slave_err_raw, 2) < 0
+            } {
+                // SAFETY: `err_fd` is the open error pipe; `child_fail` is
+                // async-signal-safe and never returns.
                 unsafe { child_fail(err_fd, STAGE_DUP2) }
             }
-            let _ = unsafe { libc::close(master_raw) };
-            let _ = unsafe { libc::close(slave_in_raw) };
-            let _ = unsafe { libc::close(slave_out_raw) };
-            let _ = unsafe { libc::close(slave_err_raw) };
+            // SAFETY: `close` takes integers only; these four descriptors are the
+            // child's copies of the pty ends, no longer needed after `dup2`
+            // (none of them is `err_fd`, which the parent keeps distinct).
+            unsafe {
+                let _ = libc::close(master_raw);
+                let _ = libc::close(slave_in_raw);
+                let _ = libc::close(slave_out_raw);
+                let _ = libc::close(slave_err_raw);
+            }
             // Everything else the keeper holds goes with them: the pty fds of
             // every other session, any eventfd, the socket. A shell is a shell,
             // not a view of its siblings. (The error pipe stays; it is
@@ -1241,6 +1282,10 @@ fn fork_shell(
             // (`yes | head` loops on errors; the shell's `set -o pipefail`
             // reports nonsense). Default it, and clear the signal mask the
             // thread forking us carries.
+            // SAFETY: `signal`, `sigemptyset` and `sigprocmask` are
+            // async-signal-safe; `set` is zero-initialised (valid for the
+            // plain-integer `sigset_t`) and then initialised by `sigemptyset`,
+            // and the old-set pointer is null, which `sigprocmask` allows.
             unsafe {
                 libc::signal(libc::SIGPIPE, libc::SIG_DFL);
                 let mut set: libc::sigset_t = std::mem::zeroed();
@@ -1250,11 +1295,19 @@ fn fork_shell(
             if let Some(c) = cwd {
                 // A directory that cannot be entered fails the spawn: a shell in
                 // the wrong place is worse than an error the caller can show.
+                // SAFETY: `c` is a NUL-terminated `CString` that outlives the
+                // call; `chdir` only reads it.
                 if unsafe { libc::chdir(c.as_ptr()) } != 0 {
+                    // SAFETY: as for the dup2 failure above.
                     unsafe { child_fail(err_fd, STAGE_CHDIR) }
                 }
             }
             // `execvpe` resolves `prog` on PATH and uses the given environment.
+            // SAFETY: `prog` is NUL-terminated; `argv_ptrs` and `envp_ptrs` are
+            // NULL-terminated arrays of pointers into `CString`s that outlive
+            // the call (they are borrowed by this function), which `execvpe` only
+            // reads. If it returns it failed, and `child_fail` (never returns)
+            // reports it.
             unsafe {
                 libc::execvpe(prog.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
                 child_fail(err_fd, STAGE_EXEC)
@@ -1267,8 +1320,16 @@ fn fork_shell(
 
 /// Tell the parent which step failed and with what errno, then `_exit`.
 /// Async-signal-safe: raw `write` of a fixed buffer, no allocation.
+///
+/// # Safety
+/// Only for use in a forked child before exec: `err_fd` must be an open
+/// descriptor (the error pipe's write end), and the caller must not rely on
+/// anything after the call, which never returns.
 unsafe fn child_fail(err_fd: std::os::fd::RawFd, stage: u8) -> ! {
     use nix::libc;
+    // SAFETY: `__errno_location` returns the calling thread's valid errno slot;
+    // `buf` is 5 initialised bytes and that length is passed; `write` and
+    // `_exit` are async-signal-safe. `err_fd` is open per this function's contract.
     unsafe {
         let errno = *libc::__errno_location();
         let e = errno.to_ne_bytes();
@@ -1379,8 +1440,12 @@ fn bind_private(socket: &std::path::Path) -> std::io::Result<tokio::net::UnixLis
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
+    // SAFETY: `umask` only swaps a process-global integer and cannot fail. The
+    // previous value is restored below straight after the synchronous `bind`
+    // (a concurrent file creation in between sees a stricter mask, never a looser).
     let old = unsafe { nix::libc::umask(0o177) };
     let bound = tokio::net::UnixListener::bind(socket);
+    // SAFETY: restores the value returned above; same reasoning as the first call.
     unsafe { nix::libc::umask(old) };
     let listener = bound?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
@@ -1545,10 +1610,11 @@ mod write_tests {
 
     fn pipe(flags: libc::c_int) -> (std::fs::File, std::fs::File) {
         let mut fds = [0 as libc::c_int; 2];
-        assert_eq!(
-            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | flags) },
-            0
-        );
+        // SAFETY: `fds` is a writable `[c_int; 2]`, the array `pipe2` fills.
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | flags) };
+        assert_eq!(rc, 0);
+        // SAFETY: `pipe2` succeeded, so both descriptors are open and
+        // exclusively ours; each is wrapped in one `File`, which closes it once.
         unsafe {
             (
                 std::fs::File::from_raw_fd(fds[0]),

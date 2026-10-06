@@ -88,33 +88,98 @@ impl CellView<'_> {
 /// cells (plan §3.11(3): the cells are the source of truth; the format is
 /// ours) — the §3.11 round-trip test pins the fidelity.
 pub fn render(rows: &[&[Cell]], width: usize) -> String {
+    render_with_links(rows, &[], width)
+}
+
+/// Distinct link targets one render will carry; cells past it render unlinked.
+pub const LINK_DISTINCT_MAX: usize = 256;
+/// Total link-target bytes one render will emit across all runs (every run of a
+/// linked cell repeats its URI), so a screen of alternating links cannot make the
+/// snapshot grow without bound.
+pub const LINK_BYTES_MAX: usize = 256 * 1024;
+
+/// [`render`], with OSC 8 hyperlinks.
+///
+/// `links[i][x]` is the link target of column `x` of `rows[i]`
+/// ([`crate::links::row_links`] produces one); a missing row, a short row or a
+/// `None` is unlinked, so `&[]` is exactly [`render`]. A run of cells sharing a
+/// target is wrapped as `ESC ] 8 ; ; uri ESC \ text ESC ] 8 ; ; ESC \`, and the
+/// link is closed at the end of every row so it cannot leak into the next. A
+/// target that fails [`crate::links::uri_is_safe`] (empty, over
+/// [`crate::links::URI_MAX`], or holding a control character) and any target past
+/// [`LINK_DISTINCT_MAX`] / [`LINK_BYTES_MAX`] is dropped: the cell keeps its text and
+/// style and loses only the link.
+pub fn render_with_links(rows: &[&[Cell]], links: &[Vec<Option<String>>], width: usize) -> String {
     let mut out = String::new();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut link_bytes = 0usize;
     for (i, row) in rows.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
         let fwr = FullWidthRow::new(row, width);
+        let row_links: &[Option<String>] = links.get(i).map_or(&[], |v| v.as_slice());
+        // The link a column carries once the safety and budget rules are applied.
+        let mut allowed = |x: usize| -> Option<&str> {
+            let uri = row_links.get(x)?.as_deref()?;
+            if !crate::links::uri_is_safe(uri) {
+                return None;
+            }
+            if !seen.contains(&uri) {
+                if seen.len() >= LINK_DISTINCT_MAX {
+                    return None;
+                }
+                seen.push(uri);
+            }
+            Some(uri)
+        };
         // Default-style blanks at the right edge are the same on screen as
         // nothing, and a replaying client starts each repaint from a clear
         // screen, so they are not emitted. A *styled* blank is content (a status
         // bar's background, an inverse space) and is kept, as is every blank
-        // that has something to its right.
+        // that has something to its right, and a linked blank.
         let end = (0..fwr.len())
             .rev()
             .find(|&x| {
                 let cv = fwr.cell(x);
-                !(cv.style() == sgr::BLANK && (cv.text().is_empty() || cv.text() == " "))
+                row_links.get(x).is_some_and(|l| l.is_some())
+                    || !(cv.style() == sgr::BLANK && (cv.text().is_empty() || cv.text() == " "))
             })
             .map_or(0, |x| x + 1);
         let mut current = sgr::BLANK;
+        let mut open: Option<&str> = None;
         for x in 0..end {
             let cv = fwr.cell(x);
+            let mut want = allowed(x);
+            if want != open
+                && let Some(u) = want
+                && link_bytes + u.len() > LINK_BYTES_MAX
+            {
+                want = None;
+            }
+            if want != open {
+                if open.is_some() {
+                    out.push_str("\x1b]8;;\x1b\\");
+                }
+                if let Some(u) = want {
+                    out.push_str("\x1b]8;;");
+                    out.push_str(u);
+                    out.push_str("\x1b\\");
+                    link_bytes += u.len();
+                }
+                open = want;
+            }
             let style = cv.style();
             if style != current {
                 out.push_str(&sgr::transition(&current, &style));
                 current = style;
             }
             out.push_str(cv.text());
+        }
+        // A link is stream state like style: close it so the next row is not
+        // linked by this one's tail.
+        if open.is_some() {
+            out.push_str("\x1b]8;;\x1b\\");
         }
         // Style is stream state, not row state: leave it reset so the next row
         // (which starts from the default) is not painted with this one's tail.

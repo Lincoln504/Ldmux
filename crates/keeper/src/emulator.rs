@@ -43,7 +43,7 @@ use ldmux_vt_sys::{
 use nix::libc;
 use tokio::sync::oneshot;
 
-use ldmux_vt_sys::snapshot;
+use ldmux_vt_sys::{links, snapshot};
 
 /// The grid history a session retains: the `history-limit 10000` analogue the
 /// plan calls for (plan §3.7/§3.4), and the ceiling a `snapshot --history`
@@ -150,10 +150,14 @@ pub struct Outcome {
 /// wake can never block the sender.
 pub(crate) fn new_waker() -> Option<Arc<OwnedFd>> {
     use nix::libc;
+    // SAFETY: `eventfd` takes only integers; it returns a new descriptor or -1.
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if fd < 0 {
         return None;
     }
+    // SAFETY: `fd` is >= 0 (checked above), was just created by `eventfd` and
+    // is referenced nowhere else, so this `OwnedFd` is its sole owner and closes
+    // it exactly once.
     Some(Arc::new(unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) }))
 }
 
@@ -164,6 +168,9 @@ pub(crate) fn wake(waker: &Option<Arc<OwnedFd>>) {
     use nix::libc;
     if let Some(fd) = waker {
         let one: u64 = 1;
+        // SAFETY: the descriptor is kept open by the `Arc<OwnedFd>` borrowed for
+        // this call, and the buffer is the 8 initialised bytes of the local `one`
+        // (an eventfd write is exactly a `u64`); `write` does not retain it.
         unsafe {
             libc::write(fd.as_raw_fd(), &one as *const u64 as *const libc::c_void, 8);
         }
@@ -174,6 +181,9 @@ pub(crate) fn wake(waker: &Option<Arc<OwnedFd>>) {
 fn drain_waker(fd: std::os::fd::RawFd) {
     use nix::libc;
     let mut buf = [0u8; 8];
+    // SAFETY: `buf` is 8 writable bytes, the size an eventfd read requires and
+    // writes. `fd` is the waker's descriptor, kept open by the `Arc<OwnedFd>`
+    // the emulator thread holds for as long as this function can be called.
     unsafe {
         libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8);
     }
@@ -271,6 +281,10 @@ pub(crate) fn spawn(
                 // A dead pane is not polled: its master returns `POLLHUP` for ever.
                 let nfds: libc::nfds_t = if reading { 2 } else { 1 };
                 let timeout = if wake_fd >= 0 { -1 } else { 1 };
+                // SAFETY: `pfds` is an initialised array of two `pollfd`s and
+                // `nfds` is at most its length (1 or 2); it outlives the call.
+                // `fd` is the master this thread owns, `wake_fd` the waker held
+                // by this thread (a negative `wake_fd` is ignored by poll).
                 let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, timeout) };
                 if n < 0 {
                     // A signal landed in the poll: look again. Anything else (the
@@ -293,6 +307,9 @@ pub(crate) fn spawn(
                 if !reading || pfds[1].revents == 0 {
                     continue;
                 }
+                // SAFETY: `buf` is a live, exclusively borrowed 4096-byte array and
+                // `buf.len()` is the length passed; `fd` is the master this thread
+                // owns (see the poll above).
                 let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
                 if n < 0 {
                     let e = std::io::Error::last_os_error();
@@ -345,6 +362,11 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
             let _ = rs.update(term);
             let rows = rs.rows();
             let live: Vec<Vec<Cell>> = (0..rows).map(|y| rs.row(y)).collect();
+            // The OSC 8 target of each linked cell, row for row alongside `live`/`hist`
+            // (an empty entry for the common row with no link).
+            let live_links: Vec<Vec<Option<String>>> = (0..rows)
+                .map(|y| links::row_links(term, rs.cols(), y))
+                .collect();
             // 2. The last `n` history lines, **a screenful at a time**. The
             //    render state holds one screen, so reading row indices past it
             //    returned blanks: a 60-line history capture answered with the 24
@@ -352,7 +374,7 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
             //    2026-10-05). The TypeScript's `capture-pane -S -N -E -` returned
             //    the lines themselves, so this walks the window instead of
             //    indexing into a screen it does not have.
-            let hist: Vec<Vec<Cell>> = if n > 0 {
+            let (hist, hist_links): (Vec<Vec<Cell>>, Vec<Vec<Option<String>>>) = if n > 0 {
                 let rows = rs.rows() as usize;
                 // Absolute top, then down to the first wanted history row: that
                 // row is `scrollback_rows - n` above the live screen.
@@ -364,10 +386,12 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
                     let _ = rs.update(term);
                 }
                 let mut h: Vec<Vec<Cell>> = Vec::with_capacity(n);
+                let mut hl: Vec<Vec<Option<String>>> = Vec::with_capacity(n);
                 while h.len() < n {
                     let take = (n - h.len()).min(rows);
                     for y in 0..take {
                         h.push(rs.row(y as u16));
+                        hl.push(links::row_links(term, rs.cols(), y as u16));
                     }
                     if h.len() >= n {
                         break;
@@ -379,9 +403,9 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
                 }
                 term.scroll_viewport(ScrollViewport::Bottom);
                 let _ = rs.update(term);
-                h
+                (h, hl)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             // 3. Render: the history lines first, then the live screen (the
             //    order the client replays into its own scrollback).
@@ -390,7 +414,9 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
                 .chain(live.iter())
                 .map(|r| r.as_slice())
                 .collect();
-            let text = snapshot::render(&all, rs.cols() as usize);
+            let all_links: Vec<Vec<Option<String>>> =
+                hist_links.into_iter().chain(live_links).collect();
+            let text = snapshot::render_with_links(&all, &all_links, rs.cols() as usize);
             // Taken here, on the thread that feeds both the emulator and `out`,
             // so the tail is exactly the bytes the render already contains.
             let tail = if drain_output {

@@ -127,6 +127,9 @@ impl KeeperSupervisor {
         let raw = fd.as_raw_fd();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            // SAFETY: `raw` is the descriptor of `fd`, which is open and owned by
+            // this function until it is returned (as an `OwnedFd`) after the lock
+            // succeeds; `flock` takes no pointers.
             match unsafe { nix::libc::flock(raw, nix::libc::LOCK_EX | nix::libc::LOCK_NB) } {
                 0 => return Ok(std::os::fd::OwnedFd::from(fd)),
                 _ => {
@@ -149,6 +152,10 @@ impl KeeperSupervisor {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
         // Its own session (setsid), so it outlives the daemon.
+        // SAFETY: the `pre_exec` closure runs in the forked child before exec,
+        // where only async-signal-safe calls are allowed. It captures nothing
+        // and calls `setsid(2)` (async-signal-safe, no allocation); the error
+        // path turns an errno into `io::Error::Os` without allocating.
         unsafe {
             cmd.pre_exec(|| match nix::unistd::setsid() {
                 Ok(_) => Ok(()),

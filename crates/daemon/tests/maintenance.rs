@@ -36,6 +36,27 @@ fn window_manager_env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Set a process environment variable for a test.
+///
+/// Edition 2024 makes this `unsafe` because `setenv` races with any other thread
+/// reading the environment through libc. Every test in this binary holds
+/// `window_manager_env_lock` for its whole body (and `Fixture` is only built under
+/// it), so no other test thread is running while the environment changes; the
+/// remaining readers are this test's own tokio threads, which go through
+/// `std::env` / `std::process::Command` and so take std's environment lock.
+fn set_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: the caller holds `window_manager_env_lock`, which every test in this
+    // binary holds, so no other test thread reads or writes the environment now.
+    unsafe { std::env::set_var(key, value) };
+}
+
+/// Remove a process environment variable for a test; same contract as `set_env`.
+fn unset_env(key: &str) {
+    // SAFETY: the caller holds `window_manager_env_lock`, which every test in this
+    // binary holds, so no other test thread reads or writes the environment now.
+    unsafe { std::env::remove_var(key) };
+}
+
 /// The environment a desk-window test needs, and how to put it back.
 struct Stubs {
     old_path: String,
@@ -45,15 +66,14 @@ struct Stubs {
 
 impl Stubs {
     fn restore(self) {
-        // SAFETY: the caller holds `window_manager_env_lock`.
-        unsafe { std::env::set_var("PATH", self.old_path) };
-        unsafe { std::env::remove_var("LDMUX_TERMINAL") };
+        set_env("PATH", self.old_path);
+        unset_env("LDMUX_TERMINAL");
         if let Some(t) = self.old_terminal {
-            unsafe { std::env::set_var("LDMUX_TERMINAL", t) };
+            set_env("LDMUX_TERMINAL", t);
         }
-        unsafe { std::env::remove_var("DISPLAY") };
+        unset_env("DISPLAY");
         if let Some(d) = self.old_display {
-            unsafe { std::env::set_var("DISPLAY", d) };
+            set_env("DISPLAY", d);
         }
     }
 }
@@ -90,10 +110,9 @@ fn install_stubs(dir: &std::path::Path) -> Stubs {
     let old_path = std::env::var("PATH").unwrap_or_default();
     let old_terminal = std::env::var("LDMUX_TERMINAL").ok();
     let old_display = std::env::var("DISPLAY").ok();
-    // SAFETY: the caller holds `window_manager_env_lock`.
-    unsafe { std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), old_path)) };
-    unsafe { std::env::set_var("LDMUX_TERMINAL", "alacritty") };
-    unsafe { std::env::set_var("DISPLAY", ":0") };
+    set_env("PATH", format!("{}:{}", stub_dir.display(), old_path));
+    set_env("LDMUX_TERMINAL", "alacritty");
+    set_env("DISPLAY", ":0");
     Stubs {
         old_path,
         old_terminal,
@@ -232,7 +251,13 @@ impl Fixture {
 /// being asked. It read `running` forever: `reconcile` ran at start-up only, and
 /// it counted a keeper state with `dead: true` as live.
 #[tokio::test]
+// Holds the environment lock so no test thread runs while another one mutates the
+// process environment (see `set_env`).
+#[allow(clippy::await_holding_lock)]
 async fn a_shell_that_exits_is_marked_dead() {
+    let _env = window_manager_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new().await;
     let id = f.new_session().await;
 
@@ -266,7 +291,13 @@ async fn a_shell_that_exits_is_marked_dead() {
 /// shell that had ever exited stayed in the keeper for the life of the process
 /// (measured live: 20 sessions and 51 MB where 2 and 26 MB were real).
 #[tokio::test]
+// Holds the environment lock so no test thread runs while another one mutates the
+// process environment (see `set_env`).
+#[allow(clippy::await_holding_lock)]
 async fn a_dead_pane_is_released_from_the_keeper() {
+    let _env = window_manager_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new().await;
     let id = f.new_session().await;
     let keeper_name = format!("ldmux-{id}");
@@ -337,16 +368,14 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
     // code is set explicitly: these tests share the process environment, and a
     // leaked non-zero from the other one read as "the window manager did not
     // answer", which is deliberately *not* a closed window.
-    unsafe { std::env::set_var("I3_TREE_CODE", "0") };
+    set_env("I3_TREE_CODE", "0");
     let class = format!("ldmux-live-{id}");
-    unsafe {
-        std::env::set_var(
-            "I3_TREE",
-            format!(
-                r#"{{"nodes":[{{"window":123,"window_properties":{{"class":"{class}"}},"nodes":[],"floating_nodes":[]}}],"floating_nodes":[]}}"#
-            ),
-        )
-    };
+    set_env(
+        "I3_TREE",
+        format!(
+            r#"{{"nodes":[{{"window":123,"window_properties":{{"class":"{class}"}},"nodes":[],"floating_nodes":[]}}],"floating_nodes":[]}}"#
+        ),
+    );
     let live = f
         .arc
         .lock()
@@ -361,7 +390,7 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
     assert_eq!(f.arc.lock().await.live_window_ids(), vec![id.clone()]);
 
     // The window goes away (the user closed it). The grace period is 1 ms.
-    unsafe { std::env::set_var("I3_TREE", r#"{"nodes":[],"floating_nodes":[]}"#) };
+    set_env("I3_TREE", r#"{"nodes":[],"floating_nodes":[]}"#);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     f.arc.lock().await.maintain().await.unwrap();
 
@@ -378,9 +407,9 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
     );
 
     stubs.restore();
-    unsafe { std::env::remove_var("I3_TREE") };
-    unsafe { std::env::remove_var("I3_TREE_CODE") };
-    unsafe { std::env::remove_var("DISPLAY") };
+    unset_env("I3_TREE");
+    unset_env("I3_TREE_CODE");
+    unset_env("DISPLAY");
     f.teardown().await;
 }
 
@@ -402,8 +431,8 @@ async fn an_unanswered_window_manager_never_ends_a_session() {
 
     let stubs = install_stubs(&f.dir);
     // No tree and a non-zero exit: the window manager is not answering.
-    unsafe { std::env::set_var("I3_TREE", "{}") };
-    unsafe { std::env::set_var("I3_TREE_CODE", "1") };
+    set_env("I3_TREE", "{}");
+    set_env("I3_TREE_CODE", "1");
 
     let live = f
         .arc
@@ -424,8 +453,8 @@ async fn an_unanswered_window_manager_never_ends_a_session() {
     );
 
     stubs.restore();
-    unsafe { std::env::remove_var("I3_TREE") };
-    unsafe { std::env::remove_var("I3_TREE_CODE") };
-    unsafe { std::env::remove_var("DISPLAY") };
+    unset_env("I3_TREE");
+    unset_env("I3_TREE_CODE");
+    unset_env("DISPLAY");
     f.teardown().await;
 }

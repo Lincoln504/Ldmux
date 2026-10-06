@@ -76,11 +76,15 @@ fn render_state_walks_rows_and_reads_cells() {
     // Create the render state.
     let mut state: ffi::GhosttyRenderState = std::ptr::null_mut();
     assert_eq!(
+        // SAFETY: `state` is a writable handle slot and the allocator is NULL (default); the
+        // handle is freed once at the end of the test.
         unsafe { ffi::ghostty_render_state_new(std::ptr::null(), &mut state) },
         ffi::SUCCESS
     );
     // Update from the terminal (borrows it).
     assert_eq!(
+        // SAFETY: `state` was created above and `t.handle()` is the live terminal `t`, which
+        // outlives the call.
         unsafe { ffi::ghostty_render_state_update(state, t.handle()) },
         ffi::SUCCESS
     );
@@ -88,10 +92,13 @@ fn render_state_walks_rows_and_reads_cells() {
     // Row iterator, linked to the render state.
     let mut it: ffi::GhosttyRenderStateRowIterator = std::ptr::null_mut();
     assert_eq!(
+        // SAFETY: `it` is a writable handle slot and the allocator is NULL.
         unsafe { ffi::ghostty_render_state_row_iterator_new(std::ptr::null(), &mut it) },
         ffi::SUCCESS
     );
     assert_eq!(
+        // SAFETY: `state` is live; ROW_ITERATOR's out type is a row-iterator handle and `it`
+        // is exactly one (a valid, writable slot), with a matching pointer cast.
         unsafe {
             ffi::ghostty_render_state_get(
                 state,
@@ -102,15 +109,19 @@ fn render_state_walks_rows_and_reads_cells() {
         ffi::SUCCESS
     );
     // Row 0 is present.
+    // SAFETY: `it` is a live iterator linked to `state` above.
     assert!(unsafe { ffi::ghostty_render_state_row_iterator_next(it) });
 
     // The row's cells.
     let mut cells: ffi::GhosttyRenderStateRowCells = std::ptr::null_mut();
     assert_eq!(
+        // SAFETY: `cells` is a writable handle slot and the allocator is NULL.
         unsafe { ffi::ghostty_render_state_row_cells_new(std::ptr::null(), &mut cells) },
         ffi::SUCCESS
     );
     assert_eq!(
+        // SAFETY: `it` is live and positioned on row 0; ROW_DATA_CELLS's out type is a
+        // row-cells handle and `cells` is exactly one (a valid, writable slot).
         unsafe {
             ffi::ghostty_render_state_row_get(
                 it,
@@ -126,22 +137,33 @@ fn render_state_walks_rows_and_reads_cells() {
     // 8-byte-aligned 56-byte buffer (a packed `GhosttyStyle` is 1-byte aligned).
     let layout = std::alloc::Layout::from_size_align(72, 8).unwrap();
     assert_eq!(
+        // SAFETY: `cells` is the live handle created above; column 0 exists in an 80-column row.
         unsafe { ffi::ghostty_render_state_row_cells_select(cells, 0) },
         ffi::SUCCESS
     );
     let style0 = {
-        let buf = unsafe { std::alloc::alloc(layout) };
-        assert_eq!(
-            unsafe {
-                ffi::ghostty_render_state_row_cells_get(
-                    cells,
-                    ffi::ROW_CELLS_DATA_STYLE,
-                    buf as *mut c_void,
-                )
-            },
-            ffi::SUCCESS
-        );
+        // SAFETY: `layout` has non-zero size (72, align 8). Zeroed, so every one of
+        // the 72 bytes is initialised before the slice below is formed even if
+        // the library leaves some of them (padding) unwritten.
+        let buf = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!buf.is_null(), "allocation failed");
+        // SAFETY: `cells` is selected on a live cell; `buf` is 72 bytes, 8-aligned
+        // (the alignment `ROW_CELLS_DATA_STYLE` casts its out pointer to) and
+        // writable, which is the size of `GhosttyStyle`.
+        let got = unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                cells,
+                ffi::ROW_CELLS_DATA_STYLE,
+                buf as *mut c_void,
+            )
+        };
+        assert_eq!(got, ffi::SUCCESS);
+        // SAFETY: `buf` is a live 72-byte allocation, fully initialised (zeroed,
+        // then written by C), and any bytes are valid `u8`s; copied out before the
+        // dealloc below.
         let b = unsafe { std::slice::from_raw_parts(buf as *const u8, 72) }.to_vec();
+        // SAFETY: `buf` was allocated above with this same `layout` and is not
+        // used again.
         unsafe { std::alloc::dealloc(buf, layout) };
         b
     };
@@ -152,6 +174,9 @@ fn render_state_walks_rows_and_reads_cells() {
         len: 0,
     };
     assert_eq!(
+        // SAFETY: `cells` is selected on a live cell; GRAPHEMES_UTF8's out type is a
+        // `GhosttyBuffer`, and `buffer` is one whose `ptr`/`cap` describe the live,
+        // writable 64-byte `buf`.
         unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 cells,
@@ -174,23 +199,32 @@ fn render_state_walks_rows_and_reads_cells() {
     );
 
     // The SGR is after "A", so cell 1 ("B") is the red one (PALETTE, index 1).
-    assert_eq!(
-        unsafe { ffi::ghostty_render_state_row_cells_select(cells, 1) },
-        ffi::SUCCESS
-    );
+    // SAFETY: `cells` is the live handle created above; column 1 exists in an 80-column row.
+    let rc = unsafe { ffi::ghostty_render_state_row_cells_select(cells, 1) };
+    assert_eq!(rc, ffi::SUCCESS);
     let style1 = {
-        let buf = unsafe { std::alloc::alloc(layout) };
-        assert_eq!(
-            unsafe {
-                ffi::ghostty_render_state_row_cells_get(
-                    cells,
-                    ffi::ROW_CELLS_DATA_STYLE,
-                    buf as *mut c_void,
-                )
-            },
-            ffi::SUCCESS
-        );
+        // SAFETY: `layout` has non-zero size (72, align 8). Zeroed, so every one of
+        // the 72 bytes is initialised before the slice below is formed even if
+        // the library leaves some of them (padding) unwritten.
+        let buf = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!buf.is_null(), "allocation failed");
+        // SAFETY: `cells` is selected on a live cell; `buf` is 72 bytes, 8-aligned
+        // (the alignment `ROW_CELLS_DATA_STYLE` casts its out pointer to) and
+        // writable, which is the size of `GhosttyStyle`.
+        let got = unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                cells,
+                ffi::ROW_CELLS_DATA_STYLE,
+                buf as *mut c_void,
+            )
+        };
+        assert_eq!(got, ffi::SUCCESS);
+        // SAFETY: `buf` is a live 72-byte allocation, fully initialised (zeroed,
+        // then written by C), and any bytes are valid `u8`s; copied out before the
+        // dealloc below.
         let b = unsafe { std::slice::from_raw_parts(buf as *const u8, 72) }.to_vec();
+        // SAFETY: `buf` was allocated above with this same `layout` and is not
+        // used again.
         unsafe { std::alloc::dealloc(buf, layout) };
         b
     };
@@ -201,6 +235,9 @@ fn render_state_walks_rows_and_reads_cells() {
     assert_eq!(val1, 1, "cell 1 fg palette index is 1");
 
     // Free.
+    // SAFETY: each handle was created in this test, is freed exactly once, and
+    // nothing uses them afterwards (`cells` and `it` before `state`, which they
+    // were linked to).
     unsafe {
         ffi::ghostty_render_state_row_cells_free(cells);
         ffi::ghostty_render_state_row_iterator_free(it);

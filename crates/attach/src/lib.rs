@@ -156,7 +156,12 @@ const MAX_MISSED_PONGS: u32 = 3;
 
 /// The terminal size of fd 0 (the window's pty), or 80x24.
 fn tty_size() -> (u64, u64) {
+    // SAFETY: `winsize` is a plain C struct of four `u16`s, for which the
+    // all-zero bit pattern is a valid value.
     let mut ws: nix::libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: TIOCGWINSZ writes exactly one `winsize` through the pointer, and
+    // `ws` is a live, exclusively borrowed, initialised `winsize` on this stack
+    // frame. fd 0 may be closed or not a tty; that is reported as -1, not UB.
     let r = unsafe { nix::libc::ioctl(0, nix::libc::TIOCGWINSZ, &mut ws) };
     if r == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
         (ws.ws_col as u64, ws.ws_row as u64)
@@ -189,9 +194,14 @@ pub fn restore_terminal() {
     use nix::sys::termios::{SetArg, tcsetattr};
     let saved = SAVED.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(t) = saved {
-        // SAFETY: fd 0/1 are the process's stdio; the writes are best effort.
+        // SAFETY: the pointer/length pair is a `'static` byte slice, readable for
+        // its whole length; `write` does not retain it. fd 1 may be closed, which
+        // is an ignored error return, not UB.
         unsafe { nix::libc::write(1, TERMINAL_RESET.as_ptr().cast(), TERMINAL_RESET.len()) };
         let _ = tcsetattr(
+            // SAFETY: fd 0 is the process's stdin, open for the life of the
+            // process; the `BorrowedFd` is used only for this call and never
+            // closed. A closed fd would only make `tcsetattr` return EBADF.
             unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
             SetArg::TCSANOW,
             &t,
@@ -210,6 +220,8 @@ impl Terminal {
     /// in raw mode and nothing a snapshot could be painted on.
     fn enter() -> Result<Self, String> {
         use nix::sys::termios::{SetArg, SpecialCharacterIndices, cfmakeraw, tcgetattr, tcsetattr};
+        // SAFETY: `isatty` takes only an integer and tolerates any value,
+        // returning 0 with EBADF for a closed descriptor.
         let is_tty = |fd| unsafe { nix::libc::isatty(fd) } == 1;
         if !is_tty(0) || !is_tty(1) {
             return Err(
@@ -218,6 +230,9 @@ impl Terminal {
                     .to_string(),
             );
         }
+        // SAFETY: fd 0 is the process's stdin and was just checked to be a tty,
+        // so it is open; it stays open for the life of the process and the
+        // `BorrowedFd` is never closed or stored beyond this function.
         let fd0 = unsafe { std::os::fd::BorrowedFd::borrow_raw(0) };
         let original =
             tcgetattr(fd0).map_err(|e| format!("cannot read the terminal settings: {e}"))?;

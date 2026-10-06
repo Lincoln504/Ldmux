@@ -6,6 +6,7 @@
 //! `docs/archive/RUST-PORT-PLAN.md` §3.4 / decision D2.
 
 pub mod ffi;
+pub mod links;
 mod safe;
 pub mod sgr;
 pub mod snapshot;

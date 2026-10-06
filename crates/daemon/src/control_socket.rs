@@ -83,6 +83,9 @@ impl ControlSocketServer {
         let prev = unsafe { nix::libc::umask(0o077) };
         let listener = tokio::net::UnixListener::bind(&self.socket_path)
             .map_err(|e| format!("bind control socket: {e}"))?;
+        // SAFETY: `umask` only swaps a process-global integer; this restores the
+        // value returned above. (Threads creating files between the two calls see
+        // the stricter mask, which can only narrow modes, never widen them.)
         unsafe { nix::libc::umask(prev) };
         std::fs::set_permissions(&self.socket_path, Permissions::from_mode(0o600))
             .map_err(|e| format!("chmod control socket: {e}"))?;

@@ -164,6 +164,10 @@ pub fn spawn_captured(argv: &[String], opts: &SpawnOptions) -> std::io::Result<S
     }
     // Its own session + process group, so kill_group can take the whole tree
     // down.
+    // SAFETY: the `pre_exec` closure runs in the forked child before exec,
+    // where only async-signal-safe calls are allowed. It captures nothing
+    // and calls `setsid(2)` (async-signal-safe, no allocation); the error
+    // path turns an errno into `io::Error::Os` without allocating.
     unsafe {
         cmd.pre_exec(|| match nix::unistd::setsid() {
             Ok(_) => Ok(()),

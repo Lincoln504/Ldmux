@@ -49,6 +49,8 @@ impl Terminal {
     /// Create a `cols`×`rows` terminal on the default allocator.
     pub fn new(cols: u16, rows: u16) -> Result<Self, FfiError> {
         let mut ptr: ffi::GhosttyTerminal = std::ptr::null_mut();
+        // SAFETY: a NULL allocator selects the default one; `ptr` is a writable
+        // slot the library fills with a new terminal (checked non-null below).
         let r = unsafe { ffi::ghostty_terminal_new(std::ptr::null(), &mut ptr, cols, rows) };
         if r != ffi::SUCCESS || ptr.is_null() {
             return Err(FfiError { code: r });
@@ -65,6 +67,9 @@ impl Terminal {
         if bytes.is_empty() {
             return;
         }
+        // SAFETY: `self.ptr` is the live terminal this value owns (non-null from
+        // `new`, freed only in `drop`); `bytes` is a valid slice read for its length
+        // only; `&mut self` plus `!Send` means no concurrent use of the handle.
         unsafe { ffi::ghostty_terminal_vt_write(self.ptr, bytes.as_ptr(), bytes.len()) };
     }
 
@@ -76,6 +81,7 @@ impl Terminal {
     /// Change the cell count (the Resize direction into the emulator).
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let (cw, ch) = self.cell;
+        // SAFETY: `self.ptr` is the live terminal this value owns; integer args.
         let _ = unsafe { ffi::ghostty_terminal_resize(self.ptr, cols, rows, cw, ch) };
     }
 
@@ -85,6 +91,9 @@ impl Terminal {
     /// `lines == 0` disables scrollback (erases retained history).
     pub fn set_max_scrollback(&self, lines: usize) {
         let v = lines;
+        // SAFETY: `self.ptr` is the live terminal this value owns. This option's
+        // value type is a `usize` read through the pointer, and `v` is a live
+        // `usize` local that the library copies and does not retain.
         let r = unsafe {
             ffi::ghostty_terminal_set(
                 self.ptr,
@@ -106,6 +115,9 @@ impl Terminal {
     /// `bytes == 0` disables scrollback.
     pub fn set_max_scrollback_bytes(&self, bytes: usize) {
         let v = bytes;
+        // SAFETY: `self.ptr` is the live terminal this value owns. This option's
+        // value type is a `usize` read through the pointer, and `v` is a live
+        // `usize` local that the library copies and does not retain.
         let r = unsafe {
             ffi::ghostty_terminal_set(
                 self.ptr,
@@ -138,6 +150,10 @@ impl Terminal {
                 value: ffi::GhosttyTerminalScrollViewportValue { row: r as usize },
             },
         };
+        // SAFETY: `self.ptr` is the live terminal this value owns; `b` is a fully
+        // initialised tagged union passed by value, whose active field matches its
+        // tag (every variant writes the whole 16-byte union or the field the
+        // tag selects, over a zero-initialised padding member for Top/Bottom).
         unsafe { ffi::ghostty_terminal_scroll_viewport(self.ptr, b) };
     }
 
@@ -184,6 +200,9 @@ impl Terminal {
     /// paste). An unknown mode leaves the value false.
     pub fn mode(&self, mode: u16) -> bool {
         let mut cfg = ffi::GhosttyTerminalModeConfig { mode, value: false };
+        // SAFETY: `self.ptr` is the live terminal this value owns; DATA_MODE's out
+        // type is a `GhosttyTerminalModeConfig`, and `cfg` is exactly that (same
+        // `repr(C)` layout, `mode` set as the key) on this stack frame.
         let r = unsafe {
             ffi::ghostty_terminal_get(self.ptr, ffi::DATA_MODE, &mut cfg as *mut _ as *mut c_void)
         };
@@ -195,7 +214,13 @@ impl Terminal {
 
     /// Whether the terminal is on the alternate screen (DEC 1047/47).
     pub fn alternate_on(&self) -> bool {
-        let mut screen = ffi::GhosttyTerminalScreen::Primary;
+        // Read as a plain `u32`, not as the Rust enum: C writing a discriminant
+        // outside the enum's variants into an enum-typed slot would be UB, and
+        // the header does not promise the set of values stays closed.
+        let mut screen: u32 = ffi::GhosttyTerminalScreen::Primary as u32;
+        // SAFETY: `self.ptr` is the live terminal this value owns; DATA_ACTIVE_SCREEN
+        // writes a `GhosttyTerminalScreen`, a `repr(u32)` enum, i.e. one `u32`, and
+        // `screen` is a live, aligned `u32`.
         let r = unsafe {
             ffi::ghostty_terminal_get(
                 self.ptr,
@@ -204,7 +229,7 @@ impl Terminal {
             )
         };
         debug_assert_eq!(r, ffi::SUCCESS);
-        screen == ffi::GhosttyTerminalScreen::Alternate
+        screen == ffi::GhosttyTerminalScreen::Alternate as u32
     }
 
     /// Whether the viewport is pinned to the active area (vs scrolled into
@@ -248,6 +273,9 @@ impl Terminal {
 
     fn get_u16(&self, data: i32) -> u16 {
         let mut v: u16 = 0;
+        // SAFETY: `self.ptr` is the live terminal this value owns; every `data`
+        // key passed to this helper writes a `u16` (see the callers), and `v` is
+        // a live, aligned `u16`.
         let _ =
             unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
         v
@@ -255,6 +283,9 @@ impl Terminal {
 
     fn get_bool(&self, data: i32) -> bool {
         let mut v: bool = false;
+        // SAFETY: `self.ptr` is the live terminal this value owns; every `data`
+        // key passed to this helper writes a `bool` (see the callers), and `v` is
+        // a live, aligned `bool`.
         let _ =
             unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
         v
@@ -262,18 +293,30 @@ impl Terminal {
 
     fn get_usize(&self, data: i32) -> usize {
         let mut v: usize = 0;
+        // SAFETY: `self.ptr` is the live terminal this value owns; every `data`
+        // key passed to this helper writes a `usize` (see the callers), and `v` is
+        // a live, aligned `usize`.
         let _ =
             unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
         v
     }
 
     fn get_string(&self, data: i32) -> String {
+        // SAFETY: `GhosttyString` is a raw pointer and a length; all-zero (null, 0)
+        // is a valid value.
         let mut s: ffi::GhosttyString = unsafe { std::mem::zeroed() };
+        // SAFETY: `self.ptr` is the live terminal this value owns; the title/pwd
+        // keys write a `GhosttyString`, and `s` is exactly that.
         let r =
             unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut s as *mut _ as *mut c_void) };
         if r != ffi::SUCCESS || s.ptr.is_null() || s.len == 0 {
             return String::new();
         }
+        // SAFETY: the call succeeded and `ptr` is non-null with `len > 0`, so the
+        // library is pointing at `len` initialised bytes it owns. They stay valid
+        // until the terminal is next mutated, and the slice is copied into a
+        // `String` before `&self` returns; `&self` and `!Sync` rule out a
+        // mutation in between.
         let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
         String::from_utf8_lossy(bytes).into_owned()
     }
@@ -281,6 +324,8 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        // SAFETY: `self.ptr` is the live terminal created in `new`, freed here
+        // exactly once (`Terminal` is not `Clone`, and drop runs once).
         unsafe { ffi::ghostty_terminal_free(self.ptr) };
     }
 }
@@ -349,6 +394,8 @@ impl RenderState {
     /// Create an empty render state.
     pub fn new() -> Result<Self, FfiError> {
         let mut ptr: ffi::GhosttyRenderState = std::ptr::null_mut();
+        // SAFETY: a NULL allocator selects the default one; `ptr` is a writable
+        // slot the library fills (checked non-null below).
         let r = unsafe { ffi::ghostty_render_state_new(std::ptr::null(), &mut ptr) };
         if r != ffi::SUCCESS || ptr.is_null() {
             return Err(FfiError { code: r });
@@ -363,6 +410,9 @@ impl RenderState {
 
     /// Update from a terminal (the snapshot's source of truth). Borrows it.
     pub fn update(&self, terminal: &Terminal) -> Result<(), FfiError> {
+        // SAFETY: `self.ptr` is the live render state this value owns, and
+        // `terminal.handle()` is a live terminal borrowed for the call (not
+        // retained, and not mutated: both are single-threaded handles).
         let r = unsafe { ffi::ghostty_render_state_update(self.ptr, terminal.handle()) };
         if r != ffi::SUCCESS {
             return Err(FfiError { code: r });
@@ -382,6 +432,8 @@ impl RenderState {
 
     fn get_u16(&self, data: u32) -> u16 {
         let mut v: u16 = 0;
+        // SAFETY: `self.ptr` is the live render state this value owns; the only
+        // callers pass RS_COLS/RS_ROWS, which write a `u16`, and `v` is one.
         let _ = unsafe {
             ffi::ghostty_render_state_get(self.ptr, data, &mut v as *mut _ as *mut c_void)
         };
@@ -392,11 +444,17 @@ impl RenderState {
     /// A row beyond the viewport is empty.
     pub fn row(&self, y: u16) -> Vec<Cell> {
         let mut it: ffi::GhosttyRenderStateRowIterator = std::ptr::null_mut();
+        // SAFETY: a NULL allocator selects the default one; `it` is a writable
+        // handle slot. From here on `it` is freed on every return path below
+        // (and only once).
         if unsafe { ffi::ghostty_render_state_row_iterator_new(std::ptr::null(), &mut it) }
             != ffi::SUCCESS
         {
             return Vec::new();
         }
+        // SAFETY: `self.ptr` is the live render state this value owns; ROW_ITERATOR's
+        // out type is a row-iterator handle, and `it` is exactly one (a valid
+        // iterator from `_new`, which this call links to the state).
         if unsafe {
             ffi::ghostty_render_state_get(
                 self.ptr,
@@ -405,23 +463,34 @@ impl RenderState {
             )
         } != ffi::SUCCESS
         {
+            // SAFETY: `it` was created by `_new` above and is freed here, once,
+            // on this return path.
             unsafe { ffi::ghostty_render_state_row_iterator_free(it) };
             return Vec::new();
         }
         // Advance to row y (the iterator walks from 0).
         for _ in 0..=y {
+            // SAFETY: `it` is the live iterator linked to the state above.
             if !unsafe { ffi::ghostty_render_state_row_iterator_next(it) } {
+                // SAFETY: freed once, on this return path.
                 unsafe { ffi::ghostty_render_state_row_iterator_free(it) };
                 return Vec::new();
             }
         }
         let mut cells: ffi::GhosttyRenderStateRowCells = std::ptr::null_mut();
+        // SAFETY: a NULL allocator selects the default one; `cells` is a writable
+        // handle slot. From here on `cells` and `it` are each freed once on every
+        // return path.
         if unsafe { ffi::ghostty_render_state_row_cells_new(std::ptr::null(), &mut cells) }
             != ffi::SUCCESS
         {
+            // SAFETY: `it` is live and freed once, on this return path.
             unsafe { ffi::ghostty_render_state_row_iterator_free(it) };
             return Vec::new();
         }
+        // SAFETY: `it` is a live iterator positioned on a row (the `next` loop
+        // above); ROW_DATA_CELLS's out type is a row-cells handle and `cells` is
+        // exactly one (a valid handle from `_new`).
         if unsafe {
             ffi::ghostty_render_state_row_get(
                 it,
@@ -430,6 +499,8 @@ impl RenderState {
             )
         } != ffi::SUCCESS
         {
+            // SAFETY: `cells` and `it` are live handles created above, each freed
+            // once, here, on this return path.
             unsafe {
                 ffi::ghostty_render_state_row_cells_free(cells);
                 ffi::ghostty_render_state_row_iterator_free(it);
@@ -448,6 +519,8 @@ impl RenderState {
         // nothing is ever read that the C side did not write (a failed `get`
         // leaves the zeros, which decode as "no colour, no attributes").
         for x in 0..cols {
+            // SAFETY: `cells` is the live row-cells handle; `x < cols`, and an
+            // out-of-range column would be reported as an error, not UB.
             if unsafe { ffi::ghostty_render_state_row_cells_select(cells, x) } != ffi::SUCCESS {
                 // Keep the column count honest: a blank, not a shifted row.
                 out.push(Cell {
@@ -457,6 +530,9 @@ impl RenderState {
                 continue;
             }
             let mut style_buf = new_style_buf();
+            // SAFETY: `cells` is selected on a cell; `style_buf` is 72 bytes
+            // (the size of `GhosttyStyle`), 8-aligned (it is a `[u64; 9]`, the
+            // alignment ROW_CELLS_DATA_STYLE casts its out pointer to) and writable.
             let got_style = unsafe {
                 ffi::ghostty_render_state_row_cells_get(
                     cells,
@@ -472,6 +548,10 @@ impl RenderState {
                 cap: text_buf.len(),
                 len: 0,
             };
+            // SAFETY: `cells` is selected on a cell; GRAPHEMES_UTF8's out type is a
+            // `GhosttyBuffer`, and `buffer` is one whose `ptr`/`cap` describe the
+            // live, writable `text_buf` (the library writes at most `cap` bytes
+            // and sets `len`, which is clamped with `.min` before use anyway).
             let got_text = unsafe {
                 ffi::ghostty_render_state_row_cells_get(
                     cells,
@@ -492,23 +572,31 @@ impl RenderState {
             // (it must render as nothing: the wide glyph already covers the
             // column) or a blank the program never wrote (it MUST render as a
             // column, or everything to its right slides left). The cell's
-            // `wide` attribute tells them apart.
-            let mut raw: u64 = 0;
-            let mut wide: u32 = 0;
-            let have_wide = unsafe {
-                ffi::ghostty_render_state_row_cells_get(
-                    cells,
-                    ffi::ROW_CELLS_DATA_RAW,
-                    &mut raw as *mut _ as *mut c_void,
-                ) == ffi::SUCCESS
-                    && ffi::ghostty_cell_get(
-                        raw,
-                        ffi::CELL_DATA_WIDE,
-                        &mut wide as *mut _ as *mut c_void,
+            // `wide` attribute tells them apart. Only an empty cell needs the
+            // question asked, so a cell with text skips two FFI calls: on a
+            // 5,000-line history walk that is most of the cells.
+            let spacer = buffer_len == 0 && {
+                let mut raw: u64 = 0;
+                let mut wide: u32 = 0;
+                // SAFETY: `cells` is selected on a cell; ROW_CELLS_DATA_RAW writes a
+                // `u64` (the raw cell) into `raw`, and `ghostty_cell_get` with
+                // CELL_DATA_WIDE then writes a `u32` into `wide`; `&&` short-circuits
+                // so `raw` is only used after it was written successfully.
+                let have_wide = unsafe {
+                    ffi::ghostty_render_state_row_cells_get(
+                        cells,
+                        ffi::ROW_CELLS_DATA_RAW,
+                        &mut raw as *mut _ as *mut c_void,
                     ) == ffi::SUCCESS
+                        && ffi::ghostty_cell_get(
+                            raw,
+                            ffi::CELL_DATA_WIDE,
+                            &mut wide as *mut _ as *mut c_void,
+                        ) == ffi::SUCCESS
+                };
+                have_wide
+                    && (wide == ffi::CELL_WIDE_SPACER_TAIL || wide == ffi::CELL_WIDE_SPACER_HEAD)
             };
-            let spacer = have_wide
-                && (wide == ffi::CELL_WIDE_SPACER_TAIL || wide == ffi::CELL_WIDE_SPACER_HEAD);
             let text = if buffer_len == 0 && !spacer {
                 " ".to_string()
             } else {
@@ -519,6 +607,9 @@ impl RenderState {
                 style: style_to_plain(style_bytes),
             });
         }
+        // SAFETY: `cells` and `it` are live handles created above, each freed
+        // once, here, on the normal return path (no `Cell` borrows from them: the
+        // text was copied out).
         unsafe {
             ffi::ghostty_render_state_row_cells_free(cells);
             ffi::ghostty_render_state_row_iterator_free(it);
@@ -604,6 +695,8 @@ fn style_to_plain(b: &[u8]) -> CellStyle {
 
 impl Drop for RenderState {
     fn drop(&mut self) {
+        // SAFETY: `self.ptr` is the live render state created in `new`, freed
+        // here exactly once (`RenderState` is not `Clone`).
         unsafe { ffi::ghostty_render_state_free(self.ptr) };
     }
 }
