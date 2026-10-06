@@ -1,0 +1,46 @@
+# The ldmux keeper, as a systemd --user service (docs/adr/0021).
+#
+# The keeper owns every PTY and supervises every shell (docs/SPEC.md §4.3). It is its
+# own unit, not a child of the daemon, so what systemd charges to `ldmux.service` is
+# the daemon alone and `systemctl --user status ldmux-keeper` shows the keeper. Each
+# shell it starts is moved into its own transient scope under `ldmux-shells.slice`
+# (`systemctl --user status ldmux-shells.slice`), so memory is attributed per session
+# and a job a shell daemonized stays attributable. `LDMUX_NO_SCOPE=1` (e.g. in
+# `~/.config/ldmux/env`) turns the scopes off and leaves shells in this unit's cgroup.
+#
+# KillMode=process: stopping or restarting THIS unit signals only the keeper. The
+# shells are in their own scopes, so they are not in this cgroup to be signalled by
+# `control-group`; but the keeper is their parent and the PTY owner, so when it dies
+# the masters close and every shell gets SIGHUP. A keeper restart ends every session
+# (docs/SPEC.md §4.3, `scripts/restart-keeper.sh` says so). A DAEMON restart does not
+# touch this unit at all.
+#
+# **This file is a template.** `@BIN_DIR@` is replaced by scripts/install.sh with the
+# absolute path of `~/.local/state/ldmux/current/bin`, as for ldmux.service. The daemon
+# starts this unit on demand (`systemctl --user start`, LDMUX_KEEPER_UNIT in
+# ldmux.service) and `Wants=` it, so it is not enabled on its own.
+[Unit]
+Description=ldmux keeper — PTYs and shells
+After=default.target
+
+[Service]
+Type=simple
+KillMode=process
+Restart=on-failure
+RestartSec=2
+
+# The socket is %t/ldmux/keeper.sock: the daemon's state dir (LDMUX_STATE_DIR in
+# ldmux.service) plus keeper.sock. The directory is made here because this unit may
+# start before the daemon; it is kept across a stop (the daemon's registry lives in it).
+RuntimeDirectory=ldmux
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# What every shell inherits, the same as it did when the daemon spawned the keeper:
+# the state dir (the `ldmux` CLI finds the daemon through it), the per-machine
+# settings, and a PATH with ~/.local/bin first so `ldmux` is on it.
+Environment=LDMUX_STATE_DIR=%t/ldmux
+Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
+EnvironmentFile=-%h/.config/ldmux/env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@BIN_DIR@/ldmux-keeper %t/ldmux/keeper.sock

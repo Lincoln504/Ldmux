@@ -104,6 +104,7 @@
           postInstall = ''
             install -Dm755 deploy/bin/ldmux-terminal $out/bin/ldmux-terminal
             install -Dm644 deploy/ldmux.service $out/share/ldmux/ldmux.service
+            install -Dm644 deploy/ldmux-keeper.service $out/share/ldmux/ldmux-keeper.service
             install -Dm644 deploy/ldmux.env.example $out/share/ldmux/ldmux.env.example
           '';
           meta = {

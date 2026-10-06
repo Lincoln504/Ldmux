@@ -4,8 +4,9 @@
 # its phone down, or a laptop that reboots the daemon, must not lose the shells
 # that are running. That requires three things, and none is the default:
 #
-#   1. `KillMode=process` — see the note on it below. Without it a restart kills
-#      the keeper, and every shell with it.
+#   1. The keeper is NOT this unit's child: it is `ldmux-keeper.service` (ADR-0021),
+#      which this unit `Wants=`. Restarting this unit never touches it. `KillMode=process`
+#      below is kept as a belt for the non-systemd-keeper fallback, not as the mechanism.
 #   2. `loginctl enable-linger $USER` — **not a setting in this file, and the one
 #      that is easiest to miss.** `WantedBy=default.target` starts the unit with the
 #      user manager, and the user manager *stops on the last logout* unless linger is
@@ -37,31 +38,30 @@
 #
 # **This file is a template.** `@BIN_DIR@` is replaced by scripts/install.sh with the
 # absolute path of `~/.local/state/ldmux/current/bin`, a stable link to the installed
-# binaries (a nix GC root when they came from `nix build`). The keeper is started by the
-# daemon from the binary beside it, so all three binaries live in that one directory.
+# binaries (a nix GC root when they came from `nix build`). The keeper unit uses the
+# binary beside the daemon, so all three binaries live in that one directory.
 #
 # Install with `nix run .#install` (nix-built binaries) or `scripts/install.sh [BIN_DIR]`
 # (any directory holding ldmuxd, ldmux and ldmux-keeper): it links the binaries into
-# `~/.local/bin`, and puts the rendered unit at `~/.config/systemd/user/ldmux.service`
-# (beside it as `ldmux.service.new` when one is already there, unless FORCE=1), then
+# `~/.local/bin`, and puts the rendered units at `~/.config/systemd/user/ldmux.service`
+# and `ldmux-keeper.service` (each beside it as `.new` when one is already there, unless
+# FORCE=1), then
 # runs `systemctl --user daemon-reload`. It does not enable or restart the unit:
 # `systemctl --user enable --now ldmux` the first time, `restart` after that.
 [Unit]
 Description=ldmux daemon — remote terminal sessions
-After=default.target
+Wants=ldmux-keeper.service
+After=default.target ldmux-keeper.service
 
 [Service]
 Type=simple
 
-# KillMode=process is the important line.
-#
-# The keeper, and therefore every shell in it, is *not* a child of this process —
-# but it is in this unit's cgroup, because the daemon was what started it. The
-# default KillMode=control-group signals the whole cgroup on stop, which kills the
-# keeper and every session with it: measured, all sessions gone on a single
-# `systemctl --user restart` (docs/DESKTOP-INTEGRATION.md). `process` signals only
-# the daemon, and the shells survive it — which is the entire point of a
-# kept-alive session. The keeper re-attaches on the daemon's next start.
+# KillMode=process: stopping this unit signals only the daemon. The keeper and every
+# shell are in other units' cgroups (ldmux-keeper.service, and one scope per shell under
+# ldmux-shells.slice), so `control-group` would not reach them either; `process` is kept
+# so that a keeper the daemon had to spawn itself (LDMUX_KEEPER_UNIT unset or failing:
+# no systemd keeper unit) still survives a daemon restart, the ssh-agent way. The keeper
+# re-attaches on the daemon's next start.
 KillMode=process
 
 # A restart is a daemon restart, not a session wipe, so it is always safe to
@@ -71,6 +71,11 @@ Restart=on-failure
 RestartSec=2
 
 Environment=LDMUX_STATE_DIR=%t/ldmux
+
+# Start the keeper through systemd, not as this process's child (ADR-0021). The daemon
+# runs `systemctl --user start` on this unit and waits for the socket; if the variable
+# is unset, or the start fails, it spawns the keeper itself.
+Environment=LDMUX_KEEPER_UNIT=ldmux-keeper.service
 
 # The bearer token the phone is paired with. Not in the state directory: that is
 # a tmpfs, so a token kept there was minted afresh on every boot and every paired

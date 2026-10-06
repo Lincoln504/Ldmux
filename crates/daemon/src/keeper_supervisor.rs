@@ -7,6 +7,16 @@
 //! `<stateDir>/keeper.lock` serializes concurrent spawn attempts (the kernel
 //! releases it on death, unlike a pidfile); the pid is read *inside* the lock.
 //!
+//! **Two ways to start a keeper (ADR-0021).** When `LDMUX_KEEPER_UNIT` names a
+//! systemd user unit and `systemctl` is found, "ensure the keeper" is
+//! `systemctl --user start <unit>` (idempotent) and then the same wait on the
+//! socket: the keeper is a unit, not the daemon's child, so its shells are not
+//! charged to the daemon. Without it (a machine without systemd, every test) the
+//! daemon spawns the keeper detached as before. The socket connect stays the only
+//! liveness test and the flock still serializes concurrent daemons in both modes;
+//! the keeper itself refuses to bind a socket a live keeper serves, so a unit
+//! start racing a detached spawn can never leave two.
+//!
 //! New (no TS source of record): the keeper does not exist in the TS tree. The
 //! TS daemon's `ldmuxd.lock` is the *daemon's* single-instance lock (a `wx`
 //! create + recorded pid); this is a *different* lock — the keeper's.
@@ -27,6 +37,50 @@ pub struct KeeperSupervisor {
     /// Exposed so a caller (a test) can stop a detached keeper; the daemon
     /// itself never signals it (the keeper outlives the daemon).
     last_pid: AtomicU32,
+    /// The systemd user unit that runs the keeper and the absolute `systemctl`,
+    /// when the keeper is started through systemd (see the module docs).
+    unit: Option<KeeperUnit>,
+}
+
+/// How to start the keeper through systemd.
+#[derive(Debug, Clone)]
+pub struct KeeperUnit {
+    /// The unit name (`ldmux-keeper.service`).
+    pub name: String,
+    /// Absolute path of `systemctl`.
+    pub systemctl: PathBuf,
+}
+
+impl KeeperUnit {
+    /// From `LDMUX_KEEPER_UNIT` and `PATH` (plus `/usr/bin:/bin`); `None` when the
+    /// variable is unset/empty or no executable `systemctl` is found.
+    pub fn from_env() -> Option<Self> {
+        Self::resolve(
+            std::env::var("LDMUX_KEEPER_UNIT").ok(),
+            std::env::var("PATH").unwrap_or_default(),
+            |p| {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(p)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            },
+        )
+    }
+
+    /// [`from_env`](Self::from_env) with the inputs injected.
+    pub fn resolve(
+        unit: Option<String>,
+        path: String,
+        executable: impl Fn(&Path) -> bool,
+    ) -> Option<Self> {
+        let name = unit.filter(|u| !u.trim().is_empty())?.trim().to_string();
+        let systemctl = path
+            .split(':')
+            .chain(["/usr/bin", "/bin"])
+            .filter(|d| d.starts_with('/'))
+            .map(|d| Path::new(d).join("systemctl"))
+            .find(|p| executable(p))?;
+        Some(Self { name, systemctl })
+    }
 }
 
 impl KeeperSupervisor {
@@ -41,7 +95,16 @@ impl KeeperSupervisor {
             lock_path,
             keeper_bin,
             last_pid: AtomicU32::new(0),
+            unit: KeeperUnit::from_env(),
         }
+    }
+
+    /// Start the keeper through `unit` (`None`: spawn it detached). [`new`](Self::new)
+    /// reads `LDMUX_KEEPER_UNIT`; this is for callers that already know.
+    #[must_use]
+    pub fn with_unit(mut self, unit: Option<KeeperUnit>) -> Self {
+        self.unit = unit;
+        self
     }
 
     /// The pid of the last keeper we spawned (`0` if we have not spawned one).
@@ -105,7 +168,20 @@ impl KeeperSupervisor {
         let _lock = self.acquire_lock().await?;
         // Re-check (another daemon may have spawned it while we waited).
         if !self.is_alive().await {
-            self.spawn_detached().await?;
+            match &self.unit {
+                Some(u) => {
+                    if let Err(e) = self.start_unit(u).await {
+                        // The unit may be missing or the user manager unreachable.
+                        // The keeper must still come up: fall back to a detached
+                        // spawn, unless the unit's keeper answered after all.
+                        eprintln!("ldmuxd: {e}; spawning the keeper directly");
+                        if !self.is_alive().await {
+                            self.spawn_detached().await?;
+                        }
+                    }
+                }
+                None => self.spawn_detached().await?,
+            }
         }
         drop(_lock);
         // Wait for the keeper to answer (it binds the socket on start).
@@ -139,6 +215,29 @@ impl KeeperSupervisor {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             }
+        }
+    }
+
+    /// `systemctl --user start <unit>`: idempotent, and returns once the service
+    /// process is forked (Type=simple), after which the caller waits on the socket.
+    async fn start_unit(&self, u: &KeeperUnit) -> Result<(), String> {
+        let mut cmd = tokio::process::Command::new(&u.systemctl);
+        cmd.args(["--user", "start", &u.name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let run = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output());
+        match run.await {
+            Err(_) => Err(format!("systemctl --user start {} timed out", u.name)),
+            Ok(Err(e)) => Err(format!("run {}: {e}", u.systemctl.display())),
+            Ok(Ok(o)) if o.status.success() => Ok(()),
+            Ok(Ok(o)) => Err(format!(
+                "systemctl --user start {} failed ({}): {}",
+                u.name,
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
         }
     }
 
@@ -279,5 +378,100 @@ mod tests {
         // Cleanup.
         kill_keeper(&sup).await;
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// Write an executable stub `systemctl` that records its arguments in `mark`
+    /// (proof it ran) and then runs `body`.
+    fn stub_systemctl(dir: &Path, mark: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("systemctl");
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\necho \"$@\" >> {}\n{body}\n", mark.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn stop_pidfile(pidfile: &Path) {
+        if let Some(pid) = std::fs::read_to_string(pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+        {
+            let _ = signal::kill(Pid::from_raw(pid), signal::Signal::SIGTERM);
+        }
+    }
+
+    /// Unit mode: `ensure` runs `systemctl --user start <unit>` and then waits on the
+    /// socket; the daemon does not spawn the keeper itself.
+    #[tokio::test]
+    async fn unit_mode_starts_the_keeper_through_systemctl() {
+        let state_dir = scratch_dir();
+        let (mark, pidfile) = (state_dir.join("mark"), state_dir.join("pid"));
+        let body = format!(
+            "{} {} </dev/null >/dev/null 2>&1 &\necho $! > {}",
+            keeper_bin().display(),
+            state_dir.join("keeper.sock").display(),
+            pidfile.display()
+        );
+        let systemctl = stub_systemctl(&state_dir, &mark, &body);
+        let sup =
+            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+                name: "ldmux-keeper.service".into(),
+                systemctl,
+            }));
+        sup.ensure().await.unwrap();
+        assert!(sup.is_alive().await);
+        assert_eq!(
+            std::fs::read_to_string(&mark).unwrap().trim(),
+            "--user start ldmux-keeper.service",
+            "the stub systemctl must have run"
+        );
+        assert_eq!(sup.last_pid(), 0, "the daemon did not spawn it");
+
+        // A live keeper: no second `start`.
+        sup.ensure().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&mark).unwrap().lines().count(), 1);
+
+        stop_pidfile(&pidfile);
+        for _ in 0..500 {
+            if !sup.is_alive().await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// A failing `systemctl` (no unit, no user manager) must not leave the daemon
+    /// without a keeper: it falls back to the detached spawn.
+    #[tokio::test]
+    async fn unit_mode_falls_back_to_a_detached_spawn_when_systemctl_fails() {
+        let state_dir = scratch_dir();
+        let mark = state_dir.join("mark");
+        let systemctl = stub_systemctl(&state_dir, &mark, "echo no such unit >&2; exit 5");
+        let sup =
+            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+                name: "ldmux-keeper.service".into(),
+                systemctl,
+            }));
+        sup.ensure().await.unwrap();
+        assert!(sup.is_alive().await);
+        assert!(mark.exists(), "the stub systemctl must have run");
+        assert!(sup.last_pid() != 0, "the fallback spawned the keeper");
+        kill_keeper(&sup).await;
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn the_unit_comes_from_the_env_with_an_absolute_systemctl() {
+        let exe = |p: &Path| p == Path::new("/usr/bin/systemctl");
+        let u = KeeperUnit::resolve(Some("k.service".into()), "rel:/nope".into(), exe).unwrap();
+        assert_eq!(u.name, "k.service");
+        assert_eq!(u.systemctl, Path::new("/usr/bin/systemctl"));
+        assert!(KeeperUnit::resolve(None, "/usr/bin".into(), exe).is_none());
+        assert!(KeeperUnit::resolve(Some(" ".into()), "/usr/bin".into(), exe).is_none());
+        assert!(KeeperUnit::resolve(Some("k".into()), "/usr/bin".into(), |_| false).is_none());
     }
 }

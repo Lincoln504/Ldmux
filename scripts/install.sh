@@ -17,11 +17,12 @@
 #                                      binaries link; any other BIN_DIR is copied into
 #                                      $STATE/releases/<stamp>/bin and linked.
 #   ~/.local/bin/{ldmuxd,ldmux,ldmux-keeper,ldmux-terminal} -> $STATE/current/bin/...
-#   ~/.config/systemd/user/ldmux.service   ExecStart = the absolute $STATE/current/bin/ldmuxd.
+#   ~/.config/systemd/user/ldmux.service         ExecStart = the absolute $STATE/current/bin/ldmuxd.
+#   ~/.config/systemd/user/ldmux-keeper.service  ExecStart = the absolute $STATE/current/bin/ldmux-keeper
+#                                                (the keeper is its own unit, ADR-0021).
 #
-# The keeper is started by the daemon from the binary BESIDE it (daf5e9f), so the three
-# binaries always come from one directory. An existing user unit is never overwritten
-# silently: the new one is written as ldmux.service.new unless FORCE=1.
+# The keeper unit and the daemon both run the binaries in one directory. An existing user
+# unit is never overwritten silently: the new one is written as <unit>.new unless FORCE=1.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -78,21 +79,31 @@ for b in ldmuxd ldmux ldmux-keeper ldmux-terminal; do
   ln -sfn "$state/current/bin/$b" "$local_bin/.$b.new" && mv -T "$local_bin/.$b.new" "$local_bin/$b"
 done
 
-# 3. The unit. The template's @BIN_DIR@ is the absolute stable path.
-rendered=$state/ldmux.service.rendered
-sed "s|@BIN_DIR@|$state/current/bin|g" "$deploy/ldmux.service" > "$rendered"
-unit=$unit_dir/ldmux.service
-if [ ! -e "$unit" ] || [ "${FORCE:-}" = 1 ]; then
-  install -m 644 "$rendered" "$unit"
-  echo "installed the unit: $unit"
-elif cmp -s "$rendered" "$unit"; then
-  echo "the unit is already current: $unit"
-else
-  install -m 644 "$rendered" "$unit.new"
-  echo "NOTE: $unit exists and differs; the new one is $unit.new"
-  echo "      review it (diff \"$unit\" \"$unit.new\"), then mv it into place, or rerun with FORCE=1"
-fi
-rm -f "$rendered"
+# 3. The units. The template's @BIN_DIR@ is the absolute stable path. Each unit file is
+# handled on its own by the never-overwrite rule: written if absent (or FORCE=1), left
+# alone when identical, else written beside it as <unit>.new. Nothing else in the unit
+# directory is touched.
+install_unit() {
+  name=$1
+  [ -f "$deploy/$name" ] || { echo "error: $deploy/$name not found" >&2; exit 1; }
+  rendered=$state/$name.rendered
+  sed "s|@BIN_DIR@|$state/current/bin|g" "$deploy/$name" > "$rendered"
+  unit=$unit_dir/$name
+  if [ ! -e "$unit" ] || [ "${FORCE:-}" = 1 ]; then
+    install -m 644 "$rendered" "$unit"
+    echo "installed the unit: $unit"
+  elif cmp -s "$rendered" "$unit"; then
+    echo "the unit is already current: $unit"
+  else
+    install -m 644 "$rendered" "$unit.new"
+    echo "NOTE: $unit exists and differs; the new one is $unit.new"
+    echo "      review it (diff \"$unit\" \"$unit.new\"), then mv it into place, or rerun with FORCE=1"
+  fi
+  rm -f "$rendered"
+}
+[ -f "$deploy/ldmux-keeper.service" ] || { echo "error: $deploy/ldmux-keeper.service not found" >&2; exit 1; }
+install_unit ldmux-keeper.service
+install_unit ldmux.service
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload || echo "note: systemctl --user daemon-reload failed (no user manager in this session?)"
@@ -118,10 +129,10 @@ if [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/ldmux/env" ]; then
 fi
 
 # A running keeper is OLD CODE and nothing replaces it. The keeper outlives the daemon
-# on purpose (the ssh-agent pattern), so `systemctl --user restart ldmux` restarts half
-# the system: the running keeper keeps executing the binary it started from (measured
-# 2026-10-04: a keeper from 13:39 served a daemon built at 23:02 and the daemon silently
-# fell back to a worse answer). Replacing it ends every shell (plan R3), so say so.
+# on purpose, so `systemctl --user restart ldmux` restarts half the system: the running
+# keeper keeps executing the binary it started from (measured 2026-10-04: a keeper from
+# 13:39 served a daemon built at 23:02 and the daemon silently fell back to a worse
+# answer). Replacing it ends every shell (plan R3), so say so.
 live_keeper=
 for c in /proc/[0-9]*/comm; do
   if [ "$(cat "$c" 2>/dev/null || true)" = ldmux-keeper ]; then
@@ -142,3 +153,4 @@ fi
 
 echo "installed ldmuxd, ldmux, ldmux-keeper and ldmux-terminal from $bin_dir"
 echo "apply with: systemctl --user restart ldmux   (first time: systemctl --user enable --now ldmux)"
+echo "the daemon starts ldmux-keeper.service itself; a RUNNING keeper (started by an older daemon) is replaced only by scripts/restart-keeper.sh"

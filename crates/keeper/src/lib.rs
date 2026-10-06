@@ -15,6 +15,7 @@
 //! `docs/SPEC.md` and `docs/STATE.md`.
 
 mod emulator;
+pub mod scope;
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -389,6 +390,10 @@ mod child_env_tests {
 pub struct Keeper {
     sessions: Mutex<HashMap<String, Session>>,
     shell: Vec<String>,
+    /// When set, each shell is moved into its own systemd scope after it starts
+    /// (ADR-0021). `None` (the default of [`Keeper::new`]) leaves shells where
+    /// the keeper forked them.
+    scope: Option<scope::ScopeEnv>,
 }
 
 /// The pane's foreground command name (`/proc/<pid>/comm`), e.g. `dash`,
@@ -443,7 +448,16 @@ impl Keeper {
         Self {
             sessions: Mutex::new(HashMap::new()),
             shell,
+            scope: None,
         }
+    }
+
+    /// Put each shell in its own transient scope (see [`scope`]); `None` keeps
+    /// shells in the keeper's cgroup. The binary passes [`scope::ScopeEnv::detect`].
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<scope::ScopeEnv>) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Process one keeper message, returning the answer (or an [`km::Error`]).
@@ -899,7 +913,29 @@ impl Keeper {
                 <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(pipe_fds[1]),
             )
         };
+        // The go pipe: with a scope configured the child blocks on it until the
+        // keeper has moved it into its scope, so nothing it forks can be left in
+        // the keeper's cgroup. A byte from the keeper (or EOF) releases it.
+        let go = if self.scope.is_some() {
+            let mut g = [0 as libc::c_int; 2];
+            // SAFETY: `g` is a writable `[c_int; 2]`, the array `pipe2` fills.
+            if unsafe { libc::pipe2(g.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `pipe2` succeeded; both descriptors are open, ours alone,
+            // and each is wrapped once.
+            Some(unsafe {
+                (
+                    <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(g[0]),
+                    <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(g[1]),
+                )
+            })
+        } else {
+            None
+        };
+        let go_raw = go.as_ref().map(|(r, w)| (r.as_raw_fd(), w.as_raw_fd()));
         let pid = fork_shell(
+            go_raw,
             slave_in_raw,
             slave_out_raw,
             slave_err_raw,
@@ -917,6 +953,28 @@ impl Keeper {
         drop(slave);
         drop(err_wr);
         // From here every error path must reap `pid`.
+        //
+        // Move the child (still blocked on the go pipe) into its own scope, then
+        // release it. A failure is logged and ignored: the shell then starts in the
+        // keeper's cgroup, exactly as it does without scopes. A cancelled future drops
+        // the write end, which releases the child by EOF.
+        if let Some((go_r, go_w)) = go {
+            drop(go_r);
+            if let Some(env) = self.scope.clone() {
+                let sid = s.session_id.clone();
+                match tokio::task::spawn_blocking(move || scope::enter(&env, &sid, pid)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => eprintln!("ldmux-keeper: no scope for pid {pid}: {e}"),
+                    Err(e) => eprintln!("ldmux-keeper: scope task failed: {e}"),
+                }
+            }
+            // Release the child with a BYTE, not by closing: a concurrent spawn's
+            // child holds a copy of this write end until it execs, so EOF alone
+            // could wait on a sibling that is itself waiting on us. (EOF still
+            // frees a child whose keeper died.) A failed write is the same as EOF.
+            let _ = nix::unistd::write(&go_w, b"g");
+            drop(go_w);
+        }
         let report = tokio::task::spawn_blocking(move || read_exec_report(&err_rd))
             .await
             .unwrap_or(ExecReport::Failed(0, 0));
@@ -1217,6 +1275,7 @@ fn signal_session(sid: i32, sig: nix::sys::signal::Signal) {
 // order. Bundling them would name them, not make them any harder to swap.
 #[allow(clippy::too_many_arguments)]
 fn fork_shell(
+    go: Option<(std::os::fd::RawFd, std::os::fd::RawFd)>,
     slave_in_raw: std::os::fd::RawFd,
     slave_out_raw: std::os::fd::RawFd,
     slave_err_raw: std::os::fd::RawFd,
@@ -1241,6 +1300,24 @@ fn fork_shell(
     match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Child) => {
             // Only async-signal-safe calls here, then exec.
+            if let Some((go_r, go_w)) = go {
+                // Wait to be put in our scope (see `spawn_session`): drop our copy of
+                // the write end, so the keeper dying releases us too, then block for
+                // the byte or the EOF. SAFETY: both descriptors are open in this
+                // child; `close` and `read` are async-signal-safe and `buf` is a
+                // valid 1-byte buffer.
+                unsafe {
+                    libc::close(go_w);
+                    let mut buf = [0u8; 1];
+                    loop {
+                        let n = libc::read(go_r, buf.as_mut_ptr() as *mut _, 1);
+                        if n >= 0 || *libc::__errno_location() != libc::EINTR {
+                            break;
+                        }
+                    }
+                    libc::close(go_r);
+                }
+            }
             // SAFETY: `setsid` takes no arguments and is async-signal-safe.
             let _ = unsafe { libc::setsid() };
             // Make the slave this session's controlling terminal. Without it the
