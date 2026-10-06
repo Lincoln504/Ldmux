@@ -1,6 +1,7 @@
 # ADR-0016 — The daemon listens on the tailnet address, and only there
 
-- **Status:** Accepted
+**Status:** Accepted (2026-09-27); supersedes ADR-0005
+
 - **Date:** 2026-09-27
 - **Supersedes:** ADR-0005 (loopback bind + `tailscale serve`)
 - **Related:** ADR-0017 (QR pairing), `docs/REMOTE.md`, `deploy/ldmux.service`
@@ -8,9 +9,9 @@
 ## Context
 
 ADR-0005 decided on a loopback bind exposed by `tailscale serve` (TLS, MagicDNS).
-That is not what runs. The deployed unit sets `LDMUX_REMOTE_HOST=100.127.119.54`
+That is not what runs. The deployed unit sets `LDMUX_REMOTE_HOST=100.x.y.z`
 (this machine's tailnet address) and `LDMUX_REMOTE_PORT=7625`, the phone connects
-with plain `ws://100.127.119.54:7625/ws`, and `tailscale serve status` reports no
+with plain `ws://100.x.y.z:7625/ws`, and `tailscale serve status` reports no
 configuration. The docs described one architecture and the machine ran another.
 
 The direct bind was chosen in practice for what it avoids:
@@ -34,9 +35,9 @@ connection's source was checked. The bearer token was the only gate.
 - The daemon listens on **its tailnet address or loopback, and nothing else**.
   Tailnet means `100.64.0.0/10` or `fd7a:115c:a1e0::/48`; loopback means
   `127.0.0.0/8`, `::1` or `localhost`. The rule is data in
-  `packages/protocol/src/net.ts`.
+  `crates/protocol/src/net.rs`.
 - It is enforced in three places:
-  1. `main.ts` exits with a message when `LDMUX_REMOTE_HOST` breaks it.
+  1. `ldmuxd` (its startup) exits with a message when `LDMUX_REMOTE_HOST` breaks it.
   2. `RemoteServer.start` refuses to listen, for any caller.
   3. Every request and upgrade from a peer outside those ranges gets `403`,
      before the token is looked at.
@@ -45,7 +46,7 @@ connection's source was checked. The bearer token was the only gate.
   `ws://`, so there is no TLS at the application layer. The link never leaves the
   tailnet, and the peer check makes that a property of the daemon, not of the
   deployment.
-- The bearer token stays the authentication gate (`auth.ts`).
+- The bearer token stays the authentication gate (`crates/daemon/src/auth.rs`).
 - `tailscale serve` is not the architecture. `ldmux expose` and the
   `serve`-shaped output of `ldmux pair` went with ADR-0017.
 

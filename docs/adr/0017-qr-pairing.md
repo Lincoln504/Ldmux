@@ -1,6 +1,7 @@
 # ADR-0017 — Pairing is a QR code from `ldmux code`
 
-- **Status:** Accepted
+**Status:** Accepted (2026-09-27); supersedes the pairing half of ADR-0005
+
 - **Date:** 2026-09-27
 - **Supersedes:** the pairing half of ADR-0005
 - **Related:** ADR-0016 (direct tailnet bind), ADR-0013 (cross-platform seams)
@@ -22,22 +23,22 @@ The app had no handler for the deep link either.
 
 **The link.**
 
-    ldmux://pair?v=1&host=100.127.119.54:7625&token=<64 hex>&name=debian
+    ldmux://pair?v=1&host=100.x.y.z:7625&token=<64 hex>&name=debian
 
-- `packages/protocol/src/pairing.ts` defines it.
+- `crates/protocol/src/pairing.rs` defines it (the daemon side is `crates/daemon/src/pairing.rs`).
 - `host` is the address the daemon listens on, from `remote_info`, never a guess
   about exposure.
 - The app refuses a link whose host is not tailnet or loopback
-  (`protocol/src/net.ts` and its Kotlin mirror). A crafted code therefore cannot
+  (`crates/protocol/src/net.rs` and its Kotlin mirror). A crafted code therefore cannot
   point the phone at a machine off the tailnet.
 - `v` is the format version, and an unknown version is refused.
-- `packages/protocol/test/fixtures/pairing-links.json` pins the format from both
-  sides: the TypeScript tests and the app's `PairingTest` read the same cases.
+- `crates/protocol/test/fixtures/pairing-links.json` pins the format from both
+  sides: the Rust tests and the app's `PairingTest` read the same cases.
 
 **The computer.**
 
 - `ldmux code` draws the link as a QR code in the terminal.
-  - The encoder is `packages/daemon/src/qr.ts`, written here because production
+  - The encoder is `crates/daemon/src/qr.rs`, written here because production
     has one dependency and the pinned runtime has no QR tool.
   - It is judged by decoding, not by comparing bits: zbar, a devShell-only test
     tool, reads back every version at every level, plus the terminal rendering
@@ -69,7 +70,7 @@ The app had no handler for the deep link either.
   is *asked about* (`pair with debian?`) before it replaces anything. A scan from
   the app's own button is not, because the button was the question.
 - **Unpairing forgets the pairing on this phone.** It does not revoke the token:
-  there is one shared token (`auth.ts`), so revoking it would unpair every
+  there is one shared token (`crates/daemon/src/auth.rs`), so revoking it would unpair every
   device. Per-device tokens are the follow-up that makes unpair a revocation.
 
 ## Consequences

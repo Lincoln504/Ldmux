@@ -1,5 +1,7 @@
 # Rust port log
 
+> **ARCHIVE (moved to docs/archive/ 2026-10-06).** Historical record. The port's continuity log; not the current gate or current state. Gate: the `Justfile` and `README.md`. State: `docs/STATE.md`.
+
 > **Banner, 2026-10-05.** tmux is now fully removed from the software: the wire
 > field is `keeperName` (was `tmuxName`), `keeperSocket` (was `tmuxSocket`), `paneInMode`
 > and the `copymode` message are gone, and the parity gate uses committed goldens

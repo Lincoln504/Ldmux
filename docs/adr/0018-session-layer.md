@@ -1,6 +1,7 @@
 # ADR-0018 — The session layer is the keeper
 
-**Status:** accepted, 2026-10-04 (the D4 step of `docs/RUST-PORT-PLAN.md`).
+**Status:** Accepted (2026-10-04); supersedes ADR-0015, ADR-0001 and ADR-0006 §2
+
 **Supersedes:** ADR-0015 (tmux keeps the PTYs), ADR-0001 (control-mode transport),
 and ADR-0006 §2 (ldmux does not own a PTY layer).
 
@@ -68,5 +69,5 @@ Unix socket using the same message vocabulary it speaks to clients.
 ## What this does not decide
 
 - `docs/MESH-TRANSPORT.md` (multi-host) is untouched.
-- The tmux *investigation* (`docs/TMUX-DEPENDENCY.md`) is kept as the evidence
+- The tmux *investigation* (`docs/archive/TMUX-DEPENDENCY.md`) is kept as the evidence
   base for this decision, not deleted.

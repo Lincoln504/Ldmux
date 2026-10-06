@@ -1,5 +1,15 @@
 # What a frame costs on the wire, measured
 
+> **Provenance (2026-10).** The measurements below were taken against the
+> TypeScript daemon (a `ws` client against `remote.ts`). The Rust daemon carries the
+> same frame format (`crates/protocol/src/frames.rs`), so the frame-size findings
+> carry over, but two things changed: the daemon's flush constant is now 4 KiB
+> (`OUTPUT_FLUSH_BYTES`, `crates/daemon/src/remote.rs`), and the Rust daemon does
+> **not** negotiate `permessage-deflate` (it has its own HTTP upgrade and no
+> `Sec-WebSocket-Extensions` handling; the Ktor client still offers it). The 14.8x
+> compression result is therefore a property of the old daemon, not of what is deployed.
+> Re-measure before relying on any number here for the Rust daemon.
+
 Status: **measured, and the conclusion contradicts the assumption this file was
 written to test.** Read the first section before reading any other document about
 frame sizes, because the premise everyone reaches for — "a grid is ~17 KB, so shrink
@@ -7,8 +17,8 @@ the grid" — is **false for this codebase**.
 
 ## What the wire actually carries
 
-`frames.ts:15` says it in so many words: *only `FrameType.Output` is emitted by the
-shipped code; the remaining members [are unused]*. A frame is an **8-byte header
+`crates/protocol/src/frames.rs` defines more frame types, but only `OUTPUT` is emitted
+on the remote socket by shipped code (the remaining members are reserved). A frame is an **8-byte header
 followed by raw pty bytes**. There is no cell grid on the wire, and there never was —
 the client runs its own libghostty and emulates the stream.
 
@@ -40,7 +50,7 @@ processed, scrolled past, and dropped — and it **must** be processed, because 
 bytes carry the state changes, not just the text.
 
 But the daemon can produce the screen directly: that is what the attach snapshot
-already is, fetched with `capture-pane`. So when a client is behind by more than it
+already is, rendered from the keeper's emulator. So when a client is behind by more than it
 can keep, the correct thing to send is **a snapshot, not the backlog**.
 
 - Measured potential: 514,758 B → **~2,000 B**, one snapshot for that workload. Two
@@ -48,8 +58,8 @@ can keep, the correct thing to send is **a snapshot, not the backlog**.
 - What it costs: the client's scrollback loses what it skipped. That is honest —
   those lines were never going to be in a 1000-line buffer anyway.
 - What it needs: a policy for "this client is too far behind", and the daemon
-  already knows the answer (it drops and resyncs today when the pending buffer
-  overflows: `MAX_PENDING_BYTES`). The mechanism exists; the threshold and the
+  already knows the answer (it drops and resyncs today when a socket's queue passes
+  `WS_BACKLOG_BYTES`, 64 KiB, in `crates/daemon/src/remote.rs`). The mechanism exists; the threshold and the
   response are what would change.
 
 **This is the answer to "how do we drastically lower it". Not smaller frames —
@@ -80,8 +90,9 @@ type is next added for another reason, and it is not worth a protocol change on 
 
 ### 3. Compression, which needs no protocol change at all
 
-`permessage-deflate` is a WebSocket extension, so it needs no framing work at all. It is
-the biggest verified win in this document. Measured over loopback, `bytesRead` on the
+`permessage-deflate` is a WebSocket extension, so it needs no framing work at all. It was
+the biggest verified win in this document **on the TypeScript daemon; the Rust daemon does
+not negotiate it (see the provenance note), so today it is an open item, not a taken win.** Measured over loopback, `bytesRead` on the
 client for identical workloads:
 
 | Workload | deflate off | deflate on | |
@@ -110,24 +121,11 @@ long-running systemd unit started before the change, so it was the old code. Aga
 daemon started from the current source the same probe returned 14.8x. **Measure against
 the source you changed**, and prefer a freshly started instance to a running one.
 
-### 3. Compression, which needs no protocol change at all
-
-`permessage-deflate` is a WebSocket extension. Terminal output is extremely
-repetitive — `-rw-r--r-- 1 ldeen ldeen 4096 Sep 18` repeated down the page — so
-bulk output should compress 5-10x.
-
-Two conditions, both real:
-
-- The **client must offer it**. Ktor does not offer `permessage-deflate` by default,
-  so enabling it on the daemon alone would activate nothing; the client needs
-  configuring too.
-- It must be **threshold-gated** (`perMessageDeflate.threshold`), or a 9-byte
-  keystroke echo would get inflated by its own deflate header.
 
 ### 4. The coalescing window is sized for a datacentre, not a phone
 
-`OUTPUT_FLUSH_BYTES = 16 * 1024`, which is why the largest frame measured above is
-18,646 bytes. On a lossy link one dropped segment costs 18 KB of retransmission, and
+`OUTPUT_FLUSH_BYTES` was `16 * 1024` when this was measured, which is why the largest
+frame above is 18,646 bytes; it is now 4 KiB. On a lossy link one dropped segment costs 18 KB of retransmission, and
 the frame cannot be displayed until all of it arrives.
 
 At 4 KB the framing overhead is 128 frames x 8 bytes = 1 KB out of 514 KB, or 0.2%.
@@ -141,9 +139,9 @@ first paint. That is worth taking, and it is a constant, not an architecture.
 | program output | 514 KB for `ls -laR` | send a snapshot instead of the backlog | **~250x** |
 | pty stream as delta | already minimal | nothing — a terminal stream *is* the delta of its own state | — |
 | snapshot envelope | 1985 B | binary frame instead of JSON | **25%** of one message per attach |
-| compression | **measured 14.8x on 218 KB** | done, threshold-gated on both sides | taken |
+| compression | measured 14.8x on 218 KB (TS daemon) | **not implemented in the Rust daemon**; client offers it | open |
 | frame header | 8 B x 32 = 0.05% | nothing worth doing | — |
-| coalescing | 16 KB units | 4 KB units | costs 0.2%, buys loss behaviour |
+| coalescing | was 16 KB units | 4 KB units (done: `OUTPUT_FLUSH_BYTES`) | taken |
 
 ## The two things that follow
 

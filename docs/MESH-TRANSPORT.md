@@ -1,5 +1,6 @@
 # Mesh transport (LoRa) — is a terminal over MeshCore plausible?
 
+Target: **MeshCore** (Meshtastic appears below only as a comparison).
 Status: **investigated, not implemented.** This records what is known, what it costs,
 and what is still unanswered. It is not a plan of record and nothing reads it at
 runtime.
@@ -46,8 +47,8 @@ corrected it.** It assumed a frame carried a cell grid — 40-byte header plus 9
 bytes per cell, so ~17.3 KB per 80x24 screen, ~94 MeshCore packets, about 0.03 fps.
 That is the arithmetic for an *in-memory render structure*, not for traffic.
 
-What actually goes on the wire is the pty byte stream. `frames.ts:15` says only
-`FrameType.Output` is emitted, and measurement agrees — see `WIRE-COST.md`:
+What actually goes on the wire is the pty byte stream. `crates/protocol/src/frames.rs` defines more frame types, but only
+`OUTPUT` is emitted on the remote socket, and measurement agrees — see `WIRE-COST.md`:
 
 | Workload | Frames | Bytes |
 |---|---|---|
@@ -63,7 +64,7 @@ So the mesh arithmetic changes completely:
   over. Interactive traffic is not the problem at all.
 - A `seq 1 100` frame is 477 bytes and does **not** fit; it would be split across
   three packets. So a mesh transport needs the daemon's coalescing capped at the
-  MTU — `OUTPUT_FLUSH_BYTES` is 4 KiB today, which is 22 MeshCore packets' worth.
+  MTU — `OUTPUT_FLUSH_BYTES` (`crates/daemon/src/remote.rs`) is 4 KiB today, which is 22 MeshCore packets' worth.
 - `ls -laR`'s 514,758 bytes are the real cost, and they are the *volume* of output
   rather than the size of a frame. The lever is the one in `WIRE-COST.md`: when a
   client is behind, send it a snapshot of now instead of the backlog. On a mesh that
@@ -71,7 +72,7 @@ So the mesh arithmetic changes completely:
 
 ## Why this is a different transport, not a lower frame rate
 
-`FramePacing` (this repo) paces **rendering** against the measured round trip. It does
+`FramePacing` (the mobile client, `packages/mobile`) paces **rendering** against the measured round trip. It does
 not change what is on the wire: a frame is sent when the pane changes, and a frame is
 the whole grid. Lowering the cadence, which was done this week and is worth doing,
 buys main-thread headroom and battery. It does not make the payload smaller, and mesh
@@ -80,7 +81,7 @@ is a payload problem.
 A mesh path would need:
 
 1. **A line-delta protocol.** The daemon sends a line, the client paints a line. The
-   daemon already has the plain-text path this needs (`capture`), which matters,
+   daemon already has the plain-text path this needs (the `capture` RPC in `crates/daemon/src/daemon.rs`), which matters,
    because `snapshot.screen` is **not** plain text — it begins with an escape stream
    and would be pointless to send over a 184-byte link.
 2. **Coalescing on the client side**, so a burst of lines becomes one "here are the last
@@ -99,7 +100,7 @@ would turn on:
   expectation, not a result.
 - **Whether real hardware sustains ~2 packets/s** in the US without the mesh
   collapsing into collisions. Absence of a duty cycle is not the same as capacity.
-- **MeshCore's region/preset in this deployment.** `docs/01-PLAN.md` targets US 902–928,
+- **MeshCore's region/preset in this deployment.** the mesh project's own plan (`docs/01-PLAN.md` there, not in this repo; unverified here) targets US 902–928,
   which is the region that makes this viable. In EU868 the same idea is 1 packet per
   36 s and this document's verdict changes to "no".
 - Whether the MeshCore companion API carries arbitrary binary for a custom application,
@@ -108,13 +109,13 @@ would turn on:
 
 ---
 
-## 9. Two profiles, because a mesh is not a slow network
+## Two profiles, because a mesh is not a slow network
 
 The question this answers: should ldmux have a separate mode for LoRa, or should the
 fastest possible tailnet mode simply be made as light as it can be? Both, and they are
 different things.
 
-### 9.1 What a LoRa link actually costs
+### What a LoRa link actually costs
 
 A summary of this kind is worth correcting before it shapes a design, because three of
 its claims are LoRaWAN-isms that would rule out work that is legal where this is going.
@@ -125,7 +126,7 @@ its claims are LoRaWAN-isms that would rule out work that is legal where this is
   payload ceiling**. Adopting the EU figure would abandon a design that is legal here.
 - **"Tokenise commands with a shared dictionary, so `systemctl restart nginx` becomes
   three bytes."** Rejected, and this is the important one. A measured keystroke echo on
-  this protocol is **9 bytes** (§4). The command text is not the cost and never was. A
+  this protocol is **9 bytes** ("The arithmetic" above). The command text is not the cost and never was. A
   static dictionary cannot cover an arbitrary shell, and it would be a large amount of
   machinery aimed at the one part of the traffic that is already small.
 - **"Strip ANSI and return a status code instead of strings."** Half right and unusable
@@ -136,9 +137,9 @@ its claims are LoRaWAN-isms that would rule out work that is legal where this is
 What is right in it: block-based rather than character-at-a-time, raw P2P with a small
 ARQ rather than LoRaWAN, and that SSH or telnet over LoRa is not a thing.
 
-### 9.2 The two profiles
+### The two profiles
 
-Not a build variant. One client binary, one daemon, a profile announced in `caps`.
+Not a build variant. One client binary, one daemon, a profile that would be announced in `caps` (today `caps.capabilities` carries only `scrollback`; no profile field exists).
 
 | | `direct` (tailnet, LAN, cellular) | `mesh` |
 |---|---|---|
@@ -146,7 +147,7 @@ Not a build variant. One client binary, one daemon, a profile announced in `caps
 | frame | 8-byte header + bytes | one line, capped to the payload MTU |
 | keystrokes | per key | **one uplink per command** |
 | backlog | full, coalesced at 4 KB | never replayed; state of now only |
-| compression | permessage-deflate, measured 14.8x | not worth it at these sizes |
+| compression | permessage-deflate (14.8x measured on the old TS daemon; **not implemented in the Rust daemon**, see `WIRE-COST.md`) | not worth it at these sizes |
 | client engine | libghostty-vt | **not used at all** |
 | ownership, `new`, `close`, `list`, security | shared | shared |
 
@@ -155,13 +156,13 @@ second column: in mesh mode the client's terminal engine is not merely slower, i
 **unused**, because there is no byte stream for it to emulate. The daemon has to be the
 one that owns the screen.
 
-### 9.3 What does not change
+### What does not change
 
 Session model, registry, ownership and claims, the launcher, `new`/`close`/`list`, and
 the entire security model. The profile changes the payload's shape and nothing about
 what the payload means.
 
-### 9.4 What this asks of the direct path
+### What this asks of the direct path
 
 Nothing, and that is the point of separating them. `direct` keeps getting the treatments
 that its own measurements justify — 4 KB coalescing, threshold-gated deflate, backlog to

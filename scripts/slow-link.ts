@@ -2,12 +2,14 @@
  * A slow, laggy link between a client and the daemon, for trying the app on
  * "bad mobile data" without root or `tc netem`.
  *
- *   node scripts/slow-link.ts --listen 100.127.119.54:7626 --to 100.127.119.54:7625 \
+ *   node scripts/slow-link.ts --listen 100.x.y.z:7626 --to 100.x.y.z:7625 \
  *        --delay-ms 300 --kbps 160
  *
  * Point the phone at the listen address (settings → host). Every byte is held for
  * `--delay-ms` in each direction and the stream is paced to `--kbps` kilobits per
- * second each way, which is roughly a weak 3G link at the defaults. TCP still
+ * second each way, which is roughly a weak 3G link at the defaults.
+ * It is a protocol-agnostic TCP proxy (it never parses the stream), so it works
+ * in front of the Rust daemon's WebSocket listener unchanged. Needs Node. TCP still
  * delivers everything in order: this models latency and bandwidth, not loss —
  * loss on a real mobile link shows up to a TCP client as exactly this, stalls.
  */

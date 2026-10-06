@@ -1,12 +1,11 @@
 # ADR-0003: pi extension session lifecycle is reason-branched
 
-> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+**Status:** Superseded by [ADR-0009](0009-node-runtime-and-no-pi-extension.md) (the pi extension is gone) and [ADR-0018](0018-session-layer.md). Kept as history.
+
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
 
 > The pi extension is gone (ADR-0009); the lifecycle it described is the daemon's
 > registry, and the keeper is the process that holds the shell across a restart.
-
-
-**Status:** Accepted
 
 ## Context
 

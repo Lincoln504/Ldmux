@@ -1,6 +1,8 @@
 # ADR-0010: Exclusive session ownership, with consented handoff
 
-> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+**Status:** Accepted; supersedes ADR-0006 §1; implemented in `crates/daemon/src/ownership.rs`
+
+> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
 
 > The rule is unchanged and still implemented (`crates/daemon/src/ownership.rs`).
 > One sentence in it is now false — the note at line 116 about the *tmux* pane
@@ -56,7 +58,6 @@
 > was ("the window is open while its process is", below). `ldmux window` — what
 > `$mod+Return` runs — is still the daemon opening the window itself, and its
 > window class is how that one is found.
-
 
 **Status:** Accepted — **supersedes ADR-0006 §1**
 
@@ -197,7 +198,7 @@ seizing it now, decides:
   the reconcile pass already detects, because the window re-attaches. Closing it
   on a seizure would destroy somebody's terminal on a fact they never agreed to.
 
-Stated once as `seizingClosesTheDeskWindow(createdBy)` in `packages/daemon/src/daemon.ts`,
+Stated once as `seizing_closes_the_desk_window(created_by)` in `crates/daemon/src/ownership.rs`,
 and tested as a rule rather than as a branch.
 
 Three consequences worth recording, because each is a place this could go wrong
@@ -259,5 +260,5 @@ not open at all.)
 - **A shell that exits ends its session** (`remain-on-exit off`), and a shell that
   ended by any route loses its claim, window record and shim.
 
-Pinned by `packages/daemon/test/desk-window.test.ts`, each case checked to fail
+Pinned (originally by the TypeScript `desk-window.test.ts`, now in `crates/daemon/src/ownership.rs` and `crates/daemon/tests/`), each case checked to fail
 with its fix removed.

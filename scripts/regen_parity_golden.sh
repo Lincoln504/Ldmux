@@ -6,6 +6,9 @@
 # `parity/*.bin` corpus file to an independent terminal emulator (tmux, as the
 # reference) and records the grid it shows, via `capture-pane -p -e -N`.
 #
+# This is the only remaining use of tmux in the repo, and it is a dev-time
+# reference only: tmux is not a runtime or test dependency.
+#
 # Usage: scripts/regen_parity_golden.sh   (needs tmux on PATH; 80x24 pane)
 # After running, commit the .capture files and update the version line in
 # crates/daemon/tests/parity/README.md.

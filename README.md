@@ -10,9 +10,9 @@ either. It is deliberately simple:
 - **The keeper is the single source of truth.** Every session is a PTY owned by a
   `ldmux-keeper` process; the daemon auto-spawns the keeper and talks to it over
   a Unix socket. There is no tmux and no second session layer.
-- **Tailnet only.** System Tailscale is already present on this machine
-  (`debian.tail496756.ts.net`, `100.127.119.54`); no public exposure, no hosted relay.
-- **Six panes of thought on the client, a thin daemon on the host.** The viewing
+- **Tailnet only.** The host runs Tailscale (`<host>.<tailnet>.ts.net`, `100.x.y.z`);
+  no public exposure, no hosted relay.
+- **A thin daemon on the host, a smart client.** The viewing
   client owns the pane geometry (ADR-0008) and paints the terminal itself, from a
   native VT emulator (`docs/NATIVE-TERMINAL.md`, ADR-0007), so there is no
   re-rendering of a server-side screenshot and no WebView.
@@ -23,13 +23,11 @@ either. It is deliberately simple:
 > **Status: the Rust daemon is deployed and running.** `crates/daemon`
 > (`ldmuxd`) is the live daemon under the systemd user unit; the keeper owns the
 > PTYs and runs libghostty-vt; the native mobile client is done and
-> device-verified for Android, with iOS deferred as a build. The Rust workspace
-> (`cargo test --workspace`, inside `nix develop`) and the TypeScript source of
-> record (`node --run test` + `node --run typecheck`) are the two gates. The
-> authoritative design is [`docs/SPEC.md`](docs/SPEC.md); the transport decision
-> is [`docs/TRANSPORT.md`](docs/TRANSPORT.md); prior art is
-> [`docs/INVESTIGATION.md`](docs/INVESTIGATION.md); the port's own record is
-> [`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md).
+> device-verified for Android, with iOS not started. The one gate is the Rust
+> workspace (`cargo test --workspace`, inside `nix develop`; `just test`). The
+> authoritative design is [`docs/SPEC.md`](docs/SPEC.md); historical records (the
+> port, the tmux study, the old state register) are in
+> [`docs/archive/`](docs/archive/).
 
 **Current position, open work and known unknowns: [`docs/STATE.md`](docs/STATE.md).**
 
@@ -37,18 +35,17 @@ either. It is deliberately simple:
 
 | Doc | Purpose |
 |-----|---------|
-| [`docs/STATE.md`](docs/STATE.md) | **Where everything stands**: what is verified and how, what is open, what is not known. Start here. |
+| [`docs/STATE.md`](docs/STATE.md) | **Where everything stands**: what exists, what is deployed, the gate, open items. Start here. |
 | [`docs/SPEC.md`](docs/SPEC.md) | The authoritative software specification (its tmux-era sections are marked historical). |
-| [`docs/RUST-PORT-PLAN.md`](docs/RUST-PORT-PLAN.md) | The Rust port and session-layer replacement plan, and its crate map. |
-| [`docs/RUST-PORT-LOG.md`](docs/RUST-PORT-LOG.md) | The port's continuity record: what was done, what was found, what is open. |
-| [`docs/RUST-PORT-AUDIT.md`](docs/RUST-PORT-AUDIT.md) | The critical audit of the port. |
+| [`docs/PLATFORMS.md`](docs/PLATFORMS.md) | What is supported where, and whether each claim is verified or intended. |
 | [`docs/REMOTE.md`](docs/REMOTE.md) | Remote WebSocket transport, auth, and framing. |
 | [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) | The native terminal engine (libghostty-vt) and the JNI seam. |
 | [`docs/WIRE-COST.md`](docs/WIRE-COST.md) | What each interaction actually costs on the wire, measured. |
 | [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
 | [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
-| [`docs/TMUX-DEPENDENCY.md`](docs/TMUX-DEPENDENCY.md) | Historical: the decision about how much of the session layer should be a multiplexer's. Decided: none — closed 2026-10-04 (ADR-0018). |
+| [`docs/MESH-TRANSPORT.md`](docs/MESH-TRANSPORT.md) | LoRa / MeshCore: investigated, not implemented. |
+| [`docs/archive/`](docs/archive/) | Historical records: the Rust port plan, log and audit, the tmux study (decided: no tmux, ADR-0018), the pre-port investigation, the old state register. |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |
 
@@ -61,12 +58,14 @@ The user's working name for the old idea was "Doombox"/"Dooboxes"; the existing
 ## Development
 
 The project uses a **Nix flake** for a reproducible toolchain (rustc/cargo for
-the workspace, Node 26 for the scripts and the mobile tree's own tests, just).
-`packages/mobile` additionally needs the Android/KMP toolchain
-(`nix develop .#mobile`).
+the workspace, just, zbar for the QR tests). Node 26 is also in the dev shell, but
+only for `just mobile-test` (the mobile tree's `.ts` tests) and the two scripts
+under `scripts/`; the Rust gate does not need it. `packages/mobile` additionally
+needs the Android/KMP toolchain (`nix develop .#mobile`). Supported platforms:
+[`docs/PLATFORMS.md`](docs/PLATFORMS.md) (today: x86_64 Linux for the host).
 
 ```bash
-nix develop                  # rustc/cargo, node 26.8.2, just, zbarimg
+nix develop                  # rustc/cargo, just, zbarimg (+ node, dev-only)
 cargo build --workspace      # build every Rust crate
 cargo test --workspace       # the gate (keeper, daemon, protocol, vt-sys, attach)
 just test                    # the same, via the Justfile
@@ -77,18 +76,18 @@ just cli run shell           # create a session and attach
 just remote                  # remote host, port, token, and whether it is listening
 just code                    # pairing QR code for the phone to scan (ADR-0017)
 just pair                    # the same pairing, as an ldmux:// link
-just latency <id>            # round-trip echo latency against a session
-just mobile-test             # the mobile tree's own TypeScript tests
+just latency <id>            # round-trip echo latency against a session (needs node)
+just mobile-test             # the mobile tree's own TypeScript tests (needs node)
 ```
 
 There is no TypeScript daemon any more: the tree was deleted at D4 (2026-10-04,
-[ADR-0018](docs/adr/0018-session-layer.md)) together with the previous session layer. Node remains a
-dev tool.
+[ADR-0018](docs/adr/0018-session-layer.md)) together with the previous session
+layer. Node remains a dev tool only.
 
 ## Status
 
-Implemented and tested (see [`docs/STATE.md`](docs/STATE.md) §4.2 for the counts
-and the commands that produce them):
+Implemented and tested (run the gate for the counts; open items are in
+[`docs/STATE.md`](docs/STATE.md)):
 
 - `crates/protocol` — one canonical frame codec, the daemon RPC contract, the
   keeper message set, runtime path resolution, the pairing link, and the socket
@@ -117,7 +116,7 @@ and the commands that produce them):
   GET answers 401/400 so the phone's connection probe can tell a refused token
   from a machine that is off.
 
-Not yet: iOS (needs a macOS host for the xcframework) and the mobile client's
+Not yet: iOS (not started; needs a macOS host for the xcframework) and the mobile client's
 Compose renderer hardening (cursor blink, zoom).
 
 Design divergences from dooboxes/gmux are recorded in

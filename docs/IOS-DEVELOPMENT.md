@@ -44,8 +44,8 @@ simple answer (VisionKit's scanner needs 16 anyway).
 
 A macOS Sequoia 15.7.9 KVM guest exists and is provisioned:
 
-- Reachable over the tailnet at `debian.tail496756.ts.net:2225` (also
-  `100.127.119.54:2225`), account `ldeen`, key `~/.ssh/macos_vm`, alias `ssh seqvm`.
+- Reachable over the tailnet at `<host>.<tailnet>.ts.net:2225` (also
+  `100.x.y.z:2225`; real values: AGENTS.md, Environment facts), account `ldeen`, key `~/.ssh/macos_vm`, alias `ssh seqvm`.
 - **Xcode 26.1.1 (17B100)** installed — the last x86-capable Xcode that also satisfies
   Apple's "Xcode 26 or later" App Store rule. 26.2+ are Apple-silicon only, so this is
   the ceiling on this hardware, not a preference.

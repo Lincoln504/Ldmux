@@ -1,8 +1,6 @@
 # ADR-0007 — Native terminal engine: libghostty-vt behind a shared KMP core
 
-**Status:** Accepted (2026-09-14). Supersedes the "native renderer is a later,
-optional swap" holding pattern in ADR-0006 §4 for the mobile apps. The web client
-(`packages/web`) is unaffected and keeps its own engine.
+**Status:** Accepted (2026-09-14); supersedes the "native renderer is a later swap" stance of ADR-0006 §4
 
 > **Later (2026-09-18):** the second client this decision tolerated — the
 > buildless browser client in `packages/web` (`docs/WEB.md`) — has been

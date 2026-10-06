@@ -2,10 +2,12 @@
 
 > **Status note (2026-09-20, amended 2026-09-27) — these decisions post-date this document.**
 >
-> - **Runtime: Node 26, not Bun.** The daemon/CLI/protocol run on Node 26 with
->   TypeScript stripped by Node itself (no build step, erasable syntax only).
->   `ws` is the only production dependency. See
->   [ADR-0009](adr/0009-node-runtime-and-no-pi-extension.md).
+> - **Runtime: Rust.** The daemon, keeper, CLI and desk-window client are Rust
+>   (`crates/`). The Node 26 + TypeScript runtime of
+>   [ADR-0009](adr/0009-node-runtime-and-no-pi-extension.md) was replaced at D4
+>   (ADR-0018); Node survives only as a dev tool for the mobile tree's `.ts`
+>   tests and the two scripts under `scripts/`. Every "Bun" or "Node" below is
+>   historical.
 > - **The pi extension has been removed.** ldmux is not a pi plugin; the
 >   `packages/extension` package, the `install-extension` CLI command, and the
 >   `register`/`session_end` RPC methods are gone, along with the RPC-only session
@@ -24,7 +26,7 @@
 >   model, §5.3's control-mode registry, §6.4's attachment discipline, the tmux
 >   runtime profile in §5.2, §11.1's language note — is **historical**. The
 >   session layer, the registry and the terminal engine are the keeper now
->   (`docs/RUST-PORT-PLAN.md`, `docs/RUST-PORT-LOG.md`). The wire protocol (§6),
+>   (`docs/archive/RUST-PORT-PLAN.md`, `docs/archive/RUST-PORT-LOG.md`). The wire protocol (§6),
 >   geometry (§7), the scroll model (§7.4), the desktop mirror (§9) and the
 >   tailnet/security model (§10) stand, with the keeper in place of tmux.
 >
@@ -41,13 +43,15 @@
 >   Sections still describing the tmux design are marked **historical** below.
 >
 > The rest of this document is still the design of record for the transport,
-> geometry, scroll and lifecycle decisions; read "Bun" as "the Node runtime", any
+> geometry, scroll and lifecycle decisions; read "Bun"/"Node" as historical, any
 > extension reference as historical, and the orientation sections as superseded.
+> Sections that still describe the tmux/TypeScript design say so in their heading
+> or in a leading note; `docs/STATE.md` is the current position.
 
 **Version:** 0.3 (design; transport decision finalized)
 **Date:** 2026-09-13
 **Author:** Lincoln Deen (with the pi coding agent)
-**Status:** Phases 1–3 implemented (see README Status). This document remains the authoritative design; where it describes a *target* API or behaviour that is not built, that is called out inline, and `AGENTS.md` plus the tests are the statement of what exists.
+**Status:** Phases 1–3 implemented (see README Status and `docs/STATE.md`). This document remains the authoritative design; where it describes a *target* API or behaviour that is not built, that is called out inline, and `AGENTS.md` plus the tests are the statement of what exists.
 
 > **Revision notes v0.2 and v0.3 are historical (tmux-era).**
 >
@@ -61,9 +65,9 @@
 > **Revision note (v0.3):** The transport decision (ADR-0001) was settled by
 > hands-on experiment: **tmux control mode `-C` runs over plain pipes with no PTY**
 > (only `-CC` requires a tty). v1 therefore uses control-mode streaming +
-> capture-pane snapshots/fallback. (It was implemented on Bun; since
-> [ADR-0009](adr/0009-node-runtime-and-no-pi-extension.md) it runs on Node 26.)
-> See [`TRANSPORT.md`](TRANSPORT.md).
+> capture-pane snapshots/fallback. (It was implemented on Bun, then Node 26;
+> both are gone — ADR-0018.)
+> See [`archive/TRANSPORT.md`](archive/TRANSPORT.md).
 
 ---
 
@@ -108,8 +112,8 @@ simpler than gmux because it is keeper-native and pi-native.
   a tmux-backed session bridge, terminal codec, `alacritty_terminal` core, Tauri
   desktop, and deep prior research on mobile terminal UX/perf and tailnet
   transport. Different product, excellent lessons.
-- **Tailscale** is installed and running (`debian.tail496756.ts.net`,
-  `100.127.119.54`); the user's Android phone is on the tailnet.
+- **Tailscale** is installed and running on the host (`<host>.<tailnet>.ts.net`,
+  `100.x.y.z`); the user's Android phone is on the tailnet.
 
 ### 1.2 Why not fork gmux
 
@@ -150,12 +154,12 @@ Tailscale only, and far less functionality than dooboxes.
    not a pi plugin (ADR-0009). What survives is the part that was never really
    about pi: the daemon is a long-lived process independent of any client, and
    `pi` can be run inside a session like any other program.
-3. **G3 — Mobile app, two locked modes.** Landscape: terminal ~3/4 and a
-   configurable left/right control panel, keyboard never up. Portrait: terminal
-   with the keyboard always up and a compact two-row bar above it. The mode is
-   chosen by an explicit button, never by a sensor (ADR-0008, ADR-0011).
-   *(This goal read "landscape-only" until the two-mode design replaced it; the
-   line was left behind by ADR-0008.)*
+3. **G3 — Mobile app, two modes that follow the device.** Landscape: terminal
+   ~3/4 and a configurable left/right control panel. Portrait: terminal with a
+   compact two-row bar above the keyboard. The shell view follows the device's
+   rotation and the app owns the keyboard; there is no flip button, and the
+   launcher holds portrait (ADR-0011). *(Earlier text said "landscape-only",
+   then "chosen by an explicit button"; both are superseded.)*
 4. **G4 — Open shells/pi in any directory from the phone**, optionally mirrored
    live into a desktop `alacritty` window on a chosen i3 workspace.
 5. **G5 — Synchronized multi-view is a nice-to-have**, achieved via the
@@ -202,7 +206,7 @@ Tailscale only, and far less functionality than dooboxes.
 | FR-3 | The backend must be a persistent session layer that outlives clients. (Originally "tmux-based"; now the keeper, ADR-0018.) |
 | FR-4 | Remote access is **Tailscale-only**. |
 | FR-5 | A **multi-platform mobile app** exists (KMP/Compose preferred). |
-| FR-6 | The mobile app is **landscape-only**. |
+| FR-6 | ~~The mobile app is landscape-only.~~ Superseded by ADR-0011: the shell view follows the device's rotation; the launcher holds portrait. |
 | FR-7 | Terminal ~3/4 of the screen; control panel 1/4, side (left/right) is a setting. |
 | FR-8 | A **clean swipe UI** between open shells and pi sessions. |
 | FR-9 | Sessions closed/ended on the host disappear from the mobile live list. |
@@ -224,7 +228,7 @@ Tailscale only, and far less functionality than dooboxes.
 ```
                        ┌─────────────────────────────────────────────┐
                        │                  TAILNET                     │
-                       │  (WireGuard; debian.tail496756.ts.net)       │
+                       │  (WireGuard; <host>.<tailnet>.ts.net)        │
                        └───────────────┬─────────────────────────────┘
                                        │  ws:// on the tailnet address, token
         ┌──────────────────────────────┴──────────────────────────────┐
@@ -232,8 +236,8 @@ Tailscale only, and far less functionality than dooboxes.
  ┌──────▼────────┐        ┌───────────────────────────────┐     ┌──────▼───────┐
  │  MOBILE APP   │        │        ldmuxd daemon          │     │  DESKTOP     │
  │ KMP/Compose   │◄──────►│  • pane stream + snapshots    │     │  MIRROR      │
- │ landscape     │  WS    │  • session registry (JSON)    │     │ alacritty -e │
- │ libghostty-vt │        │  • WS+HTTP over tailnet       │     │ ldmuxd attach│
+ │ portrait/land.│  WS    │  • session registry (JSON)    │     │ alacritty -e │
+ │ libghostty-vt │        │  • WebSocket on the tailnet   │     │ ldmuxd attach│
  │ Compose Canvas│        │  • spawn/kill/list sessions   │     └──────┬───────┘
  │ side panel    │        │  • optional i3 window helper  │            │
  └───────────────┘        └───────┬───────────────────────┘            │
@@ -250,9 +254,9 @@ Tailscale only, and far less functionality than dooboxes.
 | Component | Language | Role |
 |-----------|----------|------|
 | **`ldmuxd`** (daemon) | Rust (`crates/daemon`) | Talks to the keeper; pane streaming + snapshots; session registry; WS over tailnet; spawn/kill; optional i3 window helper. |
-| **`ldmux`** (CLI) | Rust (`crates/daemon`, `bin/ldmux`) | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `close`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write`). Unix-socket local control. (`attach` is `ldmuxd attach` via `run`/`mirror`; there is no `doctor`, and `install-extension` is gone with the extension.) |
+| **`ldmux`** (CLI) | Rust (`crates/daemon`, `bin/ldmux`) | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `close`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write`). Unix-socket local control. (`attach` is `ldmuxd attach` via `run`/`mirror`; `install-extension` is gone with the extension. Installer and `doctor` work is in progress on this branch and is not specified here.) |
 | **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the launcher holds portrait and the shell view follows the device's rotation, while the app owns the keyboard — no flip button (ADR-0011 and its amendment); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
-| **Desktop mirror / live window** | shell + WM | `i3-msg exec -- <terminal> --class ldmux-live-<id> -e <abs ldmuxd> attach <id>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. The terminal is `desktop::terminal()` — `LDMUX_TERMINAL`, default `alacritty` — so another emulator is one value rather than one edit per window kind, and `ldmux mirror` is the same argv with `--readonly`. See docs/DESKTOP-INTEGRATION.md. |
+| **Desktop mirror / live window** | shell + WM | `i3-msg exec -- <terminal> --class ldmux-live-<id> -e <abs ldmuxd> attach <id>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. The terminal is `desktop::terminal()` — `LDMUX_TERMINAL`, default `alacritty` — so another emulator is one value rather than one edit per window kind, and `ldmux mirror` is the same argv with `--readonly`. See docs/DESKTOP-INTEGRATION.md; terminal selection and window launching are being reworked on this branch (see docs/PLATFORMS.md), so treat this row as the pre-change description. |
 
 ### 4.3 Why the daemon is a separate process
 
@@ -277,8 +281,9 @@ A **session** is one keeper session (a PTY and its shell) on the keeper socket.
   exits ends its session: the row goes, and a desk window
   on it closes. Exit-status capture is not built.
 
-**Pi sessions** are ordinary keeper sessions whose pty runs `pi`. Interactive `pi`
-is launched into a session by the shell wrapper:
+**Pi sessions** are ordinary keeper sessions whose pty runs `pi`. An optional
+shell wrapper (an example only; the repo does not install it) can launch
+interactive `pi` into a session:
 
 ```bash
 # ~/.bashrc (new)
@@ -320,8 +325,7 @@ mobile (as `pi-mobile`/`pi-remote` do) without disturbing the terminal path.
 
 Honest v1 scope:
 
-1. **ldmux-created sessions** (via `ldmux --`, the wrapper, the extension, the CLI,
-   or the mobile app): full terminal control. These are the primary case.
+1. **ldmux-created sessions** (via the CLI, the optional wrapper, or the mobile app): full terminal control. These are the primary case.
 2. **Opt-in adoption** of keeper sessions the registry does not know: `ldmux adopt <keeper-session>`
    registers the session and opens a pane stream. Adoption is explicit, never
    automatic.
@@ -330,8 +334,6 @@ Honest v1 scope:
    (future). This is a stated limitation, not a bug.
 
 The mobile app always shows ldmux sessions; adopted sessions appear after opt-in.
-The extension registers the current pi session on `session_start` if it is running
-under ldmux (`$LDMUX=1`).
 
 ---
 
@@ -341,9 +343,9 @@ under ldmux (`$LDMUX=1`).
 
 1. Supervise the keeper (auto-spawned, detached, outlives the daemon).
 2. Maintain a compact **session registry** reconciled against the keeper's `List`.
-3. **Stream** pane output (see ADR-0001) and provide **snapshots**.
+3. **Stream** pane output (§6) and provide **snapshots** (rendered by the keeper's emulator).
 4. Accept **input** (`Write` to the keeper).
-5. Serve the **API** (Unix socket locally; TLS/WSS on the tailnet).
+5. Serve the **API** (Unix socket locally; plain WebSocket on the tailnet address, ADR-0016).
 6. Spawn/kill sessions in arbitrary cwds (FR-10).
 7. Optionally launch the desktop mirror (FR-11).
 8. Emit **events** for reactive UI (in-protocol; see §5.4).
@@ -442,7 +444,7 @@ server-side VT emulator (perfect snapshots) slot in behind it later.
 Rationale: `-C` over pipes gives control-mode latency and flow control **without
 the native PTY dependency** the v0.1/v0.2 drafts assumed (dooboxes labelled
 control mode "PTY-based"; that is a convention, not a requirement for `-C`).
-See [`TRANSPORT.md`](TRANSPORT.md) for the experiments and the parser spec.
+See [`archive/TRANSPORT.md`](archive/TRANSPORT.md) for the experiments and the parser spec.
 
 **Parser requirements (do not repeat dooboxes' bugs):** byte→line framing on
 `\n` (never `readline`; U+2028/9 must not split); octal → **bytes** then a
@@ -487,7 +489,7 @@ session ends and required by the signature of the one method that ends one, so a
 new ending path cannot compile without saying how: `its shell exited`, `the
 keeper no longer has it` (it came back without the pane), `its desk window
 closed`, `its desk window closed while the daemon was down`, `killed from
-motorola edge 2024`, `closed from …`. It is carried on `SessionInfo` as
+<device name>`, `closed from …`. It is carried on `SessionInfo` as
 `endedReason`, so `ldmux list` prints it beside `dead`, and the daemon logs
 `session <id> ended: <reason>` on the same path. Until 2026-10-05 a record said
 `dead` and nothing else and the journal said nothing at all — two shells ended
@@ -503,12 +505,11 @@ during an evening of use and the only way to explain either was elimination.
 > no static files. No REST layer and no `/api/dirs`; a client creates sessions
 > with the `new` WebSocket message. Scrollback paging **is** implemented, as the `scrollback` WebSocket
 > message (a snapshot carrying `history: true`, up to 5,000 lines — the
-TypeScript's `HISTORY_CAPTURE_LINES`; the keeper retains up to 10,000, the
-`history-limit` analogue) rather than
+the tmux-era `HISTORY_CAPTURE_LINES`; the keeper retains up to 10,000) rather than
 > the REST route below. The table records original intent, not the contract.
 
 Local: Unix socket `$XDG_RUNTIME_DIR/ldmux/ldmuxd.sock`.
-Remote: `ws://100.127.119.54:7625/ws` — the daemon's own tailnet address, no
+Remote: `ws://<tailnet-address>:7625/ws` — the daemon's own tailnet address, no
 proxy (ADR-0016; see §10).
 
 | Method | Path | Purpose |
@@ -552,7 +553,7 @@ helper suffices), and owner/families.
   message that would fix it properly is the one that makes `list` a
   *current-state* request whose queued copies are worthless, and at this cost it
   does not earn its complexity.
-- **Pane death ends the session** (`remain-on-exit off`); reconcile marks it
+- **A shell that exits ends its session**; reconcile marks it
   `dead`, releases its claim, window record and shim, and broadcasts. Recording
   `exit_code` and keeping the final scrollback is not built.
 - **The pi extension is gone (ADR-0009).** This section used to carry a table of
@@ -571,7 +572,7 @@ helper suffices), and owner/families.
   superseding ADR-0005's loopback + `tailscale serve`). WireGuard encrypts the
   link. The daemon listens only on a tailnet (`100.64.0.0/10`,
   `fd7a:115c:a1e0::/48`) or loopback address and answers `403` to any peer
-  outside those ranges, before the token is checked (`protocol/src/net.ts`).
+  outside those ranges, before the token is checked (`crates/protocol/src/net.rs`).
 - **Gates:** (1) the peer is on the tailnet (or loopback), and (2) a bearer
   **token** stored plaintext at `$LDMUX_TOKEN_FILE` (default `<stateDir>/token`)
   with mode `0600` and compared in constant time; the app sends it as
@@ -610,8 +611,10 @@ capabilities {scrollback}}`, `snapshot {…state fields…, history?}`,
 `error {code, message}`.
 
 Binary: exactly one frame type is emitted — `OUTPUT` (raw pane bytes) — using the
-one canonical 8-byte header (`FrameType` in `frames.ts` carries reserved members
-for later revisions; no shipped code sends them, and the `flags` byte is 0).
+one canonical 8-byte header (`crates/protocol/src/frames.rs` defines further
+frame types — hello, caps, input, resize, snapshot, follow, ping, close and so
+on — reserved for later revisions; no shipped code sends them on the remote
+socket, and the `flags` byte is 0).
 
 Deliberately **cut** from the v0.1 draft: `HELLO`/`resumeToken`,
 `SESSION_STATE`, a server-side `SCROLLBACK` frame, `CLOSE`, and the binary
@@ -689,7 +692,7 @@ every VT mode — is closed.)
   nobody holds it, it takes the shell back by itself — the device putting it down
   *is* the consent (ADR-0010). If the list has no running copy of its shell, it
   re-attaches to take the daemon's verdict, which is `error{session_dead}`:
-  "This shell has ended.", and the window ends. That last branch is the TypeScript
+  "This shell has ended.", and the window ends. That last branch was once the TypeScript
   shim's `has-session` check, and its absence was the reported bug: a window whose
   shell had been ended from the phone kept offering a reclaim that could not work.
 - **The session list is pushed when it changes.** `new`, `kill`, `close`, a
@@ -747,10 +750,6 @@ every VT mode — is closed.)
   select/copy; double-tap empty area → `Tab` (optional).
 - IME-safe layout via `WindowInsets`; the control quarter does not jump when the
   soft keyboard opens.
-- WebView hardening (from mttyd/dooboxes): xterm.js hidden textarea gets
-  `inputmode=url` + a `MutationObserver` guard to defeat Gboard autocorrect;
-  touch-drag-as-wheel when the TUI enables mouse tracking; WebGL2 → canvas/DOM
-  fallback if unavailable.
 
 ### 7.4 Scroll model — the crown jewel
 
@@ -802,12 +801,12 @@ planned.
 
 ## 8. Opening sessions from the phone (FR-10)
 
-`POST /api/sessions {kind, cwd, cmd?, title?, mirror?}`:
+The `new {kind?, cwd?, title?}` WebSocket message (or `ldmux new`/`run`; there is
+no REST layer, §5.4):
 
-- `shell` → keeper `Spawn` with `cwd`, session name `ldmux-<ulid>`, the login shell.
-- `pi` → keeper `Spawn` with `command: ["pi", …]` (`[--name …] [prompt]`).
-- `cmd` → run that command instead (still a shell session).
-- `cwd` validated; `GET /api/dirs` powers the picker (recent dirs from registry).
+- `shell` → keeper `Spawn` with `cwd`, session name `ldmux-<ulid>`, the user's shell.
+- `pi` → keeper `Spawn` with `command: ["pi", …]`.
+- `cwd` is validated by the daemon; the launcher's folder picker is a client feature.
 
 ---
 
@@ -826,27 +825,26 @@ planned.
    with the desk window's (`live_argv`), so the two cannot drift.
 
 Environment: the daemon is a `systemd --user` service and the unit sets
-`DISPLAY`/`XAUTHORITY` (`deploy/ldmux.service`); without them `desktop.rs` reports
+`DISPLAY`/`XAUTHORITY` (`deploy/ldmux.service`; the installer is being reworked on this branch); without them `desktop.rs` reports
 "no DISPLAY (not an X11 session)" rather than guessing.
 
 ---
 
 ## 10. Tailscale & security (FR-4)
 
-- **Transport:** system `tailscaled` v1.102.3 (already running). The daemon binds
+- **Transport:** the system `tailscaled` (a prerequisite, not shipped). The daemon binds
   this machine's tailnet address directly (`LDMUX_REMOTE_HOST` in
   `deploy/ldmux.service`), plain `ws://` under WireGuard (ADR-0016). No
   `tailscale serve`, no Funnel.
 - **Gates:** tailnet or loopback peer address (checked per request, `403`
   otherwise) + bearer token. Constant-time comparison.
-- **Refuse** to bind anything but a tailnet or loopback address: `main.ts` exits,
-  and `RemoteServer.start` throws.
+- **Refuse** to bind anything but a tailnet or loopback address: `ldmuxd` exits
+  at startup (`crates/daemon/src/bin/ldmuxd.rs`, rule in `crates/protocol/src/net.rs`),
+  and the remote server refuses to start on one.
 - Mobile: Android allows cleartext (`usesCleartextTraffic`, needed for `ws://`
   over the tailnet); the app refuses a pairing host that is not tailnet or
   loopback. Token in the app's private SharedPreferences; iOS in Keychain (iOS
   is a **target**, not v1 — see §11.2).
-- `/api/dirs` is read-only and constrained to configured roots; the filesystem
-  enumeration surface is documented and acceptable for single-user.
 
 ---
 
@@ -854,32 +852,19 @@ Environment: the daemon is a `systemd --user` service and the unit sets
 
 ### 11.1 Daemon language
 
-**Recommendation: TypeScript on Bun** for v1. Bun ships native `bun:sqlite`,
-WebSocket, and Unix sockets, and `bun build --target bun` yields a single binary.
-**Transport note (v0.3):** the Bun recommendation is *reinforced* by ADR-0001 —
-control mode `-C` runs over pipes and needs **no** native PTY dependency, so the
-single-binary/packaging argument holds. (If a PTY were required, e.g. for `-CC`
-or `pipe-pane` helpers, this rationale would be revisited.)
-
-Alternatives: Node.js + `ws` + `better-sqlite3` (ubiquitous, but native-module
-fragility); Rust + tokio (best throughput, slower iteration); Rust core + napi-rs
-(hot-path optimization, more build complexity). A clean module boundary keeps the
-`PaneStream` hot path portable to Rust later.
+**Rust** (edition 2024; `tokio`, `tokio-tungstenite`, `serde`, `clap`, `thiserror`,
+`ring`, `uuid`, `nix`, `rand`, `fs2`). The v0.x recommendation was TypeScript on
+Bun, then Node 26 (ADR-0009); the Rust port replaced it and the TypeScript tree
+was deleted at D4 (ADR-0018). The session layer is `crates/keeper`, with the
+terminal emulator libghostty-vt reached through `crates/vt-sys`.
 
 ### 11.2 Mobile stack
 
-No mature pure-Compose terminal renderer exists for iOS/Android in 2026. Options:
-KMP + Compose + WebView/xterm.js (**recommended v1**); native KMP via Rust
-`alacritty_terminal` JNI/UniFFI (phase 3+, behind the `TerminalSurface` seam);
-Flutter + `flutter_rust_bridge` (viable fallback); PWA (instant fallback);
-libghostty (**not viable** — no mobile target, unstable ABI).
-
-**Recommendation (target, not built): KMP + Compose Multiplatform**, landscape-only,
-WebView/xterm.js `TerminalSurface` for v1. **What shipped instead** is the
-buildless PWA, because this machine has
-no gradle/kotlin toolchain; it is the renderer the WebView shell will host. Libraries: **Ktor** (`ktor-client-websockets`; OkHttp on
-Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
-(backoff + `StateFlow`), `compose-webview-multiplatform`, foreground service +
+**KMP + Compose Multiplatform**, native renderer (§11.3), Android shipped and
+device-verified, iOS not started (`docs/IOS-DEVELOPMENT.md`). The options this
+section once weighed (WebView/xterm.js, Flutter, PWA, `alacritty_terminal`) are
+history; the buildless PWA that shipped first was deleted. Libraries: **Ktor**
+(`ktor-client-websockets`), `kotlinx.serialization`, foreground service +
 `ConnectivityManager`.
 
 **Android implementation (built):**
@@ -894,12 +879,12 @@ Android, Darwin on iOS), `kotlinx.serialization`, `ktor-reconnecting-websocket`
   gets throttled.
 - Reconnect backoff is 400 ms doubling to 10 s. A fixed 2 s made a daemon that
   restarted in a second feel broken and one down for an hour get asked 1800 times.
-- **Orientation is locked**, not sensor-driven: the manifest starts in `landscape`
-  and the app sets `requestedOrientation` for the explicit flip button.
+- **Orientation follows the device** for the shell view; the launcher holds
+  portrait (ADR-0011).
 - **Remaining:** OEM battery-exemption guidance (Samsung/Xiaomi/OnePlus) in
   onboarding; the tunnel/VPN path is manual.
-- **iOS is a target, not v1.** v1 ships Android. iOS constraints (no background
-  service model, ~3-min WS background) are documented but unimplemented.
+- **iOS is not started.** iOS constraints (no background service model, ~3-min WS
+  background) are documented but unimplemented.
 
 The service is keyed on a terminal being **open**, not on being **connected**, and
 that distinction is the whole feature: backgrounding drops the socket, which would
@@ -934,10 +919,14 @@ ldmux/
 │  ├─ attach/         # the desk-window client (`ldmuxd attach`)
 │  └─ vt-sys/         # hand-written FFI against the vendored libghostty-vt
 ├─ deploy/            # the systemd user unit, the `$mod+Return` launcher
-├─ scripts/           # measure_latency.ts, slow-link.ts (dev tools)
+├─ scripts/           # measure_latency.ts, slow-link.ts (dev tools, need Node),
+│                     # regen_parity_golden.sh (needs tmux; regenerates goldens)
 ├─ docs/
-│  ├─ SPEC.md · RUST-PORT-PLAN.md · RUST-PORT-LOG.md · STATE.md · REMOTE.md ·
-│  │  NATIVE-TERMINAL.md · PREDICTIVE-ECHO.md · MESH-TRANSPORT.md · WIRE-COST.md
+│  ├─ SPEC.md · STATE.md · PLATFORMS.md · REMOTE.md · NATIVE-TERMINAL.md ·
+│  │  PREDICTIVE-ECHO.md · MESH-TRANSPORT.md · WIRE-COST.md · DESKTOP-INTEGRATION.md ·
+│  │  IOS-DEVELOPMENT.md · TRANSPORT.md (retired)
+│  ├─ archive/        # historical records: the port plan/log/audit, the tmux study,
+│  │                  # the pre-port investigation, the old STATE.md
 │  └─ adr/            # the decision record; 0018 is the session layer
 └─ packages/
    └─ mobile/         # native KMP + Compose Multiplatform client (Android
@@ -946,7 +935,7 @@ ldmux/
 
 The TypeScript implementation (`packages/{daemon,protocol,testing}`, and tmux as
 the session layer) was deleted at D4 — see ADR-0018 and
-`docs/RUST-PORT-LOG.md`. It is readable at git commit `6b3efb8`.
+`docs/archive/RUST-PORT-LOG.md`. It is readable at git commit `6b3efb8`.
 
 Binaries: `ldmux` (CLI), `ldmuxd` (daemon), `ldmux-keeper` (auto-spawned).
 
@@ -956,7 +945,7 @@ Binaries: `ldmux` (CLI), `ldmuxd` (daemon), `ldmux-keeper` (auto-spawned).
 
 > This is the plan as written against tmux and TypeScript. It was executed, and
 > then the implementation it describes was replaced: the phases ran as the Rust
-> port (`docs/RUST-PORT-PLAN.md`, `docs/RUST-PORT-LOG.md`), and the tmux/TS tree
+> port (`docs/archive/RUST-PORT-PLAN.md`, `docs/archive/RUST-PORT-LOG.md`), and the tmux/TS tree
 > was deleted at D4 (ADR-0018). Kept as the record of how the product was built;
 > `packages/**` paths below no longer exist.
 > (§§13–17 still use tmux-era wording; they are the historical record.)
@@ -1001,7 +990,7 @@ ldmux is not a pi plugin.
   cuts the retry backoff short), and the directory browser is the folder picker in
   the launcher's new-shell dialog. E2E over Tailscale from the phone has since
   been run repeatedly (the 2026-10-05 measurements in
-  `docs/RUST-PORT-LOG.md`).
+  `docs/archive/RUST-PORT-LOG.md`).
 
 **Phase 5 — desktop mirror + polish.**
 - i3 + alacritty mirror (read-only default), focus/close helper.
@@ -1023,7 +1012,7 @@ ldmux is not a pi plugin.
 | R7 | Split input with a desktop mirror. | Mirror read-only by default; explicit "take control". |
 | R8 | i3 placement races. | **Corrected 2026-10-05.** `for_window` is not an IPC command at all (`docs/DESKTOP-INTEGRATION.md`, measured), so the mitigation that stands is `exec` and then a criteria-targeted move, polling `i3-msg -t get_tree` for the window's class — `ldmux-live-<id>` for a desk window, `ldmux-mirror-<id>` for a mirror. This is what §9 and `crates/daemon/src/desktop.rs` do. |
 | R9 | Token/identity security. | Tailnet-or-loopback bind and peer check (ADR-0016), WireGuard encryption, token `0600` (plaintext at rest; its directory is `0700`). No identity allow list or per-device tokens yet. |
-| R10 | Language choice. | TS/Bun v1 with a `PaneStream` seam to Rust. |
+| R10 | Language choice. | **Closed**: Rust (ADR-0018). The TS/Bun v1 was ported and deleted. |
 | R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |
 | R12 | ~~Control-mode parser robustness.~~ Moot: the keeper protocol is our own framed JSON/binary. | Split-UTF-8 carry (`protocol::utf8::Utf8Carry`) and frame tests. |
 | R13 | iOS scope creep. | v1 = Android; iOS is a documented target. |
@@ -1036,8 +1025,8 @@ ldmux is not a pi plugin.
 
 ## 15. Acceptance criteria (v1)
 
-- A pi session on the desktop appears in `ldmux ls` and on the phone; assert by
-  polling `/api/sessions` after launch (**bounded: 2 s, tested**).
+- A session started on the desktop appears in `ldmux list` and on the phone;
+  asserted by polling the daemon's `list` after launch (bounded, tested).
 - From the phone: create a shell and a pi session in arbitrary directories; both
   appear and are interactive.
 - Streaming output does not move the viewport while the user is scrolled up; a
@@ -1047,7 +1036,6 @@ ldmux is not a pi plugin.
 - The desktop mirror opens a live `alacritty` on the configured workspace and is
   read-only by default.
 - Reconnect after an airplane-mode toggle resumes with correct screen and anchor.
-- `/new`, `/resume`, `/quit` do **not** cause false session-ended events.
 - No leaked processes after `ldmuxd` restart; the keeper and its sessions survive.
 - Reached only over Tailscale; token required; nothing bound publicly.
 
@@ -1057,7 +1045,7 @@ ldmux is not a pi plugin.
 
 > *Historical: prior art that informed the tmux-era design.*
 
-See [`INVESTIGATION.md`](INVESTIGATION.md) for citations. Summary: gmux (runner/
+See [`archive/INVESTIGATION.md`](archive/INVESTIGATION.md) for citations. Summary: gmux (runner/
 daemon/web; scroll-anchor PR #500; two-gate Tailscale auth); dooboxes (tmux
 control mode over PTY; multi-client attachment model; mobile UX/perf research;
 terminal codec; portability lessons); trustmux/ttyd/wetty/gotty/mttyd (tmux+
@@ -1073,15 +1061,20 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 
 | ADR | Decision |
 |-----|----------|
-| **ADR-0001** | **Transport:** tmux control mode `-C` over pipes (no PTY) + `capture-pane` snapshots/fallback, behind a `PaneStream` interface. Proven on tmux 3.5a + Bun 1.3.9. |
-| **ADR-0002** | **Canonical geometry:** pin `window-size manual` + a canonical grid; clients render viewports and never resize the pane. |
-| **ADR-0003** | **Extension lifecycle:** branch on `session_shutdown.reason`; only `quit` ends a session; never tear down the daemon/tmux on shutdown. |
+| **ADR-0001** | ~~**Transport:** tmux control mode `-C` over pipes (no PTY) + `capture-pane` snapshots/fallback, behind a `PaneStream` interface.~~ **Superseded** by ADR-0018. |
+| **ADR-0002** | ~~**Canonical geometry:** pin `window-size manual` + a canonical grid; clients render viewports and never resize the pane.~~ **Superseded** by ADR-0018 (the keeper is the canonical geometry). |
+| **ADR-0003** | ~~**Extension lifecycle:** branch on `session_shutdown.reason`; only `quit` ends a session; never tear down the daemon/tmux on shutdown.~~ **Superseded** (the extension is gone, ADR-0009). |
 | **ADR-0004** | **Scroll anchor:** ~~client-owned explicit `following`/`anchored` state machine; server never resolves line ids~~ — **as built, the anchor is the emulator's viewport and `scrollBy` reports the movement it measured** (see ADR-0004's correction). |
 | **ADR-0005** | ~~**TLS/remote:** loopback bind + `tailscale serve --bg`; token + QR pairing; no Funnel.~~ **Superseded** by ADR-0016 and ADR-0017. |
 | **ADR-0016** | **Direct tailnet bind:** listen only on the tailnet address or loopback, `403` for any other peer, plain `ws://` under WireGuard, bearer token. |
 | **ADR-0017** | **QR pairing:** `ldmux code` shows `ldmux://pair?v=1&host=…&token=…&name=…` as a QR code; the app scans it from Settings; no manual host/token entry. |
+| **ADR-0018** | **Session layer:** `crates/keeper` owns the PTYs and runs libghostty-vt; supersedes ADR-0001, ADR-0015 and ADR-0006 §2; tmux and TypeScript removed. |
 
-Individual ADRs live under `docs/adr/`. ADR-0001 is now **frozen** (proven on this
-machine); ADR-0002's geometry probe is **done** (asserted in the daemon tests:
-a pinned 120×40 grid under `window-size manual`). ADR-0006 records the deliberate
-divergences from dooboxes/gmux.
+ADR-0006 to ADR-0015 (divergences, native engine, UI modes, the Node runtime,
+exclusive ownership, orientation, background/sleep, cross-platform seams, text
+selection, the tmux session-layer survey) are summarised by their own status
+lines under `docs/adr/`; every ADR carries a `Status:` line directly under its title.
+
+Individual ADRs live under `docs/adr/`. ADR-0001 to ADR-0003 and ADR-0015 are
+superseded and kept as history; ADR-0006 records the deliberate divergences from
+dooboxes/gmux.

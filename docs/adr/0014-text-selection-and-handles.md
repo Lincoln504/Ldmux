@@ -1,12 +1,12 @@
 # ADR-0014 — Text selection, and the two-point handles
 
-> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/RUST-PORT-LOG.md`.
+**Status:** Accepted; implemented on Android (`SelectionHandles.kt`, `SystemSelectionHandles.kt`, `SelectionHandlesTest.kt`); iOS not started
+
+> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
 
 > The selection format and the two-point handles are unchanged (they are the
 > client's, not the session layer's). Only its `capture-pane` provenance changed.
 
-
-**Status:** accepted (design). Implementation not started.
 **Supersedes:** nothing. **Relates to:** ADR-0007 (native engine), ADR-0013 (seams).
 
 ## 1. The engine already implements this, which is the whole finding
@@ -132,7 +132,7 @@ re-projection** this section used to describe is not implemented and is open: a 
 hands the new engine a *fresh* coordinate system (the captured screen at its bottom), so
 the difference between the old and new offsets is not a count of lines anything moved by —
 and the post-rebuild offset was in any case read before the re-render, making the delta
-always zero (STATE.md §8, 2026-09-27).
+always zero (archive/STATE.md §8, 2026-09-27).
 - `maybeExtendHistory()` is **suppressed while a gesture is live**, which the caller
 says on the call (`scrollBy(rows, pageInHistory = false)`): a per-call answer cannot
 be left set by a cancelled gesture, which is what a flag would do.
@@ -183,7 +183,7 @@ tree returned nothing.
 CORRECTION (2026-09-19). The paragraph that used to be here said the missing callback
 was "a bug" and that "a copy performed inside tmux or vim is silently discarded today".
 The first half was right and the second was wrong, and the difference matters: the
-discard is not an accident, it is `packages/daemon/src/sanitize.ts` doing its job. The
+discard is not an accident, it is `crates/daemon/src/sanitize.rs` doing its job. The
 daemon drops OSC 52 from pane output **deliberately**, because the pane is arbitrary
 code and the clipboard is shared with every other app on the device — a program inside
 a shell silently replacing what the user copies elsewhere is a real attack, not a
@@ -226,7 +226,7 @@ anything received the write) is saying what it sent, not what arrived.
   match the 40-byte layout in `ldmux_terminal.h`. The decoder is correct; the comment
   is wrong.
 
-## 9. The handles are the platform's — and the loupe is not there on purpose
+## 11. The handles are the platform's — and the loupe is not there on purpose
 
 **Status:** Accepted. This replaces the "drawn by the app" plan in §1 for the handle
 *art*.

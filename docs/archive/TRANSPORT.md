@@ -1,5 +1,7 @@
 # ldmux — Transport deep-dive and decision
 
+> **ARCHIVE (moved to docs/archive/ 2026-10-06).** Historical record. The tmux control-mode deep-dive that the keeper protocol replaced (ADR-0001, superseded by ADR-0018).
+
 > **Retired (2026-10-04, D4).** This is the control-mode deep-dive — the text protocol
 > the port most directly replaced. It is history: the transport is now one framed
 > binary protocol (`crates/protocol`), and there is no control-mode client, no
@@ -180,7 +182,7 @@ not push duplicate screens into the client's scrollback.
 Node with type-stripping, so `.ts` files execute directly and there is nothing
 to compile. No native modules are required (control mode over pipes, WebSocket
 and Unix sockets from the standard library). A Rust keeper behind `PaneStream`
-remains an option, and is costed in `docs/TMUX-DEPENDENCY.md` §3 and §9.
+remains an option, and is costed in `docs/archive/TMUX-DEPENDENCY.md` §3 and §9.
 
 ## 8. Remaining Phase-1 spike items
 

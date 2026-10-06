@@ -54,9 +54,9 @@ In rough order of value per unit of work:
 6. **Filtering DCS/clipboard/device-status out of the stream** — a hostile or
    buggy program on the remote side must not be able to write to the phone's
    clipboard or query the device through our transport. **Done**
-   (`packages/daemon/src/sanitize.ts`).
+   (`crates/daemon/src/sanitize.rs`).
 7. **Bounded scrollback paging** — history is fetched in bounded chunks, never
-   by one giant capture. **Done** (`MAX_HISTORY_LINES`, `scrollback`).
+   by one giant capture. **Done** (`HISTORY_CAPTURE_LINES`, `scrollback`).
 
 ## 3. Prior art: what `dooboxes` already worked out
 
@@ -230,7 +230,7 @@ scrollback lives in the engine.
 
 ## 6. Measuring it (so "feels fast" is falsifiable)
 
-A harness now exists: `scripts/measure_latency.ts` (`just latency <sid> [runs]`).
+A harness now exists: `scripts/measure_latency.ts` (`just latency <sid> [runs]`, needs Node; it speaks the daemon's Unix-socket RPC and the remote WebSocket, so it works against the Rust daemon).
 It types a unique marker through the real path (client → daemon → keeper → pty →
 shell echo → back) and reports the distribution.
 

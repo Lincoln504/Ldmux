@@ -1,10 +1,8 @@
 # ADR-0013 — Cross-platform seams
 
+**Status:** Accepted
+
 Date: 2026-09-18
-Status: Accepted. (This line used to read "two refactors deferred, see §4"; §4
-itself now records that both are done — the Status line was left unedited when
-that section was updated, which is exactly the kind of stale claim this ADR
-warns about in its own Consequences.)
 
 ## Context
 

@@ -1,6 +1,7 @@
 # ADR-0011: The device rotates, the keyboard does not
 
-**Status:** Accepted, amended 2026-09-27 (the launcher holds portrait; see the end)
+**Status:** Accepted, amended 2026-09-27 (the launcher holds portrait; see the end); supersedes ADR-0008 §1
+
 **Supersedes:** [ADR-0008](0008-mobile-ui-modes-and-pane-ownership.md) §1 — the
 locked-orientation decision.
 

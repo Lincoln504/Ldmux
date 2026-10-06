@@ -1,12 +1,12 @@
 # ADR-0009: Node 26 + TypeScript, and removing the pi extension
 
+**Status:** Superseded by [ADR-0018](0018-session-layer.md) (2026-10-04) for the Node + TypeScript runtime; the no-pi-extension half still stands. Kept as history.
+
 > **Partly superseded (2026-10-04, D4).** The pi-extension half stands. The "Node 26 +
 > TypeScript" half does not: the daemon, keeper and CLI are Rust, and the
 > TypeScript tree was deleted at D4. Node remains a *dev* tool only (the scripts
 > under `scripts/` and the mobile tree's own tests). See ADR-0018.
 
-
-- Status: accepted (2026-09-14)
 - Supersedes: the Bun runtime choice implied by ADR-0001's implementation notes
 
 ## Context

@@ -8,8 +8,8 @@ snapshot and the client share one cell model.
 
 The implementation is **Rust**, in `crates/`. The keeper is the
 session layer (there is no terminal multiplexer), and the TypeScript tree that preceded it was deleted at D4 (the
-history of that tree is in git; `docs/RUST-PORT-PLAN.md` and
-`docs/RUST-PORT-LOG.md` are the record of the port).
+history of that tree is in git; `docs/archive/RUST-PORT-PLAN.md` and
+`docs/archive/RUST-PORT-LOG.md` are the record of the port).
 
 | crate | contents |
 |---|---|
@@ -23,17 +23,18 @@ history of that tree is in git; `docs/RUST-PORT-PLAN.md` and
 the port and is kept.
 
 `docs/SPEC.md` is the authoritative design. `docs/adr/` is the decision record.
-`docs/RUST-PORT-PLAN.md` is the design of the session-layer replacement (the
-keeper topology, the snapshot-parity gate) and `docs/RUST-PORT-LOG.md`
-is the findings + state record.
+`docs/STATE.md` is the current position and `docs/PLATFORMS.md` the support matrix.
+`docs/archive/RUST-PORT-PLAN.md` (the keeper topology, the snapshot-parity gate)
+and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the port.
 
 ## Status
 
 - The Rust daemon **is** the deployed daemon (`systemctl --user restart ldmux`
   runs `~/.local/bin/ldmuxd`). The keeper is auto-spawned by the daemon (the
   ssh-agent pattern) and survives a daemon restart. One unit.
-- `cargo test --workspace` is the gate. See `docs/RUST-PORT-LOG.md` for the exact
-  gate and any open item.
+- `cargo test --workspace` is the gate. The exact commands are the `Justfile`
+  (`just test`, `just lint`) and the README's Development section; open items are
+  in `docs/STATE.md`.
 
 ## Rules
 
@@ -58,7 +59,8 @@ is the findings + state record.
 ## Conventions
 
 - **Nix toolchain.** Develop and test inside `nix develop` (cargo + rustc + just
-  + node and zbar come from `flake.nix`). Do not add unpinned system dependencies.
+  + zbar come from `flake.nix`; Node 26 is there too, dev-only, for `just mobile-test`
+  and `scripts/`). Do not add unpinned system dependencies.
 - **Rust**: workspace under `crates/`, no code-generation, std + the plan §0
   allowlist (`tokio`, `tokio-tungstenite`, `serde`, `clap`, `thiserror`, `ring`,
   `uuid`, `nix`, `rand`, `fs2`); edition 2024; tests in-crate (`#[cfg(test)]`)
@@ -91,8 +93,8 @@ is the findings + state record.
 - Tailscale host `debian.tail496756.ts.net` (`100.127.119.54`); phone
   `motorola-edge-2024`.
 - i3 4.24 / X11 (`DISPLAY=:0.0`); workspaces `1..10` (`Mod+0` → `10`).
-- The flake pins the devShell toolchain (Node 26 + cargo/rustc, from
-  `flake.nix`).
+- The flake pins the devShell toolchain (cargo/rustc, plus a second pin for dev-only
+  Node 26, from `flake.nix`).
 - **Deploy with `just install`**, never by hand-editing `~/.local/bin` or the
   unit: `deploy/` is the source of truth for both.
 - iOS builds need a macOS host.

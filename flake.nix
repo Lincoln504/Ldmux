@@ -4,10 +4,13 @@
   # Main toolchain pin: the same nixpkgs-unstable revision used by the dooboxes
   # flake, so the source tree and binary cache are shared on this machine.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/6cdc7fc76e8bf7fde9fa43a849fcaaa70e230dee";
-  # Second pin, for the Node runtime only. The revision above tops out at
-  # nodejs_24; Node 26 is the Current line (26.8.2), and the dev scripts under
-  # `scripts/` run on it. Pinning a second input keeps that upgrade from dragging
-  # the whole toolchain forward at the same time.
+  # Second pin, for the Node runtime only, and Node is a DEV tool: it runs
+  # `just mobile-test` (packages/mobile/test/*.test.ts, via Node's built-in type
+  # stripping) and the two scripts under `scripts/`. Nothing in the Rust workspace
+  # gate (`cargo test --workspace`) or in the deployed daemon needs it. The revision
+  # above tops out at nodejs_24; Node 26 (26.8.2) is what this pin provides.
+  # nodejs_24 from the main pin would likely do for those uses, but that is
+  # untested, so the pin stays until someone runs the mobile tests on it.
   inputs.nixpkgs-node.url = "github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f";
 
   outputs = { self, nixpkgs, nixpkgs-node }:
@@ -34,7 +37,8 @@
       # reproducible builds.
       rustToolchain = pkgs: with pkgs; [ rustfmt clippy rustc cargo ];
 
-      # Development-only extras: not part of what the daemon runs on.
+      # Development-only extras: not part of what the daemon runs on. Node is here
+      # only for the mobile `.ts` tests and `scripts/`.
       devExtras = pkgs: nodePkgs: [ nodePkgs.nodejs_26 pkgs.just pkgs.jq pkgs.git pkgs.curl pkgs.sqlite pkgs.procps
         # A QR *decoder*, for tests only: the Rust encoder behind `ldmux code`
         # is judged by reading every code it makes back (crates/daemon/src/qr.rs).
@@ -49,7 +53,7 @@
           packages = toolchain pkgs nodePkgs;
           shellHook = ''
             echo "ldmux devshell"
-            echo "  node  $(node --version)"
+            echo "  node  $(node --version)   (dev only: mobile tests, scripts/)"
             echo "  npm   $(npm --version)"
             echo "  rustc $(rustc --version)"
           '';

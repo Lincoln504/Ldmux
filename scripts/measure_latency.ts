@@ -9,6 +9,14 @@
  *   node scripts/measure_latency.ts --session <id> [--runs 20]
  *   node scripts/measure_latency.ts --url ws://host:port/ws?token=... [--runs 20]
  *
+ * Runs against the Rust daemon (`ldmuxd`): the `--session` form calls the control
+ * socket's `remote_info` RPC (newline-delimited JSON, `crates/protocol/src/rpc.rs`),
+ * then talks to the remote WebSocket (`crates/protocol`: JSON text messages
+ * `attach`/`key`/`input`, binary `OUTPUT` frames behind the 8-byte big-endian
+ * header of `frames.rs`). Verified against the protocol definitions by reading, not
+ * by a recorded run on this branch. Needs Node (global WebSocket + type stripping);
+ * Node is a dev-only dependency (flake.nix).
+ *
  * Needs a running daemon (LDMUX_SOCK, like the CLI) for the --session form.
  * Reports p50/p95/p99, which is the shape the dooboxes latency SLA is written
  * in.

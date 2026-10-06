@@ -1,5 +1,7 @@
 # ldmux Rust Port Plan — tmux removed, session layer becomes ours
 
+> **ARCHIVE (moved to docs/archive/ 2026-10-06).** Historical record. The design of the Rust port and session-layer replacement, executed through D4 (2026-10-04). The current design is `docs/SPEC.md` and ADR-0018.
+
 > **Historical plan (2026-10-05 banner).** This is the plan that removed tmux. tmux
 > is now removed from the software entirely, not only the runtime: the wire field
 > `tmuxName` is `keeperName` (and `tmuxSocket` is `keeperSocket`), `paneInMode` and

@@ -14,7 +14,7 @@ tailnet bind) and ADR-0017 (QR pairing) on top of the one canonical frame format
 ## Topology
 
 ```
-phone ──Tailscale (WireGuard)── ws://100.127.119.54:7625/ws ──▶ ldmuxd
+phone ──Tailscale (WireGuard)── ws://<tailnet-address>:7625/ws ──▶ ldmuxd
                                                                   │
                                                          ldmux-keeper
 ```
@@ -23,9 +23,9 @@ phone ──Tailscale (WireGuard)── ws://100.127.119.54:7625/ws ──▶ ld
   (`LDMUX_REMOTE_HOST`, code default `127.0.0.1`; the deployed unit sets this
   machine's tailnet address). Tailnet is `100.64.0.0/10` or
   `fd7a:115c:a1e0::/48`; loopback is `127.0.0.0/8`, `::1` or `localhost`
-  (`protocol/src/net.ts`).
-- Enforced three times: `main.ts` exits on a bad `LDMUX_REMOTE_HOST`,
-  `RemoteServer.start` refuses to listen, and a peer outside those ranges gets
+  (`crates/protocol/src/net.rs`).
+- Enforced three times: `ldmuxd` exits on a bad `LDMUX_REMOTE_HOST`,
+  the remote server refuses to listen, and a peer outside those ranges gets
   `403` before the token is looked at. Only `/ws` upgrades; any other path is
   `404`.
 - Port: `LDMUX_REMOTE_PORT` (code default `7623`; the deployed unit uses `7625`).
@@ -44,14 +44,14 @@ just pair                       # the same pairing, as an ldmux:// link
 ```
 
 `code` and `pair` print `ldmux://pair?v=1&host=<addr:port>&token=<64 hex>&name=<machine>`
-(`protocol/src/pairing.ts`), and refuse a daemon a phone cannot reach: one on
+(`crates/protocol/src/pairing.rs`), and refuse a daemon a phone cannot reach: one on
 loopback, or one not listening yet (`remote_info.listening`).
 
 ## Authentication
 
 - Token: 32 random bytes (hex) at `$LDMUX_TOKEN_FILE` (the unit sets
   `~/.local/state/ldmux/token`; default `<stateDir>/token`), mode `0600`,
-  created on first start, compared in constant time (`auth.ts`).
+  created on first start, compared in constant time (`crates/daemon/src/auth.rs`).
 - Presented as `Authorization: Bearer <token>` (what the app sends) or
   `?token=<token>` (still accepted).
 - The Unix socket (local control) is separate and `0600`; `remote_info` exposes
@@ -136,11 +136,11 @@ live. A client therefore always receives a full-screen repaint before deltas.
 
 ### Backpressure & resync
 
-Live output is best-effort. If a client's socket buffer exceeds
-`maxBufferedBytes` (4 MiB) the server emits `error{code:"too_far_behind"}` and
-closes; the client reconnects and re-attaches, receiving a fresh snapshot. If
-the control stream dies, subscribers get `error{code:"resync"}` and the stream
-reconnects with bounded backoff (`stream.ts`).
+Live output is best-effort. If the bytes queued for a client's socket pass
+`WS_BACKLOG_BYTES` (64 KiB, `crates/daemon/src/remote.rs`) the server sends one
+`error{code:"resync"}` and drops output until the client re-attaches and is sent a
+fresh snapshot. If the keeper stream dies, subscribers get `error{code:"resync"}`
+too and the stream reconnects with bounded backoff (`crates/daemon/src/stream.rs`).
 
 Writes (`input`, `key`, `mouseclick`) are the holder's only; from
 any other device they get `error{code:"not_holder"}`.

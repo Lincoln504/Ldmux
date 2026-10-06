@@ -1,5 +1,7 @@
 # The tmux dependency
 
+> **ARCHIVE (moved to docs/archive/ 2026-10-06).** Historical record. The tmux question was decided (no tmux; the keeper is the session layer, ADR-0018) and closed 2026-10-04. Kept as evidence, not as current design.
+
 > **2026-10-05:** the last tmux *names* in the software (`tmuxName`, `tmuxSocket`,
 > `paneInMode`, `copymode`, `LDMUX_TMUX_*`) were also removed; see the log entry.
 

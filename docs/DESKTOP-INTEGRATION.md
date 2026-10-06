@@ -36,14 +36,14 @@ i3-msg '[class="ldmux-live-<id>"] move to workspace number <N>'
 **This is what keeps the user's desktop still.** `exec` alone does not move the
 user's view, and a criteria-targeted `move` does not either: the probe window
 landed on workspace 6 while the focused workspace stayed 10 throughout. The
-current `openMirror()` in `packages/daemon/src/desktop.ts` does the opposite — it
-runs `i3-msg 'workspace number N'` *before* `exec`, which switches the user's
-visible workspace. That is the bug this replaces.
+old TypeScript `openMirror()` did the opposite — it ran `i3-msg 'workspace number N'`
+*before* `exec`, which switches the user's visible workspace. That was the bug this
+replaced; the Rust implementation is `crates/daemon/src/desktop.rs`.
 
 **Do not quote a shell inside the i3 command string.** `exec -- alacritty --class
 X -e sh -c "sleep 30"` silently produced no window at all: no error from
 `i3-msg`, no process. Pass `-e <argv...>` with no internal quoting, or spawn from
-the daemon's own process launcher (`proc.ts`) and use `i3-msg exec` only for the
+the daemon's own process launcher (`crates/daemon/src/proc.rs`) and use `i3-msg exec` only for the
 bare terminal invocation.
 
 **`i3-msg -t get_tree` window nodes carry no `pid` on i3 4.24** — only `id`,
@@ -81,9 +81,8 @@ ancestor) reported `ws 10`.
 What is in the pi's ancestry is the session's **shell pid**, which the keeper
 reports in every `State` (`pid`, the pane's process-group leader). The daemon
 turns the keeper's list into `shell pid → session id` and walks each pi's parents
-to it, filling `DesktopPiSession.ldmuxSessionId`. That is the TypeScript's own
-mechanism (tmux's `#{pane_pid}`, `origin/main:packages/daemon/src/daemon.ts:1096
--1106`), and its comment is why it matters: without it the phone could only guess
+to it, filling `DesktopPiSession.ldmuxSessionId`. That was the TypeScript daemon's
+mechanism too (tmux's `#{pane_pid}`; now ported to the Rust daemon), and its comment is why it matters: without it the phone could only guess
 by directory, "and a guess that missed showed the user's running pi as *not in
 ldmux* and opened a new shell instead".
 
@@ -153,12 +152,12 @@ opens. `makeLive` refuses a session that is not `running`, with a reason.
 
 ## Session provenance
 
-`SessionRecord.createdBy` exists and is set from the `NewParams.createdBy` param
-in `handleNew()` (and hardcodes `"adopt"` in `adopt()`). Live values on the dev
+`SessionRecord.createdBy` exists and is set from the `createdBy` param of the daemon's
+`new` handler (`crates/daemon/src/daemon.rs`), which hardcodes `"adopt"` for adoption. Live values on the dev
 box are `pi-extension` (from before the extension was removed) and `local`.
 
 **Correction to an earlier note here:** this did *not* need no schema change. It
-was missing from `SessionInfo` (`packages/protocol/src/messages.ts`), which is
+was missing from `SessionInfo` (`crates/protocol/src/messages.rs`), which is
 what the remote client actually receives — so the phone could not have filtered
 on it even though the daemon knew. It is now part of `SessionInfo`, the remote
 `new` path passes `createdBy: "phone"`, and the launcher shows the per-shell menu
@@ -179,8 +178,9 @@ alone. `deploy/ldmux.service` carries it with the reason written next to it.
 
 ## Opening a shell in an arbitrary directory
 
-`cwd` validation today is only `existsSync && isDirectory` (`daemon.ts`), which
-means a relative path silently resolves against the daemon's own working
+`cwd` validation was, in the TypeScript daemon, only `existsSync && isDirectory`; the
+Rust daemon resolves it through `crates/daemon/src/cwd.rs` (a leading `~` is expanded, an
+absent directory means `$HOME`). The finding below is the original problem: a relative path silently resolves against the daemon's own working
 directory. A path typed on the phone should be: absolute (or prefixed with
 `$HOME` before it is sent), resolved with `realpathSync` so symlinks cannot
 escape, then required to be the home directory or under it, and only then checked

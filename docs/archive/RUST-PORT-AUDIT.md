@@ -1,5 +1,7 @@
 # RUST-PORT-AUDIT.md — the critical audit of the Rust port (2026-09-28)
 
+> **ARCHIVE (moved to docs/archive/ 2026-10-06).** Historical record. The critical audit of the Rust port plan (2026-09-28); the port is done (ADR-0018). Current state: `docs/STATE.md`.
+
 > **Banner, 2026-10-05.** tmux is now fully removed from the software: the wire
 > field is `keeperName` (was `tmuxName`), `keeperSocket` (was `tmuxSocket`), `paneInMode`
 > and the `copymode` message are gone, and the parity gate uses committed goldens
