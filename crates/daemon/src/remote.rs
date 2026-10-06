@@ -829,9 +829,12 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 conn.send_error("input_too_large", &format!("input exceeds {MAX_INPUT_BYTES} bytes"));
                 return;
             }
-            if let Some(stream) = active_stream(conn) {
-                let _ = on_stream(&stream, move |s| s.write(&text)).await;
-            }
+            let stream = active_stream(conn);
+            let Some(stream) = stream else {
+                conn.send_error("not_attached", "attach before typing");
+                return;
+            };
+            let _ = on_stream(&stream, move |s| s.write(&text)).await;
         }
         "key" => {
             let keys: Vec<String> = v
@@ -846,17 +849,20 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                         .collect()
                 })
                 .unwrap_or_default();
-            if let Some(stream) = active_stream(conn) {
-                // A name the table refuses is reported, not swallowed: the client
-                // logs the code, and nothing reaches the shell.
-                let sent = on_stream(&stream, move |s| {
-                    let refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
-                    s.send_key(&refs)
-                })
-                .await;
-                if let Some(Err(e)) = sent {
-                    conn.send_error("bad_key", &e);
-                }
+            let stream = active_stream(conn);
+            let Some(stream) = stream else {
+                conn.send_error("not_attached", "attach before sending keys");
+                return;
+            };
+            // A name the table refuses is reported, not swallowed: the client
+            // logs the code, and nothing reaches the shell.
+            let sent = on_stream(&stream, move |s| {
+                let refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+                s.send_key(&refs)
+            })
+            .await;
+            if let Some(Err(e)) = sent {
+                conn.send_error("bad_key", &e);
             }
         }
         "follow" => {
@@ -1666,6 +1672,43 @@ mod tests {
             outstanding: AtomicUsize::new(0),
         });
         (conn, rx)
+    }
+
+    /// A write from a connection that is not attached says so.
+    ///
+    /// All three writes go to the pane, and only `mouseclick` answered: `key` and
+    /// `input` did nothing at all, on the wire, in either direction. A tap test on
+    /// the phone looked like "the app sends nothing" because of it — the app's key
+    /// batches were dropped by a daemon that said nothing back.
+    #[tokio::test]
+    async fn a_write_without_an_attach_is_refused_loudly() {
+        let (conn, mut rx) = undrained_conn();
+        let dir = std::env::temp_dir().join(format!("ldmux-remote-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let daemon = Arc::new(tokio::sync::Mutex::new(crate::daemon::LdmuxDaemon::new(
+            dir.clone(),
+            std::path::PathBuf::from("/nonexistent"),
+        )));
+        let shared = Arc::new(Shared {
+            conns: Mutex::new(HashMap::new()),
+            daemon,
+            token: "t".into(),
+            idle_ms: 20_000,
+            stopped: AtomicBool::new(false),
+        });
+        for msg in [
+            r#"{"type":"key","keys":["Enter"]}"#,
+            r#"{"type":"input","data":"ls\n"}"#,
+            r#"{"type":"mouseclick","col":1,"row":1}"#,
+        ] {
+            handle_message(msg, &conn, &shared).await;
+            let out = rx.try_recv().unwrap_or_else(|_| panic!("no answer to {msg}"));
+            let Out::Json(text) = out else { panic!("expected json for {msg}") };
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], "error", "{msg} -> {v}");
+            assert_eq!(v["code"], "not_attached", "{msg} -> {v}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The backlog rule: a client that is not reading costs the daemon a bounded

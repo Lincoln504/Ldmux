@@ -1913,6 +1913,15 @@ measured against the pane's own state, not by eye:
   scroll: the pane is in the alternate screen, where the client's scrollback does not
   exist.
 
+**A write with no attach is refused out loud now.** Chasing the tap above found it:
+`input` and `key` did nothing at all when the connection had no active stream — no
+bytes to the pane, no answer on the wire — while `mouseclick` had always answered
+`not_attached`. From the phone that is indistinguishable from an app that never sent
+anything, which is exactly how it was read first. All three writes answer
+`not_attached` now, and the test drives all three through `handle_message` on an
+unattached connection (**fails on `key` with no answer**, which is what the old arm
+did).
+
 The rotation the landscape check needed (`settings put system user_rotation 1`,
 `accelerometer_rotation 0`) was restored afterwards, and the scratch session, its
 directory and its temp files were removed.
