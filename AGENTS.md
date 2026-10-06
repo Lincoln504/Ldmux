@@ -40,6 +40,8 @@ is the findings + state record.
 - **Tests are the gate.** `cargo test --workspace`, inside `nix develop` (the QR
   decode tests need `zbarimg`, which only the devShell has). `just test` is the
   shorthand.
+- **`just lint` is clean.** `cargo clippy --workspace --all-targets -- -D warnings`,
+  zero warnings: a lint that is tolerated is a lint nobody reads.
 - **Tailnet only.** Never bind a public interface; never disable auth.
 - **Scroll fidelity is sacred.** Any terminal UI change must preserve the
   `following`/`anchored` model (SPEC §7.4). Output must never move the viewport.

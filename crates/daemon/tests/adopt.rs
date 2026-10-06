@@ -183,8 +183,7 @@ async fn adopt_refuses_a_shell_that_is_not_there_and_one_that_has_exited() {
         .await
         .handle("adopt", serde_json::json!({"keeperName": "ldmux-ghost"}))
         .await
-        .err()
-        .expect("adopting a shell that does not exist must fail");
+        .expect_err("adopting a shell that does not exist must fail");
     assert!(!err.is_empty(), "and it must say so: {err}");
     assert!(arc.lock().await.registry().get("ghost").is_none(), "and record nothing");
 
@@ -218,8 +217,7 @@ async fn adopt_refuses_a_shell_that_is_not_there_and_one_that_has_exited() {
         .await
         .handle("adopt", serde_json::json!({"keeperName": keeper_name}))
         .await
-        .err()
-        .expect("adopting an exited shell must fail");
+        .expect_err("adopting an exited shell must fail");
     assert!(err.contains("dead"), "and it must say why: {err}");
     assert!(arc.lock().await.registry().get("exited1").is_none(), "and record nothing");
 

@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn the_default_timeout_is_a_finite_sane_bound() {
-        assert!(EXEC_TIMEOUT_MS > 0);
-        assert!(EXEC_TIMEOUT_MS <= 60_000);
+        const { assert!(EXEC_TIMEOUT_MS > 0) };
+        const { assert!(EXEC_TIMEOUT_MS <= 60_000) };
     }
 }

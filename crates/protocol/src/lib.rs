@@ -65,6 +65,8 @@ mod size_tests {
         assert_eq!(clamp_pane_size(80, 300).1, MAX_PANE_ROWS);
         assert_eq!(clamp_pane_size(80, u64::MAX).1, MAX_PANE_ROWS);
         assert_eq!(clamp_pane_size(9999, 24).0, MAX_PANE_COLS);
-        assert!(MAX_PANE_ROWS <= 255);
+        // Compile-time, not run-time: raising the constant past the frame's
+        // one-byte row field is a build error, not a failing test.
+        const { assert!(MAX_PANE_ROWS <= 255) };
     }
 }

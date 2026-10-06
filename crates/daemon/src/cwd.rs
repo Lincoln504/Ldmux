@@ -37,7 +37,7 @@ pub fn resolve(cwd: Option<&str>, home: &str) -> String {
     let raw = cwd.map(str::trim).filter(|s| !s.is_empty());
     match raw {
         None => home.to_string(),
-        Some(r) if r == "~" => home.to_string(),
+        Some("~") => home.to_string(),
         Some(r) if let Some(rest) = r.strip_prefix("~/") => {
             let rest = rest.trim_start_matches('/');
             if rest.is_empty() {

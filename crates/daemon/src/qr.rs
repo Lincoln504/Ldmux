@@ -210,9 +210,9 @@ fn with_ecc(data: &[u8], ver: u32, ecc: Ecc) -> Vec<u8> {
     }
     let mut out: Vec<u8> = vec![];
     for i in 0..all[0].len() {
-        for j in 0..all.len() {
+        for (j, block) in all.iter().enumerate() {
             if i != short_len - ecc_len || j >= short_blocks {
-                out.push(all[j][i]);
+                out.push(block[i]);
             }
         }
     }
@@ -309,8 +309,11 @@ fn draw_function_patterns(g: &mut Grid, ver: u32) {
     let last = pos.len().saturating_sub(1);
     for i in 0..pos.len() {
         for j in 0..pos.len() {
-            // The three corners already hold finder patterns.
-            if (i == 0 && j == 0) || (i == 0 && j == last) || (i == last && j == 0) {
+            // The three corners already hold finder patterns. Grouped the way
+            // it reads: "top row, first or last column, plus the bottom-left".
+            let top_corner = i == 0 && (j == 0 || j == last);
+            let bottom_left = i == last && j == 0;
+            if top_corner || bottom_left {
                 continue;
             }
             for dy in -2i32..=2 {
@@ -396,7 +399,7 @@ fn apply_mask(g: &mut Grid, mask: u32) {
 }
 
 /// The four penalty rules of ISO/IEC 18004 §7.8.3. Lower scores are better.
-fn penalty(m: &Vec<Vec<bool>>) -> i64 {
+fn penalty(m: &[Vec<bool>]) -> i64 {
     let size = m.len() as u32;
     let at = |x: u32, y: u32, horizontal: bool| -> bool {
         if horizontal {
@@ -424,8 +427,8 @@ fn penalty(m: &Vec<Vec<bool>>) -> i64 {
             }
             for b in 0..=size - 7 {
                 let mut matches = true;
-                for k in 0..7usize {
-                    if at(b + k as u32, a, horizontal) != finder[k] {
+                for (k, f) in finder.iter().enumerate() {
+                    if at(b + k as u32, a, horizontal) != *f {
                         matches = false;
                     }
                 }

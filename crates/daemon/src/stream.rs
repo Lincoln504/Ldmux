@@ -782,7 +782,11 @@ mod tests {
         }
     }
 
-    fn cb() -> (Box<dyn Fn(&[u8]) + Send + Sync>, Box<dyn Fn(&str) + Send + Sync>) {
+    /// The output sink a stream calls: bytes, and text for the model's reply.
+    type OutputCb = Box<dyn Fn(&[u8]) + Send + Sync>;
+    type ResetCb = Box<dyn Fn(&str) + Send + Sync>;
+
+    fn cb() -> (OutputCb, ResetCb) {
         let got = Arc::new(Mutex::new(Vec::new()));
         let reset = Arc::new(AtomicBool::new(false));
         let g = got.clone();

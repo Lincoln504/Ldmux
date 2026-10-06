@@ -165,7 +165,7 @@ impl Registry {
     pub fn list(&self) -> Vec<SessionRecord> {
         let mut records: Vec<SessionRecord> =
             self.order.iter().filter_map(|id| self.sessions.get(id).cloned()).collect();
-        records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        records.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         records
     }
 

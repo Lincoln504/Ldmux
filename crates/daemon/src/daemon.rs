@@ -826,11 +826,8 @@ impl LdmuxDaemon {
                     }
                     let (changed, shared) = {
                         let mut d = maint_arc.lock().await;
-                        let changed = match d.maintain().await {
-                            Ok(c) => c,
-                            // A keeper that is restarting is not news.
-                            Err(_) => false,
-                        };
+                        // A keeper that is restarting is not news.
+                        let changed = d.maintain().await.unwrap_or_default();
                         let shared = d.remote.as_ref().and_then(|r| r.shared());
                         (changed, shared)
                     };

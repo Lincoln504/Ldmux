@@ -768,6 +768,9 @@ fn signal_session(sid: i32, sig: nix::sys::signal::Signal) {
 /// 0/1/2, and execs the shell; only the parent returns (the child `_exit`s).
 /// The non-`Send` pointer array is built here and dropped on return, so it is
 /// never held across an await in the async caller.
+// The fds are the point: four distinct descriptors used in a fixed `dup2`
+// order. Bundling them would name them, not make them any harder to swap.
+#[allow(clippy::too_many_arguments)]
 fn fork_shell(
     slave_in_raw: std::os::fd::RawFd,
     slave_out_raw: std::os::fd::RawFd,

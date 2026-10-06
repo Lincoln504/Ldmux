@@ -891,7 +891,7 @@ pub fn list_transcripts(dir: &str) -> Vec<String> {
             stamped.push((path, mtime));
         }
     }
-    stamped.sort_by(|a, b| b.1.cmp(&a.1)); // descending by mtime
+    stamped.sort_by_key(|b| std::cmp::Reverse(b.1)); // descending by mtime
     stamped.into_iter().map(|(p, _)| p).collect()
 }
 

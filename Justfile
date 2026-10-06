@@ -12,9 +12,9 @@ test:
 daemon-test:
     cargo test -p ldmux-daemon
 
-# Clippy, workspace-wide.
+# Clippy, workspace-wide, tests included, and a warning fails.
 lint:
-    cargo clippy --workspace
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Start the daemon in the foreground (default state dir).
 daemon:

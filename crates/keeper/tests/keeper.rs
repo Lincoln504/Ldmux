@@ -1072,11 +1072,11 @@ async fn a_background_job_does_not_survive_the_shell() {
 
     let mut child_pid = 0i32;
     for _ in 0..200 {
-        if let Ok(s) = std::fs::read_to_string(&pidfile) {
-            if let Ok(p) = s.trim().parse() {
-                child_pid = p;
-                break;
-            }
+        if let Ok(s) = std::fs::read_to_string(&pidfile)
+            && let Ok(p) = s.trim().parse()
+        {
+            child_pid = p;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }

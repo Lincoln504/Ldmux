@@ -1428,6 +1428,9 @@ fn device_of(conn: &ConnShared) -> Option<ldmux_protocol::rpc::DeviceInfo> {
 
 // ── HTTP head parsing / responses ───────────────────────────────────────────
 
+/// A parsed request head: `(method, path, headers)`.
+type ParsedHead = (String, String, Vec<(String, String)>);
+
 /// The text of a WS message, if it is text or binary (a control message).
 fn message_text(msg: &Message) -> Option<String> {
     match msg {
@@ -1460,7 +1463,7 @@ async fn read_head(stream: &TcpStream) -> Option<String> {
 }
 
 /// Parse the request line + headers from a head. Header names are lowercased.
-fn parse_request_head(head: &str) -> Option<(String, String, Vec<(String, String)>)> {
+fn parse_request_head(head: &str) -> Option<ParsedHead> {
     let mut lines = head.split("\r\n");
     let request = lines.next()?;
     let mut parts = request.split_whitespace();

@@ -280,6 +280,11 @@ async fn a_dead_pane_is_released_from_the_keeper() {
 /// outlived the window for good and `makeLive` then refused with "that shell
 /// already has a desk window" — the shell could never be made live again.
 #[tokio::test]
+// The environment lock is held for the whole test on purpose: it serialises the
+// tests that mutate PATH/DISPLAY, and the environment has to stay as they set it
+// across every await below. The lock guards no data the awaits touch, so there is
+// nothing for an async mutex to fix.
+#[allow(clippy::await_holding_lock)]
 async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
     let _env = window_manager_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new().await;
@@ -295,12 +300,12 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
     // leaked non-zero from the other one read as "the window manager did not
     // answer", which is deliberately *not* a closed window.
     unsafe { std::env::set_var("I3_TREE_CODE", "0") };
+    let class = format!("ldmux-live-{id}");
     unsafe {
         std::env::set_var(
             "I3_TREE",
             format!(
-                r#"{{"nodes":[{{"window":123,"window_properties":{{"class":"{}"}},"nodes":[],"floating_nodes":[]}}],"floating_nodes":[]}}"#,
-                format!("ldmux-live-{id}")
+                r#"{{"nodes":[{{"window":123,"window_properties":{{"class":"{class}"}},"nodes":[],"floating_nodes":[]}}],"floating_nodes":[]}}"#
             ),
         )
     };
@@ -342,6 +347,11 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
 /// `unknown` is not `absent`, and ending a session on it would be the worst
 /// possible failure mode of this pass.
 #[tokio::test]
+// The environment lock is held for the whole test on purpose: it serialises the
+// tests that mutate PATH/DISPLAY, and the environment has to stay as they set it
+// across every await below. The lock guards no data the awaits touch, so there is
+// nothing for an async mutex to fix.
+#[allow(clippy::await_holding_lock)]
 async fn an_unanswered_window_manager_never_ends_a_session() {
     let _env = window_manager_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new().await;
