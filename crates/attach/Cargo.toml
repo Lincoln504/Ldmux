@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 ldmux-protocol = { path = "../protocol" }
 tokio = { version = "1", features = ["net", "io-util", "io-std", "time", "rt", "rt-multi-thread", "macros", "signal"] }
-nix = { version = "0.29", features = ["term"] }
+nix = { version = "0.29", features = ["term", "signal", "poll"] }
 serde = "1"
 serde_json = "1"
 tokio-tungstenite = "0.26"

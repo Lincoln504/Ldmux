@@ -15,18 +15,33 @@
 #   3. Nothing else may stop the user manager: check `KillUserProcesses` in
 #      `/etc/systemd/logind.conf` is not enabled.
 #
-# **THIS FILE IS THE DEPLOYED CONFIGURATION**, and it is machine-specific in three
-# lines, each marked below. It used to be a template with those three commented out,
-# which was worse than useless: installing it gave a loopback-only daemon that
-# reported success and exited 0, so the phone could not connect and nothing said why.
-# Install with `just install`: it installs the Rust binaries to `~/.local/bin`,
-# copies this file to `~/.config/systemd/user/ldmux.service` and runs
-# `systemctl --user daemon-reload`. It does not enable or restart the unit:
-# `systemctl --user enable --now ldmux` the first time, `restart` after that.
+# **Nothing machine-specific is in this file.** Per-machine values (the tailnet
+# address the phone connects to, the port) go in an optional environment file,
+# `~/.config/ldmux/env`, which the unit reads if it exists (`deploy/ldmux.env.example`
+# is the template). With no `LDMUX_REMOTE_HOST` the daemon answers on the unix
+# socket and loopback only: fine for the CLI, useless for a phone.
+#
+# **The desktop session's variables.** To open a desk window the daemon needs to
+# know which desktop it is on (DISPLAY, WAYLAND_DISPLAY, XAUTHORITY, SWAYSOCK,
+# I3SOCK, HYPRLAND_INSTANCE_SIGNATURE, NIRI_SOCKET, DBUS_SESSION_BUS_ADDRESS). A
+# user unit starts with the user manager, possibly before login, so none are set
+# here. The session passes them on at startup, once, from its own config:
+#
+#     systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY \
+#         SWAYSOCK I3SOCK HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET DBUS_SESSION_BUS_ADDRESS
+#
+# (i3: `exec --no-startup-id systemctl --user import-environment …`; sway and
+# hyprland: `exec`/`exec-once`; GNOME and KDE do it themselves.) The daemon asks
+# the user manager for them when it has none of its own, so no restart is needed
+# after the import. Without them `ldmux window` says there is no graphical session.
+#
+# Install with `just install`: it installs the Rust binaries to `~/.local/bin`
+# and the launcher, and puts this file at `~/.config/systemd/user/ldmux.service`
+# (beside it as `ldmux.service.new` when one is already there, unless FORCE=1),
+# then runs `systemctl --user daemon-reload`. It does not enable or restart the
+# unit: `systemctl --user enable --now ldmux` the first time, `restart` after that.
 [Unit]
 Description=ldmux daemon — remote terminal sessions
-# A real path, rather than one an installer that does not exist would have created.
-Documentation=file://%h/Documents/ldmux/docs/SPEC.md
 After=default.target
 
 [Service]
@@ -49,20 +64,6 @@ KillMode=process
 Restart=on-failure
 RestartSec=2
 
-# The window manager's own environment, for "make it live on the desktop": the
-# daemon launches a window through i3, and without DISPLAY and XAUTHORITY it can
-# only report "no DISPLAY (not an X11 session)".
-#
-# User-specific, and an **override rather than a fallback**: a unit-level
-# `Environment=` wins over `systemctl --user import-environment`, and
-# `~/.config/i3/config` already imports the live DISPLAY/XAUTHORITY (docs/SPEC.md names
-# that import as the mechanism). So on a session that is not `:0` the live-window path
-# targets the wrong display and can only report the failure. It is kept because the
-# unit starts with the user manager, which can precede i3's import, and `:0` is correct
-# on this machine — measured: the session's DISPLAY is `:0.0`.
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=%h/.Xauthority
-
 Environment=LDMUX_STATE_DIR=%t/ldmux
 
 # The bearer token the phone is paired with. Not in the state directory: that is
@@ -71,13 +72,11 @@ Environment=LDMUX_STATE_DIR=%t/ldmux
 Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 
 
-# The daemon the phone talks to. Without these it answers on an unix socket only,
-# which is fine for the CLI and useless for a device.
-#
-# Machine-specific: the tailnet address the phone reaches and the port the app is
-# configured with. `ldmux remote` prints what this machine should use.
-Environment=LDMUX_REMOTE_HOST=100.127.119.54
-Environment=LDMUX_REMOTE_PORT=7625
+# Per-machine settings: LDMUX_REMOTE_HOST (the tailnet address the phone reaches),
+# LDMUX_REMOTE_PORT (default 7623), and anything else the daemon reads. The leading
+# dash makes the file optional. It is read after the Environment= lines above, so
+# it can override any of them.
+EnvironmentFile=-%h/.config/ldmux/env
 
 # `~/.local/bin` is where `just install` puts ldmuxd, ldmux and ldmux-keeper. The
 # daemon auto-spawns the keeper by name, so it must be on PATH. Nothing here comes

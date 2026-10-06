@@ -562,8 +562,13 @@ pub struct ProbeResult {
 
 use crate::exec::{self, ExecOpts};
 
-fn exec_opts(ms: u64) -> ExecOpts {
-    ExecOpts { timeout_ms: Some(ms), env: None }
+/// Every probe runs in the session environment (`desktop::session_env`): a daemon
+/// started before login has no DISPLAY/SWAYSOCK/… of its own, and a probe without
+/// them reads as "no window manager" on a machine that has one.
+type Env = Vec<(String, String)>;
+
+fn exec_opts(ms: u64, env: &Env) -> ExecOpts {
+    ExecOpts { timeout_ms: Some(ms), env: Some(env.clone()) }
 }
 
 fn argv<T: AsRef<str>>(args: &[T]) -> Vec<String> {
@@ -571,15 +576,15 @@ fn argv<T: AsRef<str>>(args: &[T]) -> Vec<String> {
 }
 
 /// Probe i3 or sway: same tree, different binary.
-async fn probe_i3_like(binary: &str, wm: &str) -> Option<ProbeResult> {
-    let tree = exec::run(argv(&[binary, "-t", "get_tree"]), exec_opts(3000)).await;
+async fn probe_i3_like(env: &Env, binary: &str, wm: &str) -> Option<ProbeResult> {
+    let tree = exec::run(argv(&[binary, "-t", "get_tree"]), exec_opts(3000, env)).await;
     if tree.code != 0 || tree.out.trim().is_empty() {
         return None;
     }
     let parsed: serde_json::Value = serde_json::from_str(&tree.out).ok()?;
     let (mut workspaces, windows) = walk_i3_tree(&parsed);
 
-    let ws = exec::run(argv(&[binary, "-t", "get_workspaces"]), exec_opts(3000)).await;
+    let ws = exec::run(argv(&[binary, "-t", "get_workspaces"]), exec_opts(3000, env)).await;
     if let Ok(reported) = serde_json::from_str::<serde_json::Value>(&ws.out) {
         workspaces = merge_i3_workspace_flags(workspaces, &reported);
     }
@@ -597,7 +602,7 @@ async fn probe_i3_like(binary: &str, wm: &str) -> Option<ProbeResult> {
 /// i3 sets `pid` on Wayland windows only; on X11 every window comes back with
 /// `null`, which would leave every pi session unattributed. `_NET_WM_PID` is
 /// the EWMH property that answers it.
-async fn enrich_window_pids(windows: &mut [DesktopWindow]) {
+async fn enrich_window_pids(env: &Env, windows: &mut [DesktopWindow]) {
     let missing: Vec<usize> = windows
         .iter()
         .enumerate()
@@ -611,8 +616,9 @@ async fn enrich_window_pids(windows: &mut [DesktopWindow]) {
         .into_iter()
         .map(|i| {
             let id = windows[i].id.clone();
+            let env = env.clone();
             tokio::spawn(async move {
-                let out = exec::run(argv(&["xprop", "-id", &id, "_NET_WM_PID"]), exec_opts(2000)).await;
+                let out = exec::run(argv(&["xprop", "-id", &id, "_NET_WM_PID"]), exec_opts(2000, &env)).await;
                 if out.code != 0 {
                     return None;
                 }
@@ -633,8 +639,8 @@ async fn enrich_window_pids(windows: &mut [DesktopWindow]) {
 }
 
 /// Probe EWMH: the standard every X11 desktop implements.
-async fn probe_ewmh() -> Option<ProbeResult> {
-    let list = exec::run(argv(&["xprop", "-root", "_NET_CLIENT_LIST"]), exec_opts(3000)).await;
+async fn probe_ewmh(env: &Env) -> Option<ProbeResult> {
+    let list = exec::run(argv(&["xprop", "-root", "_NET_CLIENT_LIST"]), exec_opts(3000, env)).await;
     if list.code != 0 {
         return None;
     }
@@ -655,7 +661,7 @@ async fn probe_ewmh() -> Option<ProbeResult> {
                         "_NET_WM_DESKTOP",
                         "_NET_WM_PID",
                     ]),
-                    exec_opts(3000),
+                    exec_opts(3000, env),
                 )
                 .await;
                 if out.code == 0 {
@@ -671,7 +677,7 @@ async fn probe_ewmh() -> Option<ProbeResult> {
     .flatten()
     .collect();
 
-    let current = exec::run(argv(&["xprop", "-root", "_NET_CURRENT_DESKTOP"]), exec_opts(2000)).await;
+    let current = exec::run(argv(&["xprop", "-root", "_NET_CURRENT_DESKTOP"]), exec_opts(2000, env)).await;
     let active = current
         .out
         .split('=')
@@ -715,15 +721,21 @@ async fn probe_ewmh() -> Option<ProbeResult> {
 /// Ask each window manager in turn. The order is "most specific first": a WM
 /// with a real tree gives workspace nesting, EWMH only gives flat desktops.
 pub async fn probe_window_manager() -> ProbeResult {
-    if let Some(r) = probe_i3_like("i3-msg", "i3").await {
+    let env = crate::desktop::session_env().await;
+    let env = &env;
+    probe_in(env).await
+}
+
+async fn probe_in(env: &Env) -> ProbeResult {
+    if let Some(r) = probe_i3_like(env, "i3-msg", "i3").await {
         return r;
     }
-    if let Some(r) = probe_i3_like("swaymsg", "sway").await {
+    if let Some(r) = probe_i3_like(env, "swaymsg", "sway").await {
         return r;
     }
 
-    let niri_ws = exec::run(argv(&["niri", "msg", "--json", "workspaces"]), exec_opts(3000)).await;
-    let niri_win = exec::run(argv(&["niri", "msg", "--json", "windows"]), exec_opts(3000)).await;
+    let niri_ws = exec::run(argv(&["niri", "msg", "--json", "workspaces"]), exec_opts(3000, env)).await;
+    let niri_win = exec::run(argv(&["niri", "msg", "--json", "windows"]), exec_opts(3000, env)).await;
     if niri_ws.code == 0
         && niri_win.code == 0
         && let (Ok(ws), Ok(win)) = (
@@ -740,8 +752,8 @@ pub async fn probe_window_manager() -> ProbeResult {
         };
     }
 
-    let hypr_ws = exec::run(argv(&["hyprctl", "-j", "workspaces"]), exec_opts(3000)).await;
-    let hypr_clients = exec::run(argv(&["hyprctl", "-j", "clients"]), exec_opts(3000)).await;
+    let hypr_ws = exec::run(argv(&["hyprctl", "-j", "workspaces"]), exec_opts(3000, env)).await;
+    let hypr_clients = exec::run(argv(&["hyprctl", "-j", "clients"]), exec_opts(3000, env)).await;
     if hypr_ws.code == 0
         && hypr_clients.code == 0
         && let (Ok(ws), Ok(clients)) = (
@@ -749,7 +761,7 @@ pub async fn probe_window_manager() -> ProbeResult {
             serde_json::from_str::<serde_json::Value>(&hypr_clients.out),
         )
     {
-        let active = exec::run(argv(&["hyprctl", "-j", "activeworkspace"]), exec_opts(2000)).await;
+        let active = exec::run(argv(&["hyprctl", "-j", "activeworkspace"]), exec_opts(2000, env)).await;
         let active_val: Option<serde_json::Value> = if active.code == 0 {
             serde_json::from_str(&active.out).ok()
         } else {
@@ -765,7 +777,7 @@ pub async fn probe_window_manager() -> ProbeResult {
         };
     }
 
-    if let Some(r) = probe_ewmh().await {
+    if let Some(r) = probe_ewmh(env).await {
         return r;
     }
 
@@ -773,7 +785,10 @@ pub async fn probe_window_manager() -> ProbeResult {
         wm: "unknown".to_string(),
         workspaces: vec![],
         windows: vec![],
-        detail: Some("no window manager could be enumerated".to_string()),
+        detail: Some(
+            "no window manager could be enumerated (i3/sway/niri/hyprland need their msg tool on PATH; other X11 desktops need xprop)"
+                .to_string(),
+        ),
     }
 }
 
@@ -984,8 +999,9 @@ pub fn link_pi_sessions(
 /// Read the full desktop inventory: probe the WM, enrich pids, scan pi
 /// sessions.
 pub async fn read_desktop(home: &str) -> DesktopInventory {
-    let mut probe = probe_window_manager().await;
-    enrich_window_pids(&mut probe.windows).await;
+    let env = crate::desktop::session_env().await;
+    let mut probe = probe_in(&env).await;
+    enrich_window_pids(&env, &mut probe.windows).await;
     let pi_sessions = scan_pi_sessions(home, "/proc", &probe.windows);
     DesktopInventory {
         wm: probe.wm,

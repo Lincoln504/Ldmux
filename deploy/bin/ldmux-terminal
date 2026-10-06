@@ -1,45 +1,90 @@
 #!/bin/sh
-# super+Return. A terminal keybinding must always give a terminal, so this asks
-# ldmux for a desk window and falls back to a plain shell when it cannot have
-# one — a fresh boot before the unit is up, or a daemon that is down.
+# A terminal keybinding must always give a terminal, so this asks ldmux for a
+# desk window and falls back to a plain terminal when it cannot have one — a
+# fresh boot before the daemon is up, or a daemon that is down.
 #
 # A desk window (`ldmux window`), not `ldmux run`: a bare shell nobody held made
 # the phone open it without asking, both typed into one pty, and closing the
 # window left the shell running (ADR-0010). The daemon opens the window itself
-# (alacritty running `ldmuxd attach`), so this wrapper spawns no terminal of
-# its own on success.
+# (a terminal emulator running `ldmuxd attach`), so this wrapper spawns no
+# terminal of its own on success.
+#
+# Usage: ldmux-terminal [directory]     (default: the current directory)
+#
+# The fallback terminal is chosen as the daemon chooses its own:
+#   $LDMUX_TERMINAL, then $TERMINAL, then the first of alacritty kitty foot
+#   wezterm gnome-terminal konsole xfce4-terminal xterm x-terminal-emulator
+#   xdg-terminal-exec on PATH. (With LDMUX_TERMINAL_CMD set, its first word is
+#   tried first; the fallback runs the bare terminal, since a plain shell has no
+#   attach command to put in it.)
 #
 # The fallback is logged. It used to be silent, and a wrapper that could not
 # find the daemon made *every* window a plain shell for days with nothing saying
-# so.
+# so. It also waits first: a window opened at login lost the race with the daemon
+# by a couple of seconds and dropped straight to a plain shell, which is not a
+# session — no client can see it. Only an *absent* daemon is worth waiting for:
+# the loop asks `ping` after a failed window and gives up at once when the daemon
+# answers.
 #
-# It waits first. A window opened at login — the commonest moment for this
-# keybinding, since the session is starting and so is the daemon — used to lose
-# the race by a couple of seconds and drop straight to the fallback. That
-# fallback shell is a plain pty: it is not a session, so no client can see it,
-# `ldmux list` does not know it, and the phone cannot open it. Measured on
-# 2026-10-06: this wrapper ran at 02:41:00, the daemon answered at 02:41:09
-# after a crash, and the terminal the user then started pi in was a plain
-# session-less shell (`no ldmux desk window, plain shell instead: ldmux:
-# connect: Connection refused (os error 111)`).
-#
-# Only a daemon that is *absent* is worth waiting for; the loop asks `ping`
-# after a failed window and gives up at once when the daemon answers, because
-# a terminal that will not open will not fix itself in 250 ms.
-LDMUX="${LDMUX:-$HOME/.local/bin/ldmux}"
-err=$(mktemp) || err=/dev/null
-tries=0
-while [ "$tries" -lt 12 ]; do
-  if "$LDMUX" window "${PWD:-$HOME}" >/dev/null 2>"$err"; then
-    rm -f "$err"
-    exit 0
-  fi
-  if "$LDMUX" ping >/dev/null 2>&1; then
-    break
-  fi
-  tries=$((tries + 1))
-  sleep 0.25
-done
-logger -t ldmux-terminal "no ldmux desk window, plain shell instead: $(head -c 300 "$err" 2>/dev/null)"
-[ "$err" = /dev/null ] || rm -f "$err"
-exec alacritty
+# POSIX sh. Whatever launches this (a window manager, a desktop entry) may have a
+# PATH without ~/.local/bin, so it is added here.
+PATH="$PATH:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH
+
+if [ -n "${LDMUX:-}" ]; then
+  LDMUX_BIN="$LDMUX"
+elif [ -x "$HOME/.local/bin/ldmux" ]; then
+  LDMUX_BIN="$HOME/.local/bin/ldmux"
+else
+  LDMUX_BIN=$(command -v ldmux 2>/dev/null || true)
+fi
+
+dir="${1:-${PWD:-$HOME}}"
+
+err=$(mktemp 2>/dev/null) || err=/dev/null
+cleanup() { [ "$err" = /dev/null ] || rm -f "$err"; }
+
+if [ -n "$LDMUX_BIN" ]; then
+  tries=0
+  while [ "$tries" -lt 12 ]; do
+    if "$LDMUX_BIN" window "$dir" >/dev/null 2>"$err"; then
+      cleanup
+      exit 0
+    fi
+    if "$LDMUX_BIN" ping >/dev/null 2>&1; then
+      break
+    fi
+    tries=$((tries + 1))
+    sleep 0.25 2>/dev/null || sleep 1
+  done
+else
+  echo "ldmux binary not found (looked at \$LDMUX, ~/.local/bin/ldmux, PATH)" >"$err" 2>/dev/null
+fi
+
+msg="no ldmux desk window, plain terminal instead: $(head -c 300 "$err" 2>/dev/null)"
+if command -v logger >/dev/null 2>&1; then
+  logger -t ldmux-terminal "$msg"
+else
+  echo "ldmux-terminal: $msg" >&2
+fi
+cleanup
+
+# First word of each candidate, as an absolute path.
+find_term() {
+  for cand in "$@"; do
+    [ -n "$cand" ] || continue
+    # shellcheck disable=SC2086
+    set -- $cand
+    found=$(command -v "$1" 2>/dev/null) || continue
+    case "$found" in /*) printf '%s\n' "$found"; return 0 ;; esac
+  done
+  return 1
+}
+
+term=$(find_term "${LDMUX_TERMINAL_CMD:-}" "${LDMUX_TERMINAL:-}" "${TERMINAL:-}" \
+  alacritty kitty foot wezterm gnome-terminal konsole xfce4-terminal xterm \
+  x-terminal-emulator xdg-terminal-exec) || {
+  echo "ldmux-terminal: no terminal emulator found; install one or set LDMUX_TERMINAL" >&2
+  exit 1
+}
+exec "$term"

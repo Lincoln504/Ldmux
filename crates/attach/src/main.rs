@@ -29,4 +29,7 @@ async fn main() {
         eprintln!("ldmux-attach: {e}");
         std::process::exit(1);
     }
+    // Exit rather than return: a read of stdin is still pending on a blocking
+    // thread, and the runtime would wait for it.
+    std::process::exit(0);
 }

@@ -1,86 +1,160 @@
-//! Desktop live-window e2e (plan §6): Xvfb + i3 scratch; the live-window
-//! lifecycle functions (open/state/close) run against a real X server and WM
-//! without panicking.
+//! Desktop live-window e2e (plan §6): Xvfb + i3 + xterm, all scratch. The window
+//! is opened by direct spawn, found and placed by the i3 adapter, observed, and
+//! closed, against a real X server and window manager.
+//!
+//! Skips, with the reason printed, when Xvfb, i3 or xterm is not installed. The
+//! test is hermetic: it sets its own DISPLAY, HOME and XDG_RUNTIME_DIR and removes
+//! every other session variable, so it never touches the developer's desktop.
 //!
 //! **What this does not cover:** the ownership/geometry semantics of a window
-//! (size-on-attach, handover, close≠detach) live in `handover.rs`, which drives
-//! two real remote-WS clients against a daemon with no X server; the full
-//! alacritty-stub handover (a real window driven through i3) is still not built.
+//! (size-on-attach, handover, close≠detach) live in `handover.rs` and
+//! `attach_client.rs`, which drive real clients against a daemon with no X server.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use ldmux_daemon::desktop;
 
-fn scratch_dir() -> std::path::PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-deske2e-{}-{}", std::process::id(), rand::random::<u64>()));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn on_path(tool: &str) -> bool {
+    std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .any(|d| !d.is_empty() && std::path::Path::new(d).join(tool).is_file())
 }
 
-/// Kill both children when the test ends, however it ends.
+/// Kill the children when the test ends, however it ends.
 struct Guard(Vec<std::process::Child>);
 impl Drop for Guard {
     fn drop(&mut self) {
-        for c in &mut self.0 {
+        for c in self.0.iter_mut().rev() {
             let _ = c.kill();
             let _ = c.wait();
         }
     }
 }
 
+/// Poll `cond` every 50 ms until it holds or `secs` pass.
+async fn wait_until(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < end {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cond()
+}
+
 #[tokio::test]
-async fn desktop_attach_e2e_functions_do_not_panic() {
-    // A random display, so two runs (or a leftover) never collide on the
-    // X server's WM-selection atom.
-    let display = format!(":{}", 90 + (rand::random::<u8>() % 8));
-    let xvfb = Command::new("Xvfb")
-        .arg(&display)
-        .arg("-screen")
-        .arg("0")
-        .arg("1024x768x24")
-        .spawn()
-        .expect("failed to start Xvfb");
-    let mut guard = Guard(vec![xvfb]);
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+async fn a_window_is_opened_found_placed_and_closed_under_i3() {
+    for tool in ["Xvfb", "i3", "i3-msg", "xterm"] {
+        if !on_path(tool) {
+            eprintln!("SKIP desktop_e2e: {tool} is not installed");
+            return;
+        }
+    }
+    let scratch = std::env::temp_dir().join(format!("ldmux-deske2e-{}-{}", std::process::id(), rand::random::<u64>()));
+    std::fs::create_dir_all(scratch.join("run")).unwrap();
+    std::fs::set_permissions(scratch.join("run"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
 
-    let i3 = Command::new("i3")
-        .env("DISPLAY", &display)
-        .spawn()
-        .expect("failed to start i3");
-    guard.0.push(i3);
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-
-    unsafe { std::env::set_var("DISPLAY", &display) };
-
-    let state_dir = scratch_dir();
-    let session_id = "s1".to_string();
-    let workspace = "1".to_string();
-
-    // Open a live window (the argv is what matters; without a real session the
-    // i3 exec may place nothing, which is fine).
-    let _ = desktop::open_live(&session_id, &workspace).await;
-
-    let state = desktop::live_window_state(&session_id).await;
-    assert!(
-        matches!(state.unwrap_or("unknown"), "absent" | "unknown" | "present"),
-        "live_window_state returns a valid state"
+    // A random display so two runs never collide on the WM-selection atom.
+    let n = 90 + (rand::random::<u8>() % 8) as u32;
+    let display = format!(":{n}");
+    let mut guard = Guard(Vec::new());
+    guard.0.push(
+        Command::new("Xvfb")
+            .args([&display, "-screen", "0", "1024x768x24"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to start Xvfb"),
     );
+    let socket = format!("/tmp/.X11-unix/X{n}");
+    if !wait_until(10, || std::path::Path::new(&socket).exists()).await {
+        eprintln!("SKIP desktop_e2e: Xvfb did not come up on {display}");
+        return;
+    }
 
-    let _ = desktop::close_live(&session_id).await;
-    // i3 processes the kill asynchronously: poll briefly for the window to go.
-    let mut state2 = "present";
-    for _ in 0..40 {
-        state2 = desktop::live_window_state(&session_id).await.unwrap_or("unknown");
-        if state2 != "present" {
+    // SAFETY: this file has one test, so nothing else reads the environment.
+    unsafe {
+        std::env::set_var("DISPLAY", &display);
+        std::env::set_var("HOME", &scratch);
+        std::env::set_var("XDG_RUNTIME_DIR", scratch.join("run"));
+        for v in ["WAYLAND_DISPLAY", "SWAYSOCK", "I3SOCK", "HYPRLAND_INSTANCE_SIGNATURE", "NIRI_SOCKET", "LDMUX_TERMINAL", "TERMINAL"] {
+            std::env::remove_var(v);
+        }
+        // xterm keeps a window up for 30 s; `{cmd}` follows as $0 and its args.
+        std::env::set_var("LDMUX_TERMINAL_CMD", "xterm -class {class} -e /bin/sh -c 'sleep 30' {cmd}");
+    }
+
+    guard.0.push(
+        Command::new("i3")
+            .env("DISPLAY", &display)
+            .env("HOME", &scratch)
+            .env("XDG_RUNTIME_DIR", scratch.join("run"))
+            .env_remove("I3SOCK")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to start i3"),
+    );
+    // i3 is ready when it answers on IPC.
+    let ready = wait_until(15, || {
+        Command::new("i3-msg")
+            .args(["-t", "get_version"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(ready, "i3 never answered on {display}");
+
+    let id = "e2e1";
+    let opened = desktop::open_live(id, "2").await.expect("the window must open");
+    assert!(opened.ok);
+    assert_eq!(opened.placed, Some(true), "i3 placed it: {:?}", opened.detail);
+    assert!(opened.window_id.is_some());
+
+    // On screen, by class, as the daemon asks i3.
+    let mut state = "";
+    for _ in 0..100 {
+        state = desktop::live_window_state(id).await.unwrap();
+        if state == "present" {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(
-        matches!(state2, "absent" | "unknown"),
-        "the window is absent or unknown after close (got {state2})"
-    );
+    assert_eq!(state, "present", "the window must be in i3's tree");
+    assert_eq!(desktop::live_window_ids().await, vec![id.to_string()]);
 
-    let _ = std::fs::remove_dir_all(&state_dir);
+    // ... and on the workspace asked for.
+    let tree = Command::new("i3-msg").args(["-t", "get_tree"]).output().unwrap();
+    let tree: serde_json::Value = serde_json::from_slice(&tree.stdout).unwrap();
+    fn workspace_of(node: &serde_json::Value, ws: Option<&str>, class: &str) -> Option<String> {
+        let ws = if node["type"] == "workspace" { node["name"].as_str() } else { ws };
+        if node["window_properties"]["class"] == class {
+            return ws.map(|s| s.to_string());
+        }
+        for k in ["nodes", "floating_nodes"] {
+            for c in node[k].as_array().into_iter().flatten() {
+                if let Some(w) = workspace_of(c, ws, class) {
+                    return Some(w);
+                }
+            }
+        }
+        None
+    }
+    assert_eq!(workspace_of(&tree, None, "ldmux-live-e2e1").as_deref(), Some("2"));
+
+    assert_eq!(desktop::close_live(id).await, Ok(true));
+    let mut gone = false;
+    for _ in 0..100 {
+        if desktop::live_window_state(id).await.unwrap() == "absent" {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "the window must be gone after close_live");
+    let _ = std::fs::remove_dir_all(&scratch);
 }

@@ -57,9 +57,8 @@ impl Stubs {
 /// Put a stub window manager and a stub terminal on `PATH`.
 ///
 /// The terminal is not decoration. `makeLive` asks `desktop::open_window` to open
-/// the window, and that refuses a terminal it cannot run before it bothers the
-/// window manager — because `i3-msg exec` reports success for a command it has
-/// only queued, so a wrong `LDMUX_TERMINAL` is a window that dies as it opens.
+/// the window, and that refuses a terminal it cannot run — a wrong
+/// `LDMUX_TERMINAL` is a window that dies as it opens.
 /// A test that stubs only `i3-msg` therefore passes or fails on whether the
 /// *developer's* box happens to have the emulator installed, which is not
 /// something a test should be measuring.
@@ -80,7 +79,10 @@ fn install_stubs(dir: &std::path::Path) -> Stubs {
         "i3-msg",
         "#!/bin/sh\ncase \"$*\" in\n  *get_tree*) printf '%s' \"$I3_TREE\"; exit \"${I3_TREE_CODE:-0}\";;\n  *) exit 0;;\nesac\n",
     );
-    write("alacritty", "#!/bin/sh\nexit 0\n");
+    // The emulator stays up, as a real one does while its window is open: the
+    // daemon launches it directly and refuses one that exits at once. The window
+    // manager stub is what says whether the window is "on screen".
+    write("alacritty", "#!/bin/sh\nsleep 3\n");
     let old_path = std::env::var("PATH").unwrap_or_default();
     let old_terminal = std::env::var("LDMUX_TERMINAL").ok();
     let old_display = std::env::var("DISPLAY").ok();

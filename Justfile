@@ -33,7 +33,7 @@ code: (cli "code")
 # The same pairing, as a link.
 pair: (cli "pair")
 
-# Open a read-only mirror of a session on the desktop (i3 workspace 10).
+# Open a read-only mirror of a session on the desktop (workspace 10 where a window-manager adapter exists).
 #   just mirror <id>
 mirror id: (cli "mirror" id)
 
@@ -72,27 +72,66 @@ android-test:
 latency sid *runs:
     nix develop --command node scripts/measure_latency.ts --session {{sid}} --runs {{runs}}
 
-# Install the host side: the Rust binaries, the desk-window launcher, the systemd
-# unit, and the nix GC root for the C library the binaries link against.
-# Idempotent.
+# Install the host side: the Rust binaries, the desk-window launcher and the
+# systemd unit. Idempotent. Nix is optional: it only adds a GC root for the C
+# library the binaries link against, and is skipped when `nix` is absent.
+#
+# An existing ~/.config/systemd/user/ldmux.service is never overwritten silently:
+# the new unit is written beside it as ldmux.service.new, unless FORCE=1.
+#   just install            FORCE=1 just install
 install: install-rust
     #!/usr/bin/env bash
     set -euo pipefail
     state="${XDG_STATE_HOME:-$HOME/.local/state}/ldmux"
-    mkdir -p "$state" "$HOME/.local/bin" "$HOME/.config/systemd/user"
+    bin="$HOME/.local/bin"
+    unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$state" "$bin" "$unit_dir"
     chmod 700 "$state"
     # The GC root: the C library the daemon links against, so a
     # `nix-collect-garbage` cannot delete it out from under a running daemon.
-    nix build .#runtime --out-link "$state/runtime"
-    # The desk-window launcher ($mod+Return). It calls `ldmux window`, which is
-    # the Rust CLI. There are no TS wrappers any more (D4: the TS tree is gone).
-    sed "s|@REPO@|$PWD|g" "deploy/bin/ldmux-terminal" > "$HOME/.local/bin/.ldmux-terminal.new"
-    chmod 755 "$HOME/.local/bin/.ldmux-terminal.new"
-    mv "$HOME/.local/bin/.ldmux-terminal.new" "$HOME/.local/bin/ldmux-terminal"
-    install -m 644 deploy/ldmux.service "$HOME/.config/systemd/user/ldmux.service"
-    systemctl --user daemon-reload
-    echo "installed ldmuxd, ldmux, ldmux-keeper and ldmux-terminal (D4 done)"
-    echo "apply with: systemctl --user restart ldmux"
+    if command -v nix >/dev/null 2>&1; then
+      nix build .#runtime --out-link "$state/runtime" || echo "note: could not pin the nix runtime (not fatal)"
+    else
+      echo "note: nix not found; skipping the nix GC root (only matters for nix-built binaries)"
+    fi
+    # The desk-window launcher (a keybinding runs it). It calls `ldmux window`.
+    install -m 755 deploy/bin/ldmux-terminal "$bin/.ldmux-terminal.new"
+    mv "$bin/.ldmux-terminal.new" "$bin/ldmux-terminal"
+    # The unit.
+    unit="$unit_dir/ldmux.service"
+    if [ ! -e "$unit" ] || [ "${FORCE:-}" = 1 ]; then
+      install -m 644 deploy/ldmux.service "$unit"
+      echo "installed the unit: $unit"
+    elif cmp -s deploy/ldmux.service "$unit"; then
+      echo "the unit is already current: $unit"
+    else
+      install -m 644 deploy/ldmux.service "$unit.new"
+      echo "NOTE: $unit exists and differs; the new one is $unit.new"
+      echo "      review it (diff \"$unit\" \"$unit.new\"), then mv it into place, or rerun with FORCE=1"
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user daemon-reload || echo "note: systemctl --user daemon-reload failed (no user manager in this session?)"
+    else
+      echo "note: no systemctl; run ldmuxd yourself or use your init system"
+    fi
+    # Things that make the install work on this machine and are not ours to set.
+    case ":$PATH:" in
+      *":$bin:"*) ;;
+      *) echo "WARNING: $bin is not on PATH; add it (e.g. in ~/.profile) or the CLI will not be found" ;;
+    esac
+    if command -v loginctl >/dev/null 2>&1; then
+      linger="$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)"
+      if [ "$linger" != yes ]; then
+        echo "WARNING: linger is off; the user manager (and every shell) stops at last logout. Fix: loginctl enable-linger $(id -un)"
+      fi
+    else
+      echo "note: no loginctl; make sure your user manager outlives logout"
+    fi
+    if [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/ldmux/env" ]; then
+      echo "note: no ~/.config/ldmux/env; without LDMUX_REMOTE_HOST the phone cannot connect (template: deploy/ldmux.env.example)"
+    fi
+    echo "installed ldmuxd, ldmux, ldmux-keeper and ldmux-terminal"
+    echo "apply with: systemctl --user restart ldmux   (first time: systemctl --user enable --now ldmux)"
 
 # Build the Rust workspace (release) and install the binaries. The daemon
 # auto-spawns the keeper, so it must be on PATH beside the daemon.
@@ -100,6 +139,7 @@ install-rust:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --release --workspace
+    mkdir -p "$HOME/.local/bin"
     cp target/release/ldmuxd "$HOME/.local/bin/.ldmuxd.new"
     chmod 755 "$HOME/.local/bin/.ldmuxd.new"
     mv "$HOME/.local/bin/.ldmuxd.new" "$HOME/.local/bin/ldmuxd"
@@ -125,7 +165,12 @@ install-rust:
     # It cannot be replaced quietly: the keeper owns the PTYs, so replacing it
     # ends every shell (the documented single point of failure, plan R3). So say
     # so, loudly, and name the target that does it.
-    live_keeper="$(pgrep -x ldmux-keeper | head -1 || true)"
+    live_keeper=""
+    for c in /proc/[0-9]*/comm; do
+      if [ "$(cat "$c" 2>/dev/null || true)" = ldmux-keeper ]; then
+        live_keeper="${c#/proc/}"; live_keeper="${live_keeper%/comm}"; break
+      fi
+    done
     if [ -n "$live_keeper" ]; then
       started="$(ps -o lstart= -p "$live_keeper" 2>/dev/null | xargs || true)"
       echo
@@ -146,25 +191,36 @@ install-rust:
 # is the keeper's documented single point of failure (plan R3). The daemon notices the dead
 # socket on its next tick and auto-spawns the new binary.
 #
-# `pgrep -x` matches the process NAME exactly: `pkill -f` on a keeper path can
-# match the daemon's own command line and kill the wrong thing (AGENTS.md).
+# The keeper is found by its process NAME (/proc/*/comm, exact match): matching a
+# path on the command line can hit the daemon's own and kill the wrong thing
+# (AGENTS.md). /proc, not pgrep, so it needs no procps.
 restart-keeper:
     #!/usr/bin/env bash
     set -euo pipefail
-    pid="$(pgrep -x ldmux-keeper | head -1 || true)"
+    keeper_pid() {
+      for c in /proc/[0-9]*/comm; do
+        if [ "$(cat "$c" 2>/dev/null || true)" = ldmux-keeper ]; then
+          p="${c#/proc/}"; echo "${p%/comm}"; return 0
+        fi
+      done
+      return 0
+    }
+    pid="$(keeper_pid)"
     if [ -z "$pid" ]; then
       echo "no keeper is running (the daemon starts one on demand)"
       exit 0
     fi
     echo "ending the keeper (pid $pid) and every shell it owns"
     kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 40); do
+    tries=0
+    while [ "$tries" -lt 40 ]; do
       sleep 0.25
-      new="$(pgrep -x ldmux-keeper | head -1 || true)"
+      new="$(keeper_pid)"
       if [ -n "$new" ] && [ "$new" != "$pid" ]; then
         echo "keeper restarted: pid $new"
         exit 0
       fi
+      tries=$((tries + 1))
     done
     echo "the keeper is gone but the daemon has not respawned one yet" >&2
     echo "check: journalctl --user -u ldmux -n 40" >&2

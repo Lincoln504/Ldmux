@@ -146,56 +146,119 @@ pub fn tty_size_for_test() -> (u64, u64) {
     tty_size()
 }
 
-/// Put the local terminal in raw mode for the life of the window, restoring the
-/// previous termios on drop. Without it, line discipline would hold a keystroke
-/// until Enter and the shell would echo it a second time.
-struct RawMode {
-    original: Option<nix::sys::termios::Termios>,
-}
+/// What a window leaves the terminal in when it exits, undone. Unconditional and
+/// idempotent: a snapshot establishes alternate screen, mouse reporting,
+/// application cursor and bracketed paste, and the pane's program can change them
+/// later through the output stream, so "what the snapshot enabled" is not all
+/// there is to undo. Every one of these is a no-op on a terminal that does not
+/// have the mode on.
+pub const TERMINAL_RESET: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m";
 
-impl RawMode {
-    fn enable() -> Self {
-        use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg};
-        let original = tcgetattr(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }).ok();
-        if let Some(ref t) = original {
-            let mut raw = t.clone();
-            raw.local_flags.remove(
-                LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG | LocalFlags::IEXTEN,
-            );
-            raw.input_flags.remove(
-                nix::sys::termios::InputFlags::IXON | nix::sys::termios::InputFlags::ICRNL,
-            );
-            let _ = tcsetattr(
-                unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
-                SetArg::TCSANOW,
-                &raw,
-            );
-        }
-        Self { original }
+/// The termios to restore. Static, because a panic hook and a signal path have no
+/// `self` to ask.
+static SAVED: std::sync::Mutex<Option<nix::sys::termios::Termios>> = std::sync::Mutex::new(None);
+
+/// Put the terminal back: the mode resets, then the termios the window found.
+/// Safe to call any number of times, from any path (drop, signal, panic).
+pub fn restore_terminal() {
+    use nix::sys::termios::{tcsetattr, SetArg};
+    let saved = SAVED.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(t) = saved {
+        // SAFETY: fd 0/1 are the process's stdio; the writes are best effort.
+        unsafe { nix::libc::write(1, TERMINAL_RESET.as_ptr().cast(), TERMINAL_RESET.len()) };
+        let _ = tcsetattr(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, SetArg::TCSANOW, &t);
     }
 }
 
-impl Drop for RawMode {
-    fn drop(&mut self) {
-        use nix::sys::termios::{tcsetattr, SetArg};
-        if let Some(ref t) = self.original {
-            let _ = tcsetattr(
-                unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
-                SetArg::TCSANOW,
-                t,
+/// The local terminal in raw mode for the life of the window, put back on drop,
+/// on SIGTERM/SIGHUP/SIGINT (see [run]) and on panic. Without raw mode, line
+/// discipline would hold a keystroke until Enter and the shell would echo it a
+/// second time.
+struct Terminal;
+
+impl Terminal {
+    /// Refuses when stdin or stdout is not a terminal: there is nothing to put
+    /// in raw mode and nothing a snapshot could be painted on.
+    fn enter() -> Result<Self, String> {
+        use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, SpecialCharacterIndices};
+        let is_tty = |fd| unsafe { nix::libc::isatty(fd) } == 1;
+        if !is_tty(0) || !is_tty(1) {
+            return Err(
+                "stdin/stdout is not a terminal; ldmux attach must run in one (use `ldmux shell` \
+                 in a terminal, or `ldmux window` to open a desk window)"
+                    .to_string(),
             );
         }
+        let fd0 = unsafe { std::os::fd::BorrowedFd::borrow_raw(0) };
+        let original = tcgetattr(fd0).map_err(|e| format!("cannot read the terminal settings: {e}"))?;
+        let mut raw = original.clone();
+        cfmakeraw(&mut raw);
+        // cfmakeraw leaves the read thresholds alone: a read must return on one
+        // byte, with no timer.
+        raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
+        raw.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+        *SAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(original);
+        install_panic_hook();
+        tcsetattr(fd0, SetArg::TCSANOW, &raw)
+            .map_err(|e| format!("cannot set the terminal to raw mode: {e}"))?;
+        Ok(Terminal)
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// A panic puts the terminal back *before* its message is printed, so the message
+/// is readable and the shell that gets the terminal next is not left raw.
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            previous(info);
+        }));
+    });
+}
+
+/// Resolves with the name of the first of SIGTERM, SIGHUP, SIGINT to arrive. With
+/// ISIG off, ^C is a byte for the shell, so these only ever come from outside: a
+/// `kill`, a closed terminal, a session ending.
+async fn termination() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => "SIGTERM",
+        _ = hup.recv() => "SIGHUP",
+        _ = int.recv() => "SIGINT",
     }
 }
 
 /// Attach this process's terminal to `session_id` and run until the window
 /// closes or the shell ends. `readonly` attaches with no identity, so it holds
 /// nothing (the daemon's read-only mirror path).
+///
+/// The terminal is put in raw mode here, not in the loop, and is restored on every
+/// way out: return, a termination signal, a panic.
 pub async fn run(session_id: &str, readonly: bool) -> Result<(), String> {
     let sock = ldmux_protocol::paths::resolve_socket_path();
+    let _terminal = Terminal::enter()?;
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    run_with(&sock, session_id, readonly, stdin, stdout).await
+    tokio::select! {
+        r = run_with(&sock, session_id, readonly, stdin, stdout) => r,
+        name = termination() => Err(format!("terminated by {name}")),
+    }
 }
 
 /// The attach loop, with the daemon socket and the terminal streams injected
@@ -240,7 +303,10 @@ async fn remote_info(daemon_socket: &str) -> Result<RemoteInfo, String> {
     let path = info["path"].as_str().unwrap_or("/ws").to_string();
     let token = info["token"].as_str().unwrap_or("").to_string();
     if !info["listening"].as_bool().unwrap_or(false) {
-        return Err("the daemon's remote is not listening".to_string());
+        return Err(
+            "the daemon's remote is not listening (is Tailscale up? LDMUX_REMOTE_HOST must be an address this machine has; `ldmux remote` shows what the daemon bound)"
+                .to_string(),
+        );
     }
     if hostname.is_empty() || port == 0 {
         return Err("the daemon has no remote address".to_string());
@@ -280,9 +346,8 @@ where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    // Raw mode for the whole window, across reconnects: the terminal must not go
-    // back to cooked mode when the link blinks.
-    let _raw = RawMode::enable();
+    // Raw mode is the caller's (see `run`): it spans every reconnect, and a
+    // test's duplex streams have no terminal to set up.
     let mut attempt: u32 = 0;
     loop {
         let info = match remote_info(daemon_socket).await {

@@ -70,6 +70,61 @@ fn machine_hostname() -> String {
     }
 }
 
+/// Report a failed daemon call and exit. A refused or missing socket means the
+/// daemon is not running, which is the one failure with a one-line fix, so the fix
+/// is printed with it.
+fn die(e: &CallError, sock: &str) -> ! {
+    eprintln!("ldmux: {e}");
+    if e.0.starts_with("connect:") {
+        eprintln!(
+            "ldmux: the daemon is not answering on {sock}; start it with `systemctl --user start ldmux` (or run `ldmuxd`), \
+             and check that LDMUX_STATE_DIR is the same for both"
+        );
+    }
+    std::process::exit(1);
+}
+
+/// The directory this command runs in, as the daemon is told it. A deleted or
+/// unreadable cwd is a user problem with a remedy, not a panic.
+fn current_dir_or_exit() -> String {
+    match std::env::current_dir() {
+        Ok(d) => d.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("ldmux: cannot read the current directory ({e}); cd somewhere that exists or pass the directory as an argument");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One command's usage, for `ldmux <command> --help`.
+fn command_help(cmd: &str) -> Option<&'static str> {
+    Some(match cmd {
+        "ping" => "ldmux ping\n  Ask the daemon whether it is alive; prints its version info as JSON.",
+        "list" => "ldmux list\n  List sessions: id, status, kind, cwd, title, keeper (and why a dead one ended).",
+        "desktop" => "ldmux desktop [--json]\n  The desktop inventory: window manager, workspaces, windows.",
+        "new" => "ldmux new [shell|pi] [cwd] [--title T]\n  Create a session (default: a shell in the current directory); prints its id.",
+        "shell" => "ldmux shell [--name N] [--cwd DIR] [dir]\n  Become a desk window for a shell in this terminal. Reuses the shell already in that directory unless --name asks for another.",
+        "run" => "ldmux run [shell|pi] [cwd]\n  Create a session and become its desk window in this terminal.",
+        "window" => "ldmux window [cwd]\n  Create a shell and open it in a new desk window (the terminal is chosen by LDMUX_TERMINAL_CMD, LDMUX_TERMINAL, $TERMINAL, then known emulators).",
+        "send" => "ldmux send <id> <text...>\n  Type text into a session.",
+        "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
+        "capture" => "ldmux capture <id> [--history]\n  Print the session's screen (with --history, its scrollback too).",
+        "snapshot" => "ldmux snapshot <id>\n  Print the session's full snapshot as JSON.",
+        "kill" => "ldmux kill <id>\n  End a session and its shell.",
+        "close" => "ldmux close <id>\n  End a session, unless a desktop window holds it (then let go).",
+        "forget" => "ldmux forget <id>\n  Drop a session's record without touching the keeper.",
+        "adopt" => "ldmux adopt <keeper-name>\n  Adopt a keeper session the daemon does not know.",
+        "mirror" => "ldmux mirror <id> [--workspace N] [--rw] [--terminal T]\n  A read-only view of a session in a new window (--rw lets it type). Placement on a workspace needs an i3/sway/hyprland adapter; without one the window opens where it opens.",
+        "live" => "ldmux live <id> [workspace]\n  Open a session in a desk window, optionally placed on a workspace.",
+        "unlive" => "ldmux unlive <id>\n  Close a session's desk window.",
+        "remote" => "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening.",
+        "code" => "ldmux code\n  Print a QR code the phone app scans to pair.",
+        "pair" => "ldmux pair\n  Print the pairing link.",
+        "clipboard-write" => "ldmux clipboard-write on|off\n  Allow or refuse terminal programs writing the clipboard.",
+        _ => return None,
+    })
+}
+
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
@@ -154,11 +209,14 @@ async fn main() {
         print_usage();
         std::process::exit(0);
     }
-    if let Some(bad) = reject_unknown_flag(rest) {
-        if bad == "--help" || bad == "-h" {
-            print_usage();
-            std::process::exit(0);
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        match command_help(&cmd) {
+            Some(h) => println!("{h}"),
+            None => print_usage(),
         }
+        std::process::exit(0);
+    }
+    if let Some(bad) = reject_unknown_flag(rest) {
         eprintln!("ldmux {cmd}: unknown option {bad}");
         print_usage();
         std::process::exit(2);
@@ -172,8 +230,7 @@ async fn main() {
             match r {
                 Ok(r) => println!("{}", serde_json::to_string(&r).unwrap()),
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -204,15 +261,14 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
         "new" => {
             let pos = positional(rest, &["--title"]);
             let kind = pos.first().copied().unwrap_or("shell");
-            let cwd_default = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+            let cwd_default = current_dir_or_exit();
             let cwd: &str = pos.get(1).copied().unwrap_or(&cwd_default);
             let title = flag(rest, "--title");
             let r: Result<serde_json::Value, CallError> = daemon_call(
@@ -231,8 +287,7 @@ async fn main() {
                     println!("{id}");
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -247,8 +302,7 @@ async fn main() {
             )
             .await;
             if let Err(e) = r {
-                eprintln!("ldmux: {e}");
-                std::process::exit(1);
+                die(&e, &sock);
             }
         }
         "key" => {
@@ -262,8 +316,7 @@ async fn main() {
             )
             .await;
             if let Err(e) = r {
-                eprintln!("ldmux: {e}");
-                std::process::exit(1);
+                die(&e, &sock);
             }
         }
         "capture" => {
@@ -282,8 +335,7 @@ async fn main() {
                     print!("{screen}");
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -299,8 +351,7 @@ async fn main() {
             match r {
                 Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -314,8 +365,7 @@ async fn main() {
             )
             .await;
             if let Err(e) = r {
-                eprintln!("ldmux: {e}");
-                std::process::exit(1);
+                die(&e, &sock);
             }
             println!("killed {id}");
         }
@@ -338,8 +388,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -362,8 +411,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -383,8 +431,7 @@ async fn main() {
                     println!("{id}  {keeper_name}");
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -404,8 +451,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -464,8 +510,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -491,8 +536,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -517,8 +561,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -542,8 +585,7 @@ async fn main() {
                     println!("clipboard-write {}", if on { "on" } else { "off" });
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -557,8 +599,7 @@ async fn main() {
             let v = match r {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             };
             let info = ldmux_daemon::pairing::ListenInfo {
@@ -590,7 +631,7 @@ async fn main() {
             // Create a shell, then make it a desk window here (the daemon opens
             // the window with the attach client and claims it to the desktop).
             let pos = positional(rest, &[]);
-            let cwd_default = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+            let cwd_default = current_dir_or_exit();
             let cwd: &str = pos.first().copied().unwrap_or(&cwd_default);
             let created: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
@@ -606,8 +647,7 @@ async fn main() {
                     .unwrap_or("")
                     .to_string(),
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             };
             let res: Result<serde_json::Value, CallError> =
@@ -622,8 +662,7 @@ async fn main() {
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             }
         }
@@ -651,7 +690,7 @@ async fn main() {
             } else {
                 ("shell".to_string(), pos.first().copied().map(|s| s.to_string()))
             };
-            let cwd_default = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+            let cwd_default = current_dir_or_exit();
             let want_cwd: String = flag(rest, "--cwd")
                 .map(|s| s.to_string())
                 .or(positional_cwd)
@@ -692,8 +731,7 @@ async fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("ldmux: {e}");
-                        std::process::exit(1);
+                        die(&e, &sock);
                     }
                 }
             }
@@ -719,8 +757,7 @@ async fn main() {
                             .unwrap_or("")
                             .to_string(),
                         Err(e) => {
-                            eprintln!("ldmux: {e}");
-                            std::process::exit(1);
+                            die(&e, &sock);
                         }
                     }
                 }
@@ -788,8 +825,7 @@ async fn main() {
                     .filter(|k| !k.is_empty())
                     .map(|k| k.to_string()),
                 Err(e) => {
-                    eprintln!("ldmux: {e}");
-                    std::process::exit(1);
+                    die(&e, &sock);
                 }
             };
             let Some(keeper) = keeper else {
