@@ -438,11 +438,27 @@ async fn main() {
                                 println!("pi sessions:");
                                 for p in pi {
                                     let label = p.get("label").and_then(|t| t.as_str()).unwrap_or("");
-                                    let ws = p.get("workspace").and_then(|t| t.as_str()).unwrap_or("");
-                                    let where_str = if ws.is_empty() { "no window" } else { &format!("ws {ws}") };
                                     let pid = p.get("pid").and_then(|t| t.as_i64()).unwrap_or(0);
                                     let cwd = p.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
-                                    println!("  {label:18} {where_str:10} pid {pid}  {cwd}");
+                                    // Absent `workspace` is "no window"; present and
+                                    // empty is "a window whose workspace the WM did
+                                    // not name" — the two used to print the same
+                                    // words, so a pi filling a window read "no
+                                    // window", which is the anomaly phrase. And a
+                                    // pi linked to an ldmux session says which one:
+                                    // a desk window is not in the pi's ancestry, so
+                                    // its workspace is often unknown here while the
+                                    // session is not.
+                                    let ws = p.get("workspace").and_then(|t| t.as_str());
+                                    let linked = p.get("ldmuxSessionId").and_then(|t| t.as_str());
+                                    let where_str = match (ws, linked) {
+                                        (Some(w), _) if !w.is_empty() => format!("ws {w}"),
+                                        (Some(_), None) => "window".to_string(),
+                                        (Some(_), Some(id)) => format!("session {id}"),
+                                        (None, Some(id)) => format!("session {id}"),
+                                        (None, None) => "no window".to_string(),
+                                    };
+                                    println!("  {label:18} {where_str:24} pid {pid}  {cwd}");
                                 }
                             }
                     }

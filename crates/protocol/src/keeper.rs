@@ -211,6 +211,16 @@ pub struct SnapshotResult {
 #[serde(rename_all = "camelCase")]
 pub struct State {
     pub session_id: String,
+    /// The shell's pid — the session's process-group leader, and the pid every
+    /// process inside the pane descends from.
+    ///
+    /// The daemon needs it to answer "is this `pi` running inside an ldmux
+    /// session": it walks the pi's ancestry until it hits a pid in this list. The
+    /// TypeScript got the same fact from tmux's `#{pane_pid}`, and without it the
+    /// phone could only guess by directory and opened a new shell instead of
+    /// going to the running one (the TS comment says exactly that).
+    #[serde(default)]
+    pub pid: i32,
     pub cols: u64,
     pub rows: u64,
     pub dead: bool,

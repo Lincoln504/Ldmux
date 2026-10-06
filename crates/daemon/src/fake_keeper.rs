@@ -31,6 +31,9 @@ use ldmux_protocol::keeper::{
 #[derive(Default)]
 pub struct FakeSession {
     pub id: String,
+    /// The shell's pid, as the real keeper reports it (`0` unless a test sets
+    /// one — the fake has no processes).
+    pub pid: i32,
     pub cols: u16,
     pub rows: u16,
     pub dead: bool,
@@ -211,6 +214,7 @@ impl FakeKeeper {
         };
         State {
             session_id: s.id.clone(),
+            pid: s.pid,
             cols: s.cols as u64,
             rows: s.rows as u64,
             dead: s.dead,
@@ -312,6 +316,13 @@ impl FakeKeeper {
 
     /// Set a session's rendered content (a test hook: the fake pane's
     /// "rendered screen", what a `Snapshot` returns).
+    /// Set the shell pid the fake reports (a test that needs an ancestry walk).
+    pub fn set_pid(&self, session_id: &str, pid: i32) {
+        if let Some(s) = self.sessions.lock().unwrap().get_mut(session_id) {
+            s.pid = pid;
+        }
+    }
+
     pub fn set_snapshot(&self, session_id: &str, text: &str) {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.get_mut(session_id) {

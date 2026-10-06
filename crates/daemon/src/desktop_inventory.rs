@@ -948,6 +948,37 @@ pub fn scan_pi_sessions(
         .collect()
 }
 
+/// Fill in which ldmux session each running pi runs inside, by walking the pi's
+/// ancestry to the session's shell pid.
+///
+/// The inventory can see a pi and cannot see that it is *in ldmux*: a desk
+/// window's terminal is not in the pi's ancestry — the pi runs in the keeper's
+/// pty, whose parent is the daemon, while the window is a separate `alacritty`
+/// running `ldmuxd attach` — so the window attribution finds nothing and the pi
+/// reads as "no window" while its shell fills one. The session's shell pid *is*
+/// in its ancestry, which is exactly what the TypeScript used (tmux's
+/// `#{pane_pid}`; `origin/main:packages/daemon/src/daemon.ts:1096-1106`), and
+/// without it the phone could only guess by directory — and a guess that missed
+/// opened a new shell instead of the running one.
+///
+/// `by_shell_pid` maps a session's shell pid to its session id.
+pub fn link_pi_sessions(
+    inv: &mut DesktopInventory,
+    by_shell_pid: &HashMap<i32, String>,
+) {
+    if by_shell_pid.is_empty() {
+        return;
+    }
+    for pi in inv.pi_sessions.iter_mut() {
+        // The pi itself is never a session's shell (that is the pane's `bash`),
+        // so the parents are the whole chain, exactly as the TS's `ancestorIn`
+        // walked it after its first lookup.
+        pi.ldmux_session_id = ancestry(pi.pid as u32, "/proc", 64)
+            .into_iter()
+            .find_map(|p| by_shell_pid.get(&(p as i32)).cloned());
+    }
+}
+
 // ── the one call the RPC makes ─────────────────────────────────────────────
 
 /// Read the full desktop inventory: probe the WM, enrich pids, scan pi
@@ -1210,6 +1241,92 @@ _NET_WM_DESKTOP(CARDINAL) = 0\n";
         assert_eq!(assigned.get(&200), Some(&Some("/home/a/t2.jsonl".into())));
         // Older proc (100, ticks 1000) gets older transcript (t1).
         assert_eq!(assigned.get(&100), Some(&Some("/home/a/t1.jsonl".into())));
+    }
+
+    /// The walk finds the session by a *real* process chain, which is the whole
+    /// mechanism: spawn a child of a child and give the grandparent's pid to a
+    /// session, exactly as the keeper reports its shell's pid.
+    #[test]
+    fn a_pi_is_linked_to_the_session_its_ancestry_runs_in() {
+        // `sh -c "sleep 30; :"`: a single command would be *exec'd* by the shell
+        // (no child at all), so the trailing no-op keeps the sh around as the
+        // parent of the sleep. The sh's own parent is this test process.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30; :")
+            .spawn()
+            .expect("spawn sh");
+        let sh_pid = child.id() as i32;
+        // The grandchild: a sleep that is a child of the sh.
+        let grandchild = {
+            let mut found = None;
+            for _ in 0..200 {
+                if let Ok(entries) = std::fs::read_dir("/proc") {
+                    for e in entries.flatten() {
+                        let Some(pid) = e
+                            .file_name()
+                            .to_str()
+                            .and_then(|s| s.parse::<i32>().ok())
+                        else {
+                            continue;
+                        };
+                        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                            continue;
+                        };
+                        if ppid_from_stat(&stat) == Some(sh_pid as u32)
+                            && let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                            && comm.trim() == "sleep"
+                        {
+                            found = Some(pid);
+                        }
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            found.expect("the sh's sleep child")
+        };
+
+        let mut inv = DesktopInventory {
+            wm: "test".into(),
+            workspaces: Vec::new(),
+            windows: Vec::new(),
+            pi_sessions: vec![DesktopPiSession {
+                pid: grandchild as i64,
+                cwd: "/tmp".into(),
+                session_id: None,
+                ldmux_session_id: None,
+                started_at: None,
+                transcript: None,
+                window_id: None,
+                workspace: None,
+                label: "sleep".into(),
+            }],
+            detail: None,
+        };
+        let mut by_shell_pid = HashMap::new();
+        // The keeper reports the *shell's* pid; here the sh stands in for it.
+        by_shell_pid.insert(sh_pid, "abc123".to_string());
+        link_pi_sessions(&mut inv, &by_shell_pid);
+        assert_eq!(inv.pi_sessions[0].ldmux_session_id.as_deref(), Some("abc123"));
+
+        // A pid whose chain holds no session is left alone, and an empty map
+        // costs nothing.
+        by_shell_pid.clear();
+        by_shell_pid.insert(2_000_000_000, "nope".to_string());
+        link_pi_sessions(&mut inv, &by_shell_pid);
+        assert_eq!(inv.pi_sessions[0].ldmux_session_id, None);
+        // The test process's own pid is an ancestor too: a map with it links as
+        // well, which is what makes the walk start at the pi and go up.
+        by_shell_pid.clear();
+        by_shell_pid.insert(std::process::id() as i32, "me".to_string());
+        link_pi_sessions(&mut inv, &by_shell_pid);
+        assert_eq!(inv.pi_sessions[0].ldmux_session_id.as_deref(), Some("me"));
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

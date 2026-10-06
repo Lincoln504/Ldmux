@@ -1665,9 +1665,54 @@ impl LdmuxDaemon {
     }
 
     /// Read the desktop inventory (the TS `desktopInventory`).
-    pub async fn desktop_inventory(&self) -> ldmux_protocol::rpc::DesktopInventory {
+    pub async fn desktop_inventory(&mut self) -> ldmux_protocol::rpc::DesktopInventory {
         let home = std::env::var("HOME").unwrap_or_default();
-        crate::desktop_inventory::read_desktop(&home).await
+        let mut inv = crate::desktop_inventory::read_desktop(&home).await;
+        // What the machine shows and what ldmux knows are two different things,
+        // and a client needs the second: a desk window's terminal is not in its
+        // pi's ancestry (the pi runs in the keeper's pty, the window is a separate
+        // alacritty running `ldmuxd attach`), so the inventory on its own reports
+        // a pi filling a window as having none. The session's shell pid is in that
+        // ancestry, which is how the TypeScript linked the two with tmux's
+        // `#{pane_pid}`, and a client that has the link goes to the running shell
+        // instead of guessing by directory and opening a new one
+        // (`origin/main:packages/daemon/src/daemon.ts:1096-1106`).
+        if let Ok(ldmux_protocol::keeper::KeeperMessage::ListResult(res)) =
+            self.keeper_call(&km::KeeperMessage::List(km::List {})).await
+        {
+            let by_shell_pid = self.session_ids_by_shell_pid(&res.sessions);
+            crate::desktop_inventory::link_pi_sessions(&mut inv, &by_shell_pid);
+        }
+        inv
+    }
+
+    /// The keeper's sessions, keyed by the shell pid it reports, valued by the
+    /// session id the daemon knows them by. `pid <= 0` is dropped: a pid that is
+    /// not a pid would match a lookup by luck.
+    fn session_ids_by_shell_pid(
+        &self,
+        states: &[ldmux_protocol::keeper::State],
+    ) -> std::collections::HashMap<i32, String> {
+        let mut map = std::collections::HashMap::new();
+        if states.is_empty() {
+            return map;
+        }
+        let by_keeper_name: std::collections::HashMap<String, String> = self
+            .registry
+            .list()
+            .into_iter()
+            .filter(|r| !r.keeper_name.is_empty())
+            .map(|r| (r.keeper_name, r.id))
+            .collect();
+        for st in states {
+            if st.pid <= 0 {
+                continue;
+            }
+            if let Some(id) = by_keeper_name.get(&st.session_id) {
+                map.insert(st.pid, id.clone());
+            }
+        }
+        map
     }
 
     /// Claim a session for a device (the TS `claimSession`, ADR-0010).
@@ -2087,6 +2132,100 @@ mod tests {
         let (ended2, _) = d.close_session(&id2, "closed").await.unwrap();
         assert!(!ended2);
         assert_eq!(d.registry().get(&id2).unwrap().status, "running");
+        drop(fk);
+    }
+
+    /// The `desktop` RPC links a running pi to the ldmux session it runs inside.
+    ///
+    /// The inventory cannot do this by itself: a desk window's terminal is not in
+    /// the pi's ancestry (the pi runs in the keeper's pty, the window is a
+    /// separate `alacritty` running `ldmuxd attach`), so a pi filling a window
+    /// reports no window at all. The keeper's shell pid *is* in that ancestry —
+    /// the same fact the TypeScript got from tmux's `#{pane_pid}` — and in the
+    /// port `ldmuxSessionId` was hard-coded `None`, so every client that asked
+    /// was told the pi was not in ldmux and guessed by directory instead
+    /// (`origin/main:packages/daemon/src/daemon.ts:1106`).
+    #[tokio::test]
+    async fn the_desktop_inventory_links_a_running_pi_to_its_session() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        // A process whose `comm` is `pi`, under a shell whose parent is this test
+        // process: `pi` → `sh` → the test process. `/bin/sleep` copied to a file
+        // named `pi` is what makes the inventory's scan find it.
+        let bin = dir.join("pi");
+        std::fs::copy("/bin/sleep", &bin).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("{} 30; :", bin.display()))
+            .spawn()
+            .unwrap();
+        let pi_pid = {
+            let mut found = 0i64;
+            for _ in 0..200 {
+                if let Ok(entries) = std::fs::read_dir("/proc") {
+                    for e in entries.flatten() {
+                        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i64>().ok())
+                        else {
+                            continue;
+                        };
+                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                            && comm.trim() == "pi"
+                        {
+                            let stat =
+                                std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                            // Only the one under our own sh: its ppid is a child of
+                            // this test process.
+                            if std::fs::read_to_string(format!("/proc/{pid}/status"))
+                                .map(|st| st.contains(&format!("PPid:\t{}", child.id())))
+                                .unwrap_or(false)
+                            {
+                                found = pid;
+                                let _ = stat;
+                            }
+                        }
+                    }
+                }
+                if found > 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(found > 0, "the spawned pi process");
+            found
+        };
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        // The keeper reports the *shell's* pid; standing in for it with this test
+        // process's pid makes the spawned pi a descendant of "the shell".
+        fk.set_pid(&rec.keeper_name, std::process::id() as i32);
+
+        let inv = d
+            .handle("desktop", serde_json::json!({}))
+            .await
+            .unwrap();
+        let sessions = inv.get("piSessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        let mine = sessions
+            .iter()
+            .find(|p| p.get("pid").and_then(|x| x.as_i64()) == Some(pi_pid))
+            .unwrap_or_else(|| panic!("the spawned pi in {sessions:?}"));
+        assert_eq!(
+            mine.get("ldmuxSessionId").and_then(|x| x.as_str()),
+            Some(rec.id.as_str()),
+            "the pi's ancestry leads to the session's shell: {mine}"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
         drop(fk);
     }
 

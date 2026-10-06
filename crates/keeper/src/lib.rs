@@ -289,6 +289,7 @@ impl Keeper {
                 // from a gone emulator); `dead` is the load-bearing field.
                 Ok(KeeperMessage::State(State {
                     session_id: k.session_id.clone(),
+                    pid,
                     cols: 0,
                     rows: 0,
                     dead: true,
@@ -508,6 +509,7 @@ impl Keeper {
         };
         Ok(KeeperMessage::State(State {
             session_id: s_id,
+            pid,
             cols: cols as u64,
             rows: rows as u64,
             dead,

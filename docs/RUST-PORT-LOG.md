@@ -2115,6 +2115,46 @@ means the kernel chose), and the daemon remembers it so `remote_info`, the pairi
 the QR all name the real one. The tests ask for 0 and read it back. The `deskWindow` variant
 of `ldmux live` was already gone.
 
+## `ldmuxSessionId` was never filled (2026-10-05)
+
+Found by exercising the CLI surface against the running daemon rather than by
+reading the code: `ldmux desktop` listed five running pis, and four of them —
+the four inside ldmux desk windows — read `no window` while their windows sat
+full of them.
+
+Two defects, one behind the other.
+
+- **The window attribution cannot work for a desk window.** `attribute_windows`
+  walks a pi's ancestry to a window's pid, and for a desk window there is no such
+  path: the pi runs in the keeper's pty (pi → the pane's shell → `ldmux-keeper` →
+  `ldmuxd`), and the window is a separate `alacritty` child of the *daemon*. The
+  the one that still worked was the pi in an in-place `ldmux shell`, whose
+  `alacritty` really is an ancestor. This is not a port bug — the TS had the same
+  limit, and it is what its comment describes — but it is why the next one
+  matters.
+- **`ldmuxSessionId` was hard-coded `None`.** The TS filled it from the pane's
+  pid (`origin/main:packages/daemon/src/daemon.ts:1106`,
+  `ancestorIn(pi.pid, byPanePid)`), the port's constructor wrote `None` and
+  nothing ever replaced it, so the field the app reads
+  (`packages/mobile/…/LdmuxClient.kt:742`) was always null. The keeper did not
+  report a pid at all, which is the reason: tmux's `#{pane_pid}` had no
+  equivalent on the wire until now.
+
+Fixed by reporting `pid` in the keeper's `State` (the pane's process-group
+leader), mapping it to a session id in the daemon, and walking each pi's parents
+(`ancestry`) to it — the TS's algorithm, in one pure function
+(`desktop_inventory::link_pi_sessions`) with its own test that spawns a real
+two-level process chain. The `desktop` RPC calls it; `ldmux desktop` prints the
+link; and a `workspace` that is present but empty prints `window`, not
+`no window` (absent still means no window — the two facts are different and the
+CLI had collapsed them).
+
+Tests: `a_pi_is_linked_to_the_session_its_ancestry_runs_in` (a real `pi` →
+`sh` → test-process chain), `the_desktop_inventory_links_a_running_pi_to_its_
+session` (the RPC, end to end, with a fake keeper reporting the pid; **fails
+with the link disabled**), and the CLI's rendering is exercised in the audit run
+recorded below.
+
 ## An ending was silent (2026-10-05)
 
 Found while chasing a report: two shells showed `dead` in the registry and nothing

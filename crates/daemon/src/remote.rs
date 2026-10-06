@@ -616,7 +616,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
         }
         "desktop" => {
             let inv = {
-                let d = shared.daemon.lock().await;
+                let mut d = shared.daemon.lock().await;
                 d.desktop_inventory().await
             };
             conn.send_json(&serde_json::json!({"type":"desktop","inventory":inv}));

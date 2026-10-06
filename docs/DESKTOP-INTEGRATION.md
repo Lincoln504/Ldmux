@@ -65,6 +65,33 @@ is unset in a plain shell; the socket is
 `_NET_CURRENT_DESKTOP`) can be built on `xdotool` alone, but `wmctrl` cannot be
 assumed present.
 
+## A pi is linked to its session by its ancestry, not by its window
+
+The desktop inventory is two views of the same machine that do not agree by
+themselves. The window half sees an `alacritty` running `ldmuxd attach`; the pi
+half sees a process in the keeper's pty. **The window is not in the pi's
+ancestry** — the pi's parent chain goes pi → the pane's shell → `ldmux-keeper` →
+`ldmuxd`, while the window hangs off the *daemon* as a separate child — so
+`attribute_windows` finds nothing and a pi whose desk window is full of it
+reports no window at all. Measured 2026-10-05 on five running pis: the four
+inside desk windows reported no window, and the one running in a terminal the
+daemon did not launch (an in-place `ldmux shell`, whose `alacritty` *is* an
+ancestor) reported `ws 10`.
+
+What is in the pi's ancestry is the session's **shell pid**, which the keeper
+reports in every `State` (`pid`, the pane's process-group leader). The daemon
+turns the keeper's list into `shell pid → session id` and walks each pi's parents
+to it, filling `DesktopPiSession.ldmuxSessionId`. That is the TypeScript's own
+mechanism (tmux's `#{pane_pid}`, `origin/main:packages/daemon/src/daemon.ts:1096
+-1106`), and its comment is why it matters: without it the phone could only guess
+by directory, "and a guess that missed showed the user's running pi as *not in
+ldmux* and opened a new shell instead".
+
+`ldmux desktop` prints the link, and says **`window`** for a window whose
+workspace the WM did not name — a present-but-empty `workspace` is not the same
+fact as an absent one, and printing both as "no window" made a pi filling a
+window read as the anomaly.
+
 ## Cross-desktop reality
 
 There is no library that covers i3 + Sway + Hyprland + GNOME + KDE + XFCE.
