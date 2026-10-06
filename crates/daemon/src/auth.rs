@@ -1,6 +1,6 @@
 //! Remote access token.
 //!
-//! Port of `packages/daemon/src/auth.ts` (the source of record).
+//! Port of `packages/daemon/src/auth.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! The daemon's WebSocket listens on the tailnet address (or loopback) and
 //! answers only tailnet or loopback peers (ADR-0016). Access additionally

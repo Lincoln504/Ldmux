@@ -11,7 +11,7 @@
 //! names the tailnet address itself (`LDMUX_REMOTE_HOST`). `localhost` is the
 //! one name accepted, because it is loopback by definition.
 //!
-//! Port of `packages/protocol/src/net.ts` (the source of record). The Node
+//! Port of `packages/protocol/src/net.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`). The Node
 //! `BlockList` is replaced by direct range tests; the classification table is
 //! the same.
 

@@ -1,12 +1,23 @@
 # Desktop integration: workspaces, windows and "make it live on the desktop"
 
-> **Partly historical (2026-10-04, D4).** The i3 rules, the workspace choice and the
-> ownership handover are still the design. The *mechanism* is not: there is no
-> shim script and no multiplexer client — a desk window is
-> `<terminal> -e ldmuxd attach <id>`, a protocol client. See `crates/attach` and
-> ADR-0018. `alacritty` below is the default, not a hardcoding: the terminal is
-> `desktop::terminal()` (`LDMUX_TERMINAL`), and `ldmux mirror` uses the same argv
-> with `--readonly`.
+> **Partly historical; current mechanism (2026-10-06).** The i3 findings below are
+> measurements from 2026-09-15 and still hold for i3. The *mechanism* has changed twice:
+> there is no shim script and no multiplexer client (a desk window is a terminal running
+> `ldmuxd attach <id>`, a protocol client; `crates/attach`, ADR-0018), and the daemon no
+> longer launches through `i3-msg exec`. It **spawns the terminal emulator directly**
+> (`crates/daemon/src/desktop.rs`; detached, own process group, absolute paths, the
+> desktop session's environment), and placing the window on a workspace is an **optional
+> adapter** for i3, sway or hyprland that finds the window by its class and moves it
+> (without one the window is "opened, not placed"). The terminal comes from
+> `LDMUX_TERMINAL_CMD` (a command line with `{cmd}` and optionally `{class}`),
+> `LDMUX_TERMINAL`, `$TERMINAL`, then a built-in autodetect list with a per-emulator
+> template table. The window attaches over the daemon's local attach socket
+> (`<control>-attach.sock`), so it needs no tailnet and no token. The daemon needs
+> `DISPLAY` or `WAYLAND_DISPLAY` from its own environment or the user manager
+> (`systemctl --user import-environment`); `ldmux mirror` uses the same argv with
+> `--readonly`. Only the i3 adapter is measured; the sway and hyprland rows in the table
+> below are still untested. The `i3-msg exec` findings below describe the old launch path
+> and are kept as the record of what was measured.
 
 
 The phone is not the only place an ldmux shell should be able to exist. The plan

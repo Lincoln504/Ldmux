@@ -17,8 +17,10 @@ either. It is deliberately simple:
   native VT emulator (`docs/NATIVE-TERMINAL.md`, ADR-0007), so there is no
   re-rendering of a server-side screenshot and no WebView.
 - **Light on the network by construction.** Output is coalesced on the daemon, the
-  client repaints on its own clock rather than per packet, and predictive local
-  echo is available (off by default) — `docs/PREDICTIVE-ECHO.md`.
+  WebSocket negotiates `permessage-deflate` when the client offers it (7x on a directory
+  listing, 3-4x on a screenful; ADR-0019, `docs/WIRE-COST.md`), the client repaints on
+  its own clock rather than per packet, and predictive local echo is available (off by
+  default) — `docs/PREDICTIVE-ECHO.md`.
 
 > **Status: the Rust daemon is deployed and running.** `crates/daemon`
 > (`ldmuxd`) is the live daemon under the systemd user unit; the keeper owns the
@@ -102,15 +104,19 @@ Implemented and tested (run the gate for the counts; open items are in
   client, shared by every consumer.
 - `crates/keeper` — the session layer: a PTY per session in its own process
   group, libghostty-vt in-process, the `Spawn`/`Kill`/`Write`/`Resize`/`Read`/
-  `Peek`/`Snapshot`/`List`/`Close` server.
+  `Peek`/`Snapshot`/`List`/`Close` server (`Peek` can be bounded, answering base64 chunks).
 - `crates/vt-sys` — the FFI surface of libghostty-vt (the vendored `.a`).
 - `crates/daemon` — the RPC daemon (Unix socket + pid lockfile), the session
   registry with reconciliation and pruning, ownership with the holder guard and
   the idle sweep, a `PaneStream` fan-out with per-subscriber coalescing, the
   **WebSocket remote transport on the tailnet address with bearer-token auth at
-  the HTTP upgrade** (ADR-0016, `docs/REMOTE.md`), the desktop mirror, tailnet
+  the HTTP upgrade** (ADR-0016, `docs/REMOTE.md`) over the daemon's own WebSocket frame
+  layer with permessage-deflate, a local `0600` attach socket for the desk window,
+  persisted claims, ended-session reporting (`session_ended`, exit status), the desktop
+  mirror (direct terminal spawn, optional i3/sway/hyprland placement), tailnet
   pairing, and the CLI (`ldmux`).
-- `crates/attach` — the desktop desk-window client (a daemon remote-WS client).
+- `crates/attach` — the desktop desk-window client; it attaches over the daemon's local
+  attach socket, so a desk window needs no tailnet.
 - `packages/mobile` — native KMP + Compose Multiplatform client (Android first).
   A Compose `Canvas` renderer over a **libghostty-vt** emulator behind a narrow
   JNI seam; client-driven pane resize; **the shell view follows the device's

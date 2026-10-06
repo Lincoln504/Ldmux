@@ -18,7 +18,7 @@
 //! - `v` is this format's version. A link with a version the app does not know
 //!   is refused rather than guessed at.
 //!
-//! Port of `packages/protocol/src/pairing.ts` (the source of record). The
+//! Port of `packages/protocol/src/pairing.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`). The
 //! `encodeURIComponent`/`URL`/`URLSearchParams` primitives are replaced by
 //! local implementations that are byte-faithful to what those built-ins do for
 //! the link shapes this contract produces.

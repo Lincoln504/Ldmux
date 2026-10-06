@@ -1,7 +1,7 @@
 //! The ldmux daemon: registry, ownership, remote WS, streams, desktop,
 //! inventory, the CLI (`bin/ldmux`), and the daemon entry (`bin/ldmuxd`).
 //!
-//! Ported from `packages/daemon` (the TS source of record); each module names
+//! Ported from `packages/daemon` (the TS original); each module names
 //! its TS source in its own doc comment. **Those files no longer exist** — the
 //! TypeScript tree was deleted at D4; read them at git commit `6b3efb8`, the
 //! last commit that carried the tree.
@@ -15,12 +15,12 @@
 //! - [`proc`] / [`exec`] — async spawn, both pipes drained, group-kill, timeout
 //! - [`pairing`] — the pairing for the address this daemon listens on
 //!
-//! The source of record for every module is the named `packages/daemon/src/…`
+//! The TS original of every module is the named `packages/daemon/src/…`
 //! TS file; the tests beside each are its TS test file, ported 1:1. The daemon
 //! proper (remote WS, streams, desktop, CLI, keeper client) lands in later
 //! phases (plan §7).
 //!
-//! See `docs/RUST-PORT-PLAN.md` and `docs/RUST-PORT-LOG.md`.
+//! See `docs/archive/RUST-PORT-PLAN.md` and `docs/archive/RUST-PORT-LOG.md` (historical records of the port).
 
 pub mod auth;
 pub mod clipboard_policy;

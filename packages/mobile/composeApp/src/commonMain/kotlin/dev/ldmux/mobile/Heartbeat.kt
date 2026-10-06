@@ -5,7 +5,7 @@ package dev.ldmux.mobile
  *
  * One constant for both sockets, because this is a property of the *protocol* and
  * not of either of them. The daemon reaps a connection that has said nothing for
- * 20 s (`WS_IDLE_MS` in `remote.ts`) — which is what makes a phone that
+ * 20 s (`WS_IDLE_MS` in `crates/daemon/src/remote.rs`) — which is what makes a phone that
  * vanished without a FIN stop holding shells it is no longer looking at — so every
  * socket the app holds has to speak on a schedule, and "every socket" has to be
  * stated once or it will be stated twice and then disagree once. It did: the

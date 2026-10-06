@@ -1,6 +1,6 @@
 //! Where a session's directory comes from, in one place.
 //!
-//! Port of `packages/daemon/src/cwd.ts` (the source of record). Two things were
+//! Port of `packages/daemon/src/cwd.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`). Two things were
 //! wrong with asking the filesystem directly:
 //!
 //! - `~` was refused. It is how every person writes their home directory, on a

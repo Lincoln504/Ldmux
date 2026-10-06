@@ -219,7 +219,7 @@ fn resize_changes_the_cell_count() {
 /// The ergonomic `RenderState` wrapper: `update` from the terminal, then
 /// `row(y)` returns one `Cell` per column (full width), with the right text
 /// and the per-cell fg colour (an SGR colour IS reflected per cell; the
-/// attributes live in the raw cell — see RUST-PORT-LOG).
+/// attributes live in the raw cell — see docs/archive/RUST-PORT-LOG.md).
 #[test]
 fn render_state_wrapper_renders_a_full_width_row() {
     let mut t = Terminal::new(80, 24).unwrap();

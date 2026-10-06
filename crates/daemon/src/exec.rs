@@ -1,6 +1,6 @@
 //! Running a short-lived external command from the CLI.
 //!
-//! Port of `packages/daemon/src/exec.ts` (the source of record).
+//! Port of `packages/daemon/src/exec.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! Same discipline as the terminal control plane: asynchronous (a CLI that
 //! blocks its event loop cannot be tested against an in-process daemon),

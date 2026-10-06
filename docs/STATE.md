@@ -29,12 +29,17 @@ scripts, not for the Rust gate.
 
 - `systemctl --user` unit `ldmux` (source `deploy/ldmux.service`) runs
   `~/.local/bin/ldmuxd`; the keeper is the binary beside it, spawned by the daemon.
-- Installed with `nix run .#install` (never by hand-editing `~/.local/bin` or the unit).
-  The install and terminal-launcher flow is being changed on this branch; see
-  `docs/PLATFORMS.md`.
+- Installed with `nix run .#install` or `scripts/install.sh [BIN_DIR]` (never by
+  hand-editing `~/.local/bin` or the unit). The unit is a template (`@BIN_DIR@`) and
+  reads an optional `~/.config/ldmux/env` (`LDMUX_REMOTE_HOST`, `LDMUX_REMOTE_PORT`;
+  template `deploy/ldmux.env.example`). There is no `just`.
+- Desk windows are opened by the daemon (direct terminal spawn, optional i3/sway/hyprland
+  placement) and attach over the local `<control>-attach.sock`; `docs/PLATFORMS.md`.
 - **A deploy does not replace a running keeper.** The keeper outlives the daemon on
   purpose, so after an install it keeps executing old code until
   `nix run .#restart-keeper`, which ends every shell. The install prints a warning.
+  A new daemon works against an old keeper (it reads either form of `Peek`) and logs
+  once that the keeper predates bounded peeks, after which a flood is served worse.
 - Remote listener: the tailnet address from `LDMUX_REMOTE_HOST`, port 7625, bearer
   token, `GET /ws` only (ADR-0016). Pairing is `ldmux code` (ADR-0017).
 - Machine facts (host, tailnet address, phone) live in `AGENTS.md`, not here.
@@ -68,14 +73,10 @@ Product and mobile:
   measurements.
 
 Daemon and protocol:
-- **`permessage-deflate` is not negotiated by the Rust daemon.** The Ktor client offers
-  it and the old TypeScript daemon honoured it (14.8x on a large listing); the Rust
-  daemon's own HTTP upgrade has no extension handling. Read, not run; see
-  `docs/WIRE-COST.md`.
 - **The keeper is a single point of failure** by design: if it dies, every shell ends.
-- **Exit status is not recorded** when a shell ends, and the final scrollback of an
-  ended session is not retained (SPEC §5.5). Endings do carry a reason (`endedReason`).
-- **OSC 8 hyperlinks** are not carried by the cell model, so a snapshot drops them.
+- **Endings are recorded** (`exitCode`, `exitSignal`, `endedKind`, `endedReason`; the
+  `session_ended` message). The final screen of an ended shell is kept for 60 s only
+  (SPEC §5.5); the final scrollback is not retained after that.
 - **SPEC §5.4** (REST surface) is aspirational and marked so; the shipped surface is the
   Unix-socket RPC plus the WebSocket.
 - `snapshotEpoch` is sent in `caps` and never read by the client; `follow` is never sent.
@@ -86,15 +87,26 @@ Platforms (see `docs/PLATFORMS.md`):
   the `/proc` reads.
 - Non-systemd Linux is intended to work, untested.
 
-Repository hygiene:
-- Source comments in `crates/*/src/lib.rs`, `crates/daemon/src/ownership.rs`,
-  `crates/vt-sys/tests/engine.rs` and `packages/mobile/README.md` cite
-  `docs/archive/RUST-PORT-PLAN.md`, `docs/archive/RUST-PORT-LOG.md` and `docs/archive/STATE.md` section
-  numbers. Those files moved to `docs/archive/` on this audit; the comments still need
-  the new path (code was out of scope for the docs pass).
-- In progress on this branch by another change set: desktop launching, terminal
-  selection, the installer, `doctor`. Docs describing those are pre-change until
-  reconciled.
+## Known gaps / follow-ups
+
+- **Painter for the new cell attributes.** The cell model is at frame version 1
+  (underline style and colour, hyperlinks, wide-glyph flags); the Android painter does not
+  draw them yet.
+- **Hyperlinks in the Rust snapshot replay** (`crates/vt-sys/src/snapshot.rs`): a
+  reattach drops OSC 8 links that a live stream would have set.
+- **SAFETY comments for the 113 `unsafe` sites** (attach, daemon, keeper, vt-sys), then
+  enable clippy's `undocumented_unsafe_blocks` in `[workspace.lints.clippy]`
+  (`Cargo.toml` explains why it is off).
+- **Shift modifier in the daemon's key table**: it is never sent (`stream.rs`).
+- **`App.kt` is about 2,000 lines** and wants splitting.
+- **Unused selection bindings in the native engine** (`ldmux_terminal.c` / the JNI shim).
+- **Real-device verification of scroll-anchor replay**: a clear-screen in the replayed
+  history may push content into scrollback; checked in tests, not on a phone.
+- **Keeper replacement is needed to get bounded peeks** on a machine whose keeper predates
+  them; it ends every shell, so it waits for a convenient moment.
+- **Mesh work** (ADR-0020, `docs/MESH-TRANSPORT.md`) is designed and unimplemented.
+- **A tailnet IP appears in test fixtures** (`crates/daemon/src/pairing.rs` and others).
+- **The git `user.name` is misconfigured** as `user.email`; commits carry that name.
 
 ## Where to look
 

@@ -1,6 +1,6 @@
-//! Stateful output sanitizer for pane bytes (ADR-0001, docs/TRANSPORT.md §5.6).
+//! Stateful output sanitizer for pane bytes (ADR-0001, docs/archive/TRANSPORT.md §5.6).
 //!
-//! Port of `packages/daemon/src/sanitize.ts` (the source of record).
+//! Port of `packages/daemon/src/sanitize.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! Why this exists: pane output is replayed to a client that *answers* terminal
 //! queries. An unfiltered OSC 52 lets a program write the user's clipboard, and

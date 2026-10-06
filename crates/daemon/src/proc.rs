@@ -1,6 +1,6 @@
 //! Running an external process, async, with both pipes drained concurrently.
 //!
-//! Port of `packages/daemon/src/proc.ts` (the source of record).
+//! Port of `packages/daemon/src/proc.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! Two properties matter and both are easy to get wrong:
 //!

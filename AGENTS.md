@@ -60,12 +60,35 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
 - **Nix toolchain.** Develop and test inside `nix develop` (cargo + rustc
   + zbar come from `flake.nix`; Node 26 is there too, dev-only, for `nix run .#mobile-test`
   and `scripts/`). Do not add unpinned system dependencies.
-- **Rust**: workspace under `crates/`, no code-generation, std + the plan §0
-  allowlist (`tokio`, `tokio-tungstenite`, `serde`, `serde_json`, `futures-util`,
-  `uuid`, `nix`, `rand`, `flate2` with the pure-Rust `miniz_oxide` backend); edition 2024; tests in-crate (`#[cfg(test)]`)
+- **Rust**: workspace under `crates/`, no code-generation, std + this
+  direct-dependency allowlist: `tokio`, `tokio-tungstenite`, `serde`, `serde_json`,
+  `futures-util`, `uuid`, `nix`, `rand`, and `flate2` with the pure-Rust `miniz_oxide`
+  backend (permessage-deflate, ADR-0019; no C, no system zlib). `deny.toml` bans TLS
+  stacks and HTTP clients. Adding a dependency needs an ADR line; edition 2024; tests in-crate (`#[cfg(test)]`)
   or `tests/`; match the style of the surrounding crate.
 - **Daemon is a separate process.** Clients talk to it over the Unix socket; the
-  daemon owns every long-lived resource.
+  daemon owns every long-lived resource. The desk attach client reaches the daemon over
+  its local attach socket (`<control>-attach.sock`, `0600`, peer uid checked), not the
+  tailnet; the phone uses the tailnet WebSocket. Both end in the same connection loop.
+- **The daemon owns the WebSocket server frame layer** (`crates/daemon/src/ws.rs`), so
+  `permessage-deflate` can be negotiated; tungstenite is the client side only.
+- **Ownership claims persist** in `<state>/claims.json` (60 s restore grace); the state
+  directory and the token file must be owned by the daemon's uid.
+- **Wire changes are additive.** New messages and fields are gated by `features` in
+  `hello`/`attach` (`inplaceResync`, `sessionEnded`); a client that says nothing gets
+  what it always got. A new keeper field must work against a running old keeper (the
+  keeper outlives the daemon and is replaced only by ending every shell).
+- **Windows are launched by the daemon, not the window manager.** The daemon spawns the
+  terminal emulator directly (template table, `LDMUX_TERMINAL_CMD` with `{cmd}`/`{class}`);
+  i3/sway/hyprland placement is an optional adapter.
+- **The unit reads an optional `~/.config/ldmux/env`** (`LDMUX_REMOTE_HOST`,
+  `LDMUX_REMOTE_PORT`); nothing machine-specific goes in `deploy/ldmux.service`.
+- **A fresh clone builds with nix alone.** `nix develop` builds libghostty-vt from the
+  commit pinned in `packages/mobile/native/ghostty.pin` and exports `LDMUX_VT_LIB_DIR`;
+  outside nix, point that variable at a directory holding `libghostty-vt.a`. There is
+  no `just`: use cargo, `nix build`, `nix run .#install` (`scripts/install.sh`),
+  `nix run .#restart-keeper` (`scripts/restart-keeper.sh`, ends every shell) and
+  `scripts/android.sh`.
 - **One resolver for every path.** The daemon, the CLI and the attach client all
   resolve the socket through `protocol::paths`. A hand-rolled fallback (the CLI
   had one: `$HOME/.ldmux/ldmuxd.sock`) looks somewhere the daemon never binds and
@@ -76,10 +99,9 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
 - **A stub binary must be proven to have run** (e.g. a marker file): a
   missing-socket binary also yields "no sessions", so a timeout test can
   silently pass against the real binary.
-- **Anything a window manager launches must use an absolute path.** `i3-msg exec`
-  runs with i3's own environment, which has no `~/.local/bin` on `PATH`; a bare
-  program name is `not found` and the window closes instantly. This has bitten
-  this project twice.
+- **Anything a window manager or the user manager launches must use an absolute
+  path.** Their environment has no `~/.local/bin` on `PATH`; a bare program name is
+  `not found` and the window closes instantly. This has bitten this project twice.
 - **Live tests clean up after themselves.** Kill the scratch keeper and remove
   the scratch state dir in the test; a leaked keeper holds PTYs and a socket for
   the life of the machine. Never `pkill -f` a path that could match the running

@@ -1,14 +1,13 @@
 # What a frame costs on the wire, measured
 
-> **Provenance (2026-10).** The measurements below were taken against the
-> TypeScript daemon (a `ws` client against `remote.ts`). The Rust daemon carries the
-> same frame format (`crates/protocol/src/frames.rs`), so the frame-size findings
-> carry over, but two things changed: the daemon's flush constant is now 4 KiB
-> (`OUTPUT_FLUSH_BYTES`, `crates/daemon/src/remote.rs`), and the Rust daemon does
-> **not** negotiate `permessage-deflate` (it has its own HTTP upgrade and no
-> `Sec-WebSocket-Extensions` handling; the Ktor client still offers it). The 14.8x
-> compression result is therefore a property of the old daemon, not of what is deployed.
-> Re-measure before relying on any number here for the Rust daemon.
+> **Provenance (2026-10).** The frame-size tables in the first two sections (the
+> attach, keystroke, `ls -la`, `seq` and `ls -laR` byte counts, and the snapshot
+> envelope breakdown) were taken against the TypeScript daemon. The Rust daemon
+> carries the same frame format (`crates/protocol/src/frames.rs`), so those findings
+> carry over; the flush constant is now 4 KiB (`OUTPUT_FLUSH_BYTES`,
+> `crates/daemon/src/remote.rs`). **Compression is re-measured on the Rust daemon**
+> (section 3, from ADR-0019): the Rust daemon negotiates `permessage-deflate` again,
+> through its own WebSocket frame layer (`crates/daemon/src/ws.rs`).
 
 Status: **measured, and the conclusion contradicts the assumption this file was
 written to test.** Read the first section before reading any other document about
@@ -59,8 +58,10 @@ can keep, the correct thing to send is **a snapshot, not the backlog**.
   those lines were never going to be in a 1000-line buffer anyway.
 - What it needs: a policy for "this client is too far behind", and the daemon
   already knows the answer (it drops and resyncs today when a socket's queue passes
-  `WS_BACKLOG_BYTES`, 64 KiB, in `crates/daemon/src/remote.rs`). The mechanism exists; the threshold and the
-  response are what would change.
+  `WS_BACKLOG_BYTES`, 64 KiB, in `crates/daemon/src/remote.rs`). The mechanism exists, and a
+  client that advertises `inplaceResync` in `hello.features` is now answered with a fresh
+  `caps` + `snapshot` (`resync: true`) on the same socket instead of a reconnect; the
+  threshold and the policy for a client far behind are what would change.
 
 **This is the answer to "how do we drastically lower it". Not smaller frames —
 fewer, and state instead of history.**
@@ -88,44 +89,54 @@ and a phone resizes the pane to roughly 67x17 before snapshotting, which is a fe
 bytes of content to begin with. **The lever is small.** It is worth taking when a frame
 type is next added for another reason, and it is not worth a protocol change on its own.
 
-### 3. Compression, which needs no protocol change at all
+### 3. Compression, which needs no protocol change at all (taken)
 
-`permessage-deflate` is a WebSocket extension, so it needs no framing work at all. It was
-the biggest verified win in this document **on the TypeScript daemon; the Rust daemon does
-not negotiate it (see the provenance note), so today it is an open item, not a taken win.** Measured over loopback, `bytesRead` on the
-client for identical workloads:
+`permessage-deflate` (RFC 7692) is a WebSocket extension, so it needs no framing work in
+the protocol. The Rust daemon negotiates it when the client offers it (ADR-0019): it owns
+the server side of the WebSocket frame layer (tungstenite has no deflate and cannot set
+RSV1), keeps per-connection context takeover, and sends messages under 96 bytes plain.
+OkHttp (the Android client) offers it on every connection; a client that does not offer
+it is served uncompressed, byte for byte as before. Measured on the Rust daemon (real
+keeper, real shell, loopback, every byte after the `101` counted, 80x24), reproduced by
+`cargo test -p ldmux-daemon --test wire_compression -- --nocapture`:
 
-| Workload | deflate off | deflate on | |
+| Workload | plain | deflate | ratio |
 |---|---|---|---|
-| `ls -laR /usr/bin` (218 KB of listing) | 218,937 B | **14,762 B** | **14.8x** |
-| `seq 1 400` (2 KB, repetitive) | 1,968 B | **775 B** | **2.5x** |
+| one keystroke echo | 11 B | 11 B (sent plain) | 1.0x |
+| `ls -la --color` (40 lines) | 2,834 B | 673 B | 4.2x |
+| `seq 1 100` | 524 B | 207 B | 2.5x |
+| `ls -laR /usr/lib` (8,000 lines) | 421,497 B | 59,521 B | 7.1x |
+| `yes \| head -c 4000000` (6.0 MB with the tty's CR) | 6,001,794 B | 8,682 B | 691x |
+| attach snapshot, screen with content | 2,051 B | 612 B | 3.4x |
 
-Terminal output compresses this well for a reason: the same `-rw-r--r-- 1 ldeen ldeen`
-columns down a page, the same prompt on every line. A directory listing is close to a
-worst case for a general compressor and close to a best case for this one.
+The ratio is a property of the output, not a constant: treat about 7x as the figure for a
+directory listing and 3-4x for a screenful. The older 14.8x figure (TypeScript daemon,
+`ls -laR /usr/bin`, default zlib level) was one corpus and is superseded by this table.
 
-Three conditions, all real:
+- **Level 3** of the pure-Rust `miniz_oxide` backend (via `flate2`, no C): 7.1x on
+  `ls -laR` at 61 MB/s, against 5.6x at 182 MB/s for level 1 and 7.5x at 25 MB/s for
+  level 6; the worst 64 KiB message takes 1.3 ms.
+- **The 96-byte threshold** is the cold break-even: the first message after a reconnect
+  has an empty dictionary, and a 64 B message compresses to 1.08x its size cold. A
+  keystroke echo is never compressed.
+- **Reconnect is cold.** The context is per connection, so the ratio right after a
+  reconnect is the cold figure (a snapshot compresses 3.4x cold) and recovers as output
+  flows. Snapshots are measured cold for that reason.
+- **Bounded.** A message over 16 KiB is compressed on the blocking pool; the inflater
+  refuses a message over the 64 KiB inbound cap (close code 1009).
+- Interop with an independent implementation (Python `websockets` 15) was checked
+  against the daemon (ADR-0019).
 
-- The **client must offer it**, and Ktor does not by default. Enabling it on the daemon
-  alone activates nothing. Both halves now do, and the server logs which way each
-  connection negotiated, because an optimisation that silently fails is worse than none.
-- It must be **threshold-gated** (`perMessageDeflate.threshold = 512`). Deflate has its
-  own framing, so compressing a nine-byte keystroke echo would make it larger. Below the
-  threshold nothing is compressed at all.
-- **Context takeover stays on.** The repetition is *across* messages, so a window that
-  reset every message would throw away exactly the matches this is for.
-
-**A measurement trap worth recording.** The first attempt at this showed a ratio of
-exactly 1.00x, with the daemon logging `compression on`. The daemon being probed was a
-long-running systemd unit started before the change, so it was the old code. Against a
-daemon started from the current source the same probe returned 14.8x. **Measure against
-the source you changed**, and prefer a freshly started instance to a running one.
+The server-side compressor state is not measured precisely (ADR-0019 estimates a few
+hundred KB per connection).
 
 
 ### 4. The coalescing window is sized for a datacentre, not a phone
 
 `OUTPUT_FLUSH_BYTES` was `16 * 1024` when this was measured, which is why the largest
-frame above is 18,646 bytes; it is now 4 KiB. On a lossy link one dropped segment costs 18 KB of retransmission, and
+frame above is 18,646 bytes; it is now 4 KiB, and the flush is leading-edge (output after
+a quiet spell goes out at once, what follows within the 8 ms window is batched; ADR-0019,
+"Output coalescing"). On a lossy link one dropped segment costs 18 KB of retransmission, and
 the frame cannot be displayed until all of it arrives.
 
 At 4 KB the framing overhead is 128 frames x 8 bytes = 1 KB out of 514 KB, or 0.2%.
@@ -139,7 +150,7 @@ first paint. That is worth taking, and it is a constant, not an architecture.
 | program output | 514 KB for `ls -laR` | send a snapshot instead of the backlog | **~250x** |
 | pty stream as delta | already minimal | nothing — a terminal stream *is* the delta of its own state | — |
 | snapshot envelope | 1985 B | binary frame instead of JSON | **25%** of one message per attach |
-| compression | measured 14.8x on 218 KB (TS daemon) | **not implemented in the Rust daemon**; client offers it | open |
+| compression | 7.1x on `ls -laR`, 4.2x on `ls -la`, 3.4x on a snapshot, 691x on a flood (Rust daemon) | permessage-deflate, negotiated when offered (ADR-0019) | taken |
 | frame header | 8 B x 32 = 0.05% | nothing worth doing | — |
 | coalescing | was 16 KB units | 4 KB units (done: `OUTPUT_FLUSH_BYTES`) | taken |
 

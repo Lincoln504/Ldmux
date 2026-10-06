@@ -40,6 +40,33 @@ is a case where *the platform cannot express the shared concept* on every versio
 one legitimate reason for a seam to differ (ADR-0013), so an iOS minimum of 16 is the
 simple answer (VisionKit's scanner needs 16 anyway).
 
+## What the native work found (2026-10-06)
+
+The C core (`packages/mobile/native/ldmux_terminal.c`, no JNI in it) was checked as far as
+this Linux machine allows:
+
+- It **compiles for aarch64-macos, aarch64-linux and the host**.
+  The **aarch64-ios target needs the Apple SDK**, so it cannot be built or checked here.
+- A **cinterop definition stub** exists at `packages/mobile/native/ios/ldmux_terminal.def`.
+  It is **unvalidated**: nothing has run it through Kotlin/Native's cinterop.
+- Nothing else of iOS exists: no `iosMain`, no Gradle iOS targets, no xcframework.
+
+**Remaining steps**, in order (all but the first two need the macOS host):
+
+1. Build the static libraries (libghostty-vt and the C core) per iOS target
+   (`iosArm64`, `iosSimulatorArm64`) on macOS.
+2. Package them as an xcframework.
+3. Wire cinterop (validate and finish the `.def`).
+4. The iOS `actual` of `TerminalEngine` over that cinterop.
+5. `TerminalPainter` on Core Text (the real work, table above).
+6. Pull the gesture extraction out of `TerminalSurface.android.kt` into shared code
+   (ADR-0013 section 2), so the surface is not Android-only logic.
+7. Add the Gradle `iosArm64` / `iosSimulatorArm64` targets and the `iosMain` source set.
+8. Use the Ktor Darwin engine for the WebSocket. `permessage-deflate` is then handled
+   natively by `URLSession`, with no code change (ADR-0019).
+9. `BackgroundSession` release must be a **platform lifecycle call** (the app entering the
+   background, with iOS's roughly three minutes), not a timer in shared code.
+
 ## The machine that would build it
 
 A macOS Sequoia 15.7.9 KVM guest exists and is provisioned:

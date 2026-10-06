@@ -1,7 +1,7 @@
 //! What `ldmux code` and `ldmux pair` show: the pairing for the address this
 //! daemon actually listens on (ADR-0016, ADR-0017).
 //!
-//! Port of `packages/daemon/src/pairing.ts` (the source of record).
+//! Port of `packages/daemon/src/pairing.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! Built from the listen info, never from a guess about how the machine is
 //! exposed. The previous version assembled a `tailscale serve` URL and a deep

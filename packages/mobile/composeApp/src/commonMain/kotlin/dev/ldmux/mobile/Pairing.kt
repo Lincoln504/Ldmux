@@ -159,7 +159,7 @@ internal fun decodeQueryComponent(s: String): String {
 
 private fun Char.isHexDigitChar(): Boolean = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
-// ── Tailnet only, as data (the mirror of packages/protocol/src/net.ts) ───────────
+// ── Tailnet only, as data (the mirror of `crates/protocol/src/net.rs`) ───────────
 
 /**
  * Is [address] loopback or a tailnet address?

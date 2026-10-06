@@ -16,8 +16,8 @@
 //! Only `OUTPUT` is emitted by the shipped code; the remaining members are the
 //! reserved vocabulary for later revisions (see docs/REMOTE.md).
 //!
-//! Port of `packages/protocol/src/frames.ts` (the source of record, unchanged
-//! during the port's A/B window). The header layout is byte-exact: the TS
+//! Port of `packages/protocol/src/frames.ts` (the TS original, deleted at D4 and
+//! readable at git commit `6b3efb8`; it was unchanged during the port's A/B window). The header layout is byte-exact: the TS
 //! `DataView` writes big-endian, and this module reads and writes the same.
 
 /// Frame type values. A const set rather than an `enum`: the wire field is a

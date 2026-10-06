@@ -287,9 +287,9 @@ pointed.
       synthesized SGR click for a mouse-aware program, relative cursor motion for
       a plain shell.
 - [ ] Selection polish: auto-scroll while dragging past an edge, a selection surviving
-      new output, double-tap for a word (`docs/STATE.md` §5.1).
-- [ ] `planTap` corrections for tap-to-cursor (`docs/STATE.md` §5.2).
-- [ ] Clipboard-write policy verified end to end on the device (`docs/STATE.md` §5.3).
+      new output, double-tap for a word (`docs/archive/STATE.md` §5.1).
+- [ ] `planTap` corrections for tap-to-cursor (`docs/archive/STATE.md` §5.2).
+- [ ] Clipboard-write policy verified end to end on the device (`docs/archive/STATE.md` §5.3).
 - [x] Foreground service for a *bounded* background window (see "Backgrounding and the
       network" below). The heartbeat does not survive Doze indefinitely, by design.
 - [ ] iOS (needs a macOS host for the xcframework).
@@ -299,7 +299,7 @@ with no control involved; closing the keyboard leaves the screen in portrait; th
 keyboard returns by rotating through portrait; typing reaches the pane in **both**
 shapes; a long-press drag selects past the cell it started on; dragging a handle moves
 its own end and leaves the other; the pane resizes per shape and the grid draws 1:1 in
-the terminal's own colours. See `docs/STATE.md` §4 for the full ledger.
+the terminal's own colours. See `docs/archive/STATE.md` §4 for the full ledger.
 
 ## Known issues
 

@@ -2,10 +2,10 @@
 //! OUTPUT frames; everything in the other direction is one of these JSON
 //! shapes.
 //!
-//! Port of `packages/protocol/src/messages.ts` (the source of record for the
-//! client-facing union) plus the **new** keeper messages (plan §3.5) that have
-//! no TS source of record yet — those are specified here and in plan §3.5, and
-//! their field sets are finalised by the keeper phase (plan §7 phase 3).
+//! Port of `packages/protocol/src/messages.ts` (the TS original for the
+//! client-facing union; deleted at D4, readable at git commit `6b3efb8`) plus the **new** keeper messages (`docs/archive/RUST-PORT-PLAN.md` §3.5) that have
+//! no TS source of record yet — those are specified here and in `docs/archive/RUST-PORT-PLAN.md` §3.5, and
+//! their field sets are finalised by the keeper phase (`docs/archive/RUST-PORT-PLAN.md` §7 phase 3).
 //!
 //! The wire tag is `type`, lower-cased, and each message's fields are
 //! camelCase — matching the TS exactly. The one modelling choice over the TS:

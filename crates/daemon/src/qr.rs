@@ -1,6 +1,6 @@
 //! A QR code encoder, for `ldmux code`.
 //!
-//! Port of `packages/daemon/src/qr.ts` (the source of record).
+//! Port of `packages/daemon/src/qr.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! Byte mode only (the payload is a URL), every version 1–40, every error
 //! correction level. The algorithm is ISO/IEC 18004 as laid out by Project

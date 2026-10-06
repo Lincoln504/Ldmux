@@ -3,7 +3,7 @@
 //!
 //! This is the single source of truth for the Unix-socket RPC surface, imported
 //! by the daemon (server), the CLI, and tests. Port of
-//! `packages/protocol/src/rpc.ts` (the source of record).
+//! `packages/protocol/src/rpc.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! The closed string unions (`kind`, `status`, device `kind`, `mode`) are modelled
 //! as `String` and documented with their closed set: the wire is a plain string

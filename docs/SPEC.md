@@ -42,6 +42,16 @@
 >   against committed goldens (`crates/daemon/tests/parity/`), not a live tmux.
 >   Sections still describing the tmux design are marked **historical** below.
 >
+> - **Current wire and lifecycle additions** (2026-10-06, branch `fix/audit-hardening`;
+>   details in §5.3, §5.5, §6, §9 and `docs/REMOTE.md`): the daemon negotiates
+>   `permessage-deflate` (ADR-0019); `hello`/`attach` carry additive `features`
+>   (`inplaceResync`, `sessionEnded`), with a `resync: true` snapshot and a
+>   `session_ended` message; session records carry the shell's exit status and a
+>   closed `endedKind`; ended shells keep their pane 60 s for a reconnecting client;
+>   claims persist across a daemon restart; the desk attach client uses a local
+>   `0600` attach socket instead of the tailnet. Mesh link security is designed in
+>   ADR-0020 and not implemented.
+>
 > The rest of this document is still the design of record for the transport,
 > geometry, scroll and lifecycle decisions; read "Bun"/"Node" as historical, any
 > extension reference as historical, and the orientation sections as superseded.
@@ -278,8 +288,10 @@ A **session** is one keeper session (a PTY and its shell) on the keeper socket.
 - **Created-by / owner:** which pi session or client created it (families, phase 2).
 - **State:** `starting | running | attached | detached | dead`.
 - **Persistence:** the keeper keeps the pty alive across disconnects. A shell that
-  exits ends its session: the row goes, and a desk window
-  on it closes. Exit-status capture is not built.
+  exits ends its session: the record becomes `dead` with the shell's
+  exit status (`exitCode`, or `exitSignal` when a signal killed it) and an
+  `endedKind`, and a desk window on it closes. The pane (final screen) stays in the
+  keeper for 60 s so a reconnecting client can read it (§5.5).
 
 **Pi sessions** are ordinary keeper sessions whose pty runs `pi`. An optional
 shell wrapper (an example only; the repo does not install it) can launch
@@ -476,9 +488,16 @@ Per-session record:
   "cwd": "/home/ldeen", "title": "ldmux investigation",
   "createdAt": 1789…, "updatedAt": 1789…, "createdBy": "mobile",
   "piSessionId": "01a09c54-…", "status": "running|dead",
-  "exitCode": null, "exitedAt": null, "endedReason": null
+  "exitCode": null, "exitedAt": null, "endedReason": null,
+  "exitSignal": null, "endedKind": null
 }
 ```
+
+`exitCode` / `exitSignal` are the shell's own ending as the keeper's `waitpid` saw it
+(neither is set for a session someone killed or the keeper lost). `endedKind` is a
+closed set: `exited | killed | closed | keeper_lost | window_closed`; it is absent while
+the session runs and on records written before it existed. The same three fields and
+`endedReason` ride on `SessionInfo` (`crates/protocol/src/rpc.rs`).
 
 Reconciliation on start and periodically: keeper `List` → upsert; drop
 records for vanished sessions; adopt survivors. Dead-but-retained sessions keep
@@ -554,8 +573,19 @@ helper suffices), and owner/families.
   *current-state* request whose queued copies are worthless, and at this cost it
   does not earn its complexity.
 - **A shell that exits ends its session**; reconcile marks it
-  `dead`, releases its claim, window record and shim, and broadcasts. Recording
-  `exit_code` and keeping the final scrollback is not built.
+  `dead` (recording its exit status and `endedKind`), releases its claim and window
+  record, and broadcasts. The keeper keeps the dead pane, with its final screen, for
+  60 s (`DEAD_KEEP_MS`; the keeper's own backstop for an unattended keeper is 15
+  minutes), so a client that reconnects in that window can attach, read the final
+  screen and receive `session_ended` (a client that advertised `sessionEnded`). After
+  that the pane is released and the final scrollback is gone. Dead records are pruned
+  after 24 h.
+- **Claims persist.** The ownership table is mirrored to `<state>/claims.json` and
+  reloaded at start with a 60 s re-claim grace (`RESTORE_GRACE_MS`); a restored claim no
+  device re-attaches to is released when the grace ends.
+- **The state directory and the token file must be owned by the daemon's uid**; the
+  daemon refuses to use one that is not (state dir tightened to `0700`, token file to
+  `0600`).
 - **The pi extension is gone (ADR-0009).** This section used to carry a table of
   what the extension did on `quit`, `reload`, `new`, `resume` and `fork`. There is
   no extension: ldmux is not a pi plugin, and `pi` runs inside a session like any
@@ -589,7 +619,16 @@ helper suffices), and owner/families.
   buffered while a client is attaching, and a 64 KiB cap on output queued for a
   socket that is not reading (`WS_BACKLOG_BYTES`; exceeding either sends one
   `resync` error and drops output until the client re-attaches and is sent a
-  snapshot).
+  snapshot; a client that advertised `inplaceResync` is instead sent a fresh `caps`
+  and a `snapshot` with `resync: true` on the same socket).
+- **Compression:** the daemon owns the server side of the WebSocket frame layer
+  (`crates/daemon/src/ws.rs`) and negotiates `permessage-deflate` when the client offers
+  it (ADR-0019): per-connection context takeover, level 3, messages under 96 B sent
+  plain, one message per frame. Measured: `ls -la` 4.2x, `ls -laR` 7.1x, a flood 691x,
+  an attach snapshot 3.4x (`docs/WIRE-COST.md`).
+- **Local attach socket:** `<control>-attach.sock` carries the same protocol over a Unix
+  socket (`0600`, peer uid checked with `SO_PEERCRED`) for the desk attach client, so a
+  desk window needs neither the tailnet nor the token.
 
 ### 6.2 Message types (implemented)
 
@@ -597,18 +636,28 @@ This is the shipped set (the source of truth is
 `crates/protocol/src/messages.rs`; behaviour is in `docs/REMOTE.md`).
 Everything below is a JSON **text** message except the last line.
 
-Client → server: `hello {device}`, `attach {sessionId, cols?, rows?, takeover?}`,
+Client → server: `hello {device, features?}`,
+`attach {sessionId, cols?, rows?, takeover?, features?}`,
 `resize {cols, rows}`, `input {data}`, `key {keys}`, `mouseclick {col, row}`,
 `follow {mode}`, `scrollback {sessionId, lines?}`, `list`,
 `new {kind?, cwd?, title?}`, `kill {sessionId}`, `close {sessionId}`, `desktop`,
 `makelive {sessionId, workspace}`, `closelive {sessionId}`, `ping {id?}`.
 
 Server → client: `caps {protocolVersion, sessionId, cols, rows, snapshotEpoch,
-capabilities {scrollback}}`, `snapshot {…state fields…, history?}`,
+capabilities {scrollback}}`, `snapshot {…state fields…, history?, resync?}`,
 `sessions {sessions[]}` (the answer to `list`/`new`/`kill`/`close`),
 `created {sessionId, cwd}`, `owned {sessionId, owner}`, `mousedelivered {col, row}`,
 `desktop {inventory}`, `live {sessionId, ok, detail?}`, `pong {id?}`,
+`session_ended {sessionId, kind, reason?, exitCode?, exitSignal?}`,
 `error {code, message}`.
+
+`features` is an optional list of strings, additive: a client that sends none gets only the
+messages it always got. `inplaceResync` — a stale picture is repaired with `caps` +
+`snapshot{resync:true}` on the same socket. `sessionEnded` — the end of a session is a
+`session_ended` message (and a just-ended session can be attached for its final screen).
+Writes (`input`, `key`, `mouseclick`) need a `hello` and the holding device
+(`hello_required`, `not_holder`); `new`, `kill`, `close`, `makelive`, `closelive` need a
+`hello`; delivery failures are `input_failed`, `kill_failed`, `close_failed`.
 
 Binary: exactly one frame type is emitted — `OUTPUT` (raw pane bytes) — using the
 one canonical 8-byte header (`crates/protocol/src/frames.rs` defines further
@@ -634,8 +683,9 @@ libghostty-vt state. (`paneInMode`, a tmux copy-mode flag, was removed
 the keeper persists, so replaying a bounded frame window adds cache/eviction/desync bugs
 for marginal benefit.
 
-1. Client → `attach {sessionId}` (the handshake is attach-triggered; there is no
-   separate hello step).
+1. Client → `hello {device}` (identity; needed before any write or shell-changing
+   message, and the carrier of `features`), then `attach {sessionId}` (a connection that
+   attaches without a hello is a read-only observer).
 2. Server → `caps`, then `snapshot` (declared geometry + state fields).
 3. Client repaints from the snapshot, replays the terminal modes, and resumes the
    live `OUTPUT` stream. The server subscribed to the pane *before* capturing the
@@ -815,18 +865,34 @@ no REST layer, §5.4):
 `ldmux mirror <id> [--workspace N] [--rw] [--terminal T]`:
 
 1. Workspace: `--workspace`, else **`10`** (`desktop::DEFAULT_MIRROR_WORKSPACE`).
-   Terminal: `--terminal`, else `LDMUX_TERMINAL`, else `alacritty`.
-2. Launch through `i3-msg exec`, then move the window by its class
-   (`ldmux-mirror-<id>`) once i3 reports it. **Never** `workspace N; exec …` —
-   that moves the user's view, which is what the tmux-era mirror did. The class
-   is per session so two mirrors of two shells cannot move each other.
-3. `alacritty --class ldmux-mirror-<id> -e ldmuxd attach <id> [--readonly]`,
-   read-only unless `--rw`. The argv is `desktop::mirror_argv`, one definition
-   with the desk window's (`live_argv`), so the two cannot drift.
+2. **Opening a window needs no window manager.** The daemon spawns a terminal emulator
+   directly (detached, own process group, absolute path, the desktop session's
+   environment) running `ldmuxd attach <id> [--readonly]`. The terminal is chosen from
+   `LDMUX_TERMINAL_CMD`, `LDMUX_TERMINAL` (or `--terminal`), `$TERMINAL`, then the first
+   found on `PATH` of alacritty, kitty, foot, wezterm, gnome-terminal, konsole,
+   xfce4-terminal, xterm, x-terminal-emulator, xdg-terminal-exec. A built-in template
+   table gives each known emulator its class flag and keeps it in the foreground; an
+   unknown one gets `-e {cmd}`. `LDMUX_TERMINAL_CMD` is a free-form command line with
+   `{cmd}` (the attach command; appended if absent) and optionally `{class}` (the window
+   class / app-id, `ldmux-mirror-<id>` or `ldmux-live-<id>`).
+3. **Placing it on a workspace is an optional adapter** (`desktop::Wm`): i3 (`i3-msg`),
+   sway (`swaymsg`) or hyprland (`hyprctl`), detected from the session's own
+   sockets; the window is found by its class and moved there once the manager reports
+   it. **Never** `workspace N; exec …` — that moves the user's view, which is what the
+   tmux-era mirror did. Without an adapter (or a terminal that cannot set a class) the
+   window is "opened, not placed". i3 is the only adapter measured; sway and hyprland
+   are written but untested (`docs/PLATFORMS.md`). The class is per session so two
+   mirrors of two shells cannot move each other.
+4. Read-only unless `--rw`. The argv is built in one place for the desk window
+   (`live`) and the mirror, so the two cannot drift.
 
-Environment: the daemon is a `systemd --user` service and the unit sets
-`DISPLAY`/`XAUTHORITY` (`deploy/ldmux.service`; the installer is being reworked on this branch); without them `desktop.rs` reports
-"no DISPLAY (not an X11 session)" rather than guessing.
+Environment: the daemon is a `systemd --user` service whose unit sets no display
+variables. It needs `DISPLAY` or `WAYLAND_DISPLAY` (and the WM sockets) in its own
+environment, or learns them from the user manager (`systemctl --user
+import-environment …`, run once from the session's startup; the unit header lists the
+variables); without them `desktop.rs` reports "no graphical session" rather than
+guessing. `deploy/bin/ldmux-terminal` is the absolute-path launcher a key binding runs
+(it asks `ldmux window`, and falls back to a plain terminal, logged).
 
 ---
 
@@ -834,7 +900,8 @@ Environment: the daemon is a `systemd --user` service and the unit sets
 
 - **Transport:** the system `tailscaled` (a prerequisite, not shipped). The daemon binds
   this machine's tailnet address directly (`LDMUX_REMOTE_HOST` in
-  `deploy/ldmux.service`), plain `ws://` under WireGuard (ADR-0016). No
+  `~/.config/ldmux/env`, read by the unit's optional `EnvironmentFile`; template
+  `deploy/ldmux.env.example`), plain `ws://` under WireGuard (ADR-0016). No
   `tailscale serve`, no Funnel.
 - **Gates:** tailnet or loopback peer address (checked per request, `403`
   otherwise) + bearer token. Constant-time comparison.
@@ -852,8 +919,9 @@ Environment: the daemon is a `systemd --user` service and the unit sets
 
 ### 11.1 Daemon language
 
-**Rust** (edition 2024; `tokio`, `tokio-tungstenite`, `serde`, `clap`, `thiserror`,
-`ring`, `uuid`, `nix`, `rand`, `fs2`). The v0.x recommendation was TypeScript on
+**Rust** (edition 2024; direct dependencies `tokio`, `tokio-tungstenite`, `serde`,
+`serde_json`, `futures-util`, `uuid`, `nix`, `rand`, and `flate2` with the pure-Rust
+backend for permessage-deflate, ADR-0019; the list is in `AGENTS.md`). The v0.x recommendation was TypeScript on
 Bun, then Node 26 (ADR-0009); the Rust port replaced it and the TypeScript tree
 was deleted at D4 (ADR-0018). The session layer is `crates/keeper`, with the
 terminal emulator libghostty-vt reached through `crates/vt-sys`.
@@ -861,7 +929,8 @@ terminal emulator libghostty-vt reached through `crates/vt-sys`.
 ### 11.2 Mobile stack
 
 **KMP + Compose Multiplatform**, native renderer (§11.3), Android shipped and
-device-verified, iOS not started (`docs/IOS-DEVELOPMENT.md`). The options this
+device-verified, iOS not started (`docs/IOS-DEVELOPMENT.md`; the C core builds for
+aarch64 macOS and Linux, the iOS target needs the Apple SDK). The options this
 section once weighed (WebView/xterm.js, Flutter, PWA, `alacritty_terminal`) are
 history; the buildless PWA that shipped first was deleted. Libraries: **Ktor**
 (`ktor-client-websockets`), `kotlinx.serialization`, foreground service +
@@ -893,6 +962,17 @@ alive to reconnect. Measured as a deadlock before it was fixed.
 
 ### 11.3 Rendering engine (client)
 
+- **Cell model, frame version 1.** The native engine's frame (`ldmux_terminal.h`,
+  mirrored by `TerminalFrame.kt`; `LDMUX_FRAME_VERSION` is 1) is additive: per-cell flags
+  now carry the underline style (single, double, curly, dotted, dashed; bit 2 still means
+  "underlined" for every style, so an older reader draws a single underline), the
+  wide-glyph head flag, and a hyperlink flag, with an extension block for underline
+  colour and OSC 8 URIs. **Known gap:** the Android painter does not draw the new
+  attributes yet (underline style and colour, hyperlinks, wide glyphs; it still draws a
+  plain underline from bit 2), and the daemon's
+  snapshot replay (`crates/vt-sys/src/snapshot.rs`) does not carry hyperlinks, so a
+  reattach drops them.
+
 - **Shipped (v1):** native libghostty-vt behind JNI, rendered on a Compose
   Canvas (ADR-0007, `packages/mobile/native/`). This section used to list "v1:
   xterm.js in a WebView... Future: native renderer" — the native renderer is
@@ -918,15 +998,17 @@ ldmux/
 │  │                  # inventory, the CLI (`bin/ldmux`), `bin/ldmuxd`
 │  ├─ attach/         # the desk-window client (`ldmuxd attach`)
 │  └─ vt-sys/         # hand-written FFI against the vendored libghostty-vt
-├─ deploy/            # the systemd user unit, the `$mod+Return` launcher
-├─ scripts/           # measure_latency.ts, slow-link.ts (dev tools, need Node),
+├─ deploy/            # the systemd user unit template, ldmux.env.example, the
+│                     # `ldmux-terminal` launcher
+├─ scripts/           # install.sh, restart-keeper.sh, android.sh (build/test),
+│                     # measure_latency.ts, slow-link.ts (dev tools, need Node),
 │                     # regen_parity_golden.sh (needs tmux; regenerates goldens)
 ├─ docs/
 │  ├─ SPEC.md · STATE.md · PLATFORMS.md · REMOTE.md · NATIVE-TERMINAL.md ·
 │  │  PREDICTIVE-ECHO.md · MESH-TRANSPORT.md · WIRE-COST.md · DESKTOP-INTEGRATION.md ·
-│  │  IOS-DEVELOPMENT.md · TRANSPORT.md (retired)
+│  │  IOS-DEVELOPMENT.md
 │  ├─ archive/        # historical records: the port plan/log/audit, the tmux study,
-│  │                  # the pre-port investigation, the old STATE.md
+│  │                  # TRANSPORT.md, the pre-port investigation, the old STATE.md
 │  └─ adr/            # the decision record; 0018 is the session layer
 └─ packages/
    └─ mobile/         # native KMP + Compose Multiplatform client (Android

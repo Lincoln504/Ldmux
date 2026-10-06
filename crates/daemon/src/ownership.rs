@@ -1,8 +1,8 @@
 //! Who is looking at a session (ADR-0010).
 //!
-//! Port of `packages/daemon/src/ownership.ts` (the source of record), plus
-//! `seizing_closes_the_desk_window`, which the TS tree keeps in
-//! `daemon.ts` and the ownership test file pins.
+//! Port of `packages/daemon/src/ownership.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`), plus
+//! `seizing_closes_the_desk_window`, which the TS tree kept in
+//! `daemon.ts` (git commit `6b3efb8`) and the ownership test file pinned.
 //!
 //! One device owns a session at a time. The whole reason this is a module and
 //! not a field on a record is the failure mode dooboxes' own glossary names

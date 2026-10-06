@@ -1,7 +1,7 @@
 //! The remote server: the phone-facing WebSocket endpoint (the tailnet address
 //! + bearer-token auth).
 //!
-//! Port of `packages/daemon/src/remote.ts` (the source of record). The phone
+//! Port of `packages/daemon/src/remote.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`). The phone
 //! connects over the tailnet address with the bearer token **at the HTTP
 //! upgrade**; terminal output travels as binary OUTPUT frames (`frames.rs`);
 //! control/handshake is JSON text.

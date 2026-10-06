@@ -1,6 +1,6 @@
 //! Session registry. Crash-safe and restart-safe.
 //!
-//! Port of `packages/daemon/src/registry.ts` (the source of record).
+//! Port of `packages/daemon/src/registry.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
 //! - The terminal layer is authoritative for terminal sessions; the registry
 //!   caches metadata it cannot hold (kind, title, created-by, pi session id).

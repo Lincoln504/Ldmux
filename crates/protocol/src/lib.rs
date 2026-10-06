@@ -2,13 +2,13 @@
 //! The ldmux wire contract: frames, messages, keeper, rpc, pairing, net,
 //! paths, socket.
 //!
-//! Port of `packages/protocol` (the TS source of record). Every module names
+//! Port of `packages/protocol` (the TS original). Every module names
 //! its TS source in its own doc comment. **Those files no longer exist** — the
 //! TypeScript tree was deleted at D4; read them at git commit `6b3efb8`, the
 //! last commit that carried the tree. The keeper messages (`keeper`) are new
-//! (plan §3.5) and have no TS source.
+//! (`docs/archive/RUST-PORT-PLAN.md` §3.5) and have no TS source.
 //!
-//! See `docs/RUST-PORT-PLAN.md` (§4 module map) and `docs/RUST-PORT-LOG.md`
+//! See `docs/archive/RUST-PORT-PLAN.md` (§4 module map) and `docs/archive/RUST-PORT-LOG.md`
 //! (phase state).
 
 /// Bounds for a client-requested pane size. The floor keeps a pane usable (a

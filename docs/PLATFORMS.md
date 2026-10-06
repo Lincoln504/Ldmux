@@ -34,7 +34,9 @@ requirements to carry over by hand are the same two: the supervisor must not sig
 keeper when it stops the daemon (the keeper is detached, but it sits in the daemon's
 cgroup or process group on most supervisors), and the user session must not be torn down
 at logout. The daemon needs `LDMUX_REMOTE_HOST` set to the tailnet address to be
-reachable by the phone; the default is loopback.
+reachable by the phone; the default is loopback. Under the unit this goes in the optional
+`~/.config/ldmux/env` (`EnvironmentFile=-%h/.config/ldmux/env`; template
+`deploy/ldmux.env.example`, `LDMUX_REMOTE_HOST` / `LDMUX_REMOTE_PORT`).
 
 **Shells.** Any. The keeper spawns `$SHELL` if it is executable, else the passwd entry's
 shell, else `/bin/sh` (`pick_shell` in `crates/keeper/src/lib.rs`, unit-tested). The
@@ -47,7 +49,14 @@ binary at runtime, only an address in `100.64.0.0/10` or `fd7a:115c:a1e0::/48` (
 loopback). Verified on the one tailnet it runs on.
 
 **Toolchain.** `nix develop` provides rustc/cargo (+ Node for the dev-only mobile
-tests and scripts, + zbar for the QR tests). The gate is `cargo test --workspace`. A
+tests and scripts, + zbar for the QR tests) and exports `LDMUX_VT_LIB_DIR` (and
+`LDMUX_VT_INCLUDE_DIR`) pointing at the nix-built libghostty-vt, so plain `cargo` works
+inside it. The gate is `cargo test --workspace` plus `cargo clippy --workspace
+--all-targets -- -D warnings`. There is no `just`; installs use `nix run .#install` /
+`scripts/install.sh`, keeper replacement `nix run .#restart-keeper` /
+`scripts/restart-keeper.sh`, Android builds `scripts/android.sh`. The release profile
+(`Cargo.toml`) strips symbols, uses thin LTO, keeps `overflow-checks` on and `panic =
+"unwind"`. A
 non-nix build needs a Rust toolchain supporting edition 2024; **not tested**.
 
 ## Desktop integration
@@ -58,19 +67,29 @@ the phone path does not touch X).
 
 Putting a shell on the machine's own screen is optional. Two parts:
 
-1. **Launching a window** is a direct spawn of `<terminal> -e <abs ldmuxd> attach <id>`
-   (`crates/daemon/src/desktop.rs`, `crates/attach`). The terminal is `LDMUX_TERMINAL`,
-   default `alacritty`. The daemon requires `DISPLAY` or `WAYLAND_DISPLAY` in its own
-   environment and says so when neither is set. **Verified** with alacritty on X11.
-2. **Placing it on a workspace** is an optional adapter. The only one with a measured
-   implementation is **i3** (`i3-msg`, X11, i3 4.24; `docs/DESKTOP-INTEGRATION.md`).
-   The source names sway and hyprland as intended adapters; treat those as **intended**.
-   GNOME, KDE and macOS have no placement adapter, so a window opens where the window
-   manager puts it.
+1. **Launching a window** is a direct spawn of the terminal emulator running
+   `<abs ldmuxd> attach <id>` (`crates/daemon/src/desktop.rs`, `crates/attach`), detached,
+   in its own process group, with the desktop session's environment. The terminal is
+   chosen from `LDMUX_TERMINAL_CMD` (a command line with `{cmd}` and optionally
+   `{class}`), `LDMUX_TERMINAL`, `$TERMINAL`, then the first of alacritty, kitty, foot,
+   wezterm, gnome-terminal, konsole, xfce4-terminal, xterm, x-terminal-emulator,
+   xdg-terminal-exec on `PATH`; a template table gives each known emulator its class flag
+   and keeps it in the foreground. The daemon needs `DISPLAY` or `WAYLAND_DISPLAY`,
+   from its own environment or from the user manager
+   (`systemctl --user import-environment`; the unit header lists the variables), and says
+   so when neither is set. **Verified** with alacritty on X11; the other templates are
+   **read** (written from each emulator's documented flags, never run).
+   The window attaches over the daemon's local attach socket
+   (`<control>-attach.sock`, `0600`, `SO_PEERCRED`), so it needs no tailnet address.
+2. **Placing it on a workspace** is an optional adapter (`desktop::Wm`: i3 via `i3-msg`,
+   sway via `swaymsg`, hyprland via `hyprctl`, detected from the session's own sockets).
+   The only one with a measured implementation is **i3** (X11, i3 4.24;
+   `docs/DESKTOP-INTEGRATION.md`); sway and hyprland are written but **intended**
+   (untested). GNOME, KDE, niri and macOS have no placement adapter, so a window opens
+   where the window manager puts it ("opened, not placed").
 
-**In progress on this branch** (another change set, not described here): terminal
-selection, window launching, the installer and a `doctor` command. This document will
-need reconciling with it; the statements above are the pre-change behaviour.
+`deploy/bin/ldmux-terminal` is the absolute-path launcher a key binding runs: it asks
+`ldmux window` and falls back to a plain terminal (logged) when the daemon is down.
 
 The desktop inventory (the launcher's list of workspaces, windows and pi sessions)
 reads `/proc` and queries i3 (`crates/daemon/src/desktop_inventory.rs`); it is X11/i3
@@ -109,7 +128,9 @@ and the Android SDK/NDK under `$HOME/Android`.
 
 ## iOS
 
-Not started. Needs a macOS host and Xcode for the engine xcframework, and a decision on
+Not started. The C core compiles for aarch64 macOS, aarch64 Linux and the host; the
+aarch64 iOS target needs the Apple SDK, so it needs a macOS host and Xcode for the engine
+xcframework, and a decision on
 the background-connection model (iOS gives roughly three minutes). The shared Kotlin core
 is kept expressible without a platform by `packages/mobile/test/architecture.test.ts`
 (ADR-0013), which is the only iOS-related thing that is enforced. See

@@ -4,7 +4,7 @@
 //! line is the answer. (Do not multiplex requests on one connection without
 //! adding id-correlation first.)
 //!
-//! Port of `packages/protocol/src/socket-client.ts` (the source of record). The
+//! Port of `packages/protocol/src/socket-client.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`). The
 //! Node `net` module is replaced by a `tokio` Unix socket; the on-the-wire
 //! contract (one JSON request line, one JSON response line) is the same.
 
