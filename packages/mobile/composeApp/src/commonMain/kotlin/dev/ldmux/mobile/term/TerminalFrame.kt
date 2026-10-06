@@ -259,7 +259,7 @@ object TerminalFrame {
             val bg = rgb(b, p + 6)
             p += 9
             val text = if (len > 0 && p + len <= b.size) {
-                String(b, p, len, Charsets.UTF_8)
+                b.decodeToString(p, p + len)
             } else {
                 ""
             }

@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.Spacer
@@ -90,7 +89,6 @@ fun LauncherScreen(
 
     val openShells = sessions.filter { it.attachable }
     val entries = launcherEntries(openShells)
-    val ended = endedSessions(sessions)
 
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(Bg).padding(LocalTouch.current.rowPad * 3)) {
@@ -201,24 +199,6 @@ fun LauncherScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text("+ shell", color = Fg, fontSize = 14.sp)
-                    }
-                }
-                // The endings, under everything else: not rows you can open, but
-                // the answer to "where did my shells go". When the keeper died
-                // with four shells on 2026-10-06 they vanished from this screen
-                // without a word, which reads as the app being broken rather than
-                // the shells being gone.
-                if (ended.isNotEmpty()) {
-                    item(key = "ended-header") {
-                        Text(
-                            "ended",
-                            color = Dim,
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(start = 2.dp),
-                        )
-                    }
-                    items(ended, key = { "ended-${it.id}" }) { s ->
-                        EndedRow(s)
                     }
                 }
             }
@@ -383,51 +363,6 @@ internal fun liveWorkspaceOf(workspace: String?): String? = workspace?.takeIf { 
 /** What the launcher's left button says, given what is chosen. */
 internal fun openButtonLabel(picked: List<LauncherEntry>): String =
     if (picked.isEmpty()) "open" else "open (${picked.size})"
-
-/**
- * The endings worth showing on the launcher: the most recent few, and no more.
- *
- * The list is the daemon's order, and the daemon puts the dead after the live
- * and the most recently ended first (measured with `ldmux list` on 2026-10-06:
- * the shell that ended at 07:24 came before the one that ended at 22:00 the
- * night before), so taking a prefix is taking the newest. The cap keeps the
- * screen about the shells you *can* open: eight dead shells accumulated in one
- * night on this box, and they are a footnote, not the list.
- */
-internal const val ENDED_SHOWN = 5
-
-internal fun endedSessions(sessions: List<Session>): List<Session> =
-    sessions.filter { it.status == "dead" }.take(ENDED_SHOWN)
-
-/**
- * A shell that ended: no controls, no tapping, just what it was and why it is
- * gone. The reason is the daemon's own sentence, so the phone and `ldmux list`
- * say the same thing about the same shell.
- */
-@Composable
-private fun EndedRow(session: Session) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RadiusMedium)
-            .background(Surface)
-            .padding(vertical = LocalTouch.current.rowPad * 2),
-    ) {
-        Text(
-            session.label,
-            color = Dim,
-            fontSize = 14.sp,
-            textDecoration = TextDecoration.LineThrough,
-            maxLines = 1,
-        )
-        Text(
-            "ended \u00b7 ${session.endedReason.ifBlank { "no reason recorded" }}",
-            color = Dim,
-            fontSize = 10.sp,
-            maxLines = 2,
-        )
-    }
-}
 
 /** One workspace, as a chip to aim a new shell at. */@Composable
 private fun ChoiceRow(
