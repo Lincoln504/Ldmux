@@ -9,7 +9,7 @@
 //! whole workspace is running. A tight budget made this file flaky, not fast.
 
 use ldmux_protocol::keeper::{
-    self as km, Kill, KeeperMessage, List, Peek, Read, Spawn,
+    self as km, Kill, KeeperMessage, List, Peek, Read, Spawn, Write,
 };
 
 /// The corpus the §3.11 harness pins (the same four styled cells): bold B,
@@ -1212,4 +1212,269 @@ async fn a_background_job_does_not_survive_the_shell() {
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(gone, "a job outlived the shell that started it");
+}
+
+/// A shell gets its own pty and nothing else's.
+///
+/// `openpty(3)` leaves `FD_CLOEXEC` unset, so a forked shell inherited the master
+/// of **every session spawned before it** — measured on the deployed keeper: a
+/// shell spawned after four sessions held four `/dev/ptmx` descriptors belonging
+/// to other sessions. A shell is not a view of its siblings, and the inheritance
+/// is also why a killed keeper left its shells running (the master's last
+/// reference stayed open in a sibling, so no `SIGHUP` was ever sent).
+#[tokio::test]
+async fn a_shell_inherits_no_other_sessions_pty() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let mut pids = Vec::new();
+    for id in ["inherit-a", "inherit-b"] {
+        let res: KeeperMessage = keeper_call(
+            &socket.to_string_lossy(),
+            &KeeperMessage::Spawn(Spawn {
+                session_id: id.to_string(),
+                cols: 80,
+                rows: 24,
+                cwd: None,
+                command: None,
+                env: None,
+            }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+        match res {
+            KeeperMessage::State(st) => pids.push(st.pid),
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+    // The second shell is the one that would have inherited the first's master.
+    let pid = pids[1];
+    let fds: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .expect("the shell's fds")
+        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let masters: Vec<&String> = fds.iter().filter(|p| p.contains("ptmx")).collect();
+    assert!(masters.is_empty(), "pid {pid} holds a sibling's pty master: {masters:?}");
+    assert!(
+        fds.iter().any(|p| p.contains("/dev/pts/")),
+        "the shell still has its own tty: {fds:?}"
+    );
+    for id in ["inherit-a", "inherit-b"] {
+        let _: KeeperMessage = keeper_call(
+            &socket.to_string_lossy(),
+            &KeeperMessage::Kill(Kill { session_id: id.to_string() }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// A killed keeper ends its shells — even when a *later* session ignores `SIGHUP`.
+///
+/// The kernel sends `SIGHUP` when the last descriptor for a pty master closes,
+/// and the keeper holds exactly one per session. The inheritance broke that:
+/// because a fork inherited *every earlier* master, the last-spawned shell was
+/// the real holder of all the others, so the keeper's death closed nothing by
+/// itself and the hangup travelled backwards along a chain — every earlier shell
+/// dying only once the later one did. One shell that ignores `SIGHUP` (which a
+/// program is allowed to do) snapped the chain at its end, and every session
+/// spawned before it stayed alive with its master held open by a stranger.
+///
+/// **This is the test that fails without the fix** (checked against the
+/// unfixed keeper: the two normal shells are still running at the end of the
+/// wait). The `no-hup` shell is spawned last on purpose, so it holds both
+/// earlier masters; it is expected to survive and is killed by the test.
+#[tokio::test]
+async fn a_killed_keeper_ends_its_shells_even_when_a_later_one_ignores_hup() {
+    let socket = socket_path();
+    let bin = env!("CARGO_BIN_EXE_ldmux-keeper");
+    let mut keeper = std::process::Command::new(bin)
+        .arg(&socket)
+        .env("SHELL", "/bin/bash")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn ldmux-keeper");
+    for _ in 0..600 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(socket.exists(), "the keeper bound its socket");
+
+    let spawn = |session_id: &str, command: Option<Vec<String>>| {
+        let socket = socket.clone();
+        let session_id = session_id.to_string();
+        async move {
+            let res: KeeperMessage = keeper_call(
+                &socket.to_string_lossy(),
+                &KeeperMessage::Spawn(Spawn {
+                    session_id,
+                    cols: 80,
+                    rows: 24,
+                    cwd: None,
+                    command,
+                    env: None,
+                }),
+                DEFAULT_TIMEOUT_MS,
+            )
+            .await
+            .unwrap();
+            match res {
+                KeeperMessage::State(st) => st.pid,
+                other => panic!("expected State, got {other:?}"),
+            }
+        }
+    };
+    // Two shells that behave normally, then one that will not take the hangup.
+    let normal_a = spawn("hup-a", None).await;
+    let normal_b = spawn("hup-b", None).await;
+    let stubborn = spawn(
+        "hup-c",
+        Some(vec![
+            "/bin/bash".into(),
+            "-c".into(),
+            "trap '' HUP; while :; do sleep 1; done".into(),
+        ]),
+    )
+    .await;
+
+    let alive = |pid: i32| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    assert!(alive(normal_a) && alive(normal_b) && alive(stubborn));
+
+    let _ = keeper.kill();
+    let _ = keeper.wait();
+    let mut gone = 0;
+    for _ in 0..200 {
+        gone = [normal_a, normal_b].iter().filter(|p| !alive(**p)).count();
+        if gone == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(stubborn),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let _ = std::fs::remove_file(&socket);
+    assert_eq!(
+        gone, 2,
+        "the shells of a dead keeper: hup-a={} hup-b={} alive",
+        alive(normal_a),
+        alive(normal_b)
+    );
+}
+
+/// A write that blocks does not block the keeper.
+///
+/// A pty's input buffer is small and a foreground program that is not reading
+/// fills it, at which point `write(2)` waits for the reader, not for the kernel.
+/// The keeper's runtime is single-threaded, so a write done inline waited for the
+/// *keeper*: one paste into one such pane stopped every session's `List`,
+/// `Snapshot` and `Peek` until the program read or died. Measured on the deployed
+/// keeper, 1.6 MB of lines into a `sleep 60`: the keeper answered nothing for
+/// 20 s, including a `Kill`, and the write was still blocked when the client gave
+/// up.
+///
+/// **This is the test that fails without the fix**, and it has to run the keeper
+/// in its own process to be able to see it: a stall inside the test's own runtime
+/// freezes the client too, so the client's timeout never fires and the test would
+/// pass whatever the keeper did. Here the client is in the test and the keeper is
+/// in another process, so "the keeper answered while a write was blocked" is a
+/// real observation. Checked against an unfixed keeper: the `List` times out.
+///
+/// The program sleeps 3 s and *then* reads, so the write finishes on its own and
+/// no blocked thread is left behind.
+#[tokio::test]
+async fn a_write_that_blocks_does_not_block_the_keeper() {
+    let socket = socket_path();
+    let bin = env!("CARGO_BIN_EXE_ldmux-keeper");
+    let mut keeper = std::process::Command::new(bin)
+        .arg(&socket)
+        .env("SHELL", "/bin/bash")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn ldmux-keeper");
+    for _ in 0..600 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(socket.exists(), "the keeper bound its socket");
+    let socket = socket.to_string_lossy().into_owned();
+
+    let res: KeeperMessage = keeper_call(
+        &socket,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: "blocked".to_string(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 3; cat > /dev/null".to_string(),
+            ]),
+            env: None,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(res, KeeperMessage::State(_)), "spawned: {res:?}");
+
+    // 1 MiB of *complete lines*. The newlines matter: with them the line
+    // discipline has whole lines to hand the reader, so a reader that is not
+    // reading fills the queue and the write blocks. Without them the canonical
+    // line buffer overruns and the kernel discards the excess instead — measured
+    // 2026-10-05: 1.6 MB of `"x"*79 + "\n"` blocked for as long as the program
+    // slept (10.34 s against a `sleep 10`), while 1.6 MB of one unbroken line was
+    // accepted in 0.82 s and the tail was thrown away by the tty.
+    let payload = ("x".repeat(79) + "\n").repeat(16 * 1024);
+    let writer_socket = socket.clone();
+    let started = std::time::Instant::now();
+    let writer = tokio::spawn(async move {
+        let _: Result<KeeperMessage, _> = keeper_call(
+            &writer_socket,
+            &KeeperMessage::Write(Write {
+                session_id: "blocked".to_string(),
+                data: payload,
+            }),
+            30_000,
+        )
+        .await;
+    });
+    // Let the write reach the pty and block.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let t0 = std::time::Instant::now();
+    let answered = keeper_call(&socket, &KeeperMessage::List(List {}), 2_000).await;
+    let took = t0.elapsed();
+    // The write must still be blocked, or the test proved nothing.
+    assert!(
+        answered.is_ok(),
+        "the keeper answered while a write was blocked (after {took:?}): {answered:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(2_500),
+        "the write had already finished; the test proved nothing"
+    );
+    // The program wakes and reads, so the write completes.
+    let _ = writer.await;
+    let _: Result<KeeperMessage, _> = keeper_call(
+        &socket,
+        &KeeperMessage::Kill(Kill { session_id: "blocked".to_string() }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
+    let _ = keeper.kill();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_file(&socket);
 }

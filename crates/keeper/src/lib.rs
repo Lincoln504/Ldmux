@@ -29,6 +29,43 @@ use tokio::sync::oneshot;
 /// The whole `Keeper` is held behind one `Mutex`, so a session is touched by
 /// one critical section at a time; the emulator thread owns its
 /// `!Send` `Terminal`/`RenderState` — the `Mutex` here never guards them.
+/// The handle on a session's emulator thread.
+///
+/// Sending is two steps on purpose: the message goes on the queue, then the
+/// eventfd is written so the thread's `poll` returns. Without the second step the
+/// thread would have to poll with a timeout to notice the message at all, which
+/// is what an idle keeper used to do 1000 times a second per session.
+#[derive(Clone)]
+struct Emu {
+    tx: mpsc::Sender<emulator::EmuMsg>,
+    waker: Option<Arc<OwnedFd>>,
+}
+
+impl Emu {
+    fn send(&self, msg: emulator::EmuMsg) -> Result<(), mpsc::SendError<emulator::EmuMsg>> {
+        let sent = self.tx.send(msg);
+        if sent.is_ok() {
+            emulator::wake(&self.waker);
+        }
+        sent
+    }
+}
+
+/// The last handle going away is a message too.
+///
+/// The emulator thread leaves its loop when its channel disconnects — but it
+/// waits in `poll` for ever while the pane is silent, so a disconnect that
+/// happens then is never noticed and the thread outlives its session. The 1 ms
+/// poll this replaced hid that: it re-checked the channel a thousand times a
+/// second. Waking on the last drop is exact instead of lucky. (It also wakes on
+/// the clones the request handlers hold, which costs one `poll` return each and
+/// is harmless: the thread re-checks, finds nothing, and waits again.)
+impl Drop for Emu {
+    fn drop(&mut self) {
+        emulator::wake(&self.waker);
+    }
+}
+
 pub struct Session {
     pub id: String,
     pub pid: i32,
@@ -42,13 +79,38 @@ pub struct Session {
     /// master" stream). The emulator thread feeds the emulator from this
     /// stream; phase 5 streams it to attaching clients.
     pub out: Arc<Mutex<OutBuf>>,
-    /// The emulator thread's message sender (dropped with the session — the
-    /// thread exits when it sees the disconnect).
-    em_tx: mpsc::Sender<emulator::EmuMsg>,
+    /// The emulator thread's message channel (dropped with the session — the
+    /// thread exits when it sees the disconnect), plus the wake-up that breaks
+    /// its `poll` so a queued message is serviced at once rather than after a
+    /// timeout. See [`Emu`].
+    em: Emu,
     /// When this pane last took input or produced output, in unix ms. Written
     /// by the reader task (output) and by `Write` (input), read by `List`.
     /// This is the wire's `lastActivityAt`.
     activity: Arc<AtomicU64>,
+}
+
+/// How long a write to a pane's input may wait before the caller is told it is
+/// still blocked. Below the daemon's keeper-call timeout (8 s) on purpose: the
+/// answer "the pane is not reading" is more useful than a bare timeout, and it
+/// arrives first.
+const WRITE_TIMEOUT_MS: u64 = 5_000;
+
+/// Write every byte to `fd`, retrying short writes.
+///
+/// Runs on the blocking pool (see the `Write` handler): the call can wait for
+/// the pane's reader, so it must never occupy the runtime.
+fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
+    use nix::libc as libc;
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let n = unsafe { libc::write(fd, bytes[off..].as_ptr() as *const _, bytes.len() - off) };
+        if n <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        off += n as usize;
+    }
+    Ok(())
 }
 
 /// The most output a session buffers for a reader that is not reading. Beyond
@@ -83,6 +145,48 @@ impl OutBuf {
     pub fn take(&mut self) -> (Vec<u8>, bool) {
         let data: Vec<u8> = self.q.drain(..).collect();
         (data, std::mem::take(&mut self.lost))
+    }
+}
+
+/// Mark a descriptor close-on-exec.
+///
+/// The PTY descriptors are the one place this matters: `openpty(3)` does not set
+/// `FD_CLOEXEC`, so every shell the keeper forked inherited **every other
+/// session's master** — measured 2026-10-05: a shell spawned after four sessions
+/// held four `/dev/ptmx` descriptors that were not its own, one per session before
+/// it, so the descriptors a keeper holds for N sessions were N(N-1)/2 in the
+/// children. Two consequences. A shell could read a sibling session's output off
+/// its master. And a keeper that died did not reliably take its shells with it:
+/// the kernel's `SIGHUP` fires when the last descriptor for a master closes, so
+/// the death travelled backwards along a chain — the last-spawned shell was the
+/// real holder of every earlier master, and one shell that ignores `SIGHUP`
+/// (permitted, and a thing programs do) left every session spawned before it
+/// alive with its master held open by a stranger. That is a plausible origin for
+/// the orphan shells found on this box. `dup2` clears the flag on the new
+/// descriptor, so the child's 0/1/2 survive exec (POSIX).
+fn set_cloexec(fd: std::os::fd::RawFd) {
+    use nix::libc as libc;
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+}
+
+/// Close every descriptor above the standard three, in a forked child.
+///
+/// `close_range` is one syscall (Linux 5.9+); the loop is the fallback for a
+/// kernel without it, and 4096 is far above any descriptor this process holds.
+/// Belt and braces with [`set_cloexec`]: the flag is what is correct, and this
+/// is what makes correctness not depend on every future descriptor remembering
+/// to set it.
+fn close_above_std() {
+    use nix::libc as libc;
+    if unsafe { libc::close_range(3, libc::c_uint::MAX, 0) } == 0 {
+        return;
+    }
+    for fd in 3..4096 {
+        unsafe {
+            libc::close(fd);
+        }
     }
 }
 
@@ -306,7 +410,6 @@ impl Keeper {
                 }))
             }
             km::KeeperMessage::Write(w) => {
-                use nix::libc as libc;
                 let m = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&w.session_id) {
@@ -321,19 +424,38 @@ impl Keeper {
                         _ => return Err(format!("no live session: {}", w.session_id)),
                     }
                 };
-                let fd = m.as_raw_fd();
-                let bytes = w.data.as_bytes();
-                let mut off = 0usize;
-                while off < bytes.len() {
-                    let n = unsafe {
-                        libc::write(fd, bytes[off..].as_ptr() as *const _, bytes.len() - off)
-                    };
-                    if n <= 0 {
-                        return Err(format!("write to {} failed", w.session_id));
-                    }
-                    off += n as usize;
+                // The write is potentially blocking, and it runs on the
+                // blocking pool, never on the runtime. A pty's input buffer is
+                // small (4 KiB in canonical mode) and a foreground program that
+                // is not reading — `sleep 300`, a stopped job — fills it, at
+                // which point `write(2)` waits for the reader, not for the
+                // kernel. Done inline that waits for the *keeper*: the runtime
+                // is single-threaded, so one paste into one such pane stopped
+                // every session's List, Snapshot and Peek for as long as the
+                // program kept not reading. Measured 2026-10-05 with the test
+                // below: a 1 MiB paste into a `sleep 60`, with a `List` behind
+                // it, hung the List.
+                //
+                // The wait is bounded so the caller gets an answer that says
+                // what happened, well inside the daemon's 8 s keeper-call
+                // timeout. The blocked task is not cancelled — it finishes the
+                // write when the pane reads — so the bytes are late, not lost,
+                // and the error says so.
+                let bytes = w.data.as_bytes().to_vec();
+                let sid = w.session_id.clone();
+                let done = tokio::time::timeout(
+                    std::time::Duration::from_millis(WRITE_TIMEOUT_MS),
+                    tokio::task::spawn_blocking(move || write_all(m.as_raw_fd(), &bytes)),
+                )
+                .await;
+                match done {
+                    Ok(Ok(Ok(()))) => Ok(KeeperMessage::Ack(Ack {})),
+                    Ok(Ok(Err(e))) => Err(format!("write to {sid} failed: {e}")),
+                    Ok(Err(e)) => Err(format!("write to {sid}: the task failed: {e}")),
+                    Err(_) => Err(format!(
+                        "write to {sid} is still blocked after {WRITE_TIMEOUT_MS} ms: the pane is not reading. The bytes may land when it does."
+                    )),
                 }
-                Ok(KeeperMessage::Ack(Ack {}))
             }
             km::KeeperMessage::Resize(r) => {
                 use nix::libc as libc;
@@ -345,11 +467,11 @@ impl Keeper {
                 let m = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&r.session_id) {
-                        Some(s) if !s.dead => (s.master.clone(), s.em_tx.clone()),
+                        Some(s) if !s.dead => (s.master.clone(), s.em.clone()),
                         _ => return Err(format!("no live session: {}", r.session_id)),
                     }
                 };
-                let (m, m_tx) = m;
+                let (m, em) = m;
                 let ws = libc::winsize {
                     ws_row: rows as u16,
                     ws_col: cols as u16,
@@ -362,7 +484,7 @@ impl Keeper {
                 }
                 // Tell the emulator to resize its grid (FIFO: it applies this
                 // before answering a later `Snapshot`).
-                let _ = m_tx.send(emulator::EmuMsg::Resize {
+                let _ = em.send(emulator::EmuMsg::Resize {
                     cols: cols as u16,
                     rows: rows as u16,
                 });
@@ -397,7 +519,7 @@ impl Keeper {
             // thread and await its reply (the cells are the source of truth;
             // the format is ours — plan §3.11(3)).
             km::KeeperMessage::Snapshot(s) => {
-                let (tx, pid, dead) = {
+                let (em, pid, dead) = {
                     let g = self.sessions.lock().unwrap();
                     // A snapshot is valid for a dead pane too: the emulator
                     // thread keeps running after the master EOF (it services
@@ -405,12 +527,12 @@ impl Keeper {
                     // `/proc` fields are reported empty for a dead pane — a
                     // reaped pid may be recycled, so we don't read it.
                     match g.get(&s.session_id) {
-                        Some(sess) => (sess.em_tx.clone(), sess.pid, sess.dead),
+                        Some(sess) => (sess.em.clone(), sess.pid, sess.dead),
                         _ => return Err(format!("no such session: {}", s.session_id)),
                     }
                 };
                 let (rtx, rrx) = oneshot::channel();
-                tx.send(emulator::EmuMsg::Snapshot {
+                em.send(emulator::EmuMsg::Snapshot {
                     history_lines: s.history_lines.unwrap_or(0),
                     drain_output: s.drain_output,
                     reply: rtx,
@@ -481,17 +603,17 @@ impl Keeper {
     /// (`foreground`, `cwd` — empty for a dead pane, a reaped pid may be
     /// recycled).
     async fn state_of(&self, id: &str) -> Result<KeeperMessage, String> {
-        // The em_tx + the Session fields, without holding the lock across the
-        // emulator round-trip.
-        let (em_tx, s_id, cols, rows, dead, pid) = {
+        // The emulator handle + the Session fields, without holding the lock
+        // across the emulator round-trip.
+        let (em, s_id, cols, rows, dead, pid) = {
             let g = self.sessions.lock().unwrap();
             match g.get(id) {
-                Some(s) => (s.em_tx.clone(), s.id.clone(), s.cols, s.rows, s.dead, s.pid),
+                Some(s) => (s.em.clone(), s.id.clone(), s.cols, s.rows, s.dead, s.pid),
                 None => return Err(format!("no such session: {id}")),
             }
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        if em_tx
+        if em
             .send(emulator::EmuMsg::StateQuery { reply: reply_tx })
             .is_err()
         {
@@ -542,6 +664,9 @@ impl Keeper {
             .map_err(|e| std::io::Error::other(format!("openpty: {e}")))?;
         let master = opened.master;
         let slave = opened.slave;
+        // The child must not inherit these (see `set_cloexec`).
+        set_cloexec(master.as_raw_fd());
+        set_cloexec(slave.as_raw_fd());
 
         // The child becomes its own session (`setsid`) so `group_kill` takes
         // the whole process group down, and the slave is its 0/1/2 (the
@@ -614,6 +739,7 @@ impl Keeper {
         // stamps it on every byte the master produces).
         let activity = Arc::new(AtomicU64::new(now_ms()));
         let (em_tx, em_rx) = mpsc::channel();
+        let waker = emulator::new_waker();
         let (boot_tx, boot_rx) = oneshot::channel();
         // The emulator thread owns this session's ghostty-vt (the `!Send`
         // values are created inside the thread, not moved in). It always
@@ -622,9 +748,12 @@ impl Keeper {
         emulator::spawn(
             s.cols as u16,
             s.rows as u16,
-            master.clone(),
-            out.clone(),
-            activity.clone(),
+            emulator::Wiring {
+                master: master.clone(),
+                waker: waker.clone(),
+                out: out.clone(),
+                activity: activity.clone(),
+            },
             em_rx,
             boot_tx,
         );
@@ -644,7 +773,7 @@ impl Keeper {
             dead: false,
             exit_code: 0,
             out,
-            em_tx,
+            em: Emu { tx: em_tx, waker },
             activity,
         })
     }
@@ -803,6 +932,10 @@ fn fork_shell(
             let _ = unsafe { libc::close(slave_in_raw) };
             let _ = unsafe { libc::close(slave_out_raw) };
             let _ = unsafe { libc::close(slave_err_raw) };
+            // Everything else the keeper holds goes with them: the pty fds of
+            // every other session, any eventfd, the socket. A shell is a shell,
+            // not a view of its siblings.
+            close_above_std();
             if let Some(c) = cwd {
                 let _ = unsafe { libc::chdir(c.as_ptr()) };
             }

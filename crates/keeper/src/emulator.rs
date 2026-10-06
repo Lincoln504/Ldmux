@@ -10,11 +10,15 @@
 //! bytes to the emulator **and** the session's `out` buffer (the attach's
 //! stream), and service the [`EmuMsg`]s the request handlers hand over.
 //!
-//! Multiplexing is a `poll(2)` on the master fd with a 1 ms timeout: a
-//! snapshot/resize is never queued behind a silent pane, and the read side is
-//! checked at most a millisecond after any master data arrives, so the kernel
-//! buffer still never fills. (There is no tokio async-fd wrapper to drive a
-//! `select!` with — the 1 ms poll is the keeper-side equivalent.)
+//! Multiplexing is a `poll(2)` on the master fd **and an eventfd**: a queued
+//! message writes to the eventfd, which breaks the poll immediately, so a
+//! snapshot/resize is never queued behind a silent pane. Until 2026-10-05 the
+//! poll carried a 1 ms timeout instead, and that is what an idle session cost —
+//! measured on the deployed keeper, ~1% of a core per session, 1000 wakeups a
+//! second each (6.1% with five sessions), for no work at all. With the eventfd
+//! the poll waits forever while the pane is silent and a message is serviced
+//! *sooner* than the 1 ms poll managed. (There is no tokio async-fd wrapper to
+//! drive a `select!` with — this is the keeper-side equivalent.)
 //!
 //! Replies ride a `tokio::sync::oneshot` per request: the `Sender` is `Send`,
 //! so the blocking thread can answer, and the handler `await`s the `Receiver`
@@ -31,7 +35,6 @@ use crate::now_ms;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{mpsc, Arc, Mutex};
 use std::sync::mpsc::TryRecvError;
-use std::time::Duration;
 
 use ldmux_vt_sys::{
     Cell, RenderState, ScrollViewport, Terminal, MODE_APP_CURSOR, MODE_BRACKETED_PASTE,
@@ -135,6 +138,52 @@ pub struct Outcome {
     pub tail: Vec<u8>,
 }
 
+/// The wake side of the emulator's poll (an `eventfd`), or `None` if the kernel
+/// would not give us one — in which case the thread falls back to the 1 ms poll
+/// this replaced. `EFD_CLOEXEC` so no shell inherits it, `EFD_NONBLOCK` so the
+/// wake can never block the sender.
+pub(crate) fn new_waker() -> Option<Arc<OwnedFd>> {
+    use nix::libc as libc;
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if fd < 0 {
+        return None;
+    }
+    Some(Arc::new(unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) }))
+}
+
+/// Break the emulator's `poll` so the message just queued is serviced now.
+/// Failure is ignored: a full eventfd counter still reads as readable, and a
+/// closed one means the thread is gone.
+pub(crate) fn wake(waker: &Option<Arc<OwnedFd>>) {
+    use nix::libc as libc;
+    if let Some(fd) = waker {
+        let one: u64 = 1;
+        unsafe {
+            libc::write(fd.as_raw_fd(), &one as *const u64 as *const libc::c_void, 8);
+        }
+    }
+}
+
+/// Read the eventfd's counter back to zero.
+fn drain_waker(fd: std::os::fd::RawFd) {
+    use nix::libc as libc;
+    let mut buf = [0u8; 8];
+    unsafe {
+        libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8);
+    }
+}
+
+/// What the emulator thread is wired to: the pty master it always reads, the
+/// wake-up that breaks its poll, the session's output buffer, and its activity
+/// clock. Named so the spawn call reads as wiring rather than as seven values in
+/// a row.
+pub(crate) struct Wiring {
+    pub master: Arc<OwnedFd>,
+    pub waker: Option<Arc<OwnedFd>>,
+    pub out: Arc<Mutex<crate::OutBuf>>,
+    pub activity: Arc<AtomicU64>,
+}
+
 /// Start the session's emulator thread.
 ///
 /// `boot` gets `true` once the `Terminal`/`RenderState` are created. On a
@@ -144,12 +193,11 @@ pub struct Outcome {
 pub(crate) fn spawn(
     cols: u16,
     rows: u16,
-    master: Arc<OwnedFd>,
-    out: Arc<Mutex<crate::OutBuf>>,
-    activity: Arc<AtomicU64>,
+    wiring: Wiring,
     rx: mpsc::Receiver<EmuMsg>,
     boot: oneshot::Sender<bool>,
 ) {
+    let Wiring { master, waker, out, activity } = wiring;
     tokio::task::spawn_blocking(move || {
         // Created here: the values are `!Send`, so they cannot be moved into
         // this closure from the caller.
@@ -172,11 +220,7 @@ pub(crate) fn spawn(
         let _ = boot.send(true);
 
         let fd = master.as_raw_fd();
-        let mut pfd: libc::pollfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
+        let wake_fd = waker.as_ref().map(|w| w.as_raw_fd()).unwrap_or(-1);
         let mut buf = [0u8; 4096];
         let mut reading = true;
         loop {
@@ -189,23 +233,35 @@ pub(crate) fn spawn(
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => break,
             }
-            // 2. Otherwise, wait for the master (1 ms, so 1. is re-checked —
-            //    a message is never queued behind a silent pane).
-            if !reading {
-                // The child is gone: nothing left but messages, until the
-                // sender drops (session killed).
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            pfd.revents = 0;
-            let n = unsafe { libc::poll(&mut pfd, 1, 1) };
+            // 2. Otherwise wait for the master and for the wake-up. With an
+            //    eventfd the wait is unbounded — an idle session costs nothing
+            //    and a queued message breaks it at once. Without one (the
+            //    fallback), 1 ms, so 1. is re-checked and a message is never
+            //    queued behind a silent pane.
+            let mut pfds = [
+                libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+            ];
+            // A dead pane is not polled: its master returns `POLLHUP` for ever.
+            let nfds: libc::nfds_t = if reading { 2 } else { 1 };
+            let timeout = if wake_fd >= 0 { -1 } else { 1 };
+            let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, timeout) };
             if n < 0 {
                 // fd error (e.g. the fd closed out from under us) — the
                 // session is gone; the sender's drop ends the loop.
                 break;
             }
             if n == 0 {
-                continue; // timeout
+                continue; // the fallback timeout
+            }
+            if wake_fd >= 0 && pfds[0].revents & libc::POLLIN != 0 {
+                // A message is waiting: drain the counter and service it at
+                // the top of the loop, before any master I/O.
+                drain_waker(wake_fd);
+                continue;
+            }
+            if !reading || pfds[1].revents == 0 {
+                continue;
             }
             let n = unsafe {
                 libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len())
