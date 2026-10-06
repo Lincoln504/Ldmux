@@ -22,18 +22,23 @@ This is the matrix of what exists, not a promise. Anything not listed is unsuppo
 
 ## Linux host
 
-**Init system.** The deployed form is a `systemd --user` unit (`deploy/ldmux.service`),
-installed by `nix run .#install`. It depends on two systemd properties that are load-bearing
-for the product (the unit header explains each): `KillMode=process`, so stopping the
-daemon does not kill the keeper and every shell, and `loginctl enable-linger`, so the
-user manager (and the keeper in its cgroup) survives logout. **Verified** on the
-deployed machine.
+**Init system.** The deployed form is two `systemd --user` units, `deploy/ldmux.service`
+(the daemon) and `deploy/ldmux-keeper.service` (the keeper, ADR-0021), installed by
+`nix run .#install`. The daemon starts the keeper unit through `systemctl --user start`;
+each shell runs in its own transient scope under `ldmux-shells.slice`, made through
+`busctl` and the user bus (skipped, with the shell started directly, when there is no
+user manager, bus or `busctl`, or `LDMUX_NO_SCOPE=1`). Load-bearing: the keeper being a
+separate unit, so stopping the daemon does not touch it or any shell, and
+`loginctl enable-linger`, so the user manager (and the keeper) survives logout.
+**Verified** on a throwaway unit and scope on the deployed machine; the live migration is
+the deploy's.
 
 Without systemd, run `ldmuxd` under any supervisor. **Intended, not tested.** The
 requirements to carry over by hand are the same two: the supervisor must not signal the
-keeper when it stops the daemon (the keeper is detached, but it sits in the daemon's
-cgroup or process group on most supervisors), and the user session must not be torn down
-at logout. The daemon needs `LDMUX_REMOTE_HOST` set to the tailnet address to be
+keeper when it stops the daemon (without `LDMUX_KEEPER_UNIT` the daemon spawns the keeper
+detached, but it sits in the daemon's cgroup or process group on most supervisors, so
+the equivalent of `KillMode=process` is needed), and the user session must not be torn
+down at logout. Shells are then plain children of the keeper (no scopes). The daemon needs `LDMUX_REMOTE_HOST` set to the tailnet address to be
 reachable by the phone; the default is loopback. Under the unit this goes in the optional
 `~/.config/ldmux/env` (`EnvironmentFile=-%h/.config/ldmux/env`; template
 `deploy/ldmux.env.example`, `LDMUX_REMOTE_HOST` / `LDMUX_REMOTE_PORT`).

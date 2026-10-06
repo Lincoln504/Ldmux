@@ -14,7 +14,7 @@ desk-window client, and a native mobile client.
 | Part | Where | State |
 |---|---|---|
 | Wire contract (frames, messages, keeper messages, rpc, pairing, net, paths) | `crates/protocol` | Implemented, unit-tested. |
-| Keeper: PTYs, child supervision and reaping, one libghostty-vt per session | `crates/keeper` | Implemented. Auto-spawned by the daemon, outlives it. |
+| Keeper: PTYs, child supervision and reaping, one libghostty-vt per session | `crates/keeper` | Implemented. Its own systemd unit (daemon-spawned without systemd), outlives the daemon; one scope per shell. |
 | FFI to libghostty-vt (static archive built by nix from the pinned commit) | `crates/vt-sys` | Implemented. Verified on x86_64 Linux (glibc); aarch64 Linux evaluates, unbuilt. |
 | Daemon: registry, ownership, remote WebSocket, streams, desktop + inventory, CLI | `crates/daemon` (`ldmuxd`, `ldmux`) | Implemented and deployed. |
 | Desk-window client (`ldmuxd attach`) | `crates/attach` | Implemented. |
@@ -27,8 +27,10 @@ scripts, not for the Rust gate.
 
 ## What is deployed
 
-- `systemctl --user` unit `ldmux` (source `deploy/ldmux.service`) runs
-  `~/.local/bin/ldmuxd`; the keeper is the binary beside it, spawned by the daemon.
+- `systemctl --user` units `ldmux` (source `deploy/ldmux.service`, runs
+  `~/.local/bin/ldmuxd`) and `ldmux-keeper` (source `deploy/ldmux-keeper.service`, the
+  binary beside the daemon; the daemon starts it, ADR-0021). Each shell is a scope under
+  `ldmux-shells.slice`. Without `LDMUX_KEEPER_UNIT` the daemon spawns the keeper itself.
 - Installed with `nix run .#install` or `scripts/install.sh [BIN_DIR]` (never by
   hand-editing `~/.local/bin` or the unit). The unit is a template (`@BIN_DIR@`) and
   reads an optional `~/.config/ldmux/env` (`LDMUX_REMOTE_HOST`, `LDMUX_REMOTE_PORT`;
@@ -37,7 +39,8 @@ scripts, not for the Rust gate.
   placement) and attach over the local `<control>-attach.sock`; `docs/PLATFORMS.md`.
 - **A deploy does not replace a running keeper.** The keeper outlives the daemon on
   purpose, so after an install it keeps executing old code until
-  `nix run .#restart-keeper`, which ends every shell. The install prints a warning.
+  `nix run .#restart-keeper` (`systemctl --user restart ldmux-keeper`), which ends every
+  shell. Migrating a daemon-spawned keeper to the unit ends every shell once. The install prints a warning.
   A new daemon works against an old keeper (it reads either form of `Peek`) and logs
   once that the keeper predates bounded peeks, after which a flood is served worse.
 - Remote listener: the tailnet address from `LDMUX_REMOTE_HOST`, port 7625, bearer

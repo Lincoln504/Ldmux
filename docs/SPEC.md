@@ -277,6 +277,17 @@ session — required by FR-9/FR-12. Historically the reason was stated as "why t
 daemon is separate from the pi extension"; the extension is gone (ADR-0009) and
 the separation is unchanged.
 
+**The keeper is not the daemon's child (ADR-0021).** Under systemd the keeper is its
+own user unit, `ldmux-keeper.service`, which the daemon starts with
+`systemctl --user start` (`LDMUX_KEEPER_UNIT`) and `ldmux.service` `Wants=`. Each shell
+the keeper forks is moved into its own transient scope under `ldmux-shells.slice`, so
+the daemon unit is charged for the daemon alone and memory is attributed per session; a
+job a user daemonized survives the shell being killed, in its scope. A failure to make
+the scope never prevents a shell. A keeper restart ends every shell; a daemon restart
+touches neither. Without systemd (`LDMUX_KEEPER_UNIT` unset, or `LDMUX_NO_SCOPE=1` for
+the scopes) the daemon spawns the keeper detached and shells stay in its cgroup, as
+before; there `KillMode=process` on the daemon unit is what keeps them across a restart.
+
 ### 4.4 Session model
 
 A **session** is one keeper session (a PTY and its shell) on the keeper socket.
@@ -1152,6 +1163,7 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0017** | **QR pairing:** `ldmux code` shows `ldmux://pair?v=1&host=…&token=…&name=…` as a QR code; the app scans it from Settings; no manual host/token entry. |
 | **ADR-0018** | **Session layer:** `crates/keeper` owns the PTYs and runs libghostty-vt; supersedes ADR-0001, ADR-0015 and ADR-0006 §2; tmux and TypeScript removed. |
 | **ADR-0020** | **Mesh link security (Proposed):** end-to-end Noise IKpsk2 session (X25519, ChaCha20-Poly1305, 256-bit PSK from the QR; optional ML-KEM stage) inside MeshCore, which is treated as an untrusted transport. Design only. |
+| **ADR-0021** | **Keeper as a unit, shells as scopes:** `ldmux-keeper.service` runs the keeper; the daemon starts it with `systemctl --user start`; each shell is moved into its own transient scope under `ldmux-shells.slice` (never blocking the shell on failure); detached-spawn fallback without systemd. Amends ADR-0015/0018's restart-survival mechanism. |
 
 ADR-0006 to ADR-0015 (divergences, native engine, UI modes, the Node runtime,
 exclusive ownership, orientation, background/sleep, cross-platform seams, text

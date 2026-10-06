@@ -186,6 +186,9 @@ This contradicts the stated design ("the daemon outlives every session"). The fi
 is a property of the unit, not the code: `KillMode=process`, so stopping the
 service stops the service and leaves the keeper (and every shell in it)
 alone. `deploy/ldmux.service` carries it with the reason written next to it.
+(Superseded in design by ADR-0021: the keeper is now its own unit and the shells are
+scopes, so a daemon stop no longer reaches them at all; `KillMode=process` stays for the
+non-systemd-keeper fallback.)
 
 ## Opening a shell in an arbitrary directory
 

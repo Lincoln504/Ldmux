@@ -30,8 +30,11 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
 ## Status
 
 - The Rust daemon **is** the deployed daemon (`systemctl --user restart ldmux`
-  runs `~/.local/bin/ldmuxd`). The keeper is auto-spawned by the daemon (the
-  ssh-agent pattern) and survives a daemon restart. One unit.
+  runs `~/.local/bin/ldmuxd`). Under systemd the keeper is its own unit,
+  `ldmux-keeper.service`, started by the daemon (`systemctl --user start`, ADR-0021) and
+  every shell lives in its own scope under `ldmux-shells.slice`; both survive a daemon
+  restart. Without systemd the daemon auto-spawns the keeper detached (the ssh-agent
+  pattern).
 - `cargo test --workspace` is the gate. The exact commands are in the README's
   Development section; open items are in `docs/STATE.md`.
 
@@ -47,9 +50,11 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
   `following`/`anchored` model (SPEC §7.4). Output must never move the viewport.
 - **Never split engines per client.** One terminal renderer (libghostty-vt)
   behind one seam.
-- **The keeper is the PTY owner.** The daemon spawns it detached; it outlives the
-  daemon (restart survival). `KillMode=process` + linger are load-bearing — see
-  the unit header.
+- **The keeper is the PTY owner.** It outlives the daemon (restart survival): under
+  systemd because it is its own unit (`ldmux-keeper.service`, ADR-0021), otherwise
+  because the daemon spawns it detached, where `KillMode=process` on the daemon unit is
+  load-bearing. Linger is load-bearing either way. A shell that cannot get a scope must
+  still start (`LDMUX_NO_SCOPE=1` turns scopes off). See the unit headers.
 - **Pin cross-component contracts with e2e tests in the same commit.**
 - Keep the design honest: update `docs/SPEC.md` (and add ADRs under
   `docs/adr/`) when decisions change, and grep the docs tree plus README/AGENTS

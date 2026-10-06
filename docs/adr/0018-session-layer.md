@@ -34,7 +34,8 @@ Unix socket using the same message vocabulary it speaks to clients.
 - **Restart survival is preserved, by the same topology.** The keeper is spawned
   detached and outlives the daemon, exactly as the tmux server did: the daemon is
   one unit with `KillMode=process`, and linger keeps the user manager from
-  stopping on the last logout.
+  stopping on the last logout. *Amended by ADR-0021: under systemd the keeper is its own
+  unit and each shell its own scope; the detached spawn is the non-systemd fallback.*
 
 ## Consequences
 

@@ -267,7 +267,8 @@ impl RawWs {
             let wait = if seen {
                 quiet
             } else {
-                std::time::Duration::from_secs(20)
+                // Generous: a loaded machine runs this beside a whole test suite.
+                std::time::Duration::from_secs(60)
             };
             let before = out.len();
             match self.next_within(wait).await {

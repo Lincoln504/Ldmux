@@ -5,6 +5,9 @@
 > **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
 
 > Superseded by ADR-0018, which is the decision that replaced it.
+>
+> Amended by ADR-0021 (2026-10-06): the keeper is its own systemd unit and each shell is
+> a scope; restart survival no longer rests on the daemon unit's `KillMode=process`.
 
 - **Date:** 2026-09-19
 - **Supersedes:** nothing

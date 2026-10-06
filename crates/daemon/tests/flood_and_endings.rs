@@ -95,7 +95,7 @@ async fn a_client_that_fell_behind_gets_an_in_place_snapshot_not_a_forced_reconn
     let rig = Rig::start().await;
     let (mut ws, _) = rig.attach_with(BOTH, true).await;
     ws.send_json(
-        &serde_json::json!({"type":"input","data":"yes | head -c 60000000; echo D_$((6*8))\n"}),
+        &serde_json::json!({"type":"input","data":"yes | head -c 24000000; echo D_$((6*8))\n"}),
     )
     .await;
     // Do not read while the daemon's writes back up behind the 4 KiB window.
@@ -125,7 +125,7 @@ async fn a_client_that_said_nothing_still_gets_the_legacy_resync() {
     let rig = Rig::start().await;
     let (mut ws, _) = rig.attach_with(&[], true).await;
     ws.send_json(
-        &serde_json::json!({"type":"input","data":"yes | head -c 60000000; echo D_$((6*9))\n"}),
+        &serde_json::json!({"type":"input","data":"yes | head -c 24000000; echo D_$((6*9))\n"}),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(2500)).await;

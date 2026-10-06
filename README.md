@@ -8,7 +8,8 @@ from the lessons of the local `dooboxes` project — but it is *not* a fork of
 either. It is deliberately simple:
 
 - **The keeper is the single source of truth.** Every session is a PTY owned by a
-  `ldmux-keeper` process; the daemon auto-spawns the keeper and talks to it over
+  `ldmux-keeper` process (under systemd its own unit, `ldmux-keeper.service`, with each
+  shell in its own scope; otherwise the daemon auto-spawns it); the daemon talks to it over
   a Unix socket. There is no tmux and no second session layer.
 - **Tailnet only.** The host runs Tailscale (`<host>.<tailnet>.ts.net`, `100.x.y.z`);
   no public exposure, no hosted relay.
@@ -75,7 +76,7 @@ cargo run -p ldmux-daemon --bin ldmuxd                  # the daemon, in the for
 cargo run -q -p ldmux-daemon --bin ldmux -- list        # the CLI: list | run shell | remote | code | pair
 nix build                    # the release binaries in ./result/bin (self-contained, own glibc)
 nix flake check              # build + the test gate + clippy + fmt + mobile TS tests, in the sandbox
-nix run .#install            # install the nix-built binaries + unit (FORCE=1 overwrites the unit)
+nix run .#install            # install the nix-built binaries + both units, ldmux and ldmux-keeper (FORCE=1 overwrites them)
 nix run .#restart-keeper     # replace the running keeper (ENDS every shell)
 nix run .#mobile-test        # the mobile tree's own TypeScript tests (needs node)
 nix develop -c node scripts/measure_latency.ts --session <id> --runs 20   # round-trip echo latency
