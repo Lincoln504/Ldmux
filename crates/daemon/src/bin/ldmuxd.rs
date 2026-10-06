@@ -16,7 +16,31 @@
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_protocol::net::is_tailnet_or_loopback;
+use std::path::{Path, PathBuf};
 use tokio::signal::unix::SignalKind;
+
+/// The keeper binary to spawn: the one **beside this daemon**, else the bare
+/// name for `PATH` to resolve.
+///
+/// A bare name is what this used to be, and it means the daemon and its keeper
+/// can be different builds with nothing saying so. That is not hypothetical
+/// here: the keeper outlives the daemon by design, so a keeper started before an
+/// upgrade keeps serving the new daemon (measured 2026-10-04: a keeper running
+/// since 13:39:30 served a keeper built at 23:02:49). Installing both binaries
+/// into one directory is the deployment's own rule (`just install`), so a
+/// sibling is the build that belongs with this daemon; the fallback keeps a
+/// hand-run daemon from a target dir working the way it always did.
+fn keeper_beside(daemon: &Path) -> PathBuf {
+    let sibling = daemon
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("ldmux-keeper");
+    if sibling.exists() {
+        sibling
+    } else {
+        PathBuf::from("ldmux-keeper")
+    }
+}
 
 fn main() {
     // `ldmuxd attach <session> [--readonly]`: the desk-window entry point
@@ -84,8 +108,10 @@ fn main() {
         token_path_env.as_deref(),
     );
 
-    // Create the daemon.
-    let keeper_bin = std::path::PathBuf::from("ldmux-keeper");
+    // Create the daemon. The keeper is the binary beside this one.
+    let keeper_bin = std::env::current_exe()
+        .map(|exe| keeper_beside(&exe))
+        .unwrap_or_else(|_| PathBuf::from("ldmux-keeper"));
     let daemon = LdmuxDaemon::new(state_dir.clone(), keeper_bin)
         .with_remote(remote_host.clone(), remote_port, token);
     // Wrap the daemon in an `Arc<tokio::sync::Mutex>` so the control socket's
@@ -150,4 +176,41 @@ fn main() {
         d2.stop();
         drop(d2);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ldmuxd-bin-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The keeper is the one beside the daemon when it is there.
+    #[test]
+    fn the_keeper_is_the_sibling_of_the_daemon() {
+        let dir = scratch_dir();
+        let daemon = dir.join("ldmuxd");
+        std::fs::write(&daemon, b"").unwrap();
+        std::fs::write(dir.join("ldmux-keeper"), b"").unwrap();
+        assert_eq!(keeper_beside(&daemon), dir.join("ldmux-keeper"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a sibling, the bare name is kept: that is the hand-run case, and
+    /// `PATH` resolving it is the old, working behaviour.
+    #[test]
+    fn without_a_sibling_the_path_is_used() {
+        let dir = scratch_dir();
+        let daemon = dir.join("ldmuxd");
+        std::fs::write(&daemon, b"").unwrap();
+        assert_eq!(keeper_beside(&daemon), PathBuf::from("ldmux-keeper"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
