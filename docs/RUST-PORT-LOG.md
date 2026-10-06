@@ -2165,14 +2165,25 @@ arriving is the consent (ADR-0010). The 45 s grace now governs page *disposal* (
 engine), not the connection.
 
 **Measured on the phone** (motorola edge 2024, `adb` over Tailscale, 2026-10-05): the app's
-list before and after; see the row below.
+list before and after, and the controls still tappable; see the row below. **Not** measured
+on a device: the background release itself. It is covered by
+`PageConnectionTest`, by the release path that was measured from the host (a page's socket
+closing gives the shell back in ~3 s), and by the sweeper above; the phone went into a call
+before that sequence could be run.
 
 **3. The launcher's rows were not one height.** Reported in the same message: "shells that are
 started from phone have like a thicker bar". They did, and it was structural: the two
 per-shell controls (send-to-desktop, close) are the tallest thing in any row — a control has a
 minimum touch height of 36 dp, the text has none — so laying them out beside the name made the
-two rows that carry them taller than every other row. Measured on the device: **64 dp against
-53 dp**. Fixed by drawing the controls over the row's right end, matched to the row's own
+two rows that carry them taller than every other row. On the device the phone-started row
+drew 175 px against 145 px for the rest in the same screenshot — 64 dp against 53 dp at that
+density, which is the control's 36 dp minimum replacing a ~25 dp line of text, and a fifth
+taller. Fixed by drawing the controls over the row's right end, matched to the row's own
 height (`Modifier.matchParentSize`, so they are measured *after* it and cannot set it) with
-their width reserved out of the address. Every row is 53 dp now, controls at full touch size,
-and the address simply ends a little earlier on those rows.
+their width reserved out of the address.
+
+After: every row reports the same bounds in a `uiautomator` dump (133 px, the phone-started
+row included) and they draw identically, the two controls sit inside the row's own bounds at
+their full touch size (117x134 px), and tapping the overlaid **send to desktop** opened its
+workspace picker — the overlay is drawn over the row's end without taking it out of the
+touch tree.
