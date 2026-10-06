@@ -309,9 +309,6 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private val _owned = MutableStateFlow<OwnedNotice?>(null)
     val owned: StateFlow<OwnedNotice?> = _owned
 
-    private val _ownedTick = MutableStateFlow(0)
-    val ownedTick: StateFlow<Int> = _ownedTick
-
     /** The user said take it over, so the notice has been dealt with. */
     fun clearOwned() {
         _owned.value = null
@@ -631,7 +628,6 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     holder = (root["owner"] as? JsonObject)
                         ?.get("name")?.let { (it as? JsonPrimitive)?.content },
                 )
-                _ownedTick.value += 1
             }
             "sessions" -> {
                 _sessions.value = parseSessions(root["sessions"], deviceId)
