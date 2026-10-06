@@ -57,6 +57,20 @@ pub struct ReconcileResult {
 /// `list`, and a desk window the user closed stays recorded for good.
 const MAINTENANCE_INTERVAL_MS: u64 = 2000;
 
+/// How long a claim may stand with no connection behind it.
+///
+/// A claim is taken on a window's behalf *before* the window has attached
+/// (`makeLive`, `deskWindow`), so it is legitimately unbacked while the window
+/// connects — a fraction of a second. Past the grace, an unbacked claim is a
+/// shell no device is using and no device can take without a takeover: a
+/// displaced desk window waits for its shell to be *free*, so it stays on
+/// "Press r to take it back" for good. Found in use, 2026-10-05.
+///
+/// The same grace a closed socket's claims wait for a reconnect (`remote.rs`):
+/// one question — how long may a claim outlive the connection that made it —
+/// and one answer.
+pub(crate) const CLAIM_GRACE_MS: u64 = 3_000;
+
 /// How long a desk window may be missing before it counts as closed.
 ///
 /// A window is not on screen the instant `makeLive` returns: i3 maps it a beat
@@ -149,6 +163,10 @@ pub struct LdmuxDaemon {
     /// longer existed. The mutator marks the state it changed; whoever owns the
     /// clients pushes it.
     sessions_dirty: bool,
+    /// Since when each claim has had no connection behind it, by session id
+    /// (the device that holds it is part of the value, so a claim that moves
+    /// starts its wait again). See [`LdmuxDaemon::release_unbacked_claims`].
+    unbacked_since: std::collections::HashMap<String, (String, u64)>,
     /// The single-instance lock (the `ldmuxd.lock` pid lockfile); `Drop`
     /// releases it.
     lock: DaemonLock,
@@ -218,6 +236,7 @@ impl LdmuxDaemon {
             streams: HashMap::new(),
             control_handle: None,
             sessions_dirty: false,
+            unbacked_since: HashMap::new(),
             live_windows: HashMap::new(),
             desktop_device: ldmux_protocol::rpc::DeviceInfo {
                 id: "desktop".into(),
@@ -1615,6 +1634,69 @@ impl LdmuxDaemon {
         r
     }
 
+    /// Release claims that no connection is behind, once they have been that way
+    /// for [`CLAIM_GRACE_MS`].
+    ///
+    /// `attached` is the set of `(session, device)` pairs that have a connection
+    /// *attached to that session right now* — the remote's view, since only it
+    /// knows the connections. A claim with no connection behind it is a shell
+    /// nobody is using: the daemon can tell, the window waiting for it cannot.
+    ///
+    /// The case this exists for: `makeLive`/`deskWindow` claim a shell to the
+    /// desk device on a window's behalf, and the window then never attaches (it
+    /// was already displaced by a phone and the daemon had lost its window
+    /// record, so a second window was refused and the first one went on
+    /// waiting). The claim stood for good, `list` said `desktop` held the shell,
+    /// and the window — which only takes a shell that is *free* — never came
+    /// back without someone pressing `r`.
+    ///
+    /// Returns the sessions it freed, which is news for every client.
+    pub fn release_unbacked_claims(
+        &mut self,
+        attached: &std::collections::HashSet<(String, String)>,
+        now: u64,
+    ) -> Vec<String> {
+        let claims: Vec<(String, String)> = self
+            .ownership
+            .session_ids()
+            .into_iter()
+            .filter_map(|sid| {
+                self.ownership
+                    .owner(&sid)
+                    .map(|c| (sid.clone(), c.device.id.clone()))
+            })
+            .collect();
+        // Forget what is no longer a claim, and what is now a different one: a
+        // claim that moved to another device has not been unbacked since the old
+        // device's timestamp.
+        self.unbacked_since.retain(|sid, (device, _)| {
+            claims
+                .iter()
+                .any(|(s, d)| s == sid && d == device)
+        });
+        let mut freed = Vec::new();
+        for (sid, device) in claims {
+            if attached.contains(&(sid.clone(), device.clone())) {
+                self.unbacked_since.remove(&sid);
+                continue;
+            }
+            let since = match self.unbacked_since.get(&sid) {
+                Some((d, t)) if d == &device => *t,
+                _ => {
+                    self.unbacked_since
+                        .insert(sid.clone(), (device.clone(), now));
+                    now
+                }
+            };
+            if now.saturating_sub(since) >= CLAIM_GRACE_MS {
+                self.unbacked_since.remove(&sid);
+                self.release_claim(&sid, &device);
+                freed.push(sid);
+            }
+        }
+        freed
+    }
+
     /// Release a claim (the TS `releaseClaim`).
     pub fn release_claim(&mut self, session_id: &str, device_id: &str) -> bool {
         let r = self.ownership.release(session_id, device_id);
@@ -1951,6 +2033,107 @@ mod tests {
         assert!(!ended2);
         assert_eq!(d.registry().get(&id2).unwrap().status, "running");
         drop(fk);
+    }
+
+    /// A claim with no connection behind it is given back after the grace, and
+    /// only then: the grace is what lets a window attach to the claim the daemon
+    /// just took on its behalf.
+    ///
+    /// The state this exists for, found in use on 2026-10-05: the daemon claimed
+    /// a shell to the desk device for a window that then never attached (it was
+    /// already displaced, and the daemon had lost its window record). `list`
+    /// said the desk held the shell, the displaced window waited for a *free*
+    /// one, and the only way out was pressing `r`.
+    #[test]
+    fn a_claim_with_no_connection_behind_it_is_given_back() {
+        let dir = scratch();
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let device = ldmux_protocol::rpc::DeviceInfo {
+            id: "desktop".into(),
+            name: "desktop".into(),
+            kind: "desktop".into(),
+        };
+        let other = ldmux_protocol::rpc::DeviceInfo {
+            id: "phone".into(),
+            name: "phone".into(),
+            kind: "phone".into(),
+        };
+        let attached = |pairs: &[(&str, &str)]| -> std::collections::HashSet<(String, String)> {
+            pairs
+                .iter()
+                .map(|(s, d)| (s.to_string(), d.to_string()))
+                .collect()
+        };
+
+        d.claim("s1", &device, false);
+        // The claim is a moment old: the window it was taken for is still
+        // connecting. Nothing is freed.
+        assert!(d.release_unbacked_claims(&attached(&[]), 1_000).is_empty());
+        assert!(d.holds("s1", "desktop"), "the grace must not be cut short");
+        // Inside the grace, still nothing.
+        assert!(
+            d.release_unbacked_claims(&attached(&[]), 1_000 + CLAIM_GRACE_MS - 1)
+                .is_empty()
+        );
+        assert!(d.holds("s1", "desktop"));
+        // Past it, the claim is given back — and it is news, so the session is
+        // marked dirty for the next push.
+        d.sessions_dirty = false;
+        assert_eq!(
+            d.release_unbacked_claims(&attached(&[]), 1_000 + CLAIM_GRACE_MS),
+            vec!["s1".to_string()]
+        );
+        assert!(!d.holds("s1", "desktop"));
+        assert!(d.sessions_dirty, "who holds a shell is on the wire");
+
+        // A connection behind the claim keeps it, however old it is.
+        d.claim("s2", &device, false);
+        assert!(
+            d.release_unbacked_claims(&attached(&[("s2", "desktop")]), 9_999_999)
+                .is_empty()
+        );
+        assert!(d.holds("s2", "desktop"));
+
+        // A connection appearing inside the grace restarts the wait: the claim
+        // has not been unbacked since it appeared. (`s2` stays attached from
+        // here on, so what is freed is never it.)
+        let with_s2 = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("s2", "desktop")];
+            pairs.extend_from_slice(extra);
+            attached(&pairs)
+        };
+        d.claim("s3", &device, false);
+        assert!(d.release_unbacked_claims(&with_s2(&[]), 1_000).is_empty());
+        assert!(
+            d.release_unbacked_claims(&with_s2(&[("s3", "desktop")]), 4_000)
+                .is_empty(),
+            "an attached claim is not unbacked"
+        );
+        assert!(
+            d.release_unbacked_claims(&with_s2(&[]), 4_100).is_empty(),
+            "the wait runs from when it went unbacked again"
+        );
+        assert!(d.holds("s3", "desktop"));
+        assert_eq!(
+            d.release_unbacked_claims(&with_s2(&[]), 4_100 + CLAIM_GRACE_MS),
+            vec!["s3".to_string()]
+        );
+
+        // A claim that moves to another device is a new claim, and waits again:
+        // the old device's timestamp is not the new holder's.
+        d.claim("s4", &device, false);
+        assert!(d.release_unbacked_claims(&with_s2(&[]), 1_000).is_empty());
+        d.claim("s4", &other, true);
+        assert!(
+            d.release_unbacked_claims(&with_s2(&[]), 1_000 + CLAIM_GRACE_MS)
+                .is_empty(),
+            "the new holder has not been unbacked for the grace yet"
+        );
+        assert!(d.holds("s4", "phone"));
+        assert_eq!(
+            d.release_unbacked_claims(&with_s2(&[]), 1_000 + 2 * CLAIM_GRACE_MS),
+            vec!["s4".to_string()]
+        );
     }
 
     /// `forget_session`: a dead session can be forgotten (removed from the

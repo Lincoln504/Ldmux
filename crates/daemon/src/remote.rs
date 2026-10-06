@@ -72,7 +72,10 @@ const WS_BACKLOG_BYTES: usize = 64 * 1024;
 /// Silence that means the other end has gone.
 const WS_IDLE_MS: u64 = 20_000;
 /// How long a closed socket's claims wait for the same device to come back.
-const RELEASE_GRACE_MS: u64 = 3_000;
+/// The same grace an unbacked claim gets ([`crate::daemon::CLAIM_GRACE_MS`]).
+const RELEASE_GRACE_MS: u64 = crate::daemon::CLAIM_GRACE_MS;
+/// How often claims are checked for a connection behind them.
+const CLAIM_TICK_MS: u64 = 1_000;
 
 /// The remote config: the hostname (the tailnet address), the port, and the
 /// bearer token.
@@ -229,13 +232,25 @@ impl RemoteServer {
         });
         let sweep_shared = shared.clone();
         let sweep = tokio::spawn(async move {
-            let step = (sweep_shared.idle_ms / 4).max(25);
+            // Two cadences, because they answer to different things. Unbacked
+            // claims are checked on their own tick — a window that is on screen
+            // waiting for one is the reader, and `idle_ms / 4` is five seconds of
+            // it. Reaping silent connections can stay as slow as the deadline it
+            // is against, and the two share a task because both walk the same
+            // connection list.
+            let sweep_step = (sweep_shared.idle_ms / 4).max(25);
+            let mut since_sweep = 0u64;
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(step)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(CLAIM_TICK_MS)).await;
                 if sweep_shared.stopped.load(Ordering::Relaxed) {
                     break;
                 }
-                sweep_once(&sweep_shared).await;
+                reconcile_claims(&sweep_shared).await;
+                since_sweep += CLAIM_TICK_MS;
+                if since_sweep >= sweep_step {
+                    since_sweep = 0;
+                    sweep_once(&sweep_shared).await;
+                }
             }
         });
         self.shared = Some(shared);
@@ -1314,6 +1329,33 @@ async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id
             broadcast_sessions(&shared).await;
         }
     });
+}
+
+/// Free claims with no connection behind them (see
+/// [`crate::daemon::LdmuxDaemon::release_unbacked_claims`]), and tell every
+/// client, because who holds a shell is on the wire.
+///
+/// It runs on the sweep's own tick rather than the maintenance pass: it is
+/// about connections, and the sweep already walks them.
+async fn reconcile_claims(shared: &Arc<Shared>) {
+    let attached: std::collections::HashSet<(String, String)> = {
+        let map = shared.conns.lock().unwrap();
+        map.values()
+            .filter_map(|c| {
+                let inner = c.inner.lock().unwrap();
+                let device = inner.device.as_ref()?.id.clone();
+                let session = inner.session_id.clone()?;
+                Some((session, device))
+            })
+            .collect()
+    };
+    let freed = {
+        let mut d = shared.daemon.lock().await;
+        d.release_unbacked_claims(&attached, now_ms())
+    };
+    if !freed.is_empty() {
+        broadcast_sessions(shared).await;
+    }
 }
 
 /// Reap connections silent for the idle deadline (the TS `sweep`).

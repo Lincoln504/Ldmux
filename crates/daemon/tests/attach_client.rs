@@ -460,3 +460,142 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
     let _ = keeper.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A claim with no connection behind it is given back, and the desk window takes
+/// the shell again by itself.
+///
+/// Found in use, 2026-10-05: a desk window sat on "Press r to take it back"
+/// while the phone had nothing open at all. The claim was the *desk's own* —
+/// the daemon takes one on a window's behalf (`makeLive`/`deskWindow`) before the
+/// window has attached — and the window it was taken for had been displaced and
+/// never come back, so no connection was behind the claim and nothing would ever
+/// release it: the window only takes a shell that is *free*, `list` said
+/// `desktop` held it, and the only way out was pressing `r`.
+///
+/// The claim here is made through the control socket with the desktop device,
+/// which is exactly what `makeLive` and `deskWindow` do (all three call
+/// `LdmuxDaemon::claim`), so the same state is reached without a window manager.
+#[tokio::test]
+async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+    let mut keeper = std::process::Command::new(keeper_bin())
+        .arg(keeper_sock.to_string_lossy().as_ref())
+        .spawn()
+        .unwrap();
+    wait_socket(&keeper_sock).await;
+
+    let token = "unbacked-claim-token";
+    // The idle deadline is left at its default on purpose. Shortening it to make
+    // the sweep run sooner also reaps the *desk window's* connection, and the
+    // client reconnects and re-attaches — which recovers the shell by itself and
+    // hides the thing under test. It pings every 4 s, so a 20 s deadline leaves it
+    // alone; the sweep still runs every 5 s, and the grace is 3 s.
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let daemon_sock = d.socket_path().to_string_lossy().into_owned();
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+    let port = remote_port(&arc).await;
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let id = arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, None, "local")
+        .await
+        .unwrap()
+        .id;
+
+    // The desk window: the real attach client, on a duplex the test drives.
+    let (desk_in, _desk_typing) = tokio::io::duplex(8192);
+    let (desk_out, mut desk_view) = tokio::io::duplex(65536);
+    let desk = {
+        let daemon_sock = daemon_sock.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+    let mut phone = connect_authed(port, token).await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({
+            "type": "hello",
+            "device": { "id": "phone-unbacked", "name": "phone", "kind": "phone" }
+        }),
+    )
+    .await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({
+            "type": "attach", "sessionId": id, "cols": 80, "rows": 24, "takeover": true
+        }),
+    )
+    .await;
+    assert!(
+        wait_for(&mut desk_view, "open on another device").await,
+        "the desk window must be displaced before its claim is taken away"
+    );
+
+    // The daemon claims the shell to the desk for a window that never attaches —
+    // the state the sweep exists to end.
+    arc.lock()
+        .await
+        .handle(
+            "reclaim",
+            serde_json::json!({
+                "id": id,
+                "device": { "id": "desktop", "name": "desktop", "kind": "desktop" }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(arc.lock().await.holds(&id, "desktop"), "the claim is the desk's");
+
+    // The window must come back on its own — no key pressed. What proves it is
+    // pane output that the window could only see while it is attached: the marker
+    // is printed *after* the claim is gone, so it reaches this duplex only if the
+    // window re-attached and is subscribed again. It is printed once a second, so
+    // the check does not depend on landing after the sweep.
+    //
+    // (Typing into the window would not prove anything here: input from a
+    // displaced window is dropped, which is the point of the notice.)
+    let mut recovered = false;
+    for _ in 0..15 {
+        arc.lock()
+            .await
+            .handle(
+                "send",
+                serde_json::json!({ "id": id, "text": "echo UNBACKED_MARK_4\n" }),
+            )
+            .await
+            .unwrap();
+        if wait_for_ms(&mut desk_view, "UNBACKED_MARK_4", 1_000).await {
+            recovered = true;
+            break;
+        }
+    }
+    assert!(
+        recovered,
+        "the desk window must take the shell back once the unbacked claim is given up"
+    );
+    assert!(
+        arc.lock().await.holds(&id, "desktop"),
+        "and the desk holds it, with the window behind the claim"
+    );
+
+    desk.abort();
+    arc.lock().await.stop();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
