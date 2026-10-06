@@ -18,18 +18,22 @@ import android.os.PowerManager
 import android.util.Log
 
 /**
- * Keeps the process alive while a session is open.
+ * Keeps the process alive for a *bounded* time while a session is open and the app is
+ * off screen (ADR-0012).
  *
- * Without this the daemon link is a foreground-only feature. Android freezes a
- * backgrounded process and then reclaims it, so a phone in a pocket drops the
- * socket and, with it, the illusion that the terminal is still there. A
- * foreground service is the sanctioned way to say "this process is doing
- * something the user asked for and knows about", which is exactly true here: the
- * user tapped a shell open.
+ * Without this an app switch drops the sockets: Android freezes a backgrounded
+ * process and then reclaims it. A foreground service is the sanctioned way to say
+ * "this process is doing something the user asked for and knows about", which is
+ * true here: the user tapped a shell open.
  *
- * It holds a **partial** wake lock rather than a screen lock — the CPU may nap,
- * the network does not — and it releases it the instant the link drops, because
- * a terminal sitting idle is not a reason to keep a phone awake.
+ * **It is not a promise that the shell stays attached.** The app lets go of every
+ * shell once it has been off screen for [BackgroundSession.releaseGraceMs] (45 s),
+ * which stops this service. The shell itself lives in the keeper on the host and is
+ * unaffected either way; what ends is this phone's *view* and its claim.
+ *
+ * It holds a **partial** wake lock rather than a screen lock — the CPU may nap, the
+ * network does not — with a timeout, so a bug anywhere else cannot keep a phone awake
+ * indefinitely; the lock is also released when the service stops.
  */
 class LdmuxService : Service() {
     companion object {
@@ -40,6 +44,14 @@ class LdmuxService : Service() {
         private const val TAG = "ldmux"
         private const val CHANNEL_ID = "ldmux.session"
         private const val NOTIFICATION_ID = 1
+
+        /**
+         * The longest a wake lock may be held without being renewed. The app releases
+         * everything 45 s after leaving the screen, so this is a backstop for a release
+         * that never comes (a crashed collector, a lost message), not a working limit;
+         * every start command renews it.
+         */
+        private const val WAKE_LOCK_MAX_MS = 10 * 60 * 1000L
 
         /**
          * Notifications are needed before the service can be told to run, and
@@ -55,19 +67,44 @@ class LdmuxService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Promote to the foreground **before anything else can happen**.
+     *
+     * `startForegroundService` obliges the service to call `startForeground` within
+     * seconds of being created, and the app may call `stopService` right after it (a
+     * shell opened and closed in one breath). A service stopped between the two
+     * crashed the app with `ForegroundServiceDidNotStartInTime`. Doing it in `onCreate`
+     * means the obligation is met by the time the service exists at all, whatever
+     * arrives next.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        createChannel()
+        promote("Session open")
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
                 // Let go of the shells, not only the service: the app drops its
-                // pages, which closes their sockets and releases their claims, and
-                // that in turn tells this service to stop.
+                // pages, which closes their sockets and releases their claims.
+                // The request is replayed to a collector that is not listening yet,
+                // and the service says it is gone so `BackgroundSession` does not
+                // believe in a service that no longer exists (it used to, and then
+                // never started one again).
                 DisconnectRequests.request()
+                BackgroundSession.markStopped()
                 stopSelf()
                 return START_NOT_STICKY
             }
         }
-        val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Session open"
-        createChannel()
+        promote(intent?.getStringExtra(EXTRA_TEXT) ?: "Session open")
+        acquireWakeLock()
+        return START_NOT_STICKY
+    }
+
+    /** Show (or refresh) the ongoing notification, which is what makes this foreground. */
+    private fun promote(text: String) {
         val n = notification(text)
         // Android 14 takes the type explicitly; it must match the manifest, or
         // the service is refused at the moment the user is watching. Below 14 the
@@ -78,8 +115,6 @@ class LdmuxService : Service() {
             @Suppress("DEPRECATION")
             startForeground(NOTIFICATION_ID, n)
         }
-        acquireWakeLock()
-        return START_NOT_STICKY
     }
 
     /**
@@ -92,13 +127,15 @@ class LdmuxService : Service() {
         super.onDestroy()
     }
 
+    /** Take the lock, or renew it: always with a timeout, never indefinitely. */
     private fun acquireWakeLock() {
-        if (wakeLock != null) return
-        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ldmux:session").apply {
-            setReferenceCounted(false)
-            runCatching { acquire() }.onFailure { Log.w(TAG, "wake lock refused", it) }
+        val lock = wakeLock ?: run {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ldmux:session")
+                .apply { setReferenceCounted(false) }
+                .also { wakeLock = it }
         }
+        runCatching { lock.acquire(WAKE_LOCK_MAX_MS) }.onFailure { Log.w(TAG, "wake lock refused", it) }
     }
 
     private fun releaseWakeLock() {
@@ -107,8 +144,8 @@ class LdmuxService : Service() {
     }
 
     /**
-     * Channels and channel-scoped notifications exist from API 26, which is this
-     * app's `minSdk` — so there is no old-API branch here to get wrong, and no
+     * Channels and channel-scoped notifications exist from API 26, and this app's
+     * `minSdk` is 28 — so there is no old-API branch here to get wrong, and no
      * support library is needed for it.
      */
     private fun createChannel() {
@@ -168,6 +205,16 @@ actual object BackgroundSession {
     private var running = false
     private var lastText = ""
 
+    /**
+     * The service stopped itself (the notification's Disconnect). Without this
+     * `running` stayed true and an identical [setActive] call was then ignored, so
+     * the service could never be started again until the text happened to change.
+     */
+    fun markStopped() {
+        running = false
+        lastText = ""
+    }
+
     /** Held so it is not collected — the framework keeps only a weak reference. */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -187,18 +234,29 @@ actual object BackgroundSession {
         // cannot see is a service the user cannot stop.
         LdmuxService.activity?.requestNotificationPermissionIfNeeded()
         runCatching {
-            // Always the foreground form: minSdk is 26, where it exists.
+            // Always the foreground form: minSdk is 28, where it exists.
             ctx.startForegroundService(intent)
-        }.onFailure { Log.w(TAG, "startForegroundService", it) }
+        }.onFailure {
+            // Refused (the app is not allowed to start one from here): the service is
+            // not running, so the next call must try again instead of assuming it is.
+            Log.w(TAG, "startForegroundService", it)
+            running = false
+            lastText = ""
+        }
     }
 
     /**
-     * Fires when a network becomes *validated*, not merely present.
-     * A phone that has joined a wifi with no internet, or is mid-handover, would
-     * otherwise wake the retry loop for nothing — and a retry storm during a
-     * handover is how an app gets throttled by the OS.
+     * Fires when the set of usable networks *changes*: one becomes validated (not
+     * merely present — a wifi with no internet, or a handover in progress, would wake
+     * the retry loop for nothing, and a retry storm is how an app gets throttled), or
+     * one that was in use is lost or stops validating.
+     *
+     * The second half is what makes a Wi-Fi to LTE move work. The LTE network was
+     * already validated, so nothing "new" appears; what happens is that the Wi-Fi goes,
+     * and every socket bound to it is dead without knowing. Reporting the loss is what
+     * lets the sockets check themselves at once instead of after three missed pings.
      */
-    actual fun watchNetwork(onNetworkUp: () -> Unit) {
+    actual fun watchNetwork(onNetworkChange: () -> Unit) {
         val ctx = AndroidApp.context
         val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         if (networkCallback != null) return
@@ -211,12 +269,15 @@ actual object BackgroundSession {
             // Wi-Fi rejoins. So the transition to validated is what fires.
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 val ok = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                val fresh = synchronized(validated) { if (ok) validated.add(network) else { validated.remove(network); false } }
-                if (fresh) onNetworkUp()
+                val changed = synchronized(validated) {
+                    if (ok) validated.add(network) else validated.remove(network)
+                }
+                if (changed) onNetworkChange()
             }
 
             override fun onLost(network: Network) {
-                synchronized(validated) { validated.remove(network) }
+                val was = synchronized(validated) { validated.remove(network) }
+                if (was) onNetworkChange()
             }
         }
         networkCallback = cb

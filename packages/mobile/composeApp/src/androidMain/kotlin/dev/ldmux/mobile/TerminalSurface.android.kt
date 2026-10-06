@@ -3,8 +3,7 @@ package dev.ldmux.mobile
 
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import android.content.Context
-import android.os.SystemClock
-import android.content.pm.ActivityInfo
+import android.view.KeyEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -25,6 +24,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.RememberObserver
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -111,8 +111,15 @@ actual fun rememberTerminalSurface(
     // saving a font size reconnected every open page, and the first attach of a
     // controller takes its shell over (ADR-0010): a settings change took every shell
     // back from the desk.
-    val controller = remember(config.connectionKey, sessionId) { TerminalController(config, sessionId, active) }
-    DisposableEffect(controller) { onDispose { controller.dispose() } }
+    //
+    // Held by a [ControllerHolder], which connects it when the composition keeps it and
+    // disposes it when the composition forgets *or abandons* it. This used to be a plain
+    // `remember` that built a controller whose constructor opened the socket, torn down
+    // by a `DisposableEffect`: an effect only exists for a composition that is applied,
+    // so a composition that was abandoned (an interrupted pager measure, a rotation
+    // mid-compose) leaked a connected controller that held the shell with no owner.
+    val holder = remember(config.connectionKey, sessionId) { ControllerHolder(config, sessionId, active) }
+    val controller = holder.controller
     LaunchedEffect(controller, config.predict) { controller.predict = config.predict }
 
     // Entering or leaving the foreground starts or drops the stream. The last
@@ -152,6 +159,10 @@ actual fun rememberTerminalSurface(
         context.getSystemService(android.content.ClipboardManager::class.java)
     }
     LaunchedEffect(controller, androidClipboard) {
+        // What the program may ask for is decided in common code
+        // (`admitClipboardRequest`: capped, cleaned); this only carries it out, and a
+        // refusal by the system (a transaction too large, a locked-down profile) is
+        // caught in the controller instead of reaching the receive loop.
         controller.onClipboardRequest = { request ->
             when (request) {
                 ClipboardRequest.Clear -> androidClipboard?.clearPrimaryClip()
@@ -305,7 +316,7 @@ actual fun rememberTerminalSurface(
         // IME — and Backspace here is the reliable path that the sentinel above
         // is the fallback for.
         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-        val key = when (event.key) {
+        val named = when (event.key) {
             Key.Backspace -> "BSpace"
             Key.Enter, Key.NumPadEnter -> "Enter"
             Key.Tab -> "Tab"
@@ -325,41 +336,37 @@ actual fun rememberTerminalSurface(
             Key.F9 -> "F9"; Key.F10 -> "F10"; Key.F11 -> "F11"; Key.F12 -> "F12"
             else -> null
         }
-        // Characters. The table above maps terminal *keys*, and everything else
-        // used to fall on the floor: in landscape there is no text field, so a
-        // letter arrives as a key event and nothing ever turned it into input.
-        // Named keys worked and letters did not, which is exactly what the phone
-        // showed.
-        //
-        // Skipped while the soft keyboard is up, because there the text field owns
-        // text: handling it here too would send every character a second time.
-        // Skipped under Ctrl or Alt, which are keys in their own right — a ctrl
-        // chord on a hardware keyboard must not become its letter.
+        // Everything that *decides* — AltGr versus an Alt chord, modifiers on a named
+        // key, whether the soft keyboard owns the text — is `mapHardwareKey`, in common
+        // code. This only describes the event to it.
         val native = event.nativeKeyEvent
-        if (!typing && !native.isCtrlPressed && !native.isAltPressed && !native.isMetaPressed) {
-            val cp = native.unicodeChar
-            if (cp >= 0x20 && cp != 0x7F) {
-                controller.sendText(cp.toChar().toString())
-                return@onPreviewKeyEvent true
+        val meta = native.metaState
+        val ctrlBits = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON or KeyEvent.META_CTRL_RIGHT_ON
+        val altBits = KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON or KeyEvent.META_ALT_RIGHT_ON
+        val action = mapHardwareKey(
+            HardwareKey(
+                named = named,
+                shift = native.isShiftPressed,
+                ctrl = native.isCtrlPressed,
+                alt = native.isAltPressed,
+                rightAlt = meta and KeyEvent.META_ALT_RIGHT_ON != 0,
+                meta = native.isMetaPressed,
+                charWithAlt = native.getUnicodeChar(meta and ctrlBits.inv()),
+                charWithoutAlt = native.getUnicodeChar(meta and (ctrlBits or altBits).inv()),
+                softKeyboardUp = typing,
+            ),
+        )
+        when (action) {
+            HardwareAction.Pass -> false
+            is HardwareAction.Type -> {
+                controller.sendText(action.text)
+                true
+            }
+            is HardwareAction.Press -> {
+                controller.sendKey(action.name)
+                true
             }
         }
-        // A hardware Ctrl/Alt chord. It used to fall through here and be dropped:
-        // the character path above skips chords and the table has no letters.
-        if (key == null) {
-            if (native.isCtrlPressed || native.isAltPressed) {
-                val ch = native.getUnicodeChar(0)
-                val chord = if (ch in 0x20..0x7e) hardwareChord(ch.toChar(), native.isCtrlPressed, native.isAltPressed) else null
-                if (chord != null) {
-                    controller.sendKey(chord)
-                    return@onPreviewKeyEvent true
-                }
-            }
-            return@onPreviewKeyEvent false
-        }
-        // Shift+Tab is back-tab, not Tab.
-        val name = if (key == "Tab" && native.isShiftPressed) "BTab" else key
-        controller.sendKey(name)
-        true
     }.focusRequester(surfaceFocus).focusable()) {
         Canvas(
             Modifier
@@ -539,11 +546,7 @@ actual fun rememberTerminalSurface(
                             // so this is the one moment where the text and the
                             // highlight provably agree.
                             val text = controller.selectionText()
-                            if (!text.isNullOrEmpty()) {
-                                androidClipboard?.setPrimaryClip(
-                                    android.content.ClipData.newPlainText("ldmux", text),
-                                )
-                            }
+                            if (!text.isNullOrEmpty()) copyToClipboard(androidClipboard, text)
                             grabOffset = Offset.Zero
                         },
                         onDragCancel = {
@@ -739,9 +742,7 @@ actual fun rememberTerminalSurface(
                         // Letting go copies, exactly as letting go of a selection does.
                         val text = controller.selectionText()
                         if (!text.isNullOrEmpty()) {
-                            androidClipboard?.setPrimaryClip(
-                                android.content.ClipData.newPlainText("ldmux", text),
-                            )
+                            copyToClipboard(androidClipboard, text)
                         }
                     }
                 },
@@ -884,6 +885,34 @@ actual fun rememberTerminalSurface(
 
     }
     return controller
+}
+
+/**
+ * Owns a [TerminalController] for exactly as long as the composition *keeps* it.
+ *
+ * [onRemembered] is the first moment the composition has actually adopted the
+ * controller, so that is when it connects; [onForgotten] and [onAbandoned] both end
+ * it, and `dispose` is idempotent. Constructing the controller allocates (an engine
+ * and a scope) but opens nothing.
+ */
+private class ControllerHolder(config: LdmuxConfig, sessionId: String, active: Boolean) : RememberObserver {
+    val controller = TerminalController(config, sessionId, active)
+
+    override fun onRemembered() = controller.begin()
+
+    override fun onForgotten() = controller.dispose()
+
+    override fun onAbandoned() = controller.dispose()
+}
+
+/** A copy the user asked for; a system that refuses it must not take the gesture down. */
+private fun copyToClipboard(clipboard: android.content.ClipboardManager?, text: String) {
+    if (clipboard == null) return
+    try {
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("ldmux", text))
+    } catch (e: Exception) {
+        appLog("copy failed: ${e::class.simpleName}")
+    }
 }
 
 /**

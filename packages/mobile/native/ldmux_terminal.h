@@ -8,8 +8,15 @@
  * unstable (0.1.0-dev), and every symbol of it is confined to `ldmux_terminal.c`
  * so an upstream change breaks one translation unit rather than the app.
  *
+ * THREADING CONTRACT. An LdmuxTerminal has no locks and is NOT thread-safe: every
+ * call on one handle (including ldmux_terminal_free, and including the borrowed
+ * buffers that render / take_clipboard / selection_text return) must come from
+ * one thread at a time, and nothing may touch the handle after free. A binding
+ * that can be closed from another thread than the one using it (the Android
+ * `TerminalEngine`) must serialise the calls itself; the core will not.
+ *
  * Frame format returned by ldmux_terminal_render (little-endian):
- *   header (48 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
+ *   header (LDMUX_FRAME_HEADER = 48 bytes): u16 cols, u16 rows, u16 cursorX, u16 cursorY,
  *                      u8 cursorVisible, u8 cursorStyle,
  *                      u8 defFgR, u8 defFgG, u8 defFgB,
  *                      u8 defBgR, u8 defBgG, u8 defBgB,
@@ -18,7 +25,8 @@
  *                      u8 mouseSgr, u8 alternateOn,
  *                      u8 selectionOn, u16 selStartCol, u8 selStartRow,
  *                      u16 selEndCol, u8 selEndRow,
- *                      u8 cursorKnown, u8 reserved[7])
+ *                      u8 cursorKnown, u8 frameVersion, u32 extLen,
+ *                      u8 selStartRowHi, u8 selEndRowHi)
  *                      (the terminal's default colours so the client can paint
  *                      the whole surface in the same background; whether the
  *                      cursor is at a password prompt, which decides whether
@@ -35,9 +43,41 @@
  *   then cols*rows cell records, row-major:
  *                      u8 utf8Len, u8 flagsLo, u8 flagsHi,
  *                      u8 fgR, u8 fgG, u8 fgB, u8 bgR, u8 bgG, u8 bgB,
- *                      u8 utf8[utf8Len]
- *   flags: bit0 bold, bit1 italic, bit2 underline, bit3 faint, bit4 blink,
- *          bit5 inverse, bit6 invisible, bit7 strikethrough, bit8 overline
+ *                      u8 utf8[utf8Len]            (utf8Len <= LDMUX_CELL_MAX_UTF8)
+ *   then an extension block of extLen bytes (see below), absent when extLen = 0.
+ *
+ *   flags (u16): bit0 bold, bit1 italic, bit2 underline (ANY style), bit3 faint,
+ *          bit4 blink, bit5 inverse, bit6 invisible, bit7 strikethrough,
+ *          bit8 overline, bit9 selected,
+ *          bit10 wide (head of a double-width glyph; the next cell is its tail),
+ *          bit11 spacerTail (the tail: zero-length text that must not be
+ *                painted, and which is NOT a blank to draw a glyph into),
+ *          bits12..14 underlineStyle (0 none, 1 single, 2 double, 3 curly,
+ *                4 dotted, 5 dashed; 6 and 7 are reserved, read them as single),
+ *          bit15 hyperlink (an OSC 8 link whose URI is in the extension block)
+ *
+ * VERSIONING. The format is additive. `frameVersion` (header byte 41) is 0 for
+ * frames written before the extension (bytes 41..47 were reserved zeros) and
+ * LDMUX_FRAME_VERSION (1) now. A reader must (a) ignore flag bits it does not
+ * know, (b) ignore any extension section whose kind it does not know, (c) ignore
+ * the whole extension block when frameVersion is greater than it understands (it
+ * still reads the cells: their layout never changes, only grows trailing data).
+ * Bit 2 keeps meaning "underlined" for every style, so a reader that predates the
+ * style bits still draws a single underline.
+ *
+ * EXTENSION BLOCK (follows the last cell record, extLen bytes, a run of sections):
+ *   section = u8 kind, u32 len, u8 payload[len]
+ *   kind 1  underline colour: (u32 cellIndex, u8 r, u8 g, u8 b)*   (7 bytes each)
+ *           only cells with underlineStyle != 0 and an explicit colour appear;
+ *           cellIndex = row * cols + col. Absent means "use the foreground".
+ *   kind 2  hyperlinks: u16 uriCount, uriCount * (u16 len, u8 uri[len]),
+ *           u32 refCount, refCount * (u32 cellIndex, u16 uriIndex).
+ *           URIs are raw bytes (UTF-8 in practice), at most LDMUX_URI_MAX each
+ *           and LDMUX_URI_TABLE_MAX in total per frame; a link that does not fit
+ *           is dropped and its cell's hyperlink flag is NOT set, so the flag
+ *           always has a URI behind it.
+ * Header bytes 46/47 are the high bytes of the selection start/end rows (the
+ * u8 rows at 36/39 wrap at 256), so a row is `lo | hi << 8`.
  *
  * The Kotlin side pins the same numbers in `TerminalFrame.kt`; a test there
  * checks the header size, and both sides must change together.
@@ -49,9 +89,26 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CELL_MAX_UTF8 16
-#define CELL_RECORD_MAX (9 + CELL_MAX_UTF8)
-#define FRAME_HEADER 48
+/* Longest cell text carried, in bytes. A cluster longer than this is cut at the
+ * last whole code point that fits (never inside one). 64 is the Unicode
+ * Stream-Safe limit (31 non-starters) and ~2x the longest real ZWJ sequence; the
+ * u8 length on the wire allows up to 255. */
+#define LDMUX_CELL_MAX_UTF8 64
+/* The fixed part of a cell record, before its text. */
+#define LDMUX_CELL_FIXED 9
+#define LDMUX_CELL_RECORD_MAX (LDMUX_CELL_FIXED + LDMUX_CELL_MAX_UTF8)
+#define LDMUX_FRAME_HEADER 48
+#define LDMUX_FRAME_VERSION 1
+/* Hyperlink bounds per frame (a hostile program can paint a link per cell). */
+#define LDMUX_URI_MAX 2048
+#define LDMUX_URI_TABLE_MAX (64 * 1024)
+#define LDMUX_URI_DISTINCT_MAX 256
+/* Extension section kinds. */
+#define LDMUX_EXT_UNDERLINE_COLOUR 1
+#define LDMUX_EXT_HYPERLINKS 2
+/* The most text one OSC 52 / 1337 / 5522 clipboard write may carry before the
+ * shim refuses it (the shim buffers it in memory). */
+#define LDMUX_CLIPBOARD_MAX_BYTES (256u * 1024u)
 
 /**
  * Scroll deltas that mean "the ends", not a number of rows. They are sentinel
@@ -62,6 +119,11 @@
 
 /** Opaque: the fields are the core's business and no binding may depend on them. */
 typedef struct LdmuxTerminal LdmuxTerminal;
+
+/** The largest grid on a side. `cols`/`rows` outside [1, LDMUX_MAX_DIM] are clamped
+ *  by [ldmux_terminal_new] and [ldmux_terminal_resize]: the engine allocates for
+ *  the whole grid, so an absurd size (65535 x 65535) is a hang, not an error. */
+#define LDMUX_MAX_DIM 2048
 
 /** Allocate a terminal of `cols` x `rows`. NULL if the emulator refused. */
 LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows);
@@ -221,12 +283,25 @@ int ldmux_terminal_selection_set(LdmuxTerminal *t, int start_col, int start_row,
 /*
  * Where the selection currently is, in viewport cells, inclusive. Answers 0 when
  * nothing is selected, in which case the out-parameters are untouched.
+ *
+ * (The frame's selection rows are u8 at bytes 36/39 plus a high byte at 46/47, so
+ * they are exact up to 65535; before the high bytes existed a reader saw rows
+ * wrap above 255.)
  */
 int ldmux_terminal_selection_bounds(LdmuxTerminal *t, int *start_col, int *start_row,
                                     int *end_col, int *end_row);
 
 /** Set on a cell whose style flags put it inside the selection (bit 9). */
 #define LDMUX_FLAG_SELECTED (1u << 9)
+/** Head of a double-width glyph (bit 10). */
+#define LDMUX_FLAG_WIDE (1u << 10)
+/** Tail of a double-width glyph: zero-length text, never painted (bit 11). */
+#define LDMUX_FLAG_SPACER_TAIL (1u << 11)
+/** Underline style, 3 bits at 12..14: the GHOSTTY_SGR_UNDERLINE_* values. */
+#define LDMUX_UNDERLINE_STYLE_SHIFT 12
+#define LDMUX_UNDERLINE_STYLE_MASK 7u
+/** The cell is inside an OSC 8 hyperlink with a URI in the extension (bit 15). */
+#define LDMUX_FLAG_HYPERLINK (1u << 15)
 
 /*
  * The style block, bits 0..8. Named here as well as in the cell encoder because

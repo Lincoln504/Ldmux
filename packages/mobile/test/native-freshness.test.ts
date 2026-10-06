@@ -102,7 +102,7 @@ test("every packaged .so was built from the current shim sources", () => {
       current,
       recorded,
       "the packaged .so was built from different shim sources than the ones on disk. " +
-        "Rebuild with: just native-android",
+        "Rebuild with: nix develop .#mobile -c scripts/build-libghostty-vt.sh",
     );
 
     // And nothing may be unclassified. A new source file is either compiled into
@@ -135,7 +135,7 @@ test("every packaged .so was built from the current shim sources", () => {
     assert.ok(
       built >= newest.t,
       `${lib} is older than ${newest.s}, so it does not contain its current code. ` +
-        `Rebuild with: just native-android`,
+        `Rebuild with: nix develop .#mobile -c scripts/build-libghostty-vt.sh`,
     );
   }
 });
@@ -152,7 +152,7 @@ test("the packaged .so records the engine pin and API level it was built from", 
   assert.ok(
     existsSync(inputsPath),
     "the packaged .so predates the record of what it was built from, so a change to the " +
-      "engine pin or the API level would leave it looking fresh. Rebuild: just native-android",
+      "engine pin or the API level would leave it looking fresh. Rebuild: nix develop .#mobile -c scripts/build-libghostty-vt.sh",
   );
   const fields = Object.fromEntries(
     readFileSync(inputsPath, "utf8")
@@ -162,17 +162,18 @@ test("the packaged .so records the engine pin and API level it was built from", 
       .map((line) => [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)]),
   );
 
-  // The pin is read out of the build script rather than restated here. Restating it is
-  // how the two came to disagree: the script would build one engine and this would
-  // compare against another, and both would look correct in isolation.
-  const script = readFileSync(join(ROOT, "scripts", "build-libghostty-vt.sh"), "utf8");
-  const pin = /GHOSTTY_COMMIT="\$\{GHOSTTY_COMMIT:-([^}]+)\}/.exec(script)?.[1];
-  assert.ok(pin, "could not read GHOSTTY_COMMIT out of scripts/build-libghostty-vt.sh");
+  // The pin is read out of native/ghostty.pin (the one file the flake and the build script
+  // both read) rather than restated here. Restating it is how the two came to disagree:
+  // the script would build one engine and this would compare against another, and both
+  // would look correct in isolation.
+  const pinFile = readFileSync(join(NATIVE, "ghostty.pin"), "utf8");
+  const pin = /^commit[ \t]+([0-9a-f]{40})\b/m.exec(pinFile)?.[1];
+  assert.ok(pin, "could not read a full 40-char `commit` out of native/ghostty.pin");
   assert.equal(
     fields["engine-commit"],
     pin,
-    `the packaged .so wraps engine ${fields["engine-commit"]} but the build script pins ` +
-      `${pin}. Rebuild with: just native-android`,
+    `the packaged .so wraps engine ${fields["engine-commit"]} but native/ghostty.pin pins ` +
+      `${pin}. Rebuild with: nix develop .#mobile -c scripts/build-libghostty-vt.sh`,
   );
   assert.ok(fields["api-level"], "no api-level was recorded by the build");
 });
@@ -212,7 +213,7 @@ test("every native method Kotlin declares is defined in the packaged .so", () =>
       assert.ok(
         defined.has(symbol),
         `${symbol} is declared by Kotlin but not defined in ${lib}. ` +
-          `The library is stale or the JNI glue did not compile: just native-android`,
+          `The library is stale or the JNI glue did not compile: nix develop .#mobile -c scripts/build-libghostty-vt.sh`,
       );
     }
   }

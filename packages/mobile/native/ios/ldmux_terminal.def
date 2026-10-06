@@ -1,0 +1,26 @@
+# Kotlin/Native cinterop definition for the portable terminal core (stub).
+#
+# Binds native/ldmux_terminal.h and nothing else: the header names no JNI, no Android
+# and no engine type (every libghostty-vt symbol is confined to ldmux_terminal.c), so
+# this is the whole iOS-side seam. It is NOT wired into the Gradle build yet and has
+# not been compiled: iOS needs a macOS host (ADR-0007, ADR-0013 section 2).
+#
+# Intended use, from a Kotlin/Native iosArm64 / iosSimulatorArm64 target:
+#   cinterops { val ldmuxTerminal by creating { definitionFile = file("../native/ios/ldmux_terminal.def") } }
+# The package below is what `iosMain` imports; the `actual class TerminalEngine` for iOS
+# is then a delegation over `ldmux_terminal_new/write/render/...`, decoding the frame
+# bytes with the shared commonMain `TerminalFrame.decode`.
+language = C
+headers = ldmux_terminal.h
+headerFilter = ldmux_terminal.h
+package = dev.ldmux.mobile.native
+
+# Resolved relative to this file's directory when gradle passes it with -I.
+compilerOpts = -I../
+
+# The core compiled as a static library for the target, plus the engine archive for the
+# same target (libghostty-vt.a from the .xcframework). Both must be linked into the
+# final framework; the paths are per-target and set by the Gradle cinterop block:
+#   staticLibraries = libldmux_terminal_core.a libghostty-vt.a
+#   libraryPaths.ios_arm64 = <build>/ios-arm64
+#   libraryPaths.ios_simulator_arm64 = <build>/ios-simulator-arm64

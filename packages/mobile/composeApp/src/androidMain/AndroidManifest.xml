@@ -11,15 +11,18 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!--
-      Keeping a session open while the app is not on screen. A remote terminal
-      that drops its link the moment you check a message is not a terminal, and
-      Android freezes and then reclaims a backgrounded process by default.
+      Keeping the link up for a *bounded* time while the app is off screen. A remote
+      terminal that drops its link the moment you check a message is not a terminal, and
+      Android freezes and then reclaims a backgrounded process by default. This is a
+      grace window, not a promise: after 45 s off screen the app lets go of its shells
+      and stops this service (ADR-0012). The shell itself lives in the keeper on the
+      host and is unaffected; what ends is this phone's attachment to it.
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Android 13+. Denial is not fatal: the service runs, quietly. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Partial only, and released the moment the link drops. -->
+    <!-- Partial only, with a timeout, and released when the service stops. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Needed so the speech recognizer is discoverable on the device. -->
@@ -29,26 +32,35 @@
         </intent>
     </queries>
 
+    <!--
+      Cleartext is governed by @xml/network_security_config (the file explains why it
+      permits it and where the tailnet-only rule is actually enforced); there is no
+      app-wide `usesCleartextTraffic`. The token must not be backed up or transferred.
+    -->
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="ldmux"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Ldmux"
-        android:usesCleartextTraffic="true">
+        android:theme="@style/Theme.Ldmux">
 
         <!--
           No `screenOrientation`: the device's own rotation decides (ADR-0011). The
           rotate button and the orientation seam are gone; the app reads its shape
-          from the window size. `configChanges` includes orientation so a turn
-          resizes the composition rather than recreating the activity, which would
-          drop every open terminal page.
+          from the window size. `configChanges` lists every configuration that can
+          change while a shell is open — orientation and size, but also font scale,
+          locale, layout direction, colour mode (dark/wide gamut) and input navigation —
+          so none of them recreates the activity, which would drop every open terminal
+          page and the launcher's state with it.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode|fontScale|locale|layoutDirection|colorMode"
             android:windowSoftInputMode="adjustResize"
             android:launchMode="singleTask">
             <intent-filter>
@@ -78,10 +90,9 @@
             android:value="barcode_ui" />
 
         <!--
-          specialUse rather than dataSync: this is a long-lived *interactive*
-          connection, and dataSync carries a runtime cap (6h/24h from Android 15)
-          that a shell someone left open would exceed. The subtype is required
-          for specialUse and is what a reviewer reads.
+          specialUse rather than dataSync: this is an *interactive* connection, and
+          dataSync carries a runtime cap (6h/24h from Android 15). The subtype is
+          required for specialUse and is what a reviewer reads.
         -->
         <service
             android:name=".LdmuxService"
@@ -89,7 +100,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Maintains an interactive remote terminal connection to the user's own workstation while the app is not in the foreground, so an open shell is not dropped when the user switches apps." />
+                android:value="Keeps an interactive remote terminal connection to the user's own workstation alive for a short grace period after the user switches away from the app, so a quick app switch does not drop the open shell." />
         </service>
     </application>
 </manifest>

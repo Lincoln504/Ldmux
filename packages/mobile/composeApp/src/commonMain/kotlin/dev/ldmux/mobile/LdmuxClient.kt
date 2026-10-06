@@ -1,7 +1,6 @@
 package dev.ldmux.mobile
 
 import io.ktor.client.HttpClient
-import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -21,18 +20,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonObject
 
 /** One ldmux session, as the daemon reports it in a `sessions` message. */
 data class Session(
@@ -172,26 +164,18 @@ data class DesktopInventory(
  * connection so a terminal stream failing never blinds the session list.
  */
 class LdmuxClient(private var config: LdmuxConfig) {
-    private val http = HttpClient { ldmuxWebSockets() }
+    /**
+     * Recreated by [start], because [stop] closes it. It was a `val` that [stop]
+     * closed for good, so a stopped client could never be started again — which is why
+     * nothing ever stopped it, and the launcher socket pinged for as long as the process
+     * lived, backgrounded or not.
+     */
+    private var httpClient: HttpClient? = null
+    private val http: HttpClient get() = httpClient ?: HttpClient { ldmuxWebSockets() }.also { httpClient = it }
 
     /** The id this device announces itself as. Not an account, not a credential. */
     private val deviceId: String get() = config.deviceId
 
-    /**
-     * Say who we are, before anything else.
-     *
-     * A client that never does holds nothing, so exclusivity silently stops
-     * applying to it: two devices could type into one shell and neither the
-     * server nor the user would know.
-     */
-    private fun helloMessage(): String = buildJsonObject {
-        put("type", "hello")
-        putJsonObject("device") {
-            put("id", config.deviceId)
-            put("name", config.deviceLabel)
-            put("kind", "phone")
-        }
-    }.toString()
     private val _sessions = MutableStateFlow<List<Session>>(emptyList())
     val sessions: StateFlow<List<Session>> = _sessions
 
@@ -365,7 +349,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
      * nothing for a caller to pass. `kind = "pi"` is the one exception the daemon
      * still recognises, and it needs no argv either.
      */
-    fun create(kind: String, cwd: String? = null, title: String? = null) {
+    fun create(kind: String, cwd: String? = null, title: String? = null): Boolean {
         val msg = buildJsonObject {
             put("type", "new")
             put("kind", kind)
@@ -379,7 +363,9 @@ class LdmuxClient(private var config: LdmuxConfig) {
         if (!sendControl(msg)) {
             _serverError.value = ServerError(code = "offline", message = "not connected to the host")
             _errorTick.value += 1
+            return false
         }
+        return true
     }
 
     /**
@@ -439,8 +425,11 @@ class LdmuxClient(private var config: LdmuxConfig) {
         return true
     }
 
-    /** Set by the pong handler, read once per beat: the launcher's liveness. */
-    private var pongSeen = false
+    /** The launcher's liveness: heartbeats that went unanswered. */
+    private val missed = MissedPongs()
+
+    /** Pongs seen, ever: a network-change probe compares two readings of it. */
+    private var pongCount = 0
 
     /**
      * Point the client at a (possibly) different daemon, or at none.
@@ -465,17 +454,24 @@ class LdmuxClient(private var config: LdmuxConfig) {
 
     fun start(scope: CoroutineScope) {
         this.scope = scope
-        if (job != null || !config.isPaired) return
+        if (job?.isActive == true || !config.isPaired) return
+        if (_link.value != LinkState.Online) _link.value = LinkState.Connecting
         job = scope.launch { loop() }
     }
 
+    /**
+     * Close the socket and stop retrying. Safe to call and to follow with [start]:
+     * the HTTP client is rebuilt on demand.
+     */
     fun stop() {
         job?.cancel()
         job = null
         generation++
         scope = null
+        ws = null
         _connected.value = false
-        http.close()
+        httpClient?.let { runCatching { it.close() } }
+        httpClient = null
     }
 
     /**
@@ -490,16 +486,17 @@ class LdmuxClient(private var config: LdmuxConfig) {
         val gen = ++generation
         val endpoint = config.endpoint ?: return
         fun current() = gen == generation
-        // Backed off rather than fixed, and capped: a daemon that is down for an
-        // hour should not be asked twelve hundred times, and one that comes back
-        // ten seconds later should not make the user wait two seconds to notice.
-        var waitMs = 400L
+        // Backed off rather than fixed, and capped (see [reconnectDelayMs], the policy
+        // the terminal pages share): a daemon that is down for an hour should not be
+        // asked twelve hundred times, and one that comes back ten seconds later should
+        // not make the user wait long to notice.
+        var attempt = 0
         while (currentCoroutineContext().isActive) {
             try {
                 appLog("connecting to ${endpoint.host}")
                 http.webSocket(endpoint.wsUrl, request = { header(HttpHeaders.Authorization, endpoint.authorization) }) {
                     ws = this
-                    waitMs = 400L
+                    attempt = 0
                     // Flush what was asked for while there was no socket, oldest
                     // first, before the fresh list — the order the user asked in.
                     for (queued in pending) runCatching { send(Frame.Text(queued)) }
@@ -512,7 +509,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     // claims are dropped when the connection ends — so a client
                     // that never says who it is holds nothing, and exclusivity
                     // silently stops applying to it.
-                    send(Frame.Text(helloMessage()))
+                    send(Frame.Text(helloMessage(config)))
                     send(Frame.Text("""{"type":"list"}"""))
                     // Say something, periodically. The daemon reaps a connection
                     // that has said nothing for a minute — that is how a phone which
@@ -527,27 +524,48 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     // flow the socket stays "connected" while the list goes stale and
                     // every command sent into it disappears. Three unanswered beats is
                     // a link that is not there — the same rule the terminal pages use.
-                    pongSeen = true
+                    missed.reset()
                     val beat = launch {
-                        var missed = 0
                         while (isActive) {
                             delay(CLIENT_PING_INTERVAL_MS)
-                            missed = if (pongSeen) 0 else missed + 1
-                            pongSeen = false
-                            if (missed >= CLIENT_MISSED_PONGS) {
-                                appLog("launcher link silent for $missed beats; reconnecting")
+                            if (missed.beat()) {
+                                appLog("launcher link silent; reconnecting")
                                 runCatching { this@webSocket.close() }
                                 break
                             }
                             runCatching { send(Frame.Text("""{"type":"ping"}""")) }
                         }
                     }
+                    // The network changed under a socket that still looks open: ask
+                    // now and allow a short, fixed time for the answer.
+                    val netWatch = launch {
+                        NetworkWake.wakes.collect {
+                            val before = pongCount
+                            runCatching { send(Frame.Text("""{"type":"ping"}""")) }
+                            delay(NETWORK_PROBE_MS)
+                            if (pongCount == before) {
+                                appLog("launcher link silent after a network change; reconnecting")
+                                runCatching { this@webSocket.close() }
+                            }
+                        }
+                    }
                     try {
                         for (frame in incoming) {
-                            if (frame is Frame.Text) onMessage(frame.readText())
+                            // A message that cannot be handled is that message's
+                            // problem: it must not read as a dead link.
+                            if (frame is Frame.Text) {
+                                try {
+                                    onMessage(frame.readText())
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    appLog("message handler failed: ${e::class.simpleName}")
+                                }
+                            }
                         }
                     } finally {
                         beat.cancel()
+                        netWatch.cancel()
                         if (ws === this) ws = null
                     }
                 }
@@ -561,9 +579,10 @@ class LdmuxClient(private var config: LdmuxConfig) {
             } catch (e: Throwable) {
                 // Why, not just that: a refused token and a machine that is off are
                 // different problems with different fixes, and the handshake's own
-                // exception cannot tell them apart. The daemon can (see [probe]).
+                // exception cannot tell them apart. The daemon can (see
+                // [probeLinkStatus]).
                 appLog("connect failed: ${e::class.simpleName}")
-                val state = linkStateFromProbe(probe(endpoint))
+                val state = linkStateFromProbe(probeLinkStatus(http, endpoint))
                 if (current()) _link.value = state
             }
             if (!current()) return
@@ -573,60 +592,61 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 // pairing, which replaces this loop) tries again.
                 appLog("token refused; waiting for a refresh or a new pairing")
                 wake.first()
-                waitMs = 400L
+                attempt = 0
                 continue
             }
             // Either the timeout elapses, or the network coming back cuts it
             // short. `withTimeoutOrNull` returning normally means the wake fired.
-            val woken = withTimeoutOrNull(waitMs) { wake.first() } != null
-            if (!woken) waitMs = (waitMs * 2).coerceAtMost(10_000L)
-            else waitMs = 400L
+            val woken = withTimeoutOrNull(withJitter(reconnectDelayMs(attempt))) { wake.first() } != null
+            attempt = if (woken) 0 else attempt + 1
         }
     }
 
     /**
-     * The daemon's HTTP status for a plain `GET /ws`, or null when nothing answered.
-     * Bounded, because a machine that is not there does not say so quickly.
+     * One text frame from the daemon. Internal so it is tested against hostile and
+     * future payloads without a socket.
+     *
+     * Every read is tolerant (see `WireJson.kt`): the throwing accessors this used to
+     * call raise on a `null` or an object where a string was expected, and a raise here
+     * was the receive loop's problem — a dropped socket for one odd field. Unknown
+     * message types and unknown fields are ignored, so a newer daemon (a `session_ended`
+     * message, a capability field) costs an older client nothing.
      */
-    private suspend fun probe(endpoint: Endpoint): Int? = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
-        runCatching {
-            http.get(endpoint.probeUrl) { header(HttpHeaders.Authorization, endpoint.authorization) }.status.value
-        }.getOrNull()
-    }
-
-    private fun onMessage(text: String) {
-        val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-        when (root["type"]?.jsonPrimitive?.content) {
-            "pong" -> pongSeen = true
+    internal fun onMessage(text: String) {
+        val root = parseJsonObject(text) ?: return
+        when (root.text("type")) {
+            "pong" -> {
+                missed.onPong()
+                pongCount++
+            }
             "error" -> {
                 _serverError.value = ServerError(
-                    code = root["code"]?.jsonPrimitive?.content ?: "error",
-                    message = root["message"]?.jsonPrimitive?.content ?: "the daemon refused that",
+                    code = root.text("code").ifEmpty { "error" },
+                    message = root.text("message").ifEmpty { "the daemon refused that" },
                 )
                 _errorTick.value += 1
             }
             "created" -> {
-                val id = root["sessionId"]?.jsonPrimitive?.content
-                if (id != null) _created.value = _created.value + id
+                val id = root.optionalText("sessionId")
+                if (!id.isNullOrEmpty()) _created.value = _created.value + id
                 _createdTick.value += 1
             }
             "desktop" -> {
-                _desktop.value = parseDesktop(root["inventory"]?.jsonObject)
+                _desktop.value = parseDesktop(root["inventory"] as? JsonObject)
                 _desktopTick.value += 1
             }
             "live" -> _liveResult.value = LiveResult(
-                sessionId = root["sessionId"]?.jsonPrimitive?.content ?: "",
-                ok = root["ok"]?.jsonPrimitive?.content == "true",
-                detail = root["detail"]?.jsonPrimitive?.content,
+                sessionId = root.text("sessionId"),
+                ok = root.flag("ok"),
+                detail = root.optionalText("detail"),
             )
             "owned" -> {
                 // A shell is held by another device (ADR-0010). Ordinary, not an
                 // error: it is the answer to "open this", and the app answers it
                 // by telling the user who has it and offering to take over.
                 _owned.value = OwnedNotice(
-                    sessionId = root["sessionId"]?.jsonPrimitive?.content ?: "",
-                    holder = (root["owner"] as? JsonObject)
-                        ?.get("name")?.let { (it as? JsonPrimitive)?.content },
+                    sessionId = root.text("sessionId"),
+                    holder = (root["owner"] as? JsonObject)?.optionalText("name"),
                 )
             }
             "sessions" -> {
@@ -636,13 +656,6 @@ class LdmuxClient(private var config: LdmuxConfig) {
         }
     }
 }
-
-// Reading JSON without `jsonPrimitive`, which throws on a null or an object.
-// Every accessor here answers "nothing" instead, so one unexpected field cannot
-// take down the launcher.
-
-private fun JsonObject.text(key: String): String =
-    ((this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content ?: ""
 
 /**
  * The session list, read with this file's tolerant accessors.
@@ -686,16 +699,6 @@ internal fun parseSessions(element: JsonElement?, deviceId: String): List<Sessio
         )
     }
 }
-
-private fun JsonObject.optionalText(key: String): String? =
-    ((this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content
-
-private fun JsonObject.number(key: String): Int? = text(key).toIntOrNull()
-
-private fun JsonObject.flag(key: String): Boolean = text(key) == "true"
-
-private fun JsonObject.objects(key: String): List<JsonObject> =
-    (this[key] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: emptyList()
 
 /**
  * Read a desktop inventory out of the wire JSON.

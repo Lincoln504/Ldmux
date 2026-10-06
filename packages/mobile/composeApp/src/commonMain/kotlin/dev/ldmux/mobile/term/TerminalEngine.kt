@@ -5,6 +5,11 @@ import dev.ldmux.mobile.ClipboardRequest
 /**
  * A terminal emulator instance, backed by libghostty-vt on each platform.
  * Created at a fixed grid size; feed it bytes, read back a decoded frame.
+ *
+ * Threading: the native core behind this is single-threaded (no locks). Drive an
+ * engine from one thread at a time. The one cross-thread operation that is
+ * supported is [close]: it is idempotent, may race with other calls, and every call
+ * after it is a no-op that returns its "nothing" answer (null, false, or unit).
  */
 expect class TerminalEngine(cols: Int, rows: Int) {
     fun write(bytes: ByteArray, length: Int = bytes.size)
@@ -63,5 +68,6 @@ expect class TerminalEngine(cols: Int, rows: Int) {
     /** The selected text, or null when there is nothing selected. */
     fun selectionText(): String?
 
+    /** Release the native terminal. Idempotent; calls after it are no-ops. */
     fun close()
 }

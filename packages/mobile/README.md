@@ -20,14 +20,15 @@ the native app with its own engine.
 ## Native terminal core
 
 ```bash
-just native-android            # libghostty-vt + JNI shim for arm64-v8a + x86_64
+scripts/android.sh native     # libghostty-vt + JNI shim for arm64-v8a + x86_64
 ```
 
-`scripts/build-libghostty-vt.sh` cross-compiles a pinned Ghostty commit with
-Zig (from the devShell) and the NDK, then links `native/ldmux_terminal.c` into
+`scripts/build-libghostty-vt.sh` cross-compiles the Ghostty commit pinned in
+`native/ghostty.pin` (the same pin the Rust build uses, via nix) with
+Zig (from the devShell; the build asserts the checkout is exactly the pin) and the NDK, then links `native/ldmux_terminal.c` into
 `libldmux_terminal.so` per ABI under `composeApp/src/androidMain/jniLibs/`.
-Those libraries are build outputs (git-ignored); the `android` just recipe
-depends on `native-android` so they are always current.
+Those libraries are build outputs (git-ignored); `scripts/android.sh build`
+rebuilds them first so they are always current.
 
 Data path: daemon `snapshot`/binary `Output` frames -> `AttachClient` ->
 `TerminalEngine.write` -> `NativeTerminal.render` (a fixed `cols*rows` cell
@@ -47,10 +48,10 @@ Two things worth knowing (both live gotchas):
 The JDK + Gradle live in a dedicated devShell so the main shell stays lean:
 
 ```bash
-# `just android` rebuilds the native core first. Gradle alone does not: it
+# `scripts/android.sh build` rebuilds the native core first. Gradle alone does not: it
 # packages whatever .so is already in jniLibs/, so invoking gradle directly can
 # ship a stale library. See "The native library is a build output" below.
-just android
+scripts/android.sh build
 # APK: packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
 adb install -r packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
 ```
@@ -61,8 +62,8 @@ machine the SDK is `/home/ldeen/Android/Sdk`. `ANDROID_HOME` is exported by the
 
 ### The native library is a build output
 
-`libldmux_terminal.so` is produced by `scripts/build-libghostty-vt.sh` (pinned
-`GHOSTTY_COMMIT`) into `composeApp/src/androidMain/jniLibs/<abi>/` and is
+`libldmux_terminal.so` is produced by `scripts/build-libghostty-vt.sh` (pinned in
+`native/ghostty.pin`) into `composeApp/src/androidMain/jniLibs/<abi>/` and is
 git-ignored. The build script resolves the NDK by each directory's
 `Pkg.Revision`, never by sorting names — `sort -V` orders `30.0.16248370` before
 `android-ndk-r27c`, which silently picks the *older* toolkit.
@@ -71,15 +72,15 @@ git-ignored. The build script resolves the NDK by each directory's
 whatever `.so` is already sitting in `jniLibs/`, so `gradle :composeApp:assembleDebug`
 on its own ships the last library that was built, however old — which is how a
 day-stale `.so` once reached a phone, where the only symptom was a program's copy
-going nowhere and the device reporting silence rather than an error. `just android`
-solves it by depending on `native-android`. `test/native-freshness.test.ts`
+going nowhere and the device reporting silence rather than an error. `scripts/android.sh build`
+solves it by building the native core first. `test/native-freshness.test.ts`
 enforces it: a packaged `.so` older than any shim source fails the suite, and so
 does a `.so` missing a JNI symbol Kotlin declares.
 
 The portable half of the shim has its own tests, which need no device at all:
 
 ```bash
-just native-test   # builds a host libghostty-vt once, then runs native/test_engine.c
+scripts/android.sh native-test   # runs native/test_engine.c against the nix-built host engine
 ```
 
 ## A test daemon, and the way it lies
@@ -120,6 +121,29 @@ USB-attached phone with no tailnet, forward the daemon's loopback port and use
 adb reverse tcp:7629 tcp:7629
 # settings -> host: localhost:7629, token: <cat <state-dir>/token>
 ```
+
+## Backgrounding and the network
+
+- **The shell survives; the attachment does not.** The shell lives in the keeper on the
+  host. Off screen, a foreground service keeps the sockets up for a 45 s grace
+  (`BackgroundSession.releaseGraceMs`, ADR-0012); after that the app drops its pages,
+  closes the sockets, releases its claims, stops the service and the wake lock (which
+  also has a 10-minute timeout as a backstop) and lands on the launcher. The release is
+  an explicit call from the platform lifecycle (`AppLifecycle.set` ->
+  `BackgroundRelease`), not a Compose effect, so it does not depend on a frame clock
+  (iOS answers a grace of 0 and releases synchronously).
+- **Scroll fidelity across reconnects.** A snapshot rebuilds the engine only while the
+  view follows live output; while the user is reading history it is replayed into the
+  existing engine (`planSnapshot`), so the anchor and scrollback survive.
+- **Input is refused while disconnected** (no prediction, no silent drop); the page says
+  "offline". A refused token shows "pairing rejected".
+- **Network changes** make every open socket ping at once and reconnect if no pong
+  arrives within 2.5 s, instead of waiting out three missed heartbeats.
+- **Cleartext.** Transport is `ws://` over WireGuard. Android's network security config
+  cannot express `100.64.0.0/10`, so it permits cleartext and the tailnet/loopback rule is
+  enforced in code where sockets are built (`LdmuxConfig.isPaired`); see
+  `res/xml/network_security_config.xml`. Backup and device transfer exclude the token.
+- Dictation prefers on-device recognition and says so on screen when it falls back to cloud.
 
 ## Modes
 
@@ -266,7 +290,8 @@ pointed.
       new output, double-tap for a word (`docs/STATE.md` §5.1).
 - [ ] `planTap` corrections for tap-to-cursor (`docs/STATE.md` §5.2).
 - [ ] Clipboard-write policy verified end to end on the device (`docs/STATE.md` §5.3).
-- [ ] Foreground service so the heartbeat survives Doze (SPEC §6.3).
+- [x] Foreground service for a *bounded* background window (see "Backgrounding and the
+      network" below). The heartbeat does not survive Doze indefinitely, by design.
 - [ ] iOS (needs a macOS host for the xcframework).
 
 Verified on a real Motorola Edge 2024 (2026-09-19): rotating the device flips the app

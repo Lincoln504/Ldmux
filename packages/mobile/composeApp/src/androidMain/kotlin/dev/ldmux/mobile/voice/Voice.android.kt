@@ -15,10 +15,12 @@ import java.lang.ref.WeakReference
 /**
  * Android's dictation: [SpeechRecognizer], headless.
  *
- * On-device recognition is preferred where the platform offers it (Android 12+),
- * because it keeps shell commands off the network and removes the round trip. When
- * only cloud recognition is available that is what we get; it still needs no
- * keyboard. The transcript goes to the sink the caller supplied.
+ * On-device recognition is preferred, because it keeps shell commands off the network
+ * and removes the round trip: the dedicated on-device recogniser where the platform
+ * has one (Android 12+), and `EXTRA_PREFER_OFFLINE` on every request otherwise. When
+ * only a cloud recogniser exists that is what we get — it still needs no keyboard —
+ * and the user is **told** ([VoiceState.ListeningCloud]) rather than left to assume.
+ * The transcript goes to the sink the caller supplied.
  *
  * The activity this needs is found here rather than passed in, which is the point
  * of the seam: `SpeechRecognizer` wants a Context and a permission request wants an
@@ -33,6 +35,9 @@ actual object Dictation {
     private var recognizer: SpeechRecognizer? = null
     private var onText: ((String) -> Unit)? = null
     private var onState: ((VoiceState) -> Unit)? = null
+
+    /** The recogniser in use is not the on-device one, so audio may leave the phone. */
+    private var cloud = false
 
     actual val listening: Boolean get() = recognizer != null
 
@@ -98,21 +103,26 @@ actual object Dictation {
         }
         recognizer = sr
         sr.setRecognitionListener(listener)
-        onState?.invoke(VoiceState.Listening)
+        onState?.invoke(if (cloud) VoiceState.ListeningCloud else VoiceState.Listening)
         sr.startListening(
             Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
+                // A request to keep it on the device; honoured by recognisers that
+                // support it, and a no-op for the rest (hence the notice above).
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             },
         )
     }
 
     private fun create(ctx: Context): SpeechRecognizer? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
+            cloud = false
             SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
         } else {
+            cloud = true
             SpeechRecognizer.createSpeechRecognizer(ctx)
         }
     }.getOrNull()
@@ -142,7 +152,7 @@ actual object Dictation {
 
         override fun onPartialResults(partialResults: Bundle?) {
             val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-            if (!text.isNullOrBlank()) onState?.invoke(VoiceState.Partial(text))
+            if (!text.isNullOrBlank()) onState?.invoke(VoiceState.Partial(text, cloud))
         }
 
         override fun onResults(results: Bundle?) {

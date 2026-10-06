@@ -20,7 +20,17 @@ sealed interface VoiceState {
     data object Idle : VoiceState
     data object RequestingPermission : VoiceState
     data object Listening : VoiceState
-    data class Partial(val text: String) : VoiceState
+
+    /**
+     * Listening, but the platform could not do it on the device: the audio goes to a
+     * cloud recogniser. Said on screen, because dictated shell commands (and anything
+     * said near the phone) leaving the device is something the user should know about
+     * before they speak, not discover.
+     */
+    data object ListeningCloud : VoiceState
+
+    /** [cloud]: the words are being recognised off the device. */
+    data class Partial(val text: String, val cloud: Boolean = false) : VoiceState
     data object Denied : VoiceState
     data object Unavailable : VoiceState
     data class Failed(val reason: String) : VoiceState
@@ -72,9 +82,10 @@ internal fun VoiceBanner(state: VoiceState, modifier: Modifier) {
         VoiceState.Idle -> return
         VoiceState.RequestingPermission -> "microphone permission…"
         VoiceState.Listening -> "listening…"
+        VoiceState.ListeningCloud -> "listening · cloud recognition, audio leaves the phone"
         VoiceState.Denied -> "microphone permission denied"
         VoiceState.Unavailable -> "no speech recognition on this device"
-        is VoiceState.Partial -> state.text
+        is VoiceState.Partial -> if (state.cloud) "\u2601 ${state.text}" else state.text
         is VoiceState.Failed -> "voice: ${state.reason}"
     }
     // The one place a hue is allowed, because these are the states a user has to

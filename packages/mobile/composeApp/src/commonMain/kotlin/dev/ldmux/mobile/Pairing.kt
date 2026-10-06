@@ -40,6 +40,75 @@ fun parsePairingLink(link: String): Pairing? {
     return if (pairingProblem(p) == null) p else null
 }
 
+/**
+ * What the confirmation dialog shows, with nothing hidden by the machine's own name.
+ *
+ * The link's `name` is chosen by whoever printed the QR code, so it is untrusted
+ * text in the one dialog that decides where every keystroke goes. The dialog used
+ * to show the name *instead of* the host when there was one, so a code could say
+ * "work laptop" and point anywhere on the tailnet. Now the address is always shown,
+ * the name is only a label next to it, and a short fingerprint of the token lets the
+ * user compare against `ldmux code`'s own output.
+ */
+data class PairingPrompt(
+    /** The name with bidi, format and control characters removed; empty when nothing is left. */
+    val name: String,
+    /** `host:port`, exactly as it will be connected to. */
+    val address: String,
+    /** First and last four hex digits of the token, e.g. `3fa9…c01d`. */
+    val fingerprint: String,
+)
+
+fun pairingPrompt(p: Pairing): PairingPrompt =
+    PairingPrompt(
+        name = sanitizeDisplayName(p.name),
+        address = p.host,
+        fingerprint = tokenFingerprint(p.token),
+    )
+
+/**
+ * A name made safe to draw next to an address.
+ *
+ * Removes every control character (C0, DEL, C1), every format character (zero-width
+ * joiners and spaces, the bidirectional marks and the embedding/override/isolate
+ * controls U+202A-U+202E and U+2066-U+2069 that can reorder the text around them),
+ * unassigned and private-use code points, and turns the line and paragraph separators
+ * into spaces. Runs of whitespace collapse to one space and the result is trimmed and capped to
+ * the same length the link allows, so one long name cannot push the address out of view.
+ */
+fun sanitizeDisplayName(name: String, max: Int = NAME_MAX): String {
+    val kept = StringBuilder()
+    var lastSpace = true
+    for (c in name) {
+        // Anything that reads as a space (tab, newline, NBSP, the line and paragraph
+        // separators) is one space, so words do not fuse when a separator is removed.
+        if (c.isWhitespace()) {
+            if (!lastSpace) kept.append(' ')
+            lastSpace = true
+            continue
+        }
+        val drop = when (c.category) {
+            CharCategory.CONTROL,
+            CharCategory.FORMAT,
+            CharCategory.LINE_SEPARATOR,
+            CharCategory.PARAGRAPH_SEPARATOR,
+            CharCategory.PRIVATE_USE,
+            CharCategory.UNASSIGNED -> true
+            else -> false
+        }
+        if (drop) continue
+        kept.append(c)
+        lastSpace = false
+    }
+    val out = kept.toString().trim().take(max)
+    // Never end on half of a surrogate pair.
+    return if (out.isNotEmpty() && out.last().isHighSurrogate()) out.dropLast(1) else out
+}
+
+/** `3fa9…c01d`: enough to compare by eye, far too little to be the secret. */
+fun tokenFingerprint(token: String): String =
+    if (token.length < 8) "" else token.take(4).lowercase() + "\u2026" + token.takeLast(4).lowercase()
+
 private fun pairingProblem(p: Pairing): String? {
     val hp = splitHost(p.host) ?: return "host"
     if (!isTailnetOrLoopback(hp.first)) return "host"
@@ -47,6 +116,10 @@ private fun pairingProblem(p: Pairing): String? {
     if (p.name.length > NAME_MAX || p.name.any { it.code < 0x20 || it.code == 0x7f }) return "name"
     return null
 }
+
+/** Whether [hostPort] (`address:port`) is a literal tailnet or loopback address. */
+fun isAllowedEndpointHost(hostPort: String): Boolean =
+    splitHost(hostPort)?.let { isTailnetOrLoopback(it.first) } == true
 
 /** `address:port` (IPv6 bracketed) split in two, or null when it is not that shape. */
 fun splitHost(host: String): Pair<String, Int>? {

@@ -22,8 +22,13 @@ expect object BackgroundSession {
      * and keep a link up, so a grace window is a real window during which nothing
      * needs to happen. iOS cannot: the process is suspended within seconds and a
      * task that outlives the background window is killed, so a coroutine delay
-     * there is a detach that never runs. iOS answers 0 and releases synchronously
-     * in `didEnterBackground`.
+     * there is a detach that never runs. iOS answers 0.
+     *
+     * Who acts on it: `AppLifecycle.set(false)` (the platform's own `onStop` /
+     * `didEnterBackground` call) hands it to `BackgroundRelease`, which releases
+     * **synchronously, inside that call**, when this is 0, and from a timer owned by no
+     * composition otherwise. It is deliberately not a Compose effect: an effect needs a
+     * live composition and a frame clock, which a suspended process does not have.
      */
     val releaseGraceMs: Long
 
@@ -37,10 +42,11 @@ expect object BackgroundSession {
     fun setActive(active: Boolean, text: String)
 
     /**
-     * Ask to be told the moment a usable network appears, so the client can
-     * retry then rather than waiting out its backoff.
+     * Ask to be told when the usable networks change (one appears, or the one in use is
+     * lost), so the clients can retry at once rather than wait out a backoff, and
+     * check that a socket that looks open still is.
      */
-    fun watchNetwork(onNetworkUp: () -> Unit)
+    fun watchNetwork(onNetworkChange: () -> Unit)
 
     /** Stop watching — the app is going away. */
     fun stopWatchingNetwork()

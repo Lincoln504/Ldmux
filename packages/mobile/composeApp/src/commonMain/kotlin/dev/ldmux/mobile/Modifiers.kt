@@ -141,9 +141,15 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
     if (base !in NAMED_KEYS && base.length != 1) return ModifiedKey.Named(key)
     var prefix = ""
     if (mods.alt) prefix += "M-"
-    if (mods.ctrl) prefix += "C-"
+    // Ctrl has no meaning on Escape or Enter (the daemon sends ESC and CR whatever
+    // the modifier), so a latched Ctrl is spent by them without being named: `C-Escape`
+    // and `C-Enter` are not keys any program is waiting for.
+    if (mods.ctrl && base !in CTRL_INERT) prefix += "C-"
     return ModifiedKey.Named(if (prefix.isEmpty()) base else prefix + base)
 }
+
+/** Named keys a Ctrl modifier does not change. */
+private val CTRL_INERT: Set<String> = setOf("Escape", "Enter")
 
 /**
  * What one typed keystroke does to a latched modifier, as data.

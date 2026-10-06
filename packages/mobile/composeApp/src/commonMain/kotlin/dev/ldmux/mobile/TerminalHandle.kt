@@ -31,9 +31,6 @@ data class LinkStats(
 }
 
 /**
- * A handle to one terminal surface. The native sidebar drives the terminal
- * through this, so controls live in native chrome rather than inside a WebView.
- *//**
  * What a program running in the shell asked the *system* clipboard to do.
  *
  * This is the shell driving the phone, not the phone driving the shell. A program
@@ -51,6 +48,10 @@ sealed interface ClipboardRequest {
     data class Set(val text: String) : ClipboardRequest
 }
 
+/**
+ * A handle to one terminal surface. The shared chrome drives the terminal through
+ * this, so controls live in the app's own chrome rather than inside the surface.
+ */
 interface TerminalHandle {
     fun sendKey(name: String)
     fun sendText(text: String)
@@ -65,8 +66,15 @@ interface TerminalHandle {
      * first line before the user has seen the rest. The default here is the plain
      * path, so an implementation that cannot know the program's mode is at least
      * never wrong about the bytes it is asked to send.
+     *
+     * Returns whether the text went anywhere. `false` means it was **refused** — the
+     * link is down, or another device holds the shell — and the caller must not act as
+     * if it had been pasted: a paste into nothing used to vanish without a trace.
      */
-    fun paste(text: String) = sendText(text)
+    fun paste(text: String): Boolean {
+        sendText(text)
+        return true
+    }
 
     /**
      * Selection. Defaults make every one of these a no-op, so a handle that
@@ -76,14 +84,6 @@ interface TerminalHandle {
     val hasSelection: Boolean get() = false
 
     fun selectionGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int) {}
-
-    fun beginSelection(col: Int, row: Int, atMs: Long) {}
-
-    fun selectWordAt(col: Int, row: Int, atMs: Long) {}
-
-    fun extendSelection(col: Int, row: Int, atMs: Long) {}
-
-    fun endSelection(col: Int, row: Int, valid: Boolean, atMs: Long): String? = null
 
     /**
      * Set the selection to an explicit inclusive range of viewport cells, for the
@@ -136,9 +136,6 @@ interface TerminalHandle {
      * acting because a caller dragging a selection has to move its anchored end by
      * what happened rather than by what it asked for, and a `Unit` return left it no
      * way to tell those two apart.
-     */
-    /**
-     * Scroll the viewport by [rows], negative being back into history.
      *
      * [pageInHistory] is false when the caller is a live selection gesture. A
      * page-in replaces the engine, so asking for one mid-drag throws away the
@@ -191,6 +188,13 @@ interface TerminalHandle {
     val ended: StateFlow<Boolean>
         get() = EMPTY_ENDED
 
+    /**
+     * The daemon refused this device's token: the pairing is stale (rotated) and
+     * retrying cannot fix it. A state, for the same reason as [ownedBy].
+     */
+    val rejected: StateFlow<Boolean>
+        get() = EMPTY_ENDED
+
     /** The user confirmed: take the shell from whoever has it. */
     fun takeOver() {}
 
@@ -213,11 +217,11 @@ interface TerminalHandle {
         get() = EMPTY_LINK
 
     companion object {
-        /** For surfaces that do not report link state (the web view, tests). */
+        /** For surfaces that do not report link state (tests). */
         val EMPTY_LINK: StateFlow<LinkStats> = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
-        /** For surfaces that do not report ownership (the web view, tests). */
+        /** For surfaces that do not report ownership (tests). */
         val EMPTY_OWNED: StateFlow<String?> = MutableStateFlow(null)
-        /** For surfaces whose shell cannot end (the web view, tests). */
+        /** For surfaces whose shell cannot end (tests). */
         val EMPTY_ENDED: StateFlow<Boolean> = MutableStateFlow(false)
     }
 }

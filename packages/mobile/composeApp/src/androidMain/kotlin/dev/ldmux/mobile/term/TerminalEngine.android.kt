@@ -3,38 +3,49 @@ package dev.ldmux.mobile.term
 import dev.ldmux.mobile.ClipboardRequest
 
 /** Android actual: a thin wrapper over the JNI shim. */
+/**
+ * Android actual: a thin wrapper over the JNI shim.
+ *
+ * Thread-safety: the native core is single-threaded by contract, and every call
+ * here goes through a [GuardedHandle], so [close] may be called from any thread,
+ * more than once, and concurrently with other calls; whatever arrives after it is
+ * a no-op that returns the "nothing" answer.
+ */
 actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
-    private var handle: Long = if (NativeTerminal.available) NativeTerminal.create(cols, rows) else 0L
+    private val native = GuardedHandle(
+        create = { if (NativeTerminal.available) NativeTerminal.create(cols, rows) else 0L },
+        destroy = { NativeTerminal.destroy(it) },
+    )
 
     actual fun write(bytes: ByteArray, length: Int) {
-        if (handle != 0L && length > 0) NativeTerminal.write(handle, bytes, length)
+        // Never trust the caller's length past the array: the JNI side clamps too.
+        val n = minOf(length, bytes.size)
+        if (n > 0) native.use(Unit) { NativeTerminal.write(it, bytes, n) }
     }
 
     actual fun resize(cols: Int, rows: Int) {
-        if (handle != 0L) NativeTerminal.resize(handle, cols, rows)
+        native.use(Unit) { NativeTerminal.resize(it, cols, rows) }
     }
 
     actual fun scrollBy(rows: Int) {
-        if (handle != 0L && rows != 0) NativeTerminal.scroll(handle, rows)
+        if (rows != 0) native.use(Unit) { NativeTerminal.scroll(it, rows) }
     }
 
     actual fun scrollToTop() {
-        if (handle != 0L) NativeTerminal.scroll(handle, NativeTerminal.SCROLL_TOP)
+        native.use(Unit) { NativeTerminal.scroll(it, NativeTerminal.SCROLL_TOP) }
     }
 
     actual fun scrollToBottom() {
-        if (handle != 0L) NativeTerminal.scroll(handle, NativeTerminal.SCROLL_BOTTOM)
+        native.use(Unit) { NativeTerminal.scroll(it, NativeTerminal.SCROLL_BOTTOM) }
     }
 
     actual fun render(): TerminalFrame.Frame? {
-        if (handle == 0L) return null
-        val bytes = NativeTerminal.render(handle) ?: return null
+        val bytes = native.use<ByteArray?>(null) { NativeTerminal.render(it) } ?: return null
         return TerminalFrame.decode(bytes)
     }
 
     actual fun takeClipboardRequest(): ClipboardRequest? {
-        if (handle == 0L) return null
-        val answer = NativeTerminal.takeClipboard(handle) ?: return null
+        val answer = native.use<ByteArray?>(null) { NativeTerminal.takeClipboard(it) } ?: return null
         if (answer.isEmpty()) return null
         return when (answer[0].toInt()) {
             NativeTerminal.CLIPBOARD_CLEAR -> ClipboardRequest.Clear
@@ -48,20 +59,20 @@ actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
     }
 
     actual fun setGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int) {
-        if (handle != 0L) NativeTerminal.setGeometry(handle, columns, cellW, cellH, padLeft, screenH)
+        native.use(Unit) { NativeTerminal.setGeometry(it, columns, cellW, cellH, padLeft, screenH) }
     }
 
     actual fun selectionPress(col: Int, row: Int, timeMs: Long): Boolean =
-        handle != 0L && NativeTerminal.selectionPress(handle, col, row, timeMs)
+        native.use(false) { NativeTerminal.selectionPress(it, col, row, timeMs) }
 
     actual fun selectionDeepPress(timeMs: Long): Boolean =
-        handle != 0L && NativeTerminal.selectionDeepPress(handle, timeMs)
+        native.use(false) { NativeTerminal.selectionDeepPress(it, timeMs) }
 
     actual fun selectionDrag(col: Int, row: Int, timeMs: Long): Boolean =
-        handle != 0L && NativeTerminal.selectionDrag(handle, col, row, timeMs)
+        native.use(false) { NativeTerminal.selectionDrag(it, col, row, timeMs) }
 
     actual fun selectionRelease(col: Int, row: Int, valid: Boolean, timeMs: Long): Boolean =
-        handle != 0L && NativeTerminal.selectionRelease(handle, col, row, valid, timeMs)
+        native.use(false) { NativeTerminal.selectionRelease(it, col, row, valid, timeMs) }
 
     actual fun selectionSet(
         startCol: Int,
@@ -69,28 +80,26 @@ actual class TerminalEngine actual constructor(cols: Int, rows: Int) {
         endCol: Int,
         endRow: Int,
     ): Boolean =
-        handle != 0L &&
-            NativeTerminal.selectionSet(handle, startCol, startRow, endCol, endRow)
+        native.use(false) {
+            NativeTerminal.selectionSet(it, startCol, startRow, endCol, endRow)
+        }
 
     actual fun selectionBounds(): IntArray? =
-        if (handle == 0L) null else NativeTerminal.selectionBounds(handle)
+        native.use<IntArray?>(null) { NativeTerminal.selectionBounds(it) }
 
-    actual fun selectionClear(): Boolean = handle != 0L && NativeTerminal.selectionClear(handle)
+    actual fun selectionClear(): Boolean = native.use(false) { NativeTerminal.selectionClear(it) }
 
     actual fun selectionSelectAll(): Boolean =
-        handle != 0L && NativeTerminal.selectionSelectAll(handle)
+        native.use(false) { NativeTerminal.selectionSelectAll(it) }
 
     actual fun selectionText(): String? {
-        if (handle == 0L) return null
         // Plain UTF-8 again, for the same reason as the clipboard: a JNI string
         // would have to be modified UTF-8 and would mangle anything off the BMP.
-        return NativeTerminal.selectionText(handle)?.decodeToString()
+        return native.use<ByteArray?>(null) { NativeTerminal.selectionText(it) }?.decodeToString()
     }
 
+    /** Free the native terminal. Idempotent and safe from any thread. */
     actual fun close() {
-        if (handle != 0L) {
-            NativeTerminal.destroy(handle)
-            handle = 0L
-        }
+        native.close()
     }
 }

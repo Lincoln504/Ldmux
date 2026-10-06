@@ -339,7 +339,12 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
 
-    LaunchedEffect(Unit) { client.start(scope) }
+    // Started with the composition and stopped with it. Nothing ever stopped it, so the
+    // launcher socket pinged the daemon for as long as the process lived.
+    DisposableEffect(client) {
+        client.start(scope)
+        onDispose { client.stop() }
+    }
     val sessions by client.sessions.collectAsState()
     val desktop by client.desktop.collectAsState()
     val connected by client.connected.collectAsState()
@@ -351,6 +356,8 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // A phone that has just rejoined the wifi should not wait out the retry
     // backoff: the network callback cuts it short.
     DisposableEffect(Unit) {
+        // A network change: cut a backoff short, and have every open socket check that it
+        // is still alive (the one on the old network will not say so by itself).
         BackgroundSession.watchNetwork {
             client.reconnectNow()
             NetworkWake.fire()
@@ -503,23 +510,41 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // everything exactly as it was. Past it the user has gone somewhere, and the
     // honest thing is to be a list of shells when they return.
     //
+    // **This is registered with the platform lifecycle, not run as an effect.** An
+    // effect needs a live composition and a frame clock, and a suspended iOS process
+    // has neither: the release would be a coroutine that never ran. `AppLifecycle.set`
+    // — the platform's own callback — runs the handler (synchronously when the platform's
+    // grace is 0), so the release is an explicit call (see `BackgroundRelease`).
+    //
     // Deliberately the same mechanism as the launcher button: dropping the pages
-    // *is* the detach, so there is one way for a shell to be let go of.
+    // *is* the detach, so there is one way for a shell to be let go of. The launcher
+    // socket stops too (it is restarted on return, below).
+    DisposableEffect(client) {
+        val removeRelease = AppLifecycle.setReleaseHandler {
+            pageSelection = emptySet()
+            showLauncher = true
+            client.stop()
+        }
+        // A microphone that outlives the screen is a microphone nobody asked for, and
+        // it is stopped at once, not after the grace.
+        val removeVoice = AppLifecycle.onBackground { Dictation.stop() }
+        onDispose {
+            removeRelease()
+            removeVoice()
+        }
+    }
     LaunchedEffect(AppLifecycle.foreground) {
         if (AppLifecycle.foreground) {
+            // Back on screen after the launcher socket was let go: bring it up (a no-op
+            // when it is running).
+            client.start(scope)
             // **Fresh session data on the way back in.** The daemon pushes a
             // broadcast whenever a directory changes, so this is belt and braces —
             // but the case it covers is the one the push cannot: a phone that was
             // asleep, whose socket came back with the app and whose list is
-            // whatever it was before. Asked *here*, on resume. The comment below
-            // said "on resume" while the call sat on the backgrounding edge, where
-            // nobody is looking at the list being refreshed.
+            // whatever it was before.
             if (connected) client.refreshSessions()
-            return@LaunchedEffect
         }
-        delay(BackgroundSession.releaseGraceMs)
-        pageSelection = emptySet()
-        showLauncher = true
     }
 
     // **A shell that ends takes its page with it, and the last one takes the pager.**
@@ -552,6 +577,7 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // behind a notification that had said it disconnected.
     LaunchedEffect(Unit) {
         DisconnectRequests.requests.collect {
+            DisconnectRequests.handled()
             pageSelection = emptySet()
             showLauncher = true
         }
@@ -601,15 +627,31 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // Carries out the "go to the shell just created" request from above. It lives
     // here because this is where the pager exists; the request is made there because
     // that is where the daemon's answer arrives.
-    LaunchedEffect(gotoSessionId, pages) {
+    LaunchedEffect(gotoSessionId, pages, sessions, connected) {
         val want = gotoSessionId ?: return@LaunchedEffect
-        val at = pages.indexOfFirst { it.id == want }
-        if (at < 0) return@LaunchedEffect
-        // Named as the intent first: the scroll below is programmatic, and the
-        // watcher below distinguishes intent from a re-measure by this id.
-        shownSessionId.value = want
-        pagerState.scrollToPage(at)
-        gotoSessionId = null
+        when (gotoState(want, sessions, pages.map { it.id }, connected)) {
+            GotoState.Arrive -> {
+                val at = pages.indexOfFirst { it.id == want }
+                // Named as the intent first: the scroll below is programmatic, and the
+                // watcher below distinguishes intent from a re-measure by this id.
+                shownSessionId.value = want
+                pagerState.scrollToPage(at)
+                gotoSessionId = null
+            }
+            // It can never arrive (it died, or the link dropped): an outstanding request
+            // blocks the "none of my shells is left" rule below, so it must not linger.
+            GotoState.Abandon -> gotoSessionId = null
+            GotoState.Wait -> Unit
+        }
+    }
+    // And a shell that is merely never listed cannot hold the request forever either.
+    // Keyed on the request alone, so the session list's own broadcasts do not keep
+    // restarting the clock.
+    LaunchedEffect(gotoSessionId) {
+        if (gotoSessionId != null) {
+            delay(GOTO_TIMEOUT_MS)
+            gotoSessionId = null
+        }
     }
 
     // A mode change is accompanied by a rotation, and the rotation is Android's:
@@ -767,11 +809,6 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         Dictation.stop()
     }
 
-    // A microphone that outlives the screen is a microphone nobody asked for.
-    LaunchedEffect(AppLifecycle.foreground) {
-        if (!AppLifecycle.foreground) Dictation.stop()
-    }
-
     // The banner is feedback rather than a notification. It is drawn over the
     // terminal, so a line that stays is a row of the terminal that stays covered —
     // and a failure that has been read, or never will be, is not worth that. Refused
@@ -879,18 +916,24 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                 // empty string: it is "wherever the daemon is", which is the
                 // host's working directory — the same default every other caller
                 // gets.
-                client.create("shell", path.ifBlank { null })
-                // ...and *go to it*. Creating a shell and leaving the user on the
-                // screen that created it is a shell they cannot reach. The going is
-                // the `gotoSessionId` request above, made when the daemon answers.
+                //
+                // ...and *go to it*, but only if the request was actually sent. Creating
+                // a shell and leaving the user on the screen that created it is a shell
+                // they cannot reach; navigating to an empty terminal for a request that
+                // never left the phone (offline) is the same stall with a worse message.
+                // When it was refused, `create` says so itself (the error banner on this
+                // screen) and the user stays here. The going is the `gotoSessionId`
+                // request above, made when the daemon answers.
                 //
                 // The selection is deliberately **not** cleared here. It used to be,
                 // and that silently closed every shell already open: the page set is
                 // what ◀ ▶ walk, so opening a second shell left one page and the
                 // arrows with nowhere to go. Creating a shell is not a reason to let
                 // go of the others.
-                pendingOpens = 1
-                showLauncher = false
+                if (client.create("shell", path.ifBlank { null })) {
+                    pendingOpens = 1
+                    showLauncher = false
+                }
             },
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
@@ -968,9 +1011,6 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                             pageSelection = emptySet()
                             showLauncher = true
                         },
-                        // Named rather than trailing: `press` is a parameter now, and
-                        // a trailing lambda would bind to it.
-                        onSettings = { showSettings = true },
                         press = press,
                         shownId = shownSessionId.value,
                         onShow = { id -> shownSessionId.value = id },
@@ -1034,7 +1074,6 @@ private fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         pageSelection = emptySet()
                         showLauncher = true
                     },
-                    onSettings = { showSettings = true },
                     modifiers = currentHandle?.modifiers ?: Modifiers(),
                     onSticky = { which -> currentHandle?.toggleModifier(which) },
                     press = press,
@@ -1199,6 +1238,16 @@ private fun TerminalArea(
                 LaunchedEffect(gone) {
                     if (gone) onShellGone(s.id)
                 }
+                // Say so when input has nowhere to go. It is refused (not queued, not
+                // painted by prediction) while the link is down, and a refusal with no
+                // message is a terminal that has silently stopped listening.
+                val linkNow by handle.link.collectAsState()
+                val tokenRefused by handle.rejected.collectAsState()
+                if (tokenRefused) {
+                    LinkNotice("pairing rejected \u00b7 pair again in settings")
+                } else if (linkNow.offline && madeVisitable == null) {
+                    LinkNotice("offline \u00b7 input is not being sent")
+                }
               }
             }
         }
@@ -1216,14 +1265,39 @@ private fun TerminalArea(
  */
 @Composable
 private fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    // The address is **always** shown, and the name is only a label beside it: the name
+    // is whatever the code's author typed, and showing it in place of the host let a
+    // code say "work laptop" and point anywhere on the tailnet. See [pairingPrompt].
+    val prompt = pairingPrompt(p)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("pair with ${p.name.ifEmpty { p.host }}?", color = Fg) },
+        title = { Text("pair with this computer?", color = Fg) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (prompt.name.isNotEmpty()) PairingFact("name", prompt.name)
+                PairingFact("address", prompt.address)
+                PairingFact("token", prompt.fingerprint)
+                Text(
+                    "Everything you type will be sent to this address.",
+                    color = Dim,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        },
         containerColor = Surface,
         tonalElevation = 0.dp,
         confirmButton = { MiniTextButton(onClick = onConfirm) { Text("pair", color = Accent) } },
         dismissButton = { MiniTextButton(onClick = onDismiss) { Text("cancel", color = Dim) } },
     )
+}
+
+@Composable
+private fun PairingFact(label: String, value: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, color = Dim, fontSize = 12.sp, modifier = Modifier.width(56.dp))
+        Text(value, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    }
 }
 
 @Composable
@@ -1263,7 +1337,6 @@ private fun PortraitBar(
     menuExpanded: Boolean,
     onMenuDismiss: () -> Unit,
     onLauncher: () -> Unit,
-    onSettings: () -> Unit,
     modifiers: Modifiers,
     onSticky: (StickyKey) -> Unit,
     press: (String) -> Unit,
@@ -1284,7 +1357,6 @@ private fun PortraitBar(
             pagerState,
             scope,
             onLauncher,
-            onSettings,
             currentId = shownId,
             onShow = onShow,
             showMenu = false,
@@ -1316,7 +1388,7 @@ private fun PortraitBar(
                 IconBtn(onClick = onMenu, label = "menu", modifier = Modifier.fillMaxWidth(), filled = true) {
                     IconLauncher(Fg, box = LocalTouch.current.icon)
                 }
-                AppMenu(menuExpanded, onMenuDismiss, onLauncher, onSettings) // settings on toolbar, not menu
+                AppMenu(menuExpanded, onMenuDismiss, onLauncher)
             }
         }
         // The keyboard, up or down: one toggle, a plain keyboard glyph, lit while
@@ -1430,7 +1502,6 @@ private fun ShellHeader(
     pagerState: PagerState,
     scope: CoroutineScope,
     onLauncher: () -> Unit,
-    onSettings: () -> Unit,
     // The shell on screen, by id — not the pager's page index, which a
     // re-measure resets underneath the user (see `shownSessionId` in App). The
     // title, the count and the arrows describe the shell the user is on.
@@ -1470,7 +1541,6 @@ private fun ShellHeader(
                     expanded = menuOpen,
                     onDismiss = { menuOpen = false },
                     onLauncher = onLauncher,
-                    onSettings = onSettings, // settings on toolbar, not menu
                 )
             }
         }
@@ -1510,7 +1580,6 @@ private fun SidePanel(
     onKill: (Session) -> Unit,
     onVoice: () -> Unit,
     onLauncher: () -> Unit,
-    onSettings: () -> Unit,
     press: (String) -> Unit,
     shownId: String?,
     onShow: (String) -> Unit,
@@ -1524,7 +1593,7 @@ private fun SidePanel(
             .padding(horizontal = 8.dp, vertical = LocalTouch.current.rowPad * 2),
         verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
     ) {
-        ShellHeader(pages, pagerState, scope, onLauncher, onSettings, currentId = shownId, onShow = onShow)
+        ShellHeader(pages, pagerState, scope, onLauncher, currentId = shownId, onShow = onShow)
 
         PanelDivider()
 
@@ -1853,6 +1922,22 @@ private fun PairingRow(current: LdmuxConfig, onPaired: (Pairing) -> Unit, onUnpa
     }
 }
 
+/** A one-line notice over the top of a page: the link is the reason nothing is happening. */
+@Composable
+private fun BoxScope.LinkNotice(text: String) {
+    Box(
+        Modifier
+            .align(Alignment.TopCenter)
+            .padding(8.dp)
+            .clip(RadiusMedium)
+            .background(Surface.copy(alpha = 0.92f))
+            .border(1.dp, Line, RadiusMedium)
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
+    ) {
+        Text(text, color = Warn, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+    }
+}
+
 /**
  * "Another device is using this shell."
  *
@@ -1921,7 +2006,6 @@ fun AppMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
     onLauncher: () -> Unit,
-    onSettings: () -> Unit, // kept for call-site compat; settings lives on the toolbar, not the menu
 ) {
     MaterialTheme(
         colorScheme = LdmuxColors,
@@ -1945,10 +2029,9 @@ fun AppMenu(
                 modifier = Modifier.height(LocalTouch.current.min),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
             )
-            // Settings is a separate button on the toolbar (see `onSettings` at
-            // line ~875 and ~951), not part of the overflow menu — keeping it
-            // here as a single-item dropdown keeps the menu from being a full-
-            // width bar that wastes screen real estate.
+            // Settings is a separate button on the toolbar, not part of the overflow
+            // menu — keeping this a single-item dropdown keeps the menu from being a
+            // full-width bar that wastes screen real estate.
         }
     }
 }

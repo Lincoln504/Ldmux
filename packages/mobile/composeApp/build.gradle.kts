@@ -73,6 +73,13 @@ android {
         }
     }
 
+    testOptions {
+        // JVM unit tests run against the SDK's stub jar. Without this `appLog` (and any
+        // other android.* call on a path under test) throws "not mocked"; with it the
+        // stubs return defaults, so the *shared* logic is testable without a device.
+        unitTests.isReturnDefaultValues = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11

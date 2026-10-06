@@ -56,8 +56,20 @@ data class LdmuxConfig(
      */
     val pairName: String = "",
 ) {
-    /** Paired means there is somewhere to connect and something to connect with. */
-    val isPaired: Boolean get() = host.isNotEmpty() && token.isNotEmpty()
+    /**
+     * Paired means there is somewhere to connect and something to connect with — and
+     * that the place is one this app may speak cleartext to.
+     *
+     * The transport is plain `ws://` (WireGuard is the encryption, ADR-0016), and
+     * Android's network security config cannot say "100.64.0.0/10 only" (it matches
+     * domains, never address ranges), so cleartext is permitted app-wide there and
+     * **this is the gate**: the only sockets the app opens are built from [endpoint],
+     * and [endpoint] exists only for a tailnet or loopback literal — the same rule a
+     * pairing link is held to (`isTailnetOrLoopback`). A host saved by an older version
+     * that fails it reads as unpaired instead of sending a bearer token across the
+     * open internet.
+     */
+    val isPaired: Boolean get() = host.isNotEmpty() && token.isNotEmpty() && isAllowedEndpointHost(host)
 
     /** What the app calls the machine it is paired with. */
     val pairedName: String get() = pairName.ifEmpty { host }

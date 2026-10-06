@@ -18,11 +18,39 @@ static LdmuxTerminal *handle_of(jlong handle) {
   return (LdmuxTerminal *)(intptr_t)handle;
 }
 
+/*
+ * Everything that crosses from Java is untrusted for range. A jint is signed and
+ * the core takes unsigned or 16-bit values, so a negative coordinate used to become
+ * a huge uint32 and then truncate to some arbitrary u16 column. These clamp to the
+ * range the core can represent instead.
+ */
+static uint32_t clamp_u16(jint v) {
+  if (v < 0) return 0;
+  if (v > 0xFFFF) return 0xFFFF;
+  return (uint32_t)v;
+}
+
+static uint32_t clamp_px(jint v) { return v < 0 ? 0u : (uint32_t)v; }
+
+static uint64_t clock_ms(jlong v) { return v < 0 ? 0u : (uint64_t)v; }
+
+/* A grid is at least 1x1 and at most LDMUX_MAX_DIM on a side. The core clamps as
+ * well; this keeps the jint -> u16 narrowing from wrapping first. */
+static uint16_t clamp_dim(jint v) {
+  if (v < 1) return 1;
+  if (v > LDMUX_MAX_DIM) return LDMUX_MAX_DIM;
+  return (uint16_t)v;
+}
+
+/* Bytes copied per JNI call in `write`. The array is never pinned whole: that
+ * either copied it entire per call or held the GC off it for the parse. */
+#define LDMUX_JNI_CHUNK 16384
+
 JNIEXPORT jlong JNICALL
 Java_dev_ldmux_mobile_term_NativeTerminal_create(JNIEnv *env, jclass cls,
                                                  jint cols, jint rows) {
   (void)env; (void)cls;
-  return (jlong)(intptr_t)ldmux_terminal_new((uint16_t)cols, (uint16_t)rows);
+  return (jlong)(intptr_t)ldmux_terminal_new(clamp_dim(cols), clamp_dim(rows));
 }
 
 JNIEXPORT void JNICALL
@@ -39,10 +67,20 @@ Java_dev_ldmux_mobile_term_NativeTerminal_write(JNIEnv *env, jclass cls,
   (void)cls;
   LdmuxTerminal *t = handle_of(handle);
   if (!t || !data || len <= 0) return;
-  jbyte *buf = (*env)->GetByteArrayElements(env, data, NULL);
-  if (!buf) return;
-  ldmux_terminal_write(t, (const uint8_t *)buf, (size_t)len);
-  (*env)->ReleaseByteArrayElements(env, data, buf, JNI_ABORT);
+  /* `len` is the caller's claim; the array is the truth. Reading past the array's
+   * end through a pinned pointer would be an out-of-bounds read of the VM's heap. */
+  jsize have = (*env)->GetArrayLength(env, data);
+  if (have <= 0) return;
+  jsize total = len < have ? len : have;
+  jbyte chunk[LDMUX_JNI_CHUNK];
+  for (jsize off = 0; off < total;) {
+    jsize n = total - off;
+    if (n > LDMUX_JNI_CHUNK) n = LDMUX_JNI_CHUNK;
+    (*env)->GetByteArrayRegion(env, data, off, n, chunk);
+    if ((*env)->ExceptionCheck(env)) return; /* leave it pending for the caller */
+    ldmux_terminal_write(t, (const uint8_t *)chunk, (size_t)n);
+    off += n;
+  }
 }
 
 JNIEXPORT void JNICALL
@@ -50,7 +88,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_resize(JNIEnv *env, jclass cls,
                                                  jlong handle, jint cols,
                                                  jint rows) {
   (void)env; (void)cls;
-  ldmux_terminal_resize(handle_of(handle), (uint16_t)cols, (uint16_t)rows);
+  ldmux_terminal_resize(handle_of(handle), clamp_dim(cols), clamp_dim(rows));
 }
 
 JNIEXPORT void JNICALL
@@ -67,6 +105,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
   const uint8_t *buf = NULL;
   size_t len = 0;
   if (!ldmux_terminal_render(handle_of(handle), &buf, &len)) return NULL;
+  if (len > (size_t)INT32_MAX) return NULL;
   jbyteArray result = (*env)->NewByteArray(env, (jsize)len);
   if (!result) return NULL;
   (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (const jbyte *)buf);
@@ -89,6 +128,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
   size_t len = 0;
   int kind = ldmux_terminal_take_clipboard(handle_of(handle), &buf, &len);
   if (kind == LDMUX_CLIPBOARD_NONE) return NULL;
+  if (len > (size_t)INT32_MAX - 1) len = 0; /* unreachable under the shim's cap */
   jbyte kind_byte = (jbyte)kind;
   jbyteArray result = (*env)->NewByteArray(env, (jsize)(len + 1));
   if (!result) return NULL;
@@ -115,9 +155,9 @@ Java_dev_ldmux_mobile_term_NativeTerminal_setGeometry(JNIEnv *env, jclass cls,
                                                       jint pad_left,
                                                       jint screen_h) {
   (void)env; (void)cls;
-  ldmux_terminal_set_geometry(handle_of(handle), (uint32_t)columns, (uint32_t)cell_w,
-                              (uint32_t)cell_h, (uint32_t)pad_left,
-                              (uint32_t)screen_h);
+  ldmux_terminal_set_geometry(handle_of(handle), clamp_px(columns), clamp_px(cell_w),
+                              clamp_px(cell_h), clamp_px(pad_left),
+                              clamp_px(screen_h));
 }
 
 JNIEXPORT jboolean JNICALL
@@ -125,8 +165,8 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionPress(JNIEnv *env, jclass cls
                                                          jlong handle, jint col,
                                                          jint row, jlong time_ms) {
   (void)env; (void)cls;
-  return ldmux_terminal_select_press(handle_of(handle), (uint32_t)col, (uint32_t)row,
-                                     (uint64_t)time_ms) ? JNI_TRUE
+  return ldmux_terminal_select_press(handle_of(handle), clamp_u16(col), clamp_u16(row),
+                                     clock_ms(time_ms)) ? JNI_TRUE
                                                         : JNI_FALSE;
 }
 
@@ -135,7 +175,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionDeepPress(JNIEnv *env, jclass
                                                              jlong handle,
                                                              jlong time_ms) {
   (void)env; (void)cls;
-  return ldmux_terminal_select_deep_press(handle_of(handle), (uint64_t)time_ms)
+  return ldmux_terminal_select_deep_press(handle_of(handle), clock_ms(time_ms))
              ? JNI_TRUE
              : JNI_FALSE;
 }
@@ -145,8 +185,8 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionDrag(JNIEnv *env, jclass cls,
                                                         jlong handle, jint col,
                                                         jint row, jlong time_ms) {
   (void)env; (void)cls;
-  return ldmux_terminal_select_drag(handle_of(handle), (uint32_t)col, (uint32_t)row,
-                                    (uint64_t)time_ms) ? JNI_TRUE
+  return ldmux_terminal_select_drag(handle_of(handle), clamp_u16(col), clamp_u16(row),
+                                    clock_ms(time_ms)) ? JNI_TRUE
                                                        : JNI_FALSE;
 }
 
@@ -156,8 +196,8 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionRelease(JNIEnv *env, jclass c
                                                             jint row, jboolean valid,
                                                             jlong time_ms) {
   (void)env; (void)cls;
-  return ldmux_terminal_select_release(handle_of(handle), (uint32_t)col, (uint32_t)row,
-                                       valid == JNI_TRUE ? 1 : 0, (uint64_t)time_ms)
+  return ldmux_terminal_select_release(handle_of(handle), clamp_u16(col), clamp_u16(row),
+                                       valid == JNI_TRUE ? 1 : 0, clock_ms(time_ms))
              ? JNI_TRUE
              : JNI_FALSE;
 }
@@ -195,8 +235,9 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionSet(JNIEnv *env, jclass cls,
                                                        jint startRow, jint endCol,
                                                        jint endRow) {
   (void)env; (void)cls;
-  return ldmux_terminal_selection_set(handle_of(handle), startCol, startRow, endCol,
-                                      endRow)
+  return ldmux_terminal_selection_set(handle_of(handle), (int)clamp_u16(startCol),
+                                      (int)clamp_u16(startRow), (int)clamp_u16(endCol),
+                                      (int)clamp_u16(endRow))
              ? JNI_TRUE
              : JNI_FALSE;
 }

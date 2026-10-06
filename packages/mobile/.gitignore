@@ -7,7 +7,7 @@ local.properties
 native/prebuilt/
 
 # Built by scripts/build-libghostty-vt.sh, not committed (a derived artifact).
-# Gradle packages whatever is here, so run `just android` rather than gradle
+# Gradle packages whatever is here, so run `scripts/android.sh build` rather than gradle
 # alone; test/native-freshness.test.ts fails if this is older than the sources.
 composeApp/src/androidMain/jniLibs/
 

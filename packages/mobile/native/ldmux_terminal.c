@@ -7,10 +7,32 @@
  */
 #include "ldmux_terminal.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <ghostty/vt.h>
+
+/* A growable byte vector. Failure latches `oom` instead of being checked at every
+ * push; the renderer reads it once at the end and drops the extension whole. */
+typedef struct {
+  uint8_t *p;
+  size_t len, cap;
+  bool oom;
+} LdmuxBuf;
+
+/* The engine's style struct is read through `GhosttyStyle`, and the Rust mirror in
+ * crates/vt-sys hard-codes its measured layout. These pin the header this file is
+ * built against to the same numbers, so an engine bump that moves a field fails
+ * the build here instead of silently mis-decoding colours there. */
+_Static_assert(sizeof(GhosttyStyle) == 72, "GhosttyStyle size changed");
+_Static_assert(offsetof(GhosttyStyle, fg_color) == 8, "GhosttyStyle.fg_color moved");
+_Static_assert(offsetof(GhosttyStyle, bg_color) == 24, "GhosttyStyle.bg_color moved");
+_Static_assert(offsetof(GhosttyStyle, underline_color) == 40,
+               "GhosttyStyle.underline_color moved");
+_Static_assert(offsetof(GhosttyStyle, bold) == 56, "GhosttyStyle.bold moved");
+_Static_assert(offsetof(GhosttyStyle, overline) == 63, "GhosttyStyle.overline moved");
+_Static_assert(offsetof(GhosttyStyle, underline) == 64, "GhosttyStyle.underline moved");
 
 struct LdmuxTerminal {
   GhosttyTerminal terminal;
@@ -38,6 +60,13 @@ struct LdmuxTerminal {
    * a size, and this is the one the client is looking at. */
   uint16_t grid_cols;
   uint16_t grid_rows;
+  /* Per-frame extension scratch (see the header's EXTENSION BLOCK). Reused across
+   * renders; reset at the top of each. */
+  LdmuxBuf ul;   /* underline colours: (u32 cell, r, g, b)* */
+  LdmuxBuf refs; /* hyperlink refs: (u32 cell, u16 uri)* */
+  LdmuxBuf uris; /* hyperlink URIs: (u16 len, bytes)* */
+  uint32_t uri_off[LDMUX_URI_DISTINCT_MAX];
+  uint32_t uri_count;
 };
 
 static GhosttyColorRgb resolve_color(GhosttyStyleColor color,
@@ -65,6 +94,36 @@ static void wr32(uint8_t *p, uint32_t v) {
   p[3] = (uint8_t)((v >> 24) & 0xff);
 }
 
+static bool buf_put(LdmuxBuf *b, const void *src, size_t n) {
+  if (b->oom) return false;
+  if (b->len + n > b->cap) {
+    size_t cap = b->cap ? b->cap : 256;
+    while (cap < b->len + n) cap *= 2;
+    uint8_t *grown = (uint8_t *)realloc(b->p, cap);
+    if (!grown) {
+      b->oom = true;
+      return false;
+    }
+    b->p = grown;
+    b->cap = cap;
+  }
+  if (n) memcpy(b->p + b->len, src, n);
+  b->len += n;
+  return true;
+}
+
+static void buf_u16(LdmuxBuf *b, uint16_t v) {
+  uint8_t t[2];
+  wr16(t, v);
+  buf_put(b, t, 2);
+}
+
+static void buf_u32(LdmuxBuf *b, uint32_t v) {
+  uint8_t t[4];
+  wr32(t, v);
+  buf_put(b, t, 4);
+}
+
 static bool ensure_frame(LdmuxTerminal *t, size_t need) {
   if (t->frame_cap >= need) return true;
   size_t cap = t->frame_cap ? t->frame_cap : 4096;
@@ -77,6 +136,10 @@ static bool ensure_frame(LdmuxTerminal *t, size_t need) {
 }
 
 static bool ensure_clip(LdmuxTerminal *t, size_t need) {
+  /* The cap is on the request, not on the buffer's growth: a program that offers
+   * more than this is refused outright rather than truncated (half a clipboard is
+   * worse than none), so the realloc below is bounded by it. */
+  if (need > LDMUX_CLIPBOARD_MAX_BYTES) return false;
   if (t->clip_cap >= need) return true;
   size_t cap = t->clip_cap ? t->clip_cap : 256;
   while (cap < need) cap *= 2;
@@ -130,7 +193,9 @@ static void on_clipboard_write(GhosttyTerminal terminal, void *userdata,
           break;
         }
       }
-      if (pick && (pick->data.len == 0 || ensure_clip(t, pick->data.len))) {
+      if (pick && pick->data.len > LDMUX_CLIPBOARD_MAX_BYTES) {
+        result = GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED;
+      } else if (pick && (pick->data.len == 0 || ensure_clip(t, pick->data.len))) {
         if (pick->data.len > 0) memcpy(t->clip, pick->data.ptr, pick->data.len);
         t->clip_len = pick->data.len;
         t->clip_kind = LDMUX_CLIPBOARD_SET;
@@ -171,7 +236,14 @@ static size_t utf8_encode(uint32_t cp, uint8_t *out) {
   return 4;
 }
 
+static uint16_t clamp_dim(uint16_t v) {
+  if (v < 1) return 1;
+  return v > LDMUX_MAX_DIM ? (uint16_t)LDMUX_MAX_DIM : v;
+}
+
 LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows) {
+  cols = clamp_dim(cols);
+  rows = clamp_dim(rows);
   LdmuxTerminal *t = (LdmuxTerminal *)calloc(1, sizeof(LdmuxTerminal));
   if (!t) return NULL;
   bool ok = ghostty_terminal_new(NULL, &t->terminal, cols, rows) == GHOSTTY_SUCCESS &&
@@ -197,6 +269,14 @@ LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows) {
   ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, t);
   ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
                        (const void *)on_clipboard_write);
+  /* Bound what the engine itself buffers for a kitty (OSC 5522) transaction; its
+   * default is 64 MiB. OSC 52 is bounded by the engine's escape-length limit, and
+   * both paths are capped again in the callback. */
+  {
+    size_t max_bytes = LDMUX_CLIPBOARD_MAX_BYTES;
+    ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES,
+                         &max_bytes);
+  }
   /* GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ is deliberately left unset: enabling it
    * would let any program running in the shell read the user's clipboard, which
    * is a capability this app was never asked for. */
@@ -334,7 +414,8 @@ static GhosttyPoint viewport_point(uint32_t col, uint32_t row) {
   GhosttyPoint p;
   memset(&p, 0, sizeof(p));
   p.tag = GHOSTTY_POINT_TAG_VIEWPORT;
-  p.value.coordinate.x = (uint16_t)col;
+  /* Saturate: a plain cast wrapped, so column 65536 meant column 0. */
+  p.value.coordinate.x = col > 0xFFFFu ? (uint16_t)0xFFFF : (uint16_t)col;
   p.value.coordinate.y = row;
   return p;
 }
@@ -550,6 +631,9 @@ void ldmux_terminal_free(LdmuxTerminal *t) {
   if (t->render_state) ghostty_render_state_free(t->render_state);
   if (t->terminal) ghostty_terminal_free(t->terminal);
   free(t->frame);
+  free(t->ul.p);
+  free(t->refs.p);
+  free(t->uris.p);
   free(t->clip);
   free(t->sel);
   free(t);
@@ -562,7 +646,7 @@ void ldmux_terminal_write(LdmuxTerminal *t, const uint8_t *bytes, size_t len) {
 
 void ldmux_terminal_resize(LdmuxTerminal *t, uint16_t cols, uint16_t rows) {
   if (!t) return;
-  ghostty_terminal_resize(t->terminal, cols, rows, 0, 0);
+  ghostty_terminal_resize(t->terminal, clamp_dim(cols), clamp_dim(rows), 0, 0);
 }
 
 void ldmux_terminal_scroll(LdmuxTerminal *t, int32_t delta) {
@@ -581,6 +665,60 @@ void ldmux_terminal_scroll(LdmuxTerminal *t, int32_t delta) {
     behavior.value.delta = (intptr_t)delta;
   }
   ghostty_terminal_scroll_viewport(t->terminal, behavior);
+}
+
+/* Scratch for one cell's cluster. Far larger than LDMUX_CELL_MAX_UTF8 so the cut
+ * happens here, at a code point boundary, rather than the engine refusing. */
+#define LDMUX_GRAPHEME_SCRATCH 1024
+
+/* Cut `len` bytes of valid UTF-8 down to at most `max`, at a code point boundary:
+ * a cell never carries half a code point. */
+static size_t utf8_clip(const uint8_t *s, size_t len, size_t max) {
+  if (len <= max) return len;
+  size_t cut = max;
+  while (cut > 0 && (s[cut] & 0xC0) == 0x80) cut--; /* s[cut] is a continuation */
+  return cut;
+}
+
+/*
+ * Record the OSC 8 link on the cell at (col,row). Answers whether the cell may
+ * carry the hyperlink flag: false when the URI is empty, over LDMUX_URI_MAX, or
+ * the per-frame table is full, so the flag always has a URI behind it.
+ */
+static bool note_hyperlink(LdmuxTerminal *t, uint32_t col, uint32_t row, uint32_t idx) {
+  GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  if (ghostty_terminal_grid_ref(t->terminal, viewport_point(col, row), &ref) !=
+      GHOSTTY_SUCCESS)
+    return false;
+  uint8_t uri[LDMUX_URI_MAX];
+  size_t n = 0;
+  if (ghostty_grid_ref_hyperlink_uri(&ref, uri, sizeof(uri), &n) != GHOSTTY_SUCCESS ||
+      n == 0 || n > sizeof(uri))
+    return false;
+
+  /* Same URI as an earlier cell: share the table entry. Distinct links are few in
+   * practice and capped, so a linear scan is fine. */
+  uint32_t found = UINT32_MAX;
+  for (uint32_t i = 0; i < t->uri_count; i++) {
+    const uint8_t *e = t->uris.p + t->uri_off[i];
+    size_t elen = (size_t)e[0] | ((size_t)e[1] << 8);
+    if (elen == n && memcmp(e + 2, uri, n) == 0) {
+      found = i;
+      break;
+    }
+  }
+  if (found == UINT32_MAX) {
+    if (t->uri_count >= LDMUX_URI_DISTINCT_MAX ||
+        t->uris.len + 2 + n > LDMUX_URI_TABLE_MAX)
+      return false;
+    t->uri_off[t->uri_count] = (uint32_t)t->uris.len;
+    buf_u16(&t->uris, (uint16_t)n);
+    buf_put(&t->uris, uri, n);
+    found = t->uri_count++;
+  }
+  buf_u32(&t->refs, idx);
+  buf_u16(&t->refs, (uint16_t)found);
+  return true;
 }
 
 bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
@@ -609,8 +747,14 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
   ghostty_render_state_get(t->render_state, GHOSTTY_RENDER_STATE_DATA_CURSOR,
                            &cursor);
 
-  size_t need = FRAME_HEADER + (size_t)cols * (size_t)rows * CELL_RECORD_MAX;
+  /* Start from the floor (header + a record with no text per cell) and grow on
+   * demand per cell: reserving the worst case for every cell was cols*rows*73
+   * bytes for a screen that is nearly all single-byte text. */
+  size_t need = LDMUX_FRAME_HEADER + (size_t)cols * (size_t)rows * LDMUX_CELL_FIXED;
   if (!ensure_frame(t, need)) return false;
+  t->ul.len = t->refs.len = t->uris.len = 0;
+  t->ul.oom = t->refs.oom = t->uris.oom = false;
+  t->uri_count = 0;
 
   uint8_t *buf = t->frame;
   wr16(buf + 0, cols);
@@ -626,7 +770,7 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
   buf[8] = (uint8_t)(cursor.visible ? 1 : 0);
   buf[9] = (uint8_t)cursor.visual_style;
 
-  size_t p = FRAME_HEADER;
+  size_t p = LDMUX_FRAME_HEADER;
   uint8_t def_fg[3] = {colors.foreground.r, colors.foreground.g, colors.foreground.b};
   uint8_t def_bg[3] = {colors.background.r, colors.background.g, colors.background.b};
   buf[10] = def_fg[0]; buf[11] = def_fg[1]; buf[12] = def_fg[2];
@@ -685,6 +829,7 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
    * coordinate system of its own. The flag comes first: a client that predates
    * this reads a zero and draws nothing, which is the whole reason for spending
    * reserved bytes instead of a version bump. */
+  uint8_t sel_row_hi[2] = {0, 0};
   buf[33] = 0;
   buf[34] = 0; buf[35] = 0; buf[36] = 0;
   buf[37] = 0; buf[38] = 0; buf[39] = 0;
@@ -696,6 +841,10 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
       buf[36] = (uint8_t)(sr & 0xFF);
       buf[37] = (uint8_t)(ec & 0xFF); buf[38] = (uint8_t)((ec >> 8) & 0xFF);
       buf[39] = (uint8_t)(er & 0xFF);
+      /* The rows are u8 on the wire at 36/39; the high bytes ride in 46/47 so a
+       * grid taller than 256 rows no longer wraps (set below with the rest). */
+      sel_row_hi[0] = (uint8_t)((sr >> 8) & 0xFF);
+      sel_row_hi[1] = (uint8_t)((er >> 8) & 0xFF);
     }
   }
 
@@ -718,8 +867,11 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
    * has to know: walking from a fabricated (0,0) aims a key run at the wrong
    * cell. Bytes 41..47 are reserved, so the next header field costs nothing. */
   buf[40] = (uint8_t)(cursor.viewport_has_value ? 1 : 0);
-  buf[41] = 0; buf[42] = 0; buf[43] = 0; buf[44] = 0;
-  buf[45] = 0; buf[46] = 0; buf[47] = 0;
+  /* 41: the frame version, 42..45: the extension length (patched once the cells
+   * are written), 46/47: the selection rows' high bytes. */
+  buf[41] = LDMUX_FRAME_VERSION;
+  buf[42] = 0; buf[43] = 0; buf[44] = 0; buf[45] = 0;
+  buf[46] = sel_row_hi[0]; buf[47] = sel_row_hi[1];
   /* The row/cell iterators may skip trailing blank cells, so a fixed cols*rows
    * encoder is mandatory: pad every missing cell with a blank. */
   bool have_row = ghostty_render_state_row_iterator_next(t->row_iter);
@@ -731,7 +883,9 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
                        &t->cells) == GHOSTTY_SUCCESS;
     }
     for (int col = 0; col < cols; col++) {
-      if (p + CELL_RECORD_MAX > t->frame_cap) break;
+      /* Room for the worst record. The buffer may move, so `buf` is re-read. */
+      if (!ensure_frame(t, p + LDMUX_CELL_RECORD_MAX)) return false;
+      buf = t->frame;
       if (!have_cells || !ghostty_render_state_row_cells_next(t->cells)) {
         buf[p++] = 0; buf[p++] = 0; buf[p++] = 0;
         buf[p++] = def_fg[0]; buf[p++] = def_fg[1]; buf[p++] = def_fg[2];
@@ -739,26 +893,35 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
         continue;
       }
 
-      uint32_t glen = 0;
-      ghostty_render_state_row_cells_get(
-          t->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+      GhosttyCell raw = 0;
+      bool have_raw = ghostty_render_state_row_cells_get(
+                          t->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+                          &raw) == GHOSTTY_SUCCESS;
 
-      uint8_t utf8[CELL_MAX_UTF8];
+      /* The cluster as UTF-8, through the engine's bounded call: it writes nothing
+       * and reports the size needed when the buffer is short, so no engine-side
+       * length can overrun this stack buffer. (This used to fetch glen code points
+       * into a fixed uint32_t[32] and trust glen; the engine writes all glen of
+       * them before any cap here applies.) A cluster that does not fit even the
+       * scratch is replaced by its base code point, never read unbounded. */
+      uint8_t gtext[LDMUX_GRAPHEME_SCRATCH];
+      GhosttyBuffer gb;
+      gb.ptr = gtext;
+      gb.cap = sizeof(gtext);
+      gb.len = 0;
       size_t n = 0;
-      if (glen > 0) {
-        uint32_t cps[32];
-        uint32_t want = glen < 32 ? glen : 32;
-        ghostty_render_state_row_cells_get(
-            t->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
-        for (uint32_t i = 0; i < want && n < CELL_MAX_UTF8;) {
-          uint8_t tmp[4];
-          size_t w = utf8_encode(cps[i], tmp);
-          if (n + w > CELL_MAX_UTF8) break;
-          memcpy(utf8 + n, tmp, w);
-          n += w;
-          i++;
+      GhosttyResult gr = ghostty_render_state_row_cells_get(
+          t->cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8, &gb);
+      if (gr == GHOSTTY_SUCCESS && gb.len <= sizeof(gtext)) {
+        n = utf8_clip(gtext, gb.len, LDMUX_CELL_MAX_UTF8);
+      } else if (have_raw) {
+        uint32_t cp = 0;
+        if (ghostty_cell_get(raw, GHOSTTY_CELL_DATA_CODEPOINT, &cp) == GHOSTTY_SUCCESS &&
+            cp != 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+          n = utf8_encode(cp, gtext);
         }
       }
+      const uint8_t *utf8 = gtext;
 
       GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
       ghostty_render_state_row_cells_get(
@@ -769,13 +932,42 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
       uint16_t flags = 0;
       if (style.bold) flags |= LDMUX_FLAG_BOLD;
       if (style.italic) flags |= LDMUX_FLAG_ITALIC;
-      if (style.underline) flags |= LDMUX_FLAG_UNDERLINE;
+      if (style.underline) {
+        /* Bit 2 stays "underlined, whatever the style" so a reader that predates
+         * the style bits still draws a line. Unknown styles degrade to single. */
+        unsigned us = (unsigned)style.underline;
+        if (us > GHOSTTY_SGR_UNDERLINE_DASHED) us = GHOSTTY_SGR_UNDERLINE_SINGLE;
+        flags |= LDMUX_FLAG_UNDERLINE;
+        flags |= (uint16_t)(us << LDMUX_UNDERLINE_STYLE_SHIFT);
+        if (style.underline_color.tag != GHOSTTY_STYLE_COLOR_NONE) {
+          GhosttyColorRgb uc = resolve_color(style.underline_color, &colors, fg);
+          uint32_t idx = (uint32_t)row * (uint32_t)cols + (uint32_t)col;
+          buf_u32(&t->ul, idx);
+          uint8_t rgb3[3] = {uc.r, uc.g, uc.b};
+          buf_put(&t->ul, rgb3, 3);
+        }
+      }
       if (style.faint) flags |= LDMUX_FLAG_FAINT;
       if (style.blink) flags |= LDMUX_FLAG_BLINK;
       if (style.inverse) flags |= LDMUX_FLAG_INVERSE;
       if (style.invisible) flags |= LDMUX_FLAG_INVISIBLE;
       if (style.strikethrough) flags |= LDMUX_FLAG_STRIKETHROUGH;
       if (style.overline) flags |= LDMUX_FLAG_OVERLINE;
+
+      if (have_raw) {
+        GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+        if (ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &wide) == GHOSTTY_SUCCESS) {
+          if (wide == GHOSTTY_CELL_WIDE_WIDE) flags |= LDMUX_FLAG_WIDE;
+          if (wide == GHOSTTY_CELL_WIDE_SPACER_TAIL) flags |= LDMUX_FLAG_SPACER_TAIL;
+        }
+        bool linked = false;
+        if (ghostty_cell_get(raw, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &linked) ==
+                GHOSTTY_SUCCESS && linked) {
+          if (note_hyperlink(t, (uint32_t)col, (uint32_t)row,
+                             (uint32_t)row * (uint32_t)cols + (uint32_t)col))
+            flags |= LDMUX_FLAG_HYPERLINK;
+        }
+      }
 
       /* Selection rides in the cell's own flag word rather than a new header
        * field. Bit 9 was the first free bit, the client already decodes this
@@ -798,6 +990,36 @@ bool ldmux_terminal_render(LdmuxTerminal *t, const uint8_t **out, size_t *len) {
     }
     have_row = ghostty_render_state_row_iterator_next(t->row_iter);
   }
+
+  /* The extension block: sparse per-cell data that does not fit the fixed record.
+   * Omitted whole when a scratch buffer ran out of memory (the cells are still a
+   * complete, correct frame; only the decoration is lost). */
+  size_t ext_len = 0;
+  if (!t->ul.oom && !t->refs.oom && !t->uris.oom) {
+    size_t ul_n = t->ul.len, ref_n = t->refs.len;
+    size_t sec1 = ul_n ? 5 + ul_n : 0;
+    size_t link_payload = 2 + t->uris.len + 4 + ref_n;
+    size_t sec2 = ref_n ? 5 + link_payload : 0;
+    if (!ensure_frame(t, p + sec1 + sec2)) return false;
+    buf = t->frame;
+    if (sec1) {
+      buf[p++] = LDMUX_EXT_UNDERLINE_COLOUR;
+      wr32(buf + p, (uint32_t)ul_n); p += 4;
+      memcpy(buf + p, t->ul.p, ul_n); p += ul_n;
+    }
+    if (sec2) {
+      buf[p++] = LDMUX_EXT_HYPERLINKS;
+      wr32(buf + p, (uint32_t)link_payload); p += 4;
+      wr16(buf + p, (uint16_t)t->uri_count); p += 2;
+      if (t->uris.len) { memcpy(buf + p, t->uris.p, t->uris.len); p += t->uris.len; }
+      wr32(buf + p, (uint32_t)(ref_n / 6)); p += 4;
+      memcpy(buf + p, t->refs.p, ref_n); p += ref_n;
+    }
+    ext_len = sec1 + sec2;
+  }
+  /* else: a scratch buffer ran out of memory. A hyperlink flag then has no URI
+   * behind it, which readers treat as "no link" (documented in the header). */
+  wr32(buf + 42, (uint32_t)ext_len);
 
   *out = t->frame;
   *len = p;

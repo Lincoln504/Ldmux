@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int checks = 0;
@@ -284,7 +285,7 @@ static bool cell_text_at(const uint8_t *buf, size_t len, int want_col, int want_
                          const uint8_t **out, size_t *out_len) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = FRAME_HEADER;
+  size_t p = LDMUX_FRAME_HEADER;
   for (int r = 0; r < rows; r++) {
     for (int c = 0; c < cols; c++) {
       if (p + 9 > len) return false;
@@ -309,7 +310,7 @@ static uint16_t cell_flags_at(const uint8_t *buf, size_t len, int want_col,
                               int want_row) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = FRAME_HEADER;
+  size_t p = LDMUX_FRAME_HEADER;
   for (int r = 0; r < rows; r++) {
     for (int c = 0; c < cols; c++) {
       if (p + 9 > len) return 0;
@@ -330,7 +331,7 @@ static bool row_text_starts(const uint8_t *buf, size_t len, int want_row,
                             const char *want) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = FRAME_HEADER;
+  size_t p = LDMUX_FRAME_HEADER;
   for (int r = 0; r < want_row && r < rows; r++) {
     for (int c = 0; c < cols; c++) {
       if (p + 9 > len) return false;
@@ -401,7 +402,7 @@ static void test_a_wide_glyph_does_not_paint_twice(void) {
 static int selected_cell_count(const uint8_t *buf, size_t len) {
   uint16_t cols = (uint16_t)(buf[0] | (buf[1] << 8));
   uint16_t rows = (uint16_t)(buf[2] | (buf[3] << 8));
-  size_t p = FRAME_HEADER;
+  size_t p = LDMUX_FRAME_HEADER;
   int count = 0;
   for (int r = 0; r < rows; r++) {
     for (int c = 0; c < cols; c++) {
@@ -929,7 +930,7 @@ static void test_a_resize_replay_replaces_the_screen_and_keeps_the_scrollback(vo
   ldmux_terminal_scroll(t, LDMUX_SCROLL_BOTTOM);
   CHECK(ldmux_terminal_render(t, &buf, &len));
   for (int i = 0; i < 10; i++) {
-    char want[8];
+    char want[16];
     snprintf(want, sizeof(want), "N%d", i);
     CHECK(row_text_starts(buf, len, i, want));
   }
@@ -1010,6 +1011,336 @@ static void test_free_with_a_live_selection(void) {
   CHECK(1); /* reached only if free did not trip anything */
 }
 
+
+/* ------------------------------------------- frame v1: cells, clusters, links */
+
+/* A parsed view of one frame: where every cell record starts, and where the
+ * extension block begins. The old helpers walk the same records; this one keeps the
+ * offsets so a test can ask for any cell and then read the extension. */
+typedef struct {
+  const uint8_t *buf;
+  size_t len, ext_at, ext_len;
+  int cols, rows, version;
+  size_t off[8192];
+} Fr;
+
+static bool parse_frame(Fr *f, const uint8_t *buf, size_t len) {
+  f->buf = buf;
+  f->len = len;
+  f->cols = buf[0] | (buf[1] << 8);
+  f->rows = buf[2] | (buf[3] << 8);
+  f->version = buf[41];
+  f->ext_len = (size_t)buf[42] | ((size_t)buf[43] << 8) | ((size_t)buf[44] << 16) |
+               ((size_t)buf[45] << 24);
+  size_t p = LDMUX_FRAME_HEADER;
+  if ((size_t)f->cols * f->rows > 8192) return false;
+  for (int i = 0; i < f->cols * f->rows; i++) {
+    if (p + LDMUX_CELL_FIXED > len) return false;
+    f->off[i] = p;
+    p += LDMUX_CELL_FIXED + buf[p];
+  }
+  f->ext_at = p;
+  return p + f->ext_len == len; /* the frame is exactly cells + extension */
+}
+
+static size_t fr_n(const Fr *f, int col, int row) { return f->buf[f->off[row * f->cols + col]]; }
+static const uint8_t *fr_text(const Fr *f, int col, int row) {
+  return f->buf + f->off[row * f->cols + col] + LDMUX_CELL_FIXED;
+}
+static unsigned fr_flags(const Fr *f, int col, int row) {
+  size_t o = f->off[row * f->cols + col];
+  return (unsigned)(f->buf[o + 1] | (f->buf[o + 2] << 8));
+}
+
+/* Valid UTF-8, strictly enough to catch a cut inside a code point. */
+static bool utf8_ok(const uint8_t *s, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    uint8_t c = s[i];
+    size_t need = c < 0x80 ? 0 : (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : (c >> 3) == 30 ? 3 : 99;
+    if (need == 99 || i + need >= n + (need ? 0 : 1)) {
+      if (need == 99) return false;
+      if (i + need > n - 1 + (need == 0)) return false;
+    }
+    for (size_t k = 1; k <= need; k++)
+      if (i + k >= n || (s[i + k] & 0xC0) != 0x80) return false;
+    i += need + 1;
+  }
+  return true;
+}
+
+/* Find an extension section by kind; returns its payload and length. */
+static const uint8_t *ext_section(const Fr *f, int kind, size_t *plen) {
+  size_t p = f->ext_at, end = f->ext_at + f->ext_len;
+  while (p + 5 <= end) {
+    uint32_t l = (uint32_t)f->buf[p + 1] | ((uint32_t)f->buf[p + 2] << 8) |
+                 ((uint32_t)f->buf[p + 3] << 16) | ((uint32_t)f->buf[p + 4] << 24);
+    if (p + 5 + l > end) return NULL;
+    if (f->buf[p] == kind) {
+      *plen = l;
+      return f->buf + p + 5;
+    }
+    p += 5 + l;
+  }
+  return NULL;
+}
+
+static void test_frame_version_and_extension_length_are_consistent(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(20, 4);
+  feed(t, "plain text");
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  CHECK_EQ_INT(f.version, LDMUX_FRAME_VERSION);
+  CHECK_EQ_INT(f.ext_len, 0); /* nothing sparse on a plain screen */
+  ldmux_terminal_free(t);
+}
+
+static void test_underline_style_is_in_the_flags_and_bit2_still_says_underlined(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(20, 4);
+  feed(t, "\x1b[4mS\x1b[0m\x1b[4:2mD\x1b[0m\x1b[4:3mC\x1b[0m\x1b[4:4mO\x1b[0m\x1b[4:5mH\x1b[0mN");
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  for (int i = 0; i < 5; i++) {
+    unsigned fl = fr_flags(&f, i, 0);
+    CHECK(fl & LDMUX_FLAG_UNDERLINE); /* an old reader still draws a line */
+    CHECK_EQ_INT((fl >> LDMUX_UNDERLINE_STYLE_SHIFT) & LDMUX_UNDERLINE_STYLE_MASK, i + 1);
+  }
+  CHECK(!(fr_flags(&f, 5, 0) & LDMUX_FLAG_UNDERLINE));
+  CHECK_EQ_INT((fr_flags(&f, 5, 0) >> LDMUX_UNDERLINE_STYLE_SHIFT) & LDMUX_UNDERLINE_STYLE_MASK, 0);
+  ldmux_terminal_free(t);
+}
+
+static void test_underline_colour_goes_in_the_extension(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(20, 4);
+  /* cell 0: curly + RGB colour; cell 1: single + palette 9; cell 2: underlined, no colour */
+  feed(t, "\x1b[4:3;58;2;255;64;0mA\x1b[0m\x1b[4;58;5;9mB\x1b[0m\x1b[4mC\x1b[0m");
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  size_t n = 0;
+  const uint8_t *e = ext_section(&f, LDMUX_EXT_UNDERLINE_COLOUR, &n);
+  CHECK(e != NULL);
+  CHECK_EQ_INT(n, 14); /* two coloured cells, 7 bytes each; the third has none */
+  if (e && n == 14) {
+    CHECK_EQ_INT(e[0], 0); /* cell index 0 */
+    CHECK(e[4] == 255 && e[5] == 64 && e[6] == 0);
+    CHECK_EQ_INT(e[7], 1); /* cell index 1: palette 9 resolved to RGB, not an index */
+    CHECK(!(e[11] == 0 && e[12] == 0 && e[13] == 0));
+  }
+  ldmux_terminal_free(t);
+}
+
+static void test_wide_head_and_spacer_tail_are_flagged(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(20, 4);
+  feed(t, "\xe4\xbd\xa0" "a"); /* wide glyph, then a narrow one */
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  CHECK(fr_flags(&f, 0, 0) & LDMUX_FLAG_WIDE);
+  CHECK(!(fr_flags(&f, 0, 0) & LDMUX_FLAG_SPACER_TAIL));
+  CHECK(fr_flags(&f, 1, 0) & LDMUX_FLAG_SPACER_TAIL);
+  CHECK_EQ_INT(fr_n(&f, 1, 0), 0);
+  CHECK(!(fr_flags(&f, 2, 0) & (LDMUX_FLAG_WIDE | LDMUX_FLAG_SPACER_TAIL)));
+  /* a blank the program never wrote is NOT a tail */
+  CHECK(!(fr_flags(&f, 10, 0) & LDMUX_FLAG_SPACER_TAIL));
+  ldmux_terminal_free(t);
+}
+
+static void test_a_zwj_family_is_carried_whole(void) {
+  /* man ZWJ woman ZWJ girl ZWJ boy: 25 bytes, which the old 16-byte cap cut in the
+   * middle of the third emoji. */
+  static const char fam[] = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D"
+                            "\xF0\x9F\x91\xA7\xE2\x80\x8D\xF0\x9F\x91\xA6";
+  LdmuxTerminal *t = ldmux_terminal_new(20, 4);
+  /* The engine only clusters ZWJ sequences into one cell under DEC mode 2027
+   * (grapheme clustering); without it the family spreads over several cells. */
+  feed(t, "\x1b[?2027h");
+  feed(t, fam);
+  feed(t, "z");
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  CHECK_EQ_INT(fr_n(&f, 0, 0), sizeof(fam) - 1);
+  CHECK(memcmp(fr_text(&f, 0, 0), fam, sizeof(fam) - 1) == 0);
+  CHECK(utf8_ok(fr_text(&f, 0, 0), fr_n(&f, 0, 0)));
+  CHECK(fr_flags(&f, 0, 0) & LDMUX_FLAG_WIDE);
+  /* and the next character is where it should be: the cluster is one wide cell */
+  CHECK(fr_n(&f, 2, 0) == 1 && fr_text(&f, 2, 0)[0] == 'z');
+  ldmux_terminal_free(t);
+}
+
+/* Under ASan: a cluster longer than the cap, and one longer than the scratch. Neither
+ * may overrun anything, and neither may come out cut inside a code point. */
+static void test_a_huge_cluster_is_clipped_on_a_code_point_boundary(void) {
+  for (int marks = 20; marks <= 600; marks += (marks < 220 ? 200 : 380)) {
+    LdmuxTerminal *t = ldmux_terminal_new(20, 4);
+    size_t n = 1 + (size_t)marks * 2;
+    uint8_t *s = (uint8_t *)malloc(n + 1);
+    s[0] = 'a';
+    for (int i = 0; i < marks; i++) { s[1 + 2 * i] = 0xCC; s[2 + 2 * i] = 0x81; } /* U+0301 */
+    ldmux_terminal_write(t, s, n);
+    feed(t, "z");
+    free(s);
+    const uint8_t *buf; size_t len;
+    CHECK(ldmux_terminal_render(t, &buf, &len));
+    static Fr f;
+    CHECK(parse_frame(&f, buf, len));
+    size_t cn = fr_n(&f, 0, 0);
+    CHECK(cn >= 1 && cn <= LDMUX_CELL_MAX_UTF8);
+    CHECK(utf8_ok(fr_text(&f, 0, 0), cn));
+    CHECK(fr_text(&f, 0, 0)[0] == 'a');
+    if (marks == 20) CHECK_EQ_INT(cn, 41); /* fits: carried whole */
+    /* whatever the engine did with the cluster, the grid after it is intact */
+    bool z = false;
+    for (int c = 0; c < 4; c++) z = z || (fr_n(&f, c, 0) == 1 && fr_text(&f, c, 0)[0] == 'z');
+    CHECK(z);
+    ldmux_terminal_free(t);
+  }
+}
+
+static void test_hyperlinks_get_a_flag_and_a_shared_uri(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(40, 4);
+  feed(t, "\x1b]8;;https://example.com/a\x07" "ab\x1b]8;;\x07 "
+          "\x1b]8;;https://example.com/b\x07" "c\x1b]8;;\x07"
+          "\x1b]8;;https://example.com/a\x07" "d\x1b]8;;\x07" "e");
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  /* a b _ c d e */
+  CHECK(fr_flags(&f, 0, 0) & LDMUX_FLAG_HYPERLINK);
+  CHECK(fr_flags(&f, 1, 0) & LDMUX_FLAG_HYPERLINK);
+  CHECK(!(fr_flags(&f, 2, 0) & LDMUX_FLAG_HYPERLINK));
+  CHECK(fr_flags(&f, 3, 0) & LDMUX_FLAG_HYPERLINK);
+  CHECK(fr_flags(&f, 4, 0) & LDMUX_FLAG_HYPERLINK);
+  CHECK(!(fr_flags(&f, 5, 0) & LDMUX_FLAG_HYPERLINK));
+  size_t n = 0;
+  const uint8_t *e = ext_section(&f, LDMUX_EXT_HYPERLINKS, &n);
+  CHECK(e != NULL);
+  if (e) {
+    CHECK_EQ_INT(e[0] | (e[1] << 8), 2); /* two distinct URIs for four linked cells */
+    size_t p = 2;
+    const char *want[2] = {"https://example.com/a", "https://example.com/b"};
+    for (int i = 0; i < 2; i++) {
+      size_t l = (size_t)(e[p] | (e[p + 1] << 8));
+      p += 2;
+      CHECK(l == strlen(want[i]) && memcmp(e + p, want[i], l) == 0);
+      p += l;
+    }
+    uint32_t refs = (uint32_t)e[p] | ((uint32_t)e[p + 1] << 8);
+    CHECK_EQ_INT(refs, 4);
+    CHECK_EQ_INT(n, p + 4 + refs * 6);
+  }
+  ldmux_terminal_free(t);
+}
+
+static void test_an_oversized_uri_is_dropped_and_its_flag_with_it(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(40, 4);
+  size_t n = LDMUX_URI_MAX + 10;
+  char *seq = (char *)malloc(n + 64);
+  size_t p = 0;
+  p += (size_t)sprintf(seq, "\x1b]8;;http://x/");
+  memset(seq + p, 'q', n);
+  p += n;
+  p += (size_t)sprintf(seq + p, "\x07" "L\x1b]8;;\x07");
+  ldmux_terminal_write(t, (const uint8_t *)seq, p);
+  free(seq);
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  CHECK(fr_n(&f, 0, 0) == 1 && fr_text(&f, 0, 0)[0] == 'L');
+  /* a flag must always have a URI behind it, so an unservable link is no link */
+  CHECK(!(fr_flags(&f, 0, 0) & LDMUX_FLAG_HYPERLINK));
+  size_t sn = 0;
+  CHECK(ext_section(&f, LDMUX_EXT_HYPERLINKS, &sn) == NULL);
+  ldmux_terminal_free(t);
+}
+
+static void test_a_link_on_every_cell_stays_bounded(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  /* a distinct URI on every cell: far past the table limits */
+  for (int i = 0; i < 80 * 24; i++) {
+    char b[96];
+    int k = sprintf(b, "\x1b]8;;http://h/%d\x07x\x1b]8;;\x07", i);
+    ldmux_terminal_write(t, (const uint8_t *)b, (size_t)k);
+  }
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  static Fr f;
+  CHECK(parse_frame(&f, buf, len));
+  size_t n = 0;
+  const uint8_t *e = ext_section(&f, LDMUX_EXT_HYPERLINKS, &n);
+  CHECK(e != NULL);
+  if (e) CHECK((e[0] | (e[1] << 8)) <= LDMUX_URI_DISTINCT_MAX);
+  CHECK(f.ext_len <= LDMUX_URI_TABLE_MAX + 80 * 24 * 6 + 64);
+  /* every flagged cell has a ref (a flag with no URI is the thing to never emit) */
+  int flagged = 0;
+  for (int r = 0; r < f.rows; r++)
+    for (int c = 0; c < f.cols; c++) flagged += (fr_flags(&f, c, r) & LDMUX_FLAG_HYPERLINK) ? 1 : 0;
+  if (e) {
+    size_t p = 2;
+    for (int i = 0; i < (e[0] | (e[1] << 8)); i++) p += 2 + (size_t)(e[p] | (e[p + 1] << 8));
+    CHECK_EQ_INT((uint32_t)e[p] | ((uint32_t)e[p + 1] << 8), flagged);
+  }
+  ldmux_terminal_free(t);
+}
+
+static void test_selection_rows_above_255_use_the_high_bytes(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(10, 300);
+  ldmux_terminal_set_geometry(t, 10, 10, 20, 0, 6000);
+  for (int i = 0; i < 300; i++) feed(t, "row\r\n");
+  ldmux_terminal_selection_set(t, 1, 270, 4, 290);
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(buf[33], 1);
+  CHECK_EQ_INT(buf[36] | (buf[46] << 8), 270);
+  CHECK_EQ_INT(buf[39] | (buf[47] << 8), 290);
+  ldmux_terminal_free(t);
+}
+
+static void test_the_grid_is_clamped_not_trusted(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(0, 0);
+  CHECK(t != NULL); /* 1x1, not a failed or wild allocation */
+  ldmux_terminal_resize(t, 65535, 65535); /* saturates at LDMUX_MAX_DIM */
+  const uint8_t *buf; size_t len;
+  CHECK(ldmux_terminal_render(t, &buf, &len));
+  CHECK_EQ_INT(buf[0] | (buf[1] << 8), LDMUX_MAX_DIM);
+  ldmux_terminal_free(t);
+}
+
+/* A hostile program offers a clipboard write far bigger than anyone would copy. It
+ * must be refused (or at least never buffered past the cap), not realloc'd to
+ * whatever it asked for. */
+static void test_an_oversized_clipboard_write_is_refused(void) {
+  LdmuxTerminal *t = ldmux_terminal_new(80, 24);
+  size_t groups = (LDMUX_CLIPBOARD_MAX_BYTES / 3) + 5000; /* base64 of ~cap+15000 bytes */
+  size_t n = groups * 4 + 16;
+  char *seq = (char *)malloc(n);
+  size_t p = (size_t)sprintf(seq, "\x1b]52;c;");
+  for (size_t i = 0; i < groups; i++) { memcpy(seq + p, "QUJD", 4); p += 4; }
+  seq[p++] = '\x07';
+  ldmux_terminal_write(t, (const uint8_t *)seq, p);
+  free(seq);
+  const uint8_t *out = NULL; size_t clen = 0;
+  int kind = ldmux_terminal_take_clipboard(t, &out, &clen);
+  CHECK(kind != LDMUX_CLIPBOARD_SET || clen <= LDMUX_CLIPBOARD_MAX_BYTES);
+  CHECK(kind != LDMUX_CLIPBOARD_SET); /* over the cap: refused whole, never truncated */
+  /* and a normal write after it still works */
+  feed(t, "\x1b]52;c;aGVsbG8=\x07");
+  Clip c = take(t);
+  CHECK_EQ_INT(c.kind, LDMUX_CLIPBOARD_SET);
+  CHECK_EQ_INT(c.len, 5);
+  ldmux_terminal_free(t);
+}
+
 int main(void) {
   struct {
     const char *name;
@@ -1056,6 +1387,21 @@ int main(void) {
       {"clear zeroes the frame bits", test_clear_zeroes_the_frame_bits},
       {"empty screen has no selection", test_empty_screen_has_no_selection},
       {"free with a live selection", test_free_with_a_live_selection},
+      {"frame version and extension length are consistent",
+       test_frame_version_and_extension_length_are_consistent},
+      {"underline style is in the flags, bit 2 still says underlined",
+       test_underline_style_is_in_the_flags_and_bit2_still_says_underlined},
+      {"underline colour goes in the extension", test_underline_colour_goes_in_the_extension},
+      {"wide head and spacer tail are flagged", test_wide_head_and_spacer_tail_are_flagged},
+      {"a ZWJ family is carried whole", test_a_zwj_family_is_carried_whole},
+      {"a huge cluster is clipped on a code point boundary",
+       test_a_huge_cluster_is_clipped_on_a_code_point_boundary},
+      {"hyperlinks get a flag and a shared URI", test_hyperlinks_get_a_flag_and_a_shared_uri},
+      {"an oversized URI is dropped with its flag", test_an_oversized_uri_is_dropped_and_its_flag_with_it},
+      {"a link on every cell stays bounded", test_a_link_on_every_cell_stays_bounded},
+      {"selection rows above 255 use the high bytes", test_selection_rows_above_255_use_the_high_bytes},
+      {"the grid is clamped, not trusted", test_the_grid_is_clamped_not_trusted},
+      {"an oversized clipboard write is refused", test_an_oversized_clipboard_write_is_refused},
   };
   const int n = (int)(sizeof(tests) / sizeof(tests[0]));
 

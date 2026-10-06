@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Why cleartext is permitted here, and why this file is not the control.
+
+  The transport is plain `ws://` on purpose: WireGuard (Tailscale) is the encryption
+  (ADR-0016), and the daemon binds only a tailnet or loopback address.
+
+  What this file would ideally say is "cleartext only to 100.64.0.0/10, fd7a:115c:a1e0::/48,
+  loopback and *.ts.net". Android's network security config cannot: a <domain> rule
+  matches a host name (or one literal IP string, or a name and its subdomains), never an
+  address *range*, and a pairing link always carries a literal tailnet address, so the
+  address cannot be listed in advance. The two real options were therefore
+    - deny cleartext here and list only `localhost` and `ts.net`, which makes every
+      ordinary pairing (`host=100.x.y.z:7625`) unreachable; or
+    - permit it here and enforce the range in the app.
+  The second is chosen. The range is enforced where sockets are built:
+  `LdmuxConfig.isPaired` / `Endpoint` accept a host only if `isAllowedEndpointHost` does
+  (the same `isTailnetOrLoopback` rule a pairing link is held to), the app opens no other
+  cleartext connection, and `test/manifest.test.ts` plus `PairingTest` pin both halves.
+
+  What this file does add over the old app-wide `usesCleartextTraffic="true"`: the
+  platform's trust anchors only (no user-installed CAs), stated rather than defaulted.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

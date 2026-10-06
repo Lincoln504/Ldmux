@@ -8,7 +8,6 @@ import io.ktor.client.plugins.websocket.webSocket
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
-import kotlin.random.Random
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 import kotlinx.coroutines.CoroutineScope
@@ -17,16 +16,16 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonObject
 
 /** Terminal modes the server reports, which affect input encoding. */
 data class TerminalModes(
@@ -52,11 +51,82 @@ data class TerminalModes(
 )
 
 /**
+ * One message from the daemon on an attached socket, parsed.
+ *
+ * Unknown `type`s parse to null and are ignored, as are unknown fields: the daemon
+ * gains messages additively (a `session_ended`, a resync capability) and an older
+ * client must keep working against it.
+ */
+internal sealed interface AttachMessage {
+    data object Caps : AttachMessage
+    data class Pong(val id: Int?) : AttachMessage
+    data class Snapshot(
+        val cols: Int,
+        val rows: Int,
+        val screen: String,
+        val history: Boolean,
+        val modes: TerminalModes,
+    ) : AttachMessage
+
+    data class Error(val code: String) : AttachMessage
+    data object MouseDelivered : AttachMessage
+    data class Owned(val holder: String?) : AttachMessage
+}
+
+/** The control message in [text], or null when it is not one this client understands. */
+internal fun parseAttachMessage(text: String): AttachMessage? {
+    val root = parseJsonObject(text) ?: return null
+    return when (root.text("type")) {
+        "caps" -> AttachMessage.Caps
+        "pong" -> AttachMessage.Pong(root.number("id"))
+        "snapshot" -> {
+            val cols = root.number("cols") ?: return null
+            val rows = root.number("rows") ?: return null
+            AttachMessage.Snapshot(
+                cols = cols,
+                rows = rows,
+                screen = root.text("screen"),
+                history = root.flag("history"),
+                modes = TerminalModes(
+                    mouse = root.flag("mouse"),
+                    appCursor = root.flag("appCursor"),
+                    bracketedPaste = root.flag("bracketedPaste"),
+                    alternateOn = root.flag("alternateOn"),
+                    mouseSgr = root.flag("mouseSgr"),
+                    cursorX = root.number("cursorX") ?: 0,
+                    cursorY = root.number("cursorY") ?: 0,
+                ),
+            )
+        }
+        "error" -> AttachMessage.Error(root.text("code").ifEmpty { "error" })
+        "mousedelivered" -> AttachMessage.MouseDelivered
+        "owned" -> AttachMessage.Owned((root["owner"] as? JsonObject)?.optionalText("name")?.ifEmpty { null })
+        else -> null
+    }
+}
+
+/** The payload of an Output frame (8-byte header: type 0x10, u32 BE length), or null. */
+internal fun decodeOutputFrame(data: ByteArray): ByteArray? {
+    if (data.size < 8) return null
+    val type = data[0].toInt() and 0xff
+    if (type != 0x10) return null // FrameType.Output
+    val length = ((data[4].toInt() and 0xff) shl 24) or
+        ((data[5].toInt() and 0xff) shl 16) or
+        ((data[6].toInt() and 0xff) shl 8) or
+        (data[7].toInt() and 0xff)
+    // A length with the top bit set reads negative; it is a corrupt frame, not a big one.
+    if (length <= 0) return null
+    val end = (8L + length).coerceAtMost(data.size.toLong()).toInt()
+    if (end <= 8) return null
+    return data.copyOfRange(8, end)
+}
+
+/**
  * Attaches to one ldmux session and streams its pane output (protocol v1).
  *
  * Control is JSON text frames; terminal output arrives as binary frames with an
  * 8-byte big-endian header (type=0x10 Output, then a u32 length) followed by the
- * payload bytes. See packages/protocol/src/frames.ts and remote.ts.
+ * payload bytes. See `crates/protocol` and `docs/SPEC.md` §6.
  */
 class AttachClient(private val config: LdmuxConfig, private val sessionId: String) {
     /**
@@ -69,13 +139,18 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     private fun httpClient(): HttpClient =
         http ?: HttpClient { ldmuxWebSockets() }.also { http = it }
 
-    private val json = Json { ignoreUnknownKeys = true }
     private var ws: DefaultClientWebSocketSession? = null
     private var job: Job? = null
     private var scope: CoroutineScope? = null
     /** The grid the surface will paint. Sent with attach, and on every change. */
     private var wantCols = 0
     private var wantRows = 0
+
+    /**
+     * Whether a socket is open right now. Input is refused while it is not (see
+     * [InputGate]): a keystroke sent into nothing used to vanish without a trace.
+     */
+    val isConnected: Boolean get() = ws != null
 
     var onSnapshot: ((cols: Int, rows: Int, screen: String, history: Boolean, modes: TerminalModes) -> Unit)? = null
     var onOutput: ((ByteArray) -> Unit)? = null
@@ -112,6 +187,36 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     var onEnded: (() -> Unit)? = null
 
     /**
+     * The daemon answered and refused the token: the pairing is stale (rotated).
+     *
+     * The equivalent of [LinkState.Rejected] on the launcher socket. Without it a
+     * rotated token retried forever with nothing on screen but a link that never
+     * came up. The loop waits (a network change, or [retryNow]) instead of hammering.
+     */
+    var onRejected: (() -> Unit)? = null
+
+    /** The daemon accepted the attach (`caps`): the link is up and the shell is ours. */
+    var onAttached: (() -> Unit)? = null
+
+    /**
+     * Run one callback so that a failure in it is *its* failure.
+     *
+     * A handler throwing used to land in the receive loop's catch-all, which reads
+     * as a dead link: one bad frame or one clipboard failure dropped the socket,
+     * reconnected, and rebuilt the terminal. Each callback is guarded separately, so
+     * a failing snapshot handler does not also lose the pong that follows it.
+     */
+    private inline fun guarded(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            appLog("page $sessionId: $what handler failed: ${e::class.simpleName}")
+        }
+    }
+
+    /**
      * Take the shell from whoever has it.
      *
      * Only ever called after the user was told who has it: attachment is never a
@@ -121,7 +226,16 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     fun takeOver() {
         wantTakeover = true
         reconnectNow()
+        kick.trySend(Unit)
     }
+
+    /** Try again now, from a refused-token wait or any other. */
+    fun retryNow() {
+        kick.trySend(Unit)
+    }
+
+    /** Wakes a loop parked after a refused token. */
+    private val kick = Channel<Unit>(Channel.CONFLATED)
 
     /**
      * Set once the user has consented, consumed by the next attach.
@@ -153,26 +267,28 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
     private var pingSeq = 0
     private var pingSentAt: TimeMark? = null
-    /** Set by the pong handler, read once per ping interval by the pinger. */
-    private var pongSeen = false
+    private val missed = MissedPongs()
+    /** Pongs seen on this client, ever: a network-change probe compares two readings. */
+    private var pongCount = 0
     /** Retry attempts since the last successful connection, for the backoff. */
     private var attempt = 0
 
     fun start(scope: CoroutineScope) {
-        if (job != null) return
+        // `isActive`, not `!= null`: a loop that ended on its own (a shell that is
+        // gone, no pairing) leaves a finished job behind, and that must not make
+        // the page unable to start again.
+        if (job?.isActive == true) return
         // Taking the shell over is what opening it on the phone means, and it is
         // every time the page comes to the front, not once per page. The page gives
         // the shell back when it swipes away ([stop] closes the socket and the daemon
         // releases the claim after its grace), so coming back is the same act as
         // arriving: the swipe the user just made *is* the consent.
         //
-        // This was once armed only on the first activation, on the argument that a
-        // swipe away and back should not steal a shell the desk had re-taken. That
-        // is the behaviour being asked for now (2026-10-05) — a swipe between pages
-        // that leaves a notice and a tap in the way is not the swipe the user made.
-        // A *reconnect* inside one activation still does not re-arm: the loop's
-        // retry does not call this, so a link that blinks cannot take a shell.
+        // A *reconnect* inside one activation does not re-arm: the loop's retry does
+        // not call this, so a link that blinks cannot take a shell.
         wantTakeover = true
+        ended = false
+        kick.tryReceive()
         this.scope = scope
         job = scope.launch { loop() }
     }
@@ -186,31 +302,27 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         wantTakeover = false
         attempt = 0
         scope = null
+        ws = null
         http?.let { runCatching { it.close() } }
         http = null
     }
 
     private suspend fun loop() {
         while (currentCoroutineContext().isActive) {
+            var connectedThisRound = false
+            var rejected = false
+            // A page exists only for a paired app; an unpaired config ends it.
+            val endpoint = config.endpoint ?: return
             try {
-                // A page exists only for a paired app; an unpaired config ends it.
-                val endpoint = config.endpoint ?: return
                 httpClient().webSocket(endpoint.wsUrl, request = { header(HttpHeaders.Authorization, endpoint.authorization) }) {
                     ws = this
+                    connectedThisRound = true
+                    missed.reset()
                     appLog("page $sessionId: connected, attaching${if (wantTakeover) " (take over)" else ""}")
                     // Say who we are first, exactly as the session-list client
                     // does. A connection with no identity holds nothing, so the
                     // daemon would have no claim to refuse a second device with.
-                    send(Frame.Text(
-                        buildJsonObject {
-                            put("type", "hello")
-                            putJsonObject("device") {
-                                put("id", config.deviceId)
-                                put("name", config.deviceLabel)
-                                put("kind", "phone")
-                            }
-                        }.toString(),
-                    ))
+                    send(Frame.Text(helloMessage(config)))
                     send(Frame.Text(
                         buildJsonObject {
                             put("type", "attach")
@@ -234,7 +346,6 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     // handshake to settle.
                     val pinger = launch {
                         delay(FIRST_PING_MS)
-                        var outstanding = 0
                         while (isActive) {
                             val id = ++pingSeq
                             pingSentAt = TimeSource.Monotonic.markNow()
@@ -245,25 +356,39 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                             // the flow, nothing says so for a long time — the
                             // terminal just stops updating. Three unanswered pings
                             // is a link that is not there, whatever it claims.
-                            outstanding = if (pongSeen) 0 else outstanding + 1
-                            pongSeen = false
-                            if (outstanding >= MISSED_PONGS) {
+                            if (missed.beat()) {
                                 runCatching { ws?.close() }
                                 break
                             }
                             delay(PING_INTERVAL_MS)
                         }
                     }
+                    // The network just changed under a socket that still looks open
+                    // (Wi-Fi to LTE leaves the old one "connected" for 12-16 s). Ask
+                    // now and give the answer a short, fixed time instead of waiting
+                    // out three heartbeats.
+                    val netWatch = launch {
+                        NetworkWake.wakes.collect {
+                            val before = pongCount
+                            runCatching { send(Frame.Text("""{"type":"ping","id":$PROBE_PING_ID}""")) }
+                            delay(NETWORK_PROBE_MS)
+                            if (pongCount == before) {
+                                appLog("page $sessionId: no answer after a network change; reconnecting")
+                                runCatching { ws?.close() }
+                            }
+                        }
+                    }
                     try {
                         for (frame in incoming) {
                             when (frame) {
-                                is Frame.Text -> onControl(frame.readText())
-                                is Frame.Binary -> onBinary(frame.data)
+                                is Frame.Text -> guarded("control") { handleControl(frame.readText()) }
+                                is Frame.Binary -> guarded("output") { handleBinary(frame.data) }
                                 else -> Unit
                             }
                         }
                     } finally {
                         pinger.cancel()
+                        netWatch.cancel()
                         ws = null
                     }
                 }
@@ -274,15 +399,32 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 // Offline / daemon restart: retry below. Said, because a page that
                 // silently retries is indistinguishable from a page that is stuck.
                 appLog("page $sessionId: link lost: ${e::class.simpleName}")
+                // A handshake that never completed says nothing about *why*. Ask the
+                // daemon the way the launcher does: a refused token is not a link
+                // problem and retrying it on a timer cannot fix it.
+                if (!connectedThisRound) {
+                    rejected = linkStateFromProbe(probeLinkStatus(httpClient(), endpoint)) == LinkState.Rejected
+                }
             }
             appLog("page $sessionId: disconnected")
+            ws = null
             pingSentAt = null
-            pongSeen = false
             if (ended) {
-                onEnded?.invoke()
+                guarded("ended") { onEnded?.invoke() }
                 return
             }
-            onOffline?.invoke()
+            guarded("offline") { onOffline?.invoke() }
+            if (rejected) {
+                appLog("page $sessionId: token refused; waiting")
+                guarded("rejected") { onRejected?.invoke() }
+                // Waiting will not fix a refused token. A network change, the user
+                // retrying, or (rarely) the daemon being given its old token back.
+                withTimeoutOrNull(REJECTED_RECHECK_MS) {
+                    merge(NetworkWake.wakes, kick.receiveAsFlow()).first()
+                }
+                attempt = 0
+                continue
+            }
             // No pause when a takeover is armed: that path is a user waiting on
             // the result of a tap, not a link that needs a moment to recover.
             //
@@ -290,62 +432,49 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             // A fixed 1.5 s retry meant a phone with no route asked again 40 times
             // a minute per shell forever — the radio cost of a client that is not
             // there — and a daemon restart had every page of every phone coming
-            // back in lockstep. The list client already backed off; two policies
-            // for one app is drift, so this is the same one.
+            // back in lockstep. The list client uses the same policy
+            // ([reconnectDelayMs]); two policies for one app is drift.
             if (skipBackoffOnce) {
                 skipBackoffOnce = false
             } else {
                 // The one attempt that follows an armed takeover is immediate — the
                 // user tapped and is watching — and every attempt after that backs
-                // off. It used to be "no pause while a takeover is armed" for all of
-                // them, and that is a hot loop: `wantTakeover` is only consumed by a
-                // connection that *succeeds*, so a page that cannot reach the daemon
-                // at all — which is exactly when someone taps take-over — retried with
-                // no delay, forever, and `attempt` never grew to widen the gap.
+                // off, because `wantTakeover` is only consumed by a connection that
+                // *succeeds* and a page that cannot reach the daemon at all would
+                // otherwise retry with no delay, forever.
                 val immediate = wantTakeover && attempt == 0
-                val base =
-                    if (immediate) 0L
-                    else (RETRY_BASE_MS shl attempt.coerceAtMost(5)).coerceAtMost(RETRY_MAX_MS)
+                val base = if (immediate) 0L else reconnectDelayMs(attempt)
                 attempt++
-                if (base > 0 && NetworkWake.sleep(base + Random.nextLong(base / 2 + 1))) attempt = 0
+                if (base > 0 && NetworkWake.sleep(withJitter(base))) attempt = 0
             }
         }
     }
 
-    private fun onControl(text: String) {
-        val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-        when (field(root, "type")) {
+    /** One text frame. Internal so the framing is tested without a socket. */
+    internal fun handleControl(text: String) {
+        when (val msg = parseAttachMessage(text) ?: return) {
             // The daemon has answered, so the link works and the next failure is
             // a new one: the backoff starts over rather than staying where the
             // last outage left it.
-            "caps" -> {
+            AttachMessage.Caps -> {
                 attempt = 0
                 appLog("page $sessionId: attached")
+                guarded("attached") { onAttached?.invoke() }
             }
-            "pong" -> {
-                pongSeen = true
+            is AttachMessage.Pong -> {
+                missed.onPong()
+                pongCount++
+                // The probe's own pong is not a round-trip sample for the heartbeat.
+                if (msg.id == PROBE_PING_ID) return
                 val sent = pingSentAt ?: return
                 pingSentAt = null
-                onRtt?.invoke(sent.elapsedNow().inWholeMilliseconds)
+                val rtt = sent.elapsedNow().inWholeMilliseconds
+                guarded("rtt") { onRtt?.invoke(rtt) }
             }
-            "snapshot" -> {
-                val cols = field(root, "cols").toIntOrNull() ?: return
-                val rows = field(root, "rows").toIntOrNull() ?: return
-                val screen = field(root, "screen")
-                val history = bool(root, "history")
-                val modes = TerminalModes(
-                    mouse = bool(root, "mouse"),
-                    appCursor = bool(root, "appCursor"),
-                    bracketedPaste = bool(root, "bracketedPaste"),
-                    alternateOn = bool(root, "alternateOn"),
-                    mouseSgr = bool(root, "mouseSgr"),
-                    cursorX = field(root, "cursorX").toIntOrNull() ?: 0,
-                    cursorY = field(root, "cursorY").toIntOrNull() ?: 0,
-                )
-                onSnapshot?.invoke(cols, rows, screen, history, modes)
-            }
-            "error" -> {
-                val code = field(root, "code").ifEmpty { "error" }
+            is AttachMessage.Snapshot ->
+                guarded("snapshot") { onSnapshot?.invoke(msg.cols, msg.rows, msg.screen, msg.history, msg.modes) }
+            is AttachMessage.Error -> {
+                val code = msg.code
                 appLog("page $sessionId: error $code")
                 when (code) {
                     // The daemon dropped output it could not deliver (the stream
@@ -366,57 +495,35 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     // and would sit there with no stream. Retry, with the backoff.
                     "attach_failed" -> reconnectNow()
                 }
-                onError?.invoke(code)
+                guarded("error") { onError?.invoke(code) }
             }
-            "mousedelivered" -> onMouseDelivered?.invoke()
-            "owned" -> {
+            AttachMessage.MouseDelivered -> guarded("mouse") { onMouseDelivered?.invoke() }
+            is AttachMessage.Owned -> {
                 // Refused, not broken: the shell is held by another device. Told
                 // as an ordinary outcome so the UI can offer to take it over
                 // rather than showing an error about the link.
-                val holder = (root["owner"] as? JsonObject)
-                    ?.let { field(it, "name").ifEmpty { null } }
-                appLog("page $sessionId: held by $holder")
-                onOwned?.invoke(holder)
+                appLog("page $sessionId: held by ${msg.holder}")
+                guarded("owned") { onOwned?.invoke(msg.holder) }
             }
         }
     }
 
-    private fun onBinary(data: ByteArray) {
-        if (data.size < 8) return
-        val type = data[0].toInt() and 0xff
-        val length = ((data[4].toInt() and 0xff) shl 24) or
-            ((data[5].toInt() and 0xff) shl 16) or
-            ((data[6].toInt() and 0xff) shl 8) or
-            (data[7].toInt() and 0xff)
-        if (type != 0x10) return // FrameType.Output
-        val end = (8 + length).coerceAtMost(data.size)
-        if (end <= 8) return
-        onOutput?.invoke(data.copyOfRange(8, end))
+    /** One binary frame. Internal for the same reason as [handleControl]. */
+    internal fun handleBinary(data: ByteArray) {
+        val payload = decodeOutputFrame(data) ?: return
+        guarded("output") { onOutput?.invoke(payload) }
     }
 
-    /**
-     * Read a field without `jsonPrimitive`, which **throws** on a `JsonNull` or an
-     * object. `?.jsonPrimitive` guards an *absent* key and nothing else, so a field
-     * the daemon sent as `null` looked handled and was not.
-     *
-     * What made that expensive is where the throw lands: inside the receive loop's
-     * `catch (Throwable)`, which reads as a dead link. So one unreadable field is not
-     * one dropped value — it is the socket, a silent reconnect, and a terminal that
-     * flinches for no visible reason. The sibling client was fixed for exactly this
-     * and has the post-mortem; this file kept the old accessor.
-     */
-    private fun field(root: JsonObject, key: String): String =
-        ((root[key] as? JsonPrimitive)?.takeIf { it !is JsonNull })?.content ?: ""
-
-    private fun bool(root: JsonObject, key: String): Boolean = field(root, key) == "true"
-
-    private fun sendControl(msg: String) {
-        scope?.launch { runCatching { ws?.send(Frame.Text(msg)) } }
+    /** Whether the message went to a socket. A refused message is the caller's to report. */
+    private fun sendControl(msg: String): Boolean {
+        val socket = ws ?: return false
+        val s = scope ?: return false
+        s.launch { runCatching { socket.send(Frame.Text(msg)) } }
+        return true
     }
 
-    fun input(text: String) {
+    fun input(text: String): Boolean =
         sendControl(buildJsonObject { put("type", "input"); put("data", text) }.toString())
-    }
 
     /**
      * Tell the daemon the grid this client will paint. Sent with attach (so the
@@ -440,9 +547,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         )
     }
 
-    fun keys(keys: List<String>) {
+    fun keys(keys: List<String>): Boolean {
         val array = keys.joinToString(",") { quote(it) }
-        sendControl("""{"type":"key","keys":[$array]}""")
+        return sendControl("""{"type":"key","keys":[$array]}""")
     }
 
     /**
@@ -450,7 +557,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      * SGR mouse reporting; the server synthesizes the click so the byte sequence
      * never has to live in the client.
      */
-    fun mouseClick(col: Int, row: Int) {
+    fun mouseClick(col: Int, row: Int): Boolean =
         sendControl(
             buildJsonObject {
                 put("type", "mouseclick")
@@ -458,9 +565,8 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 put("row", row)
             }.toString(),
         )
-    }
 
-    fun scrollback(lines: Int) {
+    fun scrollback(lines: Int): Boolean =
         sendControl(
             buildJsonObject {
                 put("type", "scrollback")
@@ -468,7 +574,6 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 put("lines", lines)
             }.toString(),
         )
-    }
 
     /**
      * Repaint the visible screen from the server. `lines = 0` is the
@@ -478,9 +583,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     fun snapshotNow() = scrollback(0)
 
-    private fun quote(s: String): String = kotlinx.serialization.json.JsonPrimitive(s).toString()
+    private fun quote(s: String): String = JsonPrimitive(s).toString()
 
-    private companion object {
+    internal companion object {
         /** Long enough that the handshake is not what gets measured. */
         const val FIRST_PING_MS = 600L
         /**
@@ -493,11 +598,10 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
          */
         const val PING_INTERVAL_MS = CLIENT_PING_INTERVAL_MS
 
-        /** Unanswered pings before the link is declared dead. */
-        const val MISSED_PONGS = CLIENT_MISSED_PONGS
+        /** The id of a network-change probe, which is not a round-trip sample. */
+        const val PROBE_PING_ID = -1
 
-        /** Retry floor, doubled per attempt up to [RETRY_MAX_MS], plus jitter. */
-        const val RETRY_BASE_MS = 400L
-        const val RETRY_MAX_MS = 10_000L
+        /** How long a page parked on a refused token waits before looking again. */
+        const val REJECTED_RECHECK_MS = 300_000L
     }
 }

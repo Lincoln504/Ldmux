@@ -29,12 +29,26 @@ object NetworkWake {
 /**
  * The user asked, from outside the app (the notification's Disconnect), to let go
  * of every open shell. The app answers it the way it answers the launcher button.
+ *
+ * Replayed to a collector that arrives late. The service stops itself on Disconnect,
+ * so a request made while nothing was collecting (the activity was between instances)
+ * was simply lost; a replay of one means the next collector hears it. [handled] empties
+ * the replay, so a request is answered once and a later collector is not woken by it.
  */
 object DisconnectRequests {
-    private val events = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val events = MutableSharedFlow<Unit>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     val requests: SharedFlow<Unit> = events
 
     fun request() {
         events.tryEmit(Unit)
+    }
+
+    /** The request has been acted on; forget it. */
+    fun handled() {
+        events.resetReplayCache()
     }
 }

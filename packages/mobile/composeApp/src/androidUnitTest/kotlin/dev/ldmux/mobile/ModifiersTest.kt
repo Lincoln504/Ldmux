@@ -98,8 +98,21 @@ class ModifiersTest {
         assertEquals("C-Left", named("Left", Modifiers(ctrl = true)))
         assertEquals("M-Up", named("Up", Modifiers(alt = true)))
         assertEquals("M-C-Right", named("Right", Modifiers(ctrl = true, alt = true)))
-        assertEquals("C-Enter", named("Enter", Modifiers(ctrl = true)))
-        assertEquals("C-Escape", named("Escape", Modifiers(ctrl = true)))
+    }
+
+    /**
+     * Ctrl means nothing on Escape and Enter — the daemon sends ESC and CR whatever the
+     * modifier — so a latched Ctrl is spent by them *without* being named: `C-Escape` and
+     * `C-Enter` are not keys any program waits for. Alt still applies (ESC-prefixed).
+     */
+    @Test
+    fun `a latched ctrl is spent by escape and enter without being named`() {
+        assertEquals("Enter", named("Enter", Modifiers(ctrl = true)))
+        assertEquals("Escape", named("Escape", Modifiers(ctrl = true)))
+        assertEquals("M-Enter", named("Enter", Modifiers(ctrl = true, alt = true)))
+        assertEquals("M-Escape", named("Escape", Modifiers(alt = true)))
+        // ...and Tab keeps its Ctrl, which the daemon does not ignore.
+        assertEquals("C-Tab", named("Tab", Modifiers(ctrl = true)))
     }
 
     @Test

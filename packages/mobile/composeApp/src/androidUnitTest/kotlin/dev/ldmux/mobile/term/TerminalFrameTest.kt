@@ -356,4 +356,209 @@ class TerminalFrameTest {
     fun `rejects a frame shorter than the header`() {
         assertFailsWith<IllegalArgumentException> { TerminalFrame.decode(ByteArray(31)) }
     }
+
+    // ---- frame version 1: the additive extension ----
+
+    /** A version-1 frame: [cells] are (text, flags) with white-on-black colours. */
+    private fun v1(
+        cols: Int,
+        rows: Int,
+        cells: List<Pair<String, Int>>,
+        ext: ByteArray = ByteArray(0),
+        version: Int = 1,
+        selRowHi: Pair<Int, Int> = 0 to 0,
+        declaredExtLen: Int = ext.size,
+    ): ByteArray = Builder().apply {
+        u16(cols); u16(rows); u16(0); u16(0)
+        byte(1); byte(1)
+        rgb(0xFFFFFF); rgb(0)
+        byte(0); byte(1); byte(0)
+        u32(0); u32(0); u32(0)
+        byte(0); byte(0)
+        byte(0); u16(0); byte(0); u16(0); byte(0) // selection (7 bytes)
+        byte(1)                                   // cursorKnown
+        byte(version)
+        u32(declaredExtLen.toLong())
+        byte(selRowHi.first); byte(selRowHi.second)
+        for ((t, f) in cells) cell(t, 0xFFFFFF, 0, f)
+    }.build() + ext
+
+    private fun le32(v: Int) = byteArrayOf(v.toByte(), (v shr 8).toByte(), (v shr 16).toByte(), (v shr 24).toByte())
+    private fun le16(v: Int) = byteArrayOf(v.toByte(), (v shr 8).toByte())
+
+    private fun section(kind: Int, payload: ByteArray) = byteArrayOf(kind.toByte()) + le32(payload.size) + payload
+
+    private fun underlineColours(vararg e: Pair<Int, Int>): ByteArray =
+        section(
+            1,
+            e.fold(ByteArray(0)) { acc, (idx, rgb) ->
+                acc + le32(idx) + byteArrayOf((rgb shr 16).toByte(), (rgb shr 8).toByte(), rgb.toByte())
+            },
+        )
+
+    private fun links(uris: List<String>, refs: List<Pair<Int, Int>>): ByteArray {
+        var payload = le16(uris.size)
+        for (u in uris) payload += le16(u.encodeToByteArray().size) + u.encodeToByteArray()
+        payload += le32(refs.size)
+        for ((cell, uri) in refs) payload += le32(cell) + le16(uri)
+        return section(2, payload)
+    }
+
+    private fun style(n: Int) = TerminalFrame.FLAG_UNDERLINE or (n shl TerminalFrame.UNDERLINE_STYLE_SHIFT)
+
+    @Test
+    fun `the header sizes and the cluster cap are the ones the C core documents`() {
+        assertEquals(48, TerminalFrame.HEADER_SIZE)
+        assertEquals(9, TerminalFrame.CELL_FIXED)
+        assertEquals(64, TerminalFrame.CELL_MAX_UTF8)
+        assertEquals(1, TerminalFrame.FRAME_VERSION)
+    }
+
+    @Test
+    fun `underline style is read from bits 12 to 14 and colour from the extension`() {
+        val f = TerminalFrame.decode(
+            v1(
+                5, 1,
+                listOf("a" to style(1), "b" to style(2), "c" to style(3), "d" to style(4), "e" to style(5)),
+                ext = underlineColours(2 to 0xFF8800),
+            ),
+        )
+        assertEquals(listOf(1, 2, 3, 4, 5), f.cells.map { it.underlineStyle })
+        assertEquals(TerminalFrame.UNDERLINE_CURLY, f.cells[2].underlineStyle)
+        assertEquals(0xFF8800, f.cells[2].underlineColor)
+        assertEquals(0xFF8800, f.cells[2].drawnUnderlineColor)
+        assertNull(f.cells[0].underlineColor)
+        // No colour of its own: the line is drawn in the text's colour.
+        assertEquals(f.cells[0].drawnFg, f.cells[0].drawnUnderlineColor)
+    }
+
+    @Test
+    fun `a bare underline bit is a single underline and a reserved style degrades to single`() {
+        // The old writer: bit 2 only. And a style value this decoder does not know.
+        val f = TerminalFrame.decode(
+            v1(3, 1, listOf("a" to TerminalFrame.FLAG_UNDERLINE, "b" to style(7), "c" to 0)),
+        )
+        assertEquals(TerminalFrame.UNDERLINE_SINGLE, f.cells[0].underlineStyle)
+        assertEquals(TerminalFrame.UNDERLINE_SINGLE, f.cells[1].underlineStyle)
+        assertEquals(TerminalFrame.UNDERLINE_NONE, f.cells[2].underlineStyle)
+        assertTrue(f.cells[0].underline && f.cells[1].underline)
+    }
+
+    @Test
+    fun `wide head and spacer tail are distinct from a blank`() {
+        val f = TerminalFrame.decode(
+            v1(
+                3, 1,
+                listOf(
+                    "\u4f60" to TerminalFrame.FLAG_WIDE,
+                    "" to TerminalFrame.FLAG_SPACER_TAIL,
+                    "" to 0,
+                ),
+            ),
+        )
+        assertTrue(f.cells[0].wide)
+        assertTrue(f.cells[1].spacerTail)
+        assertFalse(f.cells[1].wide)
+        assertFalse(f.cells[2].spacerTail, "a plain blank is not a tail")
+    }
+
+    @Test
+    fun `hyperlinks resolve to their URIs, shared and per cell`() {
+        val h = TerminalFrame.FLAG_HYPERLINK
+        val f = TerminalFrame.decode(
+            v1(
+                4, 1,
+                listOf("a" to h, "b" to h, "c" to 0, "d" to h),
+                ext = links(listOf("https://a.example/", "https://b.example/\u00e9"), listOf(0 to 0, 1 to 0, 3 to 1)),
+            ),
+        )
+        assertEquals("https://a.example/", f.cells[0].hyperlink)
+        assertEquals("https://a.example/", f.cells[1].hyperlink)
+        assertNull(f.cells[2].hyperlink)
+        assertEquals("https://b.example/\u00e9", f.cells[3].hyperlink)
+    }
+
+    @Test
+    fun `a hyperlink flag with no URI behind it is not a link`() {
+        val f = TerminalFrame.decode(v1(1, 1, listOf("a" to TerminalFrame.FLAG_HYPERLINK)))
+        assertNull(f.cells[0].hyperlink)
+    }
+
+    @Test
+    fun `unknown flag bits and unknown extension sections are ignored`() {
+        // Bits 6 and 12..14 are meaningful, so use a section kind from the future
+        // ahead of a real one: the unknown one is skipped by its length.
+        val ext = section(99, ByteArray(13) { 7 }) + underlineColours(0 to 0x123456)
+        val f = TerminalFrame.decode(v1(1, 1, listOf("a" to style(3)), ext = ext))
+        assertEquals(0x123456, f.cells[0].underlineColor)
+    }
+
+    @Test
+    fun `a newer frame version keeps its cells and loses only the extension`() {
+        val ext = underlineColours(0 to 0x123456)
+        val f = TerminalFrame.decode(v1(1, 1, listOf("a" to style(3)), ext = ext, version = 2))
+        assertEquals("a", f.cells[0].text)
+        assertEquals(TerminalFrame.UNDERLINE_CURLY, f.cells[0].underlineStyle)
+        assertNull(f.cells[0].underlineColor, "a version this decoder does not know is not parsed")
+        assertEquals(2, f.version)
+    }
+
+    @Test
+    fun `a legacy version 0 frame is decoded as having no extension`() {
+        // The pre-extension writer left bytes 41..47 zero; garbage after the cells
+        // must not be parsed as one.
+        val f = TerminalFrame.decode(v1(1, 1, listOf("a" to 0), ext = byteArrayOf(1, 9, 9, 9, 9, 9), version = 0, declaredExtLen = 0))
+        assertEquals(0, f.version)
+        assertNull(f.cells[0].underlineColor)
+    }
+
+    @Test
+    fun `malformed extensions never throw and never mis-colour`() {
+        val cases = listOf(
+            // a section longer than the block
+            byteArrayOf(1) + le32(1000) + ByteArray(7),
+            // a truncated section header
+            byteArrayOf(1, 0, 0),
+            // a cell index past the grid
+            underlineColours(500 to 0xFF0000),
+            // a link table claiming more URIs than exist
+            section(2, le16(60000)),
+            // a ref to a URI that is not there
+            links(listOf("x"), listOf(0 to 5)),
+        )
+        for (ext in cases) {
+            val f = TerminalFrame.decode(v1(1, 1, listOf("a" to style(1)), ext = ext))
+            assertEquals("a", f.cells[0].text)
+            assertNull(f.cells[0].underlineColor)
+            assertNull(f.cells[0].hyperlink)
+        }
+        // And a declared length beyond the buffer disables the block altogether.
+        val f = TerminalFrame.decode(v1(1, 1, listOf("a" to 0), ext = underlineColours(0 to 1), declaredExtLen = 99999))
+        assertNull(f.cells[0].underlineColor)
+    }
+
+    @Test
+    fun `a cluster up to the cap decodes whole`() {
+        // ZWJ family: man, ZWJ, woman, ZWJ, girl, ZWJ, boy = 25 bytes, which the old
+        // 16-byte cap cut in the middle of the third emoji.
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67\u200D\uD83D\uDC66"
+        assertEquals(25, family.encodeToByteArray().size)
+        val f = TerminalFrame.decode(v1(1, 1, listOf(family to TerminalFrame.FLAG_WIDE)))
+        assertEquals(family, f.cells[0].text)
+    }
+
+    @Test
+    fun `selection rows above 255 use the high bytes`() {
+        val bytes = v1(1, 1, listOf("x" to 0), selRowHi = 1 to 2)
+        bytes[33] = 1                    // selection on
+        bytes[36] = 5; bytes[39] = 7     // low bytes of the rows
+        val sel = TerminalFrame.decode(bytes).selection
+        assertNotNull(sel)
+        assertEquals(256 + 5, sel.startRow)
+        assertEquals(512 + 7, sel.endRow)
+        // A frame that predates the high bytes has zeros there: rows are unchanged.
+        val old = frame(1, 1, listOf(Triple("x", 1, 2)))
+        old[33] = 1; old[36] = 9; old[39] = 11
+        assertEquals(9, TerminalFrame.decode(old).selection!!.startRow)
+    }
 }

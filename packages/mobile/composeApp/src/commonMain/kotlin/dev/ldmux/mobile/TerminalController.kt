@@ -19,8 +19,15 @@ import kotlin.time.TimeSource
 
 /**
  * Owns one session's terminal: the libghostty engine plus the attach stream.
- * Recreating the engine on each snapshot gives a clean parser state and a full
- * repaint, which is exactly what a snapshot (attach or history page) means.
+ *
+ * A snapshot is applied by [planSnapshot]: rebuilding the engine gives a clean parser
+ * state and a full repaint, but it also loses the scrollback and parks the viewport at
+ * the bottom, so it is done only while the view is following live output. While the
+ * user is reading history the screen is replayed into the engine they are reading.
+ *
+ * The socket is **not** opened by the constructor: [begin] does that, called when the
+ * composition has actually kept this controller. A controller built by a composition
+ * that is then abandoned must not leave a connected socket holding the shell.
  */
 class TerminalController(
     private val config: LdmuxConfig,
@@ -68,16 +75,11 @@ class TerminalController(
      * is, which is what keeps this file testable without a device.
      */
     var onClipboardRequest: ((ClipboardRequest) -> Unit)? = null
-    /** Set once the whole scrollback has been asked for, so it is asked once. */
 
     /** Server-reported terminal modes (affects input encoding later). */
     var modes by mutableStateOf(TerminalModes())
         private set
 
-    /**
-     * Set by the platform surface: it owns the microphone, which the shared
-     * sidebar can only ask for. Null until the surface is composed.
-     */
     /**
      * A tap waiting on the server's verdict about whether this pane takes
      * clicks. Kept so a refused click can still move the cursor, which is what
@@ -121,11 +123,41 @@ class TerminalController(
     override var modifiers by mutableStateOf(Modifiers())
         private set
 
+    private val clockOrigin = TimeSource.Monotonic.markNow()
+    private val latch = ModifierLatch(now = { clockOrigin.elapsedNow().inWholeMilliseconds })
+    private var latchJob: Job? = null
+
     override fun toggleModifier(which: StickyKey) {
-        modifiers = modifiers.toggled(which)
+        modifiers = latch.toggle(which)
+        latchJob?.cancel()
+        // An armed modifier the user never used lapses, visibly: the key is drawn
+        // unlatched again instead of waiting to chord some later keystroke.
+        val wait = latch.remainingMs()
+        latchJob = if (wait == null) null else scope.launch {
+            delay(wait + 1)
+            modifiers = latch.current()
+        }
     }
 
     override fun clearModifiers() {
+        latchJob?.cancel()
+        latchJob = null
+        latch.clear()
+        modifiers = Modifiers()
+    }
+
+    /** The modifiers armed *now*: [ModifierLatch] has already let go of expired ones. */
+    private fun armedModifiers(): Modifiers {
+        val live = latch.current()
+        if (live != modifiers) modifiers = live
+        return live
+    }
+
+    /** Spend the latch: one keystroke, one use. */
+    private fun spendLatch() {
+        latchJob?.cancel()
+        latchJob = null
+        latch.clear()
         modifiers = Modifiers()
     }
 
@@ -136,143 +168,7 @@ class TerminalController(
     )
 
     init {
-        attach.onSnapshot = { cols, rows, screen, history, m ->
-            // A snapshot is the truth: any outstanding prediction is settled by
-            // it (this is also the recovery path after a mispredict).
-            predictor.reset()
-            staleJob?.cancel()
-            // A snapshot only ever follows a *successful* attach, so this is the
-            // one place that can prove the refusal no longer applies.
-            _ownedBy.value = null
-            historyLoading = false
-            // On the rebuild path the engine is about to be thrown away, and the
-            // selection lives in the engine (ADR-0014). On the resize path below the
-            // engine — and with it the selection — survives, so nothing is kept and
-            // nothing restored: re-projecting a selection that never moved would
-            // move it.
-            //
-            // The *text* is what the user chose, and it is the only honest test of
-            // whether a restored range still means what they selected: a snapshot
-            // normally arrives because new output did, so the same cells can hold
-            // different words, and a restored selection covering text nobody chose is
-            // worse than none because they will copy it.
-            //
-            // The rows are put back where they were and the text decides — see the
-            // long note at the restore below for why the offset cannot re-project
-            // them across a rebuild.
-            val resized = replayResize(_frame.value, cols, rows, m.alternateOn)
-            val keptSelection = if (resized) {
-                null
-            } else {
-                selectionBounds()?.let { b ->
-                    selectionText()?.takeIf { it.isNotEmpty() }?.let { b to it }
-                }
-            }
-            // A resize (a rotation, a pinch of the font) answers with a snapshot
-            // too, and the grid it describes is not the one the engine holds. The
-            // engine takes a new size in place — its scrollback, its selection and
-            // its scroll position all survive a resize, which a rebuild cannot
-            // say — so the screen is replayed into the engine that is already
-            // here instead of a new one built from the visible screen alone.
-            // Rebuilding was throwing away everything the client had accumulated
-            // since the last snapshot, which is how a rotation used to empty the
-            // scrollback and park the view on a screen with no history under it.
-            // Everything else — attach, resync, a mispredict's recovery — is still
-            // a rebuild: a snapshot means "the parser state may be wrong", and a
-            // fresh engine is the only way to be sure.
-            if (resized) {
-                engine.resize(cols, rows)
-                feed(
-                    resizeReplayBytes(
-                        screen = screen,
-                        cursorX = m.cursorX,
-                        cursorY = m.cursorY,
-                        cols = cols,
-                        rows = rows,
-                        modes = m,
-                    ),
-                )
-            } else {
-                engine.close()
-                engine = TerminalEngine(cols, rows)
-                // State, then content, then cursor — see [snapshotBytes], which is
-                // the only thing that decides that order.
-                val bytes = snapshotBytes(
-                    screen = screen,
-                    alternateOn = m.alternateOn,
-                    cursorX = m.cursorX,
-                    cursorY = m.cursorY,
-                    cols = cols,
-                    rows = rows,
-                    // Everything else the program had set, which a fresh engine
-                    // does not know. See [modeSequence].
-                    modes = m,
-                )
-                feed(bytes)
-                if (history) {
-                    // The page-in this controller asked for has been answered.
-                    historyRequested = true
-                    if (historyRestoreAtTop) {
-                        // The request was made from the top of what was loaded, and
-                        // a page-in only adds rows above it. How many now sit above
-                        // the row the user was reading is not knowable here — live
-                        // output that arrived between the request and this reply
-                        // moved the count — so the top is the one place that is
-                        // still honest. The user asked for more history by
-                        // reaching the top; the top is where they stay, now deeper.
-                        historyRestoreAtTop = false
-                        engine.scrollToTop()
-                    }
-                } else {
-                    // An ordinary snapshot rebuilt the engine from the visible
-                    // screen alone: whatever scrollback it held is gone, so a
-                    // page-in can be asked for again.
-                    historyRequested = false
-                    historyRestoreAtTop = false
-                }
-            }
-            // Put the selection back where its text now is. The text is then the
-            // test: if the shifted range holds what the user chose, the selection is
-            // still about it, and if it does not then the screen it was made on is
-            // gone. Output arriving during a copy used to discard the selection
-            // outright, which on an active shell is most of the time.
-            if (resized) {
-                // The engine kept its selection, exactly where it was.
-            } else if (keptSelection != null) {
-                val (bounds, text) = keptSelection
-                // **The rows go back where they were, and the text is the test.**
-                //
-                // This was meant to re-project them by the change in the viewport's
-                // scroll offset — the rule the drag uses — and that rule does not
-                // reach across a rebuild: a rebuild hands the new engine a *fresh*
-                // coordinate system (the captured screen, parked at its bottom), so
-                // the difference between the two offsets is not a count of lines that
-                // anything moved by. Measured: a resync of a long-lived pane has an
-                // offset before in the thousands and the rebuilt engine's at 1, so
-                // that "delta" would throw every selection off the grid. The offset
-                // was also never actually read after the rebuild — it came from the
-                // frame that had not been re-rendered yet, so the delta was always
-                // zero. STATE.md §5.1 records this as open rather than fixed.
-                //
-                // What does hold is the guard: if these rows no longer hold this
-                // text, the screen the selection was made on is gone, and the
-                // selection is dropped rather than mis-copied. A clipped range would
-                // copy the wrong thing for the same reason.
-                val onScreen = bounds[1] >= 0 && bounds[3] >= 0 && bounds[1] < rows && bounds[3] < rows
-                if (!onScreen || !selectionSet(bounds[0], bounds[1], bounds[2], bounds[3]) || selectionText() != text) {
-                    clearSelection()
-                }
-            } else {
-                // A freshly built engine has no selection, so the flag must not claim
-                // one — it would offer the user a copy of nothing.
-                hasSelection = false
-            }
-            modes = m
-            // A fresh snapshot is the only thing that knows the foreground
-            // program again, so it is also what re-arms the click path.
-            mouseRefused = false
-            _frame.value = engine.render()
-        }
+        attach.onSnapshot = { cols, rows, screen, history, m -> applySnapshot(cols, rows, screen, history, m) }
         attach.onOutput = { bytes -> writeOutput(bytes) }
         attach.onError = { code -> onServerError(code) }
         // The click landed, so the tap is finished. The timer in [tapCell] is
@@ -311,7 +207,141 @@ class TerminalController(
             pacing.onDisconnected()
             _link.value = linkStats()
         }
+        attach.onAttached = {
+            // The daemon accepted the attach: the link is up, even before the first
+            // round trip has been measured, so input is no longer refused.
+            linkOffline = false
+            _rejected.value = false
+            _link.value = linkStats()
+        }
+        attach.onRejected = {
+            _rejected.value = true
+        }
+    }
+
+    /**
+     * Open the stream, if this page is the one on screen.
+     *
+     * Called by whoever *kept* the controller (see `rememberTerminalSurface`), never by
+     * the constructor: construction happens during composition, and a composition can be
+     * thrown away after building it — which left a connected controller holding the
+     * shell, with nobody to dispose it.
+     */
+    fun begin() {
+        if (disposed || started) return
+        started = true
         if (active) attach.start(scope)
+    }
+
+    private var started = false
+    private var disposed = false
+
+    /**
+     * Apply a snapshot to the engine, as [planSnapshot] decides.
+     *
+     * Rebuilding throws away the engine, and the selection lives in the engine
+     * (ADR-0014), so on that path the selection is carried across by its *text*: a
+     * snapshot normally arrives because new output did, so the same cells can hold
+     * different words, and a restored selection covering text nobody chose is worse
+     * than none because they will copy it. On the in-place path the engine — and with it
+     * the scrollback, the viewport anchor and a selection that follows a resize —
+     * survives.
+     */
+    private fun applySnapshot(cols: Int, rows: Int, screen: String, history: Boolean, m: TerminalModes) {
+        // A snapshot is the truth: any outstanding prediction is settled by it (this is
+        // also the recovery path after a mispredict).
+        predictor.reset()
+        staleJob?.cancel()
+        // A snapshot only ever follows a *successful* attach, so this is the one place
+        // that can prove the refusal no longer applies.
+        _ownedBy.value = null
+        historyLoading = false
+        val current = _frame.value
+        val inPlace = planSnapshot(current, cols, rows, m.alternateOn, history) == SnapshotApply.ReplayInPlace
+        val resized = inPlace && current != null && (current.cols != cols || current.rows != rows)
+        val keptSelection = if (resized) {
+            // A real resize reflows the engine's own selection; re-projecting one that
+            // never moved would move it.
+            null
+        } else {
+            selectionBounds()?.let { b ->
+                selectionText()?.takeIf { it.isNotEmpty() }?.let { b to it }
+            }
+        }
+        if (inPlace) {
+            if (resized) engine.resize(cols, rows)
+            feed(
+                resizeReplayBytes(
+                    screen = screen,
+                    cursorX = m.cursorX,
+                    cursorY = m.cursorY,
+                    cols = cols,
+                    rows = rows,
+                    modes = m,
+                ),
+            )
+            // Same grid, new content: the selection survived at the same cells, and the
+            // text is the only honest test of whether it still means what was chosen.
+            if (!resized && keptSelection != null && selectionText() != keptSelection.second) clearSelection()
+            hasSelection = engine.selectionText() != null
+        } else {
+            engine.close()
+            engine = TerminalEngine(cols, rows)
+            // State, then content, then cursor — see [snapshotBytes], which is the only
+            // thing that decides that order.
+            feed(
+                snapshotBytes(
+                    screen = screen,
+                    alternateOn = m.alternateOn,
+                    cursorX = m.cursorX,
+                    cursorY = m.cursorY,
+                    cols = cols,
+                    rows = rows,
+                    // Everything else the program had set, which a fresh engine does not
+                    // know. See [modeSequence].
+                    modes = m,
+                ),
+            )
+            if (history) {
+                // The page-in this controller asked for has been answered.
+                historyRequested = true
+                if (historyRestoreAtTop) {
+                    // The request was made from the top of what was loaded, and a page-in
+                    // only adds rows above it. How many now sit above the row the user
+                    // was reading is not knowable here — live output that arrived between
+                    // the request and this reply moved the count — so the top is the one
+                    // place that is still honest.
+                    historyRestoreAtTop = false
+                    engine.scrollToTop()
+                }
+            } else {
+                // An ordinary snapshot rebuilt the engine from the visible screen alone:
+                // whatever scrollback it held is gone, so a page-in can be asked for again.
+                historyRequested = false
+                historyRestoreAtTop = false
+            }
+            if (keptSelection != null) {
+                val (bounds, text) = keptSelection
+                // **The rows go back where they were, and the text is the test.** A
+                // rebuild hands the new engine a fresh coordinate system, so a scroll
+                // offset cannot re-project them; if these rows no longer hold this text,
+                // the screen the selection was made on is gone, and the selection is
+                // dropped rather than mis-copied.
+                val onScreen = bounds[1] >= 0 && bounds[3] >= 0 && bounds[1] < rows && bounds[3] < rows
+                if (!onScreen || !selectionSet(bounds[0], bounds[1], bounds[2], bounds[3]) || selectionText() != text) {
+                    clearSelection()
+                }
+            } else {
+                // A freshly built engine has no selection, so the flag must not claim
+                // one — it would offer the user a copy of nothing.
+                hasSelection = false
+            }
+        }
+        modes = m
+        // A fresh snapshot is the only thing that knows the foreground program again, so
+        // it is also what re-arms the click path.
+        mouseRefused = false
+        _frame.value = engine.render()
     }
 
     /**
@@ -331,7 +361,17 @@ class TerminalController(
         // the loss is invisible because the program was told the write succeeded.
         if (onClipboardRequest != null) {
             engine.takeClipboardRequest()?.let { request ->
-                onClipboardRequest?.invoke(request)
+                // The program is untrusted: capped and cleaned before anyone acts on it,
+                // and a failure of the platform clipboard is the clipboard's, not the
+                // stream's (a throw here used to reach the receive loop and drop the
+                // socket).
+                admitClipboardRequest(request)?.let { admitted ->
+                    try {
+                        onClipboardRequest?.invoke(admitted)
+                    } catch (e: Exception) {
+                        appLog("clipboard write failed: ${e::class.simpleName}")
+                    }
+                }
             }
         }
     }
@@ -346,14 +386,13 @@ class TerminalController(
      * keypress and a pasted paragraph runs its first line before the rest is even
      * visible.
      */
-    override fun paste(text: String) {
-        if (text.isEmpty()) return
+    override fun paste(text: String): Boolean {
+        if (text.isEmpty()) return true
         if (modes.bracketedPaste) {
             // ESC stripped: the clipboard must not be able to close the paste early.
-            sendTextRaw("\u001b[200~" + sanitizeBracketedPaste(text) + "\u001b[201~")
-        } else {
-            sendTextRaw(text)
+            return sendTextRaw("\u001b[200~" + sanitizeBracketedPaste(text) + "\u001b[201~")
         }
+        return sendTextRaw(text)
     }
 
     /**
@@ -434,22 +473,32 @@ class TerminalController(
     fun setActive(value: Boolean) {
         if (value == active) return
         active = value
+        // Before [begin] the stream is not this controller's to open yet; `begin`
+        // reads the flag. After [dispose] there is nothing to open.
+        if (!started || disposed) return
         if (value) attach.start(scope) else attach.stop()
     }
 
     override fun sendKey(name: String) {
-        // Submitting a line re-arms prediction: a fresh line is expected to echo
-        // again, even if the previous one did not (a password prompt).
-        if (name == "Enter") predictor.onLineSubmitted()
-        val armed = modifiers
+        val armed = armedModifiers()
         if (armed.armed) {
             // One Ctrl arms one key. Spending it here rather than in the chrome is
-            // what makes a hardware key and a bar key behave the same.
-            modifiers = Modifiers()
+            // what makes a hardware key and a bar key behave the same. Spent even when
+            // the key is then refused: the keystroke happened.
+            spendLatch()
             sendModifiedKey(name, armed)
             return
         }
-        attach.keys(listOf(name))
+        sendNamedKey(name)
+    }
+
+    /** One protocol key, refused (and said so) while there is nowhere to send it. */
+    private fun sendNamedKey(name: String): Boolean {
+        if (!canSend()) return false
+        // Submitting a line re-arms prediction: a fresh line is expected to echo
+        // again, even if the previous one did not (a password prompt).
+        if (name == "Enter" || name.endsWith("-Enter")) predictor.onLineSubmitted()
+        return attach.keys(listOf(name))
     }
 
     /**
@@ -463,16 +512,13 @@ class TerminalController(
         when (val k = modifiedKey(key, modifiers)) {
             is ModifiedKey.None -> {}
             is ModifiedKey.Literal -> sendTextRaw(k.bytes)
-            is ModifiedKey.Named -> {
-                if (k.name == "Enter") predictor.onLineSubmitted()
-                attach.keys(listOf(k.name))
-            }
+            is ModifiedKey.Named -> sendNamedKey(k.name)
         }
     }
 
     override fun sendText(text: String) {
         if (text.isEmpty()) return
-        val armed = modifiers
+        val armed = armedModifiers()
         if (!armed.armed) {
             sendTextRaw(text)
             return
@@ -482,7 +528,7 @@ class TerminalController(
         // socket — which is the only reason the old rule could rot unnoticed here
         // while every test passed.
         val typed = spendLatchOnFirst(text, armed)
-        modifiers = typed.latchAfter
+        if (typed.latchAfter.armed) modifiers = typed.latchAfter else spendLatch()
         if (typed.head.isEmpty()) {
             sendTextRaw(typed.rest)
         } else {
@@ -498,23 +544,21 @@ class TerminalController(
      * [sendModifiedKey] resolves a chord by calling back into this, so a single
      * slash through [sendText] would apply the modifier twice.
      */
-    private fun sendTextRaw(text: String) {
+    private fun sendTextRaw(text: String): Boolean {
+        // Refused, not queued and not painted: with no live socket (or another device
+        // holding the shell) these bytes go nowhere, and a prediction would show the
+        // user a command no shell will ever receive. The page says why (see
+        // [LinkStats.offline]); a paste returns false so its caller can too.
+        val gate = gate()
+        if (!gate.canSend) return false
         returnToBottom()
         val bytes = text.encodeToByteArray()
-        // Four gates, any one of which is enough to refuse: the setting; a
-        // full-screen app (alternate screen, which does not echo the way a
-        // shell does); a password prompt, which the emulator itself tells us
-        // about — so we never have to guess from timing; and a shell this device
-        // does not hold. The last one is not cosmetic: while another device owns
-        // the shell the daemon refuses the input, so a prediction would paint a
-        // character that is then withdrawn a moment later — the user typing into a
-        // shell they cannot type into, and watching their text disappear.
-        val canShowNow = predict &&
-            !modes.alternateOn &&
-            _frame.value?.passwordInput != true &&
-            _ownedBy.value == null &&
-            predictor.canPredict(bytes)
-        if (canShowNow) {
+        // The gate folds in the setting; the alternate screen (which does not echo the
+        // way a shell does); a password prompt, which the emulator itself tells us
+        // about — so we never have to guess from timing; and a shell this device does
+        // not hold. Held elsewhere is not cosmetic: the daemon refuses the input, so a
+        // prediction would paint a character that is then withdrawn a moment later.
+        if (gate.canPredict && predictor.canPredict(bytes)) {
             // Paint it before the server is even asked. If the echo disagrees,
             // writeOutput() throws this away and repaints from a snapshot.
             feed(bytes)
@@ -523,8 +567,21 @@ class TerminalController(
             _frame.value = engine.render()
         }
         // Under the daemon's per-message cap, or a big paste is refused whole.
-        for (piece in chunkInput(text)) attach.input(piece)
+        var sent = true
+        for (piece in chunkInput(text)) sent = attach.input(piece) && sent
+        return sent
     }
+
+    /** The gate, from what this controller knows right now. */
+    private fun gate(): InputGate = inputGate(
+        connected = attach.isConnected,
+        heldElsewhere = _ownedBy.value != null,
+        predictSetting = predict,
+        alternateScreen = modes.alternateOn,
+        passwordPrompt = _frame.value?.passwordInput == true,
+    )
+
+    private fun canSend(): Boolean = gate().canSend
 
     /**
      * A prediction that is never echoed means the pane is not echoing (a
@@ -637,61 +694,12 @@ class TerminalController(
         }
     }
 
-    /**
-     * A local selection gesture is in progress.
-     *
-     * The gesture lives in the engine, so this only carries touch events down and
-     * repaints. Long-press is the word gesture on both platforms, which is why
-     * there is no platform seam here (ADR-0013, ADR-0014 §6).
-     */
-    /**
-     * How long a finger has been down when the platform calls it a long press.
-     *
-     * Android's own `ViewConfiguration.getLongPressTimeout()` is 500 ms, and the
-     * gesture that reaches here has already waited it out.
-     */
-    private val LONG_PRESS_MS = 500L
-
     override var hasSelection by mutableStateOf(false)
         private set
 
     /** Tell the engine how the grid is drawn, so it can reason about distance. */
     override fun selectionGeometry(columns: Int, cellW: Int, cellH: Int, padLeft: Int, screenH: Int) {
         engine.setGeometry(columns, cellW, cellH, padLeft, screenH)
-    }
-
-    /** Pointer down, or the start of a drag. */
-    override fun beginSelection(col: Int, row: Int, atMs: Long) {
-        engine.selectionPress(col, row, atMs)
-        refreshSelection()
-    }
-
-    /**
-     * Long press: the word under the finger.
-     *
-     * The engine's click-count path does not produce a word from two taps (see
-     * `test_engine.c`), and long-press is the standard gesture on both platforms
-     * anyway, so this is the gesture that gets it.
-     */
-    override fun selectWordAt(col: Int, row: Int, atMs: Long) {
-        engine.selectionPress(col, row, atMs)
-        engine.selectionDeepPress(atMs)
-        refreshSelection()
-    }
-
-    override fun extendSelection(col: Int, row: Int, atMs: Long) {
-        if (engine.selectionDrag(col, row, atMs)) refreshSelection()
-    }
-
-    /**
-     * Pointer up. Returns the text so the caller can put it on the clipboard:
-     * copy-on-release is the behaviour that needs no button, and the `copy`
-     * control stays for copying again later.
-     */
-    override fun endSelection(col: Int, row: Int, valid: Boolean, atMs: Long): String? {
-        engine.selectionRelease(col, row, valid, atMs)
-        refreshSelection()
-        return engine.selectionText()
     }
 
     /**
@@ -746,6 +754,9 @@ class TerminalController(
      */
     override fun tapCell(col: Int, row: Int): Boolean {
         val f = _frame.value ?: return false
+        // A tap that cannot be sent must not draw its outline: that reads as the tap
+        // having worked.
+        if (!canSend()) return false
         when (val action = planTap(col, row, f, mouseRefused)) {
             is TapAction.Click -> {
                 pendingTap = action.col to action.row
@@ -782,6 +793,11 @@ class TerminalController(
      * same way it drops one whose shell left the session list.
      */
     private val _ended = MutableStateFlow(false)
+
+    /** The daemon refused the token: the pairing is stale, pair again. */
+    private val _rejected = MutableStateFlow(false)
+
+    override val rejected: StateFlow<Boolean> = _rejected
 
     override val ended: StateFlow<Boolean> = _ended
 
@@ -832,8 +848,12 @@ class TerminalController(
         attach.setGrid(cols, rows)
     }
 
+    /** Idempotent: both a forgotten and an abandoned composition may call it. */
     fun dispose() {
+        if (disposed) return
+        disposed = true
         staleJob?.cancel()
+        latchJob?.cancel()
         attach.stop()
         engine.close()
         scope.cancel()
@@ -853,13 +873,6 @@ class TerminalController(
 }
 
 /**
- * A VT sequence that puts the cursor at a cell, 1-based on the wire and clamped
- * to the grid.
- *
- * Written after a snapshot is replayed, because the replayed screen ends
- * wherever its last non-blank row ended. See [TerminalModes.cursorX].
- */
-/**
  * A whole snapshot, as the bytes that reproduce the pane.
  *
  * **A snapshot is a piece of terminal *state*, not a picture**, and this is the
@@ -878,9 +891,10 @@ class TerminalController(
  *     it leaves the cursor at the bottom of the padding, not where the program
  *     put it.
  *
- * The engine is rebuilt for every snapshot, so `1049h` here *establishes* a
- * screen rather than toggling one, and the saved primary screen it discards is
- * genuinely disposable: the next snapshot carries whatever is on screen then.
+ * On a rebuild the engine is fresh, so `1049h` here *establishes* a screen rather
+ * than toggling one, and the saved primary screen it discards is genuinely
+ * disposable: the next snapshot carries whatever is on screen then. (An engine that
+ * is being replayed into never gets this; see [planSnapshot] and [resizeReplayBytes].)
  */
 internal fun snapshotBytes(
     screen: String,
@@ -957,6 +971,13 @@ internal fun modeSequence(modes: TerminalModes): String = buildString {
     append(if (modes.bracketedPaste) "\u001b[?2004h" else "\u001b[?2004l")
 }
 
+/**
+ * A VT sequence that puts the cursor at a cell, 1-based on the wire and clamped
+ * to the grid.
+ *
+ * Written after a snapshot is replayed, because the replayed screen ends
+ * wherever its last non-blank row ended. See [TerminalModes.cursorX].
+ */
 internal fun cursorSequence(col: Int, row: Int, cols: Int, rows: Int): String {
     val c = col.coerceIn(0, maxOf(cols - 1, 0)) + 1
     val r = row.coerceIn(0, maxOf(rows - 1, 0)) + 1
