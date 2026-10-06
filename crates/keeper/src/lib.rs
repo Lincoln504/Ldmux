@@ -88,6 +88,11 @@ pub struct Session {
     /// by the reader task (output) and by `Write` (input), read by `List`.
     /// This is the wire's `lastActivityAt`.
     activity: Arc<AtomicU64>,
+    /// Serialises writes to this pane's master. A `Write` that timed out is not
+    /// cancelled (it finishes when the pane reads), so without this the next
+    /// `Write` could start while the first is still mid-way through its bytes
+    /// and the two would interleave on the pty.
+    write_lock: Arc<Mutex<()>>,
 }
 
 /// How long a write to a pane's input may wait before the caller is told it is
@@ -96,21 +101,43 @@ pub struct Session {
 /// arrives first.
 const WRITE_TIMEOUT_MS: u64 = 5_000;
 
-/// Write every byte to `fd`, retrying short writes.
+/// Write every byte to `fd`, retrying short writes and `EINTR`.
 ///
 /// Runs on the blocking pool (see the `Write` handler): the call can wait for
-/// the pane's reader, so it must never occupy the runtime.
+/// the pane's reader, so it must never occupy the runtime. A non-blocking
+/// descriptor's `EAGAIN` waits for writability and retries rather than failing
+/// a write that would have succeeded a moment later.
 fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
     use nix::libc as libc;
     let mut off = 0usize;
     while off < bytes.len() {
         let n = unsafe { libc::write(fd, bytes[off..].as_ptr() as *const _, bytes.len() - off) };
-        if n <= 0 {
-            return Err(std::io::Error::last_os_error());
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            match e.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                    unsafe { libc::poll(&mut p, 1, 1000) };
+                    continue;
+                }
+                _ => return Err(e),
+            }
+        }
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
         }
         off += n as usize;
     }
     Ok(())
+}
+
+/// [`write_all`] under the pane's write lock: one writer at a time, so a write
+/// that outlived its caller's timeout finishes before the next one begins.
+fn locked_write(lock: &Mutex<()>, fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
+    // A poisoned lock guards nothing (`()`): carry on.
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    write_all(fd, bytes)
 }
 
 /// The most output a session buffers for a reader that is not reading. Beyond
@@ -171,21 +198,33 @@ fn set_cloexec(fd: std::os::fd::RawFd) {
     }
 }
 
-/// Close every descriptor above the standard three, in a forked child.
+/// Close every descriptor above the standard three except `keep`, in a forked
+/// child.
 ///
-/// `close_range` is one syscall (Linux 5.9+); the loop is the fallback for a
-/// kernel without it, and 4096 is far above any descriptor this process holds.
-/// Belt and braces with [`set_cloexec`]: the flag is what is correct, and this
-/// is what makes correctness not depend on every future descriptor remembering
-/// to set it.
-fn close_above_std() {
+/// `close_range` is one syscall (Linux 5.9+), invoked raw: the libc wrapper is a
+/// link-time symbol (glibc 2.34+), and a binary that names it does not even load
+/// on an older glibc. On `ENOSYS` (an older kernel) or any failure the loop is
+/// the fallback; 4096 is far above any descriptor this process holds. Belt and
+/// braces with [`set_cloexec`]: the flag is what is correct, and this is what
+/// makes correctness not depend on every future descriptor remembering to set
+/// it. `keep` is the exec-failure pipe, which closes itself on a successful exec.
+fn close_above_std(keep: std::os::fd::RawFd) {
     use nix::libc as libc;
-    if unsafe { libc::close_range(3, libc::c_uint::MAX, 0) } == 0 {
+    let range = |lo: libc::c_uint, hi: libc::c_uint| -> bool {
+        if lo > hi {
+            return true;
+        }
+        unsafe { libc::syscall(libc::SYS_close_range, lo, hi, 0 as libc::c_uint) == 0 }
+    };
+    let keep = keep as libc::c_uint;
+    if range(3, keep.saturating_sub(1).max(2)) && range(keep + 1, libc::c_uint::MAX) {
         return;
     }
     for fd in 3..4096 {
-        unsafe {
-            libc::close(fd);
+        if fd != keep as i32 {
+            unsafe {
+                libc::close(fd);
+            }
         }
     }
 }
@@ -367,26 +406,53 @@ impl Keeper {
     pub async fn handle(&self, msg: &KeeperMessage) -> Result<KeeperMessage, String> {
         self.reap(); // refresh liveness before answering anything
         match msg {
-            km::KeeperMessage::Spawn(s) => match self.spawn_session(s).await {
-                Ok(sess) => {
-                    self.sessions
-                        .lock()
-                        .unwrap()
-                        .insert(s.session_id.clone(), sess);
-                    self.state_of(&s.session_id).await
+            km::KeeperMessage::Spawn(s) => {
+                // An id that is already here is refused, not replaced: replacing
+                // drops the old session's handle and leaves its shell running
+                // with nobody able to reach it. (A dead session still holds its
+                // id until it is killed.)
+                let exists = |me: &Self| me.sessions.lock().unwrap().contains_key(&s.session_id);
+                let dup = || format!("session already exists: {}", s.session_id);
+                if exists(self) {
+                    return Err(dup());
                 }
-                Err(e) => Err(e.to_string()),
-            },
+                match self.spawn_session(s).await {
+                    Ok(sess) => {
+                        // Checked again at insert: a second Spawn for the same id
+                        // may have completed while this one was booting.
+                        let lost_race = {
+                            let mut g = self.sessions.lock().unwrap();
+                            if g.contains_key(&s.session_id) {
+                                Some(sess)
+                            } else {
+                                g.insert(s.session_id.clone(), sess);
+                                None
+                            }
+                        };
+                        if let Some(sess) = lost_race {
+                            terminate(sess.pid).await;
+                            return Err(dup());
+                        }
+                        self.state_of(&s.session_id).await
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
             km::KeeperMessage::Kill(k) => {
-                let pid = {
+                let (pid, dead) = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&k.session_id) {
-                        Some(s) => s.pid,
+                        Some(s) => (s.pid, s.dead),
                         None => return Err(format!("no such session: {}", k.session_id)),
                     }
                 };
-                self.group_kill(pid);
-                self.reap();
+                // A session already reaped is not signalled: its pid is free
+                // for the kernel to hand to an unrelated process, and
+                // `mark_dead` already tore down whatever it left behind. A live
+                // one is signalled and then waited for, so no zombie remains.
+                if !dead {
+                    terminate(pid).await;
+                }
                 self.sessions.lock().unwrap().remove(&k.session_id);
                 // The session is removed (the emulator thread exits), so the
                 // state fields are defaults (a dead pane's state is not read
@@ -410,7 +476,7 @@ impl Keeper {
                 }))
             }
             km::KeeperMessage::Write(w) => {
-                let m = {
+                let (m, wl) = {
                     let g = self.sessions.lock().unwrap();
                     match g.get(&w.session_id) {
                         Some(s) if !s.dead => {
@@ -419,7 +485,7 @@ impl Keeper {
                             // Stamped under the lock we already hold, never a
                             // second acquisition.
                             s.activity.store(now_ms(), Ordering::Relaxed);
-                            s.master.clone()
+                            (s.master.clone(), s.write_lock.clone())
                         }
                         _ => return Err(format!("no live session: {}", w.session_id)),
                     }
@@ -445,7 +511,7 @@ impl Keeper {
                 let sid = w.session_id.clone();
                 let done = tokio::time::timeout(
                     std::time::Duration::from_millis(WRITE_TIMEOUT_MS),
-                    tokio::task::spawn_blocking(move || write_all(m.as_raw_fd(), &bytes)),
+                    tokio::task::spawn_blocking(move || locked_write(&wl, m.as_raw_fd(), &bytes)),
                 )
                 .await;
                 match done {
@@ -654,9 +720,13 @@ impl Keeper {
     /// messages).
     async fn spawn_session(&self, s: &km::Spawn) -> std::io::Result<Session> {
         use nix::libc as libc;
+        // The same clamp `Resize` applies: the grid the emulator holds, the PTY's
+        // size and the size the client is told must all be the one number.
+        let (cols, rows) = ldmux_protocol::clamp_pane_size(s.cols, s.rows);
+        let (cols, rows) = (cols as u16, rows as u16);
         let winsize = libc::winsize {
-            ws_row: s.rows as u16,
-            ws_col: s.cols as u16,
+            ws_row: rows,
+            ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
@@ -717,11 +787,25 @@ impl Keeper {
             Some(c) => Some(std::ffi::CString::new(c.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}")))?),
             None => None,
         };
+        // The exec-failure pipe: close-on-exec on both ends, so a successful
+        // exec closes the child's end and the parent reads EOF; a failure (chdir,
+        // exec) writes what went wrong first.
+        let mut pipe_fds = [0 as libc::c_int; 2];
+        if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let (err_rd, err_wr) = unsafe {
+            (
+                <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(pipe_fds[0]),
+                <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(pipe_fds[1]),
+            )
+        };
         let pid = fork_shell(
             slave_in_raw,
             slave_out_raw,
             slave_err_raw,
             master_raw,
+            err_wr.as_raw_fd(),
             &prog,
             &argv,
             cwd_cstr.as_ref(),
@@ -732,6 +816,32 @@ impl Keeper {
         drop(slave_out);
         drop(slave_err);
         drop(slave);
+        drop(err_wr);
+        // From here every error path must reap `pid`.
+        let report = tokio::task::spawn_blocking(move || read_exec_report(&err_rd))
+            .await
+            .unwrap_or(ExecReport::Failed(0, 0));
+        match report {
+            ExecReport::Exec => {}
+            ExecReport::Failed(stage, errno) => {
+                wait_child(pid).await;
+                let what = match stage {
+                    STAGE_DUP2 => "dup2 of the terminal onto stdio",
+                    STAGE_CHDIR => "chdir",
+                    STAGE_EXEC => "exec",
+                    _ => "starting the child",
+                };
+                let target = match stage {
+                    STAGE_CHDIR => s.cwd.clone().unwrap_or_default(),
+                    STAGE_EXEC => prog_s.clone(),
+                    _ => String::new(),
+                };
+                return Err(std::io::Error::other(format!(
+                    "{what} {target}: {}",
+                    std::io::Error::from_raw_os_error(errno)
+                )));
+            }
+        }
 
         let master = Arc::new(master);
         let out = Arc::new(Mutex::new(OutBuf::default()));
@@ -746,8 +856,8 @@ impl Keeper {
         // reads the master (plan §3.3 — the kernel pty buffer must never
         // fill from a slow reader) and feeds the emulator and the buffer.
         emulator::spawn(
-            s.cols as u16,
-            s.rows as u16,
+            cols,
+            rows,
             emulator::Wiring {
                 master: master.clone(),
                 waker: waker.clone(),
@@ -761,39 +871,22 @@ impl Keeper {
         // session is visible.
         let booted = boot_rx.await.ok().unwrap_or_default();
         if !booted {
-            self.group_kill(pid);
+            terminate(pid).await;
             return Err(std::io::Error::other("the emulator did not boot"));
         }
         Ok(Session {
             id: s.session_id.clone(),
             pid,
             master,
-            cols: s.cols as u16,
-            rows: s.rows as u16,
+            cols,
+            rows,
             dead: false,
             exit_code: 0,
             out,
             em: Emu { tx: em_tx, waker },
             activity,
+            write_lock: Arc::new(Mutex::new(())),
         })
-    }
-
-    /// Group-kill the session's process group (SIGTERM, grace, SIGKILL).
-    ///
-    /// The group alone is not enough: an interactive shell with job control
-    /// puts every foreground job in its *own* process group, so `kill(-pid)`
-    /// reaps the shell and orphans the job it was running (a `pi` agent left
-    /// with no controlling terminal, invisible to ldmux). The session is the
-    /// unit that must die, so both the group and every process whose session is
-    /// this one are signalled.
-    fn group_kill(&self, pid: i32) {
-        use nix::sys::signal::Signal;
-        let g = nix::unistd::Pid::from_raw(-pid);
-        let _ = nix::sys::signal::kill(g, Signal::SIGTERM);
-        signal_session(pid, Signal::SIGTERM);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let _ = nix::sys::signal::kill(g, Signal::SIGKILL);
-        signal_session(pid, Signal::SIGKILL);
     }
 
     /// Reap any exited children (the authoritative death signal), marking the
@@ -843,8 +936,12 @@ impl Keeper {
         if let Some(sid) = newly_dead {
             use nix::sys::signal::Signal;
             signal_session(sid, Signal::SIGTERM);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            signal_session(sid, Signal::SIGKILL);
+            // The grace period is a timer, not a sleep: this runs on the
+            // runtime, and a blocking sleep here stalled every session.
+            tokio::spawn(async move {
+                tokio::time::sleep(KILL_GRACE).await;
+                signal_session(sid, Signal::SIGKILL);
+            });
         }
     }
 
@@ -853,6 +950,90 @@ impl Keeper {
     pub fn buffered_len(&self, id: &str) -> Option<usize> {
         let g = self.sessions.lock().unwrap();
         g.get(id).map(|s| s.out.lock().unwrap().q.len())
+    }
+}
+
+/// How long a terminated session gets between SIGTERM and SIGKILL.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Take a live session's process tree down and reap the shell.
+///
+/// SIGTERM to the process group and to every process whose session is this one,
+/// a grace period, SIGKILL, then `waitpid`. The group alone is not enough: an
+/// interactive shell with job control puts every foreground job in its *own*
+/// process group, so `kill(-pid)` reaps the shell and orphans the job it was
+/// running (a `pi` agent left with no controlling terminal, invisible to
+/// ldmux). The session is the unit that must die. Only for a child that has not
+/// been reaped: until `waitpid` collects it the pid cannot be recycled, which is
+/// what makes signalling it safe.
+async fn terminate(pid: i32) {
+    use nix::sys::signal::Signal;
+    let g = nix::unistd::Pid::from_raw(-pid);
+    let _ = nix::sys::signal::kill(g, Signal::SIGTERM);
+    signal_session(pid, Signal::SIGTERM);
+    tokio::time::sleep(KILL_GRACE).await;
+    let _ = nix::sys::signal::kill(g, Signal::SIGKILL);
+    signal_session(pid, Signal::SIGKILL);
+    wait_child(pid).await;
+}
+
+/// Collect the exit status of `pid` so no zombie remains.
+///
+/// Polls without blocking; a child stuck in uninterruptible sleep (it cannot
+/// die even to SIGKILL until its I/O returns) is handed to a blocking waiter
+/// that reaps it whenever it does.
+async fn wait_child(pid: i32) {
+    use nix::errno::Errno;
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    let p = nix::unistd::Pid::from_raw(pid);
+    for _ in 0..40 {
+        match waitpid(p, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            Err(Errno::EINTR) => {}
+            // Reaped (by us, or by the periodic reaper) or not ours: done.
+            _ => return,
+        }
+    }
+    tokio::task::spawn_blocking(move || {
+        let _ = waitpid(p, None);
+    });
+}
+
+/// What the child's exec-failure pipe said.
+enum ExecReport {
+    /// EOF with nothing written: the pipe closed on exec.
+    Exec,
+    /// `(stage, errno)` of the step that failed.
+    Failed(u8, i32),
+}
+
+const STAGE_DUP2: u8 = 1;
+const STAGE_CHDIR: u8 = 2;
+const STAGE_EXEC: u8 = 3;
+
+/// Read the child's report from the error pipe (blocks until the child execs or
+/// fails — both are immediate; run it on the blocking pool).
+fn read_exec_report(rd: &OwnedFd) -> ExecReport {
+    use nix::libc as libc;
+    let mut buf = [0u8; 5];
+    let mut got = 0usize;
+    while got < buf.len() {
+        let n = unsafe { libc::read(rd.as_raw_fd(), buf[got..].as_mut_ptr() as *mut _, buf.len() - got) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        got += n as usize;
+    }
+    match got {
+        0 => ExecReport::Exec,
+        5 => ExecReport::Failed(buf[0], i32::from_ne_bytes([buf[1], buf[2], buf[3], buf[4]])),
+        _ => ExecReport::Failed(0, 0),
     }
 }
 
@@ -905,6 +1086,7 @@ fn fork_shell(
     slave_out_raw: std::os::fd::RawFd,
     slave_err_raw: std::os::fd::RawFd,
     master_raw: std::os::fd::RawFd,
+    err_fd: std::os::fd::RawFd,
     prog: &std::ffi::CString,
     argv: &[std::ffi::CString],
     cwd: Option<&std::ffi::CString>,
@@ -925,26 +1107,61 @@ fn fork_shell(
             // depend on the shell claiming it. Ignored on failure: the shell still
             // runs, it just behaves like a non-interactive one.
             let _ = unsafe { libc::ioctl(slave_in_raw, libc::TIOCSCTTY, 0) };
-            let _ = unsafe { libc::dup2(slave_in_raw, 0) };
-            let _ = unsafe { libc::dup2(slave_out_raw, 1) };
-            let _ = unsafe { libc::dup2(slave_err_raw, 2) };
+            if unsafe { libc::dup2(slave_in_raw, 0) } < 0
+                || unsafe { libc::dup2(slave_out_raw, 1) } < 0
+                || unsafe { libc::dup2(slave_err_raw, 2) } < 0
+            {
+                unsafe { child_fail(err_fd, STAGE_DUP2) }
+            }
             let _ = unsafe { libc::close(master_raw) };
             let _ = unsafe { libc::close(slave_in_raw) };
             let _ = unsafe { libc::close(slave_out_raw) };
             let _ = unsafe { libc::close(slave_err_raw) };
             // Everything else the keeper holds goes with them: the pty fds of
             // every other session, any eventfd, the socket. A shell is a shell,
-            // not a view of its siblings.
-            close_above_std();
+            // not a view of its siblings. (The error pipe stays; it is
+            // close-on-exec.)
+            close_above_std(err_fd);
+            // Rust's runtime sets SIGPIPE to ignored, and an ignored disposition
+            // survives exec: every shell and every program under it would see
+            // `write` fail with EPIPE instead of dying quietly in a pipeline
+            // (`yes | head` loops on errors; the shell's `set -o pipefail`
+            // reports nonsense). Default it, and clear the signal mask the
+            // thread forking us carries.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+            }
             if let Some(c) = cwd {
-                let _ = unsafe { libc::chdir(c.as_ptr()) };
+                // A directory that cannot be entered fails the spawn: a shell in
+                // the wrong place is worse than an error the caller can show.
+                if unsafe { libc::chdir(c.as_ptr()) } != 0 {
+                    unsafe { child_fail(err_fd, STAGE_CHDIR) }
+                }
             }
             // `execvpe` resolves `prog` on PATH and uses the given environment.
-            let _ = unsafe { libc::execvpe(prog.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr()) };
-            unsafe { libc::_exit(127) } // execvpe failed
+            unsafe {
+                libc::execvpe(prog.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+                child_fail(err_fd, STAGE_EXEC)
+            }
         }
         Ok(nix::unistd::ForkResult::Parent { child }) => Ok(child.as_raw()),
         Err(e) => Err(std::io::Error::other(format!("fork: {e}"))),
+    }
+}
+
+/// Tell the parent which step failed and with what errno, then `_exit`.
+/// Async-signal-safe: raw `write` of a fixed buffer, no allocation.
+unsafe fn child_fail(err_fd: std::os::fd::RawFd, stage: u8) -> ! {
+    use nix::libc as libc;
+    unsafe {
+        let errno = *libc::__errno_location();
+        let e = errno.to_ne_bytes();
+        let buf = [stage, e[0], e[1], e[2], e[3]];
+        libc::write(err_fd, buf.as_ptr() as *const _, buf.len());
+        libc::_exit(127)
     }
 }
 
@@ -952,23 +1169,99 @@ fn fork_shell(
 /// [`KeeperMessage`] per line, one request line → one response line per
 /// connection (one call == one connection).
 pub async fn serve(self_: &Arc<Keeper>, socket: &std::path::Path) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(socket);
-    let listener = tokio::net::UnixListener::bind(socket)?;
-    // The keeper owns every PTY: its socket is owner-only whatever the umask, and
-    // not merely by the directory it happens to sit in.
+    let listener = bind_private(socket)?;
+    // Reaping is not left to requests alone: a shell that exits while nobody
+    // asks stays a zombie, and its session stays "alive", until the next call.
+    // The task holds a `Weak`, so it ends with the keeper.
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
-    }
-    loop {
-        let (sock, _addr) = listener.accept().await?;
-        let me = self_.clone();
+        let weak = Arc::downgrade(self_);
         tokio::spawn(async move {
-            if let Err(e) = serve_conn(&me, sock).await {
-                eprintln!("ldmux-keeper: connection: {e}");
+            let mut tick = tokio::time::interval(REAP_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                match weak.upgrade() {
+                    Some(k) => k.reap(),
+                    None => return,
+                }
             }
         });
     }
+    loop {
+        match listener.accept().await {
+            Ok((sock, _addr)) => {
+                let me = self_.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_conn(&me, sock).await {
+                        eprintln!("ldmux-keeper: connection: {e}");
+                    }
+                });
+            }
+            // A failed accept is not the end of the keeper: it owns every PTY, and
+            // exiting here would kill every session. `EMFILE`/`ENFILE` clear when a
+            // descriptor frees; `ECONNABORTED` is one dropped client. Back off so a
+            // persistent error is not a busy loop.
+            Err(e) => {
+                eprintln!("ldmux-keeper: accept: {e}");
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+            }
+        }
+    }
+}
+
+/// How often the keeper looks for exited shells on its own.
+const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// The pause after a failed `accept`.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Bind the keeper socket, owner-only from the first instant.
+///
+/// A socket that something is still answering on is **not** replaced: a second
+/// keeper unlinking the first's socket would leave the first running with every
+/// PTY and no way to reach it. Only a stale socket (nothing accepting) is
+/// unlinked. The umask is tightened around `bind` so the file never exists with
+/// wider permissions, as the daemon's control socket does; the `chmod` after is
+/// belt and braces.
+fn bind_private(socket: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+    ldmux_protocol::paths::check_socket_path(&socket.to_string_lossy())
+        .map_err(|m| Error::new(ErrorKind::InvalidInput, m))?;
+    match std::fs::symlink_metadata(socket) {
+        Ok(md) if md.file_type().is_dir() => {
+            return Err(Error::new(ErrorKind::AlreadyExists, format!("{} is a directory", socket.display())));
+        }
+        Ok(md) => {
+            if md.file_type().is_socket() {
+                match std::os::unix::net::UnixStream::connect(socket) {
+                    Ok(_) => {
+                        return Err(Error::new(
+                            ErrorKind::AddrInUse,
+                            format!("a keeper is already serving on {}", socket.display()),
+                        ));
+                    }
+                    Err(e) if matches!(e.kind(), ErrorKind::ConnectionRefused | ErrorKind::NotFound) => {}
+                    Err(e) => {
+                        return Err(Error::new(e.kind(), format!("cannot probe {}: {e}", socket.display())));
+                    }
+                }
+            }
+            // Stale (a dead keeper's socket, or a leftover file): clear it.
+            match std::fs::remove_file(socket) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let old = unsafe { nix::libc::umask(0o177) };
+    let bound = tokio::net::UnixListener::bind(socket);
+    unsafe { nix::libc::umask(old) };
+    let listener = bound?;
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 /// The largest request line the keeper will buffer (a Spawn with its env, or a Write).
@@ -977,37 +1270,23 @@ const MAX_REQUEST_LINE: usize = 4 * 1024 * 1024;
 const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let (mut rd, mut wr) = sock.into_split();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut tmp = [0u8; 4096];
     // A request is one line. Bounded in size and in time, so a client that never
     // sends the newline (or never stops sending) cannot hold memory and a task for
     // the life of the keeper.
-    let read_line = async {
-        loop {
-            let n = rd.read(&mut tmp).await?;
-            if n == 0 {
-                return Ok::<bool, std::io::Error>(false);
-            }
-            buf.extend_from_slice(&tmp[..n]);
-            if buf.contains(&b'\n') {
-                return Ok(true);
-            }
-            if buf.len() > MAX_REQUEST_LINE {
-                return Err(std::io::Error::other("request line too large"));
-            }
-        }
-    };
-    match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_line).await {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => return Ok(()),
+    let line = match tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        ldmux_protocol::socket::read_line(&mut rd, MAX_REQUEST_LINE),
+    )
+    .await
+    {
+        Ok(Ok(Some(l))) => String::from_utf8_lossy(&l).into_owned(),
+        Ok(Ok(None)) => return Ok(()),
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err(std::io::Error::other("timed out waiting for the request line")),
-    }
-    let nl = buf.iter().position(|&b| b == b'\n').unwrap();
-    let line = String::from_utf8_lossy(&buf[..nl]).to_string();
+    };
     let req: KeeperMessage = match serde_json::from_str(&line) {
         Ok(m) => m,
         Err(e) => {
@@ -1031,6 +1310,61 @@ async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::
     Ok(())
 }
 
+/// The shell argv for sessions that name no command: `$SHELL` when it is set,
+/// non-empty and executable; else the passwd entry's shell; else `/bin/sh`.
+///
+/// **Login-shell policy: not a login shell.** The argv is the bare program (no
+/// `-l`, `argv[0]` not prefixed with `-`). The keeper is spawned by the daemon,
+/// which already runs in the user's session with their environment (and the
+/// `LDMUX_*` overlay); a login shell would re-run the profile files on every
+/// pane and stack PATH entries onto an environment that was already built. A
+/// user who wants one configures their rc file, or the daemon passes a `command`.
+pub fn default_shell() -> Vec<String> {
+    let passwd = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|u| u.shell.to_string_lossy().into_owned());
+    vec![pick_shell(std::env::var("SHELL").ok(), passwd, is_executable)]
+}
+
+/// The choice in [`default_shell`], with the environment and the executable
+/// check injected so it is testable.
+pub fn pick_shell(env_shell: Option<String>, passwd_shell: Option<String>, ok: impl Fn(&str) -> bool) -> String {
+    [env_shell, passwd_shell]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty() && ok(s))
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+fn is_executable(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    // `metadata` follows symlinks (a distro `/bin/sh` is one).
+    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::pick_shell;
+
+    #[test]
+    fn env_shell_wins_when_usable_else_passwd_else_sh() {
+        let ok = |p: &str| p != "/nope";
+        assert_eq!(pick_shell(Some("/bin/zsh".into()), Some("/bin/bash".into()), ok), "/bin/zsh");
+        assert_eq!(pick_shell(Some("".into()), Some("/bin/bash".into()), ok), "/bin/bash");
+        assert_eq!(pick_shell(Some("/nope".into()), Some("/bin/bash".into()), ok), "/bin/bash");
+        assert_eq!(pick_shell(None, Some("/nope".into()), ok), "/bin/sh");
+        assert_eq!(pick_shell(None, None, ok), "/bin/sh");
+    }
+
+    #[test]
+    fn executability_is_checked_on_disk() {
+        assert!(super::is_executable("/bin/sh"));
+        assert!(!super::is_executable("/etc/passwd"));
+        assert!(!super::is_executable("/definitely/not/here"));
+    }
+}
+
 #[cfg(test)]
 mod proc_tests {
     use super::parse_tpgid;
@@ -1049,5 +1383,79 @@ mod proc_tests {
         // Garbage is not a panic and not a wrong number.
         assert_eq!(parse_tpgid("no parens here"), None);
         assert_eq!(parse_tpgid(""), None);
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::{locked_write, write_all};
+    use nix::libc as libc;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::sync::{Arc, Mutex};
+
+    fn pipe(flags: libc::c_int) -> (std::fs::File, std::fs::File) {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | flags) }, 0);
+        unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) }
+    }
+
+    /// A non-blocking descriptor answers `EAGAIN` when full; that is "wait", not
+    /// a failed write.
+    #[test]
+    fn write_all_waits_out_a_full_nonblocking_descriptor() {
+        use std::os::fd::AsRawFd;
+        let (mut rd, wr) = pipe(libc::O_NONBLOCK);
+        // 1 MiB is far over the pipe's 64 KiB.
+        let payload = vec![7u8; 1024 * 1024];
+        let n = payload.len();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            // The read end is non-blocking too: poll it.
+            let mut got = 0usize;
+            let mut buf = vec![0u8; 8192];
+            while got < n {
+                match rd.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(k) => got += k,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1))
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            got
+        });
+        write_all(wr.as_raw_fd(), &payload).expect("the write must complete, not fail with EAGAIN");
+        assert_eq!(reader.join().unwrap(), n);
+    }
+
+    /// A write that is still waiting on a slow reader finishes before the next one
+    /// starts: the two never interleave.
+    #[test]
+    fn writes_to_one_pane_do_not_interleave() {
+        use std::os::fd::AsRawFd;
+        let (mut rd, wr) = pipe(0);
+        let wr = Arc::new(wr);
+        let lock = Arc::new(Mutex::new(()));
+        let (a_len, b_len) = (300 * 1024usize, 16usize);
+        let a = {
+            let (wr, lock) = (wr.clone(), lock.clone());
+            std::thread::spawn(move || locked_write(&lock, wr.as_raw_fd(), &vec![b'a'; a_len]).unwrap())
+        };
+        // A has filled the pipe and is blocked; B arrives behind it.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let b = {
+            let (wr, lock) = (wr.clone(), lock.clone());
+            std::thread::spawn(move || locked_write(&lock, wr.as_raw_fd(), &vec![b'b'; b_len]).unwrap())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let mut all = vec![0u8; a_len + b_len];
+        rd.read_exact(&mut all).unwrap();
+        a.join().unwrap();
+        b.join().unwrap();
+        let first_b = all.iter().position(|&c| c == b'b').unwrap();
+        assert_eq!(first_b, a_len, "B's bytes must all follow A's");
+        assert!(all[first_b..].iter().all(|&c| c == b'b'));
     }
 }

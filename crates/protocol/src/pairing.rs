@@ -67,7 +67,11 @@ pub fn pairing_link(p: &Pairing) -> Result<String, PairingError> {
 /// its first value (as `URLSearchParams.get` does).
 pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
     let link = link.trim();
-    if link.len() < 12 || !link[..12].eq_ignore_ascii_case("ldmux://pair") {
+    // Compared as bytes: `link[..12]` panics when byte 12 falls inside a
+    // multibyte character. A match proves the first 12 bytes are ASCII, so the
+    // slice below is on a char boundary.
+    let head = link.as_bytes().get(..12)?;
+    if !head.eq_ignore_ascii_case(b"ldmux://pair") {
         return None;
     }
     let rest = &link[12..];
@@ -281,6 +285,15 @@ mod tests {
             assert_eq!(got.token, want_token, "token for {link}");
             assert_eq!(got.name, want_name, "name for {link}");
         }
+    }
+
+    #[test]
+    fn a_multibyte_char_at_the_prefix_boundary_is_refused_not_a_panic() {
+        // 11 ASCII bytes, then a 3-byte char straddling byte 12.
+        assert!(parse_pairing_link("ldmux://pai\u{20ac}x").is_none());
+        // And a 2-byte char whose boundary is exactly at 12 is fine to refuse.
+        assert!(parse_pairing_link("ldmux://pair\u{e9}").is_none());
+        assert!(parse_pairing_link("\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}").is_none());
     }
 
     #[test]

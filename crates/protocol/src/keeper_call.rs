@@ -76,7 +76,6 @@ pub async fn keeper_call(
     req: &KeeperMessage,
     timeout_ms: u64,
 ) -> Result<KeeperMessage, KeeperCallError> {
-    use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
     let result = async {
@@ -88,23 +87,11 @@ pub async fn keeper_call(
         sock.write_all(line.as_bytes())
             .await
             .map_err(|e| KeeperCallError::new(KeeperCallKind::Write, format!("write: {e}")))?;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut tmp = [0u8; 4096];
-        loop {
-            let n = sock
-                .read(&mut tmp)
-                .await
-                .map_err(|e| KeeperCallError::new(KeeperCallKind::Read, format!("read: {e}")))?;
-            if n == 0 {
-                return Err(KeeperCallError::new(KeeperCallKind::Read, "keeper closed the connection"));
-            }
-            buf.extend_from_slice(&tmp[..n]);
-            if buf.contains(&b'\n') {
-                break;
-            }
-        }
-        let nl = buf.iter().position(|&b| b == b'\n').unwrap();
-        let line = String::from_utf8_lossy(&buf[..nl]).to_string();
+        let line = match crate::socket::read_line(&mut sock, crate::socket::MAX_RESPONSE_LINE).await {
+            Ok(Some(l)) => String::from_utf8_lossy(&l).into_owned(),
+            Ok(None) => return Err(KeeperCallError::new(KeeperCallKind::Read, "keeper closed the connection")),
+            Err(e) => return Err(KeeperCallError::new(KeeperCallKind::Read, format!("read: {e}"))),
+        };
         let res: KeeperMessage =
             serde_json::from_str(&line).map_err(|e| KeeperCallError::new(KeeperCallKind::Protocol, format!("parse: {e}")))?;
         // A keeper `Error` answer is a failure, not a result.

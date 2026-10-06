@@ -11,50 +11,150 @@
 
 use std::env;
 
-/// `LDMUX_STATE_DIR`, else `$XDG_RUNTIME_DIR/ldmux` (default `/tmp/ldmux`).
+/// The longest a Unix socket path may be: `sun_path` is 108 bytes on Linux and
+/// the kernel needs room for the NUL.
+pub const MAX_SOCKET_PATH_BYTES: usize = 107;
+
+/// `LDMUX_STATE_DIR`, else `$XDG_RUNTIME_DIR/ldmux`, else `/tmp/ldmux-<uid>`.
+///
+/// An empty variable is unset (`LDMUX_STATE_DIR=` must not make the state dir
+/// `""`, nor `XDG_RUNTIME_DIR=` make it `/ldmux`). The last resort is per-uid,
+/// never a bare `/tmp/ldmux` that every user on the box shares and the first
+/// to create it owns; [`try_resolve_state_dir`] also creates and verifies it.
 pub fn state_dir_from(state_dir: Option<&str>, xdg_runtime_dir: Option<&str>) -> String {
-    match state_dir {
-        Some(s) => s.to_string(),
-        None => format!("{}/ldmux", xdg_runtime_dir.unwrap_or("/tmp")),
+    state_dir_for_uid(state_dir, xdg_runtime_dir, nix::unistd::getuid().as_raw())
+}
+
+fn state_dir_for_uid(state_dir: Option<&str>, xdg_runtime_dir: Option<&str>, uid: u32) -> String {
+    match (non_empty(state_dir), non_empty(xdg_runtime_dir)) {
+        (Some(s), _) => s.to_string(),
+        (None, Some(x)) => format!("{}/ldmux", x.trim_end_matches('/')),
+        (None, None) => format!("/tmp/ldmux-{uid}"),
     }
 }
 
-/// The resolved state dir, from the process environment.
-pub fn resolve_state_dir() -> String {
-    let s = env_var("LDMUX_STATE_DIR");
-    let x = env_var("XDG_RUNTIME_DIR");
-    state_dir_from(s.as_deref(), x.as_deref())
+fn non_empty(v: Option<&str>) -> Option<&str> {
+    v.filter(|s| !s.is_empty())
 }
 
-/// `LDMUX_SOCK`, else `<state_dir>/ldmuxd.sock`.
+/// Create `dir` (0700) if absent, and verify it is a real directory, owned by
+/// this uid, with no group/other access. Used for the `/tmp` fallback, where
+/// another user could have pre-created the path (or planted a symlink).
+fn ensure_private_dir(dir: &std::path::Path, uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("cannot create the state dir {}: {e}", dir.display())),
+    }
+    // `symlink_metadata`: a symlink planted at the path is refused, not followed.
+    let md = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("cannot stat the state dir {}: {e}", dir.display()))?;
+    if !md.is_dir() {
+        return Err(format!("the state dir {} is not a directory", dir.display()));
+    }
+    if md.uid() != uid {
+        return Err(format!(
+            "the state dir {} is owned by uid {}, not {uid}; refusing to use it (set LDMUX_STATE_DIR or XDG_RUNTIME_DIR)",
+            dir.display(),
+            md.uid()
+        ));
+    }
+    if md.mode() & 0o077 != 0 {
+        return Err(format!(
+            "the state dir {} has mode {:o}; it must not be accessible to group or others",
+            dir.display(),
+            md.mode() & 0o777
+        ));
+    }
+    Ok(())
+}
+
+/// The resolved state dir, from the process environment, or why it cannot be
+/// used. When the per-uid `/tmp` fallback is in play the directory is created
+/// and its owner and mode are verified.
+pub fn try_resolve_state_dir() -> Result<String, String> {
+    let s = env_var("LDMUX_STATE_DIR").filter(|v| !v.is_empty());
+    let x = env_var("XDG_RUNTIME_DIR").filter(|v| !v.is_empty());
+    let dir = state_dir_from(s.as_deref(), x.as_deref());
+    if s.is_none() && x.is_none() {
+        ensure_private_dir(std::path::Path::new(&dir), nix::unistd::getuid().as_raw())?;
+    }
+    Ok(dir)
+}
+
+/// The resolved state dir, from the process environment. An unusable fallback
+/// directory is reported on stderr and ends the process: every caller is a
+/// binary about to bind or connect, and carrying on would use a directory
+/// another user controls.
+pub fn resolve_state_dir() -> String {
+    try_resolve_state_dir().unwrap_or_else(|e| exit_with(&e))
+}
+
+/// `LDMUX_SOCK`, else `<state_dir>/ldmuxd.sock`. An empty `LDMUX_SOCK` is unset.
 pub fn socket_path_from(sock: Option<&str>, state_dir: &str) -> String {
-    match sock {
+    match non_empty(sock) {
         Some(s) => s.to_string(),
         None => format!("{state_dir}/ldmuxd.sock"),
     }
 }
 
-/// The resolved daemon socket path, from the process environment.
-pub fn resolve_socket_path() -> String {
+/// Refuse a socket path the kernel cannot bind: over `sun_path`'s limit,
+/// which otherwise surfaces as a bare `InvalidInput` from `bind`/`connect`.
+pub fn check_socket_path(path: &str) -> Result<(), String> {
+    if path.len() > MAX_SOCKET_PATH_BYTES {
+        return Err(format!(
+            "the socket path is {} bytes, over the {MAX_SOCKET_PATH_BYTES}-byte Unix socket limit: {path} (use a shorter LDMUX_STATE_DIR or LDMUX_SOCK)",
+            path.len()
+        ));
+    }
+    if path.as_bytes().contains(&0) {
+        return Err("the socket path contains a NUL byte".to_string());
+    }
+    Ok(())
+}
+
+/// The resolved daemon socket path, or why it is unusable.
+pub fn try_resolve_socket_path() -> Result<String, String> {
     let s = env_var("LDMUX_SOCK");
-    let state = resolve_state_dir();
-    socket_path_from(s.as_deref(), &state)
+    let state = try_resolve_state_dir()?;
+    let path = socket_path_from(s.as_deref(), &state);
+    check_socket_path(&path)?;
+    Ok(path)
+}
+
+/// The resolved daemon socket path, from the process environment. Exits with a
+/// clear message when the path is unusable (see [`resolve_state_dir`]).
+pub fn resolve_socket_path() -> String {
+    try_resolve_socket_path().unwrap_or_else(|e| exit_with(&e))
+}
+
+fn exit_with(msg: &str) -> ! {
+    eprintln!("ldmux: {msg}");
+    std::process::exit(1)
 }
 
 fn env_var(name: &str) -> Option<String> {
     env::var(name).ok()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn state_dir_falls_back_to_xdg_then_tmp() {
-        assert_eq!(state_dir_from(Some("/s"), None), "/s");
-        assert_eq!(state_dir_from(None, Some("/run/u0")), "/run/u0/ldmux");
-        assert_eq!(state_dir_from(None, None), "/tmp/ldmux");
+    fn state_dir_falls_back_to_xdg_then_a_per_uid_tmp_dir() {
+        assert_eq!(state_dir_for_uid(Some("/s"), None, 7), "/s");
+        assert_eq!(state_dir_for_uid(None, Some("/run/u0"), 7), "/run/u0/ldmux");
+        assert_eq!(state_dir_for_uid(None, None, 7), "/tmp/ldmux-7");
+    }
+
+    #[test]
+    fn empty_variables_are_unset() {
+        assert_eq!(state_dir_for_uid(Some(""), Some("/run/u0"), 7), "/run/u0/ldmux");
+        assert_eq!(state_dir_for_uid(Some(""), Some(""), 7), "/tmp/ldmux-7");
+        assert_eq!(state_dir_for_uid(None, Some(""), 7), "/tmp/ldmux-7");
+        assert_eq!(socket_path_from(Some(""), "/s"), "/s/ldmuxd.sock");
     }
 
     #[test]
@@ -63,4 +163,47 @@ mod tests {
         assert_eq!(socket_path_from(None, "/s"), "/s/ldmuxd.sock");
     }
 
+    #[test]
+    fn an_overlong_socket_path_is_an_error() {
+        assert!(check_socket_path(&format!("/{}", "a".repeat(106))).is_ok()); // 107 bytes
+        let e = check_socket_path(&format!("/{}", "a".repeat(107))).unwrap_err(); // 108
+        assert!(e.contains("108 bytes") && e.contains("limit"), "{e}");
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ldmux-paths-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_fallback_dir_is_created_private_and_verified() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let uid = nix::unistd::getuid().as_raw();
+        let base = scratch("ok");
+        let dir = base.join("state");
+        ensure_private_dir(&dir, uid).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+        // Idempotent.
+        ensure_private_dir(&dir, uid).unwrap();
+        // Loosened: refused.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_private_dir(&dir, uid).unwrap_err().contains("mode"));
+        // Someone else's: refused.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(ensure_private_dir(&dir, uid + 1).unwrap_err().contains("owned by"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_symlink_at_the_fallback_path_is_refused() {
+        let uid = nix::unistd::getuid().as_raw();
+        let base = scratch("link");
+        let target = base.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(ensure_private_dir(&link, uid).unwrap_err().contains("not a directory"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

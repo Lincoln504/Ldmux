@@ -198,7 +198,12 @@ pub(crate) fn spawn(
     boot: oneshot::Sender<bool>,
 ) {
     let Wiring { master, waker, out, activity } = wiring;
-    tokio::task::spawn_blocking(move || {
+    // A dedicated OS thread: the loop blocks in `poll` for the life of the
+    // session, which would pin a slot of tokio's bounded blocking pool (shared
+    // with the pane writes) for as long as the pane lives. If the thread cannot
+    // be created the closure is dropped with `boot`, and the caller sees a
+    // missing boot reply.
+    let _ = std::thread::Builder::new().name("ldmux-emulator".into()).spawn(move || {
         // Created here: the values are `!Send`, so they cannot be moved into
         // this closure from the caller.
         let mut term = match new_terminal(cols, rows) {
@@ -247,8 +252,12 @@ pub(crate) fn spawn(
             let timeout = if wake_fd >= 0 { -1 } else { 1 };
             let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, timeout) };
             if n < 0 {
-                // fd error (e.g. the fd closed out from under us) — the
-                // session is gone; the sender's drop ends the loop.
+                // A signal landed in the poll: look again. Anything else (the
+                // fd closed out from under us) means the session is gone; the
+                // sender's drop ends the loop.
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
                 break;
             }
             if n == 0 {
@@ -266,10 +275,22 @@ pub(crate) fn spawn(
             let n = unsafe {
                 libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len())
             };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if matches!(e.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) {
+                    // Not the end of the stream: try again.
+                    continue;
+                }
+                if e.raw_os_error() != Some(libc::EIO) {
+                    // Unexpected, and retrying a persistent error would spin.
+                    eprintln!("ldmux-keeper: emulator: read: {e}");
+                }
+            }
             if n <= 0 {
-                // EOF/error: the shell's side of the pty is gone. Stop
-                // reading; keep servicing messages (a snapshot of a dead
-                // pane is still valid — the grid keeps its last content).
+                // EOF, or EIO (what a pty master reads once the slave side is
+                // gone): the shell's side is closed. Stop reading; keep
+                // servicing messages (a snapshot of a dead pane is still valid
+                // — the grid keeps its last content).
                 reading = false;
                 continue;
             }

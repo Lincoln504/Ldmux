@@ -242,6 +242,7 @@ dependencies = [
 name = "ldmux-protocol"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "serde",
  "serde_json",
  "tokio",

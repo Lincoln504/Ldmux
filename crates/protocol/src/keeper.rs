@@ -33,27 +33,6 @@ pub enum KeeperMessage {
     Error(Error),
 }
 
-/// Keeper message tags.
-pub mod k {
-    pub const SPAWN: &str = "spawn";
-    pub const KILL: &str = "kill";
-    pub const WRITE: &str = "write";
-    pub const RESIZE: &str = "resize";
-    pub const READ: &str = "read";
-    pub const PEEK: &str = "peek";
-    pub const PEEK_RESULT: &str = "peekresult";
-    pub const SNAPSHOT: &str = "snapshot";
-    pub const SNAPSHOT_RESULT: &str = "snapshotresult";
-    pub const STATE: &str = "state";
-    pub const LIST: &str = "list";
-    pub const CHILD_INFO: &str = "childinfo";
-    pub const CHILD_EXITED: &str = "childexited";
-    pub const CLOSE: &str = "close";
-    pub const LIST_RESULT: &str = "listresult";
-    pub const ACK: &str = "ack";
-    pub const ERROR: &str = "error";
-}
-
 /// The terminal type the session's emulator actually implements
 /// (libghostty-vt is an xterm-256color-compatible terminal). Both the keeper
 /// (which pins it onto every child) and the daemon (which states it in the

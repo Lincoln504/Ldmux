@@ -423,32 +423,47 @@ impl RenderState {
         // The C `GhosttyStyle` is 72 bytes (unpacked, 8-byte aligned — the
         // colour value is an 8-aligned union), and `ROW_CELLS_DATA_STYLE`
         // `@alignCast`s its `out` pointer. Our Rust mirror is narrower, so we
-        // allocate the C size (72), not `size_of` (56), and read raw bytes.
+        // use the C size (72), not `size_of` (56), and read raw bytes.
         const STYLE_C_SIZE: usize = 72;
-        let style_layout = std::alloc::Layout::from_size_align(STYLE_C_SIZE, 8).unwrap();
+        // A `[u64; 9]` is 72 bytes, 8-aligned, and zeroed: no allocation, and
+        // nothing is ever read that the C side did not write (a failed `get`
+        // leaves the zeros, which decode as "no colour, no attributes").
         for x in 0..cols {
-            let _ = unsafe { ffi::ghostty_render_state_row_cells_select(cells, x) };
-            let style_buf = unsafe { std::alloc::alloc(style_layout) };
-            let _ = unsafe {
+            if unsafe { ffi::ghostty_render_state_row_cells_select(cells, x) } != ffi::SUCCESS {
+                // Keep the column count honest: a blank, not a shifted row.
+                out.push(Cell { text: " ".to_string(), style: style_to_plain(&[0u8; STYLE_C_SIZE]) });
+                continue;
+            }
+            let mut style_buf = [0u64; STYLE_C_SIZE / 8];
+            let got_style = unsafe {
                 ffi::ghostty_render_state_row_cells_get(
                     cells,
                     ffi::ROW_CELLS_DATA_STYLE,
-                    style_buf as *mut c_void,
+                    style_buf.as_mut_ptr() as *mut c_void,
                 )
             };
+            if got_style != ffi::SUCCESS {
+                style_buf = [0u64; STYLE_C_SIZE / 8];
+            }
             let mut buffer = ffi::GhosttyBuffer {
                 ptr: text_buf.as_mut_ptr(),
                 cap: text_buf.len(),
                 len: 0,
             };
-            let _ = unsafe {
+            let got_text = unsafe {
                 ffi::ghostty_render_state_row_cells_get(
                     cells,
                     ffi::ROW_CELLS_DATA_GRAPHEMES_UTF8,
                     &mut buffer as *mut _ as *mut c_void,
                 )
             };
-            let style_bytes = unsafe { std::slice::from_raw_parts(style_buf as *const u8, STYLE_C_SIZE) };
+            if got_text != ffi::SUCCESS {
+                buffer.len = 0;
+            }
+            let buffer_len = buffer.len.min(text_buf.len());
+            // SAFETY: `style_buf` is initialised (zeroed, then written by C), and
+            // any byte pattern is a valid `u8`.
+            let style_bytes = unsafe { std::slice::from_raw_parts(style_buf.as_ptr() as *const u8, STYLE_C_SIZE) };
             // A cell with no text is either the second half of a wide character
             // (it must render as nothing: the wide glyph already covers the
             // column) or a blank the program never wrote (it MUST render as a
@@ -467,13 +482,12 @@ impl RenderState {
             };
             let spacer = have_wide
                 && (wide == ffi::CELL_WIDE_SPACER_TAIL || wide == ffi::CELL_WIDE_SPACER_HEAD);
-            let text = if buffer.len == 0 && !spacer {
+            let text = if buffer_len == 0 && !spacer {
                 " ".to_string()
             } else {
-                String::from_utf8_lossy(&text_buf[..buffer.len]).into_owned()
+                String::from_utf8_lossy(&text_buf[..buffer_len]).into_owned()
             };
             out.push(Cell { text, style: style_to_plain(style_bytes) });
-            unsafe { std::alloc::dealloc(style_buf, style_layout) };
         }
         unsafe {
             ffi::ghostty_render_state_row_cells_free(cells);

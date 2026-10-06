@@ -25,12 +25,8 @@ async fn main() {
         }
     }
     let socket = PathBuf::from(socket);
-    // The shell the keeper spawns per session: the user's shell, else /bin/sh.
-    let shell = if let Ok(sh) = std::env::var("SHELL") {
-        vec![sh]
-    } else {
-        vec!["/bin/sh".to_string()]
-    };
+    // The shell the keeper spawns per session (policy: `k::default_shell`).
+    let shell = k::default_shell();
     let keeper = Arc::new(k::Keeper::new(shell));
     if let Err(e) = k::serve(&keeper, &socket).await {
         eprintln!("ldmux-keeper: serve failed: {e}");

@@ -1141,6 +1141,13 @@ async fn a_background_job_does_not_survive_the_shell() {
     let _k = boot(&socket).await;
     let dir = std::env::temp_dir().join(format!("ldmux-orphan-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
+    // Another test's keeper binds with a tightened process-wide umask (that is how
+    // its socket is born 0600), and this thread may create the directory inside
+    // that window: pin the mode rather than trust the umask.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+    }
     let pidfile = dir.join("child.pid");
     let _ = std::fs::remove_file(&pidfile);
     // `set -m` asks for job control, so the background job gets its own process
@@ -1477,4 +1484,276 @@ async fn a_write_that_blocks_does_not_block_the_keeper() {
     let _ = keeper.kill();
     let _ = keeper.wait();
     let _ = std::fs::remove_file(&socket);
+}
+
+// ---- audit hardening -------------------------------------------------------
+
+fn spawn_req(id: &str, cols: u64, rows: u64, cwd: Option<&str>, command: Option<&[&str]>) -> KeeperMessage {
+    KeeperMessage::Spawn(Spawn {
+        session_id: id.to_string(),
+        cols,
+        rows,
+        cwd: cwd.map(str::to_string),
+        command: command.map(|c| c.iter().map(|s| s.to_string()).collect()),
+        env: None,
+    })
+}
+
+/// Peek the session until `needle` shows up (or the budget runs out); returns
+/// everything seen.
+async fn peek_for(socket: &str, id: &str, needle: &str) -> String {
+    let mut seen = Vec::new();
+    for _ in 0..1200 {
+        if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
+            socket,
+            &KeeperMessage::Peek(Peek { session_id: id.to_string() }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            seen.extend_from_slice(&pr.data);
+        }
+        if String::from_utf8_lossy(&seen).contains(needle) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+fn pid_of(st: &KeeperMessage) -> i32 {
+    match st {
+        KeeperMessage::State(s) => s.pid,
+        other => panic!("expected State, got {other:?}"),
+    }
+}
+
+/// True while `/proc/<pid>` exists — a zombie still has an entry, so this is
+/// "has not been reaped".
+fn proc_exists(pid: i32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[tokio::test]
+async fn a_duplicate_session_id_is_refused_and_the_first_survives() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    let first = keeper_call(&s, &spawn_req("dup", 80, 24, None, None), DEFAULT_TIMEOUT_MS).await.unwrap();
+    let pid = pid_of(&first);
+    let err = keeper_call(&s, &spawn_req("dup", 80, 24, None, None), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("already exists"), "got: {}", err.message);
+    // The original shell is still the session's, and still alive.
+    let st = keeper_call(&s, &KeeperMessage::Read(Read { session_id: "dup".into() }), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    match st {
+        KeeperMessage::State(st) => assert!(!st.dead && st.pid == pid),
+        other => panic!("expected State, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn spawn_clamps_the_size_like_resize() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    match keeper_call(&s, &spawn_req("tiny", 1, 1, None, None), DEFAULT_TIMEOUT_MS).await.unwrap() {
+        KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (20, 5)),
+        other => panic!("expected State, got {other:?}"),
+    }
+    match keeper_call(&s, &spawn_req("huge", 9999, 9999, None, None), DEFAULT_TIMEOUT_MS).await.unwrap() {
+        KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (500, 255)),
+        other => panic!("expected State, got {other:?}"),
+    }
+    // The emulator's grid is the clamped one too.
+    let snap = snapshot(&s, "tiny").await;
+    assert_eq!((snap.cols, snap.rows), (20, 5));
+}
+
+/// Rust's runtime ignores SIGPIPE and an ignored disposition survives exec, so
+/// until the fork child reset it every shell started with SIGPIPE ignored.
+#[tokio::test]
+async fn a_child_starts_with_sigpipe_at_its_default() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    // The test process itself ignores it (the harness is a Rust main), so this
+    // is a real before/after.
+    let ours = std::fs::read_to_string("/proc/self/status").unwrap();
+    let mask = |status: &str| {
+        let line = status.lines().find(|l| l.starts_with("SigIgn:")).unwrap();
+        u64::from_str_radix(line.split_whitespace().nth(1).unwrap(), 16).unwrap()
+    };
+    const SIGPIPE_BIT: u64 = 1 << 12;
+    assert!(mask(&ours) & SIGPIPE_BIT != 0, "the premise: the test process ignores SIGPIPE");
+    keeper_call(
+        &s,
+        &spawn_req("sp", 200, 24, None, Some(&["/bin/sh", "-c", "grep '^SigIgn:' /proc/self/status; sleep 30"])),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let text = peek_for(&s, "sp", "SigIgn:").await;
+    let line = text.lines().find(|l| l.contains("SigIgn:")).unwrap_or_else(|| panic!("no SigIgn in {text:?}"));
+    let child = u64::from_str_radix(line.split_whitespace().nth(1).unwrap().trim(), 16).unwrap();
+    assert_eq!(child & SIGPIPE_BIT, 0, "SIGPIPE must be default in the child: {line}");
+}
+
+#[tokio::test]
+async fn a_chdir_failure_fails_the_spawn_and_leaves_no_session_or_zombie() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    let err = keeper_call(&s, &spawn_req("badcwd", 80, 24, Some("/definitely/not/a/dir"), None), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("chdir"), "got: {}", err.message);
+    assert!(err.message.contains("/definitely/not/a/dir"), "got: {}", err.message);
+    match keeper_call(&s, &KeeperMessage::List(List {}), DEFAULT_TIMEOUT_MS).await.unwrap() {
+        KeeperMessage::ListResult(lr) => assert!(lr.sessions.is_empty()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_exec_failure_fails_the_spawn() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    let err = keeper_call(
+        &s,
+        &spawn_req("noexec", 80, 24, None, Some(&["/definitely/not/a/program"])),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("exec"), "got: {}", err.message);
+    assert!(err.message.contains("/definitely/not/a/program"), "got: {}", err.message);
+    // The keeper still works for the next spawn.
+    keeper_call(&s, &spawn_req("after", 80, 24, None, None), DEFAULT_TIMEOUT_MS).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_valid_cwd_is_entered() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    keeper_call(
+        &s,
+        &spawn_req("cwd", 200, 24, Some("/usr"), Some(&["/bin/sh", "-c", "echo HERE=$(pwd); sleep 30"])),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let text = peek_for(&s, "cwd", "HERE=/usr").await;
+    assert!(text.contains("HERE=/usr"), "got {text:?}");
+}
+
+#[tokio::test]
+async fn kill_reaps_the_shell_so_no_zombie_remains() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    let pid = pid_of(&keeper_call(&s, &spawn_req("kz", 80, 24, None, None), DEFAULT_TIMEOUT_MS).await.unwrap());
+    assert!(proc_exists(pid));
+    keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: "kz".into() }), DEFAULT_TIMEOUT_MS).await.unwrap();
+    assert!(!proc_exists(pid), "the killed shell must be waited on, not left a zombie");
+}
+
+#[tokio::test]
+async fn killing_an_already_dead_session_succeeds_without_signalling() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    keeper_call(&s, &spawn_req("kd", 80, 24, None, Some(&["/bin/sh", "-c", "exit 3"])), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let dead = wait_until_async(|| async {
+        matches!(
+            keeper_call(&s, &KeeperMessage::Read(Read { session_id: "kd".into() }), DEFAULT_TIMEOUT_MS).await,
+            Ok(KeeperMessage::State(st)) if st.dead
+        )
+    })
+    .await;
+    assert!(dead, "the exit is noticed");
+    let r = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: "kd".into() }), DEFAULT_TIMEOUT_MS).await.unwrap();
+    assert!(matches!(r, KeeperMessage::State(st) if st.dead));
+    assert!(keeper_call(&s, &KeeperMessage::Read(Read { session_id: "kd".into() }), DEFAULT_TIMEOUT_MS).await.is_err());
+}
+
+async fn wait_until_async<F, Fut>(f: F) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..1200 {
+        if f().await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// With nobody calling the keeper, an exited shell is still collected: the
+/// reaper is periodic, not request-driven.
+#[tokio::test]
+async fn an_exited_shell_is_reaped_with_no_request_to_trigger_it() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    let pid = pid_of(
+        &keeper_call(&s, &spawn_req("rp", 80, 24, None, Some(&["/bin/sh", "-c", "sleep 0.3"])), DEFAULT_TIMEOUT_MS)
+            .await
+            .unwrap(),
+    );
+    // No keeper_call from here on.
+    assert!(wait_until(|| !proc_exists(pid)).await, "the zombie must be reaped by the keeper itself");
+}
+
+#[tokio::test]
+async fn a_second_keeper_refuses_a_live_socket_and_leaves_it_working() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let k2 = std::sync::Arc::new(keeper::Keeper::new(vec!["/bin/sh".to_string()]));
+    let err = keeper::serve(&k2, &socket).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "got {err}");
+    assert!(err.to_string().contains("already serving"), "got {err}");
+    // The first is untouched.
+    let r = keeper_call(&socket.to_string_lossy(), &KeeperMessage::List(List {}), DEFAULT_TIMEOUT_MS).await;
+    assert!(matches!(r, Ok(KeeperMessage::ListResult(_))));
+}
+
+#[tokio::test]
+async fn a_stale_socket_is_replaced_and_is_owner_only_from_the_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let socket = socket_path();
+    // A bound-then-dropped listener leaves the file behind with nothing accepting.
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    assert!(socket.exists());
+    let _k = boot(&socket).await;
+    // `boot` returns as soon as the path exists, and the stale file already does:
+    // wait for the keeper to be what answers on it.
+    let sock = socket.to_string_lossy().to_string();
+    let up = wait_until_async(|| async {
+        matches!(
+            keeper_call(&sock, &KeeperMessage::List(List {}), DEFAULT_TIMEOUT_MS).await,
+            Ok(KeeperMessage::ListResult(_))
+        )
+    })
+    .await;
+    assert!(up, "the keeper must come up beside a stale socket");
+    assert_eq!(std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn an_overlong_socket_path_is_a_clear_error() {
+    let long = std::env::temp_dir().join("x".repeat(120));
+    let k = std::sync::Arc::new(keeper::Keeper::new(vec!["/bin/sh".to_string()]));
+    let err = keeper::serve(&k, &long).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("limit"), "got {err}");
 }
