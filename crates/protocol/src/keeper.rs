@@ -103,7 +103,35 @@ pub struct Read {
 #[serde(rename_all = "camelCase")]
 pub struct Peek {
     pub session_id: String,
+    /// Take at most this many bytes, and answer in the compact form (`data64`,
+    /// `more`). Absent = the original contract: take everything, answer with a
+    /// JSON byte array. A keeper that predates the field ignores it, which is how
+    /// the daemon recognises one (see [`PeekResult::bytes`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
+
+impl Peek {
+    /// The original, unbounded peek.
+    pub fn all(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            max_bytes: None,
+        }
+    }
+    /// A bounded peek (the compact answer).
+    pub fn bounded(session_id: impl Into<String>, max_bytes: u64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            max_bytes: Some(max_bytes),
+        }
+    }
+}
+
+/// The most a bounded peek returns, whatever the request asked.
+pub const PEEK_MAX_BYTES: u64 = 256 * 1024;
+/// What the daemon asks for per peek.
+pub const PEEK_CHUNK_BYTES: u64 = 64 * 1024;
 
 /// Keeper → daemon: the drained bytes (empty when the buffer is empty).
 ///
@@ -113,11 +141,51 @@ pub struct Peek {
 #[serde(rename_all = "camelCase")]
 pub struct PeekResult {
     pub session_id: String,
+    /// The bytes as a JSON array of integers: the original encoding, used when the
+    /// request had no `max_bytes`.
+    #[serde(default)]
     pub data: Vec<u8>,
+    /// The bytes, base64 (RFC 4648, padded): the answer to a bounded peek. About
+    /// a third the size of the array form and one allocation to decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data64: Option<String>,
+    /// Bytes remain buffered after this chunk (a bounded peek only): ask again
+    /// without waiting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub more: bool,
     /// Output was discarded because nobody was reading it fast enough and the
     /// keeper's buffer hit its cap. A viewer must resync from a snapshot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lost: bool,
+}
+
+impl PeekResult {
+    /// The raw bytes, from whichever encoding the keeper answered in.
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        match &self.data64 {
+            Some(b) => crate::base64::decode(b).ok_or_else(|| "peek: invalid base64".to_string()),
+            None => Ok(self.data.clone()),
+        }
+    }
+
+    /// Consume into the raw bytes without copying the array form.
+    pub fn into_bytes(self) -> Result<Vec<u8>, String> {
+        match self.data64 {
+            Some(b) => crate::base64::decode(&b).ok_or_else(|| "peek: invalid base64".to_string()),
+            None => Ok(self.data),
+        }
+    }
+
+    /// A compact answer carrying `bytes`.
+    pub fn compact(session_id: String, bytes: &[u8], more: bool, lost: bool) -> Self {
+        Self {
+            session_id,
+            data: Vec::new(),
+            data64: Some(crate::base64::encode(bytes)),
+            more,
+            lost,
+        }
+    }
 }
 
 /// Daemon → keeper: re-send the pane, optionally with paged scrollback
@@ -223,6 +291,13 @@ pub struct State {
     pub foreground: String,
     /// The working directory (`/proc/<pid>/cwd`); empty for a dead pane.
     pub cwd: String,
+    /// How the shell ended, for a dead pane: its exit status when it exited ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// ... or the signal that killed it. Both absent: unknown (the child was
+    /// reaped by someone else) or the pane is alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_signal: Option<i32>,
 }
 
 /// Daemon → keeper: list the keeper's sessions.
@@ -304,23 +379,21 @@ mod tests {
 
     #[test]
     fn spawn_and_kill_shapes() {
-        let v: serde_json::Value =
-            serde_json::to_value(KeeperMessage::Spawn(Spawn {
-                session_id: "s1".into(),
-                cols: 80,
-                rows: 24,
-                cwd: None,
-                command: None,
-                env: None,
-            }))
-            .unwrap();
+        let v: serde_json::Value = serde_json::to_value(KeeperMessage::Spawn(Spawn {
+            session_id: "s1".into(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: None,
+            env: None,
+        }))
+        .unwrap();
         assert_eq!(v["type"], "spawn");
         assert_eq!(v["sessionId"], "s1");
-        let v: serde_json::Value =
-            serde_json::to_value(KeeperMessage::Kill(Kill {
-                session_id: "s1".into(),
-            }))
-            .unwrap();
+        let v: serde_json::Value = serde_json::to_value(KeeperMessage::Kill(Kill {
+            session_id: "s1".into(),
+        }))
+        .unwrap();
         assert_eq!(v, serde_json::json!({"type":"kill","sessionId":"s1"}));
     }
 
@@ -352,21 +425,70 @@ mod tests {
         assert_eq!(v["cursorX"], 3);
         assert_eq!(v["mouseSgr"], false);
         assert_eq!(v["foreground"], "dash");
-        let back: KeeperMessage =
-            serde_json::from_value(v).expect("snapshotresult round-trips");
+        let back: KeeperMessage = serde_json::from_value(v).expect("snapshotresult round-trips");
         assert!(matches!(back, KeeperMessage::SnapshotResult(_)));
     }
 
     #[test]
     fn snapshot_history_lines_absent() {
-        let v: serde_json::Value =
-            serde_json::to_value(KeeperMessage::Snapshot(Snapshot {
-                session_id: "s1".into(),
-                history_lines: None,
+        let v: serde_json::Value = serde_json::to_value(KeeperMessage::Snapshot(Snapshot {
+            session_id: "s1".into(),
+            history_lines: None,
             drain_output: false,
-            }))
-            .unwrap();
+        }))
+        .unwrap();
         assert_eq!(v["type"], "snapshot");
         assert!(v.get("historyLines").is_none());
+    }
+
+    /// The two peek encodings, and the compatibility rules the daemon and keeper
+    /// rely on across a restart of only one of them.
+    #[test]
+    fn peek_encodings_and_compatibility() {
+        // Request: `maxBytes` is absent for the original peek (an old keeper sees
+        // exactly what it always saw) and present for a bounded one.
+        let old = serde_json::to_value(KeeperMessage::Peek(Peek::all("s1"))).unwrap();
+        assert_eq!(old, serde_json::json!({"type":"peek","sessionId":"s1"}));
+        let new = serde_json::to_value(KeeperMessage::Peek(Peek::bounded("s1", 65536))).unwrap();
+        assert_eq!(new["maxBytes"], 65536);
+        // An old daemon's request parses on a new keeper, with no bound.
+        let KeeperMessage::Peek(p) = serde_json::from_value(old).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.max_bytes, None);
+
+        // Answer, compact: base64, no byte array, `more` only when true.
+        let c = PeekResult::compact("s1".into(), b"hello\x1b[0m", true, false);
+        let v = serde_json::to_value(KeeperMessage::PeekResult(c.clone())).unwrap();
+        assert_eq!(v["data64"], "aGVsbG8bWzBt");
+        assert_eq!(v["more"], true);
+        assert_eq!(v["data"], serde_json::json!([]));
+        assert_eq!(c.bytes().unwrap(), b"hello\x1b[0m");
+
+        // Answer, original: what an old keeper sends (no `data64`, no `more`)
+        // parses on a new daemon, and a new keeper's original-form answer parses
+        // on an old daemon (it has `data`).
+        let legacy = serde_json::json!({"type":"peekresult","sessionId":"s1","data":[104,105]});
+        let KeeperMessage::PeekResult(r) = serde_json::from_value(legacy).unwrap() else {
+            panic!()
+        };
+        assert_eq!(r.into_bytes().unwrap(), b"hi");
+        let orig = serde_json::to_value(KeeperMessage::PeekResult(PeekResult {
+            session_id: "s1".into(),
+            data: vec![1, 2],
+            data64: None,
+            more: false,
+            lost: false,
+        }))
+        .unwrap();
+        assert_eq!(orig["data"], serde_json::json!([1, 2]));
+        assert!(orig.get("data64").is_none() && orig.get("more").is_none());
+
+        // Bad base64 is an error, not silence.
+        let bad = PeekResult {
+            data64: Some("***".into()),
+            ..PeekResult::compact("s".into(), b"", false, false)
+        };
+        assert!(bad.bytes().is_err());
     }
 }

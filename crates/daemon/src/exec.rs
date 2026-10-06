@@ -7,10 +7,10 @@
 //! both pipes drained concurrently (a full pipe would otherwise deadlock),
 //! and bounded so a wedged binary cannot hang the command forever.
 
-use crate::proc::{kill_group, SpawnOptions};
+use crate::proc::{SpawnOptions, kill_group};
 use nix::sys::signal::Signal;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The outcome of one `run`.
 pub struct ExecResult {
@@ -62,7 +62,7 @@ pub async fn run(argv: Vec<String>, opts: ExecOpts) -> ExecResult {
                 code: -1,
                 out: String::new(),
                 err: e.to_string(),
-            }
+            };
         }
     };
     let mut spawned = spawned;
@@ -78,8 +78,7 @@ pub async fn run(argv: Vec<String>, opts: ExecOpts) -> ExecResult {
             tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
             flag.store(true, Ordering::Relaxed);
             kill_group(pid, Signal::SIGTERM);
-            tokio::time::sleep(std::time::Duration::from_millis(EXEC_KILL_GRACE_MS))
-                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(EXEC_KILL_GRACE_MS)).await;
             kill_group(pid, Signal::SIGKILL);
         })
     };
@@ -122,8 +121,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_binary_is_reported_never_thrown() {
-        let res = run(vec!["definitely-not-a-real-binary-ldmux".to_string()], ExecOpts::default())
-            .await;
+        let res = run(
+            vec!["definitely-not-a-real-binary-ldmux".to_string()],
+            ExecOpts::default(),
+        )
+        .await;
         assert_eq!(res.code, -1);
         assert!(!res.err.is_empty());
     }
@@ -198,7 +200,10 @@ mod tests {
         let t0 = std::time::Instant::now();
         let res = run(
             sh("echo hi"),
-            ExecOpts { timeout_ms: Some(60_000), env: None },
+            ExecOpts {
+                timeout_ms: Some(60_000),
+                env: None,
+            },
         )
         .await;
         assert_eq!(res.code, 0);

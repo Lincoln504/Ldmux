@@ -47,7 +47,10 @@ pub struct KeeperCallError {
 impl KeeperCallError {
     /// A new error of `kind`.
     pub fn new(kind: KeeperCallKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into() }
+        Self {
+            kind,
+            message: message.into(),
+        }
     }
 
     /// True when the request never reached the keeper, so a retry cannot
@@ -79,30 +82,45 @@ pub async fn keeper_call(
     use tokio::io::AsyncWriteExt;
 
     let result = async {
-        let mut sock =
-            tokio::net::UnixStream::connect(socket)
-                .await
-                .map_err(|e| KeeperCallError::new(KeeperCallKind::Connect, format!("connect: {e}")))?;
+        let mut sock = tokio::net::UnixStream::connect(socket)
+            .await
+            .map_err(|e| KeeperCallError::new(KeeperCallKind::Connect, format!("connect: {e}")))?;
         let line = format!("{}\n", serde_json::to_string(req).unwrap());
         sock.write_all(line.as_bytes())
             .await
             .map_err(|e| KeeperCallError::new(KeeperCallKind::Write, format!("write: {e}")))?;
-        let line = match crate::socket::read_line(&mut sock, crate::socket::MAX_RESPONSE_LINE).await {
+        let line = match crate::socket::read_line(&mut sock, crate::socket::MAX_RESPONSE_LINE).await
+        {
             Ok(Some(l)) => String::from_utf8_lossy(&l).into_owned(),
-            Ok(None) => return Err(KeeperCallError::new(KeeperCallKind::Read, "keeper closed the connection")),
-            Err(e) => return Err(KeeperCallError::new(KeeperCallKind::Read, format!("read: {e}"))),
+            Ok(None) => {
+                return Err(KeeperCallError::new(
+                    KeeperCallKind::Read,
+                    "keeper closed the connection",
+                ));
+            }
+            Err(e) => {
+                return Err(KeeperCallError::new(
+                    KeeperCallKind::Read,
+                    format!("read: {e}"),
+                ));
+            }
         };
-        let res: KeeperMessage =
-            serde_json::from_str(&line).map_err(|e| KeeperCallError::new(KeeperCallKind::Protocol, format!("parse: {e}")))?;
+        let res: KeeperMessage = serde_json::from_str(&line)
+            .map_err(|e| KeeperCallError::new(KeeperCallKind::Protocol, format!("parse: {e}")))?;
         // A keeper `Error` answer is a failure, not a result.
         match res {
-            crate::keeper::KeeperMessage::Error(e) => Err(KeeperCallError::new(KeeperCallKind::Keeper, e.error)),
+            crate::keeper::KeeperMessage::Error(e) => {
+                Err(KeeperCallError::new(KeeperCallKind::Keeper, e.error))
+            }
             other => Ok(other),
         }
     };
 
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), result).await {
         Ok(r) => r,
-        Err(_) => Err(KeeperCallError::new(KeeperCallKind::Timeout, "keeper call timed out")),
+        Err(_) => Err(KeeperCallError::new(
+            KeeperCallKind::Timeout,
+            "keeper call timed out",
+        )),
     }
 }

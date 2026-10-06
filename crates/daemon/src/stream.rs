@@ -38,6 +38,27 @@ struct Sub {
     sub: Arc<StreamSubscriber>,
 }
 
+/// The `on_reset` reasons a subscriber is told, so a handler can tell "your picture
+/// is stale, repaint it" from "the session is over" without parsing prose.
+pub const RESET_LOST: &str = "output was discarded while unread; resync from a snapshot";
+pub const RESET_SESSION_ENDED: &str = "session ended";
+pub const RESET_DAEMON_STOPPED: &str = "daemon stopped";
+
+/// A keeper that answers a bounded peek with the whole buffer as a byte array
+/// predates the compact form. It still works (the daemon reads either), but a flood
+/// is served worse; say so once, in the journal, where someone restarting the
+/// keeper will see it.
+fn note_unbounded_keeper() {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if !SAID.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "ldmuxd: the running keeper predates bounded peeks (it answers with the whole buffer as a byte array); \
+             it works, but a flood is served worse. The keeper is replaced only by stopping it \
+             (its sessions end with it), so do that when convenient."
+        );
+    }
+}
+
 /// Lock a mutex, recovering the guard if a panicking holder poisoned it.
 ///
 /// The state behind these locks is plain data that stays valid across a panic
@@ -116,29 +137,40 @@ impl KeeperConn for SocketKeeperConn {
         let timeout = Some(std::time::Duration::from_millis(
             ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
         ));
-        sock.set_read_timeout(timeout).map_err(|e| format!("timeout: {e}"))?;
-        sock.set_write_timeout(timeout).map_err(|e| format!("timeout: {e}"))?;
+        sock.set_read_timeout(timeout)
+            .map_err(|e| format!("timeout: {e}"))?;
+        sock.set_write_timeout(timeout)
+            .map_err(|e| format!("timeout: {e}"))?;
         let line = format!(
             "{}\n",
             serde_json::to_string(req).map_err(|e| e.to_string())?
         );
-        sock.write_all(line.as_bytes()).map_err(|e| format!("write: {e}"))?;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut tmp = [0u8; 4096];
+        sock.write_all(line.as_bytes())
+            .map_err(|e| format!("write: {e}"))?;
+        // Read until the newline, looking only at bytes not yet scanned: the
+        // answer to a flood-sized peek arrives in many reads, and rescanning the
+        // whole buffer after each one made the cost quadratic. Bounded, like
+        // `read_line`: a keeper that never sends the newline cannot grow it.
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut tmp = [0u8; 65536];
+        let mut scanned = 0usize;
         loop {
             let n = sock.read(&mut tmp).map_err(|e| format!("read: {e}"))?;
             if n == 0 {
                 return Err("keeper closed the connection".into());
             }
             buf.extend_from_slice(&tmp[..n]);
-            if buf.contains(&b'\n') {
+            if buf[scanned..].contains(&b'\n') {
                 break;
+            }
+            scanned = buf.len();
+            if buf.len() > ldmux_protocol::socket::MAX_RESPONSE_LINE {
+                return Err("keeper response too large".into());
             }
         }
         let nl = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
         let line = String::from_utf8_lossy(&buf[..nl]).to_string();
-        let res: KeeperMessage =
-            serde_json::from_str(&line).map_err(|e| format!("parse: {e}"))?;
+        let res: KeeperMessage = serde_json::from_str(&line).map_err(|e| format!("parse: {e}"))?;
         match res {
             KeeperMessage::Error(e) => Err(e.error),
             other => Ok(other),
@@ -167,7 +199,8 @@ impl PaneStream {
     /// Chosen when the stream is made, from the persisted policy
     /// (`clipboard_policy`), so changing it needs no daemon restart.
     pub fn with_clipboard_write(self, on: bool) -> Self {
-        *self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()) = crate::sanitize::Sanitizer::new(on);
+        *self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()) =
+            crate::sanitize::Sanitizer::new(on);
         self
     }
 
@@ -187,12 +220,15 @@ impl PaneStream {
     /// the `on_reset` callback fires (a forced resync).
     pub fn subscribe(&self, sub: StreamSubscriber) -> (usize, Box<dyn Fn() + Send + Sync + '_>) {
         let id_for_close = self.register(sub);
-        (id_for_close, Box::new(move || {
-            let mut subs = relock(&self.subs);
-            // Remove by id (not by position — other subscribers may have
-            // been added/removed since this one was pushed).
-            subs.retain(|s| s.id != id_for_close);
-        }))
+        (
+            id_for_close,
+            Box::new(move || {
+                let mut subs = relock(&self.subs);
+                // Remove by id (not by position — other subscribers may have
+                // been added/removed since this one was pushed).
+                subs.retain(|s| s.id != id_for_close);
+            }),
+        )
     }
 
     /// Like `subscribe`, but the unsubscribe closure owns its own `Arc`, so it is
@@ -204,17 +240,23 @@ impl PaneStream {
     ) -> (usize, Box<dyn Fn() + Send + Sync + 'static>) {
         let id_for_close = self.register(sub);
         let me = Arc::clone(self);
-        (id_for_close, Box::new(move || {
-            let mut subs = relock(&me.subs);
-            subs.retain(|s| s.id != id_for_close);
-        }))
+        (
+            id_for_close,
+            Box::new(move || {
+                let mut subs = relock(&me.subs);
+                subs.retain(|s| s.id != id_for_close);
+            }),
+        )
     }
 
     /// Register a subscriber and return its id (the shared body of `subscribe`
     /// and `subscribe_owned`).
     fn register(&self, sub: StreamSubscriber) -> usize {
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
-        relock(&self.subs).push(Sub { id, sub: Arc::new(sub) });
+        relock(&self.subs).push(Sub {
+            id,
+            sub: Arc::new(sub),
+        });
         id
     }
 
@@ -256,10 +298,11 @@ impl PaneStream {
         let press = format!("\u{1b}[<{};{};0M", col + 1, row + 1);
         let release = format!("\u{1b}[<{};{};0m", col + 1, row + 1);
         let data = format!("{}{}", press, release);
-        self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
-            session_id: self.session_id.clone(),
-            data,
-        }))
+        self.keeper
+            .call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
+                session_id: self.session_id.clone(),
+                data,
+            }))
     }
 
     /// Send keys to the pane (the `sendKey` method): convert key names to
@@ -268,30 +311,35 @@ impl PaneStream {
         // Arrow keys depend on the pane's cursor-key mode (DECCKM), which only
         // the keeper's emulator knows. One cheap `Read` per batch; if it fails
         // the normal-mode encoding is the best guess.
-        let app_cursor = match self.keeper.call(&KeeperMessage::Read(ldmux_protocol::keeper::Read {
-            session_id: self.session_id.clone(),
-        })) {
-            Ok(KeeperMessage::State(st)) => st.app_cursor,
-            _ => false,
-        };
+        let app_cursor =
+            match self
+                .keeper
+                .call(&KeeperMessage::Read(ldmux_protocol::keeper::Read {
+                    session_id: self.session_id.clone(),
+                })) {
+                Ok(KeeperMessage::State(st)) => st.app_cursor,
+                _ => false,
+            };
         let mut bytes: Vec<u8> = Vec::new();
         for key in keys {
             bytes.extend(key_name_to_bytes_in(key, app_cursor)?);
         }
         let text = String::from_utf8(bytes).map_err(|e| format!("invalid key bytes: {e}"))?;
-        self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
-            session_id: self.session_id.clone(),
-            data: text,
-        }))
+        self.keeper
+            .call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
+                session_id: self.session_id.clone(),
+                data: text,
+            }))
     }
 
     /// Write literal text to the pane (the `inputText` method): send a
     /// `Write` keeper message with the raw text bytes.
     pub fn write(&self, text: &str) -> Result<KeeperMessage, String> {
-        self.keeper.call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
-            session_id: self.session_id.clone(),
-            data: text.to_string(),
-        }))
+        self.keeper
+            .call(&KeeperMessage::Write(ldmux_protocol::keeper::Write {
+                session_id: self.session_id.clone(),
+                data: text.to_string(),
+            }))
     }
 
     /// Resize the pane (the `resize` method): send a `Resize` keeper message.
@@ -302,11 +350,12 @@ impl PaneStream {
     /// daemon's own bookkeeping must not disagree with the grid the PTY gets.
     pub fn resize(&self, cols: u64, rows: u64) -> Result<KeeperMessage, String> {
         let (cols, rows) = ldmux_protocol::clamp_pane_size(cols, rows);
-        self.keeper.call(&KeeperMessage::Resize(ldmux_protocol::keeper::Resize {
-            session_id: self.session_id.clone(),
-            cols,
-            rows,
-        }))
+        self.keeper
+            .call(&KeeperMessage::Resize(ldmux_protocol::keeper::Resize {
+                session_id: self.session_id.clone(),
+                cols,
+                rows,
+            }))
     }
 
     /// The pane's full state (the `getState` equivalent): a snapshot that does
@@ -361,9 +410,10 @@ impl PaneStream {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let tail = std::mem::take(&mut sr.tail);
         if !tail.is_empty()
-            && let Some(text) = self.decode_chunk(tail) {
-                self.fanout_except(requester, &text);
-            }
+            && let Some(text) = self.decode_chunk(tail)
+        {
+            self.fanout_except(requester, &text);
+        }
         fence(&sr, epoch);
         Ok(epoch)
     }
@@ -397,42 +447,70 @@ impl PaneStream {
     /// pulls the buffer and delivers it to subscribers through the bounded
     /// queue. When a subscriber's queue overflows, it is dropped and forced
     /// to resync from a snapshot.
-    pub fn poll_once(&self) -> Result<(), String> {
+    ///
+    /// Returns whether the keeper still holds more output (the bounded peek said
+    /// so), so the poll loop asks again at once instead of sleeping.
+    pub fn poll_once(&self) -> Result<bool, String> {
         if self.closed.load(Ordering::Relaxed) || self.poll_stop.load(Ordering::Relaxed) {
-            return Ok(());
+            return Ok(false);
         }
         // Held across the keeper call and the fanout: a snapshot must not slot
         // between "bytes taken from the keeper" and "bytes delivered".
         let _gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
-        let req = KeeperMessage::Peek(ldmux_protocol::keeper::Peek {
-            session_id: self.session_id.clone(),
-        });
+        let req = KeeperMessage::Peek(ldmux_protocol::keeper::Peek::bounded(
+            self.session_id.clone(),
+            ldmux_protocol::keeper::PEEK_CHUNK_BYTES,
+        ));
         let resp = self.keeper.call(&req)?;
         match resp {
             KeeperMessage::PeekResult(pr) => {
+                if pr.data64.is_none() && !pr.data.is_empty() {
+                    note_unbounded_keeper();
+                }
+                let more = pr.more;
+                let lost = pr.lost;
+                let data = pr.into_bytes()?;
                 // Nobody is subscribed: this is backlog from before anyone was
                 // watching (a fresh stream's first poll). It is not live output
                 // for anyone, and whoever subscribes next is sent a snapshot that
                 // already contains it. Drop it, along with any half-sequence.
-                if self.subs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
-                    self.utf8_carry.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                    self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()).reset();
-                    return Ok(());
+                if self
+                    .subs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
+                {
+                    self.utf8_carry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
+                    self.sanitizer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .reset();
+                    return Ok(more);
                 }
-                if pr.lost {
+                if lost {
                     // The keeper discarded output nobody was reading: whoever is
                     // watching now has a stale picture and must resync.
-                    self.utf8_carry.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                    self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()).reset();
+                    self.utf8_carry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear();
+                    self.sanitizer
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .reset();
                     for (_, sub) in self.subscribers() {
-                        (sub.on_reset)("output was discarded while unread; resync from a snapshot");
+                        (sub.on_reset)(RESET_LOST);
                     }
                 }
-                if !pr.data.is_empty()
-                    && let Some(text) = self.decode_chunk(pr.data) {
-                        self.fanout(&text);
-                    }
-                Ok(())
+                if !data.is_empty()
+                    && let Some(text) = self.decode_chunk(data)
+                {
+                    self.fanout(&text);
+                }
+                Ok(more)
             }
             other => Err(format!("unexpected keeper response to Peek: {other:?}")),
         }
@@ -443,7 +521,11 @@ impl PaneStream {
     /// (the pipeline downstream is `&str`), but a character that merely
     /// straddles two peeks is no longer corrupted.
     fn decode_chunk(&self, data: Vec<u8>) -> Option<String> {
-        let text = self.utf8_carry.lock().unwrap_or_else(|e| e.into_inner()).decode(&data);
+        let text = self
+            .utf8_carry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .decode(&data);
         (!text.is_empty()).then_some(text)
     }
 
@@ -625,7 +707,11 @@ mod key_name_tests {
             ("C-r", vec![0x12]),
             ("a", b"a".to_vec()),
         ] {
-            assert_eq!(key_name_to_bytes(name).as_deref(), Ok(want.as_slice()), "{name}");
+            assert_eq!(
+                key_name_to_bytes(name).as_deref(),
+                Ok(want.as_slice()),
+                "{name}"
+            );
         }
     }
 
@@ -664,34 +750,60 @@ mod key_name_tests {
     fn modified_keys_have_their_xterm_encodings() {
         for (name, want) in [
             // Alt + character: ESC prefix.
-            ("M-b", esc("ESCb")), ("M-B", esc("ESCB")), ("M-|", esc("ESC|")),
-            ("M-Space", esc("ESC ")), ("M-@", esc("ESC@")),
+            ("M-b", esc("ESCb")),
+            ("M-B", esc("ESCB")),
+            ("M-|", esc("ESC|")),
+            ("M-Space", esc("ESC ")),
+            ("M-@", esc("ESC@")),
             // Ctrl + punctuation.
-            ("C-@", vec![0]), ("C-Space", vec![0]), ("C-[", vec![0x1B]),
-            ("C-\\", vec![0x1C]), ("C-]", vec![0x1D]), ("C-^", vec![0x1E]),
-            ("C-_", vec![0x1F]), ("C-?", vec![0x7F]),
+            ("C-@", vec![0]),
+            ("C-Space", vec![0]),
+            ("C-[", vec![0x1B]),
+            ("C-\\", vec![0x1C]),
+            ("C-]", vec![0x1D]),
+            ("C-^", vec![0x1E]),
+            ("C-_", vec![0x1F]),
+            ("C-?", vec![0x7F]),
             // Alt + Ctrl + character.
-            ("M-C-c", vec![0x1B, 0x03]), ("M-C-Space", vec![0x1B, 0]), ("M-C-@", vec![0x1B, 0]),
+            ("M-C-c", vec![0x1B, 0x03]),
+            ("M-C-Space", vec![0x1B, 0]),
+            ("M-C-@", vec![0x1B, 0]),
             // Modified arrows / Home / End.
-            ("M-Up", esc("ESC[1;3A")), ("C-Up", esc("ESC[1;5A")), ("M-C-Up", esc("ESC[1;7A")),
-            ("C-Left", esc("ESC[1;5D")), ("M-C-Right", esc("ESC[1;7C")),
-            ("C-Home", esc("ESC[1;5H")), ("C-End", esc("ESC[1;5F")),
+            ("M-Up", esc("ESC[1;3A")),
+            ("C-Up", esc("ESC[1;5A")),
+            ("M-C-Up", esc("ESC[1;7A")),
+            ("C-Left", esc("ESC[1;5D")),
+            ("M-C-Right", esc("ESC[1;7C")),
+            ("C-Home", esc("ESC[1;5H")),
+            ("C-End", esc("ESC[1;5F")),
             // Modified editing keys.
-            ("C-Insert", esc("ESC[2;5~")), ("C-Delete", esc("ESC[3;5~")),
-            ("C-PageUp", esc("ESC[5;5~")), ("C-PageDown", esc("ESC[6;5~")),
-            ("M-Insert", esc("ESC[2;3~")), ("M-Delete", esc("ESC[3;3~")),
+            ("C-Insert", esc("ESC[2;5~")),
+            ("C-Delete", esc("ESC[3;5~")),
+            ("C-PageUp", esc("ESC[5;5~")),
+            ("C-PageDown", esc("ESC[6;5~")),
+            ("M-Insert", esc("ESC[2;3~")),
+            ("M-Delete", esc("ESC[3;3~")),
             // Modified F-keys.
-            ("C-F1", esc("ESC[1;5P")), ("M-F1", esc("ESC[1;3P")),
-            ("C-F5", esc("ESC[15;5~")), ("M-F5", esc("ESC[15;3~")),
+            ("C-F1", esc("ESC[1;5P")),
+            ("M-F1", esc("ESC[1;3P")),
+            ("C-F5", esc("ESC[15;5~")),
+            ("M-F5", esc("ESC[15;3~")),
             ("M-C-F12", esc("ESC[24;7~")),
             // Whitespace-ish keys.
-            ("C-Tab", vec![0x09]), ("M-Tab", vec![0x1B, 0x09]),
-            ("C-BTab", esc("ESC[Z")), ("M-BTab", esc("ESC[Z")),
-            ("C-Enter", vec![0x0D]), ("M-Enter", vec![0x1B, 0x0D]),
-            ("C-Escape", vec![0x1B]), ("M-Escape", vec![0x1B, 0x1B]),
-            ("C-BSpace", vec![0x08]), ("M-BSpace", vec![0x1B, 0x7F]),
+            ("C-Tab", vec![0x09]),
+            ("M-Tab", vec![0x1B, 0x09]),
+            ("C-BTab", esc("ESC[Z")),
+            ("M-BTab", esc("ESC[Z")),
+            ("C-Enter", vec![0x0D]),
+            ("M-Enter", vec![0x1B, 0x0D]),
+            ("C-Escape", vec![0x1B]),
+            ("M-Escape", vec![0x1B, 0x1B]),
+            ("C-BSpace", vec![0x08]),
+            ("M-BSpace", vec![0x1B, 0x7F]),
             // Unmodified keys keep their encodings.
-            ("F1", esc("ESCOP")), ("Up", esc("ESC[A")), ("F5", esc("ESC[15~")),
+            ("F1", esc("ESCOP")),
+            ("Up", esc("ESC[A")),
+            ("F5", esc("ESC[15~")),
         ] {
             assert_eq!(key_name_to_bytes(name), Ok(want), "{name}");
         }
@@ -713,7 +825,18 @@ mod key_name_tests {
 
     #[test]
     fn bad_modifier_forms_are_refused() {
-        for bad in ["C-|", "C-A", "M-", "C-", "M-C-", "M-NotAKey", "C-é", "M-é", "C-M-b", "M-\x01"] {
+        for bad in [
+            "C-|",
+            "C-A",
+            "M-",
+            "C-",
+            "M-C-",
+            "M-NotAKey",
+            "C-é",
+            "M-é",
+            "C-M-b",
+            "M-\x01",
+        ] {
             assert!(key_name_to_bytes(bad).is_err(), "{bad:?}");
         }
     }
@@ -730,7 +853,9 @@ mod key_name_tests {
         ))
         .expect("Modifiers.kt");
         // NAMED_KEYS: the quoted strings between `setOf(` and `)`.
-        let start = src.find("NAMED_KEYS: Set<String> = setOf(").expect("NAMED_KEYS");
+        let start = src
+            .find("NAMED_KEYS: Set<String> = setOf(")
+            .expect("NAMED_KEYS");
         let body = &src[start..];
         let body = &body[..body.find("\n)").expect("end of NAMED_KEYS")];
         let named: Vec<&str> = body.split('"').skip(1).step_by(2).collect();
@@ -751,14 +876,24 @@ mod key_name_tests {
         for line in ctrl_src.lines() {
             if let Some(i) = line.find("put('") {
                 let rest = &line[i + 5..];
-                let c = if rest.starts_with("\\\\") { '\\' } else { rest.chars().next().unwrap() };
+                let c = if rest.starts_with("\\\\") {
+                    '\\'
+                } else {
+                    rest.chars().next().unwrap()
+                };
                 ctrl_chars.push(c);
             }
         }
-        assert!(ctrl_chars.contains(&'[') && ctrl_chars.contains(&'?') && ctrl_chars.contains(&'\\'));
+        assert!(
+            ctrl_chars.contains(&'[') && ctrl_chars.contains(&'?') && ctrl_chars.contains(&'\\')
+        );
         for c in ctrl_chars {
             // The client lowercases letters and writes a space as `Space`.
-            let b = if c == ' ' { "Space".to_string() } else { c.to_ascii_lowercase().to_string() };
+            let b = if c == ' ' {
+                "Space".to_string()
+            } else {
+                c.to_ascii_lowercase().to_string()
+            };
             for prefix in ["C-", "M-C-"] {
                 let n = format!("{prefix}{b}");
                 assert!(key_name_to_bytes(&n).is_ok(), "{n}");
@@ -766,7 +901,11 @@ mod key_name_tests {
             }
         }
         for c in (0x20u8..0x7F).map(char::from) {
-            let b = if c == ' ' { "Space".to_string() } else { c.to_string() };
+            let b = if c == ' ' {
+                "Space".to_string()
+            } else {
+                c.to_string()
+            };
             let n = format!("M-{b}");
             assert!(key_name_to_bytes(&n).is_ok(), "{n}");
             count += 1;
@@ -778,8 +917,8 @@ mod key_name_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// A `KeeperConn` test double: answers a `Snapshot` with a fixed screen.
     /// (The `fanout`/`drain` never call the keeper, so the other arms are
@@ -806,8 +945,8 @@ mod tests {
                         dead: false,
                         foreground: "dash".into(),
                         cwd: "/".into(),
-                tail: Vec::new(),
-            },
+                        tail: Vec::new(),
+                    },
                 )),
                 other => Err(format!("not handled: {other:?}")),
             }
@@ -825,7 +964,9 @@ mod tests {
         let r = reset.clone();
         (
             Box::new(move |t: &[u8]| {
-                g.lock().unwrap().push(String::from_utf8_lossy(t).into_owned());
+                g.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(t).into_owned());
             }),
             Box::new(move |m: &str| {
                 let _ = m;
@@ -849,13 +990,19 @@ mod tests {
     impl KeeperConn for BufKeeper {
         fn call(&self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
             match req {
-                KeeperMessage::Peek(p) => Ok(KeeperMessage::PeekResult(ldmux_protocol::keeper::PeekResult {
-                    session_id: p.session_id.clone(),
-                    data: std::mem::take(&mut *self.out.lock().unwrap()),
-                    lost: self.lost.swap(false, Ordering::SeqCst),
-                })),
+                KeeperMessage::Peek(p) => Ok(KeeperMessage::PeekResult(
+                    ldmux_protocol::keeper::PeekResult {
+                        session_id: p.session_id.clone(),
+                        data: std::mem::take(&mut *self.out.lock().unwrap()),
+                        data64: None,
+                        more: false,
+                        lost: self.lost.swap(false, Ordering::SeqCst),
+                    },
+                )),
                 KeeperMessage::Snapshot(s) => {
-                    let KeeperMessage::SnapshotResult(mut sr) = TestKeeper.call(req)? else { unreachable!() };
+                    let KeeperMessage::SnapshotResult(mut sr) = TestKeeper.call(req)? else {
+                        unreachable!()
+                    };
                     if s.drain_output {
                         sr.tail = std::mem::take(&mut *self.out.lock().unwrap());
                     }
@@ -887,10 +1034,15 @@ mod tests {
     /// other viewer must, and the fence runs before any later output.
     #[test]
     fn a_snapshot_cuts_the_stream_at_one_byte_boundary() {
-        let keeper = Arc::new(BufKeeper { out: Mutex::new(Vec::new()), lost: AtomicBool::new(false) });
+        let keeper = Arc::new(BufKeeper {
+            out: Mutex::new(Vec::new()),
+            lost: AtomicBool::new(false),
+        });
         struct Shared(Arc<BufKeeper>);
         impl KeeperConn for Shared {
-            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> { self.0.call(r) }
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> {
+                self.0.call(r)
+            }
         }
         let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
         let (a, a_got, _) = collecting();
@@ -908,9 +1060,20 @@ mod tests {
             f.store(ag.lock().unwrap().len(), Ordering::SeqCst);
         })
         .unwrap();
-        assert!(a_got.lock().unwrap().is_empty(), "the requester has it in the render");
-        assert_eq!(*b_got.lock().unwrap(), b"in-the-snapshot", "other viewers still get it");
-        assert_eq!(fenced_at.load(Ordering::SeqCst), 0, "the fence ran before any output reached the requester");
+        assert!(
+            a_got.lock().unwrap().is_empty(),
+            "the requester has it in the render"
+        );
+        assert_eq!(
+            *b_got.lock().unwrap(),
+            b"in-the-snapshot",
+            "other viewers still get it"
+        );
+        assert_eq!(
+            fenced_at.load(Ordering::SeqCst),
+            0,
+            "the fence ran before any output reached the requester"
+        );
 
         // Genuinely new output after the seam reaches both.
         *keeper.out.lock().unwrap() = b"-new".to_vec();
@@ -918,14 +1081,82 @@ mod tests {
         assert_eq!(*a_got.lock().unwrap(), b"-new");
     }
 
+    /// A keeper that answers bounded peeks is drained in chunks no larger than the
+    /// chunk size, `poll_once` says when more is waiting, and nothing is lost or
+    /// reordered. (The `BufKeeper` double above is the *old* keeper — it answers a
+    /// bounded peek with the whole buffer as a byte array — and every test that
+    /// uses it is the proof that a new daemon still reads an old keeper.)
+    #[test]
+    fn a_bounded_keeper_is_drained_in_chunks_until_it_is_empty() {
+        use ldmux_protocol::keeper::{PEEK_CHUNK_BYTES, PeekResult};
+        struct Compact {
+            buf: Mutex<Vec<u8>>,
+            calls: AtomicUsize,
+            largest: AtomicUsize,
+        }
+        impl KeeperConn for Compact {
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> {
+                let KeeperMessage::Peek(p) = r else {
+                    return Err("only peeks".into());
+                };
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut b = self.buf.lock().unwrap();
+                let n = b
+                    .len()
+                    .min(p.max_bytes.expect("the daemon always bounds its peeks") as usize);
+                let chunk: Vec<u8> = b.drain(..n).collect();
+                self.largest.fetch_max(chunk.len(), Ordering::SeqCst);
+                Ok(KeeperMessage::PeekResult(PeekResult::compact(
+                    p.session_id.clone(),
+                    &chunk,
+                    !b.is_empty(),
+                    false,
+                )))
+            }
+        }
+        struct Shared(Arc<Compact>);
+        impl KeeperConn for Shared {
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> {
+                self.0.call(r)
+            }
+        }
+        let payload: Vec<u8> = (0..200_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let k = Arc::new(Compact {
+            buf: Mutex::new(payload.clone()),
+            calls: AtomicUsize::new(0),
+            largest: AtomicUsize::new(0),
+        });
+        let s = PaneStream::new("s1".into(), Box::new(Shared(k.clone())));
+        let (sub, got, resets) = collecting();
+        let (_id, _u) = s.subscribe(sub);
+        let mut polls = 0;
+        while s.poll_once().unwrap() {
+            polls += 1;
+            assert!(polls < 10, "must terminate");
+        }
+        assert_eq!(*got.lock().unwrap(), payload, "every byte, in order");
+        assert_eq!(
+            k.calls.load(Ordering::SeqCst),
+            4,
+            "200 KB in 64 KiB chunks is four peeks"
+        );
+        assert!(k.largest.load(Ordering::SeqCst) as u64 <= PEEK_CHUNK_BYTES);
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+    }
+
     /// With nobody subscribed, polled output is backlog from before anyone was
     /// watching: dropped, not queued for the next subscriber.
     #[test]
     fn output_polled_with_no_subscriber_is_dropped() {
-        let keeper = Arc::new(BufKeeper { out: Mutex::new(b"old".to_vec()), lost: AtomicBool::new(true) });
+        let keeper = Arc::new(BufKeeper {
+            out: Mutex::new(b"old".to_vec()),
+            lost: AtomicBool::new(true),
+        });
         struct Shared(Arc<BufKeeper>);
         impl KeeperConn for Shared {
-            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> { self.0.call(r) }
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> {
+                self.0.call(r)
+            }
         }
         let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
         s.poll_once().unwrap();
@@ -933,16 +1164,25 @@ mod tests {
         let (_id, _u) = s.subscribe(sub);
         s.poll_once().unwrap();
         assert!(got.lock().unwrap().is_empty());
-        assert_eq!(resets.load(Ordering::SeqCst), 0, "a lost flag with no viewer is not a resync");
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            0,
+            "a lost flag with no viewer is not a resync"
+        );
     }
 
     /// A keeper that discarded unread output tells its viewers to resync.
     #[test]
     fn lost_output_resyncs_the_viewers() {
-        let keeper = Arc::new(BufKeeper { out: Mutex::new(Vec::new()), lost: AtomicBool::new(false) });
+        let keeper = Arc::new(BufKeeper {
+            out: Mutex::new(Vec::new()),
+            lost: AtomicBool::new(false),
+        });
         struct Shared(Arc<BufKeeper>);
         impl KeeperConn for Shared {
-            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> { self.0.call(r) }
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> {
+                self.0.call(r)
+            }
         }
         let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
         let (sub, _got, resets) = collecting();
@@ -1018,7 +1258,11 @@ mod tests {
                 (0..50)
                     .map(|_| {
                         let (o, r) = cb();
-                        s.subscribe(StreamSubscriber { on_output: o, on_reset: r }).0
+                        s.subscribe(StreamSubscriber {
+                            on_output: o,
+                            on_reset: r,
+                        })
+                        .0
                     })
                     .collect::<Vec<_>>()
             }));
@@ -1061,7 +1305,12 @@ mod tests {
         let stream = Arc::new(PaneStream::new("s".into(), Box::new(TestKeeper)));
         let conn: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
         let in_callback = Arc::new(AtomicBool::new(false));
-        let (c1, c2, f1, f2) = (conn.clone(), conn.clone(), in_callback.clone(), in_callback.clone());
+        let (c1, c2, f1, f2) = (
+            conn.clone(),
+            conn.clone(),
+            in_callback.clone(),
+            in_callback.clone(),
+        );
         let (id, unsub) = stream.subscribe_owned(StreamSubscriber {
             on_output: Box::new(move |_| {
                 f1.store(true, Ordering::SeqCst);
@@ -1089,7 +1338,10 @@ mod tests {
         });
         let t0 = std::time::Instant::now();
         while !in_callback.load(Ordering::SeqCst) {
-            assert!(t0.elapsed().as_secs() < 5, "the stream side never reached the callback");
+            assert!(
+                t0.elapsed().as_secs() < 5,
+                "the stream side never reached the callback"
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         // Give the stream thread time to block on `conn`, still holding whatever it holds.
@@ -1104,9 +1356,16 @@ mod tests {
         go_tx.send(()).unwrap();
         // With the fix, unsubscribe finishes while the connection lock is held.
         let first = rx.recv_timeout(std::time::Duration::from_secs(5));
-        assert_eq!(first, Ok("unsubscribe done"), "unsubscribe must not wait on the stream's lock");
+        assert_eq!(
+            first,
+            Ok("unsubscribe done"),
+            "unsubscribe must not wait on the stream's lock"
+        );
         drop(held);
-        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok("stream side done"));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok("stream side done")
+        );
     }
 
     #[test]

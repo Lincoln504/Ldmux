@@ -46,7 +46,7 @@ impl PairingProblem {
             PairingProblem::LoopbackOnly => format!(
                 "the daemon listens on {hostname} only, which a phone cannot reach: \
                  set LDMUX_REMOTE_HOST to this machine's tailnet address (`tailscale ip -4`) \
-                 in deploy/ldmux.service, then `just install`",
+                 in deploy/ldmux.service, then re-run the install (`nix run .#install`)",
             ),
             PairingProblem::LinkRejected(why) => why.clone(),
         }
@@ -61,8 +61,8 @@ impl PairingProblem {
 /// `renderQrTerminal`).
 pub fn code_text(info: &ListenInfo, name: &str) -> Result<String, PairingProblem> {
     let (pairing, link) = pairing_for(info, name)?;
-    let code = crate::qr::encode_qr(&link, crate::qr::Ecc::L)
-        .map_err(PairingProblem::LinkRejected)?;
+    let code =
+        crate::qr::encode_qr(&link, crate::qr::Ecc::L).map_err(PairingProblem::LinkRejected)?;
     Ok(format!(
         "{}{}  {}\n",
         crate::qr::render_qr_terminal(&code, 1),
@@ -200,7 +200,10 @@ mod tests {
         // A QR drawn with the half-block character and 256-colour escapes, not a
         // line of text: many rows of it, and the link itself absent.
         assert!(text.contains('\u{2580}'), "no QR block in: {text}");
-        assert!(text.contains("\u{1b}[38;5;16;48;5;231m"), "no QR colours in: {text}");
+        assert!(
+            text.contains("\u{1b}[38;5;16;48;5;231m"),
+            "no QR colours in: {text}"
+        );
         assert!(text.lines().count() > 5, "too few rows to be a QR: {text}");
         assert!(text.contains("debian  100.127.119.54:7625"), "{text}");
         assert!(!text.contains("ldmux://"), "code printed the link: {text}");

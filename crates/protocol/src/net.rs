@@ -155,13 +155,9 @@ fn parse_ipv6(s: &str) -> Option<[u16; 8]> {
 mod tests {
     use super::*;
 
-    fn expect_kind(cases: &[( &str, AddressKind)]) {
+    fn expect_kind(cases: &[(&str, AddressKind)]) {
         for (a, want) in cases {
-            assert_eq!(
-                classify_address(a),
-                *want,
-                "classify_address({a:?})"
-            );
+            assert_eq!(classify_address(a), *want, "classify_address({a:?})");
         }
     }
 

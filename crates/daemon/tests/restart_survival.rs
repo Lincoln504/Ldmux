@@ -13,7 +13,11 @@ use ldmux_daemon::daemon::LdmuxDaemon;
 
 fn scratch_dir() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-restart-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-restart-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -37,8 +41,8 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
     let _reaper = common::Reaper::new(&dir, &keeper_sock);
 
     // Start a real keeper (the `ldmux-keeper` binary).
-    let keeper_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/ldmux-keeper");
+    let keeper_bin =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper");
     let mut keeper = std::process::Command::new(&keeper_bin)
         .arg(keeper_sock.to_string_lossy().as_ref())
         .spawn()
@@ -56,11 +60,17 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
     }
 
     // Spawn 3 sessions.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut ids = Vec::new();
     for i in 0..3 {
         let title = format!("sess-{}", i);
-        let rec = arc.lock().await.create_session("shell", &cwd, Some(&title), "local")
+        let rec = arc
+            .lock()
+            .await
+            .create_session("shell", &cwd, Some(&title), "local")
             .await
             .unwrap();
         ids.push(rec.id.clone());
@@ -72,7 +82,11 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
         for id in &ids {
             let rec = d.get_session(id);
             assert!(rec.is_some(), "session {id} should exist");
-            assert_eq!(rec.unwrap().status, "running", "session {id} should be running");
+            assert_eq!(
+                rec.unwrap().status,
+                "running",
+                "session {id} should be running"
+            );
         }
     }
 
@@ -96,7 +110,8 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
     {
         let mut d = arc2.lock().await;
         let list = d.handle("list", serde_json::json!({})).await.unwrap();
-        let sessions: Vec<serde_json::Value> = list.get("sessions")
+        let sessions: Vec<serde_json::Value> = list
+            .get("sessions")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();

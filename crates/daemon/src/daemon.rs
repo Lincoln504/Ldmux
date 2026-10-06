@@ -143,7 +143,10 @@ fn process_alive(pid: i32) -> bool {
 /// One keeper call, respawning a dead keeper once (see `LdmuxDaemon::keeper_call`).
 /// A free function over the supervisor so a caller that does not hold the daemon
 /// lock can make it.
-async fn keeper_call_via(keeper: &KeeperSupervisor, req: &KeeperMessage) -> Result<KeeperMessage, String> {
+async fn keeper_call_via(
+    keeper: &KeeperSupervisor,
+    req: &KeeperMessage,
+) -> Result<KeeperMessage, String> {
     // A path that is not valid UTF-8 is an error, not a panic.
     let keeper_sock = keeper
         .socket_path()
@@ -188,10 +191,13 @@ fn ensure_private_state_dir(dir: &std::path::Path) -> Result<(), String> {
             .create(dir)
             .map_err(|e| format!("create state dir {}: {e}", dir.display()))?;
     }
-    let md = std::fs::metadata(dir)
-        .map_err(|e| format!("stat state dir {}: {e}", dir.display()))?;
+    let md =
+        std::fs::metadata(dir).map_err(|e| format!("stat state dir {}: {e}", dir.display()))?;
     if !md.is_dir() {
-        return Err(format!("the state dir {} is not a directory", dir.display()));
+        return Err(format!(
+            "the state dir {} is not a directory",
+            dir.display()
+        ));
     }
     let uid = nix::unistd::getuid().as_raw();
     if md.uid() != uid {
@@ -203,7 +209,11 @@ fn ensure_private_state_dir(dir: &std::path::Path) -> Result<(), String> {
     }
     if md.mode() & 0o777 != 0o700 {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-            format!("the state dir {} has mode {:o} and could not be set to 700: {e}", dir.display(), md.mode() & 0o777)
+            format!(
+                "the state dir {} has mode {:o} and could not be set to 700: {e}",
+                dir.display(),
+                md.mode() & 0o777
+            )
         })?;
     }
     Ok(())
@@ -225,6 +235,19 @@ fn session_title(record: &SessionRecord, cwd: &str) -> String {
         record.title.clone()
     } else {
         record.id.clone()
+    }
+}
+
+/// The kind of an ending that went through `kill_session`, from its reason: the
+/// reasons are built by the callers (`closed from <device>`, `its desk window
+/// closed`, `killed ...`), and this is the one place that classifies them.
+fn ended_kind_of(reason: &str) -> &'static str {
+    if reason.starts_with("closed") {
+        "closed"
+    } else if reason.contains("desk window closed") {
+        "window_closed"
+    } else {
+        "killed"
     }
 }
 
@@ -276,6 +299,11 @@ pub struct LdmuxDaemon {
     remote: Option<crate::remote::RemoteServer>,
     /// The remote config (the hostname, port, token).
     remote_cfg: Option<crate::remote::RemoteConfig>,
+    /// The connection table and sweep every listener serves into (the tailnet
+    /// WebSocket and the local attach socket).
+    conn_shared: Option<std::sync::Arc<crate::remote::Shared>>,
+    /// The local attach socket's accept loop.
+    local_handle: Option<tokio::task::JoinHandle<()>>,
     /// The per-session streams (the `Arc<PaneStream>` per keeper session).
     /// The `Arc` is shared with the poll thread (which holds its own `Arc`),
     /// so the stream outlives the daemon's map entry (the poll thread keeps
@@ -303,7 +331,31 @@ pub struct LdmuxDaemon {
     /// closed. A field so the window-close rule can be tested without waiting
     /// the real five seconds for a window that is never going to appear.
     live_window_grace_ms: u64,
+    /// When the daemon first saw each keeper session dead (monotonic), by keeper
+    /// name. A shell that has exited keeps its pane in the keeper for
+    /// [`DEAD_KEEP_MS`] so a client that reconnects can still read its final
+    /// screen and be told how it ended; only then is it released.
+    dead_seen: HashMap<String, std::time::Instant>,
+    dead_keep_ms: u64,
+    /// The daemon's monotonic clock: milliseconds since this base. Every timer
+    /// the daemon runs (claim grace, restore grace) reads this, never the wall
+    /// clock, so a clock step (NTP, a suspended laptop) cannot free a claim early
+    /// or hold one for ever. `now_ms` stays for what is *shown* (`since`, record
+    /// times).
+    mono_base: std::time::Instant,
+    /// Claims reloaded at startup, by session id → the monotonic ms until which
+    /// they are held for their device to come back (see `load_claims`).
+    restored: HashMap<String, u64>,
 }
+
+/// How long a claim restored from disk waits for its device to reconnect after a
+/// daemon restart. Longer than [`CLAIM_GRACE_MS`]: the phone backs off between
+/// retries (up to ~30 s) and a daemon restart is when it is retrying.
+pub const RESTORE_GRACE_MS: u64 = 60_000;
+
+/// How long the daemon leaves an ended shell's pane in the keeper (see
+/// `dead_seen`). Short on purpose: it is a window for a reconnect, not an archive.
+pub const DEAD_KEEP_MS: u64 = 60_000;
 
 impl Drop for LdmuxDaemon {
     fn drop(&mut self) {
@@ -333,6 +385,8 @@ impl LdmuxDaemon {
             lock: DaemonLock::new(&state_dir),
             remote: None,
             remote_cfg: None,
+            conn_shared: None,
+            local_handle: None,
             streams: HashMap::new(),
             control_handle: None,
             sessions_dirty: false,
@@ -347,6 +401,10 @@ impl LdmuxDaemon {
             unknown_sessions_key: String::new(),
             maintenance_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_window_grace_ms: LIVE_WINDOW_GRACE_MS,
+            dead_seen: HashMap::new(),
+            dead_keep_ms: DEAD_KEEP_MS,
+            mono_base: std::time::Instant::now(),
+            restored: HashMap::new(),
         }
     }
 
@@ -360,6 +418,13 @@ impl LdmuxDaemon {
     /// real, and five seconds per assert is not.
     pub fn with_live_window_grace_ms(mut self, ms: u64) -> Self {
         self.live_window_grace_ms = ms;
+        self
+    }
+
+    /// How long an ended shell's pane is kept in the keeper. A test hook (`0`
+    /// releases it at once, as the daemon did before the final screen was kept).
+    pub fn with_dead_keep_ms(mut self, ms: u64) -> Self {
+        self.dead_keep_ms = ms;
         self
     }
 
@@ -446,9 +511,10 @@ impl LdmuxDaemon {
         if self.keeper.is_alive().await {
             return Ok(());
         }
-        self.keeper.ensure().await.map_err(|e| {
-            format!("keeper respawn failed: {e}")
-        })?;
+        self.keeper
+            .ensure()
+            .await
+            .map_err(|e| format!("keeper respawn failed: {e}"))?;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         // Reconcile: the new keeper is empty, so all sessions are dead.
         let _ = self.reconcile().await;
@@ -488,16 +554,42 @@ impl LdmuxDaemon {
     /// Idempotent and self-healing: it runs on every pass, so a pane leaked
     /// before this existed is collected on the next tick.
     pub async fn kill_dead_keeper_sessions(&mut self, states: &[ldmux_protocol::keeper::State]) {
-        for st in states.iter().filter(|s| s.dead) {
+        for name in self.dead_sessions_due(states) {
             let _ = self
-                .keeper_call(&KeeperMessage::Kill(km::Kill { session_id: st.session_id.clone() }))
+                .keeper_call(&KeeperMessage::Kill(km::Kill { session_id: name }))
                 .await;
         }
     }
 
+    /// The dead keeper sessions whose kept-for-a-reconnect time is up (see
+    /// `dead_seen`), and the bookkeeping that decides it. Quick and synchronous, so
+    /// a caller that does its keeper I/O unlocked can ask under the lock and kill
+    /// outside it.
+    pub(crate) fn dead_sessions_due(
+        &mut self,
+        states: &[ldmux_protocol::keeper::State],
+    ) -> Vec<String> {
+        let now = std::time::Instant::now();
+        // Forget sessions the keeper no longer lists as dead.
+        self.dead_seen
+            .retain(|name, _| states.iter().any(|s| s.dead && &s.session_id == name));
+        let mut due = Vec::new();
+        for st in states.iter().filter(|s| s.dead) {
+            let since = *self.dead_seen.entry(st.session_id.clone()).or_insert(now);
+            if now.duration_since(since).as_millis() as u64 >= self.dead_keep_ms {
+                self.dead_seen.remove(&st.session_id);
+                due.push(st.session_id.clone());
+            }
+        }
+        due
+    }
+
     /// The reconcile pass against a keeper listing already in hand, so a
     /// maintenance tick pays for one `List` and not three.
-    pub fn apply_reconcile(&mut self, states: Vec<ldmux_protocol::keeper::State>) -> ReconcileResult {
+    pub fn apply_reconcile(
+        &mut self,
+        states: Vec<ldmux_protocol::keeper::State>,
+    ) -> ReconcileResult {
         // The live set, as terminal names (`ldmux-<id>`), the registry's key.
         // The keeper's `session_id` IS that name (the daemon passes the
         // keeper name at Spawn), so it is used verbatim — re-prefixing it made every
@@ -514,11 +606,9 @@ impl LdmuxDaemon {
             .collect();
         let now = now_ms() as i64;
         let (dead, adopted) = self.registry.reconcile(Some(&live), now);
-        let pruned = self.registry.prune(
-            Some(self.dead_record_ttl_ms),
-            Some(self.max_records),
-            now,
-        );
+        let pruned =
+            self.registry
+                .prune(Some(self.dead_record_ttl_ms), Some(self.max_records), now);
         // A shell that ended on its own (`exit`, killed outside ldmux) has to lose
         // its claim and its window record exactly as one killed through ldmux
         // does. Only the killing paths did this, so a shell that exited kept its
@@ -535,13 +625,28 @@ impl LdmuxDaemon {
             .collect();
         for id in &dead {
             self.forget_session_state(id);
-            let name = self.registry.get(id).map(|r| r.keeper_name.clone()).unwrap_or_default();
-            let reason = if gone_from_keeper.contains(&name) {
-                "its shell exited"
+            let name = self
+                .registry
+                .get(id)
+                .map(|r| r.keeper_name.clone())
+                .unwrap_or_default();
+            let exited = gone_from_keeper.contains(&name);
+            let (kind, reason) = if exited {
+                ("exited", "its shell exited")
             } else {
-                "the keeper no longer has it"
+                ("keeper_lost", "the keeper no longer has it")
             };
-            self.note_ended(id, reason);
+            // How the shell went, from the keeper's `waitpid`: written before the
+            // ending is noted, so everything that reads the record (the list, the
+            // `session_ended` a watching client is sent) already has it.
+            if let Some(st) = states.iter().find(|s| s.session_id == name)
+                && let Some(mut r) = self.registry.get(id).cloned()
+            {
+                r.exit_code = st.exit_code;
+                r.exit_signal = st.exit_signal;
+                self.registry.upsert(r);
+            }
+            self.note_ended(id, kind, reason);
             // A shell that ended on its own is as over as one that was killed,
             // and the client watching it has to be told. `kill_session` drops the
             // stream; this path did not, so a desk window whose shell exited sat
@@ -565,7 +670,9 @@ impl LdmuxDaemon {
         // state: a session killed outside ldmux leaves an owner pointing at
         // nothing, and a later session reusing that id inherits it (ADR-0010).
         let known: HashSet<String> = self.registry.list().into_iter().map(|r| r.id).collect();
-        self.ownership.retain(&known);
+        if !self.ownership.retain(&known).is_empty() {
+            self.save_claims();
+        }
         for id in self.live_windows.keys().cloned().collect::<Vec<_>>() {
             if !known.contains(&id) {
                 self.live_windows.remove(&id);
@@ -574,7 +681,12 @@ impl LdmuxDaemon {
         // A stream whose session has no record any more (pruned, forgotten) or
         // is dead is a poll thread polling nothing.
         self.sweep_streams();
-        ReconcileResult { dead, adopted, pruned, unknown_changed }
+        ReconcileResult {
+            dead,
+            adopted,
+            pruned,
+            unknown_changed,
+        }
     }
 
     /// Reconcile the desk windows against reality: is each recorded window still
@@ -615,7 +727,7 @@ impl LdmuxDaemon {
         let mut changed = false;
         let mut probes = Vec::new();
         let mut absent = Vec::new();
-        let now = now_ms();
+        let now = self.mono_ms();
         for id in self.live_windows.keys().cloned().collect::<Vec<_>>() {
             let record = self.registry.get(&id).cloned();
             match record {
@@ -721,7 +833,7 @@ impl LdmuxDaemon {
             if rec.live_workspace.is_none() {
                 self.set_live_window(&id, Some(String::new()), None);
             }
-            let now = now_ms();
+            let now = self.mono_ms();
             self.live_windows.entry(id).or_insert(LiveWindow {
                 workspace: rec.live_workspace.unwrap_or_default(),
                 since: now,
@@ -737,12 +849,10 @@ impl LdmuxDaemon {
                 changed = true;
                 continue;
             }
-            let now = now_ms();
+            let now = self.mono_ms();
             let present = match r.live_pid {
                 Some(pid) => process_alive(pid),
-                None => {
-                    crate::desktop::live_window_state(&r.id).await.as_deref() != Ok("absent")
-                }
+                None => crate::desktop::live_window_state(&r.id).await.as_deref() != Ok("absent"),
             };
             if present {
                 self.live_windows.entry(r.id.clone()).or_insert(LiveWindow {
@@ -759,7 +869,9 @@ impl LdmuxDaemon {
                 r.id
             );
             self.set_live_window(&r.id, None, None);
-            let _ = self.kill_session(&r.id, "its desk window closed while the daemon was down").await;
+            let _ = self
+                .kill_session(&r.id, "its desk window closed while the daemon was down")
+                .await;
             changed = true;
         }
         changed
@@ -791,8 +903,12 @@ impl LdmuxDaemon {
         let mut changed = false;
         let mut seen: HashSet<String> = HashSet::new();
         for id in running {
-            let Some(record) = self.registry.get(&id) else { continue };
-            let Some(path) = paths.get(record.keeper_name.as_str()) else { continue };
+            let Some(record) = self.registry.get(&id) else {
+                continue;
+            };
+            let Some(path) = paths.get(record.keeper_name.as_str()) else {
+                continue;
+            };
             seen.insert(id.clone());
             if self.last_cwds.get(&id).map(String::as_str) != Some(*path) {
                 self.last_cwds.insert(id.clone(), (*path).to_string());
@@ -835,7 +951,13 @@ impl LdmuxDaemon {
         let result = self.apply_reconcile(states.to_vec());
         let (live_changed, probes, absent) = self.live_prepass();
         let cwd_changed = self.check_cwd_drift(states);
-        MaintainPlan { result, live_changed, cwd_changed, probes, absent }
+        MaintainPlan {
+            result,
+            live_changed,
+            cwd_changed,
+            probes,
+            absent,
+        }
     }
 
     /// The closing half: end the shells of windows found gone, and say whether a
@@ -869,12 +991,10 @@ impl LdmuxDaemon {
             KeeperMessage::ListResult(lr) => lr.sessions,
             _ => Vec::new(),
         };
-        for st in states.iter().filter(|s| s.dead) {
-            let _ = keeper_call_via(
-                &keeper,
-                &KeeperMessage::Kill(km::Kill { session_id: st.session_id.clone() }),
-            )
-            .await;
+        let due = arc.lock().await.dead_sessions_due(&states);
+        for name in due {
+            let _ =
+                keeper_call_via(&keeper, &KeeperMessage::Kill(km::Kill { session_id: name })).await;
         }
         let plan = {
             let mut d = arc.lock().await;
@@ -888,7 +1008,7 @@ impl LdmuxDaemon {
         }
         let mut d = arc.lock().await;
         let changed = d.maintain_commit(plan, absent).await;
-        let shared = d.remote.as_ref().and_then(|r| r.shared());
+        let shared = d.conn_shared.clone();
         Ok((changed, shared))
     }
 
@@ -904,7 +1024,10 @@ impl LdmuxDaemon {
     /// (created by the caller) so that the control socket's spawned tasks can
     /// call `handle` (which takes `&mut self`). The `Arc` is shared across the
     /// accept loop.
-    pub async fn start(&mut self, arc: &std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>>) -> Result<(), String> {
+    pub async fn start(
+        &mut self,
+        arc: &std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>>,
+    ) -> Result<(), String> {
         // The state dir holds the control socket, the keeper socket and the
         // token: it must be ours and private. A new one is created 0700; an
         // existing one must be owned by this uid and is tightened to 0700, and
@@ -926,11 +1049,33 @@ impl LdmuxDaemon {
         // daemon was down closes its shell now, exactly as if the daemon had
         // been watching.
         let _ = self.rebuild_live_windows().await;
+        // The claims the last daemon held, for shells that are still running.
+        self.load_claims();
         // Start the remote (the phone-facing WS endpoint). A bind failure is
         // logged, not fatal: the remote is optional (local control must not
         // be taken down by a remote bind failure).
+        // The connection table is the daemon's, built once, so the tailnet socket
+        // and the local attach socket are one population (see `Shared::new`).
+        let (token, idle_ms, send_timeout_ms) = match &self.remote_cfg {
+            Some(c) => (c.token.clone(), c.idle_ms, c.send_timeout_ms),
+            None => (String::new(), 20_000, 10_000),
+        };
+        let shared = crate::remote::Shared::new(arc.clone(), token, idle_ms, send_timeout_ms);
+        self.conn_shared = Some(shared.clone());
+        // The local attach socket (E): the desk attach client's way in, with no
+        // tailnet involved. A bind failure is logged, not fatal; the client then
+        // has nothing to connect to and says so.
+        let attach_path = std::path::PathBuf::from(ldmux_protocol::paths::attach_socket_path_from(
+            &self.socket_path().to_string_lossy(),
+        ));
+        match crate::control_socket::ControlSocketServer::at(&attach_path).bind() {
+            Ok(listener) => {
+                self.local_handle = Some(crate::remote::serve_local(listener, shared.clone()))
+            }
+            Err(e) => eprintln!("ldmuxd: local attach socket {}: {e}", attach_path.display()),
+        }
         if let Some(cfg) = self.remote_cfg.clone() {
-            let mut rs = crate::remote::RemoteServer::new(cfg.clone());
+            let mut rs = crate::remote::RemoteServer::new(cfg.clone()).with_shared(shared.clone());
             match rs.start(arc).await {
                 Ok((host, port)) => {
                     eprintln!("ldmuxd: remote ws://{host}:{port}/ws");
@@ -952,6 +1097,7 @@ impl LdmuxDaemon {
                     let arc2 = arc.clone();
                     let stop = self.maintenance_stop.clone();
                     tokio::spawn(async move {
+                        let mut failures = 0u64;
                         loop {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             // A stopped daemon must not grow a listener.
@@ -961,7 +1107,8 @@ impl LdmuxDaemon {
                             if arc2.lock().await.remote.is_some() {
                                 break;
                             }
-                            let mut rs = crate::remote::RemoteServer::new(cfg.clone());
+                            let mut rs = crate::remote::RemoteServer::new(cfg.clone())
+                                .with_shared(shared.clone());
                             match rs.start(&arc2).await {
                                 Ok((host, port)) => {
                                     eprintln!("ldmuxd: remote up ws://{host}:{port}/ws");
@@ -976,7 +1123,21 @@ impl LdmuxDaemon {
                                     d.remote = Some(rs);
                                     break;
                                 }
-                                Err(_) => continue,
+                                // Said again every minute, with the reason: a bind
+                                // that keeps failing (a taken port, no tailnet
+                                // address) is not a one-line event, and a journal
+                                // that stopped talking after the first line made
+                                // it look resolved.
+                                Err(e) => {
+                                    failures += 1;
+                                    if failures.is_multiple_of(12) {
+                                        eprintln!(
+                                            "ldmuxd: remote still not bound after {} attempts ({e}); retrying every 5s",
+                                            failures + 1
+                                        );
+                                    }
+                                    continue;
+                                }
                             }
                         }
                     });
@@ -1007,10 +1168,9 @@ impl LdmuxDaemon {
                     let (changed, shared) = LdmuxDaemon::maintain_shared(&maint_arc)
                         .await
                         .unwrap_or((false, None));
-                    if changed
-                        && let Some(shared) = shared {
-                            crate::remote::broadcast_sessions(&shared).await;
-                        }
+                    if changed && let Some(shared) = shared {
+                        crate::remote::broadcast_sessions(&shared).await;
+                    }
                 }
             });
         }
@@ -1058,10 +1218,16 @@ impl LdmuxDaemon {
         if let Some(ref mut r) = self.remote {
             r.stop();
         }
+        if let Some(h) = self.local_handle.take() {
+            h.abort();
+        }
+        if let Some(shared) = self.conn_shared.take() {
+            shared.stop();
+        }
         // Close all streams (the `close` sets `poll_stop`, so the poll
         // threads exit on their next iteration).
         for stream in self.streams.values() {
-            stream.close("daemon stopped");
+            stream.close(crate::stream::RESET_DAEMON_STOPPED);
         }
         self.streams.clear();
         // Remove the socket file — only if the lock is ours: a daemon that was
@@ -1070,6 +1236,9 @@ impl LdmuxDaemon {
         if self.lock.owns() {
             let sock = self.socket_path();
             let _ = std::fs::remove_file(&sock);
+            let _ = std::fs::remove_file(ldmux_protocol::paths::attach_socket_path_from(
+                &sock.to_string_lossy(),
+            ));
         }
         // Release the lock.
         self.lock.release();
@@ -1094,7 +1263,11 @@ impl LdmuxDaemon {
         }
         let id = short_id();
         let keeper_name = format!("ldmux-{id}");
-        let command: Vec<String> = if kind == "pi" { vec!["pi".to_string()] } else { vec![] };
+        let command: Vec<String> = if kind == "pi" {
+            vec!["pi".to_string()]
+        } else {
+            vec![]
+        };
         let now: u64 = now_ms();
         let record = SessionRecord {
             id: id.clone(),
@@ -1102,7 +1275,11 @@ impl LdmuxDaemon {
             kind: kind.to_string(),
             cwd: cwd.clone(),
             title: title.map(|t| t.to_string()).unwrap_or_else(|| {
-                if kind == "pi" { "pi".to_string() } else { "shell".to_string() }
+                if kind == "pi" {
+                    "pi".to_string()
+                } else {
+                    "shell".to_string()
+                }
             }),
             created_at: now,
             updated_at: now,
@@ -1113,6 +1290,8 @@ impl LdmuxDaemon {
             live_workspace: None,
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         };
         let env = session_spawn_env(
             &id,
@@ -1125,15 +1304,20 @@ impl LdmuxDaemon {
         // retargeted onto the keeper: a `Spawn` creates a new emulator session).
         // The `pi` kind runs `pi`; every session gets the `LDMUX_*` spawn env
         // (plan §2.6).
-        let spawn_resp = self.keeper_call(&km::KeeperMessage::Spawn(km::Spawn {
-            session_id: keeper_name.clone(),
-            cols: 80,
-            rows: 24,
-            cwd: Some(cwd.clone()),
-            command: if command.is_empty() { None } else { Some(command.clone()) },
-            env: Some(env.clone()),
-        }))
-        .await?;
+        let spawn_resp = self
+            .keeper_call(&km::KeeperMessage::Spawn(km::Spawn {
+                session_id: keeper_name.clone(),
+                cols: 80,
+                rows: 24,
+                cwd: Some(cwd.clone()),
+                command: if command.is_empty() {
+                    None
+                } else {
+                    Some(command.clone())
+                },
+                env: Some(env.clone()),
+            }))
+            .await?;
         let _ = spawn_resp;
         self.registry.upsert(record.clone());
         if let Err(e) = self.registry.save() {
@@ -1150,7 +1334,11 @@ impl LdmuxDaemon {
     /// compile without saying why, and before this existed no path said why at
     /// all. See [`Self::note_ended`].
     pub async fn kill_session(&mut self, id: &str, reason: &str) -> Result<SessionRecord, String> {
-        let mut record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
+        let mut record = self
+            .registry
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("no such session: {id}"))?;
         if !record.keeper_name.is_empty() {
             let killed = self
                 .keeper_call(&km::KeeperMessage::Kill(km::Kill {
@@ -1180,7 +1368,10 @@ impl LdmuxDaemon {
         record.updated_at = now;
         record.exit_code = None;
         record.ended_reason = Some(reason.to_string());
-        self.note_ended(&record.id, reason);
+        let kind = ended_kind_of(reason);
+        record.ended_kind = Some(kind.to_string());
+        record.exit_signal = None;
+        self.note_ended(&record.id, kind, reason);
         self.registry.upsert(record.clone());
         if let Err(e) = self.registry.save() {
             eprintln!("ldmuxd: registry save: {e}");
@@ -1198,8 +1389,16 @@ impl LdmuxDaemon {
     }
 
     /// Close a session (the TS `handleClose`).
-    pub async fn close_session(&mut self, id: &str, reason: &str) -> Result<(bool, SessionRecord), String> {
-        let record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
+    pub async fn close_session(
+        &mut self,
+        id: &str,
+        reason: &str,
+    ) -> Result<(bool, SessionRecord), String> {
+        let record = self
+            .registry
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("no such session: {id}"))?;
         if self.ownership.owner(id).is_some() {
             return Ok((false, record));
         }
@@ -1219,15 +1418,16 @@ impl LdmuxDaemon {
     /// Called from `kill_session` (which every explicit ending uses) and from the
     /// two ending paths that do not kill: the keeper reporting a session gone,
     /// and the daemon starting up without a window its record promised.
-    fn note_ended(&mut self, id: &str, reason: &str) {
-        println!("ldmuxd: session {id} ended: {reason}");
+    fn note_ended(&mut self, id: &str, kind: &str, reason: &str) {
+        println!("ldmuxd: session {id} ended ({kind}): {reason}");
         let Some(mut r) = self.registry.get(id).cloned() else {
             return;
         };
-        if r.ended_reason.as_deref() == Some(reason) {
+        if r.ended_reason.as_deref() == Some(reason) && r.ended_kind.as_deref() == Some(kind) {
             return;
         }
         r.ended_reason = Some(reason.to_string());
+        r.ended_kind = Some(kind.to_string());
         self.registry.upsert(r);
         if let Err(e) = self.registry.save() {
             eprintln!("ldmuxd: registry save: {e}");
@@ -1263,6 +1463,8 @@ impl LdmuxDaemon {
         self.sessions_dirty = true;
         if let Some(claim) = self.ownership.owner(id).cloned() {
             self.ownership.release(id, &claim.device.id);
+            self.restored.remove(id);
+            self.save_claims();
         }
         // A session that is over has no window. Doing it here rather than in each
         // ending keeps the invariant in one place: `running` with a window record
@@ -1293,16 +1495,45 @@ impl LdmuxDaemon {
             let poll_stream = stream.clone();
             std::thread::spawn(move || {
                 loop {
-                    if poll_stream.poll_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if poll_stream
+                        .poll_stop
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         break;
                     }
-                    let _ = poll_stream.poll_once();
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    // A chunk with more behind it is followed at once; only an
+                    // empty keeper buffer earns the sleep. A flood is therefore
+                    // drained at the keeper socket's speed, in 64 KiB pieces.
+                    let more = poll_stream.poll_once().unwrap_or(false);
+                    if !more {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 }
             });
             self.streams.insert(keeper_name.to_string(), stream);
         }
         self.streams.get(keeper_name).unwrap()
+    }
+
+    /// The last screen of a session whose shell has ended, while the keeper still
+    /// holds it (see `DEAD_KEEP`): what a reconnecting client is shown before it
+    /// is told the ending. `None` once the keeper has let go of it.
+    pub async fn final_screen(
+        &mut self,
+        keeper_name: &str,
+    ) -> Option<ldmux_protocol::keeper::SnapshotResult> {
+        if keeper_name.is_empty() {
+            return None;
+        }
+        let req = KeeperMessage::Snapshot(km::Snapshot {
+            session_id: keeper_name.to_string(),
+            history_lines: None,
+            drain_output: false,
+        });
+        match self.keeper_call(&req).await {
+            Ok(KeeperMessage::SnapshotResult(sr)) => Some(sr),
+            _ => None,
+        }
     }
 
     /// Get a stream by session id (the `streams` map lookup, without creating).
@@ -1314,7 +1545,7 @@ impl LdmuxDaemon {
     /// Its keeper session is gone.
     pub fn drop_stream(&mut self, keeper_name: &str) {
         if let Some(stream) = self.streams.remove(keeper_name) {
-            stream.close("session ended");
+            stream.close(crate::stream::RESET_SESSION_ENDED);
         }
     }
 
@@ -1354,15 +1585,17 @@ impl LdmuxDaemon {
     ///
     /// This is the core of the control socket server: the `serve_one` method
     /// in `control_socket.rs` calls this to handle each RPC request.
-    pub async fn handle(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    pub async fn handle(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         match method {
-            "ping" => {
-                Ok(serde_json::json!({
-                    "pong": true,
-                    "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,
-                    "keeperSocket": self.keeper_socket_path().to_string_lossy(),
-                }))
-            }
+            "ping" => Ok(serde_json::json!({
+                "pong": true,
+                "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,
+                "keeperSocket": self.keeper_socket_path().to_string_lossy(),
+            })),
             "list" => {
                 // Detect keeper death (plan §6): if the keeper is dead,
                 // respawn it and reconcile (mark all sessions dead).
@@ -1381,10 +1614,16 @@ impl LdmuxDaemon {
                 Ok(serde_json::json!({ "sessions": sessions }))
             }
             "new" => {
-                let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("shell");
+                let kind = params
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("shell");
                 let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
                 let title = params.get("title").and_then(|v| v.as_str());
-                let created_by = params.get("createdBy").and_then(|v| v.as_str()).unwrap_or("local");
+                let created_by = params
+                    .get("createdBy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local");
                 let record = self.create_session(kind, cwd, title, created_by).await?;
                 Ok(serde_json::json!({ "session": record }))
             }
@@ -1411,7 +1650,11 @@ impl LdmuxDaemon {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let keys = params.get("keys").and_then(|v| v.as_array());
-                let record = self.registry.get(id).cloned().ok_or_else(|| format!("no such session: {id}"))?;
+                let record = self
+                    .registry
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("no such session: {id}"))?;
                 if record.keeper_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
                 }
@@ -1421,7 +1664,9 @@ impl LdmuxDaemon {
                 // concatenating into one `Write` is equivalent).
                 // Cursor keys depend on the pane's DECCKM mode (`Read` answers it).
                 let app_cursor = match self
-                    .keeper_call(&km::KeeperMessage::Read(km::Read { session_id: record.keeper_name.clone() }))
+                    .keeper_call(&km::KeeperMessage::Read(km::Read {
+                        session_id: record.keeper_name.clone(),
+                    }))
                     .await
                 {
                     Ok(km::KeeperMessage::State(st)) => st.app_cursor,
@@ -1439,7 +1684,8 @@ impl LdmuxDaemon {
                         input.extend(crate::stream::key_name_to_bytes_in(ks, app_cursor)?);
                     }
                 }
-                let data = String::from_utf8(input).map_err(|e| format!("invalid input bytes: {e}"))?;
+                let data =
+                    String::from_utf8(input).map_err(|e| format!("invalid input bytes: {e}"))?;
                 // Send the input to the keeper (the `Write` message).
                 self.keeper_call(&km::KeeperMessage::Write(km::Write {
                     session_id: record.keeper_name.clone(),
@@ -1450,18 +1696,29 @@ impl LdmuxDaemon {
             }
             "capture" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let history = params.get("history").and_then(|v| v.as_bool()).unwrap_or(false);
-                let record = self.registry.get(id).ok_or_else(|| format!("no such session: {id}"))?;
+                let history = params
+                    .get("history")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let record = self
+                    .registry
+                    .get(id)
+                    .ok_or_else(|| format!("no such session: {id}"))?;
                 if record.keeper_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
                 }
                 // Take a snapshot (the keeper's `Snapshot` message).
-                let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
-                    session_id: record.keeper_name.clone(),
-                    history_lines: if history { Some(HISTORY_CAPTURE_LINES) } else { None },
-            drain_output: false,
-                }))
-                .await?;
+                let resp = self
+                    .keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
+                        session_id: record.keeper_name.clone(),
+                        history_lines: if history {
+                            Some(HISTORY_CAPTURE_LINES)
+                        } else {
+                            None
+                        },
+                        drain_output: false,
+                    }))
+                    .await?;
                 let text = match &resp {
                     KeeperMessage::SnapshotResult(s) => s.text.clone(),
                     _ => return Err("expected SnapshotResult".to_string()),
@@ -1470,17 +1727,21 @@ impl LdmuxDaemon {
             }
             "snapshot" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let record = self.registry.get(id).ok_or_else(|| format!("no such session: {id}"))?;
+                let record = self
+                    .registry
+                    .get(id)
+                    .ok_or_else(|| format!("no such session: {id}"))?;
                 if record.keeper_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
                 }
                 // Take a snapshot (the keeper's `Snapshot` message).
-                let resp = self.keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
-                    session_id: record.keeper_name.clone(),
-                    history_lines: None,
-            drain_output: false,
-                }))
-                .await?;
+                let resp = self
+                    .keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
+                        session_id: record.keeper_name.clone(),
+                        history_lines: None,
+                        drain_output: false,
+                    }))
+                    .await?;
                 let result = match &resp {
                     KeeperMessage::SnapshotResult(s) => s.clone(),
                     _ => return Err("expected SnapshotResult".to_string()),
@@ -1490,8 +1751,14 @@ impl LdmuxDaemon {
             // ── Desktop window lifecycle ──
             "makeLive" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let workspace = params.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
-                let record = self.registry.get(id).cloned()
+                let workspace = params
+                    .get("workspace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let record = self
+                    .registry
+                    .get(id)
+                    .cloned()
                     .ok_or_else(|| format!("no such session: {id}"))?;
                 if record.status != "running" {
                     return Ok(serde_json::json!({
@@ -1510,9 +1777,14 @@ impl LdmuxDaemon {
                     Ok(lr) => {
                         if lr.ok {
                             self.sessions_dirty = true;
-                            self.live_windows.insert(id.to_string(), LiveWindow {
-                                workspace: workspace.to_string(), since: now_ms(), pid: None,
-                            });
+                            self.live_windows.insert(
+                                id.to_string(),
+                                LiveWindow {
+                                    workspace: workspace.to_string(),
+                                    since: self.mono_ms(),
+                                    pid: None,
+                                },
+                            );
                             self.set_live_window(id, Some(workspace.to_string()), None);
                             let dd = self.desktop_device.clone();
                             let _ = self.claim(id, &dd, true);
@@ -1542,7 +1814,10 @@ impl LdmuxDaemon {
             }
             "deskWindow" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let record = self.registry.get(id).cloned()
+                let record = self
+                    .registry
+                    .get(id)
+                    .cloned()
                     .ok_or_else(|| format!("no such session: {id}"))?;
                 if record.status != "running" {
                     return Ok(serde_json::json!({
@@ -1564,11 +1839,11 @@ impl LdmuxDaemon {
                 // is given. That pid is also the model's `live_pid`, and the
                 // daemon asks the kernel about it, because a stock terminal has
                 // no window class of ours to find.
-                let spawn = params.get("spawn").and_then(|v| v.as_bool()).unwrap_or(true);
-                let pid = params
-                    .get("pid")
-                    .and_then(|v| v.as_i64())
-                    .map(|v| v as i32);
+                let spawn = params
+                    .get("spawn")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let pid = params.get("pid").and_then(|v| v.as_i64()).map(|v| v as i32);
                 let (ok, detail) = if spawn {
                     match crate::desktop::open_live(id, "").await {
                         Ok(lr) => (lr.ok, None),
@@ -1579,16 +1854,22 @@ impl LdmuxDaemon {
                 } else {
                     (
                         false,
-                        Some("an in-place desk window needs the pid of the process it is".to_string()),
+                        Some(
+                            "an in-place desk window needs the pid of the process it is"
+                                .to_string(),
+                        ),
                     )
                 };
                 if ok {
                     self.sessions_dirty = true;
-                    self.live_windows.insert(id.to_string(), LiveWindow {
-                        workspace: String::new(),
-                        since: now_ms(),
-                        pid,
-                    });
+                    self.live_windows.insert(
+                        id.to_string(),
+                        LiveWindow {
+                            workspace: String::new(),
+                            since: self.mono_ms(),
+                            pid,
+                        },
+                    );
                     self.set_live_window(id, Some(String::new()), pid);
                     let dd = self.desktop_device.clone();
                     let _ = self.claim(id, &dd, true);
@@ -1611,23 +1892,23 @@ impl LdmuxDaemon {
                 }))
             }
             // ── Remote info ──
-            "remote_info" => {
-                Ok(serde_json::json!({
-                    "hostname": self.remote_cfg.as_ref()
-                        .map(|c| c.hostname.clone())
-                        .unwrap_or_else(|| "127.0.0.1".to_string()),
-                    "port": self.remote_cfg.as_ref().map(|c| c.port).unwrap_or(0),
-                    "path": "/ws",
-                    "token": self.remote_cfg.as_ref()
-                        .map(|c| c.token.clone())
-                        .unwrap_or_default(),
-                    "listening": self.remote.is_some(),
-                }))
-            }
+            "remote_info" => Ok(serde_json::json!({
+                "hostname": self.remote_cfg.as_ref()
+                    .map(|c| c.hostname.clone())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+                "port": self.remote_cfg.as_ref().map(|c| c.port).unwrap_or(0),
+                "path": "/ws",
+                "token": self.remote_cfg.as_ref()
+                    .map(|c| c.token.clone())
+                    .unwrap_or_default(),
+                "listening": self.remote.is_some(),
+            })),
             // ── Adopt ──
             "adopt" => {
-                let keeper_name = params.get("keeperName")
-                    .and_then(|v| v.as_str()).unwrap_or("");
+                let keeper_name = params
+                    .get("keeperName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let record = self.adopt(keeper_name).await?;
                 Ok(serde_json::to_value(&record).map_err(|e| e.to_string())?)
             }
@@ -1639,10 +1920,9 @@ impl LdmuxDaemon {
                 Ok(serde_json::json!({ "on": on }))
             }
             // ── Stream-dependent handlers handled by the remote WS server ──
-            "attach" | "resize" | "mouseclick" | "input" | "key"
-            | "follow" | "scrollback" => {
-                Err(format!("not_implemented: {method} (handled by the remote WS server)"))
-            }
+            "attach" | "resize" | "mouseclick" | "input" | "key" | "follow" | "scrollback" => Err(
+                format!("not_implemented: {method} (handled by the remote WS server)"),
+            ),
             _ => Err(format!("unknown method: {method}")),
         }
     }
@@ -1688,7 +1968,10 @@ impl LdmuxDaemon {
     /// the record's `id` is the keeper `session_id` (one of this daemon's own
     /// sessions keeps its id: it is in the name, in the shell's
     /// `LDMUX_SESSION_ID`, and in any window class made for it).
-    pub async fn adopt(&mut self, session_id: &str) -> Result<ldmux_protocol::rpc::SessionRecord, String> {
+    pub async fn adopt(
+        &mut self,
+        session_id: &str,
+    ) -> Result<ldmux_protocol::rpc::SessionRecord, String> {
         // The keeper names sessions `ldmux-<id>`; accept either form (the
         // RPC passes the terminal name, `adopt_own_sessions` the same).
         let keeper_name = if session_id.starts_with("ldmux-") {
@@ -1734,6 +2017,8 @@ impl LdmuxDaemon {
             live_workspace: None,
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         };
         self.registry.upsert(record.clone());
         let _ = self.registry.save();
@@ -1761,7 +2046,10 @@ impl LdmuxDaemon {
         {
             for st in lr.sessions {
                 let activity = lr.activity.get(&st.session_id).copied().unwrap_or(0);
-                facts.insert(st.session_id.clone(), (st.foreground.clone(), st.cwd.clone(), activity));
+                facts.insert(
+                    st.session_id.clone(),
+                    (st.foreground.clone(), st.cwd.clone(), activity),
+                );
             }
         }
         let records = self.registry.list();
@@ -1777,7 +2065,9 @@ impl LdmuxDaemon {
                     }
                     _ => record.cwd.clone(),
                 };
-                let process = fact.map(|(cmd, _, _)| cmd.clone()).filter(|c| !c.is_empty());
+                let process = fact
+                    .map(|(cmd, _, _)| cmd.clone())
+                    .filter(|c| !c.is_empty());
                 // The pane's own clock where the keeper has one, else the record's
                 // last write. This was `Some(record.updated_at)` alone, which is
                 // only ever the *creation* or *death* time — so "last activity"
@@ -1823,6 +2113,9 @@ impl LdmuxDaemon {
                     owner,
                     live_workspace,
                     ended_reason: record.ended_reason.clone(),
+                    exit_code: record.exit_code,
+                    exit_signal: record.exit_signal,
+                    ended_kind: record.ended_kind.clone(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1866,8 +2159,9 @@ impl LdmuxDaemon {
         // `#{pane_pid}`, and a client that has the link goes to the running shell
         // instead of guessing by directory and opening a new one
         // (`origin/main:packages/daemon/src/daemon.ts:1096-1106`).
-        if let Ok(ldmux_protocol::keeper::KeeperMessage::ListResult(res)) =
-            self.keeper_call(&km::KeeperMessage::List(km::List {})).await
+        if let Ok(ldmux_protocol::keeper::KeeperMessage::ListResult(res)) = self
+            .keeper_call(&km::KeeperMessage::List(km::List {}))
+            .await
         {
             let by_shell_pid = self.session_ids_by_shell_pid(&res.sessions);
             crate::desktop_inventory::link_pi_sessions(&mut inv, &by_shell_pid);
@@ -1909,6 +2203,106 @@ impl LdmuxDaemon {
     /// Returns the ownership result. The daemon-side side effects (size,
     /// desk-window handling, displaced notification) are layered on by the
     /// remote (they depend on the transport state the remote owns).
+    /// Milliseconds on the daemon's monotonic clock.
+    pub fn mono_ms(&self) -> u64 {
+        self.mono_base.elapsed().as_millis() as u64
+    }
+
+    fn claims_path(&self) -> PathBuf {
+        self.state_dir.join("claims.json")
+    }
+
+    /// Mirror the claim table to disk (atomic, 0600). Best effort: a failure is
+    /// logged and costs only the restart survival.
+    fn save_claims(&self) {
+        // A stopping daemon is closing its connections, and each close would
+        // release that device's claim: exactly the thing the file is there to
+        // survive. The file written while running is the one to keep.
+        if self
+            .maintenance_stop
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let rows: Vec<Value> = self
+            .ownership
+            .export()
+            .into_iter()
+            .map(|(sid, c)| {
+                serde_json::json!({
+                    "sessionId": sid,
+                    "device": {"id": c.device.id, "name": c.device.name, "kind": c.device.kind},
+                    "since": c.since,
+                })
+            })
+            .collect();
+        let path = self.claims_path();
+        let tmp = path.with_extension("json.tmp");
+        let write = || -> std::io::Result<()> {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(Value::Array(rows).to_string().as_bytes())?;
+            std::fs::rename(&tmp, &path)
+        };
+        if let Err(e) = write() {
+            eprintln!("ldmuxd: claims save: {e}");
+        }
+    }
+
+    /// Reload the claims the last daemon held, for sessions that are still running,
+    /// each held for [`RESTORE_GRACE_MS`] for its device to come back.
+    ///
+    /// The clients a restart drops reconnect within seconds; without this another
+    /// device could attach in that gap and the shell's holder would find it taken.
+    /// A restored claim that is never re-attached is freed by the ordinary sweep
+    /// once the grace has passed.
+    pub fn load_claims(&mut self) {
+        let Ok(text) = std::fs::read_to_string(self.claims_path()) else {
+            return;
+        };
+        let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) else {
+            return;
+        };
+        let deadline = self.mono_ms() + RESTORE_GRACE_MS;
+        for r in rows {
+            let (Some(sid), Some(dev)) = (r["sessionId"].as_str(), r.get("device")) else {
+                continue;
+            };
+            let running = self
+                .registry
+                .get(sid)
+                .is_some_and(|rec| rec.status == "running");
+            let (Some(id), Some(name), Some(kind)) = (
+                dev["id"].as_str(),
+                dev["name"].as_str(),
+                dev["kind"].as_str(),
+            ) else {
+                continue;
+            };
+            if !running {
+                continue;
+            }
+            self.ownership.restore(
+                sid,
+                crate::ownership::Claim {
+                    device: ldmux_protocol::rpc::DeviceInfo {
+                        id: id.into(),
+                        name: name.into(),
+                        kind: kind.into(),
+                    },
+                    since: r["since"].as_i64().unwrap_or(0),
+                },
+            );
+            self.restored.insert(sid.to_string(), deadline);
+        }
+    }
+
     pub fn claim(
         &mut self,
         session_id: &str,
@@ -1916,9 +2310,13 @@ impl LdmuxDaemon {
         takeover: bool,
     ) -> crate::ownership::ClaimResult {
         let now = now_ms() as i64;
-        let r = self.ownership.claim(session_id, device.clone(), takeover, Some(now));
+        let r = self
+            .ownership
+            .claim(session_id, device.clone(), takeover, Some(now));
         // Who holds a shell is on the wire (`owner`), so a claim is a change.
         self.sessions_dirty = true;
+        self.restored.remove(session_id);
+        self.save_claims();
         r
     }
 
@@ -1957,14 +2355,18 @@ impl LdmuxDaemon {
         // Forget what is no longer a claim, and what is now a different one: a
         // claim that moved to another device has not been unbacked since the old
         // device's timestamp.
-        self.unbacked_since.retain(|sid, (device, _)| {
-            claims
-                .iter()
-                .any(|(s, d)| s == sid && d == device)
-        });
+        self.unbacked_since
+            .retain(|sid, (device, _)| claims.iter().any(|(s, d)| s == sid && d == device));
         let mut freed = Vec::new();
         for (sid, device) in claims {
             if attached.contains(&(sid.clone(), device.clone())) {
+                self.unbacked_since.remove(&sid);
+                self.restored.remove(&sid);
+                continue;
+            }
+            // Restored from disk: held for its device until the restore grace
+            // ends, however long it has been unbacked.
+            if self.restored.get(&sid).is_some_and(|until| *until > now) {
                 self.unbacked_since.remove(&sid);
                 continue;
             }
@@ -1990,6 +2392,8 @@ impl LdmuxDaemon {
         let r = self.ownership.release(session_id, device_id);
         if r {
             self.sessions_dirty = true;
+            self.restored.remove(session_id);
+            self.save_claims();
         }
         r
     }
@@ -2006,7 +2410,14 @@ impl LdmuxDaemon {
     ///
     /// Returns the list of session ids that were freed.
     pub fn release_device(&mut self, device_id: &str) -> Vec<String> {
-        self.ownership.release_device(device_id)
+        let freed = self.ownership.release_device(device_id);
+        if !freed.is_empty() {
+            for sid in &freed {
+                self.restored.remove(sid);
+            }
+            self.save_claims();
+        }
+        freed
     }
 }
 
@@ -2029,7 +2440,7 @@ fn session_spawn_env(
     daemon_sock: &str,
     keeper_sock: &str,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut env = vec![
         ("TERM".to_string(), km::CHILD_TERM.to_string()),
         ("COLORTERM".to_string(), km::CHILD_COLORTERM.to_string()),
         ("LDMUX".to_string(), "1".to_string()),
@@ -2038,7 +2449,47 @@ fn session_spawn_env(
         ("LDMUX_SOCKET".to_string(), daemon_sock.to_string()),
         ("LDMUX_SESSION_NAME".to_string(), keeper_name.to_string()),
         ("LDMUX_KEEPER_SOCK".to_string(), keeper_sock.to_string()),
-    ]
+    ];
+    env.extend(utf8_locale_env(|k| std::env::var(k).ok()));
+    env
+}
+
+/// The locale a session's shell starts with.
+///
+/// The emulator is UTF-8, so a shell in the `C`/`POSIX` locale (what a systemd
+/// user service has when the unit sets no `LANG`) mangles every non-ASCII
+/// character it echoes or edits. The keeper inherits *its* environment, which is
+/// whatever the daemon had when it first spawned it and can be stale, so the
+/// locale is stated in `Spawn.env` from the daemon's current one: the daemon's
+/// own `LANG` when the effective locale (`LC_ALL`, `LC_CTYPE`, `LANG`, in that
+/// order) is already UTF-8, else `C.UTF-8`, which glibc and musl both ship. A
+/// non-UTF-8 `LC_ALL`/`LC_CTYPE` would override `LANG`, so those are replaced
+/// too when they are set.
+pub(crate) fn utf8_locale_env(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let is_utf8 = |v: &str| {
+        let v = v.to_ascii_lowercase();
+        v.contains("utf-8") || v.contains("utf8")
+    };
+    let nonempty = |k: &str| get(k).filter(|v| !v.is_empty());
+    let effective = nonempty("LC_ALL")
+        .or_else(|| nonempty("LC_CTYPE"))
+        .or_else(|| nonempty("LANG"));
+    if effective.as_deref().is_some_and(is_utf8) {
+        // Already right; pin LANG only so a stale keeper environment cannot win.
+        return nonempty("LANG")
+            .map(|l| vec![("LANG".to_string(), l)])
+            .unwrap_or_default();
+    }
+    let mut env = vec![("LANG".to_string(), "C.UTF-8".to_string())];
+    for k in ["LC_ALL", "LC_CTYPE"] {
+        if nonempty(k).is_some() {
+            env.push((k.to_string(), "C.UTF-8".to_string()));
+        }
+    }
+    if nonempty("LC_ALL").is_none() && nonempty("LC_CTYPE").is_none() {
+        env.push(("LC_CTYPE".to_string(), "C.UTF-8".to_string()));
+    }
+    env
 }
 
 #[cfg(test)]
@@ -2049,10 +2500,7 @@ mod tests {
     use ldmux_protocol::rpc::SessionRecord;
 
     fn scratch() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "ldmux-daemon-core-{}",
-            rand::random::<u64>()
-        ));
+        let p = std::env::temp_dir().join(format!("ldmux-daemon-core-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -2062,6 +2510,35 @@ mod tests {
     /// Without this the daemon's unit supplies no `TERM`, bash invents `dumb`,
     /// and every program turns colour off (observed 2026-10-05).
     #[test]
+    fn the_shell_gets_a_utf8_locale_when_the_daemon_has_none() {
+        let env = |pairs: &'static [(&str, &str)]| {
+            utf8_locale_env(move |k| {
+                pairs
+                    .iter()
+                    .find(|(pk, _)| *pk == k)
+                    .map(|(_, v)| v.to_string())
+            })
+        };
+        let get = |e: &Vec<(String, String)>, k: &str| {
+            e.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone())
+        };
+        // Nothing set (a bare systemd unit): C.UTF-8.
+        let e = env(&[]);
+        assert_eq!(get(&e, "LANG").as_deref(), Some("C.UTF-8"));
+        assert_eq!(get(&e, "LC_CTYPE").as_deref(), Some("C.UTF-8"));
+        // The classic C locale is replaced, and a non-UTF-8 LC_ALL cannot win.
+        let e = env(&[("LANG", "C"), ("LC_ALL", "POSIX")]);
+        assert_eq!(get(&e, "LANG").as_deref(), Some("C.UTF-8"));
+        assert_eq!(get(&e, "LC_ALL").as_deref(), Some("C.UTF-8"));
+        // The daemon's own UTF-8 locale is kept, not replaced.
+        let e = env(&[("LANG", "ja_JP.UTF-8")]);
+        assert_eq!(e, vec![("LANG".to_string(), "ja_JP.UTF-8".to_string())]);
+        // LANG says UTF-8 but LC_CTYPE overrides it with something else: fixed.
+        let e = env(&[("LANG", "en_US.UTF-8"), ("LC_CTYPE", "C")]);
+        assert_eq!(get(&e, "LC_CTYPE").as_deref(), Some("C.UTF-8"));
+    }
+
+    #[test]
     fn the_spawn_env_pins_a_colour_terminal() {
         let env = session_spawn_env("id", "shell", "ldmux-id", "/d.sock", "/k.sock");
         let get = |k: &str| env.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.as_str());
@@ -2069,7 +2546,10 @@ mod tests {
         assert_eq!(get("COLORTERM"), Some(km::CHILD_COLORTERM));
         assert_eq!(get("LDMUX_SESSION_ID"), Some("id"));
         assert_eq!(get("LDMUX_KEEPER_SOCK"), Some("/k.sock"));
-        assert!(env.iter().all(|(k, _)| !k.to_ascii_lowercase().contains("tmux")));
+        assert!(
+            env.iter()
+                .all(|(k, _)| !k.to_ascii_lowercase().contains("tmux"))
+        );
     }
 
     /// Wait for the fake keeper's socket to exist (the bind→connect race the
@@ -2099,7 +2579,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -2116,7 +2598,7 @@ mod tests {
             cwd: None,
             command: None,
             env: None,
-            });
+        });
         ldmux_protocol::keeper_call::keeper_call(
             keeper_sock.to_str().unwrap(),
             &spawn,
@@ -2142,6 +2624,8 @@ mod tests {
             live_workspace: None,
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         });
 
         // Pass 1: the session is live, so nothing is marked dead.
@@ -2150,7 +2634,9 @@ mod tests {
         assert!(r.adopted.is_empty());
 
         // Kill the session on the fake keeper.
-        let kill = KeeperMessage::Kill(Kill { session_id: "ldmux-s1".into() });
+        let kill = KeeperMessage::Kill(Kill {
+            session_id: "ldmux-s1".into(),
+        });
         ldmux_protocol::keeper_call::keeper_call(
             keeper_sock.to_str().unwrap(),
             &kill,
@@ -2182,7 +2668,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -2198,7 +2686,7 @@ mod tests {
             cwd: None,
             command: None,
             env: None,
-            });
+        });
         ldmux_protocol::keeper_call::keeper_call(
             keeper_sock.to_str().unwrap(),
             &spawn,
@@ -2235,26 +2723,41 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         // Create a session in the current dir (which exists).
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         assert_eq!(record.kind, "shell");
         assert_eq!(record.status, "running");
         assert!(!record.keeper_name.is_empty());
         // The registry has the record.
         assert!(d.registry().get(&record.id).is_some());
         // The keeper has the session.
-        let resp = d.keeper_call(&KeeperMessage::List(km::List {})).await.unwrap();
+        let resp = d
+            .keeper_call(&KeeperMessage::List(km::List {}))
+            .await
+            .unwrap();
         let list = match &resp {
             KeeperMessage::ListResult(l) => l.clone(),
             _ => panic!("expected ListResult"),
         };
-        assert!(list.sessions.iter().any(|s| s.session_id == record.keeper_name));
+        assert!(
+            list.sessions
+                .iter()
+                .any(|s| s.session_id == record.keeper_name)
+        );
         drop(fk);
     }
 
@@ -2268,13 +2771,21 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let id = record.id.clone();
         let _keeper_name = record.keeper_name.clone();
         // Kill the session.
@@ -2297,20 +2808,31 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let id = record.id.clone();
         // No one holds it: close kills it.
         let (ended, _) = d.close_session(&id, "closed").await.unwrap();
         assert!(ended);
         assert_eq!(d.registry().get(&id).unwrap().status, "dead");
         // Create another, claim it, and close: it is let go, not killed.
-        let record2 = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let record2 = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let id2 = record2.id.clone();
         let device = ldmux_protocol::rpc::DeviceInfo {
             id: "device1".into(),
@@ -2337,21 +2859,38 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
-
-        // Without `history` the request is the live screen: no history asked for.
-        d.handle("capture", serde_json::json!({ "id": rec.id })).await.unwrap();
-        assert_eq!(fk.last_history_request(), None, "a live capture asks for no history");
-
-        d.handle("capture", serde_json::json!({ "id": rec.id, "history": true }))
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
             .await
             .unwrap();
+
+        // Without `history` the request is the live screen: no history asked for.
+        d.handle("capture", serde_json::json!({ "id": rec.id }))
+            .await
+            .unwrap();
+        assert_eq!(
+            fk.last_history_request(),
+            None,
+            "a live capture asks for no history"
+        );
+
+        d.handle(
+            "capture",
+            serde_json::json!({ "id": rec.id, "history": true }),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             fk.last_history_request(),
             Some(crate::daemon::HISTORY_CAPTURE_LINES),
@@ -2378,7 +2917,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -2404,8 +2945,8 @@ mod tests {
                         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
                             && comm.trim() == "pi"
                         {
-                            let stat =
-                                std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                                .unwrap_or_default();
                             // Only the one under our own sh: its ppid is a child of
                             // this test process.
                             if std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -2429,16 +2970,20 @@ mod tests {
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         // The keeper reports the *shell's* pid; standing in for it with this test
         // process's pid makes the spawned pi a descendant of "the shell".
         fk.set_pid(&rec.keeper_name, std::process::id() as i32);
 
-        let inv = d
-            .handle("desktop", serde_json::json!({}))
-            .await
-            .unwrap();
-        let sessions = inv.get("piSessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        let inv = d.handle("desktop", serde_json::json!({})).await.unwrap();
+        let sessions = inv
+            .get("piSessions")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mine = sessions
             .iter()
             .find(|p| p.get("pid").and_then(|x| x.as_i64()) == Some(pi_pid))
@@ -2467,26 +3012,50 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let killed = d.create_session("shell", &cwd, None, "local").await.unwrap();
-        let closed = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let killed = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
+        let closed = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
 
-        d.kill_session(&killed.id, "killed from the test").await.unwrap();
-        let (ended, _) = d.close_session(&closed.id, "closed from the test").await.unwrap();
+        d.kill_session(&killed.id, "killed from the test")
+            .await
+            .unwrap();
+        let (ended, _) = d
+            .close_session(&closed.id, "closed from the test")
+            .await
+            .unwrap();
         assert!(ended);
 
         // On the record, where `ldmux list` reads it.
         assert_eq!(
-            d.registry().get(&killed.id).unwrap().ended_reason.as_deref(),
+            d.registry()
+                .get(&killed.id)
+                .unwrap()
+                .ended_reason
+                .as_deref(),
             Some("killed from the test")
         );
         assert_eq!(
-            d.registry().get(&closed.id).unwrap().ended_reason.as_deref(),
+            d.registry()
+                .get(&closed.id)
+                .unwrap()
+                .ended_reason
+                .as_deref(),
             Some("closed from the test")
         );
         // And on the advertised session, which is what the CLI prints.
@@ -2495,7 +3064,10 @@ mod tests {
         assert_eq!(info.status, "dead");
         assert_eq!(info.ended_reason.as_deref(), Some("killed from the test"));
         // A running session has no reason to give.
-        let live = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let live = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let listed = d.describe_sessions().await;
         let info = listed.iter().find(|s| s.id == live.id).unwrap();
         assert_eq!(info.ended_reason, None);
@@ -2514,13 +3086,21 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let exited = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let exited = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         // The pane stays, marked dead: the shell exited.
         fk.kill(&exited.keeper_name);
         // A record whose keeper never had it: the keeper came back without it.
@@ -2534,9 +3114,17 @@ mod tests {
 
         let r = d.reconcile().await.unwrap();
         assert!(r.dead.contains(&exited.id), "both are dead: {:?}", r.dead);
-        assert!(r.dead.contains(&"ghost1".to_string()), "both are dead: {:?}", r.dead);
+        assert!(
+            r.dead.contains(&"ghost1".to_string()),
+            "both are dead: {:?}",
+            r.dead
+        );
         assert_eq!(
-            d.registry().get(&exited.id).unwrap().ended_reason.as_deref(),
+            d.registry()
+                .get(&exited.id)
+                .unwrap()
+                .ended_reason
+                .as_deref(),
             Some("its shell exited")
         );
         assert_eq!(
@@ -2647,6 +3235,173 @@ mod tests {
         );
     }
 
+    fn running_record(id: &str) -> SessionRecord {
+        let now = now_ms();
+        SessionRecord {
+            id: id.into(),
+            keeper_name: format!("ldmux-{id}"),
+            kind: "shell".into(),
+            cwd: "/".into(),
+            title: "shell".into(),
+            created_at: now,
+            updated_at: now,
+            created_by: "adopt".into(),
+            status: "running".into(),
+            exit_code: None,
+            exited_at: None,
+            live_workspace: None,
+            live_pid: None,
+            ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
+        }
+    }
+
+    async fn spawn_fake(sock: &std::path::Path, name: &str) {
+        ldmux_protocol::keeper_call::keeper_call(
+            sock.to_str().unwrap(),
+            &KeeperMessage::Spawn(Spawn {
+                session_id: name.into(),
+                cols: 80,
+                rows: 24,
+                cwd: None,
+                command: None,
+                env: None,
+            }),
+            ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn keeper_has(sock: &std::path::Path, name: &str) -> bool {
+        ldmux_protocol::keeper_call::keeper_call(
+            sock.to_str().unwrap(),
+            &KeeperMessage::Read(km::Read {
+                session_id: name.into(),
+            }),
+            ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .is_ok()
+    }
+
+    /// How a shell ended is recorded (status or signal, and the kind), and its pane
+    /// stays in the keeper for the keep window so the last screen can be read.
+    #[tokio::test]
+    async fn an_ended_shell_records_how_it_ended_and_its_pane_outlives_the_ending() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk2 = fk.clone();
+        let ks = keeper_sock.clone();
+        tokio::spawn(async move { FakeKeeper::serve(&fk2, ks.as_path()).await.unwrap() });
+        wait_socket(&keeper_sock).await;
+        let mut d =
+            LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent")).with_dead_keep_ms(400);
+        for id in ["a", "b", "c"] {
+            if id != "c" {
+                spawn_fake(&keeper_sock, &format!("ldmux-{id}")).await;
+            }
+            d.registry().upsert(running_record(id));
+        }
+        fk.set_snapshot("ldmux-a", "the last screen");
+        fk.exit("ldmux-a", Some(3), None);
+        fk.exit("ldmux-b", None, Some(9));
+
+        let r = d.reconcile().await.unwrap();
+        assert_eq!(r.dead.len(), 3, "{r:?}");
+        let (a, b, c) = (
+            d.registry().get("a").unwrap().clone(),
+            d.registry().get("b").unwrap().clone(),
+            d.registry().get("c").unwrap().clone(),
+        );
+        assert_eq!(
+            (a.exit_code, a.exit_signal, a.ended_kind.as_deref()),
+            (Some(3), None, Some("exited"))
+        );
+        assert_eq!(
+            (b.exit_code, b.exit_signal, b.ended_kind.as_deref()),
+            (None, Some(9), Some("exited"))
+        );
+        assert_eq!(
+            (c.exit_code, c.ended_kind.as_deref()),
+            (None, Some("keeper_lost"))
+        );
+        assert_eq!(
+            c.ended_reason.as_deref(),
+            Some("the keeper no longer has it")
+        );
+
+        // The pane is still there, and its last screen is readable.
+        assert!(keeper_has(&keeper_sock, "ldmux-a").await);
+        let screen = d
+            .final_screen("ldmux-a")
+            .await
+            .expect("the final screen is kept");
+        assert_eq!(screen.text, "the last screen");
+        // Past the keep window it is released.
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        d.reconcile().await.unwrap();
+        assert!(
+            !keeper_has(&keeper_sock, "ldmux-a").await,
+            "released after the keep window"
+        );
+        assert!(d.final_screen("ldmux-a").await.is_none());
+    }
+
+    /// Claims survive a daemon restart: held for their device for the restore
+    /// grace, freed by the ordinary sweep after it, and a stopped daemon does not
+    /// erase them on the way out.
+    #[tokio::test]
+    async fn claims_survive_a_restart_and_are_held_for_the_restore_grace() {
+        let dir = scratch();
+        let device = ldmux_protocol::rpc::DeviceInfo {
+            id: "phone".into(),
+            name: "phone".into(),
+            kind: "phone".into(),
+        };
+        let mut d1 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        d1.registry().upsert(running_record("s1"));
+        d1.claim("s1", &device, false);
+        assert!(dir.join("claims.json").exists());
+        let mode = std::fs::metadata(dir.join("claims.json")).unwrap();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode.permissions()) & 0o777,
+            0o600
+        );
+        d1.stop(); // a stopping daemon must not wipe the file
+        drop(d1);
+
+        let mut d2 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        d2.registry().upsert(running_record("s1"));
+        d2.registry().upsert(running_record("s2"));
+        d2.load_claims();
+        assert!(d2.holds("s1", "phone"), "the claim came back");
+        let nobody = std::collections::HashSet::new();
+        // Unbacked for far longer than the ordinary grace, but inside the restore grace.
+        let t = d2.mono_ms();
+        d2.release_unbacked_claims(&nobody, t + CLAIM_GRACE_MS + 1);
+        assert!(
+            d2.release_unbacked_claims(&nobody, t + 2 * CLAIM_GRACE_MS + 2)
+                .is_empty()
+        );
+        assert!(d2.holds("s1", "phone"), "held for the device to come back");
+        // After the restore grace the sweep frees it.
+        d2.release_unbacked_claims(&nobody, t + RESTORE_GRACE_MS + 1);
+        assert_eq!(
+            d2.release_unbacked_claims(&nobody, t + RESTORE_GRACE_MS + 1 + CLAIM_GRACE_MS),
+            vec!["s1".to_string()]
+        );
+        assert!(!d2.holds("s1", "phone"));
+
+        // A freed claim stays freed: the file was rewritten when d2 let it go.
+        let mut d3 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        d3.registry().upsert(running_record("s1"));
+        d3.load_claims();
+        assert!(!d3.holds("s1", "phone"), "a freed claim is not resurrected");
+    }
+
     /// `forget_session`: a dead session can be forgotten (removed from the
     /// registry); a running session cannot.
     #[tokio::test]
@@ -2657,13 +3412,21 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let id = record.id.clone();
         // A running session cannot be forgotten.
         let err = d.forget_session(&id).await.unwrap_err();
@@ -2692,12 +3455,17 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         // The create is itself news: a client must hear about a new shell.
         assert!(d.maintain().await.unwrap(), "creating a shell is news");
         assert!(!d.maintain().await.unwrap(), "an idle tick is not news");
@@ -2725,14 +3493,25 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let a = d.create_session("shell", &cwd, None, "local").await.unwrap();
-        let b = d.create_session("shell", &cwd, None, "local").await.unwrap();
-        let c = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let a = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
+        let b = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
+        let c = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         // Killed in an order that makes the *death* times the reverse of the
         // creation times, so an `updated_at` order would lead with the dead.
         // The sleeps are load-bearing: the death time and the activity fallback
@@ -2743,7 +3522,11 @@ mod tests {
         d.kill_session(&c.id, "killed").await.unwrap();
         let described = d.describe_sessions().await;
         let statuses: Vec<&str> = described.iter().map(|s| s.status.as_str()).collect();
-        assert_eq!(statuses, vec!["running", "dead", "dead"], "running leads: {statuses:?}");
+        assert_eq!(
+            statuses,
+            vec!["running", "dead", "dead"],
+            "running leads: {statuses:?}"
+        );
         assert_eq!(described[0].id, b.id, "the only running shell is first");
         assert_eq!(described[1].id, c.id, "of the dead, the most recent leads");
         assert_eq!(described[2].id, a.id);
@@ -2763,12 +3546,17 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let before = d
             .describe_sessions()
             .await
@@ -2791,8 +3579,14 @@ mod tests {
             .unwrap()
             .last_activity_at
             .unwrap();
-        assert!(after > before, "activity must advance on pane output: {before} -> {after}");
-        assert!(after > rec.created_at, "and it is not simply the creation time");
+        assert!(
+            after > before,
+            "activity must advance on pane output: {before} -> {after}"
+        );
+        assert!(
+            after > rec.created_at,
+            "and it is not simply the creation time"
+        );
     }
 
     /// Ending a shell drops its stream, so the client watching it is told.
@@ -2809,14 +3603,22 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         d.stream_for(&rec.keeper_name);
-        assert!(d.get_stream(&rec.keeper_name).is_some(), "the stream exists to be dropped");
+        assert!(
+            d.get_stream(&rec.keeper_name).is_some(),
+            "the stream exists to be dropped"
+        );
         d.kill_session(&rec.id, "killed").await.unwrap();
         assert!(
             d.get_stream(&rec.keeper_name).is_none(),
@@ -2838,12 +3640,17 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         d.stream_for(&rec.keeper_name);
         // The shell exits: the keeper marks the pane dead (its authoritative
         // death signal is `waitpid`, which is what `kill` models here).
@@ -2866,7 +3673,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -2881,23 +3690,48 @@ mod tests {
         );
 
         // `new` creates a session.
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let r = d.handle("new", serde_json::json!({ "kind": "shell", "cwd": cwd })).await.unwrap();
-        let id: &str = r.get("session").and_then(|s| s.get("id")).and_then(|v| v.as_str()).unwrap_or("");
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let r = d
+            .handle("new", serde_json::json!({ "kind": "shell", "cwd": cwd }))
+            .await
+            .unwrap();
+        let id: &str = r
+            .get("session")
+            .and_then(|s| s.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(!id.is_empty());
 
         // `list` includes the new session.
         let r = d.handle("list", serde_json::json!({})).await.unwrap();
-        let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-        assert!(sessions.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)));
+        let sessions: Vec<serde_json::Value> = r
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            sessions
+                .iter()
+                .any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
+        );
 
         // `kill` kills the session.
-        let r = d.handle("kill", serde_json::json!({ "id": id })).await.unwrap();
+        let r = d
+            .handle("kill", serde_json::json!({ "id": id }))
+            .await
+            .unwrap();
         assert!(r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
 
         // `list` shows the session as dead.
         let r = d.handle("list", serde_json::json!({})).await.unwrap();
-        let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        let sessions: Vec<serde_json::Value> = r
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
         let status = sessions
             .iter()
             .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
@@ -2906,13 +3740,24 @@ mod tests {
         assert_eq!(status, "dead");
 
         // `forget` removes the dead session.
-        let r = d.handle("forget", serde_json::json!({ "id": id })).await.unwrap();
+        let r = d
+            .handle("forget", serde_json::json!({ "id": id }))
+            .await
+            .unwrap();
         assert!(r.get("removed").and_then(|v| v.as_bool()).unwrap_or(false));
 
         // `list` no longer includes the session.
         let r = d.handle("list", serde_json::json!({})).await.unwrap();
-        let sessions: Vec<serde_json::Value> = r.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
-        assert!(!sessions.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)));
+        let sessions: Vec<serde_json::Value> = r
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !sessions
+                .iter()
+                .any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
+        );
 
         drop(fk);
     }
@@ -2928,13 +3773,21 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let keeper_name = record.keeper_name.clone();
 
         // `stream_for` creates the stream.
@@ -2969,26 +3822,43 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let record = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let id = record.id.clone();
 
         // `send` writes input to the keeper.
-        let r = d.handle("send", serde_json::json!({ "id": id, "text": "hello" })).await.unwrap();
+        let r = d
+            .handle("send", serde_json::json!({ "id": id, "text": "hello" }))
+            .await
+            .unwrap();
         assert!(r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
 
         // `capture` returns the rendered screen (the fake keeper's snapshot_text
         // is empty until a test sets it, so we only assert the field exists).
-        let r = d.handle("capture", serde_json::json!({ "id": id })).await.unwrap();
+        let r = d
+            .handle("capture", serde_json::json!({ "id": id }))
+            .await
+            .unwrap();
         assert!(r.get("screen").is_some(), "the screen field should exist");
 
         // `snapshot` returns the rendered screen + state.
-        let r = d.handle("snapshot", serde_json::json!({ "id": id })).await.unwrap();
+        let r = d
+            .handle("snapshot", serde_json::json!({ "id": id }))
+            .await
+            .unwrap();
         assert!(r.get("cols").and_then(|v| v.as_u64()).is_some());
         assert!(r.get("rows").and_then(|v| v.as_u64()).is_some());
 
@@ -3005,7 +3875,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -3027,8 +3899,20 @@ mod tests {
         // The socket is gone.
         assert!(!sock.exists(), "socket should be removed after stop");
         // The lock is released (the file stays: unlinking a flocked file races).
+        // A sibling test's fork() can hold a copy of the descriptor until its exec
+        // closes it (O_CLOEXEC), so the flock may read as held for a few
+        // milliseconds under parallel load: poll rather than assert at once.
         let mut next = crate::daemon_lock::DaemonLock::new(&dir);
-        next.acquire().expect("the lock should be free after stop");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match next.acquire() {
+                Ok(_) => break,
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    panic!("the lock should be free after stop: {e:?}")
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
     }
 
     /// Stop is idempotent (the TS `stop is idempotent and safe to call twice`).
@@ -3040,7 +3924,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -3065,7 +3951,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -3104,7 +3992,9 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
 
@@ -3113,8 +4003,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         // Start a daemon that wants the same port.
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"))
-            .with_remote("127.0.0.1".to_string(), port, "test-token".to_string());
+        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent")).with_remote(
+            "127.0.0.1".to_string(),
+            port,
+            "test-token".to_string(),
+        );
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
@@ -3153,6 +4046,8 @@ mod tests {
             live_workspace: Some("1".into()),
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"liveWorkspace\":\"1\""), "{json}");
@@ -3183,6 +4078,8 @@ mod tests {
             live_workspace: Some("1".into()),
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         });
         let _ = d.rebuild_live_windows().await;
         assert!(d.registry().get("dead1").unwrap().live_workspace.is_none());
@@ -3215,14 +4112,19 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         // The window-close rule, without the real five seconds.
         d.live_window_grace_ms = 0;
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
 
         // A pid that is certainly alive: this test process.
         let me = std::process::id() as i32;
@@ -3277,14 +4179,22 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
         let res = d
-            .handle("deskWindow", serde_json::json!({ "id": rec.id, "spawn": false }))
+            .handle(
+                "deskWindow",
+                serde_json::json!({ "id": rec.id, "spawn": false }),
+            )
             .await
             .unwrap();
         assert_eq!(res["ok"], false, "{res}");
@@ -3305,28 +4215,55 @@ mod tests {
         let fk_serve = fk.clone();
         let fk_sock = keeper_sock.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
         });
         wait_socket(&keeper_sock).await;
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d.create_session("shell", &cwd, None, "local").await.unwrap();
+        let rec = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
 
         // What `deskWindow` records: a window on whatever workspace was focused.
         d.live_windows.insert(
             rec.id.clone(),
-            LiveWindow { workspace: String::new(), since: 0, pid: None },
+            LiveWindow {
+                workspace: String::new(),
+                since: 0,
+                pid: None,
+            },
         );
         d.set_live_window(&rec.id, Some(String::new()), None);
-        let info = d.describe_sessions().await.into_iter().find(|s| s.id == rec.id).unwrap();
-        assert_eq!(info.live_workspace.as_deref(), Some(""), "an unnamed workspace is a window");
+        let info = d
+            .describe_sessions()
+            .await
+            .into_iter()
+            .find(|s| s.id == rec.id)
+            .unwrap();
+        assert_eq!(
+            info.live_workspace.as_deref(),
+            Some(""),
+            "an unnamed workspace is a window"
+        );
 
         // The moment after a restart, before the live map is rebuilt, the record
         // alone must still answer: the window is not gone just because the map
         // has not been filled yet.
         d.live_windows.clear();
-        let info = d.describe_sessions().await.into_iter().find(|s| s.id == rec.id).unwrap();
-        assert_eq!(info.live_workspace.as_deref(), Some(""), "the record is the fallback");
+        let info = d
+            .describe_sessions()
+            .await
+            .into_iter()
+            .find(|s| s.id == rec.id)
+            .unwrap();
+        assert_eq!(
+            info.live_workspace.as_deref(),
+            Some(""),
+            "the record is the fallback"
+        );
     }
 
     /// `LDMUX_SOCK` is honoured: the daemon binds where the shared resolver says,
@@ -3349,10 +4286,16 @@ mod tests {
         let root = scratch();
         let fresh = root.join("a/b");
         ensure_private_state_dir(&fresh).unwrap();
-        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).unwrap();
         ensure_private_state_dir(&fresh).unwrap();
-        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let file = root.join("file");
         std::fs::write(&file, "x").unwrap();
         assert!(ensure_private_state_dir(&file).is_err());

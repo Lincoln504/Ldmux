@@ -10,9 +10,8 @@ use futures_util::{SinkExt, StreamExt};
 use ldmux_daemon::daemon::LdmuxDaemon;
 use tokio_tungstenite::tungstenite::Message;
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn keeper_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper")
@@ -20,13 +19,18 @@ fn keeper_bin() -> PathBuf {
 
 async fn connect(port: u16, token: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut req = format!("ws://127.0.0.1:{port}/ws").into_client_request().unwrap();
-    req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let mut req = format!("ws://127.0.0.1:{port}/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     tokio_tungstenite::connect_async(req).await.unwrap().0
 }
 
 async fn send(ws: &mut Ws, msg: serde_json::Value) {
-    ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into())).await.unwrap();
+    ws.send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+        .await
+        .unwrap();
 }
 
 /// The first of `types` the socket produces within a second, if any.
@@ -53,19 +57,38 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let mut dir = std::env::temp_dir();
-    dir.push(format!("ldmux-races-{}-{}", std::process::id(), rand::random::<u64>()));
+    dir.push(format!(
+        "ldmux-races-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let reaper = common::Reaper::new(&dir, &dir.join("keeper.sock"));
     let port: u16 = 51000 + (rand::random::<u16>() % 4000);
     let token = "races-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        port,
+        token.to_string(),
+    );
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     arc.lock().await.start(&arc).await.unwrap();
     let cwd = dir.to_string_lossy().into_owned();
-    let id = arc.lock().await.create_session("shell", &cwd, None, "local").await.unwrap().id;
+    let id = arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, None, "local")
+        .await
+        .unwrap()
+        .id;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    Fixture { arc, port, token, id, _reaper: reaper }
+    Fixture {
+        arc,
+        port,
+        token,
+        id,
+        _reaper: reaper,
+    }
 }
 
 fn hello(id: &str, kind: &str) -> serde_json::Value {
@@ -84,13 +107,28 @@ async fn simultaneous_attaches_have_exactly_one_winner() {
     let att = |id: &str| serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24});
     let (ra, rb) = tokio::join!(send(&mut a, att(&f.id)), send(&mut b, att(&f.id)));
     let _ = (ra, rb);
-    let (ra, rb) = tokio::join!(first_of(&mut a, &["caps", "owned"]), first_of(&mut b, &["caps", "owned"]));
+    let (ra, rb) = tokio::join!(
+        first_of(&mut a, &["caps", "owned"]),
+        first_of(&mut b, &["caps", "owned"])
+    );
     let (ra, rb) = (ra.expect("A answered"), rb.expect("B answered"));
     let winners = [&ra, &rb].iter().filter(|v| v["type"] == "caps").count();
     assert_eq!(winners, 1, "exactly one winner: A={ra} B={rb}");
-    let holder = f.arc.lock().await.ownership().owner(&f.id).unwrap().device.id.clone();
+    let holder = f
+        .arc
+        .lock()
+        .await
+        .ownership()
+        .owner(&f.id)
+        .unwrap()
+        .device
+        .id
+        .clone();
     let loser = if ra["type"] == "owned" { &ra } else { &rb };
-    assert_eq!(loser["owner"]["id"], holder, "the loser is told the real holder");
+    assert_eq!(
+        loser["owner"]["id"], holder,
+        "the loser is told the real holder"
+    );
 }
 
 /// A socket that says `hello` again under another id is no longer the device it
@@ -101,9 +139,23 @@ async fn a_second_hello_frees_the_old_identitys_claims() {
     let f = fixture().await;
     let mut a = connect(f.port, f.token).await;
     send(&mut a, hello("old", "phone")).await;
-    send(&mut a, serde_json::json!({"type":"attach","sessionId":f.id,"cols":80,"rows":24})).await;
+    send(
+        &mut a,
+        serde_json::json!({"type":"attach","sessionId":f.id,"cols":80,"rows":24}),
+    )
+    .await;
     assert!(first_of(&mut a, &["caps"]).await.is_some());
-    assert_eq!(f.arc.lock().await.ownership().owner(&f.id).unwrap().device.id, "old");
+    assert_eq!(
+        f.arc
+            .lock()
+            .await
+            .ownership()
+            .owner(&f.id)
+            .unwrap()
+            .device
+            .id,
+        "old"
+    );
 
     send(&mut a, hello("new", "phone")).await;
     // The claim is released as part of handling the hello.
@@ -115,12 +167,21 @@ async fn a_second_hello_frees_the_old_identitys_claims() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(freed, "the old identity's claim must not outlive the identity");
+    assert!(
+        freed,
+        "the old identity's claim must not outlive the identity"
+    );
 
     // So someone else can have the shell without a takeover.
     let mut c = connect(f.port, f.token).await;
     send(&mut c, hello("other", "phone")).await;
-    send(&mut c, serde_json::json!({"type":"attach","sessionId":f.id,"cols":80,"rows":24})).await;
-    let r = first_of(&mut c, &["caps", "owned"]).await.expect("answered");
+    send(
+        &mut c,
+        serde_json::json!({"type":"attach","sessionId":f.id,"cols":80,"rows":24}),
+    )
+    .await;
+    let r = first_of(&mut c, &["caps", "owned"])
+        .await
+        .expect("answered");
     assert_eq!(r["type"], "caps", "got {r}");
 }

@@ -40,7 +40,13 @@ pub struct ControlSocketServer {
 /// `tokio::sync::Mutex` guard is `Send` (the daemon is `Send`), so the guard
 /// can be held across an `.await`.
 pub type RpcHandler = Box<
-    dyn Fn(&str, &Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> + Send + Sync,
+    dyn Fn(
+            &str,
+            &Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
+        + Send
+        + Sync,
 >;
 
 impl ControlSocketServer {
@@ -54,7 +60,9 @@ impl ControlSocketServer {
     /// A server for the socket at exactly `path` (what `LDMUX_SOCK` names), not
     /// necessarily under the state dir.
     pub fn at(path: impl Into<std::path::PathBuf>) -> Self {
-        Self { socket_path: path.into() }
+        Self {
+            socket_path: path.into(),
+        }
     }
 
     /// The socket path (for tests).
@@ -86,10 +94,7 @@ impl ControlSocketServer {
     /// Reads bytes until a newline (or EOF); an empty line is a no-op (a client
     /// that opened and closed without sending). The response is a JSON line
     /// (the `id` echoed back, an `ok`/`result`, or an `error`).
-    pub async fn serve_one_with(
-        stream: UnixStream,
-        handler: &RpcHandler,
-    ) -> Result<(), String> {
+    pub async fn serve_one_with(stream: UnixStream, handler: &RpcHandler) -> Result<(), String> {
         let mut stream = stream;
         let mut buf: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
@@ -119,8 +124,7 @@ impl ControlSocketServer {
         if buf.is_empty() {
             return Ok(());
         }
-        let req: Value =
-            serde_json::from_slice(&buf).map_err(|e| format!("parse request: {e}"))?;
+        let req: Value = serde_json::from_slice(&buf).map_err(|e| format!("parse request: {e}"))?;
         let method = req
             .get("method")
             .and_then(|m| m.as_str())
@@ -173,7 +177,9 @@ pub async fn serve_loop(
             .await
             .map_err(|e| format!("accept control connection: {e}"))?;
         let Ok(permit) = slots.clone().try_acquire_owned() else {
-            eprintln!("ldmuxd: control socket: {MAX_CONCURRENT_CONNECTIONS} connections open; dropping one");
+            eprintln!(
+                "ldmuxd: control socket: {MAX_CONCURRENT_CONNECTIONS} connections open; dropping one"
+            );
             continue;
         };
         let handler = handler.clone();
@@ -218,14 +224,12 @@ mod tests {
 
         // Spawn a task to serve the connection.
         let accept_task = tokio::spawn(async move {
-        let (stream, _addr) = listener.accept().await.unwrap();
+            let (stream, _addr) = listener.accept().await.unwrap();
             ControlSocketServer::serve_one_with(stream, &stub()).await
         });
 
         // A client connects, sends a `ping`, and reads the response.
-        let client = tokio::net::UnixStream::connect(&socket_path)
-            .await
-            .unwrap();
+        let client = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
         let (mut rd, mut wr) = tokio::io::split(client);
 
         // Send a `ping`.
@@ -265,13 +269,11 @@ mod tests {
         let socket_path = server.socket_path().to_path_buf();
 
         let accept_task = tokio::spawn(async move {
-        let (stream, _addr) = listener.accept().await.unwrap();
+            let (stream, _addr) = listener.accept().await.unwrap();
             ControlSocketServer::serve_one_with(stream, &stub()).await
         });
 
-        let client = tokio::net::UnixStream::connect(&socket_path)
-            .await
-            .unwrap();
+        let client = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
         let (mut rd, mut wr) = tokio::io::split(client);
 
         let req = serde_json::json!({"id": 2, "method": "nope"});
@@ -340,7 +342,10 @@ mod tests {
         // The silent one connects first and holds its connection open.
         let _silent = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
         let mut client = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
-        client.write_all(b"{\"id\":7,\"method\":\"ping\"}\n").await.unwrap();
+        client
+            .write_all(b"{\"id\":7,\"method\":\"ping\"}\n")
+            .await
+            .unwrap();
         let mut buf = Vec::new();
         let read = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             let mut byte = [0u8; 1];
@@ -353,7 +358,10 @@ mod tests {
             }
         })
         .await;
-        assert!(read.is_ok(), "the second client was not answered behind a silent one");
+        assert!(
+            read.is_ok(),
+            "the second client was not answered behind a silent one"
+        );
         let resp: Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(resp["result"], "pong");
         task.abort();

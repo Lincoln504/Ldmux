@@ -16,8 +16,8 @@ use std::sync::Mutex;
 
 /// Shells that cannot use a mouse click.
 const SHELLS: &[&str] = &[
-    "bash", "sh", "dash", "ash", "zsh", "fish", "ksh", "ksh93", "mksh",
-    "tcsh", "csh", "yash", "nu", "nushell", "elvish", "xonsh", "pwsh",
+    "bash", "sh", "dash", "ash", "zsh", "fish", "ksh", "ksh93", "mksh", "tcsh", "csh", "yash",
+    "nu", "nushell", "elvish", "xonsh", "pwsh",
 ];
 
 /// Is this pane's foreground command an interactive shell?
@@ -98,23 +98,75 @@ struct Spec {
 }
 
 const SPECS: &[Spec] = &[
-    Spec { name: "alacritty", args: &["--class", "{class}", "-e", "{cmd}"], class: true, foreground: true },
-    Spec { name: "kitty", args: &["--class", "{class}", "{cmd}"], class: true, foreground: true },
-    Spec { name: "foot", args: &["--app-id", "{class}", "{cmd}"], class: true, foreground: true },
     Spec {
-        name: "wezterm",
-        args: &["start", "--always-new-process", "--class", "{class}", "--", "{cmd}"],
+        name: "alacritty",
+        args: &["--class", "{class}", "-e", "{cmd}"],
         class: true,
         foreground: true,
     },
-    Spec { name: "gnome-terminal", args: &["--class={class}", "--wait", "--", "{cmd}"], class: true, foreground: true },
-    Spec { name: "konsole", args: &["--nofork", "-e", "{cmd}"], class: false, foreground: true },
-    Spec { name: "xfce4-terminal", args: &["--disable-server", "-x", "{cmd}"], class: false, foreground: true },
-    Spec { name: "xterm", args: &["-class", "{class}", "-e", "{cmd}"], class: true, foreground: true },
+    Spec {
+        name: "kitty",
+        args: &["--class", "{class}", "{cmd}"],
+        class: true,
+        foreground: true,
+    },
+    Spec {
+        name: "foot",
+        args: &["--app-id", "{class}", "{cmd}"],
+        class: true,
+        foreground: true,
+    },
+    Spec {
+        name: "wezterm",
+        args: &[
+            "start",
+            "--always-new-process",
+            "--class",
+            "{class}",
+            "--",
+            "{cmd}",
+        ],
+        class: true,
+        foreground: true,
+    },
+    Spec {
+        name: "gnome-terminal",
+        args: &["--class={class}", "--wait", "--", "{cmd}"],
+        class: true,
+        foreground: true,
+    },
+    Spec {
+        name: "konsole",
+        args: &["--nofork", "-e", "{cmd}"],
+        class: false,
+        foreground: true,
+    },
+    Spec {
+        name: "xfce4-terminal",
+        args: &["--disable-server", "-x", "{cmd}"],
+        class: false,
+        foreground: true,
+    },
+    Spec {
+        name: "xterm",
+        args: &["-class", "{class}", "-e", "{cmd}"],
+        class: true,
+        foreground: true,
+    },
     // Wrappers: whatever they run is not ours to know, so they are neither
     // class-addressable nor trusted to stay in the foreground.
-    Spec { name: "x-terminal-emulator", args: &["-e", "{cmd}"], class: false, foreground: false },
-    Spec { name: "xdg-terminal-exec", args: &["{cmd}"], class: false, foreground: false },
+    Spec {
+        name: "x-terminal-emulator",
+        args: &["-e", "{cmd}"],
+        class: false,
+        foreground: false,
+    },
+    Spec {
+        name: "xdg-terminal-exec",
+        args: &["{cmd}"],
+        class: false,
+        foreground: false,
+    },
 ];
 
 /// What an emulator this table does not know is run as: `-e` is the one spelling
@@ -124,8 +176,16 @@ const GENERIC_ARGS: &[&str] = &["-e", "{cmd}"];
 /// The order autodetection tries, after `$LDMUX_TERMINAL` and `$TERMINAL`: the
 /// real emulators first, the wrappers last (they are the least predictable).
 const AUTODETECT: &[&str] = &[
-    "alacritty", "kitty", "foot", "wezterm", "gnome-terminal", "konsole",
-    "xfce4-terminal", "xterm", "x-terminal-emulator", "xdg-terminal-exec",
+    "alacritty",
+    "kitty",
+    "foot",
+    "wezterm",
+    "gnome-terminal",
+    "konsole",
+    "xfce4-terminal",
+    "xterm",
+    "x-terminal-emulator",
+    "xdg-terminal-exec",
 ];
 
 fn spec_for(program: &str) -> Option<&'static Spec> {
@@ -135,7 +195,9 @@ fn spec_for(program: &str) -> Option<&'static Spec> {
 
 fn executable(p: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// The absolute path of `name`: itself when it is already an absolute
@@ -246,7 +308,9 @@ fn parse_custom(raw: &str, path: &str) -> Option<Vec<String>> {
 /// emulators on `PATH`.
 pub fn terminal() -> String {
     resolve_terminal(
-        custom_template().as_deref().and_then(|c| c.first().map(|s| s.as_str())),
+        custom_template()
+            .as_deref()
+            .and_then(|c| c.first().map(|s| s.as_str())),
         std::env::var("LDMUX_TERMINAL").ok().as_deref(),
         std::env::var("TERMINAL").ok().as_deref(),
         &std::env::var("PATH").unwrap_or_default(),
@@ -255,7 +319,12 @@ pub fn terminal() -> String {
 
 /// The rule behind [terminal], pure so it is testable without mutating the
 /// process environment (which tests share).
-fn resolve_terminal(custom: Option<&str>, ldmux: Option<&str>, term: Option<&str>, path: &str) -> String {
+fn resolve_terminal(
+    custom: Option<&str>,
+    ldmux: Option<&str>,
+    term: Option<&str>,
+    path: &str,
+) -> String {
     let clean = |v: Option<&str>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // Asked for by name: honoured even when it cannot be found, so the refusal
     // names what was asked for rather than silently using something else.
@@ -297,7 +366,9 @@ pub fn terminal_problem(terminal: &str) -> Option<String> {
         };
     }
     if t.contains('/') {
-        return Some(format!("the terminal must be a name on PATH or an absolute path: {t}"));
+        return Some(format!(
+            "the terminal must be a name on PATH or an absolute path: {t}"
+        ));
     }
     if which(t).is_some() {
         None
@@ -316,7 +387,11 @@ fn expand(template: &[String], class: &str, attach: &[String]) -> Vec<String> {
         if w == "{cmd}" {
             out.extend(attach.iter().cloned());
         } else if w.contains("{cmd}") {
-            let joined = attach.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+            let joined = attach
+                .iter()
+                .map(|a| shell_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
             out.push(w.replace("{cmd}", &joined).replace("{class}", class));
         } else {
             out.push(w.replace("{class}", class));
@@ -327,7 +402,12 @@ fn expand(template: &[String], class: &str, attach: &[String]) -> Vec<String> {
 
 /// The whole argv for one window: the program, then its template expanded. No
 /// shell is involved: each element reaches `execve` as it is written here.
-fn build_argv(program: &str, class: &str, attach: &[String], custom: Option<&[String]>) -> Vec<String> {
+fn build_argv(
+    program: &str,
+    class: &str,
+    attach: &[String],
+    custom: Option<&[String]>,
+) -> Vec<String> {
     let template: Vec<String> = match custom {
         Some(c) if c.first().map(|s| s.as_str()) == Some(program) => c[1..].to_vec(),
         _ => spec_for(program)
@@ -367,7 +447,12 @@ fn terminal_is_foreground(program: &str) -> bool {
 /// the launching environment's `PATH`.
 pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
     let attach = vec![attach_bin(), "attach".to_string(), session_id.to_string()];
-    build_argv(terminal, &live_window_class(session_id), &attach, custom_template().as_deref())
+    build_argv(
+        terminal,
+        &live_window_class(session_id),
+        &attach,
+        custom_template().as_deref(),
+    )
 }
 
 /// The mirror's argv: the same terminal and the same attach client, with no
@@ -381,7 +466,12 @@ pub fn mirror_argv(session_id: &str, terminal: &str, read_only: bool) -> Vec<Str
     if read_only {
         attach.push("--readonly".to_string());
     }
-    build_argv(terminal, &mirror_window_class(session_id), &attach, custom_template().as_deref())
+    build_argv(
+        terminal,
+        &mirror_window_class(session_id),
+        &attach,
+        custom_template().as_deref(),
+    )
 }
 
 /// The absolute path to the attach client (`ldmuxd`).
@@ -398,20 +488,23 @@ pub fn mirror_argv(session_id: &str, terminal: &str, read_only: bool) -> Vec<Str
 pub fn attach_bin() -> String {
     if let Ok(exe) = std::env::current_exe() {
         if exe.file_name().and_then(|n| n.to_str()) == Some("ldmuxd")
-            && let Some(s) = exe.to_str() {
-                return s.to_string();
-            }
+            && let Some(s) = exe.to_str()
+        {
+            return s.to_string();
+        }
         if let Some(parent) = exe.parent() {
             let candidate = parent.join("ldmuxd");
             if candidate.exists()
-                && let Some(s) = candidate.to_str() {
-                    return s.to_string();
-                }
-        }
-        if let Some(s) = exe.to_str()
-            && s.starts_with('/') {
+                && let Some(s) = candidate.to_str()
+            {
                 return s.to_string();
             }
+        }
+        if let Some(s) = exe.to_str()
+            && s.starts_with('/')
+        {
+            return s.to_string();
+        }
     }
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => format!("{h}/.local/bin/ldmuxd"),
@@ -431,20 +524,21 @@ pub fn find_window_id_by_class(tree_json: &str, class_name: &str) -> Option<Stri
 fn visit(node: &serde_json::Value, class_name: &str) -> Option<String> {
     let n = node.as_object()?;
     if let Some(w) = n.get("window").and_then(|w| w.as_u64())
-        && w != 0 {
-            let cls = n
-                .get("app_id")
-                .and_then(|a| a.as_str())
-                .or_else(|| {
-                    n.get("window_properties")
-                        .and_then(|p| p.get("class"))
-                        .and_then(|c| c.as_str())
-                })
-                .unwrap_or("");
-            if cls == class_name {
-                return Some(format!("0x{:x}", w));
-            }
+        && w != 0
+    {
+        let cls = n
+            .get("app_id")
+            .and_then(|a| a.as_str())
+            .or_else(|| {
+                n.get("window_properties")
+                    .and_then(|p| p.get("class"))
+                    .and_then(|c| c.as_str())
+            })
+            .unwrap_or("");
+        if cls == class_name {
+            return Some(format!("0x{:x}", w));
         }
+    }
     let mut children = Vec::new();
     if let Some(nodes) = n.get("nodes").and_then(|n| n.as_array()) {
         children.extend(nodes.iter());
@@ -465,7 +559,10 @@ fn visit(node: &serde_json::Value, class_name: &str) -> Option<String> {
 /// spawns with argv and no shell at all.
 pub fn shell_quote(a: &str) -> String {
     let safe = !a.is_empty()
-        && a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | '.' | '/' | '-'));
+        && a.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | '.' | '/' | '-')
+        });
     if safe {
         return a.to_string();
     }
@@ -490,13 +587,24 @@ type Env = Vec<(String, String)>;
 /// started by the user manager before login has none of them; the user manager
 /// learns them from `systemctl --user import-environment`.
 const SESSION_VARS: &[&str] = &[
-    "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "SWAYSOCK", "I3SOCK",
-    "HYPRLAND_INSTANCE_SIGNATURE", "NIRI_SOCKET", "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "SWAYSOCK",
+    "I3SOCK",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "NIRI_SOCKET",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_TYPE",
 ];
 
 fn env_get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str()).filter(|v| !v.is_empty())
+    env.iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+        .filter(|v| !v.is_empty())
 }
 
 /// `own` plus, for each session variable it lacks, the value in the user
@@ -505,7 +613,9 @@ fn env_get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
 fn merge_session_env(own: &[(String, String)], manager: &str) -> Env {
     let mut out: Env = own.to_vec();
     for line in manager.lines() {
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if !SESSION_VARS.contains(&k) || v.starts_with("$'") || v.is_empty() {
             continue;
         }
@@ -526,12 +636,15 @@ pub(crate) async fn session_env() -> Env {
     if env_get(&own, "DISPLAY").is_some() || env_get(&own, "WAYLAND_DISPLAY").is_some() {
         return own;
     }
-    static CACHE: std::sync::OnceLock<Mutex<Option<(std::time::Instant, String)>>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Mutex<Option<(std::time::Instant, String)>>> =
+        std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let fresh = {
         let g = cache.lock().unwrap_or_else(|e| e.into_inner());
         match &*g {
-            Some((at, text)) if at.elapsed() < std::time::Duration::from_secs(10) => Some(text.clone()),
+            Some((at, text)) if at.elapsed() < std::time::Duration::from_secs(10) => {
+                Some(text.clone())
+            }
             _ => None,
         }
     };
@@ -539,12 +652,20 @@ pub(crate) async fn session_env() -> Env {
         Some(t) => t,
         None => {
             let r = crate::exec::run(
-                vec!["systemctl".into(), "--user".into(), "show-environment".into()],
-                crate::exec::ExecOpts { timeout_ms: Some(2000), env: None },
+                vec![
+                    "systemctl".into(),
+                    "--user".into(),
+                    "show-environment".into(),
+                ],
+                crate::exec::ExecOpts {
+                    timeout_ms: Some(2000),
+                    env: None,
+                },
             )
             .await;
             let t = if r.code == 0 { r.out } else { String::new() };
-            *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), t.clone()));
+            *cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((std::time::Instant::now(), t.clone()));
             t
         }
     };
@@ -578,7 +699,9 @@ pub fn detect_wm(env: &[(String, String)], have: &dyn Fn(&str) -> bool) -> Optio
         Some(Wm::Sway)
     } else if env_get(env, "HYPRLAND_INSTANCE_SIGNATURE").is_some() && have("hyprctl") {
         Some(Wm::Hyprland)
-    } else if (env_get(env, "I3SOCK").is_some() || env_get(env, "DISPLAY").is_some()) && have("i3-msg") {
+    } else if (env_get(env, "I3SOCK").is_some() || env_get(env, "DISPLAY").is_some())
+        && have("i3-msg")
+    {
         Some(Wm::I3)
     } else {
         None
@@ -660,7 +783,10 @@ pub fn parse_windows(wm: Wm, json: &str) -> Vec<Win> {
                 let class = c.get("class").and_then(|x| x.as_str()).unwrap_or("");
                 let addr = c.get("address").and_then(|x| x.as_str()).unwrap_or("");
                 if !class.is_empty() && !addr.is_empty() {
-                    out.push(Win { class: class.to_string(), handle: format!("address:{addr}") });
+                    out.push(Win {
+                        class: class.to_string(),
+                        handle: format!("address:{addr}"),
+                    });
                 }
             }
         }
@@ -676,7 +802,9 @@ fn collect_windows(wm: Wm, node: &serde_json::Value, out: &mut Vec<Win>) {
         .and_then(|a| a.as_str())
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            n.get("window_properties").and_then(|p| p.get("class")).and_then(|c| c.as_str())
+            n.get("window_properties")
+                .and_then(|p| p.get("class"))
+                .and_then(|c| c.as_str())
         })
         .unwrap_or("");
     if !class.is_empty() {
@@ -688,7 +816,10 @@ fn collect_windows(wm: Wm, node: &serde_json::Value, out: &mut Vec<Win>) {
             _ => None,
         };
         if let Some(handle) = handle {
-            out.push(Win { class: class.to_string(), handle });
+            out.push(Win {
+                class: class.to_string(),
+                handle,
+            });
         }
     }
     for key in ["nodes", "floating_nodes"] {
@@ -702,7 +833,10 @@ fn collect_windows(wm: Wm, node: &serde_json::Value, out: &mut Vec<Win>) {
 async fn wm_windows(env: &Env, wm: Wm) -> Option<Vec<Win>> {
     let r = crate::exec::run(
         list_argv(wm),
-        crate::exec::ExecOpts { timeout_ms: Some(3000), env: Some(env.clone()) },
+        crate::exec::ExecOpts {
+            timeout_ms: Some(3000),
+            env: Some(env.clone()),
+        },
     )
     .await;
     (r.code == 0).then(|| parse_windows(wm, &r.out))
@@ -735,7 +869,10 @@ fn tracked_state(class: &str) -> Option<&'static str> {
 }
 
 fn kill_tracked(class: &str) -> bool {
-    let removed = tracked().lock().unwrap_or_else(|e| e.into_inner()).remove(class);
+    let removed = tracked()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(class);
     match removed {
         Some((child, _)) => {
             if let Some(pid) = child.id() {
@@ -762,7 +899,10 @@ pub async fn close_live(session_id: &str) -> Result<bool, String> {
         for argv in kill_argvs(wm, &class) {
             let r = crate::exec::run(
                 argv,
-                crate::exec::ExecOpts { timeout_ms: Some(3000), env: Some(env.clone()) },
+                crate::exec::ExecOpts {
+                    timeout_ms: Some(3000),
+                    env: Some(env.clone()),
+                },
             )
             .await;
             asked |= r.code == 0;
@@ -792,7 +932,11 @@ async fn window_state_in(env: &Env, wm: Option<Wm>, class: &str) -> &'static str
         && terminal_has_class(&terminal())
         && let Some(list) = wm_windows(env, wm).await
     {
-        return if list.iter().any(|w| w.class == class) { "present" } else { "absent" };
+        return if list.iter().any(|w| w.class == class) {
+            "present"
+        } else {
+            "absent"
+        };
     }
     tracked_state(class).unwrap_or("unknown")
 }
@@ -806,7 +950,9 @@ async fn window_state_in(env: &Env, wm: Option<Wm>, class: &str) -> &'static str
 pub async fn live_window_ids() -> Vec<String> {
     let (env, wm) = context().await;
     let Some(wm) = wm else { return Vec::new() };
-    let Some(list) = wm_windows(&env, wm).await else { return Vec::new() };
+    let Some(list) = wm_windows(&env, wm).await else {
+        return Vec::new();
+    };
     list.iter()
         .filter_map(|w| w.class.strip_prefix("ldmux-live-"))
         .filter(|id| !id.is_empty())
@@ -878,7 +1024,9 @@ async fn open_window_in(
     if env_get(env, "DISPLAY").is_none() && env_get(env, "WAYLAND_DISPLAY").is_none() {
         return Err(NO_DISPLAY.to_string());
     }
-    let path = env_get(env, "PATH").map(|s| s.to_string()).unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+    let path = env_get(env, "PATH")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
     let mut argv = argv.to_vec();
     if let Some(abs) = which_in(&argv[0], &path) {
         argv[0] = abs;
@@ -893,7 +1041,9 @@ async fn open_window_in(
         .stderr(std::process::Stdio::null())
         .process_group(0)
         .kill_on_drop(false);
-    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", argv[0]))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("could not start {}: {e}", argv[0]))?;
     // A foreground emulator that is already gone has failed to open its window
     // (no such display, a bad flag): say so rather than report a window.
     let foreground = terminal_is_foreground(&argv[0]);
@@ -904,16 +1054,25 @@ async fn open_window_in(
                 return Err(format!(
                     "{} exited at once ({status}); it could not open a window on {}",
                     argv[0],
-                    env_get(env, "WAYLAND_DISPLAY").or(env_get(env, "DISPLAY")).unwrap_or("the display")
+                    env_get(env, "WAYLAND_DISPLAY")
+                        .or(env_get(env, "DISPLAY"))
+                        .unwrap_or("the display")
                 ));
             }
         }
     }
-    tracked().lock().unwrap_or_else(|e| e.into_inner()).insert(class.to_string(), (child, foreground));
+    tracked()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(class.to_string(), (child, foreground));
 
     let placed = match &target {
         Some(t) => place_with(env, wm, class, t, 5000).await,
-        None => (true, None, Some("left on the current workspace".to_string())),
+        None => (
+            true,
+            None,
+            Some("left on the current workspace".to_string()),
+        ),
     };
     Ok(LiveResult {
         ok: true,
@@ -962,7 +1121,10 @@ async fn place_with(
         return (
             false,
             None,
-            Some("opened, not placed: no window manager adapter (i3, sway, hyprland) is reachable".to_string()),
+            Some(
+                "opened, not placed: no window manager adapter (i3, sway, hyprland) is reachable"
+                    .to_string(),
+            ),
         );
     };
     if !terminal_has_class(&terminal()) {
@@ -981,14 +1143,21 @@ async fn place_with(
             if let Some(win) = list.iter().find(|w| w.class == class) {
                 let moved = crate::exec::run(
                     move_argv(wm, win, &target),
-                    crate::exec::ExecOpts { timeout_ms: Some(3000), env: Some(env.clone()) },
+                    crate::exec::ExecOpts {
+                        timeout_ms: Some(3000),
+                        env: Some(env.clone()),
+                    },
                 )
                 .await;
                 let id = Some(win.handle.clone());
                 return if moved.code == 0 {
                     (true, id, None)
                 } else {
-                    (false, id, Some("opened, not placed: the move failed".to_string()))
+                    (
+                        false,
+                        id,
+                        Some("opened, not placed: the move failed".to_string()),
+                    )
                 };
             }
         }
@@ -998,7 +1167,11 @@ async fn place_with(
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    let why = if answered { "the window did not appear" } else { "the window manager did not answer" };
+    let why = if answered {
+        "the window did not appear"
+    } else {
+        "the window manager did not answer"
+    };
     (false, None, Some(format!("opened, not placed: {why}")))
 }
 
@@ -1040,13 +1213,19 @@ mod tests {
         assert_eq!(live_window_class("abc\"def"), "ldmux-live-abcdef");
         // Longer than 40 chars is truncated.
         let long = "a".repeat(100);
-        assert_eq!(live_window_class(&long), format!("ldmux-live-{}", "a".repeat(40)));
+        assert_eq!(
+            live_window_class(&long),
+            format!("ldmux-live-{}", "a".repeat(40))
+        );
     }
 
     #[test]
     fn safe_workspace_valid() {
         assert_eq!(safe_workspace("1"), Some("1".to_string()));
-        assert_eq!(safe_workspace("workspace-1"), Some("workspace-1".to_string()));
+        assert_eq!(
+            safe_workspace("workspace-1"),
+            Some("workspace-1".to_string())
+        );
         assert_eq!(safe_workspace(" 1 "), Some("1".to_string()));
     }
 
@@ -1074,7 +1253,11 @@ mod tests {
             ]
         );
         // The binary must be a path i3's exec can resolve without a PATH.
-        assert!(args[4].starts_with('/'), "the attach binary must be absolute: {}", args[4]);
+        assert!(
+            args[4].starts_with('/'),
+            "the attach binary must be absolute: {}",
+            args[4]
+        );
     }
 
     /// The mirror is the same window machinery with no identity: same terminal,
@@ -1095,7 +1278,11 @@ mod tests {
                 "--readonly",
             ]
         );
-        assert!(args[4].starts_with('/'), "the attach binary must be absolute: {}", args[4]);
+        assert!(
+            args[4].starts_with('/'),
+            "the attach binary must be absolute: {}",
+            args[4]
+        );
         // `--rw` is the same window without the read-only promise.
         let rw = mirror_argv("abc123", "foot", false);
         assert_eq!(rw[0], "foot");
@@ -1110,7 +1297,10 @@ mod tests {
         assert!(terminal_problem("   ").is_some());
         assert!(terminal_problem("/nonexistent-terminal-xyz").is_some());
         assert!(terminal_problem("definitely-not-a-real-binary-xyz").is_some());
-        assert!(terminal_problem("bin/sh").is_some(), "a relative path is not a name on PATH");
+        assert!(
+            terminal_problem("bin/sh").is_some(),
+            "a relative path is not a name on PATH"
+        );
         assert!(terminal_problem("/bin/sh").is_none());
         // A bare name is looked for on PATH.
         assert!(terminal_problem("sh").is_none(), "PATH must be searched");
@@ -1144,7 +1334,10 @@ mod tests {
     fn find_window_id_by_class_finds_nested_and_floating() {
         let tree = r#"{"nodes": [{"nodes": [{"window": 999, "app_id": "ldmux-live-abc123"}]}, {"floating_nodes": [{"window": 777, "window_properties": {"class": "ldmux-live-abc123"}}]}]}"#;
         // The nested one is found first.
-        assert_eq!(find_window_id_by_class(tree, "ldmux-live-abc123").unwrap(), "0x3e7");
+        assert_eq!(
+            find_window_id_by_class(tree, "ldmux-live-abc123").unwrap(),
+            "0x3e7"
+        );
     }
 
     /// A terminal that cannot run is refused before the window manager is asked,
@@ -1166,14 +1359,19 @@ mod tests {
             .await
             .err()
             .expect("a terminal that is not there must be refused");
-        assert!(err.contains("no such terminal"), "the refusal names it: {err}");
+        assert!(
+            err.contains("no such terminal"),
+            "the refusal names it: {err}"
+        );
     }
 
     /// A program that can use a click is not mistaken for a shell (the TS
     /// `a program that can use a click is not mistaken for a shell`).
     #[test]
     fn a_non_shell_is_not_a_shell_foreground() {
-        for prog in ["top", "vim", "emacs", "htop", "less", "nano", "git", "make", "cargo"] {
+        for prog in [
+            "top", "vim", "emacs", "htop", "less", "nano", "git", "make", "cargo",
+        ] {
             assert!(!is_shell_foreground(prog), "{prog} should not be a shell");
         }
         // The login shell with a leading dash is a shell.
@@ -1185,7 +1383,10 @@ mod tests {
     }
 
     fn env(pairs: &[(&str, &str)]) -> Env {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn strs(v: &[&str]) -> Vec<String> {
@@ -1199,7 +1400,10 @@ mod tests {
     fn nothing_in_the_argv_can_be_split_or_injected() {
         let attach = strs(&["/home/u/a,b;c d/ldmuxd", "attach", "s1"]);
         let argv = build_argv("/usr/bin/alacritty", "ldmux-live-s1", &attach, None);
-        assert_eq!(argv[4], "/home/u/a,b;c d/ldmuxd", "one element, byte for byte: {argv:?}");
+        assert_eq!(
+            argv[4], "/home/u/a,b;c d/ldmuxd",
+            "one element, byte for byte: {argv:?}"
+        );
         let tmpl = strs(&["/bin/sh", "-c", "exec {cmd}"]);
         let argv = build_argv("/bin/sh", "c", &attach, Some(&tmpl));
         assert_eq!(argv[2], "exec '/home/u/a,b;c d/ldmuxd' attach s1");
@@ -1213,8 +1417,17 @@ mod tests {
     fn every_known_terminal_has_a_template_with_the_command() {
         let attach = strs(&["/x/ldmuxd", "attach", "s1"]);
         for spec in SPECS {
-            let argv = build_argv(&format!("/usr/bin/{}", spec.name), "ldmux-live-s1", &attach, None);
-            assert!(argv.ends_with(&attach), "{}: the attach command must come last: {argv:?}", spec.name);
+            let argv = build_argv(
+                &format!("/usr/bin/{}", spec.name),
+                "ldmux-live-s1",
+                &attach,
+                None,
+            );
+            assert!(
+                argv.ends_with(&attach),
+                "{}: the attach command must come last: {argv:?}",
+                spec.name
+            );
             assert_eq!(
                 argv.iter().any(|a| a.contains("ldmux-live-s1")),
                 spec.class,
@@ -1239,10 +1452,17 @@ mod tests {
         );
         assert!(split_words("a 'b").is_err());
         let t = parse_custom("/bin/sh --name {class}", "").unwrap();
-        assert_eq!(t, strs(&["/bin/sh", "--name", "{class}", "{cmd}"]), "{{cmd}} is appended when absent");
+        assert_eq!(
+            t,
+            strs(&["/bin/sh", "--name", "{class}", "{cmd}"]),
+            "{{cmd}} is appended when absent"
+        );
         let attach = strs(&["/x/ldmuxd", "attach", "s1"]);
         let argv = build_argv("/bin/sh", "K", &attach, Some(&t));
-        assert_eq!(argv, strs(&["/bin/sh", "--name", "K", "/x/ldmuxd", "attach", "s1"]));
+        assert_eq!(
+            argv,
+            strs(&["/bin/sh", "--name", "K", "/x/ldmuxd", "attach", "s1"])
+        );
     }
 
     /// `$LDMUX_TERMINAL_CMD` > `$LDMUX_TERMINAL` > `$TERMINAL` > the known names,
@@ -1250,7 +1470,11 @@ mod tests {
     /// `LDMUX_TERMINAL` that is missing is kept so the refusal names it.
     #[test]
     fn terminal_selection_order() {
-        let dir = std::env::temp_dir().join(format!("ldmux-term-sel-{}-{}", std::process::id(), rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!(
+            "ldmux-term-sel-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         use std::os::unix::fs::PermissionsExt;
         for n in ["xterm", "kitty", "mine"] {
@@ -1260,11 +1484,28 @@ mod tests {
         }
         let path = dir.to_string_lossy().into_owned();
         let at = |n: &str| dir.join(n).to_string_lossy().into_owned();
-        assert_eq!(resolve_terminal(None, None, None, &path), at("kitty"), "known order: kitty before xterm");
-        assert_eq!(resolve_terminal(None, None, Some("xterm -x"), &path), at("xterm"), "$TERMINAL, first word");
-        assert_eq!(resolve_terminal(None, Some("mine"), Some("xterm"), &path), at("mine"));
-        assert_eq!(resolve_terminal(Some("mine"), Some("xterm"), None, &path), at("mine"));
-        assert_eq!(resolve_terminal(None, None, Some("not-installed"), &path), at("kitty"));
+        assert_eq!(
+            resolve_terminal(None, None, None, &path),
+            at("kitty"),
+            "known order: kitty before xterm"
+        );
+        assert_eq!(
+            resolve_terminal(None, None, Some("xterm -x"), &path),
+            at("xterm"),
+            "$TERMINAL, first word"
+        );
+        assert_eq!(
+            resolve_terminal(None, Some("mine"), Some("xterm"), &path),
+            at("mine")
+        );
+        assert_eq!(
+            resolve_terminal(Some("mine"), Some("xterm"), None, &path),
+            at("mine")
+        );
+        assert_eq!(
+            resolve_terminal(None, None, Some("not-installed"), &path),
+            at("kitty")
+        );
         assert_eq!(resolve_terminal(None, Some("nope"), None, &path), "nope");
         assert_eq!(resolve_terminal(None, None, None, ""), "");
         assert!(terminal_problem("").unwrap().contains("LDMUX_TERMINAL_CMD"));
@@ -1276,23 +1517,52 @@ mod tests {
         let own = env(&[("PATH", "/bin"), ("DISPLAY", ":1")]);
         let manager = "DISPLAY=:0\nWAYLAND_DISPLAY=wayland-1\nSWAYSOCK=/run/s.sock\nHOME=/x\nXAUTHORITY=$'a\\nb'\n";
         let merged = merge_session_env(&own, manager);
-        assert_eq!(env_get(&merged, "DISPLAY"), Some(":1"), "the daemon's own value wins");
+        assert_eq!(
+            env_get(&merged, "DISPLAY"),
+            Some(":1"),
+            "the daemon's own value wins"
+        );
         assert_eq!(env_get(&merged, "WAYLAND_DISPLAY"), Some("wayland-1"));
         assert_eq!(env_get(&merged, "SWAYSOCK"), Some("/run/s.sock"));
-        assert_eq!(env_get(&merged, "HOME"), None, "only session variables are taken");
-        assert_eq!(env_get(&merged, "XAUTHORITY"), None, "a $'..' value is not guessed at");
+        assert_eq!(
+            env_get(&merged, "HOME"),
+            None,
+            "only session variables are taken"
+        );
+        assert_eq!(
+            env_get(&merged, "XAUTHORITY"),
+            None,
+            "a $'..' value is not guessed at"
+        );
     }
 
     #[test]
     fn the_adapter_follows_the_session() {
         let all = |_: &str| true;
         let none = |_: &str| false;
-        assert_eq!(detect_wm(&env(&[("SWAYSOCK", "/s"), ("DISPLAY", ":0")]), &all), Some(Wm::Sway));
-        assert_eq!(detect_wm(&env(&[("HYPRLAND_INSTANCE_SIGNATURE", "x")]), &all), Some(Wm::Hyprland));
+        assert_eq!(
+            detect_wm(&env(&[("SWAYSOCK", "/s"), ("DISPLAY", ":0")]), &all),
+            Some(Wm::Sway)
+        );
+        assert_eq!(
+            detect_wm(&env(&[("HYPRLAND_INSTANCE_SIGNATURE", "x")]), &all),
+            Some(Wm::Hyprland)
+        );
         assert_eq!(detect_wm(&env(&[("I3SOCK", "/i")]), &all), Some(Wm::I3));
         assert_eq!(detect_wm(&env(&[("DISPLAY", ":0")]), &all), Some(Wm::I3));
-        assert_eq!(detect_wm(&env(&[("DISPLAY", ":0")]), &none), None, "no tool, no adapter");
-        assert_eq!(detect_wm(&env(&[("WAYLAND_DISPLAY", "w"), ("NIRI_SOCKET", "/n")]), &all), None, "niri has no adapter");
+        assert_eq!(
+            detect_wm(&env(&[("DISPLAY", ":0")]), &none),
+            None,
+            "no tool, no adapter"
+        );
+        assert_eq!(
+            detect_wm(
+                &env(&[("WAYLAND_DISPLAY", "w"), ("NIRI_SOCKET", "/n")]),
+                &all
+            ),
+            None,
+            "niri has no adapter"
+        );
         assert_eq!(detect_wm(&[], &all), None);
     }
 
@@ -1301,21 +1571,34 @@ mod tests {
         let sway = r#"{"nodes":[{"id":7,"window":null,"app_id":"ldmux-live-a","nodes":[],"floating_nodes":[]}]}"#;
         assert_eq!(
             parse_windows(Wm::Sway, sway),
-            vec![Win { class: "ldmux-live-a".into(), handle: "con_id=7".into() }]
+            vec![Win {
+                class: "ldmux-live-a".into(),
+                handle: "con_id=7".into()
+            }]
         );
-        let i3 = r#"{"nodes":[{"id":9,"window":255,"window_properties":{"class":"ldmux-live-b"}}]}"#;
+        let i3 =
+            r#"{"nodes":[{"id":9,"window":255,"window_properties":{"class":"ldmux-live-b"}}]}"#;
         assert_eq!(
             parse_windows(Wm::I3, i3),
-            vec![Win { class: "ldmux-live-b".into(), handle: "id=\"0xff\"".into() }]
+            vec![Win {
+                class: "ldmux-live-b".into(),
+                handle: "id=\"0xff\"".into()
+            }]
         );
         let hypr = r#"[{"address":"0xabc","class":"ldmux-live-c"},{"address":"0x1","class":""}]"#;
         assert_eq!(
             parse_windows(Wm::Hyprland, hypr),
-            vec![Win { class: "ldmux-live-c".into(), handle: "address:0xabc".into() }]
+            vec![Win {
+                class: "ldmux-live-c".into(),
+                handle: "address:0xabc".into()
+            }]
         );
         assert!(parse_windows(Wm::I3, "not json").is_empty());
         let mv = move_argv(Wm::Sway, &parse_windows(Wm::Sway, sway)[0], "3");
-        assert_eq!(mv, strs(&["swaymsg", "[con_id=7] move to workspace number 3"]));
+        assert_eq!(
+            mv,
+            strs(&["swaymsg", "[con_id=7] move to workspace number 3"])
+        );
     }
 
     /// With nothing that could open a window the answer says what to do, and the
@@ -1323,8 +1606,16 @@ mod tests {
     #[tokio::test]
     async fn no_display_is_a_clear_refusal() {
         let argv = strs(&["/bin/sh", "-c", "exit 0"]);
-        let err = open_window_in(&Vec::new(), None, &argv, "ldmux-live-nd", "").await.err().expect("must refuse");
-        assert!(err.contains("DISPLAY") && err.contains("WAYLAND_DISPLAY") && err.contains("import-environment"), "{err}");
+        let err = open_window_in(&Vec::new(), None, &argv, "ldmux-live-nd", "")
+            .await
+            .err()
+            .expect("must refuse");
+        assert!(
+            err.contains("DISPLAY")
+                && err.contains("WAYLAND_DISPLAY")
+                && err.contains("import-environment"),
+            "{err}"
+        );
     }
 
     /// Wayland only (no DISPLAY, no adapter): the window opens directly, is
@@ -1332,10 +1623,15 @@ mod tests {
     /// requested workspace degrades to "opened, not placed" rather than an error.
     #[tokio::test]
     async fn a_window_opens_without_any_window_manager() {
-        let e = env(&[("WAYLAND_DISPLAY", "wayland-test"), ("PATH", "/usr/bin:/bin")]);
+        let e = env(&[
+            ("WAYLAND_DISPLAY", "wayland-test"),
+            ("PATH", "/usr/bin:/bin"),
+        ]);
         let class = "ldmux-live-direct1";
         let argv = strs(&["/bin/sh", "-c", "sleep 30"]);
-        let r = open_window_in(&e, None, &argv, class, "2").await.expect("opens");
+        let r = open_window_in(&e, None, &argv, class, "2")
+            .await
+            .expect("opens");
         assert!(r.ok);
         assert_eq!(r.placed, Some(false));
         assert!(r.detail.unwrap().contains("opened, not placed"));
@@ -1350,7 +1646,10 @@ mod tests {
     async fn an_emulator_that_exits_at_once_is_reported() {
         let e = env(&[("DISPLAY", ":99"), ("PATH", "/usr/bin:/bin")]);
         let argv = strs(&["/bin/sh", "-c", "exit 3"]);
-        let err = open_window_in(&e, None, &argv, "ldmux-live-dies", "").await.err().expect("must fail");
+        let err = open_window_in(&e, None, &argv, "ldmux-live-dies", "")
+            .await
+            .err()
+            .expect("must fail");
         assert!(err.contains("exited at once"), "{err}");
     }
 
@@ -1360,9 +1659,20 @@ mod tests {
         let e = env(&[("DISPLAY", ":99"), ("PATH", "/usr/bin:/bin")]);
         let class = "ldmux-live-pgrp";
         let argv = strs(&["/bin/sh", "-c", "sleep 30"]);
-        open_window_in(&e, None, &argv, class, "").await.expect("opens");
-        let pid = tracked().lock().unwrap().get(class).unwrap().0.id().unwrap() as i32;
-        let pgid = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid))).unwrap().as_raw();
+        open_window_in(&e, None, &argv, class, "")
+            .await
+            .expect("opens");
+        let pid = tracked()
+            .lock()
+            .unwrap()
+            .get(class)
+            .unwrap()
+            .0
+            .id()
+            .unwrap() as i32;
+        let pgid = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid)))
+            .unwrap()
+            .as_raw();
         assert_eq!(pgid, pid, "own group");
         assert_ne!(pgid, nix::unistd::getpgrp().as_raw());
         kill_tracked(class);

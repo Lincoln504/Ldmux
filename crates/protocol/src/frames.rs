@@ -77,7 +77,10 @@ impl std::error::Error for FrameError {}
 /// Encode one frame. `payload` may be empty; `flags` must be 0 in v1.
 pub fn encode_frame(type_: u8, payload: &[u8], flags: u8) -> Result<Vec<u8>, FrameError> {
     if (payload.len() as u32) > MAX_FRAME_PAYLOAD {
-        return Err(FrameError(format!("frame payload too large: {}", payload.len())));
+        return Err(FrameError(format!(
+            "frame payload too large: {}",
+            payload.len()
+        )));
     }
     let mut buf = vec![0u8; HEADER_SIZE + payload.len()];
     buf[0] = type_;
@@ -90,7 +93,11 @@ pub fn encode_frame(type_: u8, payload: &[u8], flags: u8) -> Result<Vec<u8>, Fra
 
 /// Encode a JSON control frame: the payload is the UTF-8 encoding of
 /// `serde_json::to_vec` of `value`.
-pub fn encode_json_frame<T: serde::Serialize>(type_: u8, value: &T, flags: u8) -> Result<Vec<u8>, FrameError> {
+pub fn encode_json_frame<T: serde::Serialize>(
+    type_: u8,
+    value: &T,
+    flags: u8,
+) -> Result<Vec<u8>, FrameError> {
     let json = serde_json::to_vec(value).map_err(|e| FrameError(e.to_string()))?;
     encode_frame(type_, &json, flags)
 }
@@ -221,8 +228,8 @@ mod tests {
     fn decodes_from_a_subslice_with_a_non_zero_offset() {
         // The decoder reads from &buf[offset..]; a view into the middle of a
         // larger buffer must not read the wrong bytes.
-        let inner = encode_json_frame(t::OUTPUT, &serde_json::json!({ "hello": "world" }), 0)
-            .unwrap();
+        let inner =
+            encode_json_frame(t::OUTPUT, &serde_json::json!({ "hello": "world" }), 0).unwrap();
         let mut padded = vec![0u8; inner.len() + 8];
         padded[0..3].copy_from_slice(&[0xaa, 0xbb, 0xcc]);
         padded[5..5 + inner.len()].copy_from_slice(&inner);

@@ -84,7 +84,10 @@ impl KeeperSupervisor {
     /// poll or two.
     pub async fn is_alive(&self) -> bool {
         for _ in 0..20 {
-            if tokio::net::UnixStream::connect(&self.socket_path).await.is_ok() {
+            if tokio::net::UnixStream::connect(&self.socket_path)
+                .await
+                .is_ok()
+            {
                 return true;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -152,10 +155,9 @@ impl KeeperSupervisor {
                 Err(e) => Err(e.into()),
             });
         }
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("spawn keeper: {e}"))?;
-        self.last_pid.store(child.id().unwrap_or(0), Ordering::SeqCst);
+        let child = cmd.spawn().map_err(|e| format!("spawn keeper: {e}"))?;
+        self.last_pid
+            .store(child.id().unwrap_or(0), Ordering::SeqCst);
         // Detach: do not wait — the keeper runs to process exit.
         drop(child);
         Ok(())

@@ -12,7 +12,7 @@
 //! §3.11 cell-parity harness and the round-trip test
 //! (`crates/daemon/tests/parity.rs`) make it safe.
 
-use crate::{sgr, Cell, CellStyle};
+use crate::{Cell, CellStyle, sgr};
 
 /// A row of cells, padded to the full width with blank cells (the `-N`
 /// semantics — every cell to the right edge). A cell past the row's real
@@ -131,7 +131,10 @@ mod tests {
     use crate::{CellStyle, StyleColor};
 
     fn cell(text: &str, mut f: impl FnMut(&mut CellStyle)) -> Cell {
-        let mut c = Cell { text: text.into(), style: sgr::BLANK };
+        let mut c = Cell {
+            text: text.into(),
+            style: sgr::BLANK,
+        };
         f(&mut c.style);
         c
     }
@@ -155,7 +158,10 @@ mod tests {
 
     #[test]
     fn a_bold_run_is_emitted_once_then_its_text() {
-        let mut bold = Cell { text: "B".into(), style: sgr::BLANK };
+        let mut bold = Cell {
+            text: "B".into(),
+            style: sgr::BLANK,
+        };
         bold.style.bold = true;
         let row = [plain("A"), bold, plain("C")];
         // "A" blank, then a transition to bold (a `0;1` re-issue), "B", then a
@@ -173,7 +179,10 @@ mod tests {
 
     #[test]
     fn a_fg_colour_run_is_38() {
-        let mut red = Cell { text: "B".into(), style: sgr::BLANK };
+        let mut red = Cell {
+            text: "B".into(),
+            style: sgr::BLANK,
+        };
         red.style.fg = Some(StyleColor::Palette(1));
         let row = [plain("A"), red];
         assert_eq!(render(&[&row], 2), "A\x1b[0;38;5;1mB\x1b[0m");

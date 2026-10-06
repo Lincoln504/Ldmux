@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use ldmux_protocol::keeper::{self as km, Ack, KeeperMessage, ListResult, PeekResult, SnapshotResult, State};
+use ldmux_protocol::keeper::{
+    self as km, Ack, KeeperMessage, ListResult, PeekResult, SnapshotResult, State,
+};
 use tokio::sync::oneshot;
 
 /// One session: a PTY + a supervised shell + one ghostty-vt (the per-session
@@ -75,6 +77,10 @@ pub struct Session {
     pub rows: u16,
     pub dead: bool,
     pub exit_code: i32,
+    /// How the shell ended (see [`Exit`]); `None` while alive or when unknown.
+    pub exit: Option<Exit>,
+    /// When it was found dead (monotonic), for the dead-session TTL.
+    died_at: Option<std::time::Instant>,
     /// The master's bytes, buffered as they arrive (the "always reads the
     /// master" stream). The emulator thread feeds the emulator from this
     /// stream; phase 5 streams it to attaching clients.
@@ -95,6 +101,20 @@ pub struct Session {
     write_lock: Arc<Mutex<()>>,
 }
 
+/// How a shell ended: it exited with a status, or a signal killed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    Code(i32),
+    Signal(i32),
+}
+
+/// How long a dead session (its shell gone) stays in the keeper with its last
+/// screen readable, if nobody asks for it to be released. The daemon releases it
+/// sooner (it keeps it a short while for a reconnecting client); this is the
+/// backstop for a keeper whose daemon is away, so a dead pane cannot pin an
+/// emulator for the life of the process.
+pub const DEAD_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// How long a write to a pane's input may wait before the caller is told it is
 /// still blocked. Below the daemon's keeper-call timeout (8 s) on purpose: the
 /// answer "the pane is not reading" is more useful than a bare timeout, and it
@@ -108,7 +128,7 @@ const WRITE_TIMEOUT_MS: u64 = 5_000;
 /// descriptor's `EAGAIN` waits for writability and retries rather than failing
 /// a write that would have succeeded a moment later.
 fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
-    use nix::libc as libc;
+    use nix::libc;
     let mut off = 0usize;
     while off < bytes.len() {
         let n = unsafe { libc::write(fd, bytes[off..].as_ptr() as *const _, bytes.len() - off) };
@@ -117,7 +137,11 @@ fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
             match e.kind() {
                 std::io::ErrorKind::Interrupted => continue,
                 std::io::ErrorKind::WouldBlock => {
-                    let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                    let mut p = libc::pollfd {
+                        fd,
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
                     unsafe { libc::poll(&mut p, 1, 1000) };
                     continue;
                 }
@@ -168,6 +192,15 @@ impl OutBuf {
         self.q.extend(bytes.iter().copied());
     }
 
+    /// Take at most `max` bytes (and whether any was lost before them), and
+    /// whether bytes remain. Linear in what it returns: the buffer is a deque, so
+    /// a 4 MiB backlog is drained in chunks without ever being copied whole.
+    pub fn take_up_to(&mut self, max: usize) -> (Vec<u8>, bool, bool) {
+        let n = self.q.len().min(max);
+        let data: Vec<u8> = self.q.drain(..n).collect();
+        (data, std::mem::take(&mut self.lost), !self.q.is_empty())
+    }
+
     /// Take everything buffered (and whether any was lost before it).
     pub fn take(&mut self) -> (Vec<u8>, bool) {
         let data: Vec<u8> = self.q.drain(..).collect();
@@ -192,7 +225,7 @@ impl OutBuf {
 /// the orphan shells found on this box. `dup2` clears the flag on the new
 /// descriptor, so the child's 0/1/2 survive exec (POSIX).
 fn set_cloexec(fd: std::os::fd::RawFd) {
-    use nix::libc as libc;
+    use nix::libc;
     unsafe {
         libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
@@ -209,7 +242,7 @@ fn set_cloexec(fd: std::os::fd::RawFd) {
 /// makes correctness not depend on every future descriptor remembering to set
 /// it. `keep` is the exec-failure pipe, which closes itself on a successful exec.
 fn close_above_std(keep: std::os::fd::RawFd) {
-    use nix::libc as libc;
+    use nix::libc;
     let range = |lo: libc::c_uint, hi: libc::c_uint| -> bool {
         if lo > hi {
             return true;
@@ -335,7 +368,6 @@ mod child_env_tests {
     }
 }
 
-
 /// The keeper itself. `sessions` is the one shared map; every message handler
 /// takes it briefly. `shell` is the argv the keeper spawns per session (the
 /// user's shell; the daemon decides, the keeper runs it).
@@ -349,13 +381,17 @@ pub struct Keeper {
 /// reaped pid may be recycled, so a dead pane reports empty, not a read of a
 /// possibly-different process.)
 fn proc_comm(pid: i32) -> String {
-    std::fs::read_to_string(format!("/proc/{pid}/comm")).map(|s| s.trim().to_string()).unwrap_or_default()
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// The pane's working directory (`/proc/<pid>/cwd`, a symlink). Empty if the
 /// process is gone. Same liveness gating as [`proc_comm`].
 fn proc_cwd(pid: i32) -> String {
-    std::fs::read_link(format!("/proc/{pid}/cwd")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The pane's foreground command name, the way a terminal names it: the process
@@ -473,6 +509,8 @@ impl Keeper {
                     history_size: 0,
                     foreground: String::new(),
                     cwd: String::new(),
+                    exit_code: None,
+                    exit_signal: None,
                 }))
             }
             km::KeeperMessage::Write(w) => {
@@ -524,7 +562,7 @@ impl Keeper {
                 }
             }
             km::KeeperMessage::Resize(r) => {
-                use nix::libc as libc;
+                use nix::libc;
                 // Clamp at the PTY. This is the last place a size can be
                 // corrected, and the frame's selection rows are one byte, so a
                 // pane above 255 rows truncates them silently (protocol
@@ -568,15 +606,33 @@ impl Keeper {
                 let g = self.sessions.lock().unwrap();
                 match g.get(&p.session_id) {
                     Some(s) => {
-                        // Drain the buffer (the attach's stream pull). The reader
-                        // task holds only the `out` lock, never the sessions
-                        // lock, so this cannot deadlock with it.
-                        let (data, lost) = s.out.lock().unwrap().take();
-                        Ok(KeeperMessage::PeekResult(PeekResult {
-                            session_id: p.session_id.clone(),
-                            data,
-                            lost,
-                        }))
+                        // The attach's stream pull. The reader task holds only the
+                        // `out` lock, never the sessions lock, so this cannot
+                        // deadlock with it.
+                        match p.max_bytes {
+                            // The original contract, kept for a daemon that
+                            // predates the field: everything, as a byte array.
+                            None => {
+                                let (data, lost) = s.out.lock().unwrap().take();
+                                Ok(KeeperMessage::PeekResult(PeekResult {
+                                    session_id: p.session_id.clone(),
+                                    data,
+                                    data64: None,
+                                    more: false,
+                                    lost,
+                                }))
+                            }
+                            Some(max) => {
+                                let max = max.clamp(1, km::PEEK_MAX_BYTES) as usize;
+                                let (data, lost, more) = s.out.lock().unwrap().take_up_to(max);
+                                Ok(KeeperMessage::PeekResult(PeekResult::compact(
+                                    p.session_id.clone(),
+                                    &data,
+                                    more,
+                                    lost,
+                                )))
+                            }
+                        }
                     }
                     None => Err(format!("no such session: {}", p.session_id)),
                 }
@@ -671,10 +727,18 @@ impl Keeper {
     async fn state_of(&self, id: &str) -> Result<KeeperMessage, String> {
         // The emulator handle + the Session fields, without holding the lock
         // across the emulator round-trip.
-        let (em, s_id, cols, rows, dead, pid) = {
+        let (em, s_id, cols, rows, dead, pid, exit) = {
             let g = self.sessions.lock().unwrap();
             match g.get(id) {
-                Some(s) => (s.em.clone(), s.id.clone(), s.cols, s.rows, s.dead, s.pid),
+                Some(s) => (
+                    s.em.clone(),
+                    s.id.clone(),
+                    s.cols,
+                    s.rows,
+                    s.dead,
+                    s.pid,
+                    s.exit,
+                ),
                 None => return Err(format!("no such session: {id}")),
             }
         };
@@ -711,6 +775,14 @@ impl Keeper {
             history_size: st.history_size as u64,
             foreground,
             cwd,
+            exit_code: match exit {
+                Some(Exit::Code(c)) => Some(c as i64),
+                _ => None,
+            },
+            exit_signal: match exit {
+                Some(Exit::Signal(sg)) => Some(sg),
+                _ => None,
+            },
         }))
     }
 
@@ -719,7 +791,7 @@ impl Keeper {
     /// plan §3.3 — feeds the ghostty-vt, and services the snapshot/resize
     /// messages).
     async fn spawn_session(&self, s: &km::Spawn) -> std::io::Result<Session> {
-        use nix::libc as libc;
+        use nix::libc;
         // The same clamp `Resize` applies: the grid the emulator holds, the PTY's
         // size and the size the client is told must all be the one number.
         let (cols, rows) = ldmux_protocol::clamp_pane_size(s.cols, s.rows);
@@ -775,7 +847,10 @@ impl Keeper {
             .map_err(|e| std::io::Error::other(format!("CString: {e}")))?;
         let argv: Vec<std::ffi::CString> = argv_s
             .iter()
-            .map(|a| std::ffi::CString::new(a.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}"))))
+            .map(|a| {
+                std::ffi::CString::new(a.as_str())
+                    .map_err(|e| std::io::Error::other(format!("CString: {e}")))
+            })
             .collect::<Result<_, _>>()?;
         let env = child_env(std::env::vars().collect(), s.env.as_deref());
         let envp_cstrings: Vec<std::ffi::CString> = env
@@ -784,7 +859,10 @@ impl Keeper {
             .collect::<Result<_, _>>()
             .map_err(|e| std::io::Error::other(format!("CString: {e}")))?;
         let cwd_cstr: Option<std::ffi::CString> = match &s.cwd {
-            Some(c) => Some(std::ffi::CString::new(c.as_str()).map_err(|e| std::io::Error::other(format!("CString: {e}")))?),
+            Some(c) => Some(
+                std::ffi::CString::new(c.as_str())
+                    .map_err(|e| std::io::Error::other(format!("CString: {e}")))?,
+            ),
             None => None,
         };
         // The exec-failure pipe: close-on-exec on both ends, so a successful
@@ -882,6 +960,8 @@ impl Keeper {
             rows,
             dead: false,
             exit_code: 0,
+            exit: None,
+            died_at: None,
             out,
             em: Emu { tx: em_tx, waker },
             activity,
@@ -893,7 +973,7 @@ impl Keeper {
     /// matching sessions dead. Non-blocking: `waitpid(-1, WNOHANG)`.
     fn reap(&self) {
         use nix::errno::Errno;
-        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
         // Only OUR children, by pid. `waitpid(-1)` reaps *any* child of the
         // process, so a second keeper in the same process (every keeper test
         // runs several) consumed another's exit status, and the keeper that
@@ -908,23 +988,42 @@ impl Keeper {
         for pid in live {
             match waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::StillAlive) => {}
-                Ok(WaitStatus::Exited(p, code)) => self.mark_dead(p.as_raw(), code),
-                Ok(WaitStatus::Signaled(p, _sig, _core)) => self.mark_dead(p.as_raw(), -1),
+                Ok(WaitStatus::Exited(p, code)) => {
+                    self.mark_dead(p.as_raw(), Some(Exit::Code(code)))
+                }
+                Ok(WaitStatus::Signaled(p, sig, _core)) => {
+                    self.mark_dead(p.as_raw(), Some(Exit::Signal(sig as i32)))
+                }
                 Ok(_) => {}
-                // Not our child any more (already reaped): it is gone.
-                Err(Errno::ECHILD) => self.mark_dead(pid, -1),
+                // Not our child any more (already reaped): it is gone, and how it
+                // went is unknown.
+                Err(Errno::ECHILD) => self.mark_dead(pid, None),
                 Err(_) => {}
             }
         }
+        // The backstop for a dead pane nobody released (see `DEAD_SESSION_TTL`).
+        let now = std::time::Instant::now();
+        self.sessions
+            .lock()
+            .unwrap()
+            .retain(|_, s| match s.died_at {
+                Some(t) => now.duration_since(t) < DEAD_SESSION_TTL,
+                None => true,
+            });
     }
 
-    fn mark_dead(&self, pid: i32, code: i32) {
+    fn mark_dead(&self, pid: i32, exit: Option<Exit>) {
         let mut g = self.sessions.lock().unwrap();
         let mut newly_dead = None;
         for s in g.values_mut() {
             if s.pid == pid && !s.dead {
                 s.dead = true;
-                s.exit_code = code;
+                s.exit = exit;
+                s.exit_code = match exit {
+                    Some(Exit::Code(c)) => c,
+                    _ => -1,
+                };
+                s.died_at = Some(std::time::Instant::now());
                 newly_dead = Some(s.pid);
             }
         }
@@ -984,11 +1083,13 @@ async fn terminate(pid: i32) {
 /// that reaps it whenever it does.
 async fn wait_child(pid: i32) {
     use nix::errno::Errno;
-    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     let p = nix::unistd::Pid::from_raw(pid);
     for _ in 0..40 {
         match waitpid(p, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            Ok(WaitStatus::StillAlive) => {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await
+            }
             Err(Errno::EINTR) => {}
             // Reaped (by us, or by the periodic reaper) or not ours: done.
             _ => return,
@@ -1014,11 +1115,17 @@ const STAGE_EXEC: u8 = 3;
 /// Read the child's report from the error pipe (blocks until the child execs or
 /// fails — both are immediate; run it on the blocking pool).
 fn read_exec_report(rd: &OwnedFd) -> ExecReport {
-    use nix::libc as libc;
+    use nix::libc;
     let mut buf = [0u8; 5];
     let mut got = 0usize;
     while got < buf.len() {
-        let n = unsafe { libc::read(rd.as_raw_fd(), buf[got..].as_mut_ptr() as *mut _, buf.len() - got) };
+        let n = unsafe {
+            libc::read(
+                rd.as_raw_fd(),
+                buf[got..].as_mut_ptr() as *mut _,
+                buf.len() - got,
+            )
+        };
         if n < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
@@ -1050,7 +1157,11 @@ fn signal_session(sid: i32, sig: nix::sys::signal::Signal) {
         return;
     };
     for entry in dir.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
             continue;
         };
         if pid == sid || pid == me {
@@ -1092,7 +1203,7 @@ fn fork_shell(
     cwd: Option<&std::ffi::CString>,
     envp: &[std::ffi::CString],
 ) -> std::io::Result<i32> {
-    use nix::libc as libc;
+    use nix::libc;
     let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
     argv_ptrs.push(std::ptr::null()); // execve's argv is NULL-terminated
     let mut envp_ptrs: Vec<*const libc::c_char> = envp.iter().map(|c| c.as_ptr()).collect();
@@ -1155,7 +1266,7 @@ fn fork_shell(
 /// Tell the parent which step failed and with what errno, then `_exit`.
 /// Async-signal-safe: raw `write` of a fixed buffer, no allocation.
 unsafe fn child_fail(err_fd: std::os::fd::RawFd, stage: u8) -> ! {
-    use nix::libc as libc;
+    use nix::libc;
     unsafe {
         let errno = *libc::__errno_location();
         let e = errno.to_ne_bytes();
@@ -1229,7 +1340,10 @@ fn bind_private(socket: &std::path::Path) -> std::io::Result<tokio::net::UnixLis
         .map_err(|m| Error::new(ErrorKind::InvalidInput, m))?;
     match std::fs::symlink_metadata(socket) {
         Ok(md) if md.file_type().is_dir() => {
-            return Err(Error::new(ErrorKind::AlreadyExists, format!("{} is a directory", socket.display())));
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("{} is a directory", socket.display()),
+            ));
         }
         Ok(md) => {
             if md.file_type().is_socket() {
@@ -1240,9 +1354,16 @@ fn bind_private(socket: &std::path::Path) -> std::io::Result<tokio::net::UnixLis
                             format!("a keeper is already serving on {}", socket.display()),
                         ));
                     }
-                    Err(e) if matches!(e.kind(), ErrorKind::ConnectionRefused | ErrorKind::NotFound) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                        ) => {}
                     Err(e) => {
-                        return Err(Error::new(e.kind(), format!("cannot probe {}: {e}", socket.display())));
+                        return Err(Error::new(
+                            e.kind(),
+                            format!("cannot probe {}: {e}", socket.display()),
+                        ));
                     }
                 }
             }
@@ -1285,7 +1406,11 @@ async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::
         Ok(Ok(Some(l))) => String::from_utf8_lossy(&l).into_owned(),
         Ok(Ok(None)) => return Ok(()),
         Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(std::io::Error::other("timed out waiting for the request line")),
+        Err(_) => {
+            return Err(std::io::Error::other(
+                "timed out waiting for the request line",
+            ));
+        }
     };
     let req: KeeperMessage = match serde_json::from_str(&line) {
         Ok(m) => m,
@@ -1324,12 +1449,20 @@ pub fn default_shell() -> Vec<String> {
         .ok()
         .flatten()
         .map(|u| u.shell.to_string_lossy().into_owned());
-    vec![pick_shell(std::env::var("SHELL").ok(), passwd, is_executable)]
+    vec![pick_shell(
+        std::env::var("SHELL").ok(),
+        passwd,
+        is_executable,
+    )]
 }
 
 /// The choice in [`default_shell`], with the environment and the executable
 /// check injected so it is testable.
-pub fn pick_shell(env_shell: Option<String>, passwd_shell: Option<String>, ok: impl Fn(&str) -> bool) -> String {
+pub fn pick_shell(
+    env_shell: Option<String>,
+    passwd_shell: Option<String>,
+    ok: impl Fn(&str) -> bool,
+) -> String {
     [env_shell, passwd_shell]
         .into_iter()
         .flatten()
@@ -1340,7 +1473,9 @@ pub fn pick_shell(env_shell: Option<String>, passwd_shell: Option<String>, ok: i
 fn is_executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     // `metadata` follows symlinks (a distro `/bin/sh` is one).
-    std::fs::metadata(path).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1350,9 +1485,18 @@ mod shell_tests {
     #[test]
     fn env_shell_wins_when_usable_else_passwd_else_sh() {
         let ok = |p: &str| p != "/nope";
-        assert_eq!(pick_shell(Some("/bin/zsh".into()), Some("/bin/bash".into()), ok), "/bin/zsh");
-        assert_eq!(pick_shell(Some("".into()), Some("/bin/bash".into()), ok), "/bin/bash");
-        assert_eq!(pick_shell(Some("/nope".into()), Some("/bin/bash".into()), ok), "/bin/bash");
+        assert_eq!(
+            pick_shell(Some("/bin/zsh".into()), Some("/bin/bash".into()), ok),
+            "/bin/zsh"
+        );
+        assert_eq!(
+            pick_shell(Some("".into()), Some("/bin/bash".into()), ok),
+            "/bin/bash"
+        );
+        assert_eq!(
+            pick_shell(Some("/nope".into()), Some("/bin/bash".into()), ok),
+            "/bin/bash"
+        );
         assert_eq!(pick_shell(None, Some("/nope".into()), ok), "/bin/sh");
         assert_eq!(pick_shell(None, None, ok), "/bin/sh");
     }
@@ -1376,7 +1520,10 @@ mod proc_tests {
     fn the_foreground_group_comes_from_the_field_after_the_command_name() {
         // pid 42, comm "weird )name", state S, ppid 1, pgrp 42, session 42,
         // tty_nr 34816, tpgid 99.
-        assert_eq!(parse_tpgid("42 (weird )name) S 1 42 42 34816 99 0 0"), Some(99));
+        assert_eq!(
+            parse_tpgid("42 (weird )name) S 1 42 42 34816 99 0 0"),
+            Some(99)
+        );
         // A plain one, and one with parens inside the name.
         assert_eq!(parse_tpgid("7 (bash) S 1 7 7 34816 7 0 0"), Some(7));
         assert_eq!(parse_tpgid("7 ((a)(b)) S 1 7 7 1 2"), Some(2));
@@ -1389,15 +1536,23 @@ mod proc_tests {
 #[cfg(test)]
 mod write_tests {
     use super::{locked_write, write_all};
-    use nix::libc as libc;
+    use nix::libc;
     use std::io::Read;
     use std::os::fd::FromRawFd;
     use std::sync::{Arc, Mutex};
 
     fn pipe(flags: libc::c_int) -> (std::fs::File, std::fs::File) {
         let mut fds = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | flags) }, 0);
-        unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) }
+        assert_eq!(
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | flags) },
+            0
+        );
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                std::fs::File::from_raw_fd(fds[1]),
+            )
+        }
     }
 
     /// A non-blocking descriptor answers `EAGAIN` when full; that is "wait", not
@@ -1441,13 +1596,17 @@ mod write_tests {
         let (a_len, b_len) = (300 * 1024usize, 16usize);
         let a = {
             let (wr, lock) = (wr.clone(), lock.clone());
-            std::thread::spawn(move || locked_write(&lock, wr.as_raw_fd(), &vec![b'a'; a_len]).unwrap())
+            std::thread::spawn(move || {
+                locked_write(&lock, wr.as_raw_fd(), &vec![b'a'; a_len]).unwrap()
+            })
         };
         // A has filled the pipe and is blocked; B arrives behind it.
         std::thread::sleep(std::time::Duration::from_millis(150));
         let b = {
             let (wr, lock) = (wr.clone(), lock.clone());
-            std::thread::spawn(move || locked_write(&lock, wr.as_raw_fd(), &vec![b'b'; b_len]).unwrap())
+            std::thread::spawn(move || {
+                locked_write(&lock, wr.as_raw_fd(), &vec![b'b'; b_len]).unwrap()
+            })
         };
         std::thread::sleep(std::time::Duration::from_millis(150));
         let mut all = vec![0u8; a_len + b_len];

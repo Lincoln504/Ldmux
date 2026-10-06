@@ -14,7 +14,11 @@ use ldmux_daemon::daemon::LdmuxDaemon;
 
 fn scratch() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-maint-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-maint-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -90,7 +94,11 @@ fn install_stubs(dir: &std::path::Path) -> Stubs {
     unsafe { std::env::set_var("PATH", format!("{}:{}", stub_dir.display(), old_path)) };
     unsafe { std::env::set_var("LDMUX_TERMINAL", "alacritty") };
     unsafe { std::env::set_var("DISPLAY", ":0") };
-    Stubs { old_path, old_terminal, old_display }
+    Stubs {
+        old_path,
+        old_terminal,
+        old_display,
+    }
 }
 
 async fn wait_socket(path: &std::path::Path) {
@@ -149,18 +157,30 @@ impl Fixture {
         wait_socket(&keeper_sock).await;
         let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
             // No remote: the maintenance pass is the daemon's, not the socket's.
-            .with_live_window_grace_ms(1);
+            .with_live_window_grace_ms(1)
+            // Short, so the release is observable; the default keeps an ended pane a minute.
+            .with_dead_keep_ms(600);
         let daemon_sock = d.socket_path().to_string_lossy().into_owned();
         let arc = Arc::new(tokio::sync::Mutex::new(d));
         {
             let mut d = arc.lock().await;
             d.start(&arc).await.unwrap();
         }
-        Self { dir, daemon_sock, keeper_sock, arc, keeper, _reaper }
+        Self {
+            dir,
+            daemon_sock,
+            keeper_sock,
+            arc,
+            keeper,
+            _reaper,
+        }
     }
 
     async fn new_session(&self) -> String {
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         self.arc
             .lock()
             .await
@@ -251,7 +271,9 @@ async fn a_dead_pane_is_released_from_the_keeper() {
     let id = f.new_session().await;
     let keeper_name = format!("ldmux-{id}");
     assert!(
-        keeper_sessions(&f.keeper_sock).iter().any(|(n, _)| n == &keeper_name),
+        keeper_sessions(&f.keeper_sock)
+            .iter()
+            .any(|(n, _)| n == &keeper_name),
         "the session must exist before it is exited"
     );
 
@@ -267,10 +289,22 @@ async fn a_dead_pane_is_released_from_the_keeper() {
         f.wait_keeper_dead(&keeper_name).await,
         "the keeper must report the exit before the daemon is asked to release it"
     );
-    // One pass must both notice and release it.
+    // One pass notices it and marks the record dead, but the pane is kept for the
+    // keep window (a reconnecting client can still read its last screen) ...
     f.arc.lock().await.maintain().await.unwrap();
     assert!(
-        !keeper_sessions(&f.keeper_sock).iter().any(|(n, _)| n == &keeper_name),
+        keeper_sessions(&f.keeper_sock)
+            .iter()
+            .any(|(n, _)| n == &keeper_name),
+        "the dead pane is kept for the keep window"
+    );
+    // ... and a pass after it releases it.
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    f.arc.lock().await.maintain().await.unwrap();
+    assert!(
+        !keeper_sessions(&f.keeper_sock)
+            .iter()
+            .any(|(n, _)| n == &keeper_name),
         "the dead pane must be released from the keeper, not held for the life of the process"
     );
 }
@@ -288,7 +322,9 @@ async fn a_dead_pane_is_released_from_the_keeper() {
 // nothing for an async mutex to fix.
 #[allow(clippy::await_holding_lock)]
 async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
-    let _env = window_manager_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _env = window_manager_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new().await;
     let id = f.new_session().await;
 
@@ -318,7 +354,10 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
         .handle("makeLive", serde_json::json!({"id": id, "workspace": "10"}))
         .await
         .unwrap();
-    assert_eq!(live["ok"], true, "makeLive must open and record the window: {live}");
+    assert_eq!(
+        live["ok"], true,
+        "makeLive must open and record the window: {live}"
+    );
     assert_eq!(f.arc.lock().await.live_window_ids(), vec![id.clone()]);
 
     // The window goes away (the user closed it). The grace period is 1 ms.
@@ -355,7 +394,9 @@ async fn a_closed_desk_window_frees_the_record_and_ends_the_shell() {
 // nothing for an async mutex to fix.
 #[allow(clippy::await_holding_lock)]
 async fn an_unanswered_window_manager_never_ends_a_session() {
-    let _env = window_manager_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _env = window_manager_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new().await;
     let id = f.new_session().await;
 

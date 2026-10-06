@@ -24,12 +24,18 @@
 //! | bold          | `1`           | `21`         |
 //! | faint         | `2`           | —           |
 //! | italic        | `3`           | `23`         |
-//! | underline     | `4`           | `24`         |
+//! | underline     | `4` / `4:n`   | `24`         |
+//! | underline col | `58;5;n` / `58;2;r;g;b` | `59` |
 //! | blink         | `5`           | `25`         |
 //! | inverse       | `7`           | `27`         |
 //! | invisible     | `8`           | `28`         |
 //! | strikethrough | `9`           | `29`         |
 //! | overline      | `53`          | `55`         |
+//!
+//! Underline styles use the colon sub-parameter form (`4:2` double, `4:3` curly,
+//! `4:4` dotted, `4:5` dashed); a single underline stays the plain `4` that every
+//! terminal reads, and an unknown style also falls back to `4`. The underline colour
+//! is a separate attribute (SGR 58) that is emitted whenever the cell has one.
 //! | fg colour     | `38;5;n` / `38;2;r;g;b` | `39` |
 //! | bg colour     | `48;5;n` / `48;2;r;g;b` | `49` |
 //!
@@ -64,7 +70,8 @@ pub const BLANK: CellStyle = CellStyle {
 ///
 /// The output is always terminated with `m` (or empty, if nothing changed).
 /// The attributes are emitted in a fixed order (reset, bold, faint, italic,
-/// underline, blink, inverse, invisible, strikethrough, overline, fg, bg) so
+/// underline, blink, inverse, invisible, strikethrough, overline, fg, bg,
+/// underline colour) so
 /// the output is deterministic for a given pair of styles.
 pub fn transition(from: &CellStyle, to: &CellStyle) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -84,20 +91,43 @@ pub fn transition(from: &CellStyle, to: &CellStyle) -> String {
     // corpus does not pin).
     if from != to {
         let mut sgr = vec!["0".to_string()];
-        if to.bold { sgr.push("1".into()); }
-        if to.faint { sgr.push("2".into()); }
-        if to.italic { sgr.push("3".into()); }
-        if to.underline_kind != 0 { sgr.push("4".into()); }
-        if to.blink { sgr.push("5".into()); }
-        if to.inverse { sgr.push("7".into()); }
-        if to.invisible { sgr.push("8".into()); }
-        if to.strikethrough { sgr.push("9".into()); }
-        if to.overline { sgr.push("53".into()); }
+        if to.bold {
+            sgr.push("1".into());
+        }
+        if to.faint {
+            sgr.push("2".into());
+        }
+        if to.italic {
+            sgr.push("3".into());
+        }
+        match to.underline_kind {
+            0 => {}
+            k @ 2..=5 => sgr.push(format!("4:{k}")),
+            _ => sgr.push("4".into()),
+        }
+        if to.blink {
+            sgr.push("5".into());
+        }
+        if to.inverse {
+            sgr.push("7".into());
+        }
+        if to.invisible {
+            sgr.push("8".into());
+        }
+        if to.strikethrough {
+            sgr.push("9".into());
+        }
+        if to.overline {
+            sgr.push("53".into());
+        }
         if let Some(fg) = &to.fg {
             sgr.push(fg_code(fg));
         }
         if let Some(bg) = &to.bg {
             sgr.push(bg_code(bg));
+        }
+        if let Some(ul) = &to.underline {
+            sgr.push(ul_code(ul));
         }
         parts.push(format!("\x1b[{}m", sgr.join(";")));
     }
@@ -109,6 +139,14 @@ fn fg_code(c: &StyleColor) -> String {
     match c {
         StyleColor::Palette(n) => format!("38;5;{n}"),
         StyleColor::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
+    }
+}
+
+/// The `58;…` code for an underline colour.
+fn ul_code(c: &StyleColor) -> String {
+    match c {
+        StyleColor::Palette(n) => format!("58;5;{n}"),
+        StyleColor::Rgb(r, g, b) => format!("58;2;{r};{g};{b}"),
     }
 }
 
@@ -160,6 +198,45 @@ mod tests {
         to.bold = true;
         to.inverse = true;
         assert_eq!(transition(&style(), &to), "\x1b[0;1;7m");
+    }
+
+    #[test]
+    fn underline_styles_use_the_colon_form_and_single_stays_plain() {
+        let mut to = style();
+        to.underline_kind = 1;
+        assert_eq!(transition(&style(), &to), "\x1b[0;4m");
+        for (k, want) in [
+            (2, "\x1b[0;4:2m"),
+            (3, "\x1b[0;4:3m"),
+            (4, "\x1b[0;4:4m"),
+            (5, "\x1b[0;4:5m"),
+        ] {
+            to.underline_kind = k;
+            assert_eq!(transition(&style(), &to), want, "kind {k}");
+        }
+        // An unknown kind degrades to a plain underline rather than to nothing.
+        to.underline_kind = 9;
+        assert_eq!(transition(&style(), &to), "\x1b[0;4m");
+    }
+
+    #[test]
+    fn underline_colour_is_58_in_both_forms() {
+        let mut to = style();
+        to.underline_kind = 3;
+        to.underline = Some(StyleColor::Rgb(255, 0, 128));
+        assert_eq!(transition(&style(), &to), "\x1b[0;4:3;58;2;255;0;128m");
+        to.underline = Some(StyleColor::Palette(9));
+        assert_eq!(transition(&style(), &to), "\x1b[0;4:3;58;5;9m");
+    }
+
+    #[test]
+    fn a_colour_change_alone_is_a_change() {
+        let mut a = style();
+        a.underline_kind = 3;
+        a.underline = Some(StyleColor::Palette(1));
+        let mut b = a;
+        b.underline = Some(StyleColor::Palette(2));
+        assert_eq!(transition(&a, &b), "\x1b[0;4:3;58;5;2m");
     }
 
     #[test]

@@ -8,21 +8,21 @@
 //! shell and a real `cat` that take milliseconds alone can take seconds when the
 //! whole workspace is running. A tight budget made this file flaky, not fast.
 
-use ldmux_protocol::keeper::{
-    self as km, Kill, KeeperMessage, List, Peek, Read, Spawn, Write,
-};
+use ldmux_protocol::keeper::{self as km, KeeperMessage, Kill, List, Peek, Read, Spawn, Write};
 
 /// The corpus the §3.11 harness pins (the same four styled cells): bold B,
 /// underline U, 256-colour C, 24-bit D.
-const CORPUS: &[u8] = b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m\n";
+const CORPUS: &[u8] =
+    b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m\n";
 /// What `snapshot::render` produces for the corpus row (our format —
 /// plan §3.11(3): the cells are the source of truth, the format is ours).
 const CORPUS_LINE: &str = "\x1b[0;1mB\x1b[0;4mU\x1b[0;38;5;123mC\x1b[0;38;2;255;128;0mD\x1b[0m";
 /// The corpus as it appears in the byte stream: the body (no trailing
 /// `\n`), because the pty's output post-processing (ONLCR) turns the
 /// trailing `\n` into `\r\n` on the way out.
-const CORPUS_BODY: &[u8] = b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m";
-use ldmux_protocol::keeper_call::{keeper_call, DEFAULT_TIMEOUT_MS};
+const CORPUS_BODY: &[u8] =
+    b"\x1b[1mB\x1b[0m\x1b[4mU\x1b[0m\x1b[38;5;123mC\x1b[0m\x1b[38;2;255;128;0mD\x1b[0m";
+use ldmux_protocol::keeper_call::{DEFAULT_TIMEOUT_MS, keeper_call};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -102,7 +102,7 @@ async fn spawn_runs_a_shell_and_the_keeper_reads_the_master() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -139,13 +139,18 @@ async fn spawn_runs_a_shell_and_the_keeper_reads_the_master() {
             data: "printf 'ldmux-ok\\n'".to_string(),
         }),
         DEFAULT_TIMEOUT_MS,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     match res {
         KeeperMessage::Ack(_) => {}
         other => panic!("expected Ack, got {other:?}"),
     }
     let ok = wait_until(|| k.buffered_len(&id).unwrap_or(0) > 0).await;
-    assert!(ok, "the keeper must read the master (the shell echoed into it)");
+    assert!(
+        ok,
+        "the keeper must read the master (the shell echoed into it)"
+    );
 
     // A read (the attach handshake) reports the session alive.
     let res: KeeperMessage = keeper_call(
@@ -169,7 +174,9 @@ async fn spawn_runs_a_shell_and_the_keeper_reads_the_master() {
             session_id: id.clone(),
         }),
         DEFAULT_TIMEOUT_MS,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     match res {
         KeeperMessage::State(st) => assert!(st.dead, "kill reports dead"),
         other => panic!("expected State, got {other:?}"),
@@ -203,9 +210,11 @@ async fn resize_reports_the_new_state() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     match res {
         KeeperMessage::State(_) => {}
         other => panic!("expected State, got {other:?}"),
@@ -218,7 +227,9 @@ async fn resize_reports_the_new_state() {
             rows: 40,
         }),
         DEFAULT_TIMEOUT_MS,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     match res {
         KeeperMessage::State(st) => {
             assert_eq!((st.cols, st.rows), (120, 40), "resize took");
@@ -281,7 +292,7 @@ async fn the_emulator_renders_the_pane_output() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -294,7 +305,8 @@ async fn the_emulator_renders_the_pane_output() {
     // Emit the corpus through the pane: write the raw bytes to a file and
     // `cat` it (cat never interprets escapes, so the pane gets the corpus
     // byte-for-byte).
-    let corpus_file = std::env::temp_dir().join(format!("ldmux-keeper-corpus-{}.bin", std::process::id()));
+    let corpus_file =
+        std::env::temp_dir().join(format!("ldmux-keeper-corpus-{}.bin", std::process::id()));
     std::fs::write(&corpus_file, CORPUS).unwrap();
     let res = keeper_call(
         &s,
@@ -372,7 +384,7 @@ async fn the_emulator_resizes() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -410,10 +422,17 @@ async fn the_emulator_resizes() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let Some(sr) = got else { panic!("the emulator never resized") };
+    let Some(sr) = got else {
+        panic!("the emulator never resized")
+    };
     assert_eq!((sr.cols, sr.rows), (120, 40), "the grid follows the resize");
 
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 /// The attach's stream (the `out` buffer) and the emulator see the *same*
@@ -434,7 +453,7 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -444,7 +463,8 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
         other => panic!("expected State, got {other:?}"),
     }
 
-    let corpus_file = std::env::temp_dir().join(format!("ldmux-keeper-corpus-{}.bin", std::process::id()));
+    let corpus_file =
+        std::env::temp_dir().join(format!("ldmux-keeper-corpus-{}.bin", std::process::id()));
     std::fs::write(&corpus_file, CORPUS).unwrap();
     let _ = keeper_call(
         &s,
@@ -464,7 +484,7 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
     for _ in 0..1200 {
         if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
             &s,
-            &KeeperMessage::Peek(Peek { session_id: id.clone() }),
+            &KeeperMessage::Peek(Peek::all(id.clone())),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -477,9 +497,17 @@ async fn the_buffer_and_the_emulator_see_the_same_bytes() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    assert!(ok, "the attach's stream must contain the bytes the pane emitted");
+    assert!(
+        ok,
+        "the attach's stream must contain the bytes the pane emitted"
+    );
 
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
     let _ = std::fs::remove_file(&corpus_file);
 }
 
@@ -503,7 +531,7 @@ async fn the_emulator_captures_history_above_the_screen() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -520,7 +548,10 @@ async fn the_emulator_captures_history_above_the_screen() {
     let data = "i=1; while [ $i -le 30 ]; do printf \"H%04d\\n\" $i; i=$((i+1)); done\n";
     let res = keeper_call(
         &s,
-        &KeeperMessage::Write(km::Write { session_id: id.clone(), data: data.to_string() }),
+        &KeeperMessage::Write(km::Write {
+            session_id: id.clone(),
+            data: data.to_string(),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -537,13 +568,21 @@ async fn the_emulator_captures_history_above_the_screen() {
     for _ in 0..1200 {
         let sr = keeper_call(
             &s,
-            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: Some(5), drain_output: false }),
+            &KeeperMessage::Snapshot(km::Snapshot {
+                session_id: id.clone(),
+                history_lines: Some(5),
+                drain_output: false,
+            }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
         .ok()
         .and_then(|m| match m {
-            KeeperMessage::SnapshotResult(sr) if sr.history_lines == 5 && sr.text.lines().count() == 29 => Some(sr),
+            KeeperMessage::SnapshotResult(sr)
+                if sr.history_lines == 5 && sr.text.lines().count() == 29 =>
+            {
+                Some(sr)
+            }
             _ => None,
         });
         if let Some(sr) = sr {
@@ -552,7 +591,9 @@ async fn the_emulator_captures_history_above_the_screen() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let Some(sr) = got else { panic!("the emulator never returned a 5-history, 29-line capture") };
+    let Some(sr) = got else {
+        panic!("the emulator never returned a 5-history, 29-line capture")
+    };
     assert_eq!((sr.cols, sr.rows), (80, 24), "the grid is the pane size");
     let lines: Vec<&str> = sr.text.lines().collect();
     assert_eq!(lines.len(), 29, "5 history + 24 live");
@@ -565,7 +606,12 @@ async fn the_emulator_captures_history_above_the_screen() {
     assert_eq!(lines[27], "H0030");
     assert!(!lines[28].is_empty(), "cursor row holds the prompt");
 
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 /// A history capture that is longer than the screen is lines, not blanks.
@@ -590,7 +636,7 @@ async fn a_history_capture_longer_than_the_screen_is_all_lines() {
             cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -605,7 +651,10 @@ async fn a_history_capture_longer_than_the_screen_is_all_lines() {
     let data = "i=1; while [ $i -le 120 ]; do printf \"K%04d\\n\" $i; i=$((i+1)); done\n";
     keeper_call(
         &s,
-        &KeeperMessage::Write(km::Write { session_id: id.clone(), data: data.to_string() }),
+        &KeeperMessage::Write(km::Write {
+            session_id: id.clone(),
+            data: data.to_string(),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -635,7 +684,9 @@ async fn a_history_capture_longer_than_the_screen_is_all_lines() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let Some(sr) = got else { panic!("the emulator never returned a 60-history, 84-line capture") };
+    let Some(sr) = got else {
+        panic!("the emulator never returned a 60-history, 84-line capture")
+    };
 
     let lines: Vec<&str> = sr.text.lines().collect();
     assert_eq!(lines.len(), 84, "60 history + 24 live");
@@ -648,7 +699,12 @@ async fn a_history_capture_longer_than_the_screen_is_all_lines() {
         .iter()
         .filter_map(|l| l.trim().strip_prefix('K')?.parse::<u32>().ok())
         .collect();
-    assert_eq!(nums.len(), 60, "history is numbered output: {:?}", &lines[..60]);
+    assert_eq!(
+        nums.len(),
+        60,
+        "history is numbered output: {:?}",
+        &lines[..60]
+    );
     assert!(
         nums.windows(2).all(|w| w[1] == w[0] + 1),
         "and in order, oldest first: {nums:?}"
@@ -665,7 +721,12 @@ async fn a_history_capture_longer_than_the_screen_is_all_lines() {
         "the history ends where the screen begins: {nums:?}"
     );
 
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 /// A `Snapshot` reports the pane's state (plan §3.4 — the `display-message`
@@ -681,10 +742,14 @@ async fn the_emulator_reports_the_pane_state() {
 
     let res = keeper_call(
         &s,
-        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -698,7 +763,11 @@ async fn the_emulator_reports_the_pane_state() {
     for _ in 0..1200 {
         if let Ok(KeeperMessage::SnapshotResult(sr)) = keeper_call(
             &s,
-            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None, drain_output: false }),
+            &KeeperMessage::Snapshot(km::Snapshot {
+                session_id: id.clone(),
+                history_lines: None,
+                drain_output: false,
+            }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -708,7 +777,9 @@ async fn the_emulator_reports_the_pane_state() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let Some(sr) = got else { panic!("never got a snapshot") };
+    let Some(sr) = got else {
+        panic!("never got a snapshot")
+    };
 
     // Geometry + liveness.
     assert_eq!((sr.cols, sr.rows), (80, 24));
@@ -721,10 +792,19 @@ async fn the_emulator_reports_the_pane_state() {
     assert!(sr.cursor_x < 80 && sr.cursor_y < 24);
     assert_eq!(sr.history_size, 0);
     // The `/proc` fields: the shell's command name and the session's cwd.
-    assert!(!sr.foreground.is_empty(), "the pane's foreground is the shell: {}", sr.foreground);
+    assert!(
+        !sr.foreground.is_empty(),
+        "the pane's foreground is the shell: {}",
+        sr.foreground
+    );
     assert!(!sr.cwd.is_empty(), "the pane has a cwd");
 
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 /// The `State`/`List` liveness report carries the pane's state (the
@@ -741,10 +821,14 @@ async fn the_state_query_carries_the_pane_state() {
 
     let res = keeper_call(
         &s,
-        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -759,7 +843,9 @@ async fn the_state_query_carries_the_pane_state() {
     for _ in 0..1200 {
         if let Ok(KeeperMessage::State(x)) = keeper_call(
             &s,
-            &KeeperMessage::Read(Read { session_id: id.clone() }),
+            &KeeperMessage::Read(Read {
+                session_id: id.clone(),
+            }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -769,7 +855,9 @@ async fn the_state_query_carries_the_pane_state() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let Some(st) = st else { panic!("never got a State") };
+    let Some(st) = st else {
+        panic!("never got a State")
+    };
 
     // Geometry + liveness.
     assert_eq!((st.cols, st.rows), (80, 24));
@@ -781,10 +869,19 @@ async fn the_state_query_carries_the_pane_state() {
     assert!(st.cursor_x < 80 && st.cursor_y < 24);
     assert_eq!(st.history_size, 0);
     // The `/proc` fields: the shell's command name and the session's cwd.
-    assert!(!st.foreground.is_empty(), "the pane's foreground is the shell: {}", st.foreground);
+    assert!(
+        !st.foreground.is_empty(),
+        "the pane's foreground is the shell: {}",
+        st.foreground
+    );
     assert!(!st.cwd.is_empty(), "the pane has a cwd");
 
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 /// A natural shell exit (the shell exited on its own, not a `Kill`) is
@@ -810,10 +907,14 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
 
     let res = keeper_call(
         &s,
-        &KeeperMessage::Spawn(Spawn { session_id: id.clone(), cols: 80, rows: 24, cwd: None,
+        &KeeperMessage::Spawn(Spawn {
+            session_id: id.clone(),
+            cols: 80,
+            rows: 24,
+            cwd: None,
             command: None,
             env: None,
-            }),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -826,7 +927,10 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
     // The shell exits on its own (not a Kill — the session stays in the map).
     let _ = keeper_call(
         &s,
-        &KeeperMessage::Write(km::Write { session_id: id.clone(), data: "exit\n".to_string() }),
+        &KeeperMessage::Write(km::Write {
+            session_id: id.clone(),
+            data: "exit\n".to_string(),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await;
@@ -836,7 +940,9 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
     for _ in 0..1200 {
         if let Ok(KeeperMessage::State(st)) = keeper_call(
             &s,
-            &KeeperMessage::Read(Read { session_id: id.clone() }),
+            &KeeperMessage::Read(Read {
+                session_id: id.clone(),
+            }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -855,7 +961,11 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
     for _ in 0..1200 {
         if let Ok(KeeperMessage::SnapshotResult(x)) = keeper_call(
             &s,
-            &KeeperMessage::Snapshot(km::Snapshot { session_id: id.clone(), history_lines: None, drain_output: false }),
+            &KeeperMessage::Snapshot(km::Snapshot {
+                session_id: id.clone(),
+                history_lines: None,
+                drain_output: false,
+            }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -865,7 +975,9 @@ async fn a_natural_shell_exit_is_reported_dead_and_the_pane_still_snapshots() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    let Some(sr) = sr else { panic!("the dead pane never answered a snapshot") };
+    let Some(sr) = sr else {
+        panic!("the dead pane never answered a snapshot")
+    };
     assert!(sr.dead, "a dead pane reports dead");
     assert_eq!(sr.foreground, "", "a dead pane has no /proc/<pid>/comm");
     assert_eq!(sr.cwd, "", "a dead pane has no /proc/<pid>/cwd");
@@ -916,13 +1028,16 @@ async fn spawn_runs_the_command_and_passes_the_env() {
     )
     .await
     .unwrap();
-    assert!(matches!(res, KeeperMessage::State(_)), "spawn answers State, got {res:?}");
+    assert!(
+        matches!(res, KeeperMessage::State(_)),
+        "spawn answers State, got {res:?}"
+    );
 
     let mut seen = Vec::new();
     for _ in 0..1200 {
         let r = keeper_call(
             &socket.to_string_lossy(),
-            &KeeperMessage::Peek(Peek { session_id: id.clone() }),
+            &KeeperMessage::Peek(Peek::all(id.clone())),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -968,7 +1083,7 @@ async fn term_seen(id: &str, env: Option<Vec<(String, String)>>) -> String {
     for _ in 0..1200 {
         if let KeeperMessage::PeekResult(pr) = keeper_call(
             &socket.to_string_lossy(),
-            &KeeperMessage::Peek(Peek { session_id: id.to_string() }),
+            &KeeperMessage::Peek(Peek::all(id.to_string())),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -1020,7 +1135,11 @@ async fn a_snapshot_can_take_the_unpeeked_tail() {
             cols: 80,
             rows: 24,
             cwd: None,
-            command: Some(vec!["/bin/sh".into(), "-c".into(), "printf 'TAIL-MARK\\n'; sleep 30".into()]),
+            command: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'TAIL-MARK\\n'; sleep 30".into(),
+            ]),
             env: None,
         }),
         DEFAULT_TIMEOUT_MS,
@@ -1047,7 +1166,11 @@ async fn a_snapshot_can_take_the_unpeeked_tail() {
         async move {
             match keeper_call(
                 &s,
-                &KeeperMessage::Snapshot(km::Snapshot { session_id: id, history_lines: None, drain_output: drain }),
+                &KeeperMessage::Snapshot(km::Snapshot {
+                    session_id: id,
+                    history_lines: None,
+                    drain_output: drain,
+                }),
                 DEFAULT_TIMEOUT_MS,
             )
             .await
@@ -1067,14 +1190,23 @@ async fn a_snapshot_can_take_the_unpeeked_tail() {
     assert!(first.text.contains("TAIL-MARK"));
     // Taken once: a second drain and a Peek both come back empty.
     assert!(take(true).await.tail.is_empty());
-    match keeper_call(&s, &KeeperMessage::Peek(Peek { session_id: id.clone() }), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap()
+    match keeper_call(
+        &s,
+        &KeeperMessage::Peek(Peek::all(id.clone())),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap()
     {
         KeeperMessage::PeekResult(pr) => assert!(pr.data.is_empty() && !pr.lost),
         other => panic!("expected PeekResult, got {other:?}"),
     }
-    let _ = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: id }), DEFAULT_TIMEOUT_MS).await;
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill { session_id: id }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1115,7 +1247,10 @@ async fn a_request_line_without_a_newline_is_cut_off_at_the_cap() {
             Ok(Ok(0)) | Ok(Err(_))
         );
     }
-    assert!(dropped, "an unterminated oversized request must close the connection");
+    assert!(
+        dropped,
+        "an unterminated oversized request must close the connection"
+    );
     // And the keeper still serves.
     let res: KeeperMessage = keeper_call(
         &socket.to_string_lossy(),
@@ -1164,18 +1299,17 @@ async fn a_background_job_does_not_survive_the_shell() {
             cols: 80,
             rows: 24,
             cwd: None,
-            command: Some(vec![
-                "/bin/bash".to_string(),
-                "-c".to_string(),
-                script,
-            ]),
+            command: Some(vec!["/bin/bash".to_string(), "-c".to_string(), script]),
             env: None,
         }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
     .unwrap();
-    assert!(matches!(res, KeeperMessage::State(_)), "spawn failed: {res:?}");
+    assert!(
+        matches!(res, KeeperMessage::State(_)),
+        "spawn failed: {res:?}"
+    );
 
     let mut child_pid = 0i32;
     for _ in 0..200 {
@@ -1262,7 +1396,10 @@ async fn a_shell_inherits_no_other_sessions_pty() {
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     let masters: Vec<&String> = fds.iter().filter(|p| p.contains("ptmx")).collect();
-    assert!(masters.is_empty(), "pid {pid} holds a sibling's pty master: {masters:?}");
+    assert!(
+        masters.is_empty(),
+        "pid {pid} holds a sibling's pty master: {masters:?}"
+    );
     assert!(
         fds.iter().any(|p| p.contains("/dev/pts/")),
         "the shell still has its own tty: {fds:?}"
@@ -1270,7 +1407,9 @@ async fn a_shell_inherits_no_other_sessions_pty() {
     for id in ["inherit-a", "inherit-b"] {
         let _: KeeperMessage = keeper_call(
             &socket.to_string_lossy(),
-            &KeeperMessage::Kill(Kill { session_id: id.to_string() }),
+            &KeeperMessage::Kill(Kill {
+                session_id: id.to_string(),
+            }),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -1369,7 +1508,8 @@ async fn a_killed_keeper_ends_its_shells_even_when_a_later_one_ignores_hup() {
     );
     let _ = std::fs::remove_file(&socket);
     assert_eq!(
-        gone, 2,
+        gone,
+        2,
         "the shells of a dead keeper: hup-a={} hup-b={} alive",
         alive(normal_a),
         alive(normal_b)
@@ -1477,7 +1617,9 @@ async fn a_write_that_blocks_does_not_block_the_keeper() {
     let _ = writer.await;
     let _: Result<KeeperMessage, _> = keeper_call(
         &socket,
-        &KeeperMessage::Kill(Kill { session_id: "blocked".to_string() }),
+        &KeeperMessage::Kill(Kill {
+            session_id: "blocked".to_string(),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await;
@@ -1488,7 +1630,13 @@ async fn a_write_that_blocks_does_not_block_the_keeper() {
 
 // ---- audit hardening -------------------------------------------------------
 
-fn spawn_req(id: &str, cols: u64, rows: u64, cwd: Option<&str>, command: Option<&[&str]>) -> KeeperMessage {
+fn spawn_req(
+    id: &str,
+    cols: u64,
+    rows: u64,
+    cwd: Option<&str>,
+    command: Option<&[&str]>,
+) -> KeeperMessage {
     KeeperMessage::Spawn(Spawn {
         session_id: id.to_string(),
         cols,
@@ -1506,7 +1654,7 @@ async fn peek_for(socket: &str, id: &str, needle: &str) -> String {
     for _ in 0..1200 {
         if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
             socket,
-            &KeeperMessage::Peek(Peek { session_id: id.to_string() }),
+            &KeeperMessage::Peek(Peek::all(id.to_string())),
             DEFAULT_TIMEOUT_MS,
         )
         .await
@@ -1539,16 +1687,36 @@ async fn a_duplicate_session_id_is_refused_and_the_first_survives() {
     let socket = socket_path();
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy();
-    let first = keeper_call(&s, &spawn_req("dup", 80, 24, None, None), DEFAULT_TIMEOUT_MS).await.unwrap();
+    let first = keeper_call(
+        &s,
+        &spawn_req("dup", 80, 24, None, None),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
     let pid = pid_of(&first);
-    let err = keeper_call(&s, &spawn_req("dup", 80, 24, None, None), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap_err();
-    assert!(err.message.contains("already exists"), "got: {}", err.message);
+    let err = keeper_call(
+        &s,
+        &spawn_req("dup", 80, 24, None, None),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message.contains("already exists"),
+        "got: {}",
+        err.message
+    );
     // The original shell is still the session's, and still alive.
-    let st = keeper_call(&s, &KeeperMessage::Read(Read { session_id: "dup".into() }), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap();
+    let st = keeper_call(
+        &s,
+        &KeeperMessage::Read(Read {
+            session_id: "dup".into(),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
     match st {
         KeeperMessage::State(st) => assert!(!st.dead && st.pid == pid),
         other => panic!("expected State, got {other:?}"),
@@ -1560,11 +1728,21 @@ async fn spawn_clamps_the_size_like_resize() {
     let socket = socket_path();
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy();
-    match keeper_call(&s, &spawn_req("tiny", 1, 1, None, None), DEFAULT_TIMEOUT_MS).await.unwrap() {
+    match keeper_call(&s, &spawn_req("tiny", 1, 1, None, None), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap()
+    {
         KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (20, 5)),
         other => panic!("expected State, got {other:?}"),
     }
-    match keeper_call(&s, &spawn_req("huge", 9999, 9999, None, None), DEFAULT_TIMEOUT_MS).await.unwrap() {
+    match keeper_call(
+        &s,
+        &spawn_req("huge", 9999, 9999, None, None),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap()
+    {
         KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (500, 255)),
         other => panic!("expected State, got {other:?}"),
     }
@@ -1588,18 +1766,38 @@ async fn a_child_starts_with_sigpipe_at_its_default() {
         u64::from_str_radix(line.split_whitespace().nth(1).unwrap(), 16).unwrap()
     };
     const SIGPIPE_BIT: u64 = 1 << 12;
-    assert!(mask(&ours) & SIGPIPE_BIT != 0, "the premise: the test process ignores SIGPIPE");
+    assert!(
+        mask(&ours) & SIGPIPE_BIT != 0,
+        "the premise: the test process ignores SIGPIPE"
+    );
     keeper_call(
         &s,
-        &spawn_req("sp", 200, 24, None, Some(&["/bin/sh", "-c", "grep '^SigIgn:' /proc/self/status; sleep 30"])),
+        &spawn_req(
+            "sp",
+            200,
+            24,
+            None,
+            Some(&[
+                "/bin/sh",
+                "-c",
+                "grep '^SigIgn:' /proc/self/status; sleep 30",
+            ]),
+        ),
         DEFAULT_TIMEOUT_MS,
     )
     .await
     .unwrap();
     let text = peek_for(&s, "sp", "SigIgn:").await;
-    let line = text.lines().find(|l| l.contains("SigIgn:")).unwrap_or_else(|| panic!("no SigIgn in {text:?}"));
+    let line = text
+        .lines()
+        .find(|l| l.contains("SigIgn:"))
+        .unwrap_or_else(|| panic!("no SigIgn in {text:?}"));
     let child = u64::from_str_radix(line.split_whitespace().nth(1).unwrap().trim(), 16).unwrap();
-    assert_eq!(child & SIGPIPE_BIT, 0, "SIGPIPE must be default in the child: {line}");
+    assert_eq!(
+        child & SIGPIPE_BIT,
+        0,
+        "SIGPIPE must be default in the child: {line}"
+    );
 }
 
 #[tokio::test]
@@ -1607,12 +1805,23 @@ async fn a_chdir_failure_fails_the_spawn_and_leaves_no_session_or_zombie() {
     let socket = socket_path();
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy();
-    let err = keeper_call(&s, &spawn_req("badcwd", 80, 24, Some("/definitely/not/a/dir"), None), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap_err();
+    let err = keeper_call(
+        &s,
+        &spawn_req("badcwd", 80, 24, Some("/definitely/not/a/dir"), None),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap_err();
     assert!(err.message.contains("chdir"), "got: {}", err.message);
-    assert!(err.message.contains("/definitely/not/a/dir"), "got: {}", err.message);
-    match keeper_call(&s, &KeeperMessage::List(List {}), DEFAULT_TIMEOUT_MS).await.unwrap() {
+    assert!(
+        err.message.contains("/definitely/not/a/dir"),
+        "got: {}",
+        err.message
+    );
+    match keeper_call(&s, &KeeperMessage::List(List {}), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap()
+    {
         KeeperMessage::ListResult(lr) => assert!(lr.sessions.is_empty()),
         other => panic!("{other:?}"),
     }
@@ -1631,9 +1840,19 @@ async fn an_exec_failure_fails_the_spawn() {
     .await
     .unwrap_err();
     assert!(err.message.contains("exec"), "got: {}", err.message);
-    assert!(err.message.contains("/definitely/not/a/program"), "got: {}", err.message);
+    assert!(
+        err.message.contains("/definitely/not/a/program"),
+        "got: {}",
+        err.message
+    );
     // The keeper still works for the next spawn.
-    keeper_call(&s, &spawn_req("after", 80, 24, None, None), DEFAULT_TIMEOUT_MS).await.unwrap();
+    keeper_call(
+        &s,
+        &spawn_req("after", 80, 24, None, None),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1643,7 +1862,13 @@ async fn a_valid_cwd_is_entered() {
     let s = socket.to_string_lossy();
     keeper_call(
         &s,
-        &spawn_req("cwd", 200, 24, Some("/usr"), Some(&["/bin/sh", "-c", "echo HERE=$(pwd); sleep 30"])),
+        &spawn_req(
+            "cwd",
+            200,
+            24,
+            Some("/usr"),
+            Some(&["/bin/sh", "-c", "echo HERE=$(pwd); sleep 30"]),
+        ),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -1657,10 +1882,25 @@ async fn kill_reaps_the_shell_so_no_zombie_remains() {
     let socket = socket_path();
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy();
-    let pid = pid_of(&keeper_call(&s, &spawn_req("kz", 80, 24, None, None), DEFAULT_TIMEOUT_MS).await.unwrap());
+    let pid = pid_of(
+        &keeper_call(&s, &spawn_req("kz", 80, 24, None, None), DEFAULT_TIMEOUT_MS)
+            .await
+            .unwrap(),
+    );
     assert!(proc_exists(pid));
-    keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: "kz".into() }), DEFAULT_TIMEOUT_MS).await.unwrap();
-    assert!(!proc_exists(pid), "the killed shell must be waited on, not left a zombie");
+    keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill {
+            session_id: "kz".into(),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !proc_exists(pid),
+        "the killed shell must be waited on, not left a zombie"
+    );
 }
 
 #[tokio::test]
@@ -1668,9 +1908,13 @@ async fn killing_an_already_dead_session_succeeds_without_signalling() {
     let socket = socket_path();
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy();
-    keeper_call(&s, &spawn_req("kd", 80, 24, None, Some(&["/bin/sh", "-c", "exit 3"])), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap();
+    keeper_call(
+        &s,
+        &spawn_req("kd", 80, 24, None, Some(&["/bin/sh", "-c", "exit 3"])),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
     let dead = wait_until_async(|| async {
         matches!(
             keeper_call(&s, &KeeperMessage::Read(Read { session_id: "kd".into() }), DEFAULT_TIMEOUT_MS).await,
@@ -1679,9 +1923,27 @@ async fn killing_an_already_dead_session_succeeds_without_signalling() {
     })
     .await;
     assert!(dead, "the exit is noticed");
-    let r = keeper_call(&s, &KeeperMessage::Kill(Kill { session_id: "kd".into() }), DEFAULT_TIMEOUT_MS).await.unwrap();
+    let r = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill {
+            session_id: "kd".into(),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
     assert!(matches!(r, KeeperMessage::State(st) if st.dead));
-    assert!(keeper_call(&s, &KeeperMessage::Read(Read { session_id: "kd".into() }), DEFAULT_TIMEOUT_MS).await.is_err());
+    assert!(
+        keeper_call(
+            &s,
+            &KeeperMessage::Read(Read {
+                session_id: "kd".into()
+            }),
+            DEFAULT_TIMEOUT_MS
+        )
+        .await
+        .is_err()
+    );
 }
 
 async fn wait_until_async<F, Fut>(f: F) -> bool
@@ -1706,12 +1968,19 @@ async fn an_exited_shell_is_reaped_with_no_request_to_trigger_it() {
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy();
     let pid = pid_of(
-        &keeper_call(&s, &spawn_req("rp", 80, 24, None, Some(&["/bin/sh", "-c", "sleep 0.3"])), DEFAULT_TIMEOUT_MS)
-            .await
-            .unwrap(),
+        &keeper_call(
+            &s,
+            &spawn_req("rp", 80, 24, None, Some(&["/bin/sh", "-c", "sleep 0.3"])),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap(),
     );
     // No keeper_call from here on.
-    assert!(wait_until(|| !proc_exists(pid)).await, "the zombie must be reaped by the keeper itself");
+    assert!(
+        wait_until(|| !proc_exists(pid)).await,
+        "the zombie must be reaped by the keeper itself"
+    );
 }
 
 #[tokio::test]
@@ -1723,7 +1992,12 @@ async fn a_second_keeper_refuses_a_live_socket_and_leaves_it_working() {
     assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "got {err}");
     assert!(err.to_string().contains("already serving"), "got {err}");
     // The first is untouched.
-    let r = keeper_call(&socket.to_string_lossy(), &KeeperMessage::List(List {}), DEFAULT_TIMEOUT_MS).await;
+    let r = keeper_call(
+        &socket.to_string_lossy(),
+        &KeeperMessage::List(List {}),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
     assert!(matches!(r, Ok(KeeperMessage::ListResult(_))));
 }
 
@@ -1746,7 +2020,10 @@ async fn a_stale_socket_is_replaced_and_is_owner_only_from_the_start() {
     })
     .await;
     assert!(up, "the keeper must come up beside a stale socket");
-    assert_eq!(std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[tokio::test]
@@ -1756,4 +2033,145 @@ async fn an_overlong_socket_path_is_a_clear_error() {
     let err = keeper::serve(&k, &long).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("limit"), "got {err}");
+}
+
+/// A bounded peek answers in the compact form, never more than asked, and says
+/// when more is waiting; the original peek still answers with the whole buffer as
+/// a byte array (a daemon that predates `max_bytes` depends on it).
+#[tokio::test]
+async fn a_bounded_peek_is_chunked_compact_and_lossless_and_the_old_peek_still_works() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    let id = "bp1";
+    keeper_call(
+        &s,
+        &spawn_req(
+            id,
+            80,
+            24,
+            None,
+            Some(&[
+                "/bin/sh",
+                "-c",
+                "head -c 300000 /dev/zero | tr '\\0' 'x'; echo END_MARK; sleep 30",
+            ]),
+        ),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    // Let the 300 KB land in the keeper's buffer (not peeking meanwhile).
+    for _ in 0..400 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        if let Ok(KeeperMessage::State(_)) = keeper_call(
+            &s,
+            &KeeperMessage::Read(Read {
+                session_id: id.into(),
+            }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            // buffered_len is not on the wire; the first bounded peek below says more=true once it is full enough
+        }
+        let probe = keeper_call(
+            &s,
+            &KeeperMessage::Peek(Peek::bounded(id, 1)),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await;
+        if let Ok(KeeperMessage::PeekResult(pr)) = probe
+            && pr.more
+        {
+            // took 1 byte and more is waiting: continue below, counting that byte.
+            let mut got = pr.into_bytes().unwrap();
+            let mut chunks = 0;
+            loop {
+                let KeeperMessage::PeekResult(pr) = keeper_call(
+                    &s,
+                    &KeeperMessage::Peek(Peek::bounded(id, 64 * 1024)),
+                    DEFAULT_TIMEOUT_MS,
+                )
+                .await
+                .unwrap() else {
+                    panic!("not a peekresult")
+                };
+                assert!(pr.data.is_empty(), "the compact form carries no byte array");
+                assert!(pr.data64.is_some());
+                let more = pr.more;
+                let b = pr.into_bytes().unwrap();
+                assert!(b.len() <= 64 * 1024, "a chunk is bounded: {}", b.len());
+                got.extend(b);
+                chunks += 1;
+                if !more && String::from_utf8_lossy(&got).contains("END_MARK") {
+                    break;
+                }
+                if !more {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+            assert!(chunks >= 2, "300 KB is more than one 64 KiB chunk");
+            let xs = got.iter().filter(|&&c| c == b'x').count();
+            assert_eq!(xs, 300_000, "no byte lost or duplicated across chunks");
+            break;
+        }
+    }
+    // The original contract on the same session.
+    let KeeperMessage::PeekResult(pr) =
+        keeper_call(&s, &KeeperMessage::Peek(Peek::all(id)), DEFAULT_TIMEOUT_MS)
+            .await
+            .unwrap()
+    else {
+        panic!()
+    };
+    assert!(pr.data64.is_none() && !pr.more);
+    let _ = keeper_call(
+        &s,
+        &KeeperMessage::Kill(Kill {
+            session_id: id.into(),
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
+}
+
+/// The keeper reports how the shell ended: its exit status, or the signal.
+#[tokio::test]
+async fn a_dead_pane_reports_its_exit_status_or_signal() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    for (id, cmd, code, sig) in [
+        ("ex3", "exit 3", Some(3i64), None),
+        ("ex0", "exit 0", Some(0), None),
+        ("exk", "kill -9 $$", None, Some(9i32)),
+    ] {
+        keeper_call(
+            &s,
+            &spawn_req(id, 80, 24, None, Some(&["/bin/sh", "-c", cmd])),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .unwrap();
+        let mut seen = None;
+        for _ in 0..400 {
+            if let Ok(KeeperMessage::State(st)) = keeper_call(
+                &s,
+                &KeeperMessage::Read(Read {
+                    session_id: id.into(),
+                }),
+                DEFAULT_TIMEOUT_MS,
+            )
+            .await
+                && st.dead
+            {
+                seen = Some(st);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let st = seen.unwrap_or_else(|| panic!("{id} never reported dead"));
+        assert_eq!((st.exit_code, st.exit_signal), (code, sig), "{id}");
+    }
 }

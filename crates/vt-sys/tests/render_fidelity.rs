@@ -2,7 +2,7 @@
 //! characters, combining marks, hyperlinks. The render is parsed back to a
 //! plain grid and compared with what a terminal would show.
 
-use ldmux_vt_sys::{snapshot, Cell, RenderState, Terminal};
+use ldmux_vt_sys::{Cell, RenderState, Terminal, snapshot};
 
 fn rows_of(bytes: &[u8], cols: u16, rows: u16) -> (Vec<Vec<Cell>>, String) {
     let mut t = Terminal::new(cols, rows).unwrap();
@@ -39,7 +39,13 @@ fn width(s: &str) -> usize {
     s.chars()
         .map(|c| match c as u32 {
             0x0300..=0x036F => 0, // combining
-            0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0x1F300..=0x1FAFF => 2,
+            0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0x1F300..=0x1FAFF => 2,
             _ => 1,
         })
         .sum()
@@ -52,7 +58,11 @@ fn width(s: &str) -> usize {
 fn unwritten_cells_between_writes_keep_their_columns() {
     let (_, text) = rows_of(b"a\x1b[5Cb", 20, 2);
     let line0 = text.split('\n').next().unwrap();
-    assert_eq!(plain(line0).chars().take(7).collect::<String>(), "a     b", "line: {line0:?}");
+    assert_eq!(
+        plain(line0).chars().take(7).collect::<String>(),
+        "a     b",
+        "line: {line0:?}"
+    );
 }
 
 #[test]
@@ -66,7 +76,11 @@ fn a_cleared_region_then_drawn_text_keeps_position() {
 
 #[test]
 fn every_row_keeps_its_columns_and_never_exceeds_the_grid() {
-    let (_, text) = rows_of("a\x1b[5Cb\r\n\u{4e2d}\u{6587}x\r\ne\u{301}y".as_bytes(), 20, 4);
+    let (_, text) = rows_of(
+        "a\x1b[5Cb\r\n\u{4e2d}\u{6587}x\r\ne\u{301}y".as_bytes(),
+        20,
+        4,
+    );
     let lines: Vec<String> = text.split('\n').map(plain).collect();
     assert_eq!(lines[0], "a     b");
     assert_eq!(lines[1], "\u{4e2d}\u{6587}x");
@@ -82,7 +96,10 @@ fn every_row_keeps_its_columns_and_never_exceeds_the_grid() {
 fn wide_characters_take_two_columns_and_no_spacer_text() {
     let (cells, text) = rows_of("\u{4e2d}\u{6587}x".as_bytes(), 10, 1);
     let line = plain(text.split('\n').next().unwrap());
-    assert_eq!(line, "\u{4e2d}\u{6587}x", "no stray cell text for the spacer halves");
+    assert_eq!(
+        line, "\u{4e2d}\u{6587}x",
+        "no stray cell text for the spacer halves"
+    );
     assert_eq!(width(&line), 5);
     // the cell list is one per column; the spacer after a wide char carries no text
     assert_eq!(cells[0].len(), 10);
@@ -109,7 +126,9 @@ fn a_style_ending_a_row_does_not_bleed_into_the_next() {
     let lines: Vec<&str> = text.split('\n').collect();
     // Interpret the stream: the second line starts from a clean state iff the
     // first line leaves SGR reset.
-    let first_end_reset = lines[0].rfind("\x1b[0m").is_some_and(|i| lines[0][i..].starts_with("\x1b[0m") && !lines[0][i + 4..].contains("\x1b["));
+    let first_end_reset = lines[0].rfind("\x1b[0m").is_some_and(|i| {
+        lines[0][i..].starts_with("\x1b[0m") && !lines[0][i + 4..].contains("\x1b[")
+    });
     assert!(first_end_reset, "row 0 must end reset, got {:?}", lines[0]);
 }
 
@@ -122,4 +141,61 @@ fn styled_blanks_are_kept_and_plain_trailing_blanks_are_not_emitted() {
     assert_eq!(plain(line), "hi   ", "the styled blanks stay: {line:?}");
     let (_, text) = rows_of(b"hi", 10, 1);
     assert_eq!(text, "hi", "trailing default blanks are not emitted");
+}
+
+// ---- the snapshot replay reproduces underline style and colour ----
+
+/// Run `bytes` through engine A, render the snapshot, replay it into engine B, and
+/// return both grids. This is the same engine → SGR → engine path the daemon's
+/// parity gate uses, minus tmux.
+fn replay(bytes: &[u8], cols: u16, rows: u16) -> (Vec<Vec<Cell>>, Vec<Vec<Cell>>, String) {
+    let (a, text) = rows_of(bytes, cols, rows);
+    let mut b = Terminal::new(cols, rows).unwrap();
+    // The snapshot is `\n`-joined; a terminal needs CR as well to return to column 0.
+    b.write(text.replace('\n', "\r\n").as_bytes());
+    let rs = RenderState::new().unwrap();
+    rs.update(&b).unwrap();
+    let bc: Vec<Vec<Cell>> = (0..rs.rows()).map(|y| rs.row(y)).collect();
+    (a, bc, text)
+}
+
+#[test]
+fn underline_styles_survive_the_replay() {
+    let input = "\x1b[4mS\x1b[0m \x1b[4:2mD\x1b[0m \x1b[4:3mC\x1b[0m \x1b[4:4mO\x1b[0m \x1b[4:5mH\x1b[0m end";
+    let (a, b, text) = replay(input.as_bytes(), 30, 2);
+    let kinds: Vec<u32> = a[0].iter().map(|c| c.style.underline_kind).collect();
+    assert_eq!(kinds[0], 1);
+    assert_eq!(kinds[2], 2);
+    assert_eq!(kinds[4], 3);
+    assert_eq!(kinds[6], 4);
+    assert_eq!(kinds[8], 5);
+    assert!(
+        text.contains("4:3"),
+        "the snapshot must spell the style: {text:?}"
+    );
+    assert_eq!(
+        a, b,
+        "engine A and its replay in engine B must agree cell for cell"
+    );
+}
+
+#[test]
+fn underline_colour_survives_the_replay_in_both_forms() {
+    let input = "\x1b[4:3;58;2;255;64;0mR\x1b[0m \x1b[4;58;5;12mP\x1b[0m \x1b[58;2;1;2;3mN\x1b[0m";
+    let (a, b, text) = replay(input.as_bytes(), 20, 2);
+    assert!(
+        text.contains("58;2;255;64;0") && text.contains("58;5;12"),
+        "{text:?}"
+    );
+    assert!(a[0][0].style.underline.is_some());
+    // A colour on a cell that is not underlined is still part of its style.
+    assert!(a[0][4].style.underline.is_some());
+    assert_eq!(a, b);
+}
+
+#[test]
+fn a_wide_glyph_with_a_styled_underline_replays_exactly() {
+    let input = "\x1b[4:3;58;2;9;9;9m\u{4f60}\u{597d}\x1b[0m\u{1F468}\u{200D}\u{1F469}x";
+    let (a, b, _) = replay(input.as_bytes(), 20, 2);
+    assert_eq!(a, b);
 }

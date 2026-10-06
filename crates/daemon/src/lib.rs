@@ -24,22 +24,21 @@
 
 pub mod auth;
 pub mod clipboard_policy;
-pub mod cwd;
 pub mod control_socket;
-pub mod remote;
+pub mod cwd;
 pub mod daemon;
 pub mod daemon_lock;
 pub mod desktop;
-pub mod fake_keeper;
-pub mod stream;
+pub mod desktop_inventory;
 pub mod exec;
+pub mod fake_keeper;
 pub mod keeper_supervisor;
+pub mod ownership;
 pub mod pairing;
 pub mod proc;
 pub mod qr;
 pub mod registry;
+pub mod remote;
 pub mod sanitize;
-pub mod ownership;
-pub mod desktop_inventory;
-
-
+pub mod stream;
+pub mod ws;

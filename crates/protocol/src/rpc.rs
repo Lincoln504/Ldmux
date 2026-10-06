@@ -42,7 +42,6 @@ pub mod method {
     pub const REMOTE_INFO: &str = "remote_info";
 }
 
-
 /// A device identity, so two devices can be told apart in a message about a
 /// session they both want. It is **not** an account and **not** a security
 /// boundary: it is a stable per-install string, and nothing is authorised by it.
@@ -116,6 +115,21 @@ pub struct SessionRecord {
     /// shell die" has an answer in `ldmux list` and in the journal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_reason: Option<String>,
+
+    /// The signal that killed the shell, when one did (`exit_code` is then absent).
+    /// `exit_code` and this are the shell's own ending, from the keeper's `waitpid`;
+    /// neither is set for a session someone killed or that the keeper lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_signal: Option<i32>,
+
+    /// What kind of ending it was, as a closed set:
+    /// `"exited"` (the shell ended itself), `"killed"` (`kill`), `"closed"`
+    /// (closed from a client), `"keeper_lost"` (the keeper came back without it),
+    /// `"window_closed"` (its desk window was closed). Absent while running and
+    /// for records written before this existed. `ended_reason` is the same fact
+    /// in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_kind: Option<String>,
 }
 
 /// A session as advertised to remote clients: the registry record minus the
@@ -148,6 +162,17 @@ pub struct SessionInfo {
     /// Why it ended, when it has. Absent while it is running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_reason: Option<String>,
+
+    /// The shell's exit status, when it exited by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// The signal that killed the shell, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_signal: Option<i32>,
+    /// `exited | killed | closed | keeper_lost | window_closed` (see
+    /// [`SessionRecord::ended_kind`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_kind: Option<String>,
 }
 
 /// The desktop inventory: what the launcher shows *before* a terminal.
@@ -306,6 +331,9 @@ mod tests {
             owner: None,
             live_workspace: None,
             ended_reason: Some("its shell exited".into()),
+            exit_code: None,
+            exit_signal: None,
+            ended_kind: None,
         };
         let s = serde_json::to_string(&info).unwrap();
         assert!(s.contains(r#""endedReason":"its shell exited""#), "got {s}");
@@ -313,7 +341,10 @@ mod tests {
         live.status = "running".into();
         live.ended_reason = None;
         let s = serde_json::to_string(&live).unwrap();
-        assert!(!s.contains("endedReason"), "a running shell has no reason: {s}");
+        assert!(
+            !s.contains("endedReason"),
+            "a running shell has no reason: {s}"
+        );
         // Round-trips, so an older writer and a newer reader agree.
         let back: SessionInfo = serde_json::from_str(&s).unwrap();
         assert_eq!(back, live);
@@ -336,6 +367,8 @@ mod tests {
             live_workspace: None,
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(!s.contains("exitCode"), "exitCode must be absent: {s}");
@@ -365,6 +398,8 @@ mod tests {
             live_workspace: None,
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""exitCode":130"#), "got {s}");

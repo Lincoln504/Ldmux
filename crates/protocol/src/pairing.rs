@@ -51,8 +51,11 @@ pub fn pairing_link(p: &Pairing) -> Result<String, PairingError> {
     if let Some(problem) = pairing_problem(p) {
         return Err(PairingError(problem));
     }
-    let mut fields: Vec<(&'static str, String)> =
-        vec![("v", PAIRING_VERSION.to_string()), ("host", enc(&p.host)), ("token", enc(&p.token))];
+    let mut fields: Vec<(&'static str, String)> = vec![
+        ("v", PAIRING_VERSION.to_string()),
+        ("host", enc(&p.host)),
+        ("token", enc(&p.token)),
+    ];
     if !p.name.is_empty() {
         fields.push(("name", enc(&p.name)));
     }
@@ -127,7 +130,11 @@ pub fn split_host(host: &str) -> Option<(String, u16)> {
     if host.starts_with('[') {
         let close = host.find(']')?;
         let inner = &host[1..close];
-        if inner.is_empty() || !inner.bytes().all(|b| b.is_ascii_hexdigit() || b == b'.' || b == b':') {
+        if inner.is_empty()
+            || !inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'.' || b == b':')
+        {
             return None;
         }
         let after = &host[close + 1..];
@@ -140,9 +147,7 @@ pub fn split_host(host: &str) -> Option<(String, u16)> {
     let port_s = &host[idx + 1..];
     // The unbracketed address may not contain a colon (the TS regex
     // `[^:[\]]+`): a bare IPv6 like fd7a::1:7625 is not "address:port".
-    if addr.is_empty()
-        || addr.bytes().any(|b| b == b']' || b == b':')
-    {
+    if addr.is_empty() || addr.bytes().any(|b| b == b']' || b == b':') {
         return None;
     }
     Some((addr.to_string(), parse_port(port_s)?))
@@ -152,23 +157,35 @@ fn pairing_problem(p: &Pairing) -> Option<String> {
     // `None` from split_host means a host the app would refuse, not a
     // non-problem: the TS returns an error string there.
     let Some(hp) = split_host(&p.host) else {
-        return Some(format!("pairing host must be address:port, got {}", serde_json::to_string(&p.host).unwrap()));
+        return Some(format!(
+            "pairing host must be address:port, got {}",
+            serde_json::to_string(&p.host).unwrap()
+        ));
     };
     if !is_tailnet_or_loopback(&hp.0) {
-        return Some(format!("pairing host must be a tailnet or loopback address, got {}", hp.0));
+        return Some(format!(
+            "pairing host must be a tailnet or loopback address, got {}",
+            hp.0
+        ));
     }
     if !is_token(&p.token) {
         return Some("pairing token must be 64 lowercase hex characters".to_string());
     }
     let name_units: usize = p.name.chars().count();
-    if name_units > 64 || p.name.chars().any(|c| (0x00u32..=0x1f).contains(&(c as u32)) || c as u32 == 0x7f) {
+    if name_units > 64
+        || p.name
+            .chars()
+            .any(|c| (0x00u32..=0x1f).contains(&(c as u32)) || c as u32 == 0x7f)
+    {
         return Some("pairing name must be at most 64 printable characters".to_string());
     }
     None
 }
 
 fn is_token(t: &str) -> bool {
-    t.len() == 64 && t.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    t.len() == 64
+        && t.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn parse_port(s: &str) -> Option<u16> {
@@ -258,12 +275,10 @@ mod tests {
     fn fixture() -> Fixture {
         // One corpus, read by both surviving sides: the app's PairingTest and
         // this one (the TS test went with the TS tree at D4).
-        let raw = fs::read_to_string(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/test/fixtures/pairing-links.json"
-            ),
-        )
+        let raw = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test/fixtures/pairing-links.json"
+        ))
         .unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
         Fixture {
@@ -301,7 +316,10 @@ mod tests {
         let f = fixture();
         for iv in &f.invalid {
             let link = iv.as_str().unwrap();
-            assert!(parse_pairing_link(link).is_none(), "expected refusal of {link}");
+            assert!(
+                parse_pairing_link(link).is_none(),
+                "expected refusal of {link}"
+            );
         }
     }
 
@@ -322,11 +340,23 @@ mod tests {
     #[test]
     fn the_cli_never_makes_a_link_the_app_would_refuse() {
         let token = "0".repeat(64);
-        let p = Pairing { host: "192.168.1.5:7625".into(), token: token.clone(), name: "".into() };
+        let p = Pairing {
+            host: "192.168.1.5:7625".into(),
+            token: token.clone(),
+            name: "".into(),
+        };
         assert!(pairing_link(&p).is_err(), "LAN host must be refused");
-        let p = Pairing { host: "100.127.119.54".into(), token: token.clone(), name: "".into() };
+        let p = Pairing {
+            host: "100.127.119.54".into(),
+            token: token.clone(),
+            name: "".into(),
+        };
         assert!(pairing_link(&p).is_err(), "missing :port must be refused");
-        let p = Pairing { host: "100.127.119.54:7625".into(), token: "short".into(), name: "".into() };
+        let p = Pairing {
+            host: "100.127.119.54:7625".into(),
+            token: "short".into(),
+            name: "".into(),
+        };
         assert!(pairing_link(&p).is_err(), "short token must be refused");
     }
 

@@ -41,7 +41,8 @@ fn our_cells(corpus: &[u8]) -> Vec<Vec<Cell>> {
     let mut term = Terminal::new(COLS, ROWS).expect("the engine allocates");
     term.write(corpus);
     let rs = RenderState::new().expect("the render state allocates");
-    rs.update(&term).expect("the render state updates from the terminal");
+    rs.update(&term)
+        .expect("the render state updates from the terminal");
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for y in 0..rs.rows() {
         rows.push(rs.row(y));
@@ -61,7 +62,10 @@ fn normalize(rows: Vec<Vec<Cell>>, width: usize) -> Vec<Vec<Cell>> {
     rows.into_iter()
         .map(|mut row| {
             while row.len() < width {
-                row.push(Cell { text: String::new(), style: BLANK });
+                row.push(Cell {
+                    text: String::new(),
+                    style: BLANK,
+                });
             }
             for c in row.iter_mut() {
                 if c.text == " " && c.style == BLANK {
@@ -82,11 +86,15 @@ fn golden_corpus_cells_match_the_reference_grids() {
         .filter(|p| p.extension().is_some_and(|x| x == "bin"))
         .collect();
     corpora.sort();
-    assert!(corpora.len() >= 7, "the corpus is missing files: {corpora:?}");
+    assert!(
+        corpora.len() >= 7,
+        "the corpus is missing files: {corpora:?}"
+    );
     for bin in corpora {
         let name = bin.file_stem().unwrap().to_string_lossy().into_owned();
-        let golden = std::fs::read_to_string(bin.with_extension("capture"))
-            .unwrap_or_else(|e| panic!("{name}: golden missing ({e}); run scripts/regen_parity_golden.sh"));
+        let golden = std::fs::read_to_string(bin.with_extension("capture")).unwrap_or_else(|e| {
+            panic!("{name}: golden missing ({e}); run scripts/regen_parity_golden.sh")
+        });
         let corpus = std::fs::read(&bin).unwrap();
         let want = normalize(sgrep::parse(&golden, COLS as usize), COLS as usize);
         let got = normalize(our_cells(&corpus), COLS as usize);
@@ -105,19 +113,34 @@ fn golden_corpus_cells_match_the_reference_grids() {
 
 #[test]
 fn round_trip_render_then_parse_is_identity() {
-    use ldmux_vt_sys::{sgr::BLANK, StyleColor};
+    use ldmux_vt_sys::{StyleColor, sgr::BLANK};
 
     // A synthetic content row exercising every branch of both sides:
     // plain, bold, underline, 256-colour, 24-bit colour, then back to plain.
-    let mut bold = Cell { text: "B".into(), style: BLANK };
+    let mut bold = Cell {
+        text: "B".into(),
+        style: BLANK,
+    };
     bold.style.bold = true;
-    let mut ul = Cell { text: "U".into(), style: BLANK };
+    let mut ul = Cell {
+        text: "U".into(),
+        style: BLANK,
+    };
     ul.style.underline_kind = 1;
-    let mut pal = Cell { text: "C".into(), style: BLANK };
+    let mut pal = Cell {
+        text: "C".into(),
+        style: BLANK,
+    };
     pal.style.fg = Some(StyleColor::Palette(123));
-    let mut rgb = Cell { text: "D".into(), style: BLANK };
+    let mut rgb = Cell {
+        text: "D".into(),
+        style: BLANK,
+    };
     rgb.style.fg = Some(StyleColor::Rgb(255, 128, 0));
-    let plain = Cell { text: "E".into(), style: BLANK };
+    let plain = Cell {
+        text: "E".into(),
+        style: BLANK,
+    };
     let row = vec![plain.clone(), bold, ul, pal, rgb, plain];
     let width = 8;
 
@@ -127,10 +150,6 @@ fn round_trip_render_then_parse_is_identity() {
     let parsed = sgrep::parse(&rendered, width);
     assert_eq!(parsed.len(), 1, "one row");
     for x in 0..row.len() {
-        assert_eq!(
-            &parsed[0][x],
-            &row[x],
-            "cell {x} — rendered: {rendered:?}"
-        );
+        assert_eq!(&parsed[0][x], &row[x], "cell {x} — rendered: {rendered:?}");
     }
 }

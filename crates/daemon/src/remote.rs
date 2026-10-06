@@ -35,21 +35,30 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures_util::stream::StreamExt;
-use futures_util::SinkExt;
 use ldmux_protocol::frames::{encode_frame, t as ft};
 use ldmux_protocol::messages::PROTOCOL_VERSION;
 use ldmux_protocol::net::is_tailnet_or_loopback;
 use ldmux_protocol::rpc::{DeviceInfo, SessionOwner, SessionRecord};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::Message;
+
+use crate::ws::{Incoming, Limits, WsReader, WsWriter};
 
 use crate::daemon::now_ms;
-use crate::stream::{relock, PaneStream, StreamSubscriber};
+use crate::stream::{PaneStream, StreamSubscriber, relock};
 
-/// The WS stream type (`accept_async` returns this).
-type WsStream = tokio_tungstenite::WebSocketStream<TcpStream>;
+/// The two halves of an upgraded connection, over any byte stream (the tailnet
+/// TCP socket and the local Unix socket share one connection loop).
+type Rd = Box<dyn AsyncRead + Send + Unpin>;
+type Wr = Box<dyn AsyncWrite + Send + Unpin>;
+type WsRead = WsReader<Rd>;
+type WsWrite = WsWriter<Wr>;
+
+/// One outbound WebSocket message.
+enum Wire<'a> {
+    Text(&'a str),
+    Binary(&'a [u8]),
+}
 
 /// The daemon handle shared with the connection tasks.
 type DaemonArc = Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>;
@@ -69,6 +78,18 @@ const MAX_PENDING_BYTES: usize = 1024 * 1024;
 /// Output coalescing window, and the size that flushes it early.
 const OUTPUT_FLUSH_MS: u64 = 8;
 const OUTPUT_FLUSH_BYTES: usize = 4 * 1024;
+/// How much queued snapshot / scrollback JSON a connection may be carrying, on top
+/// of [`WS_BACKLOG_BYTES`] of output, before output is refused too. A history page
+/// is legitimately large (20 000 lines is a few MiB of JSON) and live output
+/// correctly queues behind it, so the allowance covers one; what it bounds is a
+/// link that is not draining *anything*.
+const SNAPSHOT_ALLOWANCE_BYTES: usize = 4 * 1024 * 1024;
+/// A scrollback page is served at most this often, and not while the previous
+/// page (or any snapshot) is still more than [`WS_BACKLOG_BYTES`] from the wire.
+const SCROLLBACK_MIN_INTERVAL_MS: u64 = 200;
+/// How long an in-place resync, or a deferred scrollback page, waits for the link
+/// to drain before the connection is declared stuck and closed.
+const DRAIN_WAIT_MS: u64 = 10_000;
 /// Unsent output on one socket past this means the link, not the terminal, is
 /// behind — answer `resync` instead of building a history the client cannot show.
 const WS_BACKLOG_BYTES: usize = 64 * 1024;
@@ -147,8 +168,50 @@ enum Out {
     /// A JSON control message (flushes pending output first, so it cannot
     /// overtake output it should follow).
     Json(String),
+    /// The pane's picture on this connection is stale (output was dropped for a
+    /// slow link, or the keeper lost some): a client that advertised
+    /// `inplaceResync` gets a fresh snapshot on this socket; any other gets the
+    /// legacy `error`/`resync`, and reconnects.
+    Resync(String),
+    /// The session is over: tell the client what ended it (`session_ended`) if it
+    /// advertised `sessionEnded`, else the legacy `resync`.
+    Ended,
     /// Close the connection (the sweep, or `stop`).
     Close,
+}
+
+/// What a client said it understands, in `hello.features` (or `attach.features`).
+/// A client that says nothing gets exactly the messages it always got.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct Features {
+    /// "inplaceResync": a stale picture is repaired with a fresh `caps`+`snapshot`
+    /// (the snapshot carries `"resync": true`) on the same socket.
+    inplace_resync: bool,
+    /// "sessionEnded": the end of a session is a `session_ended` message, and a
+    /// recently ended session can be attached to for its final screen.
+    session_ended: bool,
+}
+
+impl Features {
+    fn from_json(v: &serde_json::Value) -> Option<Features> {
+        let list = v.get("features")?.as_array()?;
+        let has = |n: &str| list.iter().any(|x| x.as_str() == Some(n));
+        Some(Features {
+            inplace_resync: has("inplaceResync"),
+            session_ended: has("sessionEnded"),
+        })
+    }
+}
+
+/// Which snapshot a connection is being sent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapKind {
+    /// The visible screen (attach, resize).
+    Screen,
+    /// A scrollback page (`history: true`).
+    History,
+    /// A repair of a stale picture (`resync: true`).
+    Resync,
 }
 
 /// The connection's mutable state, shared between the reader task and the
@@ -171,7 +234,41 @@ struct ConnInner {
     pending: Vec<u8>,
     pending_bytes: usize,
     resyncing: bool,
-    last_seen_ms: u64,
+    /// Monotonic: a wall-clock step must not reap a healthy connection.
+    last_seen: std::time::Instant,
+    features: Features,
+    /// An in-place resync is waiting for the link to drain (one at a time).
+    resync_task: bool,
+    /// When the last scrollback page was served, and the newest request that is
+    /// waiting its turn (only the newest matters: it is where the user is now).
+    last_scrollback: Option<std::time::Instant>,
+    deferred_scrollback: Option<u64>,
+    scrollback_task: bool,
+}
+
+impl ConnInner {
+    fn new() -> Self {
+        Self {
+            disposed: false,
+            live: false,
+            attach_gen: 0,
+            session_id: None,
+            record: None,
+            stream: None,
+            unsubscribe: None,
+            sub_id: None,
+            device: None,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            resyncing: false,
+            last_seen: std::time::Instant::now(),
+            features: Features::default(),
+            resync_task: false,
+            last_scrollback: None,
+            deferred_scrollback: None,
+            scrollback_task: false,
+        }
+    }
 }
 
 /// A live connection: the outbound channel, the shared state, and the count of
@@ -204,6 +301,12 @@ impl ConnShared {
         }
     }
 
+    /// Everything produced for this socket and not yet written: pane output and
+    /// control JSON (snapshots, scrollback pages, lists) together.
+    fn backlog_bytes(&self) -> usize {
+        self.outstanding.load(Ordering::Relaxed) + self.queued_json.load(Ordering::Relaxed)
+    }
+
     fn send_error(&self, code: &str, message: &str) {
         self.send_json(&serde_json::json!({
             "type": "error", "code": code, "message": message
@@ -221,63 +324,34 @@ pub(crate) struct Shared {
     stopped: AtomicBool,
     /// One permit per connection being served (see [`MAX_CONNECTIONS`]).
     slots: Arc<tokio::sync::Semaphore>,
+    /// Connection ids, across every listener (the tailnet socket and the local
+    /// one share the `conns` table, so their ids must not collide).
+    next_conn: std::sync::atomic::AtomicU64,
+    /// The claim/idle sweep, which walks `conns`.
+    sweep: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-/// The remote server: the phone-facing WebSocket endpoint.
-pub struct RemoteServer {
-    cfg: RemoteConfig,
-    /// The port actually bound, which is `cfg.port` unless that was 0.
-    bound_port: u16,
-    shared: Option<Arc<Shared>>,
-    accept: Option<tokio::task::JoinHandle<()>>,
-    sweep: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl RemoteServer {
-    pub fn new(cfg: RemoteConfig) -> Self {
-        Self {
-            bound_port: cfg.port,
-            cfg,
-            shared: None,
-            accept: None,
-            sweep: None,
-        }
-    }
-
-    /// Bind the WS server on the tailnet address and begin serving.
-    pub async fn start(&mut self, daemon_arc: &DaemonArc) -> Result<(String, u16), String> {
-        let addr = format!("{}:{}", self.cfg.hostname, self.cfg.port);
-        // Refused here, at the one place that listens (the TS `start` check).
-        if !is_tailnet_or_loopback(&self.cfg.hostname) {
-            return Err(format!(
-                "refusing to listen on {}: not a tailnet or loopback address",
-                self.cfg.hostname
-            ));
-        }
-        let listener = TcpListener::bind(&addr)
-            .await
-            .map_err(|e| format!("bind {addr}: {e}"))?;
-        // The port the kernel actually gave us. A configured port of 0 means
-        // "any free one", so the configured number is not the answer to where
-        // this is listening — and reporting 0 to a pairing client would send the
-        // phone nowhere. It is also what lets a test ask for a port nobody else
-        // can have, rather than picking a number and hoping.
-        self.bound_port = listener
-            .local_addr()
-            .map(|a| a.port())
-            .unwrap_or(self.cfg.port);
+impl Shared {
+    /// The connection table and its sweep, for listeners to serve into. Built once
+    /// per daemon so that every way in (the tailnet WebSocket, the local attach
+    /// socket) is one population: a claim is held by a connection from either,
+    /// and the sweep that frees unbacked claims has to see both.
+    pub(crate) fn new(
+        daemon: DaemonArc,
+        token: String,
+        idle_ms: u64,
+        send_timeout_ms: u64,
+    ) -> Arc<Shared> {
         let shared = Arc::new(Shared {
             conns: Mutex::new(HashMap::new()),
-            daemon: daemon_arc.clone(),
-            token: self.cfg.token.clone(),
-            idle_ms: self.cfg.idle_ms,
-            send_timeout_ms: self.cfg.send_timeout_ms,
+            daemon,
+            token,
+            idle_ms,
+            send_timeout_ms,
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
-        });
-        let accept_shared = shared.clone();
-        let accept = tokio::spawn(async move {
-            accept_loop(listener, accept_shared).await;
+            next_conn: std::sync::atomic::AtomicU64::new(1),
+            sweep: Mutex::new(None),
         });
         let sweep_shared = shared.clone();
         let sweep = tokio::spawn(async move {
@@ -302,9 +376,89 @@ impl RemoteServer {
                 }
             }
         });
+        *relock(&shared.sweep) = Some(sweep);
+        shared
+    }
+
+    /// Stop serving: mark stopped, tell every connection to close, end the sweep.
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        for c in relock(&self.conns).values() {
+            let _ = c.tx.send(Out::Close);
+        }
+        if let Some(h) = relock(&self.sweep).take() {
+            h.abort();
+        }
+    }
+}
+
+/// The remote server: the phone-facing WebSocket endpoint.
+pub struct RemoteServer {
+    cfg: RemoteConfig,
+    /// The port actually bound, which is `cfg.port` unless that was 0.
+    bound_port: u16,
+    shared: Option<Arc<Shared>>,
+    /// The daemon built `shared` (and stops it); otherwise this server did.
+    shared_is_external: bool,
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RemoteServer {
+    pub fn new(cfg: RemoteConfig) -> Self {
+        Self {
+            bound_port: cfg.port,
+            cfg,
+            shared: None,
+            shared_is_external: false,
+            accept: None,
+        }
+    }
+
+    /// Serve into a connection table the daemon owns (shared with the local
+    /// attach socket) instead of making one.
+    pub(crate) fn with_shared(mut self, shared: Arc<Shared>) -> Self {
+        self.shared = Some(shared);
+        self.shared_is_external = true;
+        self
+    }
+
+    /// Bind the WS server on the tailnet address and begin serving.
+    pub async fn start(&mut self, daemon_arc: &DaemonArc) -> Result<(String, u16), String> {
+        let addr = format!("{}:{}", self.cfg.hostname, self.cfg.port);
+        // Refused here, at the one place that listens (the TS `start` check).
+        if !is_tailnet_or_loopback(&self.cfg.hostname) {
+            return Err(format!(
+                "refusing to listen on {}: not a tailnet or loopback address",
+                self.cfg.hostname
+            ));
+        }
+        let listener = TcpListener::bind(&addr)
+            .await
+            .map_err(|e| format!("bind {addr}: {e}"))?;
+        // The port the kernel actually gave us. A configured port of 0 means
+        // "any free one", so the configured number is not the answer to where
+        // this is listening — and reporting 0 to a pairing client would send the
+        // phone nowhere. It is also what lets a test ask for a port nobody else
+        // can have, rather than picking a number and hoping.
+        self.bound_port = listener
+            .local_addr()
+            .map(|a| a.port())
+            .unwrap_or(self.cfg.port);
+        let shared = match &self.shared {
+            Some(s) => s.clone(),
+            None => Shared::new(
+                daemon_arc.clone(),
+                self.cfg.token.clone(),
+                self.cfg.idle_ms,
+                self.cfg.send_timeout_ms,
+            ),
+        };
+        let accept_shared = shared.clone();
+        let accept = tokio::spawn(async move {
+            accept_loop(listener, accept_shared).await;
+        });
         self.shared = Some(shared);
         self.accept = Some(accept);
-        self.sweep = Some(sweep);
         Ok((self.cfg.hostname.clone(), self.bound_port))
     }
 
@@ -313,29 +467,20 @@ impl RemoteServer {
         self.bound_port
     }
 
-    /// Stop the server: mark stopped, tell every connection to close.
-    /// The connections, for the daemon's maintenance loop to push through.
-    pub(crate) fn shared(&self) -> Option<Arc<Shared>> {
-        self.shared.clone()
-    }
-
     /// The remote's live state, for tests.
     pub fn is_listening(&self) -> bool {
         self.shared.is_some()
     }
 
     pub fn stop(&mut self) {
-        if let Some(shared) = &self.shared {
-            shared.stopped.store(true, Ordering::Relaxed);
-            let conns = crate::stream::relock(&shared.conns);
-            for c in conns.values() {
-                let _ = c.tx.send(Out::Close);
-            }
+        // A table the daemon owns outlives this listener (the local attach socket
+        // still serves into it); one this server made goes with it.
+        if !self.shared_is_external
+            && let Some(shared) = &self.shared
+        {
+            shared.stop();
         }
         if let Some(h) = self.accept.take() {
-            h.abort();
-        }
-        if let Some(h) = self.sweep.take() {
             h.abort();
         }
     }
@@ -349,7 +494,6 @@ impl Drop for RemoteServer {
 
 /// The accept loop: auth at the upgrade, then one task per connection.
 async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
-    let mut conn_id: u64 = 0;
     loop {
         if shared.stopped.load(Ordering::Relaxed) {
             break;
@@ -379,7 +523,7 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         // Keystroke latency (Nagle) and dead-peer detection (keepalive): see
         // [`tune_socket`].
         tune_socket(&stream);
-        conn_id += 1;
+        let conn_id = shared.next_conn.fetch_add(1, Ordering::Relaxed);
         let shared = shared.clone();
         // Everything past the cheap peer check runs on its own task. The head
         // read can block for its full deadline, and doing the pre-auth work
@@ -390,6 +534,75 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             drop(permit);
         });
     }
+}
+
+/// Serve the local attach socket: the same WebSocket protocol, the same
+/// connection loop, over a Unix socket the desk attach client uses so a window
+/// needs neither the tailnet nor the token.
+///
+/// What stands in for the bearer token is the kernel: the socket is 0600 in the
+/// private state directory *and* every connection's peer credentials
+/// (`SO_PEERCRED`) must carry this daemon's uid, so a stray permission or a
+/// handed-over descriptor still cannot let another user in.
+pub(crate) fn serve_local(
+    listener: tokio::net::UnixListener,
+    shared: Arc<Shared>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let me = nix::unistd::getuid().as_raw();
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(e) => {
+                    if shared.stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    eprintln!("ldmuxd: local attach accept: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            match stream.peer_cred() {
+                Ok(c) if c.uid() == me => {}
+                other => {
+                    eprintln!(
+                        "ldmuxd: local attach: refused a peer that is not uid {me}: {other:?}"
+                    );
+                    continue;
+                }
+            }
+            let Ok(permit) = shared.slots.clone().try_acquire_owned() else {
+                eprintln!(
+                    "ldmuxd: local attach refused: {MAX_CONNECTIONS} connections already open"
+                );
+                continue;
+            };
+            let conn_id = shared.next_conn.fetch_add(1, Ordering::Relaxed);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                serve_local_conn(stream, shared, conn_id).await;
+                drop(permit);
+            });
+        }
+    })
+}
+
+async fn serve_local_conn(mut stream: tokio::net::UnixStream, shared: Arc<Shared>, conn_id: u64) {
+    let Some((head, leftover)) =
+        crate::ws::read_head(&mut stream, std::time::Duration::from_secs(5)).await
+    else {
+        return;
+    };
+    let Some((method, target, headers)) = parse_request_head(&head) else {
+        return;
+    };
+    if !is_ws_upgrade(&headers) || path_of(&target) != "/ws" {
+        return;
+    }
+    let Some(up) = parse_upgrade(&method, &headers) else {
+        return;
+    };
+    serve_upgrade(stream, leftover, up, shared, conn_id).await;
 }
 
 /// Socket options for an accepted client: `TCP_NODELAY` (a keystroke is a few
@@ -439,13 +652,14 @@ async fn serve_accepted(
     shared: Arc<Shared>,
     conn_id: u64,
 ) {
-    // Peek the request head (without consuming it) so a plain HTTP GET is
-    // answered rather than left to the WebSocket handshake to fail — the
-    // phone's `probe()` reads the status to tell a refused token (401) from
-    // a machine that is off.
-    let head = match read_head(&stream).await {
-        Some(h) => h,
-        None => return,
+    // Read the request head so a plain HTTP GET is answered rather than left to
+    // the upgrade to fail — the phone's `probe()` reads the status to tell a
+    // refused token (401) from a machine that is off. The bytes are consumed:
+    // the upgrade below is ours, not a library's (see `crate::ws`).
+    let Some((head, leftover)) =
+        crate::ws::read_head(&mut stream, std::time::Duration::from_secs(5)).await
+    else {
+        return;
     };
     let Some((_method, target, headers)) = parse_request_head(&head) else {
         write_http(&mut stream, 400, "bad request\n").await;
@@ -470,48 +684,101 @@ async fn serve_accepted(
         write_http(&mut stream, 401, "unauthorized\n").await;
         return;
     }
-    // The inbound frame cap. The TypeScript server was `new WebSocketServer({
-    // maxPayload: 64 * 1024 })`, which closed the socket on anything larger; the
-    // port lost it and inherited tungstenite's 64 MiB default, so a client could
-    // make the daemon buffer 64 MiB in one message. The limit is on *reads* only
-    // (tungstenite enforces `max_message_size` when it decodes a message, and
-    // `max_frame_size` in `read_message_frame`), so server→client snapshots are
-    // unaffected however large they are. 64 KiB is far above every client
-    // message: `input` is capped at 16 KiB by the handler, `key` at 32 names.
-    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_message_size(Some(64 * 1024))
-        .max_frame_size(Some(64 * 1024));
-    let ws = match tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
-        Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("ldmuxd: remote: upgrade failed from {peer}: {e}");
-            return;
-        }
+    let Some(up) = parse_upgrade(&_method, &headers) else {
+        eprintln!("ldmuxd: remote: upgrade from {peer} is not a valid WebSocket handshake");
+        write_http(&mut stream, 400, "bad websocket handshake\n").await;
+        return;
     };
-    eprintln!("ldmuxd: remote: connection from {peer}");
-    handle_connection(ws, shared, conn_id).await;
+    eprintln!(
+        "ldmuxd: remote: connection from {peer}{}",
+        if up.deflate.is_some() {
+            " (permessage-deflate)"
+        } else {
+            ""
+        }
+    );
+    serve_upgrade(stream, leftover, up, shared, conn_id).await;
+}
+
+/// Answer the handshake on any stream and run the connection on it.
+///
+/// The inbound limits: the TypeScript server was `new WebSocketServer({
+/// maxPayload: 64 * 1024 })`, which closed the socket on anything larger; the
+/// port lost it and inherited tungstenite's 64 MiB default. 64 KiB is far above
+/// every client message (`input` is capped at 16 KiB by the handler, `key` at 32
+/// names), and it bounds a compressed message *after* inflation too. The limit is
+/// on reads only, so server→client snapshots are unaffected however large.
+pub(crate) async fn serve_upgrade<S>(
+    mut stream: S,
+    leftover: Vec<u8>,
+    up: crate::ws::Upgrade,
+    shared: Arc<Shared>,
+    conn_id: u64,
+) where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    if stream
+        .write_all(crate::ws::upgrade_response(&up).as_bytes())
+        .await
+        .is_err()
+        || stream.flush().await.is_err()
+    {
+        return;
+    }
+    let params = up.deflate.map(|(p, _)| p);
+    let (rd, wr) = tokio::io::split(stream);
+    let rd = WsReader::new(
+        Box::new(rd) as Rd,
+        leftover,
+        Limits {
+            max_frame: 64 * 1024,
+            max_message: 64 * 1024,
+        },
+        params,
+    );
+    let wr = WsWriter::new(Box::new(wr) as Wr, params);
+    handle_connection(rd, wr, shared, conn_id).await;
+}
+
+/// The handshake fields a WebSocket upgrade must carry, and the extension offer
+/// (`None` when the request is not a well-formed RFC 6455 handshake).
+pub(crate) fn parse_upgrade(
+    method: &str,
+    headers: &[(String, String)],
+) -> Option<crate::ws::Upgrade> {
+    if !method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+    let get = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    if get("sec-websocket-version")? != "13" {
+        return None;
+    }
+    let key = get("sec-websocket-key")?.trim().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    let offers: Vec<&str> = headers
+        .iter()
+        .filter(|(k, _)| k == "sec-websocket-extensions")
+        .map(|(_, v)| v.as_str())
+        .collect();
+    Some(crate::ws::Upgrade {
+        key,
+        deflate: crate::ws::negotiate(&offers),
+    })
 }
 
 /// The per-connection loop: read messages, enqueue responses, coalesce output.
-async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
+async fn handle_connection(rd: WsRead, wr: WsWrite, shared: Arc<Shared>, conn_id: u64) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
     let conn = Arc::new(ConnShared {
         tx,
-        inner: Mutex::new(ConnInner {
-            disposed: false,
-            live: false,
-            attach_gen: 0,
-            session_id: None,
-            record: None,
-            stream: None,
-            unsubscribe: None,
-            sub_id: None,
-            device: None,
-            pending: Vec::new(),
-            pending_bytes: 0,
-            resyncing: false,
-            last_seen_ms: now_ms(),
-        }),
+        inner: Mutex::new(ConnInner::new()),
         outstanding: AtomicUsize::new(0),
         queued_json: AtomicUsize::new(0),
     });
@@ -520,7 +787,7 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
     // The loop runs on its own task so a panic in a handler ends only that
     // connection, and the cleanup below still runs (the claim is released, the
     // subscription dropped) instead of both dying with the unwound task.
-    let looped = tokio::spawn(connection_loop(ws, shared.clone(), conn.clone(), rx));
+    let looped = tokio::spawn(connection_loop(rd, wr, shared.clone(), conn.clone(), rx));
     if let Err(e) = looped.await {
         eprintln!("ldmuxd: remote: connection {conn_id} task ended abnormally: {e}");
     }
@@ -532,7 +799,8 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
 
 /// The connection loop proper: read messages, write responses and output.
 async fn connection_loop(
-    ws: WsStream,
+    mut rd: WsRead,
+    mut ws: WsWrite,
     shared: Arc<Shared>,
     conn: Arc<ConnShared>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Out>,
@@ -540,8 +808,8 @@ async fn connection_loop(
     let send_limit = std::time::Duration::from_millis(shared.send_timeout_ms);
     // The connection loop owns the socket; outbound goes through `tx` so the
     // coalescer and every control message share one ordering.
-    let mut ws = ws;
     let mut pending: Vec<u8> = Vec::new();
+    let mut last_flush = tokio::time::Instant::now();
     // Every write is bounded by `send_limit`; a write that does not finish means
     // the peer is gone, and the connection ends (so its claim can be released)
     // instead of waiting here for an ACK that will never come.
@@ -556,19 +824,43 @@ async fn connection_loop(
                 )))
             };
         tokio::select! {
-            maybe = ws.next() => {
+            maybe = rd.next() => {
                 match maybe {
-                    None => break,
-                    Some(Err(_)) => break,
-                    Some(Ok(msg)) => {
+                    Ok(None) => break,
+                    Err(e) => {
+                        // A protocol violation is owed its close code; a dead
+                        // transport is owed nothing.
+                        if e.io.is_none() {
+                            let _ = tokio::time::timeout(send_limit, ws.send_close(e.code)).await;
+                        }
+                        break;
+                    }
+                    Ok(Some(msg)) => {
                         // Flush buffered output before acting on the message, so a
                         // reply cannot overtake the output it should follow.
-                        if !flush_output(&mut ws, &mut pending, &conn, send_limit).await {
+                        if !flush_output(&mut ws, &mut pending, &conn, send_limit, &mut last_flush).await {
                             break 'conn;
                         }
-                        if let Some(text) = message_text(&msg) {
-                            touch(&conn);
-                            handle_message(&text, &conn, &shared).await;
+                        match msg {
+                            Incoming::Text(text) => {
+                                touch(&conn);
+                                handle_message(&text, &conn, &shared).await;
+                            }
+                            Incoming::Binary(b) => {
+                                touch(&conn);
+                                handle_message(&String::from_utf8_lossy(&b), &conn, &shared).await;
+                            }
+                            Incoming::Ping(p) => {
+                                let sent = tokio::time::timeout(send_limit, ws.send_pong(&p)).await;
+                                if !matches!(sent, Ok(Ok(()))) {
+                                    break 'conn;
+                                }
+                            }
+                            Incoming::Pong => {}
+                            Incoming::Close => {
+                                let _ = tokio::time::timeout(send_limit, ws.send_close(1000)).await;
+                                break 'conn;
+                            }
                         }
                     }
                 }
@@ -577,18 +869,37 @@ async fn connection_loop(
                 match out {
                     None => break,
                     Some(Out::Close) => break,
+                    Some(Out::Resync(reason)) => {
+                        if relock(&conn.inner).features.inplace_resync {
+                            tokio::spawn(resync_in_place(conn.clone()));
+                        } else {
+                            conn.send_error("resync", &reason);
+                        }
+                    }
+                    Some(Out::Ended) => {
+                        if relock(&conn.inner).features.session_ended {
+                            tokio::spawn(send_session_ended(conn.clone(), shared.clone()));
+                        } else {
+                            conn.send_error("resync", crate::stream::RESET_SESSION_ENDED);
+                        }
+                    }
                     Some(Out::Output(b)) => {
+                        // Leading edge: output that arrives after a quiet spell goes
+                        // out now (a keystroke's echo must not wait for the batch
+                        // timer); what follows within the window is coalesced.
+                        let quiet = pending.is_empty()
+                            && last_flush.elapsed() >= std::time::Duration::from_millis(OUTPUT_FLUSH_MS);
                         pending.extend_from_slice(&b);
-                        if pending.len() >= OUTPUT_FLUSH_BYTES
-                            && !flush_output(&mut ws, &mut pending, &conn, send_limit).await
+                        if (quiet || pending.len() >= OUTPUT_FLUSH_BYTES)
+                            && !flush_output(&mut ws, &mut pending, &conn, send_limit, &mut last_flush).await
                         {
                             break 'conn;
                         }
                     }
                     Some(Out::Json(s)) => {
                         let n = s.len();
-                        let sent = flush_output(&mut ws, &mut pending, &conn, send_limit).await
-                            && send_bounded(&mut ws, Message::Text(s.into()), send_limit).await;
+                        let sent = flush_output(&mut ws, &mut pending, &conn, send_limit, &mut last_flush).await
+                            && send_bounded(&mut ws, Wire::Text(&s), send_limit).await;
                         conn.queued_json.fetch_sub(n, Ordering::Relaxed);
                         if !sent {
                             break 'conn;
@@ -597,7 +908,7 @@ async fn connection_loop(
                 }
             }
             _ = &mut timer => {
-                if !flush_output(&mut ws, &mut pending, &conn, send_limit).await {
+                if !flush_output(&mut ws, &mut pending, &conn, send_limit, &mut last_flush).await {
                     break 'conn;
                 }
             }
@@ -611,25 +922,26 @@ async fn connection_loop(
 /// Returns `false` when the peer did not take the write within `limit` (or the
 /// socket is broken): the connection is over.
 async fn flush_output(
-    ws: &mut WsStream,
+    ws: &mut WsWrite,
     pending: &mut Vec<u8>,
     conn: &ConnShared,
     limit: std::time::Duration,
+    last_flush: &mut tokio::time::Instant,
 ) -> bool {
     if pending.is_empty() {
         return true;
     }
+    *last_flush = tokio::time::Instant::now();
     let data = std::mem::take(pending);
     let n = data.len();
     let ok = match encode_frame(ft::OUTPUT, &data, 0) {
-        Ok(frame) => send_bounded(ws, Message::Binary(frame.into()), limit).await,
+        Ok(frame) => send_bounded(ws, Wire::Binary(&frame), limit).await,
         Err(_) => {
             send_bounded(
                 ws,
-                Message::Text(
-                    serde_json::json!({"type":"error","code":"resync","message":"output frame too large"})
-                        .to_string()
-                        .into(),
+                Wire::Text(
+                    &serde_json::json!({"type":"error","code":"resync","message":"output frame too large"})
+                        .to_string(),
                 ),
                 limit,
             )
@@ -642,14 +954,19 @@ async fn flush_output(
     ok
 }
 
-/// One socket write, bounded. `false` is a timeout or a socket error.
-async fn send_bounded(ws: &mut WsStream, msg: Message, limit: std::time::Duration) -> bool {
-    matches!(tokio::time::timeout(limit, ws.send(msg)).await, Ok(Ok(())))
+/// One socket write (compression included), bounded. `false` is a timeout or a
+/// socket error.
+async fn send_bounded(ws: &mut WsWrite, msg: Wire<'_>, limit: std::time::Duration) -> bool {
+    let sent = match msg {
+        Wire::Text(t) => tokio::time::timeout(limit, ws.send_text(t)).await,
+        Wire::Binary(b) => tokio::time::timeout(limit, ws.send_binary(b)).await,
+    };
+    matches!(sent, Ok(Ok(())))
 }
 
 /// Mark the connection seen (any inbound message counts).
 fn touch(conn: &ConnShared) {
-    relock(&conn.inner).last_seen_ms = now_ms();
+    relock(&conn.inner).last_seen = std::time::Instant::now();
 }
 
 /// Hand pane output to the connection's writer, or — when the link is behind —
@@ -666,12 +983,14 @@ fn queue_output(conn: &ConnShared, inner: &mut ConnInner, bytes: &[u8]) {
     if inner.resyncing {
         return;
     }
-    if conn.outstanding.load(Ordering::Relaxed) > WS_BACKLOG_BYTES {
+    let outstanding = conn.outstanding.load(Ordering::Relaxed);
+    if outstanding > WS_BACKLOG_BYTES
+        || conn.backlog_bytes() > WS_BACKLOG_BYTES + SNAPSHOT_ALLOWANCE_BYTES
+    {
         inner.resyncing = true;
-        conn.send_json_text(
-            serde_json::json!({"type":"error","code":"resync","message":"client is behind the link"})
-                .to_string(),
-        );
+        let _ = conn
+            .tx
+            .send(Out::Resync("client is behind the link".into()));
         return;
     }
     conn.outstanding.fetch_add(bytes.len(), Ordering::Relaxed);
@@ -690,7 +1009,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             return;
         }
     };
-    let mtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let mtype = v
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Writing to a shell is the holder's (the TS `WRITES` / `mayWrite`).
     //
@@ -743,6 +1066,9 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             conn.send_json(&serde_json::json!({"type":"pong","id":id}));
         }
         "hello" => {
+            if let Some(f) = Features::from_json(&v) {
+                relock(&conn.inner).features = f;
+            }
             // Identity, not authentication (ADR-0010).
             let dev = v.get("device");
             if let Some(dev) = dev {
@@ -763,7 +1089,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     };
                     let previous = relock(&conn.inner).device.replace(DeviceInfo {
                         id: id.clone(),
-                        name: if name.is_empty() { "device".into() } else { name },
+                        name: if name.is_empty() {
+                            "device".into()
+                        } else {
+                            name
+                        },
                         kind: kind.into(),
                     });
                     // A second `hello` under a different id means this socket is
@@ -773,10 +1103,19 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     // daemon restarts).
                     if let Some(prev) = previous.filter(|p| p.id != id) {
                         let still_held = relock(&shared.conns).values().any(|c| {
-                            relock(&c.inner).device.as_ref().map(|d| d.id == prev.id).unwrap_or(false)
+                            relock(&c.inner)
+                                .device
+                                .as_ref()
+                                .map(|d| d.id == prev.id)
+                                .unwrap_or(false)
                         });
                         if !still_held {
-                            let freed = !shared.daemon.lock().await.release_device(&prev.id).is_empty();
+                            let freed = !shared
+                                .daemon
+                                .lock()
+                                .await
+                                .release_device(&prev.id)
+                                .is_empty();
                             if freed {
                                 broadcast_sessions(shared).await;
                             }
@@ -854,12 +1193,19 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             }
         }
         "makelive" => {
-            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let id = v
+                .get("sessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let workspace = v.get("workspace").and_then(|x| x.as_str()).unwrap_or("");
             let result = {
                 let mut d = shared.daemon.lock().await;
-                d.handle("makeLive", serde_json::json!({"id": id, "workspace": workspace}))
-                    .await
+                d.handle(
+                    "makeLive",
+                    serde_json::json!({"id": id, "workspace": workspace}),
+                )
+                .await
             };
             let (ok, detail) = live_result(result);
             conn.send_json(&serde_json::json!({
@@ -870,7 +1216,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             }
         }
         "closelive" => {
-            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let id = v
+                .get("sessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let result = {
                 let mut d = shared.daemon.lock().await;
                 d.handle("closeLive", serde_json::json!({"id": id})).await
@@ -894,7 +1244,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             broadcast_sessions(shared).await;
         }
         "close" => {
-            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let id = v
+                .get("sessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let device = relock(&conn.inner).device.clone();
             // A shell opened at the desk belongs to the desk: closing it from a
             // phone is putting it down, not destroying it (ADR-0010).
@@ -902,8 +1256,14 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 let d = shared.daemon.lock().await;
                 d.get_session(&id)
             };
-            let phone_owned_closed = device.as_ref().map(|dev| dev.kind == "phone").unwrap_or(false)
-                && record.as_ref().map(|r| r.created_by != "phone").unwrap_or(false);
+            let phone_owned_closed = device
+                .as_ref()
+                .map(|dev| dev.kind == "phone")
+                .unwrap_or(false)
+                && record
+                    .as_ref()
+                    .map(|r| r.created_by != "phone")
+                    .unwrap_or(false);
             if phone_owned_closed {
                 if let Some(dev) = &device {
                     let mut d = shared.daemon.lock().await;
@@ -936,18 +1296,26 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 }
             };
             if let Some(dev) = &device
-                && !ended {
-                    let mut d = shared.daemon.lock().await;
-                    d.release_claim(&id, &dev.id);
-                }
+                && !ended
+            {
+                let mut d = shared.daemon.lock().await;
+                d.release_claim(&id, &dev.id);
+            }
             stop_viewing(conn, shared).await;
             broadcast_sessions(shared).await;
         }
         "attach" => {
-            let session_id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let session_id = v
+                .get("sessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             let takeover = v.get("takeover").and_then(|x| x.as_bool()).unwrap_or(false);
             let cols = v.get("cols").and_then(|x| x.as_u64());
             let rows = v.get("rows").and_then(|x| x.as_u64());
+            if let Some(f) = Features::from_json(&v) {
+                relock(&conn.inner).features = f;
+            }
             attach(conn, shared, session_id, takeover, cols, rows).await;
         }
         "resize" => {
@@ -979,7 +1347,9 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             // The pane geometry changed: answer with a fresh snapshot.
             let sid = relock(&conn.inner).session_id.clone().unwrap_or_default();
             let sub = relock(&conn.inner).sub_id;
-            if let Err(e) = snapshot_and_go_live(conn, &stream, sub, None, gen_id, &sid, false).await {
+            if let Err(e) =
+                snapshot_and_go_live(conn, &stream, sub, None, gen_id, &sid, SnapKind::Screen).await
+            {
                 conn.send_error("resize_failed", &e);
             }
         }
@@ -995,7 +1365,10 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 conn.send_error("not_attached", "attach before clicking");
                 return;
             };
-            match on_stream(&stream, move |s| s.snapshot_full()).await.unwrap_or_else(|| Err("snapshot task failed".to_string())) {
+            match on_stream(&stream, move |s| s.snapshot_full())
+                .await
+                .unwrap_or_else(|| Err("snapshot task failed".to_string()))
+            {
                 Ok(state) => {
                     if !(state.mouse && state.mouse_sgr) {
                         conn.send_error("no_mouse", "pane has not enabled SGR mouse reporting");
@@ -1004,7 +1377,10 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     if crate::desktop::is_shell_foreground(&state.foreground) {
                         conn.send_error(
                             "shell_foreground",
-                            &format!("pane is at a shell prompt ({}), not a mouse-aware program", state.foreground),
+                            &format!(
+                                "pane is at a shell prompt ({}), not a mouse-aware program",
+                                state.foreground
+                            ),
                         );
                         return;
                     }
@@ -1024,9 +1400,16 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             }
         }
         "input" => {
-            let text = v.get("data").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let text = v
+                .get("data")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if text.len() > MAX_INPUT_BYTES {
-                conn.send_error("input_too_large", &format!("input exceeds {MAX_INPUT_BYTES} bytes"));
+                conn.send_error(
+                    "input_too_large",
+                    &format!("input exceeds {MAX_INPUT_BYTES} bytes"),
+                );
                 return;
             }
             let stream = active_stream(conn);
@@ -1080,26 +1463,170 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0)
                 .min(MAX_SCROLLBACK_LINES);
-            let wants_history = lines > 0;
-            let (gen_id, sid) = {
-                let inner = relock(&conn.inner);
-                (inner.attach_gen, inner.session_id.clone().unwrap_or_default())
-            };
-            let stream = active_stream(conn);
-            let Some(stream) = stream else {
+            if active_stream(conn).is_none() {
                 conn.send_error("not_attached", "attach before requesting scrollback");
                 return;
+            }
+            // A page is a big message. One that arrives while the last is still
+            // on its way is held (only the newest, which is where the user is now)
+            // until the link has drained, rather than stacked behind it.
+            let now = std::time::Instant::now();
+            let serve_now = {
+                let mut inner = relock(&conn.inner);
+                let paced = inner.last_scrollback.is_none_or(|t| {
+                    now.duration_since(t).as_millis() as u64 >= SCROLLBACK_MIN_INTERVAL_MS
+                });
+                if paced && !inner.scrollback_task && conn.backlog_bytes() <= WS_BACKLOG_BYTES {
+                    inner.last_scrollback = Some(now);
+                    true
+                } else {
+                    inner.deferred_scrollback = Some(lines);
+                    if !inner.scrollback_task {
+                        inner.scrollback_task = true;
+                        tokio::spawn(deferred_scrollback(conn.clone()));
+                    }
+                    false
+                }
             };
-            let hist = if wants_history { Some(lines) } else { None };
-            let sub = relock(&conn.inner).sub_id;
-            if let Err(e) = snapshot_and_go_live(conn, &stream, sub, hist, gen_id, &sid, wants_history).await {
-                conn.send_error("scrollback_failed", &e);
+            if serve_now {
+                serve_scrollback(conn, lines).await;
             }
         }
         other => {
             conn.send_error("bad_message", &format!("unknown type: {other}"));
         }
     }
+}
+
+/// Answer one `scrollback` request (`lines == 0` is the return-to-bottom repaint).
+async fn serve_scrollback(conn: &Arc<ConnShared>, lines: u64) {
+    let wants_history = lines > 0;
+    let (gen_id, sid, sub) = {
+        let inner = relock(&conn.inner);
+        (
+            inner.attach_gen,
+            inner.session_id.clone().unwrap_or_default(),
+            inner.sub_id,
+        )
+    };
+    let Some(stream) = active_stream(conn) else {
+        conn.send_error("not_attached", "attach before requesting scrollback");
+        return;
+    };
+    let hist = if wants_history { Some(lines) } else { None };
+    let kind = if wants_history {
+        SnapKind::History
+    } else {
+        SnapKind::Screen
+    };
+    if let Err(e) = snapshot_and_go_live(conn, &stream, sub, hist, gen_id, &sid, kind).await {
+        conn.send_error("scrollback_failed", &e);
+    }
+}
+
+/// Wait for the link to drain and the pacing interval to pass, then serve the
+/// newest scrollback request that arrived meanwhile. A link that never drains
+/// ends the connection (the send deadline would have anyway).
+async fn deferred_scrollback(conn: Arc<ConnShared>) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(DRAIN_WAIT_MS);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let ready = {
+            let mut inner = relock(&conn.inner);
+            if inner.disposed {
+                inner.scrollback_task = false;
+                return;
+            }
+            let paced = inner
+                .last_scrollback
+                .is_none_or(|t| t.elapsed().as_millis() as u64 >= SCROLLBACK_MIN_INTERVAL_MS);
+            if paced && conn.backlog_bytes() <= WS_BACKLOG_BYTES {
+                inner.last_scrollback = Some(std::time::Instant::now());
+                inner.scrollback_task = false;
+                Some(inner.deferred_scrollback.take())
+            } else {
+                None
+            }
+        };
+        match ready {
+            Some(Some(lines)) => return serve_scrollback(&conn, lines).await,
+            Some(None) => return,
+            None if tokio::time::Instant::now() > deadline => {
+                relock(&conn.inner).scrollback_task = false;
+                let _ = conn.tx.send(Out::Close);
+                return;
+            }
+            None => {}
+        }
+    }
+}
+
+/// Repair a stale picture on the same socket: wait until the link has drained
+/// (so the snapshot is not queued behind what it replaces, and a slow link is
+/// not handed a new burst every time it falls behind), then send a fresh
+/// `caps`+`snapshot` pair marked `"resync": true`.
+async fn resync_in_place(conn: Arc<ConnShared>) {
+    {
+        let mut inner = relock(&conn.inner);
+        if inner.resync_task {
+            return;
+        }
+        inner.resync_task = true;
+    }
+    let done = |conn: &Arc<ConnShared>| relock(&conn.inner).resync_task = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(DRAIN_WAIT_MS);
+    while conn.backlog_bytes() > WS_BACKLOG_BYTES / 2 {
+        if relock(&conn.inner).disposed {
+            return done(&conn);
+        }
+        if tokio::time::Instant::now() > deadline {
+            let _ = conn.tx.send(Out::Close);
+            return done(&conn);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let (stream, gen_id, sid, sub) = {
+        let inner = relock(&conn.inner);
+        (
+            inner.stream.clone(),
+            inner.attach_gen,
+            inner.session_id.clone(),
+            inner.sub_id,
+        )
+    };
+    if let (Some(stream), Some(sid)) = (stream, sid)
+        && let Err(e) =
+            snapshot_and_go_live(&conn, &stream, sub, None, gen_id, &sid, SnapKind::Resync).await
+    {
+        conn.send_error("resync_failed", &e);
+    }
+    done(&conn);
+}
+
+/// The `session_ended` message: what ended the session and how.
+fn ended_message(r: &SessionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "type": "session_ended",
+        "sessionId": r.id,
+        "kind": r.ended_kind.clone().unwrap_or_else(|| "ended".into()),
+        "reason": r.ended_reason,
+        "exitCode": r.exit_code,
+        "exitSignal": r.exit_signal,
+    })
+}
+
+/// Tell a client its session is over, then let go of it.
+async fn send_session_ended(conn: Arc<ConnShared>, shared: Arc<Shared>) {
+    let Some(sid) = relock(&conn.inner).session_id.clone() else {
+        return;
+    };
+    let record = shared.daemon.lock().await.get_session(&sid);
+    match record {
+        Some(r) => conn.send_json(&ended_message(&r)),
+        None => conn
+            .send_json(&serde_json::json!({"type":"session_ended","sessionId":sid,"kind":"ended"})),
+    }
+    stop_viewing(&conn, &shared).await;
 }
 
 /// The `attach` handler: claim, subscribe, snapshot, CAPS + SNAPSHOT, flush.
@@ -1117,17 +1644,42 @@ async fn attach(
         let mut d = shared.daemon.lock().await;
         let Some(record) = d.get_session(&session_id) else {
             drop(d);
-            conn.send_error("unknown_session", &format!("no terminal-backed session: {session_id}"));
+            conn.send_error(
+                "unknown_session",
+                &format!("no terminal-backed session: {session_id}"),
+            );
             return;
         };
         if record.keeper_name.is_empty() {
             drop(d);
-            conn.send_error("unknown_session", &format!("no terminal-backed session: {session_id}"));
+            conn.send_error(
+                "unknown_session",
+                &format!("no terminal-backed session: {session_id}"),
+            );
             return;
         }
         if record.status != "running" {
+            // A client that understands endings is given the final screen while the
+            // keeper still holds it, then the ending; any other is refused as it
+            // always was.
+            let wants_end = relock(&conn.inner).features.session_ended;
+            let last = if wants_end {
+                d.final_screen(&record.keeper_name).await
+            } else {
+                None
+            };
             drop(d);
-            conn.send_error("session_dead", &format!("session is {}: {session_id}", record.status));
+            match last {
+                Some(snap) => {
+                    send_state(conn, &session_id, &snap, 0, SnapKind::Screen);
+                    conn.send_json(&ended_message(&record));
+                }
+                None if wants_end => conn.send_json(&ended_message(&record)),
+                None => conn.send_error(
+                    "session_dead",
+                    &format!("session is {}: {session_id}", record.status),
+                ),
+            }
             return;
         }
         let device = relock(&conn.inner).device.clone();
@@ -1242,13 +1794,18 @@ async fn attach(
                 if inner.pending_bytes > MAX_PENDING_BYTES {
                     inner.pending.clear();
                     inner.pending_bytes = 0;
-                    let _ = tx.send(Out::Json(
-                        serde_json::json!({
-                            "type":"error","code":"resync",
-                            "message":"output backlog exceeded while attaching"
-                        })
-                        .to_string(),
-                    ));
+                    // The snapshot this attach is about to send repaints
+                    // everything dropped here; only a client that cannot take a
+                    // repaint on the same socket is told to start over.
+                    if !inner.features.inplace_resync {
+                        let _ = tx.send(Out::Json(
+                            serde_json::json!({
+                                "type":"error","code":"resync",
+                                "message":"output backlog exceeded while attaching"
+                            })
+                            .to_string(),
+                        ));
+                    }
                 }
             }
         }),
@@ -1257,12 +1814,28 @@ async fn attach(
             move |reason: &str| {
                 // Not while attaching: the snapshot that is about to be sent
                 // repaints from scratch, which is all a resync asks for.
-                let ok = {
-                    let inner = relock(&conn2.inner);
-                    inner.attach_gen == cb_gen && inner.live
-                };
-                if ok {
-                    conn2.send_error("resync", reason);
+                let mut inner = relock(&conn2.inner);
+                if !(inner.attach_gen == cb_gen && inner.live) {
+                    return;
+                }
+                match reason {
+                    crate::stream::RESET_SESSION_ENDED => {
+                        let _ = conn2.tx.send(Out::Ended);
+                    }
+                    // The keeper dropped output: the picture is stale. Output is
+                    // held back until the repaint (once, however often it is said).
+                    crate::stream::RESET_LOST => {
+                        if !inner.features.inplace_resync {
+                            let _ = conn2.tx.send(Out::Resync(reason.to_string()));
+                        } else if !inner.resyncing {
+                            inner.resyncing = true;
+                            let _ = conn2.tx.send(Out::Resync(reason.to_string()));
+                        }
+                    }
+                    other => {
+                        drop(inner);
+                        conn2.send_error("resync", other);
+                    }
                 }
             }
         }),
@@ -1284,7 +1857,11 @@ async fn attach(
     };
     if let Some(unsubscribe) = leftover {
         unsubscribe();
-        shared.daemon.lock().await.release_stream_if_idle(&record.keeper_name);
+        shared
+            .daemon
+            .lock()
+            .await
+            .release_stream_if_idle(&record.keeper_name);
         return;
     }
 
@@ -1297,7 +1874,16 @@ async fn attach(
     // with the stream's poll held off: whatever was queued while attaching is
     // already in the snapshot (dropped), the snapshot goes out first, and
     // everything after it is new output.
-    let fenced = snapshot_and_go_live(conn, &stream, Some(sub_id), None, gen_id, &session_id, false).await;
+    let fenced = snapshot_and_go_live(
+        conn,
+        &stream,
+        Some(sub_id),
+        None,
+        gen_id,
+        &session_id,
+        SnapKind::Screen,
+    )
+    .await;
 
     // A second attach (or a disconnect) may have superseded us while we awaited.
     if relock(&conn.inner).attach_gen != gen_id {
@@ -1311,7 +1897,11 @@ async fn attach(
         // lockout ADR-0010 exists to prevent.
         stop_viewing(conn, shared).await;
         let freed = match &device {
-            Some(dev) => shared.daemon.lock().await.release_claim(&session_id, &dev.id),
+            Some(dev) => shared
+                .daemon
+                .lock()
+                .await
+                .release_claim(&session_id, &dev.id),
             None => false,
         };
         conn.send_error("attach_failed", &e);
@@ -1337,7 +1927,7 @@ async fn snapshot_and_go_live(
     history: Option<u64>,
     gen_id: u64,
     session_id: &str,
-    history_flag: bool,
+    kind: SnapKind,
 ) -> Result<(), String> {
     let conn2 = conn.clone();
     let sid = session_id.to_string();
@@ -1351,8 +1941,10 @@ async fn snapshot_and_go_live(
                 inner.pending.clear();
                 inner.pending_bytes = 0;
                 inner.live = true;
+                // Whatever was dropped is in this snapshot.
+                inner.resyncing = false;
             }
-            send_state(&conn2, &sid, snap, epoch, history_flag);
+            send_state(&conn2, &sid, snap, epoch, kind);
         })
     })
     .await
@@ -1371,7 +1963,11 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
         let (is_holder, _sid) = {
             let inner = relock(&c.inner);
             (
-                inner.device.as_ref().map(|d| d.id == device_id).unwrap_or(false),
+                inner
+                    .device
+                    .as_ref()
+                    .map(|d| d.id == device_id)
+                    .unwrap_or(false),
                 inner.session_id.clone(),
             )
         };
@@ -1429,7 +2025,7 @@ fn send_state(
     session_id: &str,
     snap: &ldmux_protocol::keeper::SnapshotResult,
     epoch: u64,
-    history: bool,
+    kind: SnapKind,
 ) {
     conn.send_json(&serde_json::json!({
         "type": "caps",
@@ -1456,8 +2052,10 @@ fn send_state(
         "historySize": snap.history_size,
         "snapshotEpoch": epoch,
     });
-    if history {
-        snapshot["history"] = serde_json::Value::Bool(true);
+    match kind {
+        SnapKind::History => snapshot["history"] = serde_json::Value::Bool(true),
+        SnapKind::Resync => snapshot["resync"] = serde_json::Value::Bool(true),
+        SnapKind::Screen => {}
     }
     conn.send_json(&snapshot);
 }
@@ -1557,10 +2155,11 @@ async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id
             let mut d = shared.daemon.lock().await;
             freed = !d.release_device(&device_id).is_empty();
         } else if let Some(sid) = &session_id
-            && !still_viewing {
-                let mut d = shared.daemon.lock().await;
-                freed = d.release_claim(sid, &device_id);
-            }
+            && !still_viewing
+        {
+            let mut d = shared.daemon.lock().await;
+            freed = d.release_claim(sid, &device_id);
+        }
         if freed {
             broadcast_sessions(&shared).await;
         }
@@ -1587,7 +2186,8 @@ async fn reconcile_claims(shared: &Arc<Shared>) {
     };
     let freed = {
         let mut d = shared.daemon.lock().await;
-        d.release_unbacked_claims(&attached, now_ms())
+        let now = d.mono_ms();
+        d.release_unbacked_claims(&attached, now)
     };
     if !freed.is_empty() {
         broadcast_sessions(shared).await;
@@ -1596,7 +2196,7 @@ async fn reconcile_claims(shared: &Arc<Shared>) {
 
 /// Reap connections silent for the idle deadline (the TS `sweep`).
 async fn sweep_once(shared: &Arc<Shared>) {
-    let now = now_ms();
+    let now = std::time::Instant::now();
     let conns: Vec<Arc<ConnShared>> = {
         let map = relock(&shared.conns);
         map.values().cloned().collect()
@@ -1604,12 +2204,15 @@ async fn sweep_once(shared: &Arc<Shared>) {
     for c in conns {
         let (idle, disposed) = {
             let inner = relock(&c.inner);
-            (now.saturating_sub(inner.last_seen_ms), inner.disposed)
+            (
+                now.saturating_duration_since(inner.last_seen),
+                inner.disposed,
+            )
         };
         if disposed {
             continue;
         }
-        if idle > shared.idle_ms {
+        if idle.as_millis() as u64 > shared.idle_ms {
             let _ = c.tx.send(Out::Close);
         }
     }
@@ -1620,7 +2223,9 @@ fn live_result(result: Result<serde_json::Value, String>) -> (bool, Option<Strin
     match result {
         Ok(v) => (
             v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
-            v.get("detail").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            v.get("detail")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
         ),
         Err(e) => (false, Some(e)),
     }
@@ -1654,37 +2259,6 @@ fn device_of(conn: &ConnShared) -> Option<ldmux_protocol::rpc::DeviceInfo> {
 
 /// A parsed request head: `(method, path, headers)`.
 type ParsedHead = (String, String, Vec<(String, String)>);
-
-/// The text of a WS message, if it is text or binary (a control message).
-fn message_text(msg: &Message) -> Option<String> {
-    match msg {
-        Message::Text(t) => Some(t.to_string()),
-        Message::Binary(b) => Some(String::from_utf8_lossy(b.as_ref()).to_string()),
-        _ => None,
-    }
-}
-
-/// Read the HTTP request head from the socket without consuming it (a
-/// non-destructive peek, so the WebSocket handshake still sees the request).
-async fn read_head(stream: &TcpStream) -> Option<String> {
-    let mut buf = vec![0u8; 16 * 1024];
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        match stream.peek(&mut buf).await {
-            Ok(0) => return None,
-            Ok(n) => {
-                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") || n >= buf.len() {
-                    return Some(String::from_utf8_lossy(&buf[..n]).into_owned());
-                }
-            }
-            Err(_) => return None,
-        }
-        if tokio::time::Instant::now() > deadline {
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    }
-}
 
 /// Parse the request line + headers from a head. Header names are lowercased.
 fn parse_request_head(head: &str) -> Option<ParsedHead> {
@@ -1723,10 +2297,7 @@ fn is_ws_upgrade(headers: &[(String, String)]) -> bool {
         .find(|(k, _)| k == "upgrade")
         .map(|(_, v)| v.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false);
-    connection
-        .split(',')
-        .any(|p| p.trim() == "upgrade")
-        && upgrade
+    connection.split(',').any(|p| p.trim() == "upgrade") && upgrade
 }
 
 /// Whether the request carries the bearer token (header or `?token=`) —
@@ -1863,8 +2434,7 @@ mod tests {
 
     #[test]
     fn a_non_upgrade_request_is_not_an_upgrade() {
-        let (_, _, headers) =
-            parse_request_head("GET /ws HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let (_, _, headers) = parse_request_head("GET /ws HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         assert!(!is_ws_upgrade(&headers));
     }
 
@@ -1885,8 +2455,7 @@ mod tests {
                 device: None,
                 pending: Vec::new(),
                 pending_bytes: 0,
-                resyncing: false,
-                last_seen_ms: 0,
+                ..ConnInner::new()
             }),
             outstanding: AtomicUsize::new(0),
             queued_json: AtomicUsize::new(0),
@@ -1917,6 +2486,8 @@ mod tests {
             send_timeout_ms: WS_SEND_TIMEOUT_MS,
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
+            next_conn: std::sync::atomic::AtomicU64::new(1),
+            sweep: Mutex::new(None),
         });
         for msg in [
             r#"{"type":"key","keys":["Enter"]}"#,
@@ -1924,8 +2495,12 @@ mod tests {
             r#"{"type":"mouseclick","col":1,"row":1}"#,
         ] {
             handle_message(msg, &conn, &shared).await;
-            let out = rx.try_recv().unwrap_or_else(|_| panic!("no answer to {msg}"));
-            let Out::Json(text) = out else { panic!("expected json for {msg}") };
+            let out = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("no answer to {msg}"));
+            let Out::Json(text) = out else {
+                panic!("expected json for {msg}")
+            };
             let v: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(v["type"], "error", "{msg} -> {v}");
             assert_eq!(v["code"], "not_attached", "{msg} -> {v}");
@@ -1950,10 +2525,8 @@ mod tests {
         while let Ok(m) = rx.try_recv() {
             match m {
                 Out::Output(b) => output += b.len(),
-                Out::Json(j) => {
-                    assert!(j.contains("\"resync\""));
-                    resyncs += 1;
-                }
+                Out::Resync(_) => resyncs += 1,
+                Out::Json(_) | Out::Ended => panic!("only a resync is expected"),
                 Out::Close => panic!("no close"),
             }
         }
@@ -1991,8 +2564,7 @@ mod tests {
                 device: None,
                 pending: Vec::new(),
                 pending_bytes: 0,
-                resyncing: false,
-                last_seen_ms: 0,
+                ..ConnInner::new()
             }),
             outstanding: AtomicUsize::new(0),
             queued_json: AtomicUsize::new(0),
@@ -2014,9 +2586,9 @@ mod tests {
             dead: false,
             foreground: "bash".into(),
             cwd: "/".into(),
-                tail: Vec::new(),
-            };
-        send_state(&conn, "s1", &snap, 7, false);
+            tail: Vec::new(),
+        };
+        send_state(&conn, "s1", &snap, 7, SnapKind::Screen);
         let a = rx.try_recv().unwrap();
         let b = rx.try_recv().unwrap();
         let (Out::Json(a), Out::Json(b)) = (a, b) else {
@@ -2043,8 +2615,14 @@ mod tests {
             name: "motorola edge 2024".into(),
             kind: "phone".into(),
         };
-        assert_eq!(ended_by("killed", Some(&phone)), "killed from motorola edge 2024");
-        assert_eq!(ended_by("closed", Some(&phone)), "closed from motorola edge 2024");
+        assert_eq!(
+            ended_by("killed", Some(&phone)),
+            "killed from motorola edge 2024"
+        );
+        assert_eq!(
+            ended_by("closed", Some(&phone)),
+            "closed from motorola edge 2024"
+        );
         // A connection with no device (a bare socket, the CLI over RPC), and one
         // that announced itself without a name, both leave the bare verb.
         assert_eq!(ended_by("killed", None), "killed");
@@ -2072,12 +2650,16 @@ mod tests {
             send_timeout_ms,
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
+            next_conn: std::sync::atomic::AtomicU64::new(1),
+            sweep: Mutex::new(None),
         });
         (shared, dir)
     }
 
     fn error_code(out: Out) -> String {
-        let Out::Json(text) = out else { panic!("expected json") };
+        let Out::Json(text) = out else {
+            panic!("expected json")
+        };
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["type"], "error", "{v}");
         v["code"].as_str().unwrap().to_string()
@@ -2111,7 +2693,9 @@ mod tests {
             r#"{"type":"closelive","sessionId":"s1"}"#,
         ] {
             handle_message(msg, &conn, &shared).await;
-            let out = rx.try_recv().unwrap_or_else(|_| panic!("no answer to {msg}"));
+            let out = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("no answer to {msg}"));
             assert_eq!(error_code(out), "hello_required", "{msg}");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -2141,8 +2725,14 @@ mod tests {
                 live_workspace: None,
                 live_pid: None,
                 ended_reason: None,
+                exit_signal: None,
+                ended_kind: None,
             });
-            let owner = DeviceInfo { id: "desk".into(), name: "desk".into(), kind: "desktop".into() };
+            let owner = DeviceInfo {
+                id: "desk".into(),
+                name: "desk".into(),
+                kind: "desktop".into(),
+            };
             d.claim("s1", &owner, false);
         }
         hello_as(&conn, "phone-1");
@@ -2152,10 +2742,15 @@ mod tests {
             r#"{"type":"makelive","sessionId":"s1"}"#,
         ] {
             handle_message(msg, &conn, &shared).await;
-            let out = rx.try_recv().unwrap_or_else(|_| panic!("no answer to {msg}"));
+            let out = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("no answer to {msg}"));
             assert_eq!(error_code(out), "not_holder", "{msg}");
         }
-        assert_eq!(shared.daemon.lock().await.get_session("s1").unwrap().status, "running");
+        assert_eq!(
+            shared.daemon.lock().await.get_session("s1").unwrap().status,
+            "running"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2174,7 +2769,7 @@ mod tests {
             match m {
                 Out::Json(j) => queued += j.len(),
                 Out::Close => closes += 1,
-                Out::Output(_) => panic!("no output"),
+                Out::Output(_) | Out::Resync(_) | Out::Ended => panic!("no output"),
             }
         }
         assert!(queued <= MAX_QUEUED_JSON_BYTES, "queued {queued}");
@@ -2191,10 +2786,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server_shared = shared.clone();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
             tune_socket(&stream);
-            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-            handle_connection(ws, server_shared, 1).await;
+            let (head, rest) = crate::ws::read_head(&mut stream, std::time::Duration::from_secs(5))
+                .await
+                .unwrap();
+            let (m, _, h) = parse_request_head(&head).unwrap();
+            let up = parse_upgrade(&m, &h).unwrap();
+            serve_upgrade(stream, rest, up, server_shared, 1).await;
         });
         // The client completes the handshake and then never reads again.
         let tcp = TcpStream::connect(addr).await.unwrap();
@@ -2225,7 +2824,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        assert!(gone, "the connection must end when the peer stops taking writes");
+        assert!(
+            gone,
+            "the connection must end when the peer stops taking writes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

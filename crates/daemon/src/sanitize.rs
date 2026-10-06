@@ -218,7 +218,9 @@ impl Sanitizer {
         // pending is `ESC ] <body>`; the body is what follows the `]`.
         let body = &self.pending[2..];
         let num = body.split(';').next().unwrap_or("");
-        let is_colour_query = num.parse::<u32>().is_ok_and(|n| n == 4 || n == 5 || (10..=19).contains(&n))
+        let is_colour_query = num
+            .parse::<u32>()
+            .is_ok_and(|n| n == 4 || n == 5 || (10..=19).contains(&n))
             && body
                 .trim_end_matches(['\x07', '\x1b', '\\'])
                 .split(';')
@@ -235,7 +237,9 @@ impl Sanitizer {
 /// so must not reach one: the answer would come back as typed input.
 fn csi_is_query(seq: &str) -> bool {
     let body = seq.strip_prefix("\x1b[").unwrap_or(seq);
-    let Some(fin) = body.chars().last() else { return false };
+    let Some(fin) = body.chars().last() else {
+        return false;
+    };
     let params = &body[..body.len() - fin.len_utf8()];
     match fin {
         // DA and DSR in every parameter form.
@@ -250,7 +254,10 @@ fn csi_is_query(seq: &str) -> bool {
         // that answer; 22/23 push and pop the title and do not).
         't' => {
             let first = params.split(';').next().unwrap_or("");
-            matches!(first, "11" | "13" | "14" | "15" | "16" | "18" | "19" | "20" | "21")
+            matches!(
+                first,
+                "11" | "13" | "14" | "15" | "16" | "18" | "19" | "20" | "21"
+            )
         }
         _ => false,
     }
@@ -289,8 +296,14 @@ mod tests {
         assert_eq!(off.push("a\x1b]52;c;SGVsbG8=\x07b"), "ab");
 
         let mut on = Sanitizer::new(true);
-        assert_eq!(on.push("a\x1b]52;c;SGVsbG8=\x07b"), "a\x1b]52;c;SGVsbG8=\x07b");
-        assert_eq!(on.push("a\x1b]52;c;SGVsbG8=\x1b\\b"), "a\x1b]52;c;SGVsbG8=\x1b\\b");
+        assert_eq!(
+            on.push("a\x1b]52;c;SGVsbG8=\x07b"),
+            "a\x1b]52;c;SGVsbG8=\x07b"
+        );
+        assert_eq!(
+            on.push("a\x1b]52;c;SGVsbG8=\x1b\\b"),
+            "a\x1b]52;c;SGVsbG8=\x1b\\b"
+        );
     }
 
     #[test]
@@ -340,7 +353,11 @@ mod tests {
 
     #[test]
     fn drops_device_status_queries_the_reason_xterm_js_would_auto_reply() {
-        for query in ["\x1b[c", "\x1b[>c", "\x1b[0c", "\x1b[>0c", "\x1b[5n", "\x1b[6n", "\x1b[?0n"].iter() {
+        for query in [
+            "\x1b[c", "\x1b[>c", "\x1b[0c", "\x1b[>0c", "\x1b[5n", "\x1b[6n", "\x1b[?0n",
+        ]
+        .iter()
+        {
             assert_eq!(sanitize_once(&format!("a{query}b")), "ab");
         }
     }
@@ -390,7 +407,16 @@ mod tests {
     fn drops_device_status_queries_in_any_parameter_form_not_just_an_allowlist() {
         // The policy keys on the final byte: a real terminal answers all of
         // these, and the answer would be sent back into the pane as input.
-        for query in ["\x1b[?6n", "\x1b[1;2c", "\x1b[?62;1;2c", "\x1b[=c", "\x1b[?15n", "\x1b[999n"].iter() {
+        for query in [
+            "\x1b[?6n",
+            "\x1b[1;2c",
+            "\x1b[?62;1;2c",
+            "\x1b[=c",
+            "\x1b[?15n",
+            "\x1b[999n",
+        ]
+        .iter()
+        {
             assert_eq!(sanitize_once(&format!("a{query}b")), "ab");
         }
     }
@@ -399,7 +425,16 @@ mod tests {
     fn still_keeps_csi_sequences_whose_final_byte_is_not_a_device_query() {
         // c/n are queries; p/q/J/m/H and friends are not and must survive
         // intact.
-        for keep in ["\x1b[0m", "\x1b[2J", "\x1b[3;7H", "\x1b[?25l", "\x1b[?25h", "\x1b[4h"].iter() {
+        for keep in [
+            "\x1b[0m",
+            "\x1b[2J",
+            "\x1b[3;7H",
+            "\x1b[?25l",
+            "\x1b[?25h",
+            "\x1b[4h",
+        ]
+        .iter()
+        {
             assert_eq!(sanitize_once(&format!("a{keep}b")), format!("a{keep}b"));
         }
     }
@@ -418,15 +453,15 @@ mod tests {
     #[test]
     fn drops_the_queries_a_real_terminal_would_answer() {
         for q in [
-            "\x1b[?2004$p",      // DECRQM
-            "\x1b[4$p",          // DECRQM (ANSI mode)
-            "\x1b[>0q",          // XTVERSION
-            "\x1b[?u",           // kitty keyboard query
-            "\x1b[14t",          // text area size in pixels
-            "\x1b[18t",          // text area size in chars
-            "\x1b]11;?\x07",     // background colour query
-            "\x1b]10;?\x1b\\",   // foreground colour query, ST
-            "\x1b]4;1;?\x07",    // palette colour query
+            "\x1b[?2004$p",    // DECRQM
+            "\x1b[4$p",        // DECRQM (ANSI mode)
+            "\x1b[>0q",        // XTVERSION
+            "\x1b[?u",         // kitty keyboard query
+            "\x1b[14t",        // text area size in pixels
+            "\x1b[18t",        // text area size in chars
+            "\x1b]11;?\x07",   // background colour query
+            "\x1b]10;?\x1b\\", // foreground colour query, ST
+            "\x1b]4;1;?\x07",  // palette colour query
         ] {
             assert_eq!(sanitize_once(&format!("a{q}b")), "ab", "{q:?}");
         }
@@ -435,14 +470,18 @@ mod tests {
     #[test]
     fn keeps_the_sequences_that_look_alike_but_do_not_answer() {
         for keep in [
-            "\x1b[2 q",            // cursor style (final q, no '>')
-            "\x1b[22t",            // push title: no reply
-            "\x1b[>1u",            // kitty push flags: not a query
+            "\x1b[2 q",                 // cursor style (final q, no '>')
+            "\x1b[22t",                 // push title: no reply
+            "\x1b[>1u",                 // kitty push flags: not a query
             "\x1b]11;rgb:00/00/00\x07", // setting a colour is fine
-            "\x1b[?2004h",         // set a mode
-            "\x1b[2;3p",           // not DECRQM
+            "\x1b[?2004h",              // set a mode
+            "\x1b[2;3p",                // not DECRQM
         ] {
-            assert_eq!(sanitize_once(&format!("a{keep}b")), format!("a{keep}b"), "{keep:?}");
+            assert_eq!(
+                sanitize_once(&format!("a{keep}b")),
+                format!("a{keep}b"),
+                "{keep:?}"
+            );
         }
     }
 
@@ -454,7 +493,10 @@ mod tests {
         // Past the cap the string is abandoned; an ESC then resyncs and text flows.
         out.push_str(&s.push("\x1b[31mlater\x1b[0m"));
         assert!(out.starts_with('a'));
-        assert!(out.contains("later"), "output after a bad sequence must come through: {out:?}");
+        assert!(
+            out.contains("later"),
+            "output after a bad sequence must come through: {out:?}"
+        );
         // And a lone unterminated string followed only by text recovers too.
         let mut t = Sanitizer::new(false);
         let mut tail = t.push("\x1b_never-ends");

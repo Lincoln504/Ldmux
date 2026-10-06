@@ -22,7 +22,11 @@ use ldmux_protocol::keeper_call::{DEFAULT_TIMEOUT_MS, keeper_call};
 
 fn scratch() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-adopt-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-adopt-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -69,7 +73,9 @@ async fn spawn_in_keeper(sock: &std::path::Path, id: &str, cwd: &str) -> String 
 async fn keeper_state(sock: &std::path::Path, keeper_name: &str) -> Option<bool> {
     let res = keeper_call(
         sock.to_str().unwrap(),
-        &KeeperMessage::Read(Read { session_id: keeper_name.to_string() }),
+        &KeeperMessage::Read(Read {
+            session_id: keeper_name.to_string(),
+        }),
         DEFAULT_TIMEOUT_MS,
     )
     .await
@@ -98,7 +104,10 @@ async fn adopt_takes_a_running_shell_the_daemon_has_never_heard_of() {
         d.start(&arc).await.unwrap();
     }
 
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let keeper_name = spawn_in_keeper(&keeper_sock, "unknown1", &cwd).await;
 
     // A session the daemon does not know is not listable...
@@ -117,8 +126,14 @@ async fn adopt_takes_a_running_shell_the_daemon_has_never_heard_of() {
     assert_eq!(rec["id"], "unknown1");
     assert_eq!(rec["keeperName"], keeper_name);
     assert_eq!(rec["status"], "running");
-    assert_eq!(rec["createdBy"], "adopt", "an adopted shell records how it arrived");
-    assert_eq!(rec["cwd"], cwd, "the cwd comes from the keeper's own view of the pane");
+    assert_eq!(
+        rec["createdBy"], "adopt",
+        "an adopted shell records how it arrived"
+    );
+    assert_eq!(
+        rec["cwd"], cwd,
+        "the cwd comes from the keeper's own view of the pane"
+    );
 
     // The bare id is the same session: the RPC accepts either spelling, and the
     // second adopt is the first one's record rather than a second record for one
@@ -131,7 +146,12 @@ async fn adopt_takes_a_running_shell_the_daemon_has_never_heard_of() {
         .unwrap();
     assert_eq!(again["id"], rec["id"]);
     assert_eq!(again["createdBy"], "adopt");
-    let listed = arc.lock().await.handle("list", serde_json::json!({})).await.unwrap();
+    let listed = arc
+        .lock()
+        .await
+        .handle("list", serde_json::json!({}))
+        .await
+        .unwrap();
     let rows = listed["sessions"]
         .as_array()
         .unwrap()
@@ -146,8 +166,14 @@ async fn adopt_takes_a_running_shell_the_daemon_has_never_heard_of() {
     // all over again if the record were missing — which is the one thing this is
     // trying to tell apart.
     let reg = std::fs::read_to_string(dir.join("registry.json")).unwrap();
-    assert!(reg.contains("unknown1"), "an adopted shell must be on disk: {reg}");
-    assert!(reg.contains(keeper_name.as_str()), "with the name it was adopted under");
+    assert!(
+        reg.contains("unknown1"),
+        "an adopted shell must be on disk: {reg}"
+    );
+    assert!(
+        reg.contains(keeper_name.as_str()),
+        "with the name it was adopted under"
+    );
     assert!(reg.contains("adopt"), "and how it arrived");
 
     arc.lock().await.stop();
@@ -185,12 +211,18 @@ async fn adopt_refuses_a_shell_that_is_not_there_and_one_that_has_exited() {
         .await
         .expect_err("adopting a shell that does not exist must fail");
     assert!(!err.is_empty(), "and it must say so: {err}");
-    assert!(arc.lock().await.registry().get("ghost").is_none(), "and record nothing");
+    assert!(
+        arc.lock().await.registry().get("ghost").is_none(),
+        "and record nothing"
+    );
 
     // A shell that has exited: the pane is still in the keeper (that is what a
     // dead pane is — the emulator keeps the last grid), and adopting it would
     // put a row in the list for a shell nobody can type into.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let keeper_name = spawn_in_keeper(&keeper_sock, "exited1", &cwd).await;
     keeper_call(
         keeper_sock.to_str().unwrap(),
@@ -210,7 +242,10 @@ async fn adopt_refuses_a_shell_that_is_not_there_and_one_that_has_exited() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    assert!(dead, "the shell must have exited for this test to mean anything");
+    assert!(
+        dead,
+        "the shell must have exited for this test to mean anything"
+    );
 
     let err = arc
         .lock()
@@ -219,7 +254,10 @@ async fn adopt_refuses_a_shell_that_is_not_there_and_one_that_has_exited() {
         .await
         .expect_err("adopting an exited shell must fail");
     assert!(err.contains("dead"), "and it must say why: {err}");
-    assert!(arc.lock().await.registry().get("exited1").is_none(), "and record nothing");
+    assert!(
+        arc.lock().await.registry().get("exited1").is_none(),
+        "and record nothing"
+    );
 
     arc.lock().await.stop();
     let _ = std::process::Command::new("kill")

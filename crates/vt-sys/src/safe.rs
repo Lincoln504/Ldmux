@@ -53,7 +53,10 @@ impl Terminal {
         if r != ffi::SUCCESS || ptr.is_null() {
             return Err(FfiError { code: r });
         }
-        Ok(Self { ptr, cell: (10, 20) })
+        Ok(Self {
+            ptr,
+            cell: (10, 20),
+        })
     }
 
     /// Feed raw bytes through the VT parser (the Write direction into the
@@ -245,29 +248,29 @@ impl Terminal {
 
     fn get_u16(&self, data: i32) -> u16 {
         let mut v: u16 = 0;
-        let _ = unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
+        let _ =
+            unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
         v
     }
 
     fn get_bool(&self, data: i32) -> bool {
         let mut v: bool = false;
-        let _ = unsafe {
-            ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void)
-        };
+        let _ =
+            unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
         v
     }
 
     fn get_usize(&self, data: i32) -> usize {
         let mut v: usize = 0;
-        let _ = unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
+        let _ =
+            unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
         v
     }
 
     fn get_string(&self, data: i32) -> String {
         let mut s: ffi::GhosttyString = unsafe { std::mem::zeroed() };
-        let r = unsafe {
-            ffi::ghostty_terminal_get(self.ptr, data, &mut s as *mut _ as *mut c_void)
-        };
+        let r =
+            unsafe { ffi::ghostty_terminal_get(self.ptr, data, &mut s as *mut _ as *mut c_void) };
         if r != ffi::SUCCESS || s.ptr.is_null() || s.len == 0 {
             return String::new();
         }
@@ -379,7 +382,9 @@ impl RenderState {
 
     fn get_u16(&self, data: u32) -> u16 {
         let mut v: u16 = 0;
-        let _ = unsafe { ffi::ghostty_render_state_get(self.ptr, data, &mut v as *mut _ as *mut c_void) };
+        let _ = unsafe {
+            ffi::ghostty_render_state_get(self.ptr, data, &mut v as *mut _ as *mut c_void)
+        };
         v
     }
 
@@ -387,11 +392,18 @@ impl RenderState {
     /// A row beyond the viewport is empty.
     pub fn row(&self, y: u16) -> Vec<Cell> {
         let mut it: ffi::GhosttyRenderStateRowIterator = std::ptr::null_mut();
-        if unsafe { ffi::ghostty_render_state_row_iterator_new(std::ptr::null(), &mut it) } != ffi::SUCCESS {
+        if unsafe { ffi::ghostty_render_state_row_iterator_new(std::ptr::null(), &mut it) }
+            != ffi::SUCCESS
+        {
             return Vec::new();
         }
-        if unsafe { ffi::ghostty_render_state_get(self.ptr, ffi::ROW_ITERATOR, &mut it as *mut _ as *mut c_void) }
-            != ffi::SUCCESS
+        if unsafe {
+            ffi::ghostty_render_state_get(
+                self.ptr,
+                ffi::ROW_ITERATOR,
+                &mut it as *mut _ as *mut c_void,
+            )
+        } != ffi::SUCCESS
         {
             unsafe { ffi::ghostty_render_state_row_iterator_free(it) };
             return Vec::new();
@@ -404,12 +416,19 @@ impl RenderState {
             }
         }
         let mut cells: ffi::GhosttyRenderStateRowCells = std::ptr::null_mut();
-        if unsafe { ffi::ghostty_render_state_row_cells_new(std::ptr::null(), &mut cells) } != ffi::SUCCESS {
+        if unsafe { ffi::ghostty_render_state_row_cells_new(std::ptr::null(), &mut cells) }
+            != ffi::SUCCESS
+        {
             unsafe { ffi::ghostty_render_state_row_iterator_free(it) };
             return Vec::new();
         }
-        if unsafe { ffi::ghostty_render_state_row_get(it, ffi::ROW_DATA_CELLS, &mut cells as *mut _ as *mut c_void) }
-            != ffi::SUCCESS
+        if unsafe {
+            ffi::ghostty_render_state_row_get(
+                it,
+                ffi::ROW_DATA_CELLS,
+                &mut cells as *mut _ as *mut c_void,
+            )
+        } != ffi::SUCCESS
         {
             unsafe {
                 ffi::ghostty_render_state_row_cells_free(cells);
@@ -424,17 +443,20 @@ impl RenderState {
         // colour value is an 8-aligned union), and `ROW_CELLS_DATA_STYLE`
         // `@alignCast`s its `out` pointer. Our Rust mirror is narrower, so we
         // use the C size (72), not `size_of` (56), and read raw bytes.
-        const STYLE_C_SIZE: usize = 72;
+        const STYLE_C_SIZE: usize = STYLE_C_SIZE_BYTES;
         // A `[u64; 9]` is 72 bytes, 8-aligned, and zeroed: no allocation, and
         // nothing is ever read that the C side did not write (a failed `get`
         // leaves the zeros, which decode as "no colour, no attributes").
         for x in 0..cols {
             if unsafe { ffi::ghostty_render_state_row_cells_select(cells, x) } != ffi::SUCCESS {
                 // Keep the column count honest: a blank, not a shifted row.
-                out.push(Cell { text: " ".to_string(), style: style_to_plain(&[0u8; STYLE_C_SIZE]) });
+                out.push(Cell {
+                    text: " ".to_string(),
+                    style: style_to_plain(&[0u8; STYLE_C_SIZE]),
+                });
                 continue;
             }
-            let mut style_buf = [0u64; STYLE_C_SIZE / 8];
+            let mut style_buf = new_style_buf();
             let got_style = unsafe {
                 ffi::ghostty_render_state_row_cells_get(
                     cells,
@@ -443,7 +465,7 @@ impl RenderState {
                 )
             };
             if got_style != ffi::SUCCESS {
-                style_buf = [0u64; STYLE_C_SIZE / 8];
+                style_buf = new_style_buf();
             }
             let mut buffer = ffi::GhosttyBuffer {
                 ptr: text_buf.as_mut_ptr(),
@@ -463,7 +485,9 @@ impl RenderState {
             let buffer_len = buffer.len.min(text_buf.len());
             // SAFETY: `style_buf` is initialised (zeroed, then written by C), and
             // any byte pattern is a valid `u8`.
-            let style_bytes = unsafe { std::slice::from_raw_parts(style_buf.as_ptr() as *const u8, STYLE_C_SIZE) };
+            let style_bytes = unsafe {
+                std::slice::from_raw_parts(style_buf.as_ptr() as *const u8, STYLE_C_SIZE)
+            };
             // A cell with no text is either the second half of a wide character
             // (it must render as nothing: the wide glyph already covers the
             // column) or a blank the program never wrote (it MUST render as a
@@ -477,8 +501,11 @@ impl RenderState {
                     ffi::ROW_CELLS_DATA_RAW,
                     &mut raw as *mut _ as *mut c_void,
                 ) == ffi::SUCCESS
-                    && ffi::ghostty_cell_get(raw, ffi::CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void)
-                        == ffi::SUCCESS
+                    && ffi::ghostty_cell_get(
+                        raw,
+                        ffi::CELL_DATA_WIDE,
+                        &mut wide as *mut _ as *mut c_void,
+                    ) == ffi::SUCCESS
             };
             let spacer = have_wide
                 && (wide == ffi::CELL_WIDE_SPACER_TAIL || wide == ffi::CELL_WIDE_SPACER_HEAD);
@@ -487,7 +514,10 @@ impl RenderState {
             } else {
                 String::from_utf8_lossy(&text_buf[..buffer_len]).into_owned()
             };
-            out.push(Cell { text, style: style_to_plain(style_bytes) });
+            out.push(Cell {
+                text,
+                style: style_to_plain(style_bytes),
+            });
         }
         unsafe {
             ffi::ghostty_render_state_row_cells_free(cells);
@@ -497,10 +527,50 @@ impl RenderState {
     }
 }
 
+/// `sizeof(GhosttyStyle)` in the vendored header.
+const STYLE_C_SIZE_BYTES: usize = 72;
+
+// The layout `style_to_plain` reads at hand-measured offsets, checked at compile
+// time against the `#[repr(C)]` mirror in `ffi` (which is declared from the header's
+// field order). The header itself is checked by the same numbers in
+// `packages/mobile/native/ldmux_terminal.c` (`_Static_assert`), and the live engine
+// by `tests/style_layout.rs`, which decodes every attribute out of a real cell.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<ffi::GhosttyStyle>() == STYLE_C_SIZE_BYTES);
+    assert!(offset_of!(ffi::GhosttyStyle, fg_color) == 8);
+    assert!(offset_of!(ffi::GhosttyStyle, bg_color) == 24);
+    assert!(offset_of!(ffi::GhosttyStyle, underline_color) == 40);
+    assert!(offset_of!(ffi::GhosttyStyle, bold) == 56);
+    assert!(offset_of!(ffi::GhosttyStyle, italic) == 57);
+    assert!(offset_of!(ffi::GhosttyStyle, faint) == 58);
+    assert!(offset_of!(ffi::GhosttyStyle, blink) == 59);
+    assert!(offset_of!(ffi::GhosttyStyle, inverse) == 60);
+    assert!(offset_of!(ffi::GhosttyStyle, invisible) == 61);
+    assert!(offset_of!(ffi::GhosttyStyle, strikethrough) == 62);
+    assert!(offset_of!(ffi::GhosttyStyle, overline) == 63);
+    assert!(offset_of!(ffi::GhosttyStyle, underline) == 64);
+    // Inside a colour: tag at 0, value at 8.
+    assert!(offset_of!(ffi::GhosttyStyleColor, value) == 8);
+    assert!(size_of::<ffi::GhosttyStyleColor>() == 16);
+};
+
+/// A zeroed, 8-aligned style image with its `size` field set. The C struct is a
+/// *sized* struct (`GHOSTTY_INIT_SIZED`): the first word is the caller's
+/// `sizeof`, which lets the library grow the struct compatibly. It is ignored on
+/// `get` today, which is why leaving it zero worked; it is set so that stops being
+/// load-bearing luck.
+fn new_style_buf() -> [u64; STYLE_C_SIZE_BYTES / 8] {
+    let mut b = [0u64; STYLE_C_SIZE_BYTES / 8];
+    b[0] = STYLE_C_SIZE_BYTES as u64;
+    b
+}
+
 /// Read one tagged color from a raw `GhosttyStyle` byte image. `base` is the
-/// offset of the 12-byte `GhosttyStyleColor` (fg at 8, bg at 20, underline at
-/// 32); the tag is its first 4 bytes and the colour value lives at offset 8
-/// within it (measured against the vendored library, plan §3.4).
+/// offset of the 16-byte `GhosttyStyleColor` (fg at 8, bg at 24, underline at
+/// 40); the tag is its first 4 bytes and the colour value lives at offset 8
+/// within it (measured against the vendored library, plan §3.4, and now asserted
+/// at compile time above).
 fn color_from_raw(b: &[u8], base: usize) -> Option<StyleColor> {
     let tag = u32::from_le_bytes([b[base], b[base + 1], b[base + 2], b[base + 3]]);
     match tag {
@@ -535,5 +605,21 @@ fn style_to_plain(b: &[u8]) -> CellStyle {
 impl Drop for RenderState {
     fn drop(&mut self) {
         unsafe { ffi::ghostty_render_state_free(self.ptr) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_style_image_is_sized_like_the_c_struct() {
+        let b = new_style_buf();
+        assert_eq!(b[0], 72, "the size word is sizeof(GhosttyStyle)");
+        assert_eq!(std::mem::size_of_val(&b), 72);
+        assert!(
+            b[1..].iter().all(|&w| w == 0),
+            "everything else starts zeroed"
+        );
     }
 }

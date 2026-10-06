@@ -33,17 +33,16 @@ async fn wait_socket(path: &std::path::Path) {
     panic!("socket did not appear: {}", path.display());
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Connect with the bearer token in the HTTP upgrade header.
 async fn connect_authed(port: u16, token: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let uri = format!("ws://127.0.0.1:{port}/ws");
     let mut req = uri.into_client_request().unwrap();
-    req.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {token}").parse().unwrap(),
-    );
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
     ws
 }
@@ -85,7 +84,9 @@ async fn next_of_type(ws: &mut Ws, ty: &str) -> serde_json::Value {
 /// A raw plain-HTTP GET, returning the status code.
 async fn plain_get_status(port: u16, token: Option<&str>) -> u16 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
     let auth = token
         .map(|t| format!("Authorization: Bearer {t}\r\n"))
         .unwrap_or_default();
@@ -94,9 +95,8 @@ async fn plain_get_status(port: u16, token: Option<&str>) -> u16 {
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.ok();
     let head = String::from_utf8_lossy(&buf);
-    
-    head
-        .split_whitespace()
+
+    head.split_whitespace()
         .nth(1)
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(0)
@@ -119,7 +119,9 @@ async fn start_daemon(
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
     let d = LdmuxDaemon::new(dir.to_path_buf(), std::path::PathBuf::from("/nonexistent"))
@@ -177,8 +179,14 @@ async fn remote_contract_list_new_kill_close() {
     // camelCase, and the fields the Kotlin `parseSessions` reads.
     let row = &sessions["sessions"][0];
     assert_eq!(row["id"], session_id);
-    assert!(row.get("keeperName").is_some(), "camelCase keeperName: {row}");
-    assert!(row.get("tmuxName").is_none(), "the legacy key must not be on the wire: {row}");
+    assert!(
+        row.get("keeperName").is_some(),
+        "camelCase keeperName: {row}"
+    );
+    assert!(
+        row.get("tmuxName").is_none(),
+        "the legacy key must not be on the wire: {row}"
+    );
     assert_eq!(row["createdBy"], "phone");
     assert!(row.get("lastActivityAt").is_some());
 
@@ -230,7 +238,9 @@ async fn a_silent_peer_does_not_block_the_next_client() {
     let token = "right-token";
     let (arc, port) = start_daemon(&dir, port, token).await;
 
-    let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
     let started = std::time::Instant::now();
     let status = plain_get_status(port, Some(token)).await;
     assert_eq!(status, 400);

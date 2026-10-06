@@ -72,7 +72,10 @@ exit 0
 fn write_fallback_stubs(dir: &Path) {
     write_script(
         &dir.join("alacritty"),
-        &format!("#!/bin/sh\necho ran > {}\n", dir.join("alacritty-ran").display()),
+        &format!(
+            "#!/bin/sh\necho ran > {}\n",
+            dir.join("alacritty-ran").display()
+        ),
     );
     write_script(
         &dir.join("logger"),
@@ -204,7 +207,10 @@ fn a_reachable_daemon_whose_window_fails_is_not_waited_for() {
         .unwrap();
     let took = start.elapsed();
     assert_eq!(out.status.code(), Some(0));
-    assert!(dir.join("alacritty-ran").exists(), "it must still give a terminal");
+    assert!(
+        dir.join("alacritty-ran").exists(),
+        "it must still give a terminal"
+    );
     let calls = std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
     assert_eq!(
         calls.lines().filter(|l| *l == "window").count(),
@@ -226,10 +232,17 @@ fn the_fallback_honours_ldmux_terminal() {
     write_fallback_stubs(&dir);
     write_script(
         &dir.join("myterm"),
-        &format!("#!/bin/sh\necho \"$0\" > {}\n", dir.join("myterm-ran").display()),
+        &format!(
+            "#!/bin/sh\necho \"$0\" > {}\n",
+            dir.join("myterm-ran").display()
+        ),
     );
     write_ldmux_stub(&dir, 99, true);
-    let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let out = std::process::Command::new(launcher())
         .env("LDMUX", dir.join("ldmux"))
         .env("PATH", &path)
@@ -239,10 +252,22 @@ fn the_fallback_honours_ldmux_terminal() {
         .current_dir(&dir)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(!dir.join("alacritty-ran").exists(), "the autodetect must not override the choice");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.join("alacritty-ran").exists(),
+        "the autodetect must not override the choice"
+    );
     let ran = std::fs::read_to_string(dir.join("myterm-ran")).unwrap_or_default();
-    assert_eq!(ran.trim(), dir.join("myterm").display().to_string(), "run by absolute path");
+    assert_eq!(
+        ran.trim(),
+        dir.join("myterm").display().to_string(),
+        "run by absolute path"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -253,12 +278,22 @@ fn the_directory_argument_is_passed_through() {
     write_fallback_stubs(&dir);
     write_script(
         &dir.join("ldmux"),
-        &format!("#!/bin/sh\nprintf '%s|' \"$@\" >> {}\nexit 0\n", dir.join("args").display()),
+        &format!(
+            "#!/bin/sh\nprintf '%s|' \"$@\" >> {}\nexit 0\n",
+            dir.join("args").display()
+        ),
     );
     let out = std::process::Command::new(launcher())
         .arg("/some dir/with space")
         .env("LDMUX", dir.join("ldmux"))
-        .env("PATH", format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .current_dir(&dir)
         .output()
         .unwrap();

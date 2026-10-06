@@ -38,6 +38,8 @@ pub struct FakeSession {
     pub rows: u16,
     pub dead: bool,
     pub exit_code: i32,
+    /// The signal that killed the shell, when one did (`exit_code` is then unused).
+    pub exit_signal: Option<i32>,
     /// The buffered output (what a `Peek` drains).
     pub out: VecDeque<u8>,
     /// The rendered content (what a `Snapshot` returns, `\n`-joined).
@@ -137,7 +139,7 @@ impl FakeKeeper {
                 };
                 sessions.remove(&k.session_id);
                 Ok(KeeperMessage::State(st))
-            },
+            }
             km::KeeperMessage::Write(w) => match sessions.get_mut(&w.session_id) {
                 Some(s) if !s.dead => {
                     s.out.extend(w.data.bytes());
@@ -162,14 +164,28 @@ impl FakeKeeper {
                 None => Err(format!("no such session: {}", rd.session_id)),
             },
             km::KeeperMessage::Peek(p) => match sessions.get_mut(&p.session_id) {
-                Some(s) => {
-                    let data: Vec<u8> = s.out.drain(..).collect();
-                    Ok(KeeperMessage::PeekResult(PeekResult {
-                        session_id: p.session_id.clone(),
-                        data,
-                        lost: false,
-                    }))
-                }
+                Some(s) => match p.max_bytes {
+                    None => {
+                        let data: Vec<u8> = s.out.drain(..).collect();
+                        Ok(KeeperMessage::PeekResult(PeekResult {
+                            session_id: p.session_id.clone(),
+                            data,
+                            data64: None,
+                            more: false,
+                            lost: false,
+                        }))
+                    }
+                    Some(max) => {
+                        let n = s.out.len().min(max.clamp(1, km::PEEK_MAX_BYTES) as usize);
+                        let data: Vec<u8> = s.out.drain(..n).collect();
+                        Ok(KeeperMessage::PeekResult(PeekResult::compact(
+                            p.session_id.clone(),
+                            &data,
+                            !s.out.is_empty(),
+                            false,
+                        )))
+                    }
+                },
                 None => Err(format!("no such session: {}", p.session_id)),
             },
             km::KeeperMessage::Snapshot(req) => match sessions.get_mut(&req.session_id) {
@@ -191,9 +207,21 @@ impl FakeKeeper {
                     bracketed_paste: sess.bracketed_paste,
                     history_size: sess.history_size as u64,
                     dead: sess.dead,
-                    foreground: if sess.dead { String::new() } else { sess.foreground.clone() },
-                    cwd: if sess.dead { String::new() } else { sess.cwd.clone() },
-                    tail: if req.drain_output { sess.out.drain(..).collect() } else { Vec::new() },
+                    foreground: if sess.dead {
+                        String::new()
+                    } else {
+                        sess.foreground.clone()
+                    },
+                    cwd: if sess.dead {
+                        String::new()
+                    } else {
+                        sess.cwd.clone()
+                    },
+                    tail: if req.drain_output {
+                        sess.out.drain(..).collect()
+                    } else {
+                        Vec::new()
+                    },
                 })),
                 None => Err(format!("no such session: {}", req.session_id)),
             },
@@ -204,7 +232,10 @@ impl FakeKeeper {
                     states.push(Self::state_fields(s));
                     activity.insert(s.id.clone(), s.activity);
                 }
-                Ok(KeeperMessage::ListResult(ListResult { sessions: states, activity }))
+                Ok(KeeperMessage::ListResult(ListResult {
+                    sessions: states,
+                    activity,
+                }))
             }
             km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
             // The request-only shapes (`ChildInfo`, `ChildExited`, the result
@@ -238,13 +269,18 @@ impl FakeKeeper {
             history_size: s.history_size as u64,
             foreground,
             cwd,
+            exit_code: (s.dead && s.exit_signal.is_none()).then_some(s.exit_code as i64),
+            exit_signal: if s.dead { s.exit_signal } else { None },
         }
     }
 
     /// Bind the socket and run the accept loop (one connection == one request
     /// line → one response line). Runs forever; drop the task (or the process)
     /// to stop. Mirrors the real keeper's `serve`.
-    pub async fn serve(self_: &std::sync::Arc<Self>, socket: &std::path::Path) -> std::io::Result<()> {
+    pub async fn serve(
+        self_: &std::sync::Arc<Self>,
+        socket: &std::path::Path,
+    ) -> std::io::Result<()> {
         let _ = std::fs::remove_file(socket);
         let listener = tokio::net::UnixListener::bind(socket)?;
         loop {
@@ -324,6 +360,17 @@ impl FakeKeeper {
         }
     }
 
+    /// Mark a session dead the way the real keeper's `waitpid` does: with the
+    /// shell's exit status, or the signal that killed it.
+    pub fn exit(&self, session_id: &str, code: Option<i32>, signal: Option<i32>) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.dead = true;
+            s.exit_code = code.unwrap_or(0);
+            s.exit_signal = signal;
+        }
+    }
+
     /// Set a session's rendered content (a test hook: the fake pane's
     /// "rendered screen", what a `Snapshot` returns).
     /// The history count of the last `Snapshot` request (`None` = the live screen).
@@ -359,7 +406,7 @@ mod tests {
             cwd: None,
             command: None,
             env: None,
-            }))
+        }))
     }
 
     fn is_state(m: &KeeperMessage, id: &str, dead: bool) -> bool {
@@ -391,7 +438,9 @@ mod tests {
         let k = FakeKeeper::new(std::path::PathBuf::from("/tmp/fk-t"));
         let _ = spawn_id(&k, "s1").unwrap();
         let m = k
-            .handle(&KeeperMessage::Read(Read { session_id: "s1".into() }))
+            .handle(&KeeperMessage::Read(Read {
+                session_id: "s1".into(),
+            }))
             .unwrap();
         assert!(is_state(&m, "s1", false));
     }
@@ -402,17 +451,13 @@ mod tests {
         let k = FakeKeeper::new(std::path::PathBuf::from("/tmp/fk-t"));
         let _ = spawn_id(&k, "s1").unwrap();
         k.inject_output("s1", b"hello");
-        let m = k
-            .handle(&KeeperMessage::Peek(Peek { session_id: "s1".into() }))
-            .unwrap();
+        let m = k.handle(&KeeperMessage::Peek(Peek::all("s1"))).unwrap();
         match &m {
             KeeperMessage::PeekResult(p) => assert_eq!(p.data, b"hello"),
             _ => panic!("not a peekresult"),
         }
         // A second `Peek` drains nothing (the buffer is empty).
-        let m = k
-            .handle(&KeeperMessage::Peek(Peek { session_id: "s1".into() }))
-            .unwrap();
+        let m = k.handle(&KeeperMessage::Peek(Peek::all("s1"))).unwrap();
         match &m {
             KeeperMessage::PeekResult(p) => assert!(p.data.is_empty()),
             _ => panic!("not a peekresult"),
@@ -428,13 +473,9 @@ mod tests {
             session_id: "s1".into(),
             data: "abc".into(),
         };
-        let m = k
-            .handle(&KeeperMessage::Write(w))
-            .unwrap();
+        let m = k.handle(&KeeperMessage::Write(w)).unwrap();
         assert!(matches!(m, KeeperMessage::Ack(_)));
-        let m = k
-            .handle(&KeeperMessage::Peek(Peek { session_id: "s1".into() }))
-            .unwrap();
+        let m = k.handle(&KeeperMessage::Peek(Peek::all("s1"))).unwrap();
         match &m {
             KeeperMessage::PeekResult(p) => assert_eq!(p.data, b"abc"),
             _ => panic!("not a peekresult"),
@@ -451,7 +492,7 @@ mod tests {
             .handle(&KeeperMessage::Snapshot(Snapshot {
                 session_id: "s1".into(),
                 history_lines: None,
-            drain_output: false,
+                drain_output: false,
             }))
             .unwrap();
         match &m {
@@ -476,7 +517,9 @@ mod tests {
         let k = FakeKeeper::new(std::path::PathBuf::from("/tmp/fk-t"));
         let _ = spawn_id(&k, "s1").unwrap();
         let m = k
-            .handle(&KeeperMessage::Kill(Kill { session_id: "s1".into() }))
+            .handle(&KeeperMessage::Kill(Kill {
+                session_id: "s1".into(),
+            }))
             .unwrap();
         match &m {
             KeeperMessage::State(st) => {
@@ -488,7 +531,9 @@ mod tests {
         }
         // The session is removed: a later `Read` is a "no such session" error.
         let m = k
-            .handle(&KeeperMessage::Read(Read { session_id: "s1".into() }))
+            .handle(&KeeperMessage::Read(Read {
+                session_id: "s1".into(),
+            }))
             .unwrap_err();
         assert!(m.contains("no such session"));
     }
@@ -518,9 +563,7 @@ mod tests {
             session_id: "nope".into(),
             data: "x".into(),
         };
-        assert!(k
-            .handle(&KeeperMessage::Write(w))
-            .is_err());
+        assert!(k.handle(&KeeperMessage::Write(w)).is_err());
     }
 
     /// End-to-end over the socket: `keeper_call` drives the fake keeper the way
@@ -530,17 +573,16 @@ mod tests {
     #[tokio::test]
     async fn keeper_call_drives_the_fake_over_the_socket() {
         use ldmux_protocol::keeper_call::keeper_call;
-        let dir = std::env::temp_dir().join(format!(
-            "ldmux-fake-keeper-{}",
-            rand::random::<u64>()
-        ));
+        let dir = std::env::temp_dir().join(format!("ldmux-fake-keeper-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("keeper.sock");
         let k = std::sync::Arc::new(FakeKeeper::new(socket.clone()));
         let k_serve = k.clone();
         let socket_serve = socket.clone();
         tokio::spawn(async move {
-            FakeKeeper::serve(&k_serve, socket_serve.as_path()).await.unwrap();
+            FakeKeeper::serve(&k_serve, socket_serve.as_path())
+                .await
+                .unwrap();
         });
 
         // Wait for the fake keeper's socket file to exist (the `serve` task
@@ -560,23 +602,31 @@ mod tests {
         .unwrap();
 
         // A `Spawn` over the socket answers a live `State`.
-        let r = keeper_call(socket.to_str().unwrap(), &KeeperMessage::Spawn(Spawn {
-            session_id: "s1".into(),
-            cols: 80,
-            rows: 24,
-            cwd: None,
-            command: None,
-            env: None,
-            }), 2000)
+        let r = keeper_call(
+            socket.to_str().unwrap(),
+            &KeeperMessage::Spawn(Spawn {
+                session_id: "s1".into(),
+                cols: 80,
+                rows: 24,
+                cwd: None,
+                command: None,
+                env: None,
+            }),
+            2000,
+        )
         .await
         .unwrap();
         assert!(is_state(&r, "s1", false));
 
         // A `Peek` over the socket drains what the test injected.
         k.inject_output("s1", b"socket-bytes");
-        let r = keeper_call(socket.to_str().unwrap(), &KeeperMessage::Peek(Peek { session_id: "s1".into() }), 2000)
-            .await
-            .unwrap();
+        let r = keeper_call(
+            socket.to_str().unwrap(),
+            &KeeperMessage::Peek(Peek::all("s1")),
+            2000,
+        )
+        .await
+        .unwrap();
         match &r {
             KeeperMessage::PeekResult(p) => assert_eq!(p.data, b"socket-bytes"),
             _ => panic!("not a peekresult"),

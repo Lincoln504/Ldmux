@@ -96,11 +96,7 @@ unsafe extern "C" {
 
     /// Feed raw VT bytes through the parser. Never fails (input is untrusted;
     /// the goal is to stay consistent, not to reject).
-    pub fn ghostty_terminal_vt_write(
-        terminal: GhosttyTerminal,
-        data: *const u8,
-        len: usize,
-    );
+    pub fn ghostty_terminal_vt_write(terminal: GhosttyTerminal, data: *const u8, len: usize);
 
     /// Change the cell count. `cell_*_px` are the pixel size of one cell
     /// (drives image protocols and size reports; arbitrary headless).
@@ -114,11 +110,7 @@ unsafe extern "C" {
 
     /// The one generic accessor: extract `data` into `out` (typed per the
     /// `GhosttyTerminalData` doc).
-    pub fn ghostty_terminal_get(
-        terminal: GhosttyTerminal,
-        data: c_int,
-        out: *mut c_void,
-    ) -> c_int;
+    pub fn ghostty_terminal_get(terminal: GhosttyTerminal, data: c_int, out: *mut c_void) -> c_int;
 
     /// Batch accessor (one call, many keys). Bound for completeness of "that
     /// one function" — the skeleton uses the single `get`.
@@ -131,11 +123,7 @@ unsafe extern "C" {
     ) -> c_int;
 
     /// Free a library-allocated buffer (e.g. a `continuation_alloc` result).
-    pub fn ghostty_free(
-        allocator: *const GhosttyAllocator,
-        ptr: *mut u8,
-        len: usize,
-    );
+    pub fn ghostty_free(allocator: *const GhosttyAllocator, ptr: *mut u8, len: usize);
 
     /// Scroll the terminal viewport (TOP / BOTTOM / DELTA / ROW). Returns
     /// void (may be passed NULL for the terminal, a no-op).
@@ -220,8 +208,11 @@ pub struct GhosttyColorRgb {
 // We mirror them `#[repr(C)]` (72-byte `GhosttyStyle`) so `size_of` matches the
 // C, and read the fields as raw bytes (`style_to_plain`) at the measured
 // offsets, not via the field accessors.
-/// A color value: the raw 8 bytes of the C union.
-#[repr(C)]
+/// A color value: the raw 8 bytes of the C union. `align(8)` because the C union
+/// holds a `uint64_t` (`_padding`), which is what puts it at offset 8 of the
+/// 16-byte `GhosttyStyleColor` and makes the whole style 72 bytes; without it this
+/// mirror was 56 bytes and its `size_of` agreed with nothing.
+#[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GhosttyStyleColorValue {
     pub bytes: [u8; 8],
@@ -298,11 +289,17 @@ unsafe extern "C" {
     pub fn ghostty_render_state_free(state: GhosttyRenderState);
 
     /// Update a render state from a terminal (one convenience call).
-    pub fn ghostty_render_state_update(state: GhosttyRenderState, terminal: GhosttyTerminal)
-        -> c_int;
+    pub fn ghostty_render_state_update(
+        state: GhosttyRenderState,
+        terminal: GhosttyTerminal,
+    ) -> c_int;
 
     /// Get a value from a render state (e.g. ROW_ITERATOR).
-    pub fn ghostty_render_state_get(state: GhosttyRenderState, data: u32, out: *mut c_void) -> c_int;
+    pub fn ghostty_render_state_get(
+        state: GhosttyRenderState,
+        data: u32,
+        out: *mut c_void,
+    ) -> c_int;
 
     /// Create a row-iterator instance (populated via `get` ROW_ITERATOR).
     pub fn ghostty_render_state_row_iterator_new(
@@ -315,9 +312,7 @@ unsafe extern "C" {
 
     /// Advance to the next row (y = 0, ascending). Returns true if a row is
     /// now available to read.
-    pub fn ghostty_render_state_row_iterator_next(
-        iterator: GhosttyRenderStateRowIterator,
-    ) -> bool;
+    pub fn ghostty_render_state_row_iterator_next(iterator: GhosttyRenderStateRowIterator) -> bool;
 
     /// Read a value of the current row (e.g. ROW_DATA_CELLS).
     pub fn ghostty_render_state_row_get(

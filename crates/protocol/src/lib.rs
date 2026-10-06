@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! The ldmux wire contract: frames, messages, keeper, rpc, pairing, net,
 //! paths, socket.
 //!
@@ -34,19 +35,23 @@ pub const MAX_PANE_ROWS: u64 = 255;
 /// Every path that sizes a PTY goes through this, so the grid the emulator holds
 /// and the grid the client is told about are the same grid.
 pub fn clamp_pane_size(cols: u64, rows: u64) -> (u64, u64) {
-    (cols.clamp(MIN_PANE_COLS, MAX_PANE_COLS), rows.clamp(MIN_PANE_ROWS, MAX_PANE_ROWS))
+    (
+        cols.clamp(MIN_PANE_COLS, MAX_PANE_COLS),
+        rows.clamp(MIN_PANE_ROWS, MAX_PANE_ROWS),
+    )
 }
 
+pub mod base64;
 pub mod frames;
-pub mod utf8;
 pub mod keeper;
 pub mod keeper_call;
 pub mod messages;
 pub mod net;
-pub mod paths;
 pub mod pairing;
+pub mod paths;
 pub mod rpc;
 pub mod socket;
+pub mod utf8;
 
 #[cfg(test)]
 mod size_tests {

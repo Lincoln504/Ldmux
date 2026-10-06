@@ -89,16 +89,28 @@ fn terminal_modes_and_alternate_screen_are_tracked() {
     // alternate screen (?1047).
     t.write(b"\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[?1047h");
     assert!(t.mode(MODE_SGR_MOUSE), "SGR mouse on after ?1006h");
-    assert!(t.mode(MODE_BRACKETED_PASTE), "bracketed paste on after ?2004h");
-    assert!(t.mode(MODE_APP_CURSOR), "application cursor keys on after ?1h");
+    assert!(
+        t.mode(MODE_BRACKETED_PASTE),
+        "bracketed paste on after ?2004h"
+    );
+    assert!(
+        t.mode(MODE_APP_CURSOR),
+        "application cursor keys on after ?1h"
+    );
     assert!(!t.cursor_visible(), "cursor hidden after ?25l");
     assert!(t.alternate_on(), "alternate screen on after ?1047h");
 
     // Restore: the modes off, cursor shown, primary screen.
     t.write(b"\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b[?25h\x1b[?1047l");
     assert!(!t.mode(MODE_SGR_MOUSE), "SGR mouse off after ?1006l");
-    assert!(!t.mode(MODE_BRACKETED_PASTE), "bracketed paste off after ?2004l");
-    assert!(!t.mode(MODE_APP_CURSOR), "application cursor keys off after ?1l");
+    assert!(
+        !t.mode(MODE_BRACKETED_PASTE),
+        "bracketed paste off after ?2004l"
+    );
+    assert!(
+        !t.mode(MODE_APP_CURSOR),
+        "application cursor keys off after ?1l"
+    );
     assert!(t.cursor_visible(), "cursor shown after ?25h");
     assert!(!t.alternate_on(), "primary screen after ?1047l");
 }

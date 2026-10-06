@@ -13,7 +13,11 @@ use std::os::fd::AsFd;
 use std::process::{Command, Stdio};
 
 fn scratch() -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("ldmux-attach-t-{}-{}", std::process::id(), std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()));
+    let p = std::env::temp_dir().join(format!(
+        "ldmux-attach-t-{}-{}",
+        std::process::id(),
+        std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -31,19 +35,27 @@ fn refuses_when_stdin_is_not_a_terminal() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("not a terminal") && err.contains("ldmux shell"), "{err}");
+    assert!(
+        err.contains("not a terminal") && err.contains("ldmux shell"),
+        "{err}"
+    );
 }
 
 /// The window puts the terminal in raw mode, and SIGTERM puts it back: cooked
 /// flags restored, and the mode resets written to the terminal.
 #[test]
 fn a_termination_signal_restores_the_terminal() {
-    use nix::sys::termios::{tcgetattr, LocalFlags};
+    use nix::sys::termios::{LocalFlags, tcgetattr};
     use std::io::Read;
     let dir = scratch();
     let pty = nix::pty::openpty(None, None).unwrap();
     let cooked = tcgetattr(pty.slave.as_fd()).unwrap();
-    assert!(cooked.local_flags.contains(LocalFlags::ICANON | LocalFlags::ECHO), "a pty starts cooked");
+    assert!(
+        cooked
+            .local_flags
+            .contains(LocalFlags::ICANON | LocalFlags::ECHO),
+        "a pty starts cooked"
+    );
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ldmux-attach"))
         .arg("some-session")
@@ -59,7 +71,10 @@ fn a_termination_signal_restores_the_terminal() {
     let mut raw = false;
     for _ in 0..200 {
         let t = tcgetattr(pty.slave.as_fd()).unwrap();
-        if !t.local_flags.intersects(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG) {
+        if !t
+            .local_flags
+            .intersects(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG)
+        {
             raw = true;
             break;
         }
@@ -84,14 +99,30 @@ fn a_termination_signal_restores_the_terminal() {
             break;
         }
     }
-    assert!(String::from_utf8_lossy(&seen).contains("retrying"), "client never reached its loop");
+    assert!(
+        String::from_utf8_lossy(&seen).contains("retrying"),
+        "client never reached its loop"
+    );
 
-    nix::sys::signal::kill(nix::unistd::Pid::from_raw(child.id() as i32), nix::sys::signal::Signal::SIGTERM).unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
     let status = child.wait().unwrap();
-    assert_eq!(status.code(), Some(1), "terminated by a signal is reported, not a crash: {status:?}");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "terminated by a signal is reported, not a crash: {status:?}"
+    );
 
     let after = tcgetattr(pty.slave.as_fd()).unwrap();
-    assert!(after.local_flags.contains(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG), "cooked flags restored");
+    assert!(
+        after
+            .local_flags
+            .contains(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG),
+        "cooked flags restored"
+    );
     // The resets were written before the process ended.
     let mut tail = Vec::new();
     for _ in 0..40 {
@@ -110,7 +141,10 @@ fn a_termination_signal_restores_the_terminal() {
     seen.extend(tail);
     let text = String::from_utf8_lossy(&seen);
     for needle in ["\x1b[?2004l", "\x1b[?1000l", "\x1b[?1049l", "\x1b[?25h"] {
-        assert!(text.contains(needle), "missing reset {needle:?} in {text:?}");
+        assert!(
+            text.contains(needle),
+            "missing reset {needle:?} in {text:?}"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

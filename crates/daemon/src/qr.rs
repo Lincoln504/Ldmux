@@ -44,46 +44,46 @@ const ECC_ORDER: [Ecc; 4] = [Ecc::L, Ecc::M, Ecc::Q, Ecc::H];
 const ECC_CODEWORDS_PER_BLOCK: [[u32; 41]; 4] = [
     // L
     [
-        0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28,
-        28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30
+        0, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28,
+        30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
     ],
     // M
     [
-        0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26,
-        28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28
+        0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28,
+        28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
     ],
     // Q
     [
-        0, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28,
-        30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30
+        0, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30,
+        30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
     ],
     // H
     [
-        0, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30,
-        24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30
+        0, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24,
+        30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
     ],
 ];
 
 const ECC_BLOCKS: [[u32; 41]; 4] = [
     // L
     [
-        0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12,
-        12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25
+        0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13,
+        14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25,
     ],
     // M
     [
-        0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20,
-        21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49
+        0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21,
+        23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49,
     ],
     // Q
     [
-        0, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25,
-        27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68
+        0, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29,
+        34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68,
     ],
     // H
     [
-        0, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30,
-        32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81
+        0, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32,
+        35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81,
     ],
 ];
 
@@ -190,12 +190,7 @@ fn with_ecc(data: &[u8], ver: u32, ecc: Ecc) -> Vec<u8> {
     let mut all: Vec<Vec<u8>> = vec![];
     let mut k = 0usize;
     for i in 0..blocks {
-        let len = short_len as i64 - ecc_len as i64
-            + (if i < short_blocks {
-                0
-            } else {
-                1
-            });
+        let len = short_len as i64 - ecc_len as i64 + (if i < short_blocks { 0 } else { 1 });
         let len = if len > 0 { len as usize } else { 0 };
         let dat = data[k..k + len].to_vec();
         k += len;
@@ -358,11 +353,14 @@ fn draw_codewords(g: &mut Grid, data: &[u8]) {
             for j in 0..2u32 {
                 let x = right - j;
                 let upward = (right + 1) & 2 == 0;
-                let y = if upward { size as u32 - 1 - vert as u32 } else { vert as u32 };
+                let y = if upward {
+                    size as u32 - 1 - vert as u32
+                } else {
+                    vert as u32
+                };
                 if !g.fixed[y as usize][x as usize] && i < data.len() as u32 * 8 {
-                    g.modules[y as usize][x as usize] = (data[(i >> 3) as usize] >> (7 - (i & 7)))
-                        & 1
-                        != 0;
+                    g.modules[y as usize][x as usize] =
+                        (data[(i >> 3) as usize] >> (7 - (i & 7))) & 1 != 0;
                     i += 1;
                 }
             }
@@ -439,9 +437,8 @@ fn penalty(m: &[Vec<bool>]) -> i64 {
                     let before = b as i64 - k as i64;
                     before < 0 || !at(b - k, a, horizontal)
                 });
-                let light_after = (0..3u32).all(|k| {
-                    b + 7 + k >= size || !at(b + 7 + k, a, horizontal)
-                });
+                let light_after =
+                    (0..3u32).all(|k| b + 7 + k >= size || !at(b + 7 + k, a, horizontal));
                 if light_before || light_after {
                     score += 40;
                 }
@@ -580,13 +577,7 @@ pub fn render_qr_terminal(code: &QrCode, quiet: usize) -> String {
             && my < code.size as i32
             && code.modules[my as usize][mx as usize]
     };
-    let colour = |d: bool| -> u32 {
-        if d {
-            16
-        } else {
-            231
-        }
-    };
+    let colour = |d: bool| -> u32 { if d { 16 } else { 231 } };
     let mut lines: Vec<String> = vec![];
     for y in (0..n).step_by(2) {
         let mut line = String::new();
@@ -632,7 +623,8 @@ mod tests {
 
     /// Printable ASCII, varied, so no two codes share a payload.
     fn payload(len: usize, seed: u32) -> String {
-        const ALPHABET: &[u8] = br"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/?&=.-_%~";
+        const ALPHABET: &[u8] =
+            br"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/?&=.-_%~";
         let mut x = seed.wrapping_mul(2654435761);
         let mut s = String::new();
         for _ in 0..len {
@@ -682,10 +674,13 @@ mod tests {
             "-Sqrcode.enable".into(),
         ];
         argv.extend(cases.iter().map(|(f, _)| f.clone()));
-        let res = run(argv, ExecOpts {
-            timeout_ms: Some(100_000),
-            env: None,
-        })
+        let res = run(
+            argv,
+            ExecOpts {
+                timeout_ms: Some(100_000),
+                env: None,
+            },
+        )
         .await;
         assert!(
             zbar_on_path(&res),
@@ -693,7 +688,12 @@ mod tests {
             res.err
         );
         assert_eq!(res.code, 0);
-        let decoded: Vec<String> = res.out.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+        let decoded: Vec<String> = res
+            .out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
         let expected: Vec<String> = cases.into_iter().map(|(_, t)| t).collect();
         assert_eq!(decoded, expected);
         let _ = std::fs::remove_dir_all(&dir);
@@ -770,8 +770,16 @@ mod tests {
                     j += 1;
                 }
                 // j is at 'm'; j+1 is the upper half block.
-                if fg == "16" { top.push('1'); } else { top.push('0'); }
-                if bg == "16" { bottom.push('1'); } else { bottom.push('0'); }
+                if fg == "16" {
+                    top.push('1');
+                } else {
+                    top.push('0');
+                }
+                if bg == "16" {
+                    bottom.push('1');
+                } else {
+                    bottom.push('0');
+                }
                 i = j + 2;
             } else {
                 i += 1;
@@ -807,7 +815,10 @@ mod tests {
         let mut px: Vec<String> = vec![];
         for r in &rows {
             // Horizontal: each character repeated `scale` times.
-            let s: String = r.chars().flat_map(|c| std::iter::repeat_n(c, scale as usize)).collect();
+            let s: String = r
+                .chars()
+                .flat_map(|c| std::iter::repeat_n(c, scale as usize))
+                .collect();
             // Vertical: `scale` copies of that line.
             for _ in 0..scale {
                 px.push(s.clone());
@@ -818,7 +829,12 @@ mod tests {
         let file = dir.join("term.pbm");
         std::fs::write(
             &file,
-            format!("P1\n{} {}\n{}\n", width as u32 * scale, px.len(), px.join("\n")),
+            format!(
+                "P1\n{} {}\n{}\n",
+                width as u32 * scale,
+                px.len(),
+                px.join("\n")
+            ),
         )
         .unwrap();
         let res = run(
@@ -830,7 +846,10 @@ mod tests {
                 "-Sqrcode.enable".into(),
                 file.to_string_lossy().to_string(),
             ],
-            ExecOpts { timeout_ms: None, env: None },
+            ExecOpts {
+                timeout_ms: None,
+                env: None,
+            },
         )
         .await;
         assert!(

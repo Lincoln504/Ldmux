@@ -9,11 +9,15 @@
 //! *Stale State*: attachment state that outlives the connection **blocks the
 //! next attach**. The failure is a lockout, not a cosmetic bug.
 //!
-//! So ownership is a **map of live claims**, not durable state:
+//! So ownership is a **map of live claims**, kept honest by three rules:
 //! - a device's claims are dropped when its connection ends (`release_device`);
 //! - claims for sessions that no longer exist are dropped by `retain`;
-//! - nothing is ever written to disk. A daemon restart loses every claim,
-//!   which is correct — a restart also loses every client.
+//! - a daemon restart does **not** lose the claims: the table is mirrored to
+//!   `<state>/claims.json` and reloaded with a re-claim grace
+//!   (`LdmuxDaemon::load_claims`), because the clients a restart drops come
+//!   straight back and another device must not be able to slip in between. A
+//!   restored claim nobody re-attaches to is released when the grace ends, so
+//!   the Stale State lockout is still bounded.
 //!
 //! Pure and synchronous: every rule here is a rule the tests can state
 //! directly.
@@ -59,7 +63,6 @@ pub struct Ownership {
     held: std::collections::HashMap<String, Vec<String>>,
 }
 
-
 impl Ownership {
     pub fn new() -> Self {
         Self::default()
@@ -68,6 +71,23 @@ impl Ownership {
     /// The device currently looking at this session, if any.
     pub fn owner(&self, session_id: &str) -> Option<&Claim> {
         self.claims.get(session_id)
+    }
+
+    /// Every claim, for persisting.
+    pub fn export(&self) -> Vec<(String, Claim)> {
+        self.claims
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Put back a claim that was persisted (a restart). Keeps the original `since`.
+    pub fn restore(&mut self, session_id: &str, claim: Claim) {
+        if self.claims.contains_key(session_id) {
+            return;
+        }
+        self.index(session_id, &claim.device.id);
+        self.claims.insert(session_id.to_string(), claim);
     }
 
     /// Every claimed session id, for broadcast/retain checks.
@@ -103,7 +123,8 @@ impl Ownership {
                     device: device.clone(),
                     since: e.since,
                 };
-                self.claims.insert(session_id.to_string(), refreshed.clone());
+                self.claims
+                    .insert(session_id.to_string(), refreshed.clone());
                 return ClaimResult::Acquired {
                     claim: refreshed,
                     previous: None,
@@ -191,7 +212,10 @@ impl Ownership {
     }
 
     fn index(&mut self, session_id: &str, device_id: &str) {
-        self.held.entry(device_id.to_string()).or_default().push(session_id.to_string());
+        self.held
+            .entry(device_id.to_string())
+            .or_default()
+            .push(session_id.to_string());
     }
 
     fn unindex(&mut self, session_id: &str, device_id: &str) {

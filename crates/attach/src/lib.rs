@@ -8,12 +8,15 @@
 //! `owned` and cuts the stream; the client prints the notice and waits for
 //! `r` to take it back (the keystroke is the consent, plan §3.9 / D-1).
 //!
-//! Transport: the daemon's remote WebSocket (the same endpoint the phone uses),
-//! addressed via the `remote_info` control-socket call. The device identity is
-//! the daemon's desktop device, so `makeLive`'s claim and this attach agree.
+//! Transport: the daemon's **local attach socket** (`<control>-attach.sock`, a
+//! Unix socket speaking the same WebSocket protocol the phone uses, 0600 and
+//! checked by peer uid), so a window needs no tailnet and no token. Only a daemon
+//! that predates that socket is reached the old way, over the remote endpoint the
+//! `remote_info` control-socket call names. The device identity is the daemon's
+//! desktop device, so `makeLive`'s claim and this attach agree.
 
-use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
+use futures_util::stream::StreamExt;
 use ldmux_protocol::frames::{decode_frames, t as ft};
 use ldmux_protocol::socket;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -88,11 +91,31 @@ pub fn render_snapshot(s: &Snapshot) -> Vec<u8> {
     // and it is sent unconditionally (`l` included): on a fresh terminal leaving
     // the primary screen is a no-op, and being unconditional is what makes the
     // two screens impossible to get out of step.
-    out.extend_from_slice(if s.alternate_on { b"\x1b[?1049h" } else { b"\x1b[?1049l" });
-    out.extend_from_slice(if s.mouse { b"\x1b[?1000h" } else { b"\x1b[?1000l" });
-    out.extend_from_slice(if s.mouse_sgr { b"\x1b[?1006h" } else { b"\x1b[?1006l" });
-    out.extend_from_slice(if s.app_cursor { b"\x1b[?1h" } else { b"\x1b[?1l" });
-    out.extend_from_slice(if s.bracketed_paste { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+    out.extend_from_slice(if s.alternate_on {
+        b"\x1b[?1049h"
+    } else {
+        b"\x1b[?1049l"
+    });
+    out.extend_from_slice(if s.mouse {
+        b"\x1b[?1000h"
+    } else {
+        b"\x1b[?1000l"
+    });
+    out.extend_from_slice(if s.mouse_sgr {
+        b"\x1b[?1006h"
+    } else {
+        b"\x1b[?1006l"
+    });
+    out.extend_from_slice(if s.app_cursor {
+        b"\x1b[?1h"
+    } else {
+        b"\x1b[?1l"
+    });
+    out.extend_from_slice(if s.bracketed_paste {
+        b"\x1b[?2004h"
+    } else {
+        b"\x1b[?2004l"
+    });
     // The window is already empty when it opens, but a resync re-renders over
     // whatever is on screen, so the visible screen is cleared either way.
     out.extend_from_slice(b"\x1b[2J\x1b[H");
@@ -162,12 +185,16 @@ static SAVED: std::sync::Mutex<Option<nix::sys::termios::Termios>> = std::sync::
 /// Put the terminal back: the mode resets, then the termios the window found.
 /// Safe to call any number of times, from any path (drop, signal, panic).
 pub fn restore_terminal() {
-    use nix::sys::termios::{tcsetattr, SetArg};
+    use nix::sys::termios::{SetArg, tcsetattr};
     let saved = SAVED.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(t) = saved {
         // SAFETY: fd 0/1 are the process's stdio; the writes are best effort.
         unsafe { nix::libc::write(1, TERMINAL_RESET.as_ptr().cast(), TERMINAL_RESET.len()) };
-        let _ = tcsetattr(unsafe { std::os::fd::BorrowedFd::borrow_raw(0) }, SetArg::TCSANOW, &t);
+        let _ = tcsetattr(
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(0) },
+            SetArg::TCSANOW,
+            &t,
+        );
     }
 }
 
@@ -181,7 +208,7 @@ impl Terminal {
     /// Refuses when stdin or stdout is not a terminal: there is nothing to put
     /// in raw mode and nothing a snapshot could be painted on.
     fn enter() -> Result<Self, String> {
-        use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, SpecialCharacterIndices};
+        use nix::sys::termios::{SetArg, SpecialCharacterIndices, cfmakeraw, tcgetattr, tcsetattr};
         let is_tty = |fd| unsafe { nix::libc::isatty(fd) } == 1;
         if !is_tty(0) || !is_tty(1) {
             return Err(
@@ -191,7 +218,8 @@ impl Terminal {
             );
         }
         let fd0 = unsafe { std::os::fd::BorrowedFd::borrow_raw(0) };
-        let original = tcgetattr(fd0).map_err(|e| format!("cannot read the terminal settings: {e}"))?;
+        let original =
+            tcgetattr(fd0).map_err(|e| format!("cannot read the terminal settings: {e}"))?;
         let mut raw = original.clone();
         cfmakeraw(&mut raw);
         // cfmakeraw leaves the read thresholds alone: a read must return on one
@@ -229,7 +257,7 @@ fn install_panic_hook() {
 /// ISIG off, ^C is a byte for the shell, so these only ever come from outside: a
 /// `kill`, a closed terminal, a session ending.
 async fn termination() -> &'static str {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut hup), Ok(mut int)) = (
         signal(SignalKind::terminate()),
         signal(SignalKind::hangup()),
@@ -274,7 +302,15 @@ where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    run_with_ping(daemon_socket, session_id, readonly, input, output, PING_INTERVAL_MS).await
+    run_with_ping(
+        daemon_socket,
+        session_id,
+        readonly,
+        input,
+        output,
+        PING_INTERVAL_MS,
+    )
+    .await
 }
 
 /// One connection's lifetime, from the caller's point of view.
@@ -311,7 +347,12 @@ async fn remote_info(daemon_socket: &str) -> Result<RemoteInfo, String> {
     if hostname.is_empty() || port == 0 {
         return Err("the daemon has no remote address".to_string());
     }
-    Ok(RemoteInfo { hostname, port, path, token })
+    Ok(RemoteInfo {
+        hostname,
+        port,
+        path,
+        token,
+    })
 }
 
 /// 250 ms doubling to 5 s. A daemon restart takes a second or two; a window must
@@ -322,7 +363,9 @@ fn reconnect_delay(attempt: u32) -> std::time::Duration {
 }
 
 async fn note<W: AsyncWriteExt + Unpin>(output: &mut W, text: &str) {
-    let _ = output.write_all(format!("\r\n  {text}\r\n").as_bytes()).await;
+    let _ = output
+        .write_all(format!("\r\n  {text}\r\n").as_bytes())
+        .await;
     let _ = output.flush().await;
 }
 
@@ -350,16 +393,16 @@ where
     // test's duplex streams have no terminal to set up.
     let mut attempt: u32 = 0;
     loop {
-        let info = match remote_info(daemon_socket).await {
-            Ok(i) => i,
-            Err(e) => {
-                note(&mut output, &format!("ldmux: {e}; retrying")).await;
-                attempt += 1;
-                tokio::time::sleep(reconnect_delay(attempt)).await;
-                continue;
-            }
-        };
-        match attach_once(&info, session_id, readonly, &mut input, &mut output, ping_ms).await {
+        match attach_once(
+            daemon_socket,
+            session_id,
+            readonly,
+            &mut input,
+            &mut output,
+            ping_ms,
+        )
+        .await
+        {
             // The shell ended, or the window closed: this process is done.
             Ok(Outcome::Ended) => return Ok(()),
             Ok(Outcome::Lost) => {
@@ -367,7 +410,7 @@ where
                 attempt = 0;
             }
             Err(e) => {
-                note(&mut output, &format!("ldmux: {e}")).await;
+                note(&mut output, &format!("ldmux: {e}; retrying")).await;
             }
         }
         attempt += 1;
@@ -379,7 +422,7 @@ where
 /// ends. Keeping raw mode and the retry policy out of here is what makes a
 /// reconnect a fresh call instead of a second copy of the loop.
 async fn attach_once<R, W>(
-    info: &RemoteInfo,
+    daemon_socket: &str,
     session_id: &str,
     readonly: bool,
     input: &mut R,
@@ -390,21 +433,62 @@ where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    let uri = format!("ws://{}:{}{}", info.hostname, info.port, info.path);
-    let mut req = {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        uri.clone().into_client_request().map_err(|e| e.to_string())?
-    };
-    req.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {}", info.token)
-            .parse()
-            .map_err(|_| "bad token header".to_string())?,
-    );
-    let (ws, _) = tokio_tungstenite::connect_async(req)
-        .await
-        .map_err(|e| format!("connect {uri}: {e}"))?;
+    // The way in is the daemon's local attach socket (`<control>-attach.sock`):
+    // the same WebSocket protocol over a Unix socket, so a window needs neither
+    // the tailnet nor the token. Only a daemon that predates the socket (nothing
+    // there, or nothing listening) is reached the old way, over the remote
+    // endpoint `remote_info` names.
+    let local = ldmux_protocol::paths::attach_socket_path_from(daemon_socket);
+    match tokio::net::UnixStream::connect(&local).await {
+        Ok(stream) => {
+            let (ws, _) = tokio_tungstenite::client_async("ws://ldmux.local/ws", stream)
+                .await
+                .map_err(|e| format!("attach socket {local}: {e}"))?;
+            pump(ws, session_id, readonly, input, output, ping_ms).await
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            let info = remote_info(daemon_socket).await?;
+            let uri = format!("ws://{}:{}{}", info.hostname, info.port, info.path);
+            let mut req = {
+                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+                uri.clone()
+                    .into_client_request()
+                    .map_err(|e| e.to_string())?
+            };
+            req.headers_mut().insert(
+                "Authorization",
+                format!("Bearer {}", info.token)
+                    .parse()
+                    .map_err(|_| "bad token header".to_string())?,
+            );
+            let (ws, _) = tokio_tungstenite::connect_async(req)
+                .await
+                .map_err(|e| format!("connect {uri}: {e}"))?;
+            pump(ws, session_id, readonly, input, output, ping_ms).await
+        }
+        Err(e) => Err(format!("attach socket {local}: {e}")),
+    }
+}
 
+/// Attach and pump on an established WebSocket until the link or the shell ends.
+async fn pump<S, R, W>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
+    session_id: &str,
+    readonly: bool,
+    input: &mut R,
+    output: &mut W,
+    ping_ms: u64,
+) -> Result<Outcome, String>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
     let (mut cols, mut rows) = tty_size();
     let (mut sink, mut stream) = ws.split();
 
@@ -440,8 +524,9 @@ where
     )
     .await?;
 
-    let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-        .map_err(|e| e.to_string())?;
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+            .map_err(|e| e.to_string())?;
     let mut inbuf = [0u8; 4096];
     // A multi-byte character can straddle two reads (a large paste): decoding
     // each read alone turned both halves into U+FFFD in the user's shell.
@@ -663,7 +748,7 @@ where
 }
 #[cfg(test)]
 mod render_tests {
-    use super::{render_snapshot, Snapshot};
+    use super::{Snapshot, render_snapshot};
 
     fn snap(screen: &str) -> Snapshot<'_> {
         Snapshot {
@@ -682,7 +767,11 @@ mod render_tests {
     fn rows_are_separated_by_carriage_return_and_line_feed() {
         let out = String::from_utf8(render_snapshot(&snap("aa\nbb\n"))).unwrap();
         assert!(out.contains("aa\r\nbb"), "rows must not staircase: {out:?}");
-        assert_eq!(out.matches('\n').count(), 1, "one separator for two rows: {out:?}");
+        assert_eq!(
+            out.matches('\n').count(),
+            1,
+            "one separator for two rows: {out:?}"
+        );
     }
 
     /// The daemon terminates *every* row, including the last, so an N-row pane
@@ -701,7 +790,11 @@ mod render_tests {
         }
         let with = render_snapshot(&snap("aa\nbb\n"));
         let without = render_snapshot(&snap("aa\nbb"));
-        assert_eq!(body(&with), body(&without), "the terminator must make no difference");
+        assert_eq!(
+            body(&with),
+            body(&without),
+            "the terminator must make no difference"
+        );
         assert_eq!(body(&with), "aa\r\nbb", "two rows, one separator");
         assert_eq!(body(&render_snapshot(&snap("aa\n"))), "aa", "one row, none");
     }
@@ -756,8 +849,16 @@ mod render_tests {
             ..snap("x")
         }))
         .unwrap();
-        assert!(out.starts_with("\u{1b}[?1049h"), "alternate screen: {out:?}");
-        for seq in ["\u{1b}[?1000h", "\u{1b}[?1006h", "\u{1b}[?1h", "\u{1b}[?2004h"] {
+        assert!(
+            out.starts_with("\u{1b}[?1049h"),
+            "alternate screen: {out:?}"
+        );
+        for seq in [
+            "\u{1b}[?1000h",
+            "\u{1b}[?1006h",
+            "\u{1b}[?1h",
+            "\u{1b}[?2004h",
+        ] {
             assert!(out.contains(seq), "missing {seq:?} in {out:?}");
         }
     }
@@ -768,7 +869,13 @@ mod render_tests {
     #[test]
     fn modes_are_sent_even_when_off() {
         let out = String::from_utf8(render_snapshot(&snap("x"))).unwrap();
-        for seq in ["\u{1b}[?1049l", "\u{1b}[?1000l", "\u{1b}[?1006l", "\u{1b}[?1l", "\u{1b}[?2004l"] {
+        for seq in [
+            "\u{1b}[?1049l",
+            "\u{1b}[?1000l",
+            "\u{1b}[?1006l",
+            "\u{1b}[?1l",
+            "\u{1b}[?2004l",
+        ] {
             assert!(out.contains(seq), "missing {seq:?} in {out:?}");
         }
     }

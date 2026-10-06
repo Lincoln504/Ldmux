@@ -28,16 +28,19 @@ use rand::Rng;
 /// not ours (another uid could have planted it) must not be trusted.
 pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> Result<String, String> {
     let legacy_path = format!("{state_dir}/token");
-    let path: String = token_path.map(str::to_string).unwrap_or_else(|| legacy_path.clone());
+    let path: String = token_path
+        .map(str::to_string)
+        .unwrap_or_else(|| legacy_path.clone());
 
     let existing = read_token(&path)?;
     if !existing.is_empty() {
         // A copy left at the old place would be adopted again if the real one
         // were deleted to rotate it — silently bringing the old token back.
         if let Some(p) = token_path
-            && p != legacy_path.as_str() {
-                let _ = std::fs::remove_file(&legacy_path);
-            }
+            && p != legacy_path.as_str()
+        {
+            let _ = std::fs::remove_file(&legacy_path);
+        }
         return Ok(existing);
     }
 
@@ -50,18 +53,23 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> Result
     } else {
         String::new()
     };
-    let token = if legacy.is_empty() { random_token() } else { legacy };
+    let token = if legacy.is_empty() {
+        random_token()
+    } else {
+        legacy
+    };
 
     // mkdir -p the parent 0700 (only when we create it: the TS mode applies to
     // created directories), then write 0600 and chmod, so umask cannot widen
     // it: the token is a credential even though it lives in a 0700 dir.
     if let Some(parent) = std::path::Path::new(&path).parent()
-        && parent != std::path::Path::new("") && !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create {}: {e}", parent.display()))?;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("chmod {}: {e}", parent.display()))?;
-        }
+        && parent != std::path::Path::new("")
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod {}: {e}", parent.display()))?;
+    }
     // Created 0600 from the first byte: `fs::write` then `chmod` left a window in
     // which the credential existed with the umask's mode (0644), readable by any
     // local user when the parent directory was not ours to tighten.
@@ -85,9 +93,10 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> Result
     // Once the token has a path of its own, the legacy copy must go, so a
     // deletion of the real token really rotates it.
     if let Some(p) = token_path
-        && p != legacy_path.as_str() {
-            let _ = std::fs::remove_file(&legacy_path);
-        }
+        && p != legacy_path.as_str()
+    {
+        let _ = std::fs::remove_file(&legacy_path);
+    }
     Ok(token)
 }
 
@@ -122,8 +131,9 @@ fn read_token(path: &str) -> Result<String, String> {
         ));
     }
     if md.mode() & 0o077 != 0 {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("the token file {path} is accessible to others and could not be fixed: {e}"))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            format!("the token file {path} is accessible to others and could not be fixed: {e}")
+        })?;
     }
     std::fs::read_to_string(path)
         .map(|s| s.trim().to_string())
@@ -173,7 +183,10 @@ mod tests {
         let state_dir = new_state_dir(&root);
         let token = load_or_create_token(&state_dir, None).unwrap();
         assert!(is_token_hex64(&token));
-        assert_eq!(std::fs::read_to_string(format!("{state_dir}/token")).unwrap(), token);
+        assert_eq!(
+            std::fs::read_to_string(format!("{state_dir}/token")).unwrap(),
+            token
+        );
         // 0600: the token is a credential even though it lives in a 0700 dir.
         let mode = std::fs::metadata(format!("{state_dir}/token"))
             .unwrap()
@@ -207,7 +220,10 @@ mod tests {
         let root = temp_dir();
         let state_dir = new_state_dir(&root);
         std::fs::write(format!("{state_dir}/token"), "hand-written-token\n").unwrap();
-        assert_eq!(load_or_create_token(&state_dir, None).unwrap(), "hand-written-token");
+        assert_eq!(
+            load_or_create_token(&state_dir, None).unwrap(),
+            "hand-written-token"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -254,16 +270,19 @@ mod tests {
     fn a_token_path_outside_the_state_dir_survives_the_state_dir_being_wiped() {
         // The state dir is a tmpfs under XDG_RUNTIME_DIR: gone on every reboot.
         let root = temp_dir();
-        let token_path = root.join("persist/nested/token").to_string_lossy().to_string();
+        let token_path = root
+            .join("persist/nested/token")
+            .to_string_lossy()
+            .to_string();
         let boot1 = new_state_dir(&root);
         let first = load_or_create_token(&boot1, Some(&token_path)).unwrap();
-        let mode = std::fs::metadata(&token_path)
-            .unwrap()
-            .permissions()
-            .mode();
+        let mode = std::fs::metadata(&token_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         let boot2 = new_state_dir(&root);
-        assert_eq!(load_or_create_token(&boot2, Some(&token_path)).unwrap(), first);
+        assert_eq!(
+            load_or_create_token(&boot2, Some(&token_path)).unwrap(),
+            first
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -275,7 +294,10 @@ mod tests {
         let moved_root = root.join(format!("moved-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&moved_root).unwrap();
         let token_path = moved_root.join("token").to_string_lossy().to_string();
-        assert_eq!(load_or_create_token(&state_dir, Some(&token_path)).unwrap(), paired);
+        assert_eq!(
+            load_or_create_token(&state_dir, Some(&token_path)).unwrap(),
+            paired
+        );
         assert_eq!(std::fs::read_to_string(&token_path).unwrap(), paired);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -292,7 +314,10 @@ mod tests {
         // The legacy copy is gone, so deleting the token really rotates it.
         assert!(!std::path::Path::new(&state_dir).join("token").exists());
         std::fs::remove_file(&token_path).unwrap();
-        assert_ne!(load_or_create_token(&state_dir, Some(&token_path)).unwrap(), paired);
+        assert_ne!(
+            load_or_create_token(&state_dir, Some(&token_path)).unwrap(),
+            paired
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -318,7 +343,10 @@ mod tests {
         let path = format!("{state_dir}/token");
         std::fs::write(&path, "hand-written-token").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(load_or_create_token(&state_dir, None).unwrap(), "hand-written-token");
+        assert_eq!(
+            load_or_create_token(&state_dir, None).unwrap(),
+            "hand-written-token"
+        );
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(root);

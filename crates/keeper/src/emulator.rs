@@ -33,14 +33,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::now_ms;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::{mpsc, Arc, Mutex};
 use std::sync::mpsc::TryRecvError;
+use std::sync::{Arc, Mutex, mpsc};
 
 use ldmux_vt_sys::{
-    Cell, RenderState, ScrollViewport, Terminal, MODE_APP_CURSOR, MODE_BRACKETED_PASTE,
-    MODE_SGR_MOUSE,
+    Cell, MODE_APP_CURSOR, MODE_BRACKETED_PASTE, MODE_SGR_MOUSE, RenderState, ScrollViewport,
+    Terminal,
 };
-use nix::libc as libc;
+use nix::libc;
 use tokio::sync::oneshot;
 
 use ldmux_vt_sys::snapshot;
@@ -84,14 +84,20 @@ pub(crate) enum EmuMsg {
     /// Render the screen: the `rows` live lines, plus `history_lines` of
     /// history above them when requested (the `capture-pane -S -N -E -`
     /// contract). `0` = live screen only.
-    Snapshot { history_lines: u64, drain_output: bool, reply: oneshot::Sender<Outcome> },
+    Snapshot {
+        history_lines: u64,
+        drain_output: bool,
+        reply: oneshot::Sender<Outcome>,
+    },
     /// The pane's size changed. The handler has already done `TIOCSWINSZ`;
     /// the emulator must resize its grid.
     Resize { cols: u16, rows: u16 },
     /// Read the pane's state (the display-message fields), no render — the
     /// `State`/`List` liveness report. The `cols`/`rows`/`dead` and the
     /// `/proc` fields are added by the keeper (which owns the pid).
-    StateQuery { reply: oneshot::Sender<StateOutcome> },
+    StateQuery {
+        reply: oneshot::Sender<StateOutcome>,
+    },
 }
 
 /// The pane's state, read by a `StateQuery` (no render). The keeper adds
@@ -143,7 +149,7 @@ pub struct Outcome {
 /// this replaced. `EFD_CLOEXEC` so no shell inherits it, `EFD_NONBLOCK` so the
 /// wake can never block the sender.
 pub(crate) fn new_waker() -> Option<Arc<OwnedFd>> {
-    use nix::libc as libc;
+    use nix::libc;
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if fd < 0 {
         return None;
@@ -155,7 +161,7 @@ pub(crate) fn new_waker() -> Option<Arc<OwnedFd>> {
 /// Failure is ignored: a full eventfd counter still reads as readable, and a
 /// closed one means the thread is gone.
 pub(crate) fn wake(waker: &Option<Arc<OwnedFd>>) {
-    use nix::libc as libc;
+    use nix::libc;
     if let Some(fd) = waker {
         let one: u64 = 1;
         unsafe {
@@ -166,7 +172,7 @@ pub(crate) fn wake(waker: &Option<Arc<OwnedFd>>) {
 
 /// Read the eventfd's counter back to zero.
 fn drain_waker(fd: std::os::fd::RawFd) {
-    use nix::libc as libc;
+    use nix::libc;
     let mut buf = [0u8; 8];
     unsafe {
         libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8);
@@ -197,120 +203,140 @@ pub(crate) fn spawn(
     rx: mpsc::Receiver<EmuMsg>,
     boot: oneshot::Sender<bool>,
 ) {
-    let Wiring { master, waker, out, activity } = wiring;
+    let Wiring {
+        master,
+        waker,
+        out,
+        activity,
+    } = wiring;
     // A dedicated OS thread: the loop blocks in `poll` for the life of the
     // session, which would pin a slot of tokio's bounded blocking pool (shared
     // with the pane writes) for as long as the pane lives. If the thread cannot
     // be created the closure is dropped with `boot`, and the caller sees a
     // missing boot reply.
-    let _ = std::thread::Builder::new().name("ldmux-emulator".into()).spawn(move || {
-        // Created here: the values are `!Send`, so they cannot be moved into
-        // this closure from the caller.
-        let mut term = match new_terminal(cols, rows) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("ldmux-keeper: emulator: {e}");
-                let _ = boot.send(false);
-                return;
-            }
-        };
-        let mut rs = match RenderState::new() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("ldmux-keeper: emulator: {e}");
-                let _ = boot.send(false);
-                return;
-            }
-        };
-        let _ = boot.send(true);
-
-        let fd = master.as_raw_fd();
-        let wake_fd = waker.as_ref().map(|w| w.as_raw_fd()).unwrap_or(-1);
-        let mut buf = [0u8; 4096];
-        let mut reading = true;
-        loop {
-            // 1. A waiting message is serviced before any I/O.
-            match rx.try_recv() {
-                Ok(msg) => {
-                    service(msg, &mut term, &mut rs, &out);
-                    continue;
+    let _ = std::thread::Builder::new()
+        .name("ldmux-emulator".into())
+        .spawn(move || {
+            // Created here: the values are `!Send`, so they cannot be moved into
+            // this closure from the caller.
+            let mut term = match new_terminal(cols, rows) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("ldmux-keeper: emulator: {e}");
+                    let _ = boot.send(false);
+                    return;
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => break,
-            }
-            // 2. Otherwise wait for the master and for the wake-up. With an
-            //    eventfd the wait is unbounded — an idle session costs nothing
-            //    and a queued message breaks it at once. Without one (the
-            //    fallback), 1 ms, so 1. is re-checked and a message is never
-            //    queued behind a silent pane.
-            let mut pfds = [
-                libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
-            ];
-            // A dead pane is not polled: its master returns `POLLHUP` for ever.
-            let nfds: libc::nfds_t = if reading { 2 } else { 1 };
-            let timeout = if wake_fd >= 0 { -1 } else { 1 };
-            let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, timeout) };
-            if n < 0 {
-                // A signal landed in the poll: look again. Anything else (the
-                // fd closed out from under us) means the session is gone; the
-                // sender's drop ends the loop.
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                break;
-            }
-            if n == 0 {
-                continue; // the fallback timeout
-            }
-            if wake_fd >= 0 && pfds[0].revents & libc::POLLIN != 0 {
-                // A message is waiting: drain the counter and service it at
-                // the top of the loop, before any master I/O.
-                drain_waker(wake_fd);
-                continue;
-            }
-            if !reading || pfds[1].revents == 0 {
-                continue;
-            }
-            let n = unsafe {
-                libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len())
             };
-            if n < 0 {
-                let e = std::io::Error::last_os_error();
-                if matches!(e.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) {
-                    // Not the end of the stream: try again.
+            let mut rs = match RenderState::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("ldmux-keeper: emulator: {e}");
+                    let _ = boot.send(false);
+                    return;
+                }
+            };
+            let _ = boot.send(true);
+
+            let fd = master.as_raw_fd();
+            let wake_fd = waker.as_ref().map(|w| w.as_raw_fd()).unwrap_or(-1);
+            let mut buf = [0u8; 4096];
+            let mut reading = true;
+            loop {
+                // 1. A waiting message is serviced before any I/O.
+                match rx.try_recv() {
+                    Ok(msg) => {
+                        service(msg, &mut term, &mut rs, &out);
+                        continue;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => break,
+                }
+                // 2. Otherwise wait for the master and for the wake-up. With an
+                //    eventfd the wait is unbounded — an idle session costs nothing
+                //    and a queued message breaks it at once. Without one (the
+                //    fallback), 1 ms, so 1. is re-checked and a message is never
+                //    queued behind a silent pane.
+                let mut pfds = [
+                    libc::pollfd {
+                        fd: wake_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                // A dead pane is not polled: its master returns `POLLHUP` for ever.
+                let nfds: libc::nfds_t = if reading { 2 } else { 1 };
+                let timeout = if wake_fd >= 0 { -1 } else { 1 };
+                let n = unsafe { libc::poll(pfds.as_mut_ptr(), nfds, timeout) };
+                if n < 0 {
+                    // A signal landed in the poll: look again. Anything else (the
+                    // fd closed out from under us) means the session is gone; the
+                    // sender's drop ends the loop.
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                if n == 0 {
+                    continue; // the fallback timeout
+                }
+                if wake_fd >= 0 && pfds[0].revents & libc::POLLIN != 0 {
+                    // A message is waiting: drain the counter and service it at
+                    // the top of the loop, before any master I/O.
+                    drain_waker(wake_fd);
                     continue;
                 }
-                if e.raw_os_error() != Some(libc::EIO) {
-                    // Unexpected, and retrying a persistent error would spin.
-                    eprintln!("ldmux-keeper: emulator: read: {e}");
+                if !reading || pfds[1].revents == 0 {
+                    continue;
                 }
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                if n < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) {
+                        // Not the end of the stream: try again.
+                        continue;
+                    }
+                    if e.raw_os_error() != Some(libc::EIO) {
+                        // Unexpected, and retrying a persistent error would spin.
+                        eprintln!("ldmux-keeper: emulator: read: {e}");
+                    }
+                }
+                if n <= 0 {
+                    // EOF, or EIO (what a pty master reads once the slave side is
+                    // gone): the shell's side is closed. Stop reading; keep
+                    // servicing messages (a snapshot of a dead pane is still valid
+                    // — the grid keeps its last content).
+                    reading = false;
+                    continue;
+                }
+                let bytes = &buf[..n as usize];
+                term.write(bytes);
+                out.lock().unwrap().push(bytes);
+                // The pane said something: this is the activity clock
+                // (`lastActivityAt`). Stamped here — the one place every byte
+                // from the master passes — and not where the buffer is drained,
+                // because a `Peek` takes the bytes away and says nothing about
+                // whether they were new.
+                activity.store(now_ms(), Ordering::Relaxed);
             }
-            if n <= 0 {
-                // EOF, or EIO (what a pty master reads once the slave side is
-                // gone): the shell's side is closed. Stop reading; keep
-                // servicing messages (a snapshot of a dead pane is still valid
-                // — the grid keeps its last content).
-                reading = false;
-                continue;
-            }
-            let bytes = &buf[..n as usize];
-            term.write(bytes);
-            out.lock().unwrap().push(bytes);
-            // The pane said something: this is the activity clock
-            // (`lastActivityAt`). Stamped here — the one place every byte
-            // from the master passes — and not where the buffer is drained,
-            // because a `Peek` takes the bytes away and says nothing about
-            // whether they were new.
-            activity.store(now_ms(), Ordering::Relaxed);
-        }
-    });
+        });
 }
 
 /// Service one message (called on the emulator thread).
 fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<crate::OutBuf>) {
     match msg {
-        EmuMsg::Snapshot { history_lines, drain_output, reply } => {
+        EmuMsg::Snapshot {
+            history_lines,
+            drain_output,
+            reply,
+        } => {
             // Clamp to the available scrollback (a capture cannot exceed what
             // the grid retained).
             let n = (history_lines as usize).min(term.scrollback_rows());
@@ -359,11 +385,19 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
             };
             // 3. Render: the history lines first, then the live screen (the
             //    order the client replays into its own scrollback).
-            let all: Vec<&[Cell]> = hist.iter().chain(live.iter()).map(|r| r.as_slice()).collect();
+            let all: Vec<&[Cell]> = hist
+                .iter()
+                .chain(live.iter())
+                .map(|r| r.as_slice())
+                .collect();
             let text = snapshot::render(&all, rs.cols() as usize);
             // Taken here, on the thread that feeds both the emulator and `out`,
             // so the tail is exactly the bytes the render already contains.
-            let tail = if drain_output { out.lock().unwrap().take().0 } else { Vec::new() };
+            let tail = if drain_output {
+                out.lock().unwrap().take().0
+            } else {
+                Vec::new()
+            };
             // The state reflects the live screen (we're back at `Bottom`).
             let _ = reply.send(Outcome {
                 cols: rs.cols(),

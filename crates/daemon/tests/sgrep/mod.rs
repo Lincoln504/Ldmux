@@ -74,11 +74,20 @@ pub fn parse(out: &str, width: usize) -> Vec<Vec<Cell>> {
                 last.text.push(c);
             }
         } else if width_of(c) == 2 {
-            row.push(Cell { text: c.to_string(), style });
-            row.push(Cell { text: String::new(), style });
+            row.push(Cell {
+                text: c.to_string(),
+                style,
+            });
+            row.push(Cell {
+                text: String::new(),
+                style,
+            });
             col += 2;
         } else {
-            row.push(Cell { text: c.to_string(), style });
+            row.push(Cell {
+                text: c.to_string(),
+                style,
+            });
             col += 1;
         }
     }
@@ -96,9 +105,16 @@ pub fn parse(out: &str, width: usize) -> Vec<Vec<Cell>> {
 fn width_of(c: char) -> usize {
     match c as u32 {
         0x0300..=0x036F => 0,
-        0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF
-        | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x1F300..=0x1F64F
-        | 0x1F900..=0x1F9FF | 0x20000..=0x3FFFD => 2,
+        0x1100..=0x115F
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD => 2,
         _ => 1,
     }
 }
@@ -106,7 +122,10 @@ fn width_of(c: char) -> usize {
 /// Pad the current row to `width` with empty cells.
 fn pad_row(row: &mut Vec<Cell>, col: &mut usize, width: usize) {
     while *col < width {
-        row.push(Cell { text: String::new(), style: BLANK });
+        row.push(Cell {
+            text: String::new(),
+            style: BLANK,
+        });
         *col += 1;
     }
 }

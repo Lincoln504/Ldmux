@@ -61,9 +61,7 @@ impl Spawned {
     /// The wait future for the child's exit status.
     pub fn wait<'a>(
         &'a mut self,
-    ) -> impl std::future::Future<
-        Output = std::io::Result<std::process::ExitStatus>,
-    > + 'a {
+    ) -> impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + 'a {
         self.child.wait()
     }
 
@@ -149,10 +147,7 @@ pub struct SpawnOptions {
 /// child's error event; Rust surfaces them at spawn time, which is strictly
 /// earlier — the observable behaviour (a spawn failure is reported, not
 /// thrown) is the same.
-pub fn spawn_captured(
-    argv: &[String],
-    opts: &SpawnOptions,
-) -> std::io::Result<Spawned> {
+pub fn spawn_captured(argv: &[String], opts: &SpawnOptions) -> std::io::Result<Spawned> {
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.stdin(Stdio::null());

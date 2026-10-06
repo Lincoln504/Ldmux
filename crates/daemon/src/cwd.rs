@@ -83,7 +83,10 @@ mod tests {
     #[test]
     fn a_tilde_and_a_path_are_joined_onto_home() {
         let h = home();
-        assert_eq!(resolve_cwd(Some("~/Documents")).unwrap(), format!("{h}/Documents"));
+        assert_eq!(
+            resolve_cwd(Some("~/Documents")).unwrap(),
+            format!("{h}/Documents")
+        );
         assert_eq!(resolve_cwd(Some("~/a/b/c")).unwrap(), format!("{h}/a/b/c"));
         assert_eq!(resolve(Some("~/a/b/c"), "/h"), "/h/a/b/c");
     }
@@ -139,7 +142,10 @@ mod tests {
         // The expansion is arithmetic on a string; the two ways to get that
         // wrong are to pass it through a shell or to reach for a regex.
         let h = home();
-        assert_eq!(resolve_cwd(Some("~/$(whoami)")).unwrap(), format!("{h}/$(whoami)"));
+        assert_eq!(
+            resolve_cwd(Some("~/$(whoami)")).unwrap(),
+            format!("{h}/$(whoami)")
+        );
         assert_eq!(resolve_cwd(Some("~/*")).unwrap(), format!("{h}/*"));
         assert_eq!(resolve_cwd(Some("/tmp/../etc")).unwrap(), "/tmp/../etc");
         assert_eq!(resolve(Some("~/a//b"), "/h"), "/h/a//b");

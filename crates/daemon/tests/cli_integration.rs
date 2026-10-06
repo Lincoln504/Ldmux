@@ -76,7 +76,9 @@ async fn cli_ping_over_the_control_socket() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
@@ -93,7 +95,10 @@ async fn cli_ping_over_the_control_socket() {
     // The CLI `ping` command.
     let (code, out, err) = run_cli(&["ping"], &dir.to_string_lossy()).await;
     assert_eq!(code, 0, "ping failed: {out} {err}");
-    assert!(out.contains("pong") || out.contains("true"), "unexpected: {out} {err}");
+    assert!(
+        out.contains("pong") || out.contains("true"),
+        "unexpected: {out} {err}"
+    );
 
     // The CLI `list` command.
     let (code, out, err) = run_cli(&["list"], &dir.to_string_lossy()).await;
@@ -111,7 +116,9 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
@@ -167,7 +174,10 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     // `list` — should be empty.
     let (code, out, err) = run_cli(&["list"], &dir_str).await;
     assert_eq!(code, 0, "list failed: {out} {err}");
-    assert!(out.trim() == "(no sessions)", "session still in list: {out} {err}");
+    assert!(
+        out.trim() == "(no sessions)",
+        "session still in list: {out} {err}"
+    );
 
     drop(fk);
     let _ = std::fs::remove_dir_all(&dir);
@@ -186,7 +196,9 @@ async fn cli_code_and_pair_refuse_a_daemon_a_phone_cannot_reach() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
@@ -231,7 +243,9 @@ async fn cli_desktop_json_is_json() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
@@ -254,7 +268,10 @@ async fn cli_desktop_json_is_json() {
     // Without the flag it is the human format, which is not JSON.
     let (code, out, _err) = run_cli(&["desktop"], &dir.to_string_lossy()).await;
     assert_eq!(code, 0);
-    assert!(out.trim_start().starts_with("wm:"), "human format changed: {out}");
+    assert!(
+        out.trim_start().starts_with("wm:"),
+        "human format changed: {out}"
+    );
 
     drop(fk);
     let _ = std::fs::remove_dir_all(&dir);

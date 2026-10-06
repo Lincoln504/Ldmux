@@ -14,7 +14,11 @@ use ldmux_daemon::daemon::LdmuxDaemon;
 
 fn scratch() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-e2e-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-e2e-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -33,7 +37,8 @@ async fn wait_socket(path: &std::path::Path) {
     panic!("socket did not appear: {}", path.display());
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect_authed(port: u16, token: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -144,8 +149,11 @@ async fn a_client_message_over_the_cap_closes_the_connection() {
     wait_socket(&keeper_sock).await;
 
     let token = "cap-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     arc.lock().await.start(&arc).await.unwrap();
     let port = remote_port(&arc).await;
@@ -203,8 +211,11 @@ async fn remote_end_to_end_attach_and_type() {
     // Port 0: the kernel picks, and the daemon reports what it bound. A fixed
     // port made this file and `attach_client.rs` fight over 49997 — the same
     // gate failing because two tests, or two runs of the gate, wanted one port.
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     arc.lock().await.start(&arc).await.unwrap();
     let port = remote_port(&arc).await;

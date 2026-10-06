@@ -45,13 +45,21 @@ fn ensure_private_dir(dir: &std::path::Path, uid: u32) -> Result<(), String> {
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(format!("cannot create the state dir {}: {e}", dir.display())),
+        Err(e) => {
+            return Err(format!(
+                "cannot create the state dir {}: {e}",
+                dir.display()
+            ));
+        }
     }
     // `symlink_metadata`: a symlink planted at the path is refused, not followed.
     let md = std::fs::symlink_metadata(dir)
         .map_err(|e| format!("cannot stat the state dir {}: {e}", dir.display()))?;
     if !md.is_dir() {
-        return Err(format!("the state dir {} is not a directory", dir.display()));
+        return Err(format!(
+            "the state dir {} is not a directory",
+            dir.display()
+        ));
     }
     if md.uid() != uid {
         return Err(format!(
@@ -99,6 +107,19 @@ pub fn socket_path_from(sock: Option<&str>, state_dir: &str) -> String {
     }
 }
 
+/// The daemon's local attach socket, derived from its control socket: the same
+/// directory and stem with `-attach` before the extension (`ldmuxd.sock` becomes
+/// `ldmuxd-attach.sock`). It carries the WebSocket protocol for the desk attach
+/// client, so a window needs no TCP, no tailnet and no token — only to be this
+/// user (the daemon checks the peer's uid). Derived rather than configured so the
+/// daemon and the client resolve it from the one path they already share.
+pub fn attach_socket_path_from(control_socket: &str) -> String {
+    match control_socket.strip_suffix(".sock") {
+        Some(stem) => format!("{stem}-attach.sock"),
+        None => format!("{control_socket}-attach"),
+    }
+}
+
 /// Refuse a socket path the kernel cannot bind: over `sun_path`'s limit,
 /// which otherwise surfaces as a bare `InvalidInput` from `bind`/`connect`.
 pub fn check_socket_path(path: &str) -> Result<(), String> {
@@ -140,6 +161,18 @@ fn env_var(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_attach_socket_sits_beside_the_control_socket() {
+        assert_eq!(
+            attach_socket_path_from("/run/user/1000/ldmux/ldmuxd.sock"),
+            "/run/user/1000/ldmux/ldmuxd-attach.sock"
+        );
+        assert_eq!(
+            attach_socket_path_from("/tmp/x/custom"),
+            "/tmp/x/custom-attach"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -151,7 +184,10 @@ mod tests {
 
     #[test]
     fn empty_variables_are_unset() {
-        assert_eq!(state_dir_for_uid(Some(""), Some("/run/u0"), 7), "/run/u0/ldmux");
+        assert_eq!(
+            state_dir_for_uid(Some(""), Some("/run/u0"), 7),
+            "/run/u0/ldmux"
+        );
         assert_eq!(state_dir_for_uid(Some(""), Some(""), 7), "/tmp/ldmux-7");
         assert_eq!(state_dir_for_uid(None, Some(""), 7), "/tmp/ldmux-7");
         assert_eq!(socket_path_from(Some(""), "/s"), "/s/ldmuxd.sock");
@@ -191,7 +227,11 @@ mod tests {
         assert!(ensure_private_dir(&dir, uid).unwrap_err().contains("mode"));
         // Someone else's: refused.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(ensure_private_dir(&dir, uid + 1).unwrap_err().contains("owned by"));
+        assert!(
+            ensure_private_dir(&dir, uid + 1)
+                .unwrap_err()
+                .contains("owned by")
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -203,7 +243,11 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         let link = base.join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert!(ensure_private_dir(&link, uid).unwrap_err().contains("not a directory"));
+        assert!(
+            ensure_private_dir(&link, uid)
+                .unwrap_err()
+                .contains("not a directory")
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

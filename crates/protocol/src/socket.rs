@@ -8,7 +8,7 @@
 //! Node `net` module is replaced by a `tokio` Unix socket; the on-the-wire
 //! contract (one JSON request line, one JSON response line) is the same.
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// A socket call error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,13 +50,19 @@ pub async fn read_line<R: tokio::io::AsyncRead + Unpin>(
         if let Some(i) = chunk.iter().position(|&b| b == b'\n') {
             buf.extend_from_slice(&chunk[..i]);
             if buf.len() > max {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too large"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "line too large",
+                ));
             }
             return Ok(Some(buf));
         }
         buf.extend_from_slice(chunk);
         if buf.len() > max {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "line too large",
+            ));
         }
     }
 }
@@ -87,10 +93,9 @@ pub async fn call<R: Serialize, T: DeserializeOwned>(
     use tokio::io::AsyncWriteExt;
 
     let result = async {
-        let mut sock =
-            tokio::net::UnixStream::connect(socket_path)
-                .await
-                .map_err(|e| CallError(format!("connect: {e}")))?;
+        let mut sock = tokio::net::UnixStream::connect(socket_path)
+            .await
+            .map_err(|e| CallError(format!("connect: {e}")))?;
         let req = serde_json::json!({
             "id": 1,
             "method": method.to_string(),
@@ -113,7 +118,10 @@ pub async fn call<R: Serialize, T: DeserializeOwned>(
                 None => Err(CallError("ok response with no result".to_string())),
             }
         } else {
-            Err(CallError(res.error.unwrap_or_else(|| "ldmux request failed".to_string())))
+            Err(CallError(
+                res.error
+                    .unwrap_or_else(|| "ldmux request failed".to_string()),
+            ))
         }
     };
 
@@ -185,10 +193,9 @@ mod tests {
         })));
         let srv = tokio::spawn(async move { serve(listener, served).await });
         let params = serde_json::json!({});
-        let res: serde_json::Value =
-            call(&path.to_string_lossy(), "ping", &params, 2000)
-                .await
-                .unwrap();
+        let res: serde_json::Value = call(&path.to_string_lossy(), "ping", &params, 2000)
+            .await
+            .unwrap();
         assert_eq!(res["pong"], true);
         assert_eq!(res["version"], 1);
         let _ = srv.await;
@@ -207,9 +214,14 @@ mod tests {
         })));
         let srv = tokio::spawn(async move { serve(listener, served).await });
         let params = serde_json::json!({ "id": "x" });
-        let err = call::<serde_json::Value, serde_json::Value>(&path.to_string_lossy(), "kill", &params, 2000)
-            .await
-            .unwrap_err();
+        let err = call::<serde_json::Value, serde_json::Value>(
+            &path.to_string_lossy(),
+            "kill",
+            &params,
+            2000,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, CallError("boom".to_string()));
         let _ = srv.await;
         let _ = std::fs::remove_file(&path);
@@ -227,9 +239,14 @@ mod tests {
         })));
         let srv = tokio::spawn(async move { serve(listener, served).await });
         let params = serde_json::json!({});
-        let err = call::<serde_json::Value, serde_json::Value>(&path.to_string_lossy(), "ping", &params, 200)
-            .await
-            .unwrap_err();
+        let err = call::<serde_json::Value, serde_json::Value>(
+            &path.to_string_lossy(),
+            "ping",
+            &params,
+            200,
+        )
+        .await
+        .unwrap_err();
         assert!(err.0.contains("timed out"), "got: {}", err.0);
         let _ = srv.await;
         let _ = std::fs::remove_file(&path);
@@ -238,7 +255,10 @@ mod tests {
     #[tokio::test]
     async fn read_line_splits_caps_and_reports_eof() {
         let mut r: &[u8] = b"hello\nrest";
-        assert_eq!(read_line(&mut r, 100).await.unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(
+            read_line(&mut r, 100).await.unwrap(),
+            Some(b"hello".to_vec())
+        );
         let mut r: &[u8] = b"no newline";
         assert_eq!(read_line(&mut r, 100).await.unwrap(), None);
         let big = vec![b'x'; 10_000];
@@ -248,7 +268,10 @@ mod tests {
         let mut with_nl = big.clone();
         with_nl.push(b'\n');
         let mut r: &[u8] = &with_nl;
-        assert!(read_line(&mut r, 1000).await.is_err(), "a long complete line is refused too");
+        assert!(
+            read_line(&mut r, 1000).await.is_err(),
+            "a long complete line is refused too"
+        );
     }
 
     #[tokio::test]
@@ -266,9 +289,14 @@ mod tests {
                 }
             }
         });
-        let err = call::<serde_json::Value, serde_json::Value>(&path.to_string_lossy(), "x", &serde_json::json!({}), 20_000)
-            .await
-            .unwrap_err();
+        let err = call::<serde_json::Value, serde_json::Value>(
+            &path.to_string_lossy(),
+            "x",
+            &serde_json::json!({}),
+            20_000,
+        )
+        .await
+        .unwrap_err();
         assert!(err.0.contains("too large"), "got: {}", err.0);
         let _ = srv.await;
         let _ = std::fs::remove_file(&path);
@@ -279,9 +307,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ldmux-sock-{}", uuid::Uuid::new_v4()));
         let path = dir.join("absent.sock");
         let params = serde_json::json!({});
-        let err = call::<serde_json::Value, serde_json::Value>(&path.to_string_lossy(), "ping", &params, 500)
-            .await
-            .unwrap_err();
+        let err = call::<serde_json::Value, serde_json::Value>(
+            &path.to_string_lossy(),
+            "ping",
+            &params,
+            500,
+        )
+        .await
+        .unwrap_err();
         assert!(!err.0.is_empty(), "expected a connect error");
         let _ = std::fs::remove_dir(&dir);
     }

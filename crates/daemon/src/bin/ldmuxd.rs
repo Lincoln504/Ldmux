@@ -28,7 +28,7 @@ use tokio::signal::unix::SignalKind;
 /// here: the keeper outlives the daemon by design, so a keeper started before an
 /// upgrade keeps serving the new daemon (measured 2026-10-04: a keeper running
 /// since 13:39:30 served a keeper built at 23:02:49). Installing both binaries
-/// into one directory is the deployment's own rule (`just install`), so a
+/// into one directory is the deployment's own rule (`scripts/install.sh`), so a
 /// sibling is the build that belongs with this daemon; the fallback keeps a
 /// hand-run daemon from a target dir working the way it always did.
 fn keeper_beside(daemon: &Path) -> PathBuf {
@@ -49,11 +49,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("attach") {
         let readonly = args.iter().any(|a| a == "--readonly" || a == "-r");
-        let session = args
-            .iter()
-            .skip(2)
-            .find(|a| !a.starts_with('-'))
-            .cloned();
+        let session = args.iter().skip(2).find(|a| !a.starts_with('-')).cloned();
         let Some(session) = session else {
             eprintln!("usage: ldmuxd attach <session-id> [--readonly]");
             std::process::exit(2);
@@ -78,9 +74,7 @@ fn main() {
     let remote_port: u16 = match remote_port_str.parse() {
         Ok(p) if (1..=65535).contains(&p) => p,
         _ => {
-            eprintln!(
-                "ldmuxd: LDMUX_REMOTE_PORT must be a port number, got {remote_port_str:?}"
-            );
+            eprintln!("ldmuxd: LDMUX_REMOTE_PORT must be a port number, got {remote_port_str:?}");
             std::process::exit(1);
         }
     };

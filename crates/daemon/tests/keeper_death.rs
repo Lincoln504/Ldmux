@@ -11,7 +11,11 @@ use ldmux_daemon::daemon::LdmuxDaemon;
 
 fn scratch_dir() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-kdeath-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-kdeath-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -35,8 +39,8 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
     let _reaper = common::Reaper::new(&dir, &keeper_sock);
 
     // Start a real keeper.
-    let keeper_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/ldmux-keeper");
+    let keeper_bin =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper");
     let mut keeper = std::process::Command::new(&keeper_bin)
         .arg(keeper_sock.to_string_lossy().as_ref())
         .spawn()
@@ -52,11 +56,16 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
     }
 
     // Spawn 3 sessions.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let mut ids = Vec::new();
     for i in 0..3 {
         let title = format!("sess-{}", i);
-        let rec = arc.lock().await
+        let rec = arc
+            .lock()
+            .await
             .create_session("shell", &cwd, Some(&title), "local")
             .await
             .unwrap();
@@ -136,12 +145,15 @@ async fn a_daemon_starts_next_to_a_stale_keeper_socket() {
 
     // A slow keeper: sleep, then become the real one (same argv, so the
     // Reaper still matches this test's keeper by its socket path).
-    let real_keeper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/ldmux-keeper");
+    let real_keeper =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper");
     let stub = dir.join("ldmux-keeper");
     std::fs::write(
         &stub,
-        format!("#!/bin/sh\nsleep 3\nexec {} \"$1\"\n", real_keeper.display()),
+        format!(
+            "#!/bin/sh\nsleep 3\nexec {} \"$1\"\n",
+            real_keeper.display()
+        ),
     )
     .unwrap();
     {
@@ -161,7 +173,10 @@ async fn a_daemon_starts_next_to_a_stale_keeper_socket() {
     );
 
     // And it works: a session can be created through the keeper it waited for.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let id = arc
         .lock()
         .await

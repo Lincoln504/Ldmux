@@ -11,7 +11,11 @@ use ldmux_daemon::daemon::LdmuxDaemon;
 
 fn scratch() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-attach-int-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-attach-int-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -60,8 +64,11 @@ async fn attach_client_streams_and_types_against_a_daemon() {
     wait_socket(&keeper_sock).await;
 
     let token = "attach-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -69,7 +76,10 @@ async fn attach_client_streams_and_types_against_a_daemon() {
         d.start(&arc).await.unwrap();
     }
     // Create a shell the attach client will view.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let id = arc
         .lock()
         .await
@@ -87,10 +97,7 @@ async fn attach_client_streams_and_types_against_a_daemon() {
 
     // Type a command into the window.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    test_write
-        .write_all(b"echo ATTACH_MARK_7\n")
-        .await
-        .unwrap();
+    test_write.write_all(b"echo ATTACH_MARK_7\n").await.unwrap();
     test_write.flush().await.unwrap();
 
     // The pane's output must reach the client's terminal.
@@ -98,8 +105,11 @@ async fn attach_client_streams_and_types_against_a_daemon() {
     let mut buf = [0u8; 4096];
     let mut found = false;
     for _ in 0..200 {
-        match tokio::time::timeout(std::time::Duration::from_millis(50), test_read.read(&mut buf))
-            .await
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            test_read.read(&mut buf),
+        )
+        .await
         {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
@@ -159,7 +169,10 @@ async fn attach_client_survives_the_idle_sweep() {
         let mut d = arc.lock().await;
         d.start(&arc).await.unwrap();
     }
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let id = arc
         .lock()
         .await
@@ -196,9 +209,8 @@ async fn attach_client_survives_the_idle_sweep() {
 
 // ── helpers for the handover test ──
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect_authed(port: u16, token: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -232,7 +244,8 @@ async fn wait_for_ms<R: tokio::io::AsyncReadExt + Unpin>(
     let mut seen = Vec::new();
     let mut buf = [0u8; 8192];
     for _ in 0..(ms / 50).max(1) {
-        match tokio::time::timeout(std::time::Duration::from_millis(50), reader.read(&mut buf)).await
+        match tokio::time::timeout(std::time::Duration::from_millis(50), reader.read(&mut buf))
+            .await
         {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
@@ -271,8 +284,11 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
     wait_socket(&keeper_sock).await;
 
     let token = "holder-let-go-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -280,7 +296,10 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
         d.start(&arc).await.unwrap();
     }
     let port = remote_port(&arc).await;
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let id = arc
         .lock()
         .await
@@ -295,9 +314,9 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
     let desk = {
         let daemon_sock = daemon_sock.clone();
         let id = id.clone();
-        tokio::spawn(async move {
-            attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await
-        })
+        tokio::spawn(
+            async move { attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await },
+        )
     };
     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
 
@@ -385,8 +404,11 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
     wait_socket(&keeper_sock).await;
 
     let token = "displaced-death-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -394,7 +416,10 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
         d.start(&arc).await.unwrap();
     }
     let port = remote_port(&arc).await;
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let id = arc
         .lock()
         .await
@@ -408,9 +433,9 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
     let desk = {
         let daemon_sock = daemon_sock.clone();
         let id = id.clone();
-        tokio::spawn(async move {
-            attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await
-        })
+        tokio::spawn(
+            async move { attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await },
+        )
     };
     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
 
@@ -437,7 +462,11 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
 
     // The phone ends the shell. Nothing about that reaches a displaced window
     // directly: it hears it in the session list, or not at all.
-    ws_send(&mut phone, &serde_json::json!({"type": "kill", "sessionId": id})).await;
+    ws_send(
+        &mut phone,
+        &serde_json::json!({"type": "kill", "sessionId": id}),
+    )
+    .await;
 
     assert!(
         wait_for(&mut desk_view, "This shell has ended.").await,
@@ -449,7 +478,10 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(desk.is_finished(), "the attach client must end with its shell");
+    assert!(
+        desk.is_finished(),
+        "the attach client must end with its shell"
+    );
 
     desk.abort();
     arc.lock().await.stop();
@@ -492,8 +524,11 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
     // client reconnects and re-attaches — which recovers the shell by itself and
     // hides the thing under test. It pings every 4 s, so a 20 s deadline leaves it
     // alone; the sweep still runs every 5 s, and the grace is 3 s.
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -501,7 +536,10 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
         d.start(&arc).await.unwrap();
     }
     let port = remote_port(&arc).await;
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let id = arc
         .lock()
         .await
@@ -516,9 +554,9 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
     let desk = {
         let daemon_sock = daemon_sock.clone();
         let id = id.clone();
-        tokio::spawn(async move {
-            attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await
-        })
+        tokio::spawn(
+            async move { attach::run_with(&daemon_sock, &id, false, desk_in, desk_out).await },
+        )
     };
     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
 
@@ -556,7 +594,10 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
         )
         .await
         .unwrap();
-    assert!(arc.lock().await.holds(&id, "desktop"), "the claim is the desk's");
+    assert!(
+        arc.lock().await.holds(&id, "desktop"),
+        "the claim is the desk's"
+    );
 
     // The window must come back on its own — no key pressed. What proves it is
     // pane output that the window could only see while it is attached: the marker

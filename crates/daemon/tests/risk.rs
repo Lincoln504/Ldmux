@@ -6,9 +6,9 @@
 //! session survives. The spawn race test asserts that two concurrent
 //! first-needs produce one stream, not two.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use ldmux_daemon::fake_keeper::FakeKeeper;
 use ldmux_daemon::stream::KeeperConn;
@@ -18,7 +18,11 @@ use ldmux_protocol::keeper::KeeperMessage;
 
 fn scratch_dir() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-risk-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-risk-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -84,7 +88,9 @@ async fn a_flood_is_delivered_in_full_without_a_spurious_resync() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
@@ -106,8 +112,16 @@ async fn a_flood_is_delivered_in_full_without_a_spurious_resync() {
     stream.fanout(&big);
     stream.fanout("hello");
 
-    assert_eq!(reset_count.load(Ordering::SeqCst), 0, "volume alone is not a resync");
-    assert_eq!(delivered.load(Ordering::SeqCst), 2 * 1024 * 1024 + 5, "every byte reached the viewer");
+    assert_eq!(
+        reset_count.load(Ordering::SeqCst),
+        0,
+        "volume alone is not a resync"
+    );
+    assert_eq!(
+        delivered.load(Ordering::SeqCst),
+        2 * 1024 * 1024 + 5,
+        "every byte reached the viewer"
+    );
 
     drop(fk);
 }
@@ -122,7 +136,9 @@ async fn dead_reader_does_not_kill_the_session() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
@@ -185,12 +201,15 @@ async fn spawn_race_two_concurrent_stream_for_one_wins() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     wait_socket(&keeper_sock).await;
 
     // Two concurrent stream_for calls for the same session.
-    let daemon = ldmux_daemon::daemon::LdmuxDaemon::new(dir, std::path::PathBuf::from("/nonexistent"));
+    let daemon =
+        ldmux_daemon::daemon::LdmuxDaemon::new(dir, std::path::PathBuf::from("/nonexistent"));
     let daemon = Arc::new(std::sync::Mutex::new(daemon));
 
     let d1 = daemon.clone();

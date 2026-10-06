@@ -347,10 +347,7 @@ mod tests {
             cols: 80,
             rows: 24,
             snapshot_epoch: 7,
-            capabilities: CapsCapabilities {
-
-                scrollback: true,
-            },
+            capabilities: CapsCapabilities { scrollback: true },
         };
         let v: serde_json::Value = serde_json::to_value(Message::Caps(c)).unwrap();
         assert_eq!(v["type"], "caps");
@@ -374,7 +371,10 @@ mod tests {
     #[test]
     fn desktop_request_has_no_inventory_result_has_one() {
         let req = Message::Desktop(Desktop { inventory: None });
-        assert_eq!(serde_json::to_string(&req).unwrap(), r#"{"type":"desktop"}"#);
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"type":"desktop"}"#
+        );
         let res = Message::Desktop(Desktop {
             inventory: Some(DesktopInventory {
                 wm: "i3".into(),
@@ -462,9 +462,23 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::to_value(Message::Snapshot(snap)).unwrap();
         let keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
-        let want = ["type", "sessionId", "cols", "rows", "screen", "cursorX", "cursorY",
-            "alternateOn", "bracketedPaste", "mouse", "mouseSgr",
-            "appCursor", "historySize", "snapshotEpoch", "history"];
+        let want = [
+            "type",
+            "sessionId",
+            "cols",
+            "rows",
+            "screen",
+            "cursorX",
+            "cursorY",
+            "alternateOn",
+            "bracketedPaste",
+            "mouse",
+            "mouseSgr",
+            "appCursor",
+            "historySize",
+            "snapshotEpoch",
+            "history",
+        ];
         for k in want {
             assert!(v.get(k).is_some(), "missing key {k} in {v:?}");
         }

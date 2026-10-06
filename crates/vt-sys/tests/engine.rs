@@ -92,7 +92,13 @@ fn render_state_walks_rows_and_reads_cells() {
         ffi::SUCCESS
     );
     assert_eq!(
-        unsafe { ffi::ghostty_render_state_get(state, ffi::ROW_ITERATOR, &mut it as *mut _ as *mut c_void) },
+        unsafe {
+            ffi::ghostty_render_state_get(
+                state,
+                ffi::ROW_ITERATOR,
+                &mut it as *mut _ as *mut c_void,
+            )
+        },
         ffi::SUCCESS
     );
     // Row 0 is present.
@@ -105,7 +111,13 @@ fn render_state_walks_rows_and_reads_cells() {
         ffi::SUCCESS
     );
     assert_eq!(
-        unsafe { ffi::ghostty_render_state_row_get(it, ffi::ROW_DATA_CELLS, &mut cells as *mut _ as *mut c_void) },
+        unsafe {
+            ffi::ghostty_render_state_row_get(
+                it,
+                ffi::ROW_DATA_CELLS,
+                &mut cells as *mut _ as *mut c_void,
+            )
+        },
         ffi::SUCCESS
     );
 
@@ -113,11 +125,20 @@ fn render_state_walks_rows_and_reads_cells() {
     // `ROW_CELLS_DATA_STYLE` `@alignCast`s its `out` pointer, so it needs an
     // 8-byte-aligned 56-byte buffer (a packed `GhosttyStyle` is 1-byte aligned).
     let layout = std::alloc::Layout::from_size_align(72, 8).unwrap();
-    assert_eq!(unsafe { ffi::ghostty_render_state_row_cells_select(cells, 0) }, ffi::SUCCESS);
+    assert_eq!(
+        unsafe { ffi::ghostty_render_state_row_cells_select(cells, 0) },
+        ffi::SUCCESS
+    );
     let style0 = {
         let buf = unsafe { std::alloc::alloc(layout) };
         assert_eq!(
-            unsafe { ffi::ghostty_render_state_row_cells_get(cells, ffi::ROW_CELLS_DATA_STYLE, buf as *mut c_void) },
+            unsafe {
+                ffi::ghostty_render_state_row_cells_get(
+                    cells,
+                    ffi::ROW_CELLS_DATA_STYLE,
+                    buf as *mut c_void,
+                )
+            },
             ffi::SUCCESS
         );
         let b = unsafe { std::slice::from_raw_parts(buf as *const u8, 72) }.to_vec();
@@ -125,9 +146,19 @@ fn render_state_walks_rows_and_reads_cells() {
         b
     };
     let mut buf = [0u8; 64];
-    let mut buffer = ffi::GhosttyBuffer { ptr: buf.as_mut_ptr(), cap: buf.len(), len: 0 };
+    let mut buffer = ffi::GhosttyBuffer {
+        ptr: buf.as_mut_ptr(),
+        cap: buf.len(),
+        len: 0,
+    };
     assert_eq!(
-        unsafe { ffi::ghostty_render_state_row_cells_get(cells, ffi::ROW_CELLS_DATA_GRAPHEMES_UTF8, &mut buffer as *mut _ as *mut c_void) },
+        unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                cells,
+                ffi::ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                &mut buffer as *mut _ as *mut c_void,
+            )
+        },
         ffi::SUCCESS
     );
     assert_eq!(std::str::from_utf8(&buf[..buffer.len]).unwrap(), "A");
@@ -137,14 +168,26 @@ fn render_state_walks_rows_and_reads_cells() {
     let tag0 = u32::from_le_bytes([style0[8], style0[9], style0[10], style0[11]]);
     // Neither PALETTE (1) nor RGB (2): no explicit colour. (A "no colour"
     // cell carries a sentinel tag, e.g. 0xfffffffe — anything-but-1/2.)
-    assert!(tag0 != 1 && tag0 != 2, "col 0 has no explicit fg color (tag {tag0:#x})");
+    assert!(
+        tag0 != 1 && tag0 != 2,
+        "col 0 has no explicit fg color (tag {tag0:#x})"
+    );
 
     // The SGR is after "A", so cell 1 ("B") is the red one (PALETTE, index 1).
-    assert_eq!(unsafe { ffi::ghostty_render_state_row_cells_select(cells, 1) }, ffi::SUCCESS);
+    assert_eq!(
+        unsafe { ffi::ghostty_render_state_row_cells_select(cells, 1) },
+        ffi::SUCCESS
+    );
     let style1 = {
         let buf = unsafe { std::alloc::alloc(layout) };
         assert_eq!(
-            unsafe { ffi::ghostty_render_state_row_cells_get(cells, ffi::ROW_CELLS_DATA_STYLE, buf as *mut c_void) },
+            unsafe {
+                ffi::ghostty_render_state_row_cells_get(
+                    cells,
+                    ffi::ROW_CELLS_DATA_STYLE,
+                    buf as *mut c_void,
+                )
+            },
             ffi::SUCCESS
         );
         let b = unsafe { std::slice::from_raw_parts(buf as *const u8, 72) }.to_vec();
@@ -200,6 +243,10 @@ fn render_state_wrapper_renders_a_full_width_row() {
     let rs2 = RenderState::new().unwrap();
     rs2.update(&t2).unwrap();
     let row2 = rs2.row(0);
-    assert_eq!(row2[2].style.fg, Some(StyleColor::Palette(1)), "SGR 31 -> palette red");
+    assert_eq!(
+        row2[2].style.fg,
+        Some(StyleColor::Palette(1)),
+        "SGR 31 -> palette red"
+    );
     assert_eq!(row2[0].style.fg, None, "no explicit fg before the SGR");
 }

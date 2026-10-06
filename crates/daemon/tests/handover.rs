@@ -14,13 +14,16 @@ use std::time::Duration;
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn scratch() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-handover-{}-{}", std::process::id(), rand::random::<u64>()));
+    p.push(format!(
+        "ldmux-handover-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -41,7 +44,9 @@ async fn wait_socket(path: &std::path::Path) {
 
 async fn connect(port: u16, token: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut req = format!("ws://127.0.0.1:{port}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://127.0.0.1:{port}/ws")
+        .into_client_request()
+        .unwrap();
     req.headers_mut()
         .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
@@ -97,8 +102,11 @@ async fn handover_size_and_close_does_not_detach() {
 
     let port: u16 = 51000 + (rand::random::<u16>() % 4000);
     let token = "handover-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        port,
+        token.to_string(),
+    );
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
         let mut d = arc.lock().await;
@@ -116,39 +124,78 @@ async fn handover_size_and_close_does_not_detach() {
 
     // A attaches with a size: the pane takes it (size-on-attach).
     let mut a = connect(port, token).await;
-    send(&mut a, serde_json::json!({"type":"hello","device":{"id":"A","name":"desk","kind":"desktop"}})).await;
-    send(&mut a, serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30})).await;
+    send(
+        &mut a,
+        serde_json::json!({"type":"hello","device":{"id":"A","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut a,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30}),
+    )
+    .await;
     let caps = next_of_type(&mut a, "caps").await;
     assert_eq!(caps["cols"], 100, "attach resizes the pane: {caps}");
     assert_eq!(caps["rows"], 30);
     let snap = next_of_type(&mut a, "snapshot").await;
     assert_eq!(snap["cols"], 100, "the snapshot matches the new grid");
     assert_eq!(snap["rows"], 30);
-    assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "A");
+    assert_eq!(
+        arc.lock().await.ownership().owner(&id).unwrap().device.id,
+        "A"
+    );
 
     // B attaches with no takeover: refused, told who holds it, and A keeps it.
     let mut b = connect(port, token).await;
-    send(&mut b, serde_json::json!({"type":"hello","device":{"id":"B","name":"phone","kind":"phone"}})).await;
-    send(&mut b, serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24})).await;
+    send(
+        &mut b,
+        serde_json::json!({"type":"hello","device":{"id":"B","name":"phone","kind":"phone"}}),
+    )
+    .await;
+    send(
+        &mut b,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24}),
+    )
+    .await;
     let owned = next_of_type(&mut b, "owned").await;
     assert_eq!(owned["owner"]["id"], "A", "B is told A holds it: {owned}");
-    assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "A");
+    assert_eq!(
+        arc.lock().await.ownership().owner(&id).unwrap().device.id,
+        "A"
+    );
 
     // B takes over (the phone's reclaim / the window's r): A is cut off.
-    send(&mut b, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":80,"rows":24})).await;
+    send(
+        &mut b,
+        serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":80,"rows":24}),
+    )
+    .await;
     let caps_b = next_of_type(&mut b, "caps").await;
     assert_eq!(caps_b["cols"], 80);
     let owned_a = next_of_type(&mut a, "owned").await;
-    assert!(owned_a["owner"].is_null(), "A is told it lost the shell: {owned_a}");
-    assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "B");
+    assert!(
+        owned_a["owner"].is_null(),
+        "A is told it lost the shell: {owned_a}"
+    );
+    assert_eq!(
+        arc.lock().await.ownership().owner(&id).unwrap().device.id,
+        "B"
+    );
 
     // A takes it back — the desk window's r, which is the one reclaim the spec
     // allows. B is told it lost the shell, and A owns it again.
-    send(&mut a, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":100,"rows":30})).await;
+    send(
+        &mut a,
+        serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":100,"rows":30}),
+    )
+    .await;
     let caps_a2 = next_of_type(&mut a, "caps").await;
     assert_eq!(caps_a2["cols"], 100);
     let owned_b = next_of_type(&mut b, "owned").await;
-    assert!(owned_b["owner"].is_null(), "B is told it lost the shell: {owned_b}");
+    assert!(
+        owned_b["owner"].is_null(),
+        "B is told it lost the shell: {owned_b}"
+    );
     assert_eq!(
         arc.lock().await.ownership().owner(&id).unwrap().device.id,
         "A",
@@ -157,10 +204,17 @@ async fn handover_size_and_close_does_not_detach() {
 
     // B takes it once more, so the rest of this test still describes B as the
     // holder (the close/grace assertions below).
-    send(&mut b, serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":80,"rows":24})).await;
+    send(
+        &mut b,
+        serde_json::json!({"type":"attach","sessionId":id,"takeover":true,"cols":80,"rows":24}),
+    )
+    .await;
     let _ = next_of_type(&mut b, "caps").await;
     let _ = next_of_type(&mut a, "owned").await;
-    assert_eq!(arc.lock().await.ownership().owner(&id).unwrap().device.id, "B");
+    assert_eq!(
+        arc.lock().await.ownership().owner(&id).unwrap().device.id,
+        "B"
+    );
 
     // Closing B is not detaching: the claim survives the socket for the grace.
     drop(b);
@@ -174,7 +228,10 @@ async fn handover_size_and_close_does_not_detach() {
 
     // After the release grace the claim is freed — and the session still lives.
     tokio::time::sleep(Duration::from_millis(3500)).await;
-    assert!(arc.lock().await.ownership().owner(&id).is_none(), "the grace releases the claim");
+    assert!(
+        arc.lock().await.ownership().owner(&id).is_none(),
+        "the grace releases the claim"
+    );
     assert_eq!(
         arc.lock().await.get_session(&id).unwrap().status,
         "running",
@@ -183,8 +240,16 @@ async fn handover_size_and_close_does_not_detach() {
 
     // A fresh attach still finds a live shell (it was never killed).
     let mut c = connect(port, token).await;
-    send(&mut c, serde_json::json!({"type":"hello","device":{"id":"C","name":"desk","kind":"desktop"}})).await;
-    send(&mut c, serde_json::json!({"type":"attach","sessionId":id,"cols":90,"rows":20})).await;
+    send(
+        &mut c,
+        serde_json::json!({"type":"hello","device":{"id":"C","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut c,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":90,"rows":20}),
+    )
+    .await;
     let caps_c = next_of_type(&mut c, "caps").await;
     assert_eq!(caps_c["cols"], 90);
 
@@ -222,8 +287,11 @@ impl Harness {
         wait_socket(&keeper_sock).await;
 
         let token = format!("handover-{}", rand::random::<u32>());
-        let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-            .with_remote("127.0.0.1".to_string(), 0, token.clone());
+        let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+            "127.0.0.1".to_string(),
+            0,
+            token.clone(),
+        );
         let arc = Arc::new(tokio::sync::Mutex::new(d));
         {
             let mut d = arc.lock().await;
@@ -237,7 +305,10 @@ impl Harness {
             .unwrap()["port"]
             .as_u64()
             .unwrap() as u16;
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let mut ids = Vec::new();
         for _ in 0..sessions {
             ids.push(
@@ -250,7 +321,16 @@ impl Harness {
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
-        (Self { port, token, arc, _keeper, _reaper }, ids)
+        (
+            Self {
+                port,
+                token,
+                arc,
+                _keeper,
+                _reaper,
+            },
+            ids,
+        )
     }
 }
 
@@ -307,13 +387,28 @@ async fn a_connection_that_moves_to_another_shell_lets_the_first_one_go() {
     let (s1, s2) = (ids[0].clone(), ids[1].clone());
 
     let mut c = connect(h.port, &h.token).await;
-    send(&mut c, serde_json::json!({"type":"hello","device":{"id":"mover","name":"desk","kind":"desktop"}})).await;
-    send(&mut c, serde_json::json!({"type":"attach","sessionId":s1,"cols":100,"rows":30})).await;
+    send(
+        &mut c,
+        serde_json::json!({"type":"hello","device":{"id":"mover","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut c,
+        serde_json::json!({"type":"attach","sessionId":s1,"cols":100,"rows":30}),
+    )
+    .await;
     let _ = next_of_type(&mut c, "caps").await;
-    assert_eq!(h.arc.lock().await.ownership().owner(&s1).unwrap().device.id, "mover");
+    assert_eq!(
+        h.arc.lock().await.ownership().owner(&s1).unwrap().device.id,
+        "mover"
+    );
 
     // The same connection attaches to the other shell.
-    send(&mut c, serde_json::json!({"type":"attach","sessionId":s2,"cols":100,"rows":30})).await;
+    send(
+        &mut c,
+        serde_json::json!({"type":"attach","sessionId":s2,"cols":100,"rows":30}),
+    )
+    .await;
     let _ = next_of_type(&mut c, "caps").await;
 
     assert_eq!(
@@ -342,17 +437,36 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
 
     // The desk window holds its shell.
     let mut desk = connect(h.port, &h.token).await;
-    send(&mut desk, serde_json::json!({"type":"hello","device":{"id":"desk-1","name":"desk","kind":"desktop"}})).await;
-    send(&mut desk, serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30})).await;
+    send(
+        &mut desk,
+        serde_json::json!({"type":"hello","device":{"id":"desk-1","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut desk,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30}),
+    )
+    .await;
     let _ = next_of_type(&mut desk, "caps").await;
 
     // A phone takes it, so the desk window is displaced and waiting.
     let mut phone = connect(h.port, &h.token).await;
-    send(&mut phone, serde_json::json!({"type":"hello","device":{"id":"phone-1","name":"phone","kind":"phone"}})).await;
-    send(&mut phone, serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24,"takeover":true})).await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"hello","device":{"id":"phone-1","name":"phone","kind":"phone"}}),
+    )
+    .await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24,"takeover":true}),
+    )
+    .await;
     let _ = next_of_type(&mut phone, "caps").await;
     let owned = next_of_type(&mut desk, "owned").await;
-    assert!(owned["owner"].is_null(), "the desk window is told it lost the shell");
+    assert!(
+        owned["owner"].is_null(),
+        "the desk window is told it lost the shell"
+    );
 
     // The phone puts it down. That is a release, and the desk window has to be
     // told — it is the client that acts on it.
@@ -364,7 +478,10 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
     // (no socket, so no immediate broadcast) is announced by the pass, and seeing
     // that means the next pass is about two seconds away. A release that reaches
     // the desk inside a second was therefore broadcast when it happened.
-    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     h.arc
         .lock()
         .await
@@ -376,7 +493,11 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
         "the maintenance pass announces a new shell"
     );
 
-    send(&mut phone, serde_json::json!({"type":"close","sessionId":id})).await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"close","sessionId":id}),
+    )
+    .await;
     let told = tokio::time::timeout(
         Duration::from_millis(1000),
         wait_owner_cleared(&mut desk, &id),
@@ -387,5 +508,8 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
         "releasing a shell must reach the client waiting for it, not only the one that released it"
     );
     // Putting it down is not ending it: the shell is still there to be picked up.
-    assert_eq!(h.arc.lock().await.get_session(&id).unwrap().status, "running");
+    assert_eq!(
+        h.arc.lock().await.get_session(&id).unwrap().status,
+        "running"
+    );
 }

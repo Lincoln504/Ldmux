@@ -7,10 +7,10 @@
 
 pub mod ffi;
 mod safe;
-pub mod snapshot;
 pub mod sgr;
+pub mod snapshot;
 
 pub use safe::{
-    Cell, CellStyle, FfiError, MODE_APP_CURSOR, MODE_BRACKETED_PASTE, MODE_SGR_MOUSE,
-    RenderState, ScrollViewport, StyleColor, Terminal,
+    Cell, CellStyle, FfiError, MODE_APP_CURSOR, MODE_BRACKETED_PASTE, MODE_SGR_MOUSE, RenderState,
+    ScrollViewport, StyleColor, Terminal,
 };

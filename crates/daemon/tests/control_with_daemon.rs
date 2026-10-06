@@ -11,10 +11,14 @@ async fn control_socket_with_daemon_handle() {
     let fk_serve = fk.clone();
     let fk_sock = keeper_sock.clone();
     tokio::spawn(async move {
-        FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+            .await
+            .unwrap();
     });
     for _ in 0..50 {
-        if keeper_sock.exists() { break; }
+        if keeper_sock.exists() {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 

@@ -39,8 +39,12 @@ use std::collections::HashMap;
 const LEGACY_NAME_KEY: &str = "tmuxName";
 
 fn migrate_legacy_name_key(record: &mut serde_json::Value) -> bool {
-    let Some(obj) = record.as_object_mut() else { return false };
-    let Some(v) = obj.remove(LEGACY_NAME_KEY) else { return false };
+    let Some(obj) = record.as_object_mut() else {
+        return false;
+    };
+    let Some(v) = obj.remove(LEGACY_NAME_KEY) else {
+        return false;
+    };
     obj.entry("keeperName").or_insert(v);
     true
 }
@@ -147,9 +151,10 @@ impl Registry {
     /// `<path>`, fsync the directory.
     pub fn save(&self) -> std::io::Result<()> {
         if let Some(parent) = std::path::Path::new(&self.path).parent()
-            && parent != std::path::Path::new("") {
-                std::fs::create_dir_all(parent)?;
-            }
+            && parent != std::path::Path::new("")
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut file = RegistryFile {
             version: 1,
             sessions: Vec::new(),
@@ -170,7 +175,9 @@ impl Registry {
         }
         let tmp = format!("{}.tmp", self.path);
         let Ok(text) = serde_json::to_string_pretty(&file) else {
-            return Err(std::io::Error::other("registry: could not serialise the file"));
+            return Err(std::io::Error::other(
+                "registry: could not serialise the file",
+            ));
         };
         {
             use std::io::Write;
@@ -180,7 +187,11 @@ impl Registry {
         }
         std::fs::rename(&tmp, &self.path)?;
         if let Some(parent) = std::path::Path::new(&self.path).parent() {
-            let dir = if parent == std::path::Path::new("") { std::path::Path::new(".") } else { parent };
+            let dir = if parent == std::path::Path::new("") {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
             if let Ok(d) = std::fs::File::open(dir) {
                 let _ = d.sync_all();
             }
@@ -206,8 +217,11 @@ impl Registry {
     /// All records, most-recently-updated first (stable: ties keep insertion
     /// order, as the TS `Array.sort` does).
     pub fn list(&self) -> Vec<SessionRecord> {
-        let mut records: Vec<SessionRecord> =
-            self.order.iter().filter_map(|id| self.sessions.get(id).cloned()).collect();
+        let mut records: Vec<SessionRecord> = self
+            .order
+            .iter()
+            .filter_map(|id| self.sessions.get(id).cloned())
+            .collect();
         records.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         records
     }
@@ -250,7 +264,8 @@ impl Registry {
                     return false;
                 };
                 r.status == "dead"
-                    && r.exited_at.is_some_and(|e| now - e > max_dead_age_ms as i64)
+                    && r.exited_at
+                        .is_some_and(|e| now - e > max_dead_age_ms as i64)
             })
             .cloned()
             .collect();
@@ -351,14 +366,26 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("registry.json");
         let mut reg = Registry::new(path.to_string_lossy());
-        reg.upsert(record(Over { id: Some("keep".into()), ..Over::default() }));
-        reg.upsert(record(Over { id: Some("lost".into()), ..Over::default() }));
+        reg.upsert(record(Over {
+            id: Some("keep".into()),
+            ..Over::default()
+        }));
+        reg.upsert(record(Over {
+            id: Some("lost".into()),
+            ..Over::default()
+        }));
         // Drop the record but keep the index entry: the disagreement.
         reg.sessions.remove("lost");
         reg.save().expect("save must not panic or fail");
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(on_disk.contains("keep"), "the session it has is written: {on_disk}");
-        assert!(!on_disk.contains("lost"), "the one it does not have is skipped");
+        assert!(
+            on_disk.contains("keep"),
+            "the session it has is written: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains("lost"),
+            "the one it does not have is skipped"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -368,7 +395,9 @@ mod tests {
     fn record(over: Over) -> SessionRecord {
         let now: i64 = 1_700_000_000_000;
         SessionRecord {
-            id: over.id.unwrap_or_else(|| format!("r-{}", uuid::Uuid::new_v4())),
+            id: over
+                .id
+                .unwrap_or_else(|| format!("r-{}", uuid::Uuid::new_v4())),
             keeper_name: over.keeper_name.unwrap_or_default(),
             kind: "shell".into(),
             cwd: over.cwd.unwrap_or_else(|| "/tmp".into()),
@@ -382,6 +411,8 @@ mod tests {
             live_workspace: None,
             live_pid: None,
             ended_reason: None,
+            exit_signal: None,
+            ended_kind: None,
         }
     }
 
@@ -456,9 +487,7 @@ mod tests {
                 .exited_at(Some(now - 60_000))
                 .updated_at(now - 60_000),
         );
-        let fresh = record(
-            Over::new().id("fresh").status("dead").exited_at(Some(now)),
-        );
+        let fresh = record(Over::new().id("fresh").status("dead").exited_at(Some(now)));
         let live = record(Over::new().id("live"));
         reg.upsert(old);
         reg.upsert(fresh);
@@ -499,16 +528,15 @@ mod tests {
         let reg_path = path(&root, "c.json");
         let mut reg = Registry::new(&reg_path);
         let now: i64 = 1_700_000_000_000;
-        reg.upsert(
-            record(
-                Over::new().id("term").keeper_name("ldmux-x").status("running"),
-            ),
-        );
-        reg.upsert(
-            record(
-                Over::new().id("rpc").keeper_name("").status("running"),
-            ),
-        );
+        reg.upsert(record(
+            Over::new()
+                .id("term")
+                .keeper_name("ldmux-x")
+                .status("running"),
+        ));
+        reg.upsert(record(
+            Over::new().id("rpc").keeper_name("").status("running"),
+        ));
         let live: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let (dead, _) = reg.reconcile(Some(&live), now);
         assert_eq!(dead, ["term"]);
@@ -537,11 +565,12 @@ mod tests {
         let reg_path = path(&root, "unknown.json");
         let mut reg = Registry::new(&reg_path);
         let now: i64 = 1_700_000_000_000;
-        reg.upsert(
-            record(
-                Over::new().id("term").keeper_name("ldmux-x").status("running"),
-            ),
-        );
+        reg.upsert(record(
+            Over::new()
+                .id("term")
+                .keeper_name("ldmux-x")
+                .status("running"),
+        ));
         let (dead, adopted) = reg.reconcile(None, now);
         assert!(dead.is_empty());
         assert!(adopted.is_empty());
@@ -626,8 +655,14 @@ mod tests {
         assert_eq!(r.list().len(), 2, "both sessions survive");
         assert_eq!(r.get("d9f93a03d4").unwrap().keeper_name, "ldmux-d9f93a03d4");
         let on_disk = std::fs::read_to_string(&p).unwrap();
-        assert!(on_disk.contains("\"keeperName\": \"ldmux-d9f93a03d4\""), "{on_disk}");
-        assert!(!on_disk.contains("tmuxName"), "the legacy key is gone: {on_disk}");
+        assert!(
+            on_disk.contains("\"keeperName\": \"ldmux-d9f93a03d4\""),
+            "{on_disk}"
+        );
+        assert!(
+            !on_disk.contains("tmuxName"),
+            "the legacy key is gone: {on_disk}"
+        );
         // A second load is a plain load.
         let mut again = Registry::new(&p);
         again.load();
@@ -641,19 +676,19 @@ mod tests {
         let reg_path = path(&root, "reconcile.json");
         let mut r = Registry::new(&reg_path);
         let now: i64 = 1_700_000_000_000;
-        r.upsert(
-            record(
-                Over::new()
-                    .id("revive")
-                    .keeper_name("keeper-revive")
-                    .status("dead")
-                    .exited_at(Some(5)),
-            ),
-        );
+        r.upsert(record(
+            Over::new()
+                .id("revive")
+                .keeper_name("keeper-revive")
+                .status("dead")
+                .exited_at(Some(5)),
+        ));
         // A session the terminal has but the registry does not is an adoption
         // candidate.
         let live: std::collections::BTreeSet<String> =
-            ["keeper-revive".to_string(), "keeper-orphan".to_string()].into_iter().collect();
+            ["keeper-revive".to_string(), "keeper-orphan".to_string()]
+                .into_iter()
+                .collect();
         let (dead, adopted) = r.reconcile(Some(&live), now);
         assert!(dead.is_empty());
         assert_eq!(adopted, ["keeper-orphan"]);
@@ -732,9 +767,18 @@ mod tests {
     fn the_cap_never_evicts_a_running_session() {
         let root = temp_dir();
         let mut reg = Registry::new(path(&root, "cap.json"));
-        reg.upsert(record(Over::new().id("old-running").status("running").updated_at(1)));
-        reg.upsert(record(Over::new().id("dead-1").status("dead").updated_at(2)));
-        reg.upsert(record(Over::new().id("run-2").status("running").updated_at(3)));
+        reg.upsert(record(
+            Over::new()
+                .id("old-running")
+                .status("running")
+                .updated_at(1),
+        ));
+        reg.upsert(record(
+            Over::new().id("dead-1").status("dead").updated_at(2),
+        ));
+        reg.upsert(record(
+            Over::new().id("run-2").status("running").updated_at(3),
+        ));
         let removed = reg.prune(Some(u64::MAX / 4), Some(2), 1_700_000_000_000);
         assert_eq!(removed, vec!["dead-1".to_string()]);
         assert!(reg.get("old-running").is_some());

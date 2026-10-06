@@ -25,9 +25,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use ldmux_protocol::rpc::{
-    DesktopInventory, DesktopPiSession, DesktopWindow, DesktopWorkspace,
-};
+use ldmux_protocol::rpc::{DesktopInventory, DesktopPiSession, DesktopWindow, DesktopWorkspace};
 
 // ── window-manager trees: i3 and sway ───────────────────────────────────────
 
@@ -67,7 +65,11 @@ struct WindowProperties {
 fn class_of(node: &I3LikeNode) -> String {
     node.app_id
         .clone()
-        .or_else(|| node.window_properties.as_ref().and_then(|w| w.class.clone()))
+        .or_else(|| {
+            node.window_properties
+                .as_ref()
+                .and_then(|w| w.class.clone())
+        })
         .unwrap_or_default()
 }
 
@@ -181,28 +183,23 @@ pub fn parse_niri(
 
     let windows: Vec<DesktopWindow> = raw_win
         .iter()
-        .map(|w| {
-            DesktopWindow {
-                id: w
-                    .get("id")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                app_class: w
-                    .get("app_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                title: w
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                workspace: w
-                    .get("workspace_id")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                pid: w.get("pid").and_then(|v| v.as_u64()).map(|v| v as i64),
-            }
+        .map(|w| DesktopWindow {
+            id: w.get("id").map(|v| v.to_string()).unwrap_or_default(),
+            app_class: w
+                .get("app_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            title: w
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            workspace: w
+                .get("workspace_id")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            pid: w.get("pid").and_then(|v| v.as_u64()).map(|v| v as i64),
         })
         .collect();
 
@@ -249,30 +246,25 @@ pub fn parse_hyprland(
 
     let windows: Vec<DesktopWindow> = raw_win
         .iter()
-        .map(|w| {
-            DesktopWindow {
-                id: w
-                    .get("address")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                app_class: w
-                    .get("class")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                title: w
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                workspace: w
-                    .get("workspace")
-                    .and_then(|w| w.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                pid: w.get("pid").and_then(|v| v.as_u64()).map(|v| v as i64),
-            }
+        .map(|w| DesktopWindow {
+            id: w.get("address").map(|v| v.to_string()).unwrap_or_default(),
+            app_class: w
+                .get("class")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            title: w
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            workspace: w
+                .get("workspace")
+                .and_then(|w| w.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            pid: w.get("pid").and_then(|v| v.as_u64()).map(|v| v as i64),
         })
         .collect();
 
@@ -294,10 +286,7 @@ pub fn parse_hyprland(
                     .and_then(|v| v.as_str())
                     .map(|s| !s.is_empty())
                     .unwrap_or(false),
-                window_count: w
-                    .get("windows")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0),
+                window_count: w.get("windows").and_then(|v| v.as_u64()).unwrap_or(0),
             }
         })
         .collect();
@@ -337,9 +326,7 @@ pub fn parse_ewmh_window(id: &str, stdout: &str) -> Option<DesktopWindow> {
     let line = |key: &str| -> String {
         stdout
             .lines()
-            .find(|l| {
-                l.starts_with(key) && l.contains('=')
-            })
+            .find(|l| l.starts_with(key) && l.contains('='))
             .and_then(|l| {
                 let eq = l.find('=')?;
                 Some(l[eq + 1..].trim().to_string())
@@ -414,8 +401,14 @@ pub fn parse_pi_session_head(text: &str) -> (Option<String>, Option<String>, Opt
             return (None, None, None);
         }
     };
-    let id = obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let cwd = obj.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let id = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let cwd = obj
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let started_at = obj
         .get("timestamp")
         .and_then(|v| v.as_str())
@@ -496,18 +489,18 @@ pub fn assign_transcripts(
     transcripts_by_cwd: &HashMap<String, Vec<String>>,
 ) -> HashMap<i64, Option<String>> {
     let mut out = HashMap::new();
-    let by_cwd: HashMap<&str, Vec<&PiProc>> = procs.iter().fold(
-        HashMap::new(),
-        |mut acc, p| {
-            acc.entry(p.cwd.as_str()).or_default().push(p);
-            acc
-        },
-    );
+    let by_cwd: HashMap<&str, Vec<&PiProc>> = procs.iter().fold(HashMap::new(), |mut acc, p| {
+        acc.entry(p.cwd.as_str()).or_default().push(p);
+        acc
+    });
 
     for (cwd, group) in &by_cwd {
         let mut fresh: Vec<&PiProc> = group.to_vec();
         fresh.sort_by_key(|p| std::cmp::Reverse(p.start_ticks));
-        let files = transcripts_by_cwd.get(*cwd).map(|v| v.as_slice()).unwrap_or(&[]);
+        let files = transcripts_by_cwd
+            .get(*cwd)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         for (i, p) in fresh.iter().enumerate() {
             out.insert(p.pid, files.get(i).cloned());
         }
@@ -540,7 +533,9 @@ fn build_pi_session(
         transcript: transcript.map(|s| s.to_string()),
         window_id: window.map(|w| w.id.clone()),
         workspace: window.map(|w| w.workspace.clone()),
-        label: proc.cwd.rsplit('/')
+        label: proc
+            .cwd
+            .rsplit('/')
             .find(|s| !s.is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "pi".to_string()),
@@ -568,7 +563,10 @@ use crate::exec::{self, ExecOpts};
 type Env = Vec<(String, String)>;
 
 fn exec_opts(ms: u64, env: &Env) -> ExecOpts {
-    ExecOpts { timeout_ms: Some(ms), env: Some(env.clone()) }
+    ExecOpts {
+        timeout_ms: Some(ms),
+        env: Some(env.clone()),
+    }
 }
 
 fn argv<T: AsRef<str>>(args: &[T]) -> Vec<String> {
@@ -584,7 +582,11 @@ async fn probe_i3_like(env: &Env, binary: &str, wm: &str) -> Option<ProbeResult>
     let parsed: serde_json::Value = serde_json::from_str(&tree.out).ok()?;
     let (mut workspaces, windows) = walk_i3_tree(&parsed);
 
-    let ws = exec::run(argv(&[binary, "-t", "get_workspaces"]), exec_opts(3000, env)).await;
+    let ws = exec::run(
+        argv(&[binary, "-t", "get_workspaces"]),
+        exec_opts(3000, env),
+    )
+    .await;
     if let Ok(reported) = serde_json::from_str::<serde_json::Value>(&ws.out) {
         workspaces = merge_i3_workspace_flags(workspaces, &reported);
     }
@@ -618,7 +620,11 @@ async fn enrich_window_pids(env: &Env, windows: &mut [DesktopWindow]) {
             let id = windows[i].id.clone();
             let env = env.clone();
             tokio::spawn(async move {
-                let out = exec::run(argv(&["xprop", "-id", &id, "_NET_WM_PID"]), exec_opts(2000, &env)).await;
+                let out = exec::run(
+                    argv(&["xprop", "-id", &id, "_NET_WM_PID"]),
+                    exec_opts(2000, &env),
+                )
+                .await;
                 if out.code != 0 {
                     return None;
                 }
@@ -640,44 +646,50 @@ async fn enrich_window_pids(env: &Env, windows: &mut [DesktopWindow]) {
 
 /// Probe EWMH: the standard every X11 desktop implements.
 async fn probe_ewmh(env: &Env) -> Option<ProbeResult> {
-    let list = exec::run(argv(&["xprop", "-root", "_NET_CLIENT_LIST"]), exec_opts(3000, env)).await;
+    let list = exec::run(
+        argv(&["xprop", "-root", "_NET_CLIENT_LIST"]),
+        exec_opts(3000, env),
+    )
+    .await;
     if list.code != 0 {
         return None;
     }
     let ids = parse_ewmh_client_list(&list.out);
 
-    let windows: Vec<DesktopWindow> = futures_util::future::join_all(
-        ids.iter().map(|id| {
-            let id = id.clone();
-            async move {
-                let out = exec::run(
-                    argv(&[
-                        "xprop",
-                        "-id",
-                        &id,
-                        "WM_CLASS",
-                        "_NET_WM_NAME",
-                        "WM_NAME",
-                        "_NET_WM_DESKTOP",
-                        "_NET_WM_PID",
-                    ]),
-                    exec_opts(3000, env),
-                )
-                .await;
-                if out.code == 0 {
-                    parse_ewmh_window(&id, &out.out)
-                } else {
-                    None
-                }
+    let windows: Vec<DesktopWindow> = futures_util::future::join_all(ids.iter().map(|id| {
+        let id = id.clone();
+        async move {
+            let out = exec::run(
+                argv(&[
+                    "xprop",
+                    "-id",
+                    &id,
+                    "WM_CLASS",
+                    "_NET_WM_NAME",
+                    "WM_NAME",
+                    "_NET_WM_DESKTOP",
+                    "_NET_WM_PID",
+                ]),
+                exec_opts(3000, env),
+            )
+            .await;
+            if out.code == 0 {
+                parse_ewmh_window(&id, &out.out)
+            } else {
+                None
             }
-        }),
-    )
+        }
+    }))
     .await
     .into_iter()
     .flatten()
     .collect();
 
-    let current = exec::run(argv(&["xprop", "-root", "_NET_CURRENT_DESKTOP"]), exec_opts(2000, env)).await;
+    let current = exec::run(
+        argv(&["xprop", "-root", "_NET_CURRENT_DESKTOP"]),
+        exec_opts(2000, env),
+    )
+    .await;
     let active = current
         .out
         .split('=')
@@ -698,14 +710,12 @@ async fn probe_ewmh(env: &Env) -> Option<ProbeResult> {
 
     let mut workspaces: Vec<DesktopWorkspace> = by_desktop
         .iter()
-        .map(|(name, count)| {
-            DesktopWorkspace {
-                name: name.clone(),
-                index: name.parse::<i64>().ok(),
-                focused: *name == active,
-                visible: *name == active,
-                window_count: *count,
-            }
+        .map(|(name, count)| DesktopWorkspace {
+            name: name.clone(),
+            index: name.parse::<i64>().ok(),
+            focused: *name == active,
+            visible: *name == active,
+            window_count: *count,
         })
         .collect();
     workspaces.sort_by(|a, b| a.name.cmp(&b.name));
@@ -734,8 +744,16 @@ async fn probe_in(env: &Env) -> ProbeResult {
         return r;
     }
 
-    let niri_ws = exec::run(argv(&["niri", "msg", "--json", "workspaces"]), exec_opts(3000, env)).await;
-    let niri_win = exec::run(argv(&["niri", "msg", "--json", "windows"]), exec_opts(3000, env)).await;
+    let niri_ws = exec::run(
+        argv(&["niri", "msg", "--json", "workspaces"]),
+        exec_opts(3000, env),
+    )
+    .await;
+    let niri_win = exec::run(
+        argv(&["niri", "msg", "--json", "windows"]),
+        exec_opts(3000, env),
+    )
+    .await;
     if niri_ws.code == 0
         && niri_win.code == 0
         && let (Ok(ws), Ok(win)) = (
@@ -761,7 +779,11 @@ async fn probe_in(env: &Env) -> ProbeResult {
             serde_json::from_str::<serde_json::Value>(&hypr_clients.out),
         )
     {
-        let active = exec::run(argv(&["hyprctl", "-j", "activeworkspace"]), exec_opts(2000, env)).await;
+        let active = exec::run(
+            argv(&["hyprctl", "-j", "activeworkspace"]),
+            exec_opts(2000, env),
+        )
+        .await;
         let active_val: Option<serde_json::Value> = if active.code == 0 {
             serde_json::from_str(&active.out).ok()
         } else {
@@ -806,9 +828,7 @@ pub fn scan_pi_pids(proc_root: &str) -> Vec<i64> {
         if !name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let comm_path = std::path::Path::new(proc_root)
-            .join(&name)
-            .join("comm");
+        let comm_path = std::path::Path::new(proc_root).join(&name).join("comm");
         match std::fs::read_to_string(&comm_path) {
             Ok(content) => {
                 if content.trim() == "pi" {
@@ -890,11 +910,7 @@ pub fn list_transcripts(dir: &str) -> Vec<String> {
     let names: Vec<String> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .ends_with(".jsonl")
-            })
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
             .map(|e| e.path().to_string_lossy().to_string())
             .collect(),
         Err(_) => return vec![],
@@ -937,19 +953,28 @@ pub fn scan_pi_sessions(
         })
         .collect();
 
-    let sessions_root = std::path::Path::new(home).join(".pi").join("agent").join("sessions");
+    let sessions_root = std::path::Path::new(home)
+        .join(".pi")
+        .join("agent")
+        .join("sessions");
     let cwd_set: std::collections::HashSet<String> = procs.iter().map(|p| p.cwd.clone()).collect();
     let transcripts: HashMap<String, Vec<String>> = cwd_set
         .iter()
         .map(|cwd| {
             let dir = sessions_root.join(encode_pi_session_dir(cwd));
-            (cwd.clone(), list_transcripts(dir.to_string_lossy().as_ref()))
+            (
+                cwd.clone(),
+                list_transcripts(dir.to_string_lossy().as_ref()),
+            )
         })
         .collect();
 
     let assigned = assign_transcripts(&procs, &transcripts);
     let attributed = attribute_windows(
-        &procs.iter().map(|p| (p.pid, p.ancestors.clone())).collect::<Vec<_>>(),
+        &procs
+            .iter()
+            .map(|p| (p.pid, p.ancestors.clone()))
+            .collect::<Vec<_>>(),
         windows,
     );
 
@@ -977,10 +1002,7 @@ pub fn scan_pi_sessions(
 /// opened a new shell instead of the running one.
 ///
 /// `by_shell_pid` maps a session's shell pid to its session id.
-pub fn link_pi_sessions(
-    inv: &mut DesktopInventory,
-    by_shell_pid: &HashMap<i32, String>,
-) {
+pub fn link_pi_sessions(inv: &mut DesktopInventory, by_shell_pid: &HashMap<i32, String>) {
     if by_shell_pid.is_empty() {
         return;
     }
@@ -1165,15 +1187,9 @@ _NET_WM_DESKTOP(CARDINAL) = 0\n";
             encode_pi_session_dir("/home/ldeen/Documents/ponydeck"),
             "--home-ldeen-Documents-ponydeck--"
         );
-        assert_eq!(
-            encode_pi_session_dir("/home/ldeen"),
-            "--home-ldeen--"
-        );
+        assert_eq!(encode_pi_session_dir("/home/ldeen"), "--home-ldeen--");
         // Leading/trailing slashes are dropped, not turned into dashes.
-        assert_eq!(
-            encode_pi_session_dir("/home/"),
-            "--home--"
-        );
+        assert_eq!(encode_pi_session_dir("/home/"), "--home--");
     }
 
     #[test]
@@ -1241,15 +1257,13 @@ _NET_WM_DESKTOP(CARDINAL) = 0\n";
             },
         ];
         // Transcripts are sorted newest-first (as `listTranscripts` returns them).
-        let transcripts: HashMap<String, Vec<String>> = [
-            (
-                "/home/a".to_string(),
-                vec![
-                    "/home/a/t2.jsonl".to_string(), // newest
-                    "/home/a/t1.jsonl".to_string(), // older
-                ],
-            ),
-        ]
+        let transcripts: HashMap<String, Vec<String>> = [(
+            "/home/a".to_string(),
+            vec![
+                "/home/a/t2.jsonl".to_string(), // newest
+                "/home/a/t1.jsonl".to_string(), // older
+            ],
+        )]
         .into_iter()
         .collect();
         let assigned = assign_transcripts(&procs, &transcripts);
@@ -1279,10 +1293,7 @@ _NET_WM_DESKTOP(CARDINAL) = 0\n";
             for _ in 0..200 {
                 if let Ok(entries) = std::fs::read_dir("/proc") {
                     for e in entries.flatten() {
-                        let Some(pid) = e
-                            .file_name()
-                            .to_str()
-                            .and_then(|s| s.parse::<i32>().ok())
+                        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok())
                         else {
                             continue;
                         };
@@ -1326,7 +1337,10 @@ _NET_WM_DESKTOP(CARDINAL) = 0\n";
         // The keeper reports the *shell's* pid; here the sh stands in for it.
         by_shell_pid.insert(sh_pid, "abc123".to_string());
         link_pi_sessions(&mut inv, &by_shell_pid);
-        assert_eq!(inv.pi_sessions[0].ldmux_session_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            inv.pi_sessions[0].ldmux_session_id.as_deref(),
+            Some("abc123")
+        );
 
         // A pid whose chain holds no session is left alone, and an empty map
         // costs nothing.

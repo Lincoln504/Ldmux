@@ -53,9 +53,17 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
             return;
         }
     }
-    let scratch = std::env::temp_dir().join(format!("ldmux-deske2e-{}-{}", std::process::id(), rand::random::<u64>()));
+    let scratch = std::env::temp_dir().join(format!(
+        "ldmux-deske2e-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
     std::fs::create_dir_all(scratch.join("run")).unwrap();
-    std::fs::set_permissions(scratch.join("run"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        scratch.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
 
     // A random display so two runs never collide on the WM-selection atom.
     let n = 90 + (rand::random::<u8>() % 8) as u32;
@@ -80,11 +88,22 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
         std::env::set_var("DISPLAY", &display);
         std::env::set_var("HOME", &scratch);
         std::env::set_var("XDG_RUNTIME_DIR", scratch.join("run"));
-        for v in ["WAYLAND_DISPLAY", "SWAYSOCK", "I3SOCK", "HYPRLAND_INSTANCE_SIGNATURE", "NIRI_SOCKET", "LDMUX_TERMINAL", "TERMINAL"] {
+        for v in [
+            "WAYLAND_DISPLAY",
+            "SWAYSOCK",
+            "I3SOCK",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "NIRI_SOCKET",
+            "LDMUX_TERMINAL",
+            "TERMINAL",
+        ] {
             std::env::remove_var(v);
         }
         // xterm keeps a window up for 30 s; `{cmd}` follows as $0 and its args.
-        std::env::set_var("LDMUX_TERMINAL_CMD", "xterm -class {class} -e /bin/sh -c 'sleep 30' {cmd}");
+        std::env::set_var(
+            "LDMUX_TERMINAL_CMD",
+            "xterm -class {class} -e /bin/sh -c 'sleep 30' {cmd}",
+        );
     }
 
     guard.0.push(
@@ -110,9 +129,16 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
     assert!(ready, "i3 never answered on {display}");
 
     let id = "e2e1";
-    let opened = desktop::open_live(id, "2").await.expect("the window must open");
+    let opened = desktop::open_live(id, "2")
+        .await
+        .expect("the window must open");
     assert!(opened.ok);
-    assert_eq!(opened.placed, Some(true), "i3 placed it: {:?}", opened.detail);
+    assert_eq!(
+        opened.placed,
+        Some(true),
+        "i3 placed it: {:?}",
+        opened.detail
+    );
     assert!(opened.window_id.is_some());
 
     // On screen, by class, as the daemon asks i3.
@@ -128,10 +154,17 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
     assert_eq!(desktop::live_window_ids().await, vec![id.to_string()]);
 
     // ... and on the workspace asked for.
-    let tree = Command::new("i3-msg").args(["-t", "get_tree"]).output().unwrap();
+    let tree = Command::new("i3-msg")
+        .args(["-t", "get_tree"])
+        .output()
+        .unwrap();
     let tree: serde_json::Value = serde_json::from_slice(&tree.stdout).unwrap();
     fn workspace_of(node: &serde_json::Value, ws: Option<&str>, class: &str) -> Option<String> {
-        let ws = if node["type"] == "workspace" { node["name"].as_str() } else { ws };
+        let ws = if node["type"] == "workspace" {
+            node["name"].as_str()
+        } else {
+            ws
+        };
         if node["window_properties"]["class"] == class {
             return ws.map(|s| s.to_string());
         }
@@ -144,7 +177,10 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
         }
         None
     }
-    assert_eq!(workspace_of(&tree, None, "ldmux-live-e2e1").as_deref(), Some("2"));
+    assert_eq!(
+        workspace_of(&tree, None, "ldmux-live-e2e1").as_deref(),
+        Some("2")
+    );
 
     assert_eq!(desktop::close_live(id).await, Ok(true));
     let mut gone = false;

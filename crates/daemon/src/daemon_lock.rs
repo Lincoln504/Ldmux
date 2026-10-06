@@ -54,7 +54,8 @@ impl DaemonLock {
             .open(&self.lock_path)
             .map_err(|e| format!("open lock: {e}"))?;
         // SAFETY: `flock` on a descriptor this function owns for the call.
-        let rc = unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
+        let rc =
+            unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             return if err.raw_os_error() == Some(nix::libc::EWOULDBLOCK) {
@@ -177,7 +178,8 @@ mod tests {
         let held: std::sync::Arc<std::sync::Mutex<Vec<DaemonLock>>> = Default::default();
         let handles: Vec<_> = (0..8)
             .map(|_| {
-                let (dir, wins, barrier, held) = (dir.clone(), wins.clone(), barrier.clone(), held.clone());
+                let (dir, wins, barrier, held) =
+                    (dir.clone(), wins.clone(), barrier.clone(), held.clone());
                 std::thread::spawn(move || {
                     let mut l = DaemonLock::new(&dir);
                     barrier.wait();

@@ -32,8 +32,8 @@
 //! - `mirror <id> [--workspace N] [--rw] [--terminal T]` — a view of a session's
 //!   screen on the desktop, read-only unless `--rw`.
 
-use ldmux_protocol::socket::{self as ps, CallError};
 use ldmux_protocol::rpc::PingResult;
+use ldmux_protocol::socket::{self as ps, CallError};
 
 /// The daemon socket path, resolved exactly as the daemon resolves it.
 ///
@@ -90,7 +90,9 @@ fn current_dir_or_exit() -> String {
     match std::env::current_dir() {
         Ok(d) => d.to_string_lossy().into_owned(),
         Err(e) => {
-            eprintln!("ldmux: cannot read the current directory ({e}); cd somewhere that exists or pass the directory as an argument");
+            eprintln!(
+                "ldmux: cannot read the current directory ({e}); cd somewhere that exists or pass the directory as an argument"
+            );
             std::process::exit(1);
         }
     }
@@ -99,28 +101,54 @@ fn current_dir_or_exit() -> String {
 /// One command's usage, for `ldmux <command> --help`.
 fn command_help(cmd: &str) -> Option<&'static str> {
     Some(match cmd {
-        "ping" => "ldmux ping\n  Ask the daemon whether it is alive; prints its version info as JSON.",
-        "list" => "ldmux list\n  List sessions: id, status, kind, cwd, title, keeper (and why a dead one ended).",
-        "desktop" => "ldmux desktop [--json]\n  The desktop inventory: window manager, workspaces, windows.",
-        "new" => "ldmux new [shell|pi] [cwd] [--title T]\n  Create a session (default: a shell in the current directory); prints its id.",
-        "shell" => "ldmux shell [--name N] [--cwd DIR] [dir]\n  Become a desk window for a shell in this terminal. Reuses the shell already in that directory unless --name asks for another.",
-        "run" => "ldmux run [shell|pi] [cwd]\n  Create a session and become its desk window in this terminal.",
-        "window" => "ldmux window [cwd]\n  Create a shell and open it in a new desk window (the terminal is chosen by LDMUX_TERMINAL_CMD, LDMUX_TERMINAL, $TERMINAL, then known emulators).",
+        "ping" => {
+            "ldmux ping\n  Ask the daemon whether it is alive; prints its version info as JSON."
+        }
+        "list" => {
+            "ldmux list\n  List sessions: id, status, kind, cwd, title, keeper (and why a dead one ended)."
+        }
+        "desktop" => {
+            "ldmux desktop [--json]\n  The desktop inventory: window manager, workspaces, windows."
+        }
+        "new" => {
+            "ldmux new [shell|pi] [cwd] [--title T]\n  Create a session (default: a shell in the current directory); prints its id."
+        }
+        "shell" => {
+            "ldmux shell [--name N] [--cwd DIR] [dir]\n  Become a desk window for a shell in this terminal. Reuses the shell already in that directory unless --name asks for another."
+        }
+        "run" => {
+            "ldmux run [shell|pi] [cwd]\n  Create a session and become its desk window in this terminal."
+        }
+        "window" => {
+            "ldmux window [cwd]\n  Create a shell and open it in a new desk window (the terminal is chosen by LDMUX_TERMINAL_CMD, LDMUX_TERMINAL, $TERMINAL, then known emulators)."
+        }
         "send" => "ldmux send <id> <text...>\n  Type text into a session.",
         "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
-        "capture" => "ldmux capture <id> [--history]\n  Print the session's screen (with --history, its scrollback too).",
+        "capture" => {
+            "ldmux capture <id> [--history]\n  Print the session's screen (with --history, its scrollback too)."
+        }
         "snapshot" => "ldmux snapshot <id>\n  Print the session's full snapshot as JSON.",
         "kill" => "ldmux kill <id>\n  End a session and its shell.",
-        "close" => "ldmux close <id>\n  End a session, unless a desktop window holds it (then let go).",
+        "close" => {
+            "ldmux close <id>\n  End a session, unless a desktop window holds it (then let go)."
+        }
         "forget" => "ldmux forget <id>\n  Drop a session's record without touching the keeper.",
         "adopt" => "ldmux adopt <keeper-name>\n  Adopt a keeper session the daemon does not know.",
-        "mirror" => "ldmux mirror <id> [--workspace N] [--rw] [--terminal T]\n  A read-only view of a session in a new window (--rw lets it type). Placement on a workspace needs an i3/sway/hyprland adapter; without one the window opens where it opens.",
-        "live" => "ldmux live <id> [workspace]\n  Open a session in a desk window, optionally placed on a workspace.",
+        "mirror" => {
+            "ldmux mirror <id> [--workspace N] [--rw] [--terminal T]\n  A read-only view of a session in a new window (--rw lets it type). Placement on a workspace needs an i3/sway/hyprland adapter; without one the window opens where it opens."
+        }
+        "live" => {
+            "ldmux live <id> [workspace]\n  Open a session in a desk window, optionally placed on a workspace."
+        }
         "unlive" => "ldmux unlive <id>\n  Close a session's desk window.",
-        "remote" => "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening.",
+        "remote" => {
+            "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening."
+        }
         "code" => "ldmux code\n  Print a QR code the phone app scans to pair.",
         "pair" => "ldmux pair\n  Print the pairing link.",
-        "clipboard-write" => "ldmux clipboard-write on|off\n  Allow or refuse terminal programs writing the clipboard.",
+        "clipboard-write" => {
+            "ldmux clipboard-write on|off\n  Allow or refuse terminal programs writing the clipboard."
+        }
         _ => return None,
     })
 }
@@ -140,7 +168,13 @@ fn print_usage() {
 /// `--dry-run` was in this list in the TS and here, read by no command at all.
 fn reject_unknown_flag(rest: &[String]) -> Option<String> {
     const KNOWN_FLAGS: &[&str] = &[
-        "--cwd", "--history", "--json", "--name", "--rw", "--terminal", "--title",
+        "--cwd",
+        "--history",
+        "--json",
+        "--name",
+        "--rw",
+        "--terminal",
+        "--title",
         "--workspace",
     ];
     for arg in rest {
@@ -226,7 +260,8 @@ async fn main() {
 
     match cmd.as_str() {
         "ping" => {
-            let r: Result<PingResult, CallError> = daemon_call(&sock, "ping", &serde_json::json!({})).await;
+            let r: Result<PingResult, CallError> =
+                daemon_call(&sock, "ping", &serde_json::json!({})).await;
             match r {
                 Ok(r) => println!("{}", serde_json::to_string(&r).unwrap()),
                 Err(e) => {
@@ -235,10 +270,15 @@ async fn main() {
             }
         }
         "list" => {
-            let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "list", &serde_json::json!({})).await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "list", &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
-                    let sessions = v.get("sessions").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+                    let sessions = v
+                        .get("sessions")
+                        .and_then(|s| s.as_array())
+                        .cloned()
+                        .unwrap_or_default();
                     if sessions.is_empty() {
                         println!("(no sessions)");
                     } else {
@@ -248,12 +288,27 @@ async fn main() {
                             let kind = s.get("kind").and_then(|t| t.as_str()).unwrap_or("");
                             let cwd = s.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
                             let title = s.get("title").and_then(|t| t.as_str()).unwrap_or("");
-                            let keeper_name = s.get("keeperName").and_then(|t| t.as_str()).unwrap_or("");
-                            let attach = if keeper_name.is_empty() { "[rpc]".to_string() } else { format!("[{keeper_name}]") };
+                            let keeper_name =
+                                s.get("keeperName").and_then(|t| t.as_str()).unwrap_or("");
+                            let attach = if keeper_name.is_empty() {
+                                "[rpc]".to_string()
+                            } else {
+                                format!("[{keeper_name}]")
+                            };
                             // An ending says why, on the line, for the shells that
                             // ended: `dead` alone sends you looking for a cause.
+                            // ... and how, when the shell's own ending is known: its
+                            // exit status, or the signal that killed it.
+                            let how = match (
+                                s.get("exitCode").and_then(|t| t.as_i64()),
+                                s.get("exitSignal").and_then(|t| t.as_i64()),
+                            ) {
+                                (Some(c), _) => format!(", exit {c}"),
+                                (_, Some(sig)) => format!(", signal {sig}"),
+                                _ => String::new(),
+                            };
                             let why = match s.get("endedReason").and_then(|t| t.as_str()) {
-                                Some(r) if status == "dead" => format!("  ({r})"),
+                                Some(r) if status == "dead" => format!("  ({r}{how})"),
                                 _ => String::new(),
                             };
                             println!("{id}  {status:7} {kind:5} {cwd}  \"{title}\"  {attach}{why}");
@@ -283,7 +338,11 @@ async fn main() {
             .await;
             match r {
                 Ok(v) => {
-                    let id = v.get("session").and_then(|s| s.get("id")).and_then(|t| t.as_str()).unwrap_or("");
+                    let id = v
+                        .get("session")
+                        .and_then(|s| s.get("id"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
                     println!("{id}");
                 }
                 Err(e) => {
@@ -342,12 +401,8 @@ async fn main() {
         "snapshot" => {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "snapshot",
-                &serde_json::json!({ "id": id }),
-            )
-            .await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "snapshot", &serde_json::json!({ "id": id })).await;
             match r {
                 Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
                 Err(e) => {
@@ -358,12 +413,8 @@ async fn main() {
         "kill" => {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "kill",
-                &serde_json::json!({ "id": id }),
-            )
-            .await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "kill", &serde_json::json!({ "id": id })).await;
             if let Err(e) = r {
                 die(&e, &sock);
             }
@@ -372,12 +423,8 @@ async fn main() {
         "close" => {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "close",
-                &serde_json::json!({ "id": id }),
-            )
-            .await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "close", &serde_json::json!({ "id": id })).await;
             match r {
                 Ok(v) => {
                     let ended = v.get("ended").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -395,12 +442,8 @@ async fn main() {
         "forget" => {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "forget",
-                &serde_json::json!({ "id": id }),
-            )
-            .await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "forget", &serde_json::json!({ "id": id })).await;
             match r {
                 Ok(v) => {
                     let removed = v.get("removed").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -426,8 +469,16 @@ async fn main() {
             .await;
             match r {
                 Ok(v) => {
-                    let id = v.get("session").and_then(|s| s.get("id")).and_then(|t| t.as_str()).unwrap_or("");
-                    let keeper_name = v.get("session").and_then(|s| s.get("keeperName")).and_then(|t| t.as_str()).unwrap_or("");
+                    let id = v
+                        .get("session")
+                        .and_then(|s| s.get("id"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    let keeper_name = v
+                        .get("session")
+                        .and_then(|s| s.get("keeperName"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
                     println!("{id}  {keeper_name}");
                 }
                 Err(e) => {
@@ -436,11 +487,15 @@ async fn main() {
             }
         }
         "remote" => {
-            let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
                     println!("{}", serde_json::to_string_pretty(&v).unwrap());
-                    let listening = v.get("listening").and_then(|t| t.as_bool()).unwrap_or(false);
+                    let listening = v
+                        .get("listening")
+                        .and_then(|t| t.as_bool())
+                        .unwrap_or(false);
                     if listening {
                         let host = v.get("hostname").and_then(|t| t.as_str()).unwrap_or("");
                         let port = v.get("port").and_then(|t| t.as_u64()).unwrap_or(0);
@@ -456,7 +511,8 @@ async fn main() {
             }
         }
         "desktop" => {
-            let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "desktop", &serde_json::json!({})).await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "desktop", &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
                     if rest.iter().any(|a| a == "--json") {
@@ -471,42 +527,45 @@ async fn main() {
                         }
                         if let Some(ws) = v.get("workspaces").and_then(|w| w.as_array()) {
                             for w in ws {
-                                let focused = w.get("focused").and_then(|t| t.as_bool()).unwrap_or(false);
+                                let focused =
+                                    w.get("focused").and_then(|t| t.as_bool()).unwrap_or(false);
                                 let name = w.get("name").and_then(|t| t.as_str()).unwrap_or("");
-                                let count = w.get("windowCount").and_then(|t| t.as_u64()).unwrap_or(0);
+                                let count =
+                                    w.get("windowCount").and_then(|t| t.as_u64()).unwrap_or(0);
                                 let marker = if focused { "*" } else { " " };
                                 let plural = if count == 1 { "" } else { "s" };
                                 println!("  {marker} {name:12} {count} window{plural}");
                             }
                         }
                         if let Some(pi) = v.get("piSessions").and_then(|s| s.as_array())
-                            && !pi.is_empty() {
-                                println!("pi sessions:");
-                                for p in pi {
-                                    let label = p.get("label").and_then(|t| t.as_str()).unwrap_or("");
-                                    let pid = p.get("pid").and_then(|t| t.as_i64()).unwrap_or(0);
-                                    let cwd = p.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
-                                    // Absent `workspace` is "no window"; present and
-                                    // empty is "a window whose workspace the WM did
-                                    // not name" — the two used to print the same
-                                    // words, so a pi filling a window read "no
-                                    // window", which is the anomaly phrase. And a
-                                    // pi linked to an ldmux session says which one:
-                                    // a desk window is not in the pi's ancestry, so
-                                    // its workspace is often unknown here while the
-                                    // session is not.
-                                    let ws = p.get("workspace").and_then(|t| t.as_str());
-                                    let linked = p.get("ldmuxSessionId").and_then(|t| t.as_str());
-                                    let where_str = match (ws, linked) {
-                                        (Some(w), _) if !w.is_empty() => format!("ws {w}"),
-                                        (Some(_), None) => "window".to_string(),
-                                        (Some(_), Some(id)) => format!("session {id}"),
-                                        (None, Some(id)) => format!("session {id}"),
-                                        (None, None) => "no window".to_string(),
-                                    };
-                                    println!("  {label:18} {where_str:24} pid {pid}  {cwd}");
-                                }
+                            && !pi.is_empty()
+                        {
+                            println!("pi sessions:");
+                            for p in pi {
+                                let label = p.get("label").and_then(|t| t.as_str()).unwrap_or("");
+                                let pid = p.get("pid").and_then(|t| t.as_i64()).unwrap_or(0);
+                                let cwd = p.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
+                                // Absent `workspace` is "no window"; present and
+                                // empty is "a window whose workspace the WM did
+                                // not name" — the two used to print the same
+                                // words, so a pi filling a window read "no
+                                // window", which is the anomaly phrase. And a
+                                // pi linked to an ldmux session says which one:
+                                // a desk window is not in the pi's ancestry, so
+                                // its workspace is often unknown here while the
+                                // session is not.
+                                let ws = p.get("workspace").and_then(|t| t.as_str());
+                                let linked = p.get("ldmuxSessionId").and_then(|t| t.as_str());
+                                let where_str = match (ws, linked) {
+                                    (Some(w), _) if !w.is_empty() => format!("ws {w}"),
+                                    (Some(_), None) => "window".to_string(),
+                                    (Some(_), Some(id)) => format!("session {id}"),
+                                    (None, Some(id)) => format!("session {id}"),
+                                    (None, None) => "no window".to_string(),
+                                };
+                                println!("  {label:18} {where_str:24} pid {pid}  {cwd}");
                             }
+                        }
                     }
                 }
                 Err(e) => {
@@ -543,12 +602,8 @@ async fn main() {
         "unlive" => {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "closeLive",
-                &serde_json::json!({ "id": id }),
-            )
-            .await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "closeLive", &serde_json::json!({ "id": id })).await;
             match r {
                 Ok(v) => {
                     let ok = v.get("ok").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -573,12 +628,8 @@ async fn main() {
                 std::process::exit(2);
             }
             let on = arg == Some("on");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "clipboardWrite",
-                &serde_json::json!({ "on": on }),
-            )
-            .await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "clipboardWrite", &serde_json::json!({ "on": on })).await;
             match r {
                 Ok(v) => {
                     let on = v.get("on").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -595,7 +646,8 @@ async fn main() {
             // can scan (`code`), or the same pairing as a link (`pair`). Both
             // refuse a daemon a phone cannot reach instead of printing a link
             // that goes nowhere (the TS rule, ADR-0016/ADR-0017).
-            let r: Result<serde_json::Value, CallError> = daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
             let v = match r {
                 Ok(v) => v,
                 Err(e) => {
@@ -603,10 +655,21 @@ async fn main() {
                 }
             };
             let info = ldmux_daemon::pairing::ListenInfo {
-                hostname: v.get("hostname").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                hostname: v
+                    .get("hostname")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 port: v.get("port").and_then(|t| t.as_u64()).unwrap_or(0) as u16,
-                token: v.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                listening: v.get("listening").and_then(|t| t.as_bool()).unwrap_or(false),
+                token: v
+                    .get("token")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                listening: v
+                    .get("listening")
+                    .and_then(|t| t.as_bool())
+                    .unwrap_or(false),
             };
             let name = machine_hostname();
             if cmd == "code" {
@@ -657,7 +720,9 @@ async fn main() {
                 Ok(v) => {
                     eprintln!(
                         "ldmux: {}",
-                        v.get("detail").and_then(|x| x.as_str()).unwrap_or("could not make a desk window")
+                        v.get("detail")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("could not make a desk window")
                     );
                     std::process::exit(1);
                 }
@@ -688,7 +753,10 @@ async fn main() {
                     pos.get(1).copied().map(|s| s.to_string()),
                 )
             } else {
-                ("shell".to_string(), pos.first().copied().map(|s| s.to_string()))
+                (
+                    "shell".to_string(),
+                    pos.first().copied().map(|s| s.to_string()),
+                )
             };
             let cwd_default = current_dir_or_exit();
             let want_cwd: String = flag(rest, "--cwd")
@@ -704,7 +772,10 @@ async fn main() {
                 match listed {
                     Ok(v) => {
                         let empty = Vec::new();
-                        let sessions = v.get("sessions").and_then(|s| s.as_array()).unwrap_or(&empty);
+                        let sessions = v
+                            .get("sessions")
+                            .and_then(|s| s.as_array())
+                            .unwrap_or(&empty);
                         for s in sessions {
                             let is_shell = s.get("kind").and_then(|t| t.as_str()) == Some("shell");
                             let alive = s.get("status").and_then(|t| t.as_str()) != Some("dead");
@@ -725,7 +796,8 @@ async fn main() {
                                 }
                             };
                             if matches {
-                                reused = s.get("id").and_then(|t| t.as_str()).map(|x| x.to_string());
+                                reused =
+                                    s.get("id").and_then(|t| t.as_str()).map(|x| x.to_string());
                                 break;
                             }
                         }
@@ -846,7 +918,9 @@ async fn main() {
                 std::process::exit(1);
             }
             let read_only = !rest.iter().any(|a| a == "--rw");
-            match ldmux_daemon::desktop::open_mirror(id, &workspace, read_only, &terminal_name).await {
+            match ldmux_daemon::desktop::open_mirror(id, &workspace, read_only, &terminal_name)
+                .await
+            {
                 Ok(lr) if lr.ok => println!("mirror of {keeper} on workspace {workspace}"),
                 Ok(lr) => {
                     eprintln!(

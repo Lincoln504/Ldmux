@@ -23,7 +23,10 @@ impl Reaper {
     /// `dir` is the scratch dir (removed on drop); `sock` the keeper socket
     /// inside it that identifies this test's keepers.
     pub fn new(dir: &Path, sock: &Path) -> Self {
-        Self { dir: dir.to_path_buf(), sock: sock.to_path_buf() }
+        Self {
+            dir: dir.to_path_buf(),
+            sock: sock.to_path_buf(),
+        }
     }
 }
 
@@ -31,13 +34,23 @@ impl Reaper {
 pub fn keepers_on(sock: &Path) -> Vec<i32> {
     let want = sock.to_string_lossy().into_owned();
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else { return out };
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return out;
+    };
     for e in rd.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
-        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
-        let mut args = raw.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned());
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else {
+            continue;
+        };
+        let mut args = raw
+            .split(|b| *b == 0)
+            .map(|a| String::from_utf8_lossy(a).into_owned());
         let prog = args.next().unwrap_or_default();
-        let is_keeper = Path::new(&prog).file_name().is_some_and(|n| n == "ldmux-keeper");
+        let is_keeper = Path::new(&prog)
+            .file_name()
+            .is_some_and(|n| n == "ldmux-keeper");
         if is_keeper && args.next().as_deref() == Some(want.as_str()) {
             out.push(pid);
         }
@@ -60,3 +73,6 @@ impl Drop for Reaper {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+
+pub mod rig;
+pub mod wsraw;
