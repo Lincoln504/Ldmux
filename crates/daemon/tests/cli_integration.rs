@@ -276,3 +276,35 @@ async fn cli_desktop_json_is_json() {
     drop(fk);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ldmux ... | head -1`: the reader closes before the CLI writes. Rust ignores
+/// SIGPIPE, so `println!` used to panic ("failed printing to stdout: Broken
+/// pipe"). The CLI now dies quietly like any Unix tool: no panic text, and the
+/// status is either a clean exit or termination by SIGPIPE.
+#[test]
+fn cli_output_into_a_closed_pipe_does_not_panic() {
+    use std::os::unix::process::ExitStatusExt;
+    ensure_cli_built();
+    let dir = scratch();
+    for args in [vec!["--help"], vec!["list", "--help"]] {
+        let mut child = std::process::Command::new(cli_binary())
+            .args(&args)
+            .env("LDMUX_STATE_DIR", &dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn CLI");
+        // The reader goes away before the process has started writing.
+        drop(child.stdout.take());
+        let out = child.wait_with_output().expect("wait CLI");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("panicked"), "{args:?} panicked: {err}");
+        assert!(!err.contains("Broken pipe"), "{args:?}: {err}");
+        assert!(
+            out.status.success() || out.status.signal() == Some(13),
+            "{args:?}: unexpected status {:?}: {err}",
+            out.status
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

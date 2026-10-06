@@ -177,7 +177,7 @@ mod tests {
     fn the_tailnet_ranges_edges_included() {
         expect_kind(&[
             ("100.64.0.0", AddressKind::Tailnet),
-            ("100.127.119.54", AddressKind::Tailnet),
+            ("100.100.0.1", AddressKind::Tailnet),
             ("100.127.255.255", AddressKind::Tailnet),
             ("::ffff:100.100.1.2", AddressKind::Tailnet),
             ("fd7a:115c:a1e0::1", AddressKind::Tailnet),
@@ -197,7 +197,7 @@ mod tests {
             ("8.8.8.8", AddressKind::Other),
             ("fd7a:115c:a1e1::1", AddressKind::Other),
             ("fe80::1%eth0", AddressKind::Other),
-            ("debian.tail496756.ts.net", AddressKind::Other),
+            ("host.example.ts.net", AddressKind::Other),
             ("", AddressKind::Other),
             ("not an address", AddressKind::Other),
         ]);
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn is_tailnet_or_loopback_matches_classification() {
         assert!(is_tailnet_or_loopback("127.0.0.1"));
-        assert!(is_tailnet_or_loopback("100.127.119.54"));
+        assert!(is_tailnet_or_loopback("100.100.0.1"));
         assert!(!is_tailnet_or_loopback("8.8.8.8"));
         assert!(!is_tailnet_or_loopback("localhost-lookalike"));
     }

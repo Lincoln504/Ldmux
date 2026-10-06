@@ -106,6 +106,11 @@ pub struct CapsCapabilities {
     /// mechanism that no longer exists and that nothing read; it was removed
     /// with the rest of the tmux vocabulary (2026-10-05).
     pub scrollback: bool,
+    /// Whether `key` accepts the `S-` (shift) modifier on named keys. An older daemon
+    /// refuses a whole `key` message it does not know, so a client sends `S-` only
+    /// when this is true; absent reads as false.
+    #[serde(default)]
+    pub shift_keys: bool,
 }
 
 /// Server → client: snapshot of the visible screen + terminal state.
@@ -347,13 +352,27 @@ mod tests {
             cols: 80,
             rows: 24,
             snapshot_epoch: 7,
-            capabilities: CapsCapabilities { scrollback: true },
+            capabilities: CapsCapabilities {
+                scrollback: true,
+                shift_keys: true,
+            },
         };
         let v: serde_json::Value = serde_json::to_value(Message::Caps(c)).unwrap();
         assert_eq!(v["type"], "caps");
         assert_eq!(v["protocolVersion"], 1);
         assert_eq!(v["sessionId"], "s1");
         assert_eq!(v["capabilities"]["scrollback"], true);
+        assert_eq!(v["capabilities"]["shiftKeys"], true);
+    }
+
+    #[test]
+    fn caps_from_an_older_daemon_has_no_shift_keys() {
+        let c: Caps = serde_json::from_str(
+            r#"{"protocolVersion":1,"sessionId":"s","cols":80,"rows":24,"snapshotEpoch":1,"capabilities":{"scrollback":true}}"#,
+        )
+        .unwrap();
+        assert!(c.capabilities.scrollback);
+        assert!(!c.capabilities.shift_keys);
     }
 
     #[test]

@@ -798,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn what_ldmux_code_prints_decodes_back_to_the_pairing_link() {
         let link = format!(
-            "ldmux://pair?v=1&host=100.127.119.54:7625&token={}&name=debian",
+            "ldmux://pair?v=1&host=100.100.0.1:7625&token={}&name=debian",
             "0123456789abcdef".repeat(4)
         );
         let code = encode_qr(&link, Ecc::L).unwrap();

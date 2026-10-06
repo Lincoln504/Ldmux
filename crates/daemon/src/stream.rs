@@ -578,12 +578,18 @@ pub fn key_name_to_bytes_in(name: &str, app_cursor: bool) -> Result<Vec<u8>, Str
         Some(r) if !r.is_empty() => (true, r),
         _ => (false, rest),
     };
+    // Shift is the innermost prefix (`S-`, `C-S-`, `M-C-S-`). It exists only on
+    // named keys; a shifted character is the client typing the shifted character.
+    let (shift, base) = match base.strip_prefix("S-") {
+        Some(r) if !r.is_empty() => (true, r),
+        _ => (false, base),
+    };
     if base.is_empty() {
         return Err(unknown());
     }
-    // xterm's modifier parameter: 1 + alt(2) + ctrl(4). Shift is never sent.
-    let m = 1 + if alt { 2 } else { 0 } + if ctrl { 4 } else { 0 };
-    let modified = alt || ctrl;
+    // xterm's modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
+    let m = 1 + u8::from(shift) + if alt { 2 } else { 0 } + if ctrl { 4 } else { 0 };
+    let modified = alt || ctrl || shift;
 
     // Keys that are one byte (or an escape-prefixed byte) whatever the modifier.
     let simple = |byte: u8| -> Vec<u8> {
@@ -615,6 +621,9 @@ pub fn key_name_to_bytes_in(name: &str, app_cursor: bool) -> Result<Vec<u8>, Str
 
     let bytes = match base {
         "Enter" => simple(0x0D),
+        // Shift+Tab is back-tab; with Ctrl/Alt too it is `CSI 1 ; m Z`.
+        "Tab" if shift && !alt && !ctrl => vec![0x1B, b'[', b'Z'],
+        "Tab" if shift => format!("\x1b[1;{m}Z").into_bytes(),
         "Tab" => simple(0x09),
         "BTab" => vec![0x1B, b'[', b'Z'],
         "Escape" => simple(0x1B),
@@ -650,6 +659,9 @@ pub fn key_name_to_bytes_in(name: &str, app_cursor: bool) -> Result<Vec<u8>, Str
         // A single ASCII character: itself, as a control byte under Ctrl, with
         // an ESC prefix under Alt.
         _ if base.len() == 1 && base.is_ascii() => {
+            if shift {
+                return Err(unknown());
+            }
             let c = base.as_bytes()[0];
             if ctrl {
                 let byte = match c {
@@ -821,6 +833,90 @@ mod key_name_tests {
         assert_eq!(k("C-Up", true), Ok(esc("ESC[1;5A")));
         assert_eq!(k("PageUp", true), Ok(esc("ESC[5~")));
         assert_eq!(k("F5", true), Ok(esc("ESC[15~")));
+    }
+
+    /// Shift (`S-`) composes with every named key the table supports, in xterm's
+    /// encoding: `1 + shift(1) + alt(2) + ctrl(4)`.
+    #[test]
+    fn shift_encodes_per_xterm_for_every_combination() {
+        let fin = [
+            ("Up", 'A'),
+            ("Down", 'B'),
+            ("Right", 'C'),
+            ("Left", 'D'),
+            ("Home", 'H'),
+            ("End", 'F'),
+            ("F1", 'P'),
+            ("F2", 'Q'),
+            ("F3", 'R'),
+            ("F4", 'S'),
+        ];
+        let tilde = [
+            ("PageUp", 5),
+            ("PPage", 5),
+            ("PageDown", 6),
+            ("NPage", 6),
+            ("Insert", 2),
+            ("IC", 2),
+            ("Delete", 3),
+            ("DC", 3),
+            ("F5", 15),
+            ("F6", 17),
+            ("F7", 18),
+            ("F8", 19),
+            ("F9", 20),
+            ("F10", 21),
+            ("F11", 23),
+            ("F12", 24),
+        ];
+        // (prefix, modifier parameter)
+        let combos = [("S-", 2), ("C-S-", 6), ("M-S-", 4), ("M-C-S-", 8)];
+        for (pre, m) in combos {
+            for (k, f) in fin {
+                for app in [false, true] {
+                    let want = format!("\x1b[1;{m}{f}").into_bytes();
+                    assert_eq!(
+                        super::key_name_to_bytes_in(&format!("{pre}{k}"), app),
+                        Ok(want),
+                        "{pre}{k}"
+                    );
+                }
+            }
+            for (k, n) in tilde {
+                let want = format!("\x1b[{n};{m}~").into_bytes();
+                assert_eq!(
+                    key_name_to_bytes(&format!("{pre}{k}")),
+                    Ok(want),
+                    "{pre}{k}"
+                );
+            }
+        }
+        // Tab: back-tab alone, `CSI 1;m Z` with Ctrl/Alt.
+        assert_eq!(key_name_to_bytes("S-Tab"), Ok(b"\x1b[Z".to_vec()));
+        assert_eq!(key_name_to_bytes("S-BTab"), Ok(b"\x1b[Z".to_vec()));
+        assert_eq!(key_name_to_bytes("C-S-Tab"), Ok(b"\x1b[1;6Z".to_vec()));
+        assert_eq!(key_name_to_bytes("M-S-Tab"), Ok(b"\x1b[1;4Z".to_vec()));
+        assert_eq!(key_name_to_bytes("M-C-S-Tab"), Ok(b"\x1b[1;8Z".to_vec()));
+        // Keys with one byte are unchanged by shift.
+        assert_eq!(key_name_to_bytes("S-Enter"), key_name_to_bytes("Enter"));
+        assert_eq!(key_name_to_bytes("S-Escape"), key_name_to_bytes("Escape"));
+        assert_eq!(key_name_to_bytes("S-BSpace"), key_name_to_bytes("BSpace"));
+        assert_eq!(key_name_to_bytes("M-S-Space"), key_name_to_bytes("M-Space"));
+        // Existing names are untouched.
+        assert_eq!(key_name_to_bytes("C-Left"), Ok(b"\x1b[1;5D".to_vec()));
+        // Shifted characters and malformed shift forms are refused.
+        for bad in [
+            "S-a",
+            "C-S-a",
+            "S-",
+            "C-S-",
+            "S-NotAKey",
+            "S-S-Up",
+            "S-C-Up",
+            "S-M-Up",
+        ] {
+            assert!(key_name_to_bytes(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

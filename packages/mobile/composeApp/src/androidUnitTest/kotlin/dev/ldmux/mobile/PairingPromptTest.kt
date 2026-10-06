@@ -11,12 +11,12 @@ import kotlin.test.assertTrue
  */
 class PairingPromptTest {
     private val token = "0123456789abcdef".repeat(4)
-    private fun pairing(name: String = "debian", host: String = "100.127.119.54:7625") = Pairing(host, token, name)
+    private fun pairing(name: String = "debian", host: String = "100.100.0.1:7625") = Pairing(host, token, name)
 
     @Test
     fun `the address is always shown, with or without a name`() {
-        assertEquals("100.127.119.54:7625", pairingPrompt(pairing(name = "work laptop")).address)
-        assertEquals("100.127.119.54:7625", pairingPrompt(pairing(name = "")).address)
+        assertEquals("100.100.0.1:7625", pairingPrompt(pairing(name = "work laptop")).address)
+        assertEquals("100.100.0.1:7625", pairingPrompt(pairing(name = "")).address)
     }
 
     @Test
@@ -81,7 +81,7 @@ class PairingPromptTest {
 
     @Test
     fun `tailnet and loopback literals are endpoints, nothing else is`() {
-        for (h in listOf("100.64.0.1:7625", "100.127.119.54:7625", "localhost:7629", "127.0.0.1:7629", "[::1]:7625", "[fd7a:115c:a1e0::1]:7625")) {
+        for (h in listOf("100.64.0.1:7625", "100.100.0.1:7625", "localhost:7629", "127.0.0.1:7629", "[::1]:7625", "[fd7a:115c:a1e0::1]:7625")) {
             assertTrue(isAllowedEndpointHost(h), h)
         }
         for (h in listOf("8.8.8.8:7625", "100.128.0.1:7625", "192.168.1.5:7625", "debian:7625", "example.com:80", "100.64.0.1", "", "100.64.0.1:0")) {

@@ -2,17 +2,17 @@
   "//": "The pairing-link contract, pinned from both sides: crates/protocol/src/pairing.rs and the app's PairingTest read this file. Add a case here, not in one of them.",
   "valid": [
     {
-      "link": "ldmux://pair?v=1&host=100.127.119.54%3A7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian",
+      "link": "ldmux://pair?v=1&host=100.100.0.1%3A7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian",
       "pairing": {
-        "host": "100.127.119.54:7625",
+        "host": "100.100.0.1:7625",
         "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "name": "debian"
       }
     },
     {
-      "link": "ldmux://pair?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "pairing": {
-        "host": "100.127.119.54:7625",
+        "host": "100.100.0.1:7625",
         "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "name": ""
       }
@@ -50,25 +50,25 @@
       }
     },
     {
-      "link": "LDMUX://PAIR?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "link": "LDMUX://PAIR?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "pairing": {
-        "host": "100.127.119.54:7625",
+        "host": "100.100.0.1:7625",
         "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "name": ""
       }
     },
     {
-      "link": "ldmux://pair?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=100%25+a%zzb",
+      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=100%25+a%zzb",
       "pairing": {
-        "host": "100.127.119.54:7625",
+        "host": "100.100.0.1:7625",
         "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "name": "100% a%zzb"
       }
     },
     {
-      "link": "ldmux://pair?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=%F0%9F%96%A5&v=2#frag",
+      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=%F0%9F%96%A5&v=2#frag",
       "pairing": {
-        "host": "100.127.119.54:7625",
+        "host": "100.100.0.1:7625",
         "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "name": "🖥"
       }
@@ -77,27 +77,27 @@
   "invalid": [
     "",
     "not a link",
-    "https://debian/pair?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://open?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=2&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "https://debian/pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://open?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?v=2&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "ldmux://pair?v=1&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=1&host=100.127.119.54&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=1&host=100.127.119.54:0&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=1&host=100.127.119.54:65536&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?v=1&host=100.100.0.1&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?v=1&host=100.100.0.1:0&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?v=1&host=100.100.0.1:65536&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "ldmux://pair?v=1&host=192.168.1.5:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "ldmux://pair?v=1&host=8.8.8.8:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "ldmux://pair?v=1&host=100.128.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "ldmux://pair?v=1&host=0.0.0.0:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=1&host=debian.tail496756.ts.net:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?v=1&host=host.example.ts.net:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "ldmux://pair?v=1&host=fd7a:115c:a1e0::1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=1&host=100.127.119.54:7625",
-    "ldmux://pair?v=1&host=100.127.119.54:7625&token=abc123",
-    "ldmux://pair?v=1&host=100.127.119.54:7625&token=0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "ldmux://pair?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=a%0Ab",
-    "ldmux://pair/?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pair:80?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "ldmux://pairing?v=1&host=100.127.119.54:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    "ldmux://pair?v=1&host=100.100.0.1:7625",
+    "ldmux://pair?v=1&host=100.100.0.1:7625&token=abc123",
+    "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=a%0Ab",
+    "ldmux://pair/?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pair:80?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "ldmux://pairing?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   ]
 }

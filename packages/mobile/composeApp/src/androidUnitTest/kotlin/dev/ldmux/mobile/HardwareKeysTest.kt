@@ -17,6 +17,7 @@ class HardwareKeysTest {
         withAlt: Char? = null,
         without: Char? = withAlt,
         softKeyboard: Boolean = false,
+        shiftKeys: Boolean = false,
     ) = mapHardwareKey(
         HardwareKey(
             named = named,
@@ -29,6 +30,7 @@ class HardwareKeysTest {
             charWithoutAlt = without?.code ?: 0,
             softKeyboardUp = softKeyboard,
         ),
+        shiftKeys,
     )
 
     // ---- AltGr ---------------------------------------------------------------------
@@ -78,7 +80,7 @@ class HardwareKeysTest {
     fun `an unmodified named key is just its name`() {
         assertEquals(HardwareAction.Press("Left"), key(named = "Left"))
         assertEquals(HardwareAction.Press("Enter"), key(named = "Enter"))
-        // Shift on a named key is not forwarded: the daemon has no shift modifier to name.
+        // Without daemon support for `S-`, Shift on a named key is not forwarded.
         assertEquals(HardwareAction.Press("Left"), key(named = "Left", shift = true))
     }
 
@@ -86,6 +88,27 @@ class HardwareKeysTest {
     fun `shift tab is back-tab whatever else is held`() {
         assertEquals(HardwareAction.Press("BTab"), key(named = "Tab", shift = true))
         assertEquals(HardwareAction.Press("BTab"), key(named = "Tab", shift = true, ctrl = true))
+    }
+
+    @Test
+    fun `shift on named keys is the S prefix when the daemon knows it`() {
+        for (n in listOf("Up", "Left", "Home", "End", "PageUp", "PageDown", "IC", "DC", "F1", "F5", "F12")) {
+            assertEquals(HardwareAction.Press("S-$n"), key(named = n, shift = true, shiftKeys = true), n)
+            assertEquals(HardwareAction.Press("C-S-$n").takeIf { n != "IC" && n != "DC" } ?: HardwareAction.Press("S-$n"),
+                key(named = n, shift = true, ctrl = true, shiftKeys = true), n)
+        }
+        assertEquals(HardwareAction.Press("M-S-Right"), key(named = "Right", shift = true, alt = true, shiftKeys = true))
+        assertEquals(HardwareAction.Press("M-C-S-Right"), key(named = "Right", shift = true, ctrl = true, alt = true, shiftKeys = true))
+        assertEquals(HardwareAction.Press("C-S-Tab"), key(named = "Tab", shift = true, ctrl = true, shiftKeys = true))
+        // Shift+Tab alone stays BTab: every daemon knows it, and it is the same bytes.
+        assertEquals(HardwareAction.Press("BTab"), key(named = "Tab", shift = true, shiftKeys = true))
+        // No shifted form exists for these; Shift is dropped and the name is unchanged.
+        assertEquals(HardwareAction.Press("Enter"), key(named = "Enter", shift = true, shiftKeys = true))
+        assertEquals(HardwareAction.Press("BSpace"), key(named = "BSpace", shift = true, shiftKeys = true))
+        // Unshifted keys never gain a prefix.
+        assertEquals(HardwareAction.Press("C-Left"), key(named = "Left", ctrl = true, shiftKeys = true))
+        // And an older daemon never sees `S-`.
+        assertEquals(HardwareAction.Press("M-C-Right"), key(named = "Right", shift = true, ctrl = true, alt = true))
     }
 
     @Test

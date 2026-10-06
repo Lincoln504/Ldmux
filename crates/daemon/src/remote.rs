@@ -2034,7 +2034,7 @@ fn send_state(
         "cols": snap.cols,
         "rows": snap.rows,
         "snapshotEpoch": epoch,
-        "capabilities": {"scrollback": true},
+        "capabilities": {"scrollback": true, "shiftKeys": true},
     }));
     let mut snapshot = serde_json::json!({
         "type": "snapshot",

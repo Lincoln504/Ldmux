@@ -51,6 +51,25 @@ class AttachClientTest {
     // ---- control messages ------------------------------------------------------------
 
     @Test
+    fun `caps says whether the daemon understands shift on named keys`() {
+        assertEquals(
+            AttachMessage.Caps(shiftKeys = true),
+            parseAttachMessage("""{"type":"caps","capabilities":{"scrollback":true,"shiftKeys":true}}"""),
+        )
+        // An older daemon advertises no such capability: Shift must not be sent to it.
+        assertEquals(
+            AttachMessage.Caps(shiftKeys = false),
+            parseAttachMessage("""{"type":"caps","capabilities":{"scrollback":true}}"""),
+        )
+        assertEquals(AttachMessage.Caps(shiftKeys = false), parseAttachMessage("""{"type":"caps"}"""))
+        // A malformed capabilities value costs the capability, not the message.
+        assertEquals(
+            AttachMessage.Caps(shiftKeys = false),
+            parseAttachMessage("""{"type":"caps","capabilities":"yes"}"""),
+        )
+    }
+
+    @Test
     fun `a snapshot is parsed with its modes`() {
         val m = parseAttachMessage(
             """{"type":"snapshot","cols":100,"rows":30,"screen":"hi","history":true,

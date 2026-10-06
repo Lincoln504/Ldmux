@@ -1,6 +1,6 @@
 //! The pairing link: everything a phone needs to reach this daemon, in one URL.
 //!
-//!   ldmux://pair?v=1&host=100.127.119.54:7625&token=<64 hex>&name=debian
+//!   ldmux://pair?v=1&host=100.100.0.1:7625&token=<64 hex>&name=debian
 //!
 //! `ldmux code` shows it as a QR code; the app scans it (or the system camera
 //! opens it) and stores `host` and `token` exactly as they are here. It is a
@@ -347,13 +347,13 @@ mod tests {
         };
         assert!(pairing_link(&p).is_err(), "LAN host must be refused");
         let p = Pairing {
-            host: "100.127.119.54".into(),
+            host: "100.100.0.1".into(),
             token: token.clone(),
             name: "".into(),
         };
         assert!(pairing_link(&p).is_err(), "missing :port must be refused");
         let p = Pairing {
-            host: "100.127.119.54:7625".into(),
+            host: "100.100.0.1:7625".into(),
             token: "short".into(),
             name: "".into(),
         };
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn the_link_is_short_enough_for_a_small_code() {
         let p = Pairing {
-            host: "100.127.119.254:65535".into(),
+            host: "100.100.0.254:65535".into(),
             token: "f".repeat(64),
             name: "debian".into(),
         };

@@ -231,6 +231,18 @@ fn positional<'a>(args: &'a [String], skip: &[&str]) -> Vec<&'a str> {
 
 #[tokio::main]
 async fn main() {
+    // Rust ignores SIGPIPE, so `ldmux list | head -1` made println! panic on EPIPE.
+    // A CLI wants the Unix default: die quietly when the reader goes away. Set
+    // before any output. Socket writes to the daemon use send(MSG_NOSIGNAL) and
+    // still return EPIPE as an error. This is the CLI binary only; the daemon
+    // keeps its own disposition.
+    // SAFETY: installing SIG_DFL, no handler code runs.
+    unsafe {
+        let _ = nix::sys::signal::signal(
+            nix::sys::signal::Signal::SIGPIPE,
+            nix::sys::signal::SigHandler::SigDfl,
+        );
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         print_usage();

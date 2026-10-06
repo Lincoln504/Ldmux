@@ -102,7 +102,7 @@ class GuardedHandleTest {
         e.write(ByteArray(4), 99)
         e.resize(10, 10)
         assertNull(e.render())
-        assertFalse(e.selectionPress(0, 0, 1))
+        assertFalse(e.selectionSet(0, 0, 1, 0))
         assertNull(e.selectionText())
         e.close()
         e.close()

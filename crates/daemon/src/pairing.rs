@@ -13,7 +13,7 @@ use ldmux_protocol::{net::AddressKind, pairing::Pairing};
 
 /// The listen facts the pairing is built from.
 pub struct ListenInfo {
-    /// The address the WebSocket is bound to, as a string ("100.127.119.54",
+    /// The address the WebSocket is bound to, as a string ("100.100.0.1",
     /// "127.0.0.1", "fd7a::1", …).
     pub hostname: String,
     pub port: u16,
@@ -129,11 +129,11 @@ mod tests {
 
     #[test]
     fn the_pairing_is_the_address_the_daemon_listens_on_not_a_guess() {
-        let (pairing, link) = pairing_for(&live("100.127.119.54", 7625), "debian").unwrap();
+        let (pairing, link) = pairing_for(&live("100.100.0.1", 7625), "debian").unwrap();
         assert_eq!(
             &pairing,
             &Pairing {
-                host: "100.127.119.54:7625".to_string(),
+                host: "100.100.0.1:7625".to_string(),
                 token: token(),
                 name: "debian".to_string(),
             }
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn a_long_or_odd_hostname_is_trimmed_to_what_the_link_allows() {
         let name = "x".repeat(80) + "\n";
-        let (pairing, _) = pairing_for(&live("100.127.119.54", 7625), &name).unwrap();
+        let (pairing, _) = pairing_for(&live("100.100.0.1", 7625), &name).unwrap();
         assert_eq!(pairing.name, "x".repeat(64));
     }
 
@@ -196,7 +196,7 @@ mod tests {
     /// documented way to pair a phone with nothing to scan.
     #[test]
     fn code_text_is_a_qr_block_and_what_it_is_for() {
-        let text = code_text(&live("100.127.119.54", 7625), "debian").unwrap();
+        let text = code_text(&live("100.100.0.1", 7625), "debian").unwrap();
         // A QR drawn with the half-block character and 256-colour escapes, not a
         // line of text: many rows of it, and the link itself absent.
         assert!(text.contains('\u{2580}'), "no QR block in: {text}");
@@ -205,7 +205,7 @@ mod tests {
             "no QR colours in: {text}"
         );
         assert!(text.lines().count() > 5, "too few rows to be a QR: {text}");
-        assert!(text.contains("debian  100.127.119.54:7625"), "{text}");
+        assert!(text.contains("debian  100.100.0.1:7625"), "{text}");
         assert!(!text.contains("ldmux://"), "code printed the link: {text}");
     }
 

@@ -16,8 +16,8 @@ package dev.ldmux.mobile
  *   the daemon encodes `C-Left` (and `M-C-Left`).
  * - Shift+Tab is back-tab, and that stays.
  *
- * Shift on other named keys is not forwarded: the daemon's key table has no shift
- * modifier (`key_name_to_bytes` never sends one), so there is no name to send.
+ * Shift on other named keys goes out as the `S-` prefix (`S-Left`, `M-C-S-End`) when
+ * the caller says the daemon knows it (`shiftKeys`); otherwise it is dropped.
  */
 data class HardwareKey(
     /** The protocol key name for a non-character key (`Left`, `F5`, `Enter`...), else null. */
@@ -58,15 +58,35 @@ sealed interface HardwareAction {
     data class Press(val name: String) : HardwareAction
 }
 
-fun mapHardwareKey(k: HardwareKey): HardwareAction {
+/**
+ * Keys whose shifted form is a different sequence (`CSI 1;2 A`...). Shift on
+ * Enter, Escape, Backspace or Space sends the same byte, so those never carry `S-`.
+ */
+private val SHIFTABLE_NAMED: Set<String> = setOf(
+    "Tab", "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert",
+    "Delete", "DC", "IC", "PPage", "NPage",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+)
+
+/**
+ * [shiftKeys]: the daemon understands the `S-` key-name prefix. Off by default: a
+ * daemon without it answers an unknown name with a `bad_key` error frame and types
+ * nothing (the whole `key` message is refused), so Shift+Left would stop working
+ * instead of degrading to Left. With it off, Shift is dropped on named keys, as
+ * before, except Shift+Tab which is `BTab` (a name every daemon knows).
+ */
+fun mapHardwareKey(k: HardwareKey, shiftKeys: Boolean = false): HardwareAction {
     if (k.named != null) {
-        // Back-tab is its own key and takes no further modifier.
-        if (k.named == "Tab" && k.shift) return HardwareAction.Press("BTab")
-        if (!k.ctrl && !k.alt) return HardwareAction.Press(k.named)
-        return when (val m = modifiedKey(k.named, Modifiers(ctrl = k.ctrl, alt = k.alt))) {
-            is ModifiedKey.Named -> HardwareAction.Press(m.name)
-            else -> HardwareAction.Press(k.named)
+        val shifted = k.shift && shiftKeys && k.named in SHIFTABLE_NAMED
+        // Back-tab is its own key and takes no further modifier on a daemon without `S-`.
+        if (k.named == "Tab" && k.shift && !(shifted && (k.ctrl || k.alt))) return HardwareAction.Press("BTab")
+        if (!k.ctrl && !k.alt && !shifted) return HardwareAction.Press(k.named)
+        val name = when (val m = modifiedKey(k.named, Modifiers(ctrl = k.ctrl, alt = k.alt))) {
+            is ModifiedKey.Named -> m.name
+            else -> k.named
         }
+        // `S-` is the innermost prefix: `M-C-S-Left`.
+        return HardwareAction.Press(if (shifted) withShift(name) else name)
     }
 
     // The right Alt producing a character that differs from the plain one is a
@@ -88,6 +108,12 @@ fun mapHardwareKey(k: HardwareKey): HardwareAction {
     if (ch !in 0x20..0x7e) return HardwareAction.Pass
     val name = hardwareChord(ch.toChar(), k.ctrl, k.alt)
     return if (name != null) HardwareAction.Press(name) else HardwareAction.Pass
+}
+
+/** Insert `S-` after any `M-`/`C-` prefix: `M-C-Left` -> `M-C-S-Left`. */
+private fun withShift(name: String): String {
+    val base = name.removePrefix("M-").removePrefix("C-")
+    return name.substring(0, name.length - base.length) + "S-" + base
 }
 
 /** A character a user typed, not a control code, a surrogate half or a dead-key flag. */
