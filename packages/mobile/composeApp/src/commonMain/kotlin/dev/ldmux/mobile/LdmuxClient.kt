@@ -41,6 +41,8 @@ data class Session(
     val title: String,
     val cwd: String,
     val status: String,
+    /** Why it ended, in the daemon's words. Empty while it is running. */
+    val endedReason: String = "",
     /** Empty for an RPC-only pi session (nothing to attach to in the keeper). */
     val keeperName: String,
     /** Who opened it: "phone", "local", "cli", "adopt". */
@@ -676,6 +678,7 @@ internal fun parseSessions(element: JsonElement?, deviceId: String): List<Sessio
             title = o.text("title"),
             cwd = o.text("cwd"),
             status = o.text("status"),
+            endedReason = o.text("endedReason"),
             keeperName = o.text("keeperName"),
             createdBy = o.text("createdBy"),
             process = o.text("process"),

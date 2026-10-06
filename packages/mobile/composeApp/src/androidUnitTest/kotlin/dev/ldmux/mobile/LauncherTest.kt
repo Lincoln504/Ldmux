@@ -213,4 +213,45 @@ class LauncherTest {
         assertEquals("web", liveWorkspaceOf("web"))
     }
 
+    /**
+     * A shell that ended is a row, with the daemon's own reason under it.
+     *
+     * It used to be nothing at all: when the keeper died with four shells on
+     * 2026-10-06 the launcher simply showed fewer rows, so "the shells are gone"
+     * was indistinguishable from "the app is broken". Only the newest few are
+     * shown — eight shells accumulated in that one night and the list is about
+     * what you can open.
+     */
+    @Test
+    fun `an ended shell is shown with the daemon's reason, newest first, capped`() {
+        val live = shell("live", "/home/ldeen")
+        val dead = (1..7).map {
+            Session(
+                id = "d$it",
+                kind = "shell",
+                title = "",
+                cwd = "/home/ldeen",
+                status = "dead",
+                keeperName = "ldmux-d$it",
+                endedReason = "the keeper no longer has it",
+            )
+        }
+        val ended = endedSessions(listOf(live) + dead)
+        assertEquals(ENDED_SHOWN, ended.size, "older endings are dropped, the newest kept")
+        assertEquals("d1", ended.first().id, "the daemon's order is the newest first")
+        assertEquals("the keeper no longer has it", ended.first().endedReason)
+        assertTrue(ended.all { it.status == "dead" }, "a live shell is not an ending")
+    }
+
+    /** An ending with no reason recorded still says something, not an empty line. */
+    @Test
+    fun `an ending with no reason is still a row`() {
+        val ended = endedSessions(
+            listOf(
+                Session(id = "x", kind = "shell", title = "gone", cwd = "/tmp", status = "dead", keeperName = "ldmux-x")
+            )
+        )
+        assertEquals(1, ended.size)
+        assertEquals("", ended.first().endedReason)
+    }
 }

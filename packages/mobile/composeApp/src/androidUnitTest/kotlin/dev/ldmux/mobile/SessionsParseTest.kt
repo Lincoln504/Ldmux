@@ -86,6 +86,21 @@ class SessionsParseTest {
         assertTrue(!sessions.first { it.id == "b" }.attachable)
     }
 
+    /**
+     * An ended session carries the daemon's reason, and a running one does not
+     * carry the field at all (`ldmux list` prints that same sentence, so the two
+     * surfaces agree about the same shell).
+     */
+    @Test
+    fun `an ended session parses its reason and a running one has none`() {
+        val sessions = parse("""{"sessions":[
+            {"id":"a","kind":"shell","title":"t","cwd":"/x","status":"dead","keeperName":"ldmux-a","createdBy":"local","endedReason":"its desk window closed"},
+            {"id":"b","kind":"shell","title":"t","cwd":"/y","status":"running","keeperName":"ldmux-b","createdBy":"local"}
+        ]}""")
+        assertEquals("its desk window closed", sessions.first { it.id == "a" }.endedReason)
+        assertEquals("", sessions.first { it.id == "b" }.endedReason)
+    }
+
     @Test
     fun `no sessions is an empty list, not a failure`() {
         assertEquals(0, parse("""{"sessions":[]}""").size)
