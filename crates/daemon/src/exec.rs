@@ -72,7 +72,7 @@ pub async fn run(argv: Vec<String>, opts: ExecOpts) -> ExecResult {
     // its own task because the wait future must stay driven from here; the
     // flag is what tells a kill of ours apart from the child's own death.
     let timed_out_flag = Arc::new(AtomicBool::new(false));
-    {
+    let watchdog = {
         let flag = timed_out_flag.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
@@ -81,9 +81,13 @@ pub async fn run(argv: Vec<String>, opts: ExecOpts) -> ExecResult {
             tokio::time::sleep(std::time::Duration::from_millis(EXEC_KILL_GRACE_MS))
                 .await;
             kill_group(pid, Signal::SIGKILL);
-        });
-    }
+        })
+    };
     let (code, out, err) = spawned.wait_drained().await;
+    // The child is reaped: the watchdog must not outlive it, or it sleeps out the
+    // whole timeout (a leaked task per call) and then signals a pid the kernel
+    // may have given to something else.
+    watchdog.abort();
     if timed_out_flag.load(Ordering::Relaxed) {
         return ExecResult {
             code: -1,
@@ -185,5 +189,19 @@ mod tests {
     fn the_default_timeout_is_a_finite_sane_bound() {
         const { assert!(EXEC_TIMEOUT_MS > 0) };
         const { assert!(EXEC_TIMEOUT_MS <= 60_000) };
+    }
+
+    /// The watchdog is cancelled when the command finishes: a fast command with
+    /// a long timeout must return at once and leave nothing to signal later.
+    #[tokio::test]
+    async fn a_finished_command_does_not_leave_its_watchdog_armed() {
+        let t0 = std::time::Instant::now();
+        let res = run(
+            sh("echo hi"),
+            ExecOpts { timeout_ms: Some(60_000), env: None },
+        )
+        .await;
+        assert_eq!(res.code, 0);
+        assert!(t0.elapsed().as_secs() < 5);
     }
 }

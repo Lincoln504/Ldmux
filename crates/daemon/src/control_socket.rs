@@ -33,8 +33,8 @@ pub struct ControlSocketServer {
 /// A handler that dispatches an RPC request to a response.
 ///
 /// The daemon's `handle` method is the production handler; the tests use a
-/// simple stub. This indirection lets the `serve_one` method call the daemon
-/// without holding a `&mut` reference (the accept loop is a spawned task).
+/// simple stub. This indirection lets the serve loop call the daemon without
+/// holding a `&mut` reference (each connection is a spawned task).
 ///
 /// The handler is async: the daemon's `handle` method is async, and the
 /// `tokio::sync::Mutex` guard is `Send` (the daemon is `Send`), so the guard
@@ -49,6 +49,12 @@ impl ControlSocketServer {
         Self {
             socket_path: state_dir.join("ldmuxd.sock"),
         }
+    }
+
+    /// A server for the socket at exactly `path` (what `LDMUX_SOCK` names), not
+    /// necessarily under the state dir.
+    pub fn at(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { socket_path: path.into() }
     }
 
     /// The socket path (for tests).
@@ -75,31 +81,12 @@ impl ControlSocketServer {
         Ok(listener)
     }
 
-    /// Serve one connection with the stub handler (the old `dispatch` method).
-    ///
-    /// For tests and the parity test. The production path uses
-    /// `serve_one_with` with the daemon's `handle` method.
-    pub async fn serve_one(&self, stream: UnixStream) -> Result<(), String> {
-        let handler: RpcHandler = Box::new(|_method, req| {
-            let resp = Self::dispatch(req);
-            // Extract the `result` from the stub response.
-            let result = if resp.get("ok").and_then(|o| o.as_bool()) == Some(true) {
-                Ok(resp.get("result").cloned().unwrap_or(Value::Null))
-            } else {
-                Err(resp.get("error").and_then(|e| e.as_str()).unwrap_or("error").to_string())
-            };
-            Box::pin(async move { result })
-        });
-        self.serve_one_with(stream, &handler).await
-    }
-
     /// Serve one connection: read a JSON line, dispatch, write the response.
     ///
     /// Reads bytes until a newline (or EOF); an empty line is a no-op (a client
     /// that opened and closed without sending). The response is a JSON line
     /// (the `id` echoed back, an `ok`/`result`, or an `error`).
     pub async fn serve_one_with(
-        &self,
         stream: UnixStream,
         handler: &RpcHandler,
     ) -> Result<(), String> {
@@ -163,62 +150,56 @@ impl ControlSocketServer {
             .map_err(|e| format!("flush response: {e}"))?;
         Ok(())
     }
-
-    /// Dispatch a request to a handler.
-    ///
-    /// A standalone `ping` echo, kept because the parity test drives it. The
-    /// daemon itself does not go through here: `serve_accept_with` takes the
-    /// daemon's `handle` as its handler, so every real method is served by the
-    /// daemon and not by this table. The shape mirrors the TS
-    /// `RpcRequest`/`RpcResponse`: `{ id, ok, result }` on success,
-    /// `{ id, ok: false, error }` on failure.
-    fn dispatch(req: &Value) -> Value {
-        let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default()
-            .to_string();
-        match method.as_str() {
-            "ping" => Value::from_iter([
-                (
-                    "ok",
-                    Value::Bool(true),
-                ),
-                ("id", id),
-                (
-                    "result",
-                    Value::String("pong".to_string()),
-                ),
-            ]),
-            _ => Value::from_iter([
-                ("ok", Value::Bool(false)),
-                ("id", id),
-                (
-                    "error",
-                    Value::String(format!("unknown method: {method}")),
-                ),
-            ]),
-        }
-    }
 }
 
-/// Accept one connection from the listener and serve it.
-pub async fn serve_accept_with(
-    server: &ControlSocketServer,
+/// Connections served at once. One task each: a client that connects and says
+/// nothing holds only its own slot (for up to [`REQUEST_READ_TIMEOUT`]), instead
+/// of the whole accept loop, which is what made the CLI wait out a stranger's
+/// silence.
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+
+/// Accept connections until the listener fails, serving each on its own task.
+///
+/// Past [`MAX_CONCURRENT_CONNECTIONS`] a new connection is closed at once rather
+/// than queued behind the others.
+pub async fn serve_loop(
     listener: &UnixListener,
-    handler: &RpcHandler,
+    handler: std::sync::Arc<RpcHandler>,
 ) -> Result<(), String> {
-let (stream, _addr) = listener
-        .accept()
-        .await
-        .map_err(|e| format!("accept control connection: {e}"))?;
-    server.serve_one_with(stream, handler).await
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    loop {
+        let (stream, _addr) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept control connection: {e}"))?;
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            eprintln!("ldmuxd: control socket: {MAX_CONCURRENT_CONNECTIONS} connections open; dropping one");
+            continue;
+        };
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ControlSocketServer::serve_one_with(stream, &handler).await {
+                eprintln!("ldmuxd: control socket: {e}");
+            }
+            drop(permit);
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stub handler: `ping` answers `pong`, anything else is unknown.
+    fn stub() -> RpcHandler {
+        Box::new(|method, _req| {
+            let result = match method {
+                "ping" => Ok(Value::String("pong".to_string())),
+                other => Err(format!("unknown method: {other}")),
+            };
+            Box::pin(async move { result })
+        })
+    }
 
     fn state_dir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
@@ -238,7 +219,7 @@ mod tests {
         // Spawn a task to serve the connection.
         let accept_task = tokio::spawn(async move {
         let (stream, _addr) = listener.accept().await.unwrap();
-            server.serve_one(stream).await
+            ControlSocketServer::serve_one_with(stream, &stub()).await
         });
 
         // A client connects, sends a `ping`, and reads the response.
@@ -285,7 +266,7 @@ mod tests {
 
         let accept_task = tokio::spawn(async move {
         let (stream, _addr) = listener.accept().await.unwrap();
-            server.serve_one(stream).await
+            ControlSocketServer::serve_one_with(stream, &stub()).await
         });
 
         let client = tokio::net::UnixStream::connect(&socket_path)
@@ -327,7 +308,7 @@ mod tests {
         let socket_path = server.socket_path().to_path_buf();
         let task = tokio::spawn(async move {
             let (stream, _addr) = listener.accept().await.unwrap();
-            server.serve_one(stream).await
+            ControlSocketServer::serve_one_with(stream, &stub()).await
         });
         let mut client = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
         let chunk = vec![b'a'; 64 * 1024];
@@ -340,6 +321,42 @@ mod tests {
         }
         let r = task.await.unwrap();
         assert_eq!(r, Err("request line too large".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A client that connects and says nothing must not hold up the next one:
+    /// connections are served on their own tasks, not one at a time inside the
+    /// accept loop (where the silent one cost everyone its 30 s read timeout).
+    #[tokio::test]
+    async fn a_silent_client_does_not_block_the_next() {
+        let dir = state_dir();
+        let server = ControlSocketServer::new(&dir);
+        let listener = server.bind().unwrap();
+        let socket_path = server.socket_path().to_path_buf();
+        let task = tokio::spawn(async move {
+            let handler: std::sync::Arc<RpcHandler> = std::sync::Arc::new(stub());
+            serve_loop(&listener, handler).await
+        });
+        // The silent one connects first and holds its connection open.
+        let _silent = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let mut client = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        client.write_all(b"{\"id\":7,\"method\":\"ping\"}\n").await.unwrap();
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut byte = [0u8; 1];
+            loop {
+                let n = client.read(&mut byte).await.unwrap();
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+        })
+        .await;
+        assert!(read.is_ok(), "the second client was not answered behind a silent one");
+        let resp: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(resp["result"], "pong");
+        task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

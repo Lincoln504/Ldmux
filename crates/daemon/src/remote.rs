@@ -46,7 +46,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::daemon::now_ms;
-use crate::stream::{PaneStream, StreamSubscriber};
+use crate::stream::{relock, PaneStream, StreamSubscriber};
 
 /// The WS stream type (`accept_async` returns this).
 type WsStream = tokio_tungstenite::WebSocketStream<TcpStream>;
@@ -57,6 +57,9 @@ type DaemonArc = Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>;
 /// Messages that change what is in a shell, and so are only the holder's to
 /// send (the TS `WRITES`).
 const WRITES: [&str; 3] = ["input", "key", "mouseclick"];
+
+/// Messages that create, end or hand out shells; they need a `hello`.
+const MUTATES: [&str; 5] = ["new", "kill", "close", "makelive", "closelive"];
 
 /// Per-type caps (the TS `MAX_INPUT_BYTES` / `MAX_KEYS`).
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -76,6 +79,21 @@ const WS_IDLE_MS: u64 = 20_000;
 const RELEASE_GRACE_MS: u64 = crate::daemon::CLAIM_GRACE_MS;
 /// How often claims are checked for a connection behind them.
 const CLAIM_TICK_MS: u64 = 1_000;
+/// How long one write to the socket may take before the peer is declared gone.
+///
+/// A write that never completes (a phone on a dead link: the radio is off, the
+/// NAT forgot the flow, nothing ever ACKs) used to hold the connection loop in
+/// `ws.send` for good, and the loop is also what reads the idle sweep's `Close`,
+/// so the connection and its claim were never released.
+const WS_SEND_TIMEOUT_MS: u64 = 10_000;
+/// Queued control JSON (snapshots, session lists) past this on one connection
+/// means the peer is not reading at all: close it rather than hold it in memory.
+const MAX_QUEUED_JSON_BYTES: usize = 16 * 1024 * 1024;
+/// Connections (pre-auth and upgraded) the server holds at once. A tailnet has
+/// one user; this only bounds what a misbehaving peer can pin.
+const MAX_CONNECTIONS: usize = 64;
+/// Most scrollback lines one request may ask the keeper for.
+const MAX_SCROLLBACK_LINES: u64 = 20_000;
 
 /// The remote config: the hostname (the tailnet address), the port, and the
 /// bearer token.
@@ -94,6 +112,8 @@ pub struct RemoteConfig {
     /// speak on a schedule is closed, and the desktop attach client did not, so
     /// its window exited about 20 s after it opened.
     pub idle_ms: u64,
+    /// How long one socket write may take before the peer is declared gone.
+    pub send_timeout_ms: u64,
 }
 
 impl RemoteConfig {
@@ -103,7 +123,14 @@ impl RemoteConfig {
             port,
             token: token.into(),
             idle_ms: WS_IDLE_MS,
+            send_timeout_ms: WS_SEND_TIMEOUT_MS,
         }
+    }
+
+    /// The send deadline for tests: a real value, shortened.
+    pub fn with_send_timeout_ms(mut self, ms: u64) -> Self {
+        self.send_timeout_ms = ms.max(1);
+        self
     }
 
     /// The idle deadline for tests: a real value, shortened.
@@ -153,11 +180,28 @@ struct ConnShared {
     tx: tokio::sync::mpsc::UnboundedSender<Out>,
     inner: Mutex<ConnInner>,
     outstanding: AtomicUsize,
+    /// Bytes of control JSON queued and not yet written (the snapshot / list
+    /// side of the backlog, which `outstanding` does not count).
+    queued_json: AtomicUsize,
 }
 
 impl ConnShared {
     fn send_json(&self, value: &serde_json::Value) {
-        let _ = self.tx.send(Out::Json(value.to_string()));
+        self.send_json_text(value.to_string());
+    }
+
+    /// Queue one JSON text for the writer, bounded: a peer that has stopped
+    /// reading is closed once [`MAX_QUEUED_JSON_BYTES`] are waiting for it.
+    fn send_json_text(&self, text: String) {
+        let n = text.len();
+        if self.queued_json.fetch_add(n, Ordering::Relaxed) + n > MAX_QUEUED_JSON_BYTES {
+            self.queued_json.fetch_sub(n, Ordering::Relaxed);
+            let _ = self.tx.send(Out::Close);
+            return;
+        }
+        if self.tx.send(Out::Json(text)).is_err() {
+            self.queued_json.fetch_sub(n, Ordering::Relaxed);
+        }
     }
 
     fn send_error(&self, code: &str, message: &str) {
@@ -173,7 +217,10 @@ pub(crate) struct Shared {
     daemon: DaemonArc,
     token: String,
     idle_ms: u64,
+    send_timeout_ms: u64,
     stopped: AtomicBool,
+    /// One permit per connection being served (see [`MAX_CONNECTIONS`]).
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// The remote server: the phone-facing WebSocket endpoint.
@@ -224,7 +271,9 @@ impl RemoteServer {
             daemon: daemon_arc.clone(),
             token: self.cfg.token.clone(),
             idle_ms: self.cfg.idle_ms,
+            send_timeout_ms: self.cfg.send_timeout_ms,
             stopped: AtomicBool::new(false),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
         });
         let accept_shared = shared.clone();
         let accept = tokio::spawn(async move {
@@ -278,7 +327,7 @@ impl RemoteServer {
     pub fn stop(&mut self) {
         if let Some(shared) = &self.shared {
             shared.stopped.store(true, Ordering::Relaxed);
-            let conns = shared.conns.lock().unwrap();
+            let conns = crate::stream::relock(&shared.conns);
             for c in conns.values() {
                 let _ = c.tx.send(Out::Close);
             }
@@ -320,6 +369,16 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             write_http(&mut stream, 403, "forbidden\n").await;
             continue;
         }
+        // A bound on what peers can hold at once, pre-auth included: past it the
+        // newcomer is turned away, not queued.
+        let Ok(permit) = shared.slots.clone().try_acquire_owned() else {
+            eprintln!("ldmuxd: remote: {peer} refused: {MAX_CONNECTIONS} connections already open");
+            write_http(&mut stream, 503, "too many connections\n").await;
+            continue;
+        };
+        // Keystroke latency (Nagle) and dead-peer detection (keepalive): see
+        // [`tune_socket`].
+        tune_socket(&stream);
         conn_id += 1;
         let shared = shared.clone();
         // Everything past the cheap peer check runs on its own task. The head
@@ -328,7 +387,45 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         // behind it for that whole deadline.
         tokio::spawn(async move {
             serve_accepted(stream, peer, shared, conn_id).await;
+            drop(permit);
         });
+    }
+}
+
+/// Socket options for an accepted client: `TCP_NODELAY` (a keystroke is a few
+/// bytes and must not wait for Nagle), and keepalive probing so the kernel
+/// notices a peer that vanished without a FIN (the phone's radio went off).
+/// Best effort: a failure is logged and the connection is served anyway, since
+/// the idle sweep and the send deadline still bound a dead peer.
+fn tune_socket(stream: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    if let Err(e) = stream.set_nodelay(true) {
+        eprintln!("ldmuxd: remote: set TCP_NODELAY: {e}");
+    }
+    let fd = stream.as_raw_fd();
+    let set = |level: i32, name: i32, value: i32| -> bool {
+        // SAFETY: `fd` is a live socket owned by `stream` for the duration of the
+        // call, and the option value is a plain `c_int` of the size passed.
+        unsafe {
+            nix::libc::setsockopt(
+                fd,
+                level,
+                name,
+                &value as *const i32 as *const nix::libc::c_void,
+                std::mem::size_of::<i32>() as nix::libc::socklen_t,
+            ) == 0
+        }
+    };
+    let ok = set(nix::libc::SOL_SOCKET, nix::libc::SO_KEEPALIVE, 1)
+        // Probe after 15 s idle, every 5 s, give up after 3 misses (~30 s).
+        && set(nix::libc::IPPROTO_TCP, nix::libc::TCP_KEEPIDLE, 15)
+        && set(nix::libc::IPPROTO_TCP, nix::libc::TCP_KEEPINTVL, 5)
+        && set(nix::libc::IPPROTO_TCP, nix::libc::TCP_KEEPCNT, 3);
+    if !ok {
+        eprintln!(
+            "ldmuxd: remote: TCP keepalive could not be set: {}",
+            std::io::Error::last_os_error()
+        );
     }
 }
 
@@ -397,7 +494,7 @@ async fn serve_accepted(
 
 /// The per-connection loop: read messages, enqueue responses, coalesce output.
 async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
     let conn = Arc::new(ConnShared {
         tx,
         inner: Mutex::new(ConnInner {
@@ -416,18 +513,39 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
             last_seen_ms: now_ms(),
         }),
         outstanding: AtomicUsize::new(0),
+        queued_json: AtomicUsize::new(0),
     });
-    shared
-        .conns
-        .lock()
-        .unwrap()
-        .insert(conn_id, conn.clone());
+    relock(&shared.conns).insert(conn_id, conn.clone());
 
+    // The loop runs on its own task so a panic in a handler ends only that
+    // connection, and the cleanup below still runs (the claim is released, the
+    // subscription dropped) instead of both dying with the unwound task.
+    let looped = tokio::spawn(connection_loop(ws, shared.clone(), conn.clone(), rx));
+    if let Err(e) = looped.await {
+        eprintln!("ldmuxd: remote: connection {conn_id} task ended abnormally: {e}");
+    }
+
+    // The connection ended. Clean up: unsubscribe, release the stream, and
+    // release the device's claims after the grace.
+    disconnect(conn, shared).await;
+}
+
+/// The connection loop proper: read messages, write responses and output.
+async fn connection_loop(
+    ws: WsStream,
+    shared: Arc<Shared>,
+    conn: Arc<ConnShared>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Out>,
+) {
+    let send_limit = std::time::Duration::from_millis(shared.send_timeout_ms);
     // The connection loop owns the socket; outbound goes through `tx` so the
     // coalescer and every control message share one ordering.
     let mut ws = ws;
     let mut pending: Vec<u8> = Vec::new();
-    loop {
+    // Every write is bounded by `send_limit`; a write that does not finish means
+    // the peer is gone, and the connection ends (so its claim can be released)
+    // instead of waiting here for an ACK that will never come.
+    'conn: loop {
         // Arm the coalescing timer only when there is output to flush.
         let mut timer: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             if pending.is_empty() {
@@ -445,7 +563,9 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
                     Some(Ok(msg)) => {
                         // Flush buffered output before acting on the message, so a
                         // reply cannot overtake the output it should follow.
-                        flush_output(&mut ws, &mut pending, &conn).await;
+                        if !flush_output(&mut ws, &mut pending, &conn, send_limit).await {
+                            break 'conn;
+                        }
                         if let Some(text) = message_text(&msg) {
                             touch(&conn);
                             handle_message(&text, &conn, &shared).await;
@@ -459,57 +579,77 @@ async fn handle_connection(ws: WsStream, shared: Arc<Shared>, conn_id: u64) {
                     Some(Out::Close) => break,
                     Some(Out::Output(b)) => {
                         pending.extend_from_slice(&b);
-                        if pending.len() >= OUTPUT_FLUSH_BYTES {
-                            flush_output(&mut ws, &mut pending, &conn).await;
+                        if pending.len() >= OUTPUT_FLUSH_BYTES
+                            && !flush_output(&mut ws, &mut pending, &conn, send_limit).await
+                        {
+                            break 'conn;
                         }
                     }
                     Some(Out::Json(s)) => {
-                        flush_output(&mut ws, &mut pending, &conn).await;
-                        let _ = ws.send(Message::Text(s.into())).await;
+                        let n = s.len();
+                        let sent = flush_output(&mut ws, &mut pending, &conn, send_limit).await
+                            && send_bounded(&mut ws, Message::Text(s.into()), send_limit).await;
+                        conn.queued_json.fetch_sub(n, Ordering::Relaxed);
+                        if !sent {
+                            break 'conn;
+                        }
                     }
                 }
             }
             _ = &mut timer => {
-                flush_output(&mut ws, &mut pending, &conn).await;
+                if !flush_output(&mut ws, &mut pending, &conn, send_limit).await {
+                    break 'conn;
+                }
             }
         }
     }
-
-    // The connection ended. Clean up: unsubscribe, release the stream, and
-    // release the device's claims after the grace.
-    disconnect(conn, shared).await;
 }
 
 /// Send every buffered output frame, then release those bytes from the
 /// connection's `outstanding` count (they have left the daemon).
-async fn flush_output(ws: &mut WsStream, pending: &mut Vec<u8>, conn: &ConnShared) {
+///
+/// Returns `false` when the peer did not take the write within `limit` (or the
+/// socket is broken): the connection is over.
+async fn flush_output(
+    ws: &mut WsStream,
+    pending: &mut Vec<u8>,
+    conn: &ConnShared,
+    limit: std::time::Duration,
+) -> bool {
     if pending.is_empty() {
-        return;
+        return true;
     }
     let data = std::mem::take(pending);
     let n = data.len();
-    match encode_frame(ft::OUTPUT, &data, 0) {
-        Ok(frame) => {
-            let _ = ws.send(Message::Binary(frame.into())).await;
-        }
+    let ok = match encode_frame(ft::OUTPUT, &data, 0) {
+        Ok(frame) => send_bounded(ws, Message::Binary(frame.into()), limit).await,
         Err(_) => {
-            let _ = ws
-                .send(Message::Text(
+            send_bounded(
+                ws,
+                Message::Text(
                     serde_json::json!({"type":"error","code":"resync","message":"output frame too large"})
                         .to_string()
                         .into(),
-                ))
-                .await;
+                ),
+                limit,
+            )
+            .await
         }
-    }
+    };
     // Only now are the bytes off the daemon: a client that is not reading holds
     // this await open, and `outstanding` must keep counting them meanwhile.
     conn.outstanding.fetch_sub(n, Ordering::Relaxed);
+    ok
+}
+
+/// One socket write, bounded. `false` is a timeout or a socket error.
+async fn send_bounded(ws: &mut WsStream, msg: Message, limit: std::time::Duration) -> bool {
+    matches!(tokio::time::timeout(limit, ws.send(msg)).await, Ok(Ok(())))
 }
 
 /// Mark the connection seen (any inbound message counts).
 fn touch(conn: &ConnShared) {
-    conn.inner.lock().unwrap().last_seen_ms = now_ms();
+    relock(&conn.inner).last_seen_ms = now_ms();
 }
 
 /// Hand pane output to the connection's writer, or — when the link is behind —
@@ -528,10 +668,10 @@ fn queue_output(conn: &ConnShared, inner: &mut ConnInner, bytes: &[u8]) {
     }
     if conn.outstanding.load(Ordering::Relaxed) > WS_BACKLOG_BYTES {
         inner.resyncing = true;
-        let _ = conn.tx.send(Out::Json(
+        conn.send_json_text(
             serde_json::json!({"type":"error","code":"resync","message":"client is behind the link"})
                 .to_string(),
-        ));
+        );
         return;
     }
     conn.outstanding.fetch_add(bytes.len(), Ordering::Relaxed);
@@ -553,18 +693,45 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
     let mtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
 
     // Writing to a shell is the holder's (the TS `WRITES` / `mayWrite`).
+    //
+    // A connection that attached without a `hello` is a read-only observer (the
+    // desktop mirror, `ldmuxd attach --readonly`): it holds nothing and so can
+    // type nothing. The check used to be skipped for it, which made "no identity"
+    // the way around ADR-0010. Not attached at all falls through to each
+    // handler's own `not_attached`.
     if WRITES.contains(&mtype.as_str()) {
         let (device, session) = {
-            let inner = conn.inner.lock().unwrap();
+            let inner = relock(&conn.inner);
             (inner.device.clone(), inner.session_id.clone())
         };
-        if let (Some(device), Some(session)) = (device, session) {
+        if let Some(session) = session {
+            let Some(device) = device else {
+                conn.send_error("hello_required", "say hello before writing to a shell");
+                return;
+            };
             let holds = {
                 let d = shared.daemon.lock().await;
                 d.holds(&session, &device.id)
             };
             if !holds {
                 conn.send_error("not_holder", "this device does not hold that shell");
+                return;
+            }
+        }
+    }
+
+    // Changing the set of shells is the same kind of act and needs an identity
+    // too, and a shell another device holds is not ours to end or hand to the
+    // desk without a takeover (ADR-0010: no forced detach without consent).
+    if MUTATES.contains(&mtype.as_str()) {
+        let Some(device) = device_of(conn) else {
+            conn.send_error("hello_required", "say hello before changing shells");
+            return;
+        };
+        if matches!(mtype.as_str(), "kill" | "makelive") {
+            let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
+            if held_by_another(shared, id, &device.id).await {
+                conn.send_error("not_holder", "another device holds that shell");
                 return;
             }
         }
@@ -594,7 +761,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     } else {
                         "phone"
                     };
-                    let previous = conn.inner.lock().unwrap().device.replace(DeviceInfo {
+                    let previous = relock(&conn.inner).device.replace(DeviceInfo {
                         id: id.clone(),
                         name: if name.is_empty() { "device".into() } else { name },
                         kind: kind.into(),
@@ -605,8 +772,8 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     // would free them (they would block everyone else until the
                     // daemon restarts).
                     if let Some(prev) = previous.filter(|p| p.id != id) {
-                        let still_held = shared.conns.lock().unwrap().values().any(|c| {
-                            c.inner.lock().unwrap().device.as_ref().map(|d| d.id == prev.id).unwrap_or(false)
+                        let still_held = relock(&shared.conns).values().any(|c| {
+                            relock(&c.inner).device.as_ref().map(|d| d.id == prev.id).unwrap_or(false)
                         });
                         if !still_held {
                             let freed = !shared.daemon.lock().await.release_device(&prev.id).is_empty();
@@ -654,9 +821,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .or_else(|| {
-                    conn.inner
-                        .lock()
-                        .unwrap()
+                    relock(&conn.inner)
                         .device
                         .as_ref()
                         .map(|d| d.kind.clone())
@@ -719,14 +884,18 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
         "kill" => {
             let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
             let reason = ended_by("killed", device_of(conn).as_ref());
-            {
+            let killed = {
                 let mut d = shared.daemon.lock().await;
-                let _ = d.kill_session(id, &reason).await;
+                d.kill_session(id, &reason).await
+            };
+            if let Err(e) = killed {
+                conn.send_error("kill_failed", &e);
             }
             broadcast_sessions(shared).await;
-        }        "close" => {
+        }
+        "close" => {
             let id = v.get("sessionId").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let device = conn.inner.lock().unwrap().device.clone();
+            let device = relock(&conn.inner).device.clone();
             // A shell opened at the desk belongs to the desk: closing it from a
             // phone is putting it down, not destroying it (ADR-0010).
             let record = {
@@ -744,10 +913,27 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 broadcast_sessions(shared).await;
                 return;
             }
+            // Ending it is the holder's call; putting it down is handled above.
+            if let Some(dev) = &device
+                && held_by_another(shared, &id, &dev.id).await
+            {
+                conn.send_error("not_holder", "another device holds that shell");
+                return;
+            }
             let reason = ended_by("closed", device_of(conn).as_ref());
-            let (ended, _) = {
+            let closed = {
                 let mut d = shared.daemon.lock().await;
-                d.close_session(&id, &reason).await.unwrap_or((true, default_record(&id)))
+                d.close_session(&id, &reason).await
+            };
+            let ended = match closed {
+                Ok((ended, _)) => ended,
+                Err(e) => {
+                    // Not "ended": that would release a claim and detach the
+                    // viewer for a shell that is still there.
+                    conn.send_error("close_failed", &e);
+                    broadcast_sessions(shared).await;
+                    return;
+                }
             };
             if let Some(dev) = &device
                 && !ended {
@@ -766,7 +952,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
         }
         "resize" => {
             let (cols, rows, gen_id) = {
-                let inner = conn.inner.lock().unwrap();
+                let inner = relock(&conn.inner);
                 (
                     v.get("cols").and_then(|x| x.as_u64()),
                     v.get("rows").and_then(|x| x.as_u64()),
@@ -791,8 +977,8 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             }
             // The pane geometry changed: answer with a fresh snapshot.
-            let sid = conn.inner.lock().unwrap().session_id.clone().unwrap_or_default();
-            let sub = conn.inner.lock().unwrap().sub_id;
+            let sid = relock(&conn.inner).session_id.clone().unwrap_or_default();
+            let sub = relock(&conn.inner).sub_id;
             if let Err(e) = snapshot_and_go_live(conn, &stream, sub, None, gen_id, &sid, false).await {
                 conn.send_error("resize_failed", &e);
             }
@@ -826,10 +1012,13 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                         conn.send_error("bad_cell", "cell outside the pane");
                         return;
                     }
-                    let _ = on_stream(&stream, move |s| s.mouse_click(col, row)).await;
-                    conn.send_json(&serde_json::json!({
-                        "type": "mousedelivered", "col": col, "row": row
-                    }));
+                    match on_stream(&stream, move |s| s.mouse_click(col, row)).await {
+                        Some(Ok(_)) => conn.send_json(&serde_json::json!({
+                            "type": "mousedelivered", "col": col, "row": row
+                        })),
+                        Some(Err(e)) => conn.send_error("input_failed", &e),
+                        None => conn.send_error("input_failed", "click task failed"),
+                    }
                 }
                 Err(e) => conn.send_error("handler_error", &e),
             }
@@ -845,7 +1034,11 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 conn.send_error("not_attached", "attach before typing");
                 return;
             };
-            let _ = on_stream(&stream, move |s| s.write(&text)).await;
+            match on_stream(&stream, move |s| s.write(&text)).await {
+                Some(Ok(_)) => {}
+                Some(Err(e)) => conn.send_error("input_failed", &e),
+                None => conn.send_error("input_failed", "input task failed"),
+            }
         }
         "key" => {
             let keys: Vec<String> = v
@@ -854,7 +1047,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 .map(|a| {
                     a.iter()
                         .filter_map(|k| k.as_str())
-                        .filter(|k| !k.is_empty() && !k.starts_with('-'))
+                        .filter(|k| !k.is_empty())
                         .take(MAX_KEYS)
                         .map(|k| k.to_string())
                         .collect()
@@ -880,10 +1073,16 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             // Client-owned scroll (ADR-0004): a no-op.
         }
         "scrollback" => {
-            let lines = v.get("lines").and_then(|x| x.as_u64()).unwrap_or(0);
+            // The keeper is asked for exactly this many rows of history: clamp it
+            // to what a client can page through, not whatever a message says.
+            let lines = v
+                .get("lines")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0)
+                .min(MAX_SCROLLBACK_LINES);
             let wants_history = lines > 0;
             let (gen_id, sid) = {
-                let inner = conn.inner.lock().unwrap();
+                let inner = relock(&conn.inner);
                 (inner.attach_gen, inner.session_id.clone().unwrap_or_default())
             };
             let stream = active_stream(conn);
@@ -892,7 +1091,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             };
             let hist = if wants_history { Some(lines) } else { None };
-            let sub = conn.inner.lock().unwrap().sub_id;
+            let sub = relock(&conn.inner).sub_id;
             if let Err(e) = snapshot_and_go_live(conn, &stream, sub, hist, gen_id, &sid, wants_history).await {
                 conn.send_error("scrollback_failed", &e);
             }
@@ -931,7 +1130,7 @@ async fn attach(
             conn.send_error("session_dead", &format!("session is {}: {session_id}", record.status));
             return;
         }
-        let device = conn.inner.lock().unwrap().device.clone();
+        let device = relock(&conn.inner).device.clone();
         let mut displaced = None;
         if let Some(device) = &device {
             match d.claim(&session_id, device, takeover) {
@@ -967,13 +1166,13 @@ async fn attach(
     // Per *device*, not per connection: a device with two live sockets on the
     // same shell keeps it, because one of them is still watching.
     {
-        let previous = conn.inner.lock().unwrap().session_id.clone();
+        let previous = relock(&conn.inner).session_id.clone();
         if let (Some(device), Some(previous)) = (&device, previous)
             && previous != session_id
         {
             let still_watched = {
                 let conns: Vec<Arc<ConnShared>> = {
-                    let map = shared.conns.lock().unwrap();
+                    let map = relock(&shared.conns);
                     map.values().cloned().collect()
                 };
                 conns.iter().any(|c| {
@@ -982,7 +1181,7 @@ async fn attach(
                     if Arc::ptr_eq(c, conn) {
                         return false;
                     }
-                    let inner = c.inner.lock().unwrap();
+                    let inner = relock(&c.inner);
                     inner.session_id.as_deref() == Some(previous.as_str())
                         && inner
                             .device
@@ -1004,13 +1203,14 @@ async fn attach(
     }
 
     // Bump the generation, clear the old subscription.
-    let gen_id = {
-        let mut inner = conn.inner.lock().unwrap();
+    let (gen_id, old_unsub) = {
+        let mut inner = relock(&conn.inner);
         inner.attach_gen += 1;
         let gen_id = inner.attach_gen;
-        if let Some(unsub) = inner.unsubscribe.take() {
-            unsub();
-        }
+        // Taken out and called below, **after** the guard is gone: unsubscribing
+        // takes the stream's subscriber lock, and the stream's thread holds that
+        // lock while it calls back into this connection's lock.
+        let old_unsub = inner.unsubscribe.take();
         inner.stream = None;
         inner.session_id = Some(session_id.clone());
         inner.record = Some(record.clone());
@@ -1018,8 +1218,11 @@ async fn attach(
         inner.resyncing = false;
         inner.pending.clear();
         inner.pending_bytes = 0;
-        gen_id
+        (gen_id, old_unsub)
     };
+    if let Some(unsub) = old_unsub {
+        unsub();
+    }
 
     // Subscribe (queueing output until `live`).
     let tx = conn.tx.clone();
@@ -1027,7 +1230,7 @@ async fn attach(
     let cb_gen = gen_id;
     let sub = StreamSubscriber {
         on_output: Box::new(move |bytes: &[u8]| {
-            let mut inner = inner_for_cb.inner.lock().unwrap();
+            let mut inner = relock(&inner_for_cb.inner);
             if inner.attach_gen != cb_gen {
                 return;
             }
@@ -1055,7 +1258,7 @@ async fn attach(
                 // Not while attaching: the snapshot that is about to be sent
                 // repaints from scratch, which is all a resync asks for.
                 let ok = {
-                    let inner = conn2.inner.lock().unwrap();
+                    let inner = relock(&conn2.inner);
                     inner.attach_gen == cb_gen && inner.live
                 };
                 if ok {
@@ -1065,11 +1268,24 @@ async fn attach(
         }),
     };
     let (sub_id, unsubscribe) = stream.subscribe_owned(sub);
-    {
-        let mut inner = conn.inner.lock().unwrap();
-        inner.unsubscribe = Some(unsubscribe);
-        inner.sub_id = Some(sub_id);
-        inner.stream = Some(stream.clone());
+    let leftover = {
+        let mut inner = relock(&conn.inner);
+        if inner.disposed || inner.attach_gen != gen_id {
+            // The connection ended (or attached elsewhere) while we were
+            // subscribing: nothing else will ever call this unsubscribe, so it
+            // is called here, after the guard is gone.
+            Some(unsubscribe)
+        } else {
+            inner.unsubscribe = Some(unsubscribe);
+            inner.sub_id = Some(sub_id);
+            inner.stream = Some(stream.clone());
+            None
+        }
+    };
+    if let Some(unsubscribe) = leftover {
+        unsubscribe();
+        shared.daemon.lock().await.release_stream_if_idle(&record.keeper_name);
+        return;
     }
 
     // Resize before the snapshot so the screen we send already matches the grid
@@ -1084,7 +1300,7 @@ async fn attach(
     let fenced = snapshot_and_go_live(conn, &stream, Some(sub_id), None, gen_id, &session_id, false).await;
 
     // A second attach (or a disconnect) may have superseded us while we awaited.
-    if conn.inner.lock().unwrap().attach_gen != gen_id {
+    if relock(&conn.inner).attach_gen != gen_id {
         return;
     }
 
@@ -1128,7 +1344,7 @@ async fn snapshot_and_go_live(
     on_stream(stream, move |s| {
         s.snapshot_fenced(requester, history, |snap, epoch| {
             {
-                let mut inner = conn2.inner.lock().unwrap();
+                let mut inner = relock(&conn2.inner);
                 if inner.disposed || inner.attach_gen != gen_id {
                     return;
                 }
@@ -1148,12 +1364,12 @@ async fn snapshot_and_go_live(
 /// and cut it off (the TS `notifyDisplaced`).
 async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &str) {
     let conns: Vec<Arc<ConnShared>> = {
-        let map = shared.conns.lock().unwrap();
+        let map = relock(&shared.conns);
         map.values().cloned().collect()
     };
     for c in conns {
         let (is_holder, _sid) = {
-            let inner = c.inner.lock().unwrap();
+            let inner = relock(&c.inner);
             (
                 inner.device.as_ref().map(|d| d.id == device_id).unwrap_or(false),
                 inner.session_id.clone(),
@@ -1162,22 +1378,23 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
         if !is_holder {
             continue;
         }
-        let viewing = { c.inner.lock().unwrap().session_id.as_deref() == Some(session_id) };
+        let viewing = { relock(&c.inner).session_id.as_deref() == Some(session_id) };
         if !viewing {
             continue;
         }
         c.send_json(&serde_json::json!({"type":"owned","sessionId":session_id,"owner":null}));
         // Cut it off: unsubscribe and forget the stream.
-        let keeper_name = {
-            let mut inner = c.inner.lock().unwrap();
-            if let Some(unsub) = inner.unsubscribe.take() {
-                unsub();
-            }
+        let (keeper_name, unsub) = {
+            let mut inner = relock(&c.inner);
+            let unsub = inner.unsubscribe.take();
             inner.stream = None;
             inner.session_id = None;
             inner.live = false;
-            inner.record.as_ref().map(|r| r.keeper_name.clone())
+            (inner.record.as_ref().map(|r| r.keeper_name.clone()), unsub)
         };
+        if let Some(unsub) = unsub {
+            unsub();
+        }
         if let Some(keeper_name) = keeper_name {
             let mut d = shared.daemon.lock().await;
             d.release_stream_if_idle(&keeper_name);
@@ -1194,11 +1411,11 @@ pub(crate) async fn broadcast_sessions(shared: &Arc<Shared>) {
     };
     let msg = sessions_message(&sessions).to_string();
     let conns: Vec<Arc<ConnShared>> = {
-        let map = shared.conns.lock().unwrap();
+        let map = relock(&shared.conns);
         map.values().cloned().collect()
     };
     for c in conns {
-        let _ = c.tx.send(Out::Json(msg.clone()));
+        c.send_json_text(msg.clone());
     }
 }
 
@@ -1260,21 +1477,22 @@ where
 
 /// The connection's active stream (cloned).
 fn active_stream(conn: &Arc<ConnShared>) -> Option<Arc<PaneStream>> {
-    conn.inner.lock().unwrap().stream.clone()
+    relock(&conn.inner).stream.clone()
 }
 
 /// Stop viewing the currently-attached session (a `close`/`kill` path).
 async fn stop_viewing(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
-    let keeper_name = {
-        let mut inner = conn.inner.lock().unwrap();
-        if let Some(unsub) = inner.unsubscribe.take() {
-            unsub();
-        }
+    let (keeper_name, unsub) = {
+        let mut inner = relock(&conn.inner);
+        let unsub = inner.unsubscribe.take();
         inner.stream = None;
         inner.session_id = None;
         inner.live = false;
-        inner.record.take().map(|r| r.keeper_name)
+        (inner.record.take().map(|r| r.keeper_name), unsub)
     };
+    if let Some(unsub) = unsub {
+        unsub();
+    }
     if let Some(keeper_name) = keeper_name {
         let mut d = shared.daemon.lock().await;
         d.release_stream_if_idle(&keeper_name);
@@ -1283,19 +1501,21 @@ async fn stop_viewing(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
 
 /// The connection ended: unsubscribe, release the stream, release claims.
 async fn disconnect(conn: Arc<ConnShared>, shared: Arc<Shared>) {
-    let (keeper_name, device, session) = {
-        let mut inner = conn.inner.lock().unwrap();
+    let (keeper_name, device, session, unsub) = {
+        let mut inner = relock(&conn.inner);
         inner.disposed = true;
-        if let Some(unsub) = inner.unsubscribe.take() {
-            unsub();
-        }
+        let unsub = inner.unsubscribe.take();
         (
             inner.record.take().map(|r| r.keeper_name),
             inner.device.clone(),
             inner.session_id.clone(),
+            unsub,
         )
     };
-    shared.conns.lock().unwrap().remove_by_ptr(&conn);
+    if let Some(unsub) = unsub {
+        unsub();
+    }
+    relock(&shared.conns).remove_by_ptr(&conn);
     if let Some(keeper_name) = keeper_name {
         let mut d = shared.daemon.lock().await;
         d.release_stream_if_idle(&keeper_name);
@@ -1312,18 +1532,16 @@ async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(RELEASE_GRACE_MS)).await;
         let (device_has_conns, still_viewing) = {
-            let map = shared.conns.lock().unwrap();
+            let map = relock(&shared.conns);
             let has = map.values().any(|c| {
-                c.inner
-                    .lock()
-                    .unwrap()
+                relock(&c.inner)
                     .device
                     .as_ref()
                     .map(|d| d.id == device_id)
                     .unwrap_or(false)
             });
             let viewing = map.values().any(|c| {
-                let inner = c.inner.lock().unwrap();
+                let inner = relock(&c.inner);
                 inner
                     .device
                     .as_ref()
@@ -1357,10 +1575,10 @@ async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id
 /// about connections, and the sweep already walks them.
 async fn reconcile_claims(shared: &Arc<Shared>) {
     let attached: std::collections::HashSet<(String, String)> = {
-        let map = shared.conns.lock().unwrap();
+        let map = relock(&shared.conns);
         map.values()
             .filter_map(|c| {
-                let inner = c.inner.lock().unwrap();
+                let inner = relock(&c.inner);
                 let device = inner.device.as_ref()?.id.clone();
                 let session = inner.session_id.clone()?;
                 Some((session, device))
@@ -1380,12 +1598,12 @@ async fn reconcile_claims(shared: &Arc<Shared>) {
 async fn sweep_once(shared: &Arc<Shared>) {
     let now = now_ms();
     let conns: Vec<Arc<ConnShared>> = {
-        let map = shared.conns.lock().unwrap();
+        let map = relock(&shared.conns);
         map.values().cloned().collect()
     };
     for c in conns {
         let (idle, disposed) = {
-            let inner = c.inner.lock().unwrap();
+            let inner = relock(&c.inner);
             (now.saturating_sub(inner.last_seen_ms), inner.disposed)
         };
         if disposed {
@@ -1408,23 +1626,12 @@ fn live_result(result: Result<serde_json::Value, String>) -> (bool, Option<Strin
     }
 }
 
-fn default_record(id: &str) -> SessionRecord {
-    SessionRecord {
-        id: id.into(),
-        keeper_name: String::new(),
-        kind: "shell".into(),
-        cwd: String::new(),
-        title: String::new(),
-        created_at: 0,
-        updated_at: 0,
-        created_by: String::new(),
-        status: "dead".into(),
-        exit_code: None,
-        exited_at: None,
-        live_workspace: None,
-        live_pid: None,
-        ended_reason: None,
-    }
+/// Whether some device other than `device_id` holds `session_id`.
+async fn held_by_another(shared: &Arc<Shared>, session_id: &str, device_id: &str) -> bool {
+    let d = shared.daemon.lock().await;
+    d.ownership()
+        .owner(session_id)
+        .is_some_and(|c| c.device.id != device_id)
 }
 
 /// How an ending reads when the device behind it is known: `killed from motorola
@@ -1440,7 +1647,7 @@ fn ended_by(verb: &str, device: Option<&ldmux_protocol::rpc::DeviceInfo>) -> Str
 
 /// The device behind a connection, for [`ended_by`], without holding the lock.
 fn device_of(conn: &ConnShared) -> Option<ldmux_protocol::rpc::DeviceInfo> {
-    conn.inner.lock().unwrap().device.clone()
+    relock(&conn.inner).device.clone()
 }
 
 // ── HTTP head parsing / responses ───────────────────────────────────────────
@@ -1594,6 +1801,7 @@ async fn write_http(stream: &mut TcpStream, status: u16, body: &str) {
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        503 => "Service Unavailable",
         _ => "OK",
     };
     let text = format!(
@@ -1681,6 +1889,7 @@ mod tests {
                 last_seen_ms: 0,
             }),
             outstanding: AtomicUsize::new(0),
+            queued_json: AtomicUsize::new(0),
         });
         (conn, rx)
     }
@@ -1705,7 +1914,9 @@ mod tests {
             daemon,
             token: "t".into(),
             idle_ms: 20_000,
+            send_timeout_ms: WS_SEND_TIMEOUT_MS,
             stopped: AtomicBool::new(false),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
         });
         for msg in [
             r#"{"type":"key","keys":["Enter"]}"#,
@@ -1784,6 +1995,7 @@ mod tests {
                 last_seen_ms: 0,
             }),
             outstanding: AtomicUsize::new(0),
+            queued_json: AtomicUsize::new(0),
         });
         let snap = ldmux_protocol::keeper::SnapshotResult {
             session_id: "s".into(),
@@ -1842,5 +2054,178 @@ mod tests {
             kind: "phone".into(),
         };
         assert_eq!(ended_by("killed", Some(&unnamed)), "killed");
+    }
+
+    /// A server state over a scratch daemon, for the handler tests.
+    fn test_shared(tag: &str, send_timeout_ms: u64) -> (Arc<Shared>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ldmux-remote-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let daemon = Arc::new(tokio::sync::Mutex::new(crate::daemon::LdmuxDaemon::new(
+            dir.clone(),
+            std::path::PathBuf::from("/nonexistent"),
+        )));
+        let shared = Arc::new(Shared {
+            conns: Mutex::new(HashMap::new()),
+            daemon,
+            token: "t".into(),
+            idle_ms: 20_000,
+            send_timeout_ms,
+            stopped: AtomicBool::new(false),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
+        });
+        (shared, dir)
+    }
+
+    fn error_code(out: Out) -> String {
+        let Out::Json(text) = out else { panic!("expected json") };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["type"], "error", "{v}");
+        v["code"].as_str().unwrap().to_string()
+    }
+
+    fn hello_as(conn: &Arc<ConnShared>, id: &str) {
+        relock(&conn.inner).device = Some(DeviceInfo {
+            id: id.into(),
+            name: id.into(),
+            kind: "phone".into(),
+        });
+    }
+
+    /// ADR-0010: a connection with no identity holds nothing. Writing from an
+    /// attached connection that never said `hello` used to skip the holder check
+    /// altogether, and `kill`/`close`/`new`/`makelive`/`closelive` had no check.
+    #[tokio::test]
+    async fn no_hello_means_no_writes_and_no_shell_changes() {
+        let (conn, mut rx) = undrained_conn();
+        let (shared, dir) = test_shared("nohello", WS_SEND_TIMEOUT_MS);
+        // Attached as a read-only observer would be.
+        relock(&conn.inner).session_id = Some("s1".into());
+        for msg in [
+            r#"{"type":"input","data":"rm -rf x\n"}"#,
+            r#"{"type":"key","keys":["Enter"]}"#,
+            r#"{"type":"mouseclick","col":1,"row":1}"#,
+            r#"{"type":"new","kind":"shell"}"#,
+            r#"{"type":"kill","sessionId":"s1"}"#,
+            r#"{"type":"close","sessionId":"s1"}"#,
+            r#"{"type":"makelive","sessionId":"s1"}"#,
+            r#"{"type":"closelive","sessionId":"s1"}"#,
+        ] {
+            handle_message(msg, &conn, &shared).await;
+            let out = rx.try_recv().unwrap_or_else(|_| panic!("no answer to {msg}"));
+            assert_eq!(error_code(out), "hello_required", "{msg}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A device that does not hold a shell cannot end it or hand it to the desk;
+    /// the holder can, and so can anyone when nobody holds it.
+    #[tokio::test]
+    async fn a_shell_another_device_holds_cannot_be_killed_or_closed() {
+        let (conn, mut rx) = undrained_conn();
+        let (shared, dir) = test_shared("holder", WS_SEND_TIMEOUT_MS);
+        {
+            let mut d = shared.daemon.lock().await;
+            let now = crate::daemon::now_ms();
+            d.registry().upsert(SessionRecord {
+                id: "s1".into(),
+                keeper_name: String::new(),
+                kind: "shell".into(),
+                cwd: "/".into(),
+                title: "t".into(),
+                created_at: now,
+                updated_at: now,
+                created_by: "phone".into(),
+                status: "running".into(),
+                exit_code: None,
+                exited_at: None,
+                live_workspace: None,
+                live_pid: None,
+                ended_reason: None,
+            });
+            let owner = DeviceInfo { id: "desk".into(), name: "desk".into(), kind: "desktop".into() };
+            d.claim("s1", &owner, false);
+        }
+        hello_as(&conn, "phone-1");
+        for msg in [
+            r#"{"type":"kill","sessionId":"s1"}"#,
+            r#"{"type":"close","sessionId":"s1"}"#,
+            r#"{"type":"makelive","sessionId":"s1"}"#,
+        ] {
+            handle_message(msg, &conn, &shared).await;
+            let out = rx.try_recv().unwrap_or_else(|_| panic!("no answer to {msg}"));
+            assert_eq!(error_code(out), "not_holder", "{msg}");
+        }
+        assert_eq!(shared.daemon.lock().await.get_session("s1").unwrap().status, "running");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A control message queue is bounded: a peer that has stopped reading is
+    /// closed once the cap is passed, not buffered without limit.
+    #[test]
+    fn queued_control_json_is_bounded() {
+        let (conn, mut rx) = undrained_conn();
+        let big = "x".repeat(1024 * 1024);
+        for _ in 0..(MAX_QUEUED_JSON_BYTES / big.len() + 4) {
+            conn.send_json_text(big.clone());
+        }
+        let mut queued = 0usize;
+        let mut closes = 0usize;
+        while let Ok(m) = rx.try_recv() {
+            match m {
+                Out::Json(j) => queued += j.len(),
+                Out::Close => closes += 1,
+                Out::Output(_) => panic!("no output"),
+            }
+        }
+        assert!(queued <= MAX_QUEUED_JSON_BYTES, "queued {queued}");
+        assert!(closes >= 1, "the connection must be told to close");
+    }
+
+    /// A peer that stops reading wedged the connection loop in `ws.send`, which
+    /// is also where the sweep's `Close` is read, so the connection (and its
+    /// claim) were never released. With a send deadline it ends.
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_does_not_wedge_the_connection() {
+        let (shared, dir) = test_shared("deadpeer", 300);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_shared = shared.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tune_socket(&stream);
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            handle_connection(ws, server_shared, 1).await;
+        });
+        // The client completes the handshake and then never reads again.
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (_client_ws, _) = tokio_tungstenite::client_async("ws://127.0.0.1/ws", tcp)
+            .await
+            .unwrap();
+        let conn = {
+            let mut found = None;
+            for _ in 0..100 {
+                if let Some(c) = relock(&shared.conns).values().next().cloned() {
+                    found = Some(c);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            found.expect("the connection registered")
+        };
+        // More than both kernel buffers can hold, straight into the writer.
+        let chunk = "y".repeat(1024 * 1024);
+        for _ in 0..48 {
+            let _ = conn.tx.send(Out::Json(chunk.clone()));
+        }
+        let mut gone = false;
+        for _ in 0..100 {
+            if relock(&shared.conns).is_empty() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(gone, "the connection must end when the peer stops taking writes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -77,11 +77,13 @@ impl Registry {
             return;
         };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            self.quarantine("it is not valid JSON");
             self.sessions.clear();
             self.order.clear();
             return;
         };
         let Some(sessions) = v.get("sessions").and_then(|s| s.as_array()) else {
+            self.quarantine("it has no `sessions` list");
             self.sessions.clear();
             self.order.clear();
             return;
@@ -124,7 +126,25 @@ impl Registry {
         }
     }
 
-    /// Save atomically: write `<path>.tmp`, rename over `<path>`.
+    /// Keep a copy of a registry file that could not be read and say so. Starting
+    /// empty is still the recovery, but silently: the next save overwrote the only
+    /// copy of every record in it.
+    fn quarantine(&self, why: &str) {
+        let corrupt = format!("{}.corrupt", self.path);
+        match std::fs::copy(&self.path, &corrupt) {
+            Ok(_) => eprintln!(
+                "ldmuxd: registry {} is unusable ({why}); starting empty, the original is kept at {corrupt}",
+                self.path
+            ),
+            Err(e) => eprintln!(
+                "ldmuxd: registry {} is unusable ({why}) and could not be copied to {corrupt}: {e}; starting empty",
+                self.path
+            ),
+        }
+    }
+
+    /// Save atomically and durably: write `<path>.tmp`, fsync it, rename over
+    /// `<path>`, fsync the directory.
     pub fn save(&self) -> std::io::Result<()> {
         if let Some(parent) = std::path::Path::new(&self.path).parent()
             && parent != std::path::Path::new("") {
@@ -152,8 +172,19 @@ impl Registry {
         let Ok(text) = serde_json::to_string_pretty(&file) else {
             return Err(std::io::Error::other("registry: could not serialise the file"));
         };
-        std::fs::write(&tmp, text)?;
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, &self.path)?;
+        if let Some(parent) = std::path::Path::new(&self.path).parent() {
+            let dir = if parent == std::path::Path::new("") { std::path::Path::new(".") } else { parent };
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
         Ok(())
     }
 
@@ -229,14 +260,17 @@ impl Registry {
             removed.push(id);
         }
 
-        // Pass 2: hard cap, oldest-updated first.
+        // Pass 2: hard cap, oldest-updated first. A running session is never
+        // evicted: its record is the only thing that names it, and dropping it
+        // would turn a live shell into an "adoptable" stranger. Past the cap with
+        // only running records left, the cap yields.
         if self.sessions.len() > max_records {
             let mut by_updated: Vec<(String, u64)> = self
                 .order
                 .iter()
                 .filter_map(|id| {
                     let r = self.sessions.get(id)?;
-                    Some((id.clone(), r.updated_at))
+                    (r.status != "running").then(|| (id.clone(), r.updated_at))
                 })
                 .collect();
             by_updated.sort_by_key(|(_, u)| *u);
@@ -445,7 +479,11 @@ mod tests {
         let now: i64 = 1_700_000_000_000;
         for i in 0..10 {
             reg.upsert(record(
-                Over::new().id(&format!("s{i}")).updated_at(now + i),
+                Over::new()
+                    .id(&format!("s{i}"))
+                    .status("dead")
+                    .exited_at(Some(now))
+                    .updated_at(now + i),
             ));
         }
         let mut removed = reg.prune(None, Some(4), now);
@@ -673,5 +711,36 @@ mod tests {
             "proj"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_corrupt_registry_is_kept_aside_not_silently_replaced() {
+        let root = temp_dir();
+        let reg_path = path(&root, "reg.json");
+        std::fs::write(&reg_path, "{ this is not json").unwrap();
+        let mut reg = Registry::new(&reg_path);
+        reg.load();
+        assert!(reg.list().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(format!("{reg_path}.corrupt")).unwrap(),
+            "{ this is not json"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_cap_never_evicts_a_running_session() {
+        let root = temp_dir();
+        let mut reg = Registry::new(path(&root, "cap.json"));
+        reg.upsert(record(Over::new().id("old-running").status("running").updated_at(1)));
+        reg.upsert(record(Over::new().id("dead-1").status("dead").updated_at(2)));
+        reg.upsert(record(Over::new().id("run-2").status("running").updated_at(3)));
+        let removed = reg.prune(Some(u64::MAX / 4), Some(2), 1_700_000_000_000);
+        assert_eq!(removed, vec!["dead-1".to_string()]);
+        assert!(reg.get("old-running").is_some());
+        // Only running records left over the cap: the cap yields.
+        let removed = reg.prune(Some(u64::MAX / 4), Some(1), 1_700_000_000_000);
+        assert!(removed.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

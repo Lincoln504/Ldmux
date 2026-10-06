@@ -1,18 +1,30 @@
-//! The daemon's single-instance lock (a pid lockfile, `ldmuxd.lock`).
+//! The daemon's single-instance lock (`ldmuxd.lock`).
 //!
-//! A file that contains the daemon's pid, created exclusively (O_CREAT | O_EXCL).
-//! A concurrent daemon that finds the lock held by a *live* pid refuses to start;
-//! one that finds it held by a *dead* pid steals it (the daemon crashed without
-//! releasing).
+//! An exclusive, non-blocking `flock` on the file, with the daemon's pid written
+//! into it for humans. A concurrent daemon that cannot take the flock refuses to
+//! start ("ldmuxd already running").
 //!
-//! This is the §3.2 daemon-side piece. The keeper uses a `flock` (the kernel
-//! releases it on death); the daemon's lock is a pid lockfile because the TS
-//! daemon uses one and the parity suite exercises the steal path.
+//! The lock is the kernel's, not the file's: it dies with the process, so a
+//! crashed daemon leaves nothing to steal, and two daemons starting at once
+//! cannot both win. (This was a pid file created `O_EXCL`: the stale-lock steal
+//! was remove-then-recreate, which two daemons could both do, and its liveness
+//! test read `/proc`, which is Linux-only.) It is the same mechanism the keeper
+//! supervisor uses for `keeper.lock`.
+//!
+//! The file is **never unlinked**. Unlinking a flocked file races with an
+//! acquirer that already opened the old inode: it would lock a file nobody else
+//! can see while a second daemon creates a new one. Releasing is closing the
+//! descriptor, which is also all a kill does.
 
-/// The daemon's single-instance lock (a pid lockfile, `ldmuxd.lock`).
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::AsRawFd;
+
+/// The daemon's single-instance lock.
 pub struct DaemonLock {
     lock_path: std::path::PathBuf,
-    owns: bool,
+    /// The open, flocked file; `Some` exactly while this process owns the lock.
+    file: Option<File>,
 }
 
 impl DaemonLock {
@@ -20,84 +32,57 @@ impl DaemonLock {
     pub fn new(state_dir: &std::path::Path) -> Self {
         Self {
             lock_path: state_dir.join("ldmuxd.lock"),
-            owns: false,
+            file: None,
         }
     }
 
     /// Try to acquire the lock.
     ///
-    /// Creates the file exclusively. If it exists, reads the recorded pid; if
-    /// that pid is live, refuses with "ldmuxd already running"; if it is dead
-    /// (or the file is unreadable), steals the lock.
+    /// Refuses with "ldmuxd already running" when another process holds it.
+    /// Taking it is atomic, so there is no steal path to race on.
     pub fn acquire(&mut self) -> Result<(), String> {
-        if let Err(e) = Self::create_and_write(&self.lock_path) {
-            if matches!(e.kind(), std::io::ErrorKind::AlreadyExists) {
-                // Lock exists: steal only if the recorded pid is dead.
-                let recorded = std::fs::read_to_string(&self.lock_path)
-                    .ok()
-                    .and_then(|s| s.trim().parse::<i32>().ok())
-                    .unwrap_or(0);
-                if recorded > 0 && is_process_alive(recorded) {
-                    return Err("ldmuxd already running".to_string());
-                }
-                // Steal: remove the stale lock and retry.
-                let _ = std::fs::remove_file(&self.lock_path);
-                Self::create_and_write(&self.lock_path)
-                    .map_err(|e| format!("create lock after steal: {e}"))?;
-                self.owns = true;
-                return Ok(());
-            }
-            return Err(format!("open lock: {e}"));
+        use std::os::unix::fs::OpenOptionsExt;
+        if self.file.is_some() {
+            return Ok(());
         }
-        self.owns = true;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&self.lock_path)
+            .map_err(|e| format!("open lock: {e}"))?;
+        // SAFETY: `flock` on a descriptor this function owns for the call.
+        let rc = unsafe { nix::libc::flock(file.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            return if err.raw_os_error() == Some(nix::libc::EWOULDBLOCK) {
+                Err("ldmuxd already running".to_string())
+            } else {
+                Err(format!("lock {}: {err}", self.lock_path.display()))
+            };
+        }
+        // Ours now: record the pid (informational) over whatever a dead owner left.
+        file.set_len(0).map_err(|e| format!("write lock: {e}"))?;
+        write!(file, "{}", std::process::id()).map_err(|e| format!("write lock: {e}"))?;
+        self.file = Some(file);
         Ok(())
     }
 
-    /// Release the lock (remove the file).
+    /// Release the lock (close the descriptor). The file stays, see the module docs.
     pub fn release(&mut self) {
-        if !self.owns {
-            return;
-        }
-        self.owns = false;
-        let _ = std::fs::remove_file(&self.lock_path);
+        self.file = None;
     }
 
     /// Does the daemon own the lock?
     pub fn owns(&self) -> bool {
-        self.owns
+        self.file.is_some()
     }
 
     /// The lock path (for tests).
     pub fn path(&self) -> &std::path::Path {
         &self.lock_path
-    }
-
-    /// Create the lock file exclusively and write our pid into it.
-    fn create_and_write(path: &std::path::Path) -> Result<(), std::io::Error> {
-        use std::io::Write;
-        let mut fd = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        if let Err(e) = write!(fd, "{}", std::process::id()) {
-            let _ = std::fs::remove_file(path);
-            return Err(e);
-        }
-        Ok(())
-    }
-}
-
-/// Is the process alive? On Linux, `/proc/<pid>/` exists iff the process is
-/// alive — the same liveness contract as the TS daemon's `process.kill(pid, 0)`
-/// (a process that exists is signalable, one that doesn't is not). A dead pid
-/// leaves no `/proc` entry, so the lock is steal-able.
-fn is_process_alive(pid: i32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
-}
-
-impl Drop for DaemonLock {
-    fn drop(&mut self) {
-        self.release();
     }
 }
 
@@ -112,27 +97,34 @@ mod tests {
         p
     }
 
-    /// A second daemon that finds a *live* lock refuses to start.
+    /// A second daemon that finds the lock held refuses to start.
     #[test]
-    fn refuses_when_a_live_pid_holds_the_lock() {
+    fn refuses_when_another_daemon_holds_the_lock() {
         let dir = state_dir();
         let mut lock = DaemonLock::new(&dir);
         lock.acquire().unwrap();
 
-        // A concurrent daemon sees a live pid (ours) and refuses.
         let mut other = DaemonLock::new(&dir);
         let err = other.acquire().unwrap_err();
         assert!(err.contains("already running"), "got: {err}");
         assert!(!other.owns());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // A daemon that sees a *dead* pid steals the lock.
-        let mut dead = DaemonLock::new(&dir);
-        // Rewrite the lock with a dead pid (a crashed daemon that didn't release).
+    /// A lock file a crashed daemon left behind (a dead pid in it, nobody
+    /// holding the flock) is simply taken: there is no liveness probe to get wrong.
+    #[test]
+    fn a_lock_file_nobody_holds_is_taken_whatever_pid_it_names() {
+        let dir = state_dir();
         std::fs::write(dir.join("ldmuxd.lock"), "999999999").unwrap();
-        dead.acquire().unwrap();
-        assert!(dead.owns());
-        assert_eq!(std::fs::read_to_string(dir.join("ldmuxd.lock")).unwrap(), format!("{}", std::process::id()));
-
+        let mut lock = DaemonLock::new(&dir);
+        lock.acquire().unwrap();
+        assert!(lock.owns());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ldmuxd.lock")).unwrap(),
+            std::process::id().to_string()
+        );
+        // ...and a live pid in the file does not stand in for the flock either.
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -145,11 +137,61 @@ mod tests {
         assert!(a.owns());
         a.release();
         assert!(!a.owns());
-        assert!(!dir.join("ldmuxd.lock").exists());
 
         let mut b = DaemonLock::new(&dir);
         b.acquire().unwrap();
         assert!(b.owns());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Releasing must not take away a lock somebody else now holds. The old
+    /// release removed the file by path, so a daemon whose lock had been taken
+    /// (or that never owned it) deleted the new owner's lock and let a third
+    /// daemon start beside it.
+    #[test]
+    fn releasing_never_takes_a_lock_someone_else_holds() {
+        let dir = state_dir();
+        let mut first = DaemonLock::new(&dir);
+        first.acquire().unwrap();
+        // A second handle that never owned it releases: nothing happens.
+        let mut stranger = DaemonLock::new(&dir);
+        stranger.release();
+        let mut third = DaemonLock::new(&dir);
+        assert!(third.acquire().is_err(), "the owner still holds it");
+        // Once the owner lets go, the next one gets it.
+        first.release();
+        third.acquire().unwrap();
+        // And dropping an old, released handle does not disturb the new owner.
+        drop(first);
+        let mut fourth = DaemonLock::new(&dir);
+        assert!(fourth.acquire().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two daemons racing for the lock cannot both win.
+    #[test]
+    fn concurrent_acquirers_have_exactly_one_winner() {
+        let dir = state_dir();
+        let wins = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let held: std::sync::Arc<std::sync::Mutex<Vec<DaemonLock>>> = Default::default();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (dir, wins, barrier, held) = (dir.clone(), wins.clone(), barrier.clone(), held.clone());
+                std::thread::spawn(move || {
+                    let mut l = DaemonLock::new(&dir);
+                    barrier.wait();
+                    if l.acquire().is_ok() {
+                        wins.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        held.lock().unwrap().push(l);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(wins.load(std::sync::atomic::Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

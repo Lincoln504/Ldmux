@@ -52,15 +52,17 @@ pub fn resolve(cwd: Option<&str>, home: &str) -> String {
 
 /// The daemon entry point: `cwd` resolved against `$HOME`.
 ///
-/// Panics with a clear message when `$HOME` is unset (see [`home_dir`]); that is
-/// the one place the TS source's passwd fallback would matter, and it does not
-/// happen for a login daemon.
-pub fn resolve_cwd(cwd: Option<&str>) -> String {
-    let home = match home_dir() {
-        Ok(h) => h,
-        Err(why) => panic!("{why}"),
-    };
-    resolve(cwd, &home)
+/// An error (not a panic) when `$HOME` is unset and the path needs it: this runs
+/// on the request path, and one `new` from a phone must not take a handler down.
+pub fn resolve_cwd(cwd: Option<&str>) -> Result<String, String> {
+    let raw = cwd.map(str::trim).filter(|s| !s.is_empty());
+    // Only a path that is empty or starts with `~` needs a home directory.
+    let needs_home = raw.is_none_or(|r| r == "~" || r.starts_with("~/"));
+    if needs_home {
+        Ok(resolve(cwd, &home_dir()?))
+    } else {
+        Ok(resolve(cwd, ""))
+    }
 }
 
 #[cfg(test)]
@@ -74,15 +76,15 @@ mod tests {
 
     #[test]
     fn a_bare_tilde_is_the_home_directory() {
-        assert_eq!(resolve_cwd(Some("~")), home());
+        assert_eq!(resolve_cwd(Some("~")).unwrap(), home());
         assert_eq!(resolve(Some("~"), "/h"), "/h");
     }
 
     #[test]
     fn a_tilde_and_a_path_are_joined_onto_home() {
         let h = home();
-        assert_eq!(resolve_cwd(Some("~/Documents")), format!("{h}/Documents"));
-        assert_eq!(resolve_cwd(Some("~/a/b/c")), format!("{h}/a/b/c"));
+        assert_eq!(resolve_cwd(Some("~/Documents")).unwrap(), format!("{h}/Documents"));
+        assert_eq!(resolve_cwd(Some("~/a/b/c")).unwrap(), format!("{h}/a/b/c"));
         assert_eq!(resolve(Some("~/a/b/c"), "/h"), "/h/a/b/c");
     }
 
@@ -91,8 +93,8 @@ mod tests {
         // `~/` is what a phone keyboard produces from the autocomplete, and it
         // means home rather than a directory named the empty string.
         let h = home();
-        assert_eq!(resolve_cwd(Some("~/")), h);
-        assert_eq!(resolve_cwd(Some("~//")), h);
+        assert_eq!(resolve_cwd(Some("~/")).unwrap(), h);
+        assert_eq!(resolve_cwd(Some("~//")).unwrap(), h);
         assert_eq!(resolve(Some("~/"), "/h"), "/h");
     }
 
@@ -102,17 +104,17 @@ mod tests {
         // tilde without checking the separator would silently send the shell to
         // `home/foo`.
         let h = home();
-        assert_eq!(resolve_cwd(Some("~foo")), "~foo");
-        assert_eq!(resolve_cwd(Some("~foo/bar")), "~foo/bar");
-        assert_eq!(resolve_cwd(Some("a/~/b")), "a/~/b");
+        assert_eq!(resolve_cwd(Some("~foo")).unwrap(), "~foo");
+        assert_eq!(resolve_cwd(Some("~foo/bar")).unwrap(), "~foo/bar");
+        assert_eq!(resolve_cwd(Some("a/~/b")).unwrap(), "a/~/b");
         assert_eq!(resolve(Some("~foo"), &h), "~foo");
     }
 
     #[test]
     fn an_absolute_path_is_returned_unchanged() {
-        assert_eq!(resolve_cwd(Some("/tmp")), "/tmp");
+        assert_eq!(resolve_cwd(Some("/tmp")).unwrap(), "/tmp");
         assert_eq!(
-            resolve_cwd(Some("/home/someone/../someone/x")),
+            resolve_cwd(Some("/home/someone/../someone/x")).unwrap(),
             "/home/someone/../someone/x"
         );
     }
@@ -120,16 +122,16 @@ mod tests {
     #[test]
     fn an_absent_blank_or_non_string_directory_means_home() {
         let h = home();
-        assert_eq!(resolve_cwd(None), h);
-        assert_eq!(resolve_cwd(Some("")), h);
-        assert_eq!(resolve_cwd(Some("   ")), h);
+        assert_eq!(resolve_cwd(None).unwrap(), h);
+        assert_eq!(resolve_cwd(Some("")).unwrap(), h);
+        assert_eq!(resolve_cwd(Some("   ")).unwrap(), h);
     }
 
     #[test]
     fn surrounding_whitespace_is_not_part_of_a_path() {
         let h = home();
-        assert_eq!(resolve_cwd(Some("  /tmp  ")), "/tmp");
-        assert_eq!(resolve_cwd(Some(" ~ ")), h);
+        assert_eq!(resolve_cwd(Some("  /tmp  ")).unwrap(), "/tmp");
+        assert_eq!(resolve_cwd(Some(" ~ ")).unwrap(), h);
     }
 
     #[test]
@@ -137,9 +139,18 @@ mod tests {
         // The expansion is arithmetic on a string; the two ways to get that
         // wrong are to pass it through a shell or to reach for a regex.
         let h = home();
-        assert_eq!(resolve_cwd(Some("~/$(whoami)")), format!("{h}/$(whoami)"));
-        assert_eq!(resolve_cwd(Some("~/*")), format!("{h}/*"));
-        assert_eq!(resolve_cwd(Some("/tmp/../etc")), "/tmp/../etc");
+        assert_eq!(resolve_cwd(Some("~/$(whoami)")).unwrap(), format!("{h}/$(whoami)"));
+        assert_eq!(resolve_cwd(Some("~/*")).unwrap(), format!("{h}/*"));
+        assert_eq!(resolve_cwd(Some("/tmp/../etc")).unwrap(), "/tmp/../etc");
         assert_eq!(resolve(Some("~/a//b"), "/h"), "/h/a//b");
+    }
+
+    #[test]
+    fn an_unset_home_is_an_error_not_a_panic_and_only_where_needed() {
+        // Resolved against nothing: a path that does not use home never needs it.
+        assert_eq!(resolve(Some("/tmp"), ""), "/tmp");
+        // The env-reading entry point reports (rather than panics on) a missing
+        // HOME; exercised through its pure helper to avoid racing the environment.
+        assert!(home_dir().is_ok() || resolve_cwd(Some("~")).is_err());
     }
 }

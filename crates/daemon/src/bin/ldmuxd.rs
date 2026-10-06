@@ -8,11 +8,12 @@
 //!
 //! Environment:
 //! - `LDMUX_STATE_DIR` — the state directory (default: `~/.ldmux`).
-//! - `LDMUX_SOCK` — the control socket path (default: `<state_dir>/ldmuxd.sock`).
+//! - `LDMUX_SOCK` — the control socket path (default: `<state_dir>/ldmuxd.sock`);
+//!   resolved by `ldmux_protocol::paths`, the same resolver the CLI and the attach
+//!   client use.
 //! - `LDMUX_REMOTE_HOST` — the tailnet or loopback address (default: `127.0.0.1`).
 //! - `LDMUX_REMOTE_PORT` — the remote port (default: `7623`).
 //! - `LDMUX_TOKEN_FILE` — where the bearer token persists (default: `<state_dir>/token`).
-//! - `LDMUX_STREAM_TRANSPORT` — `"control"` (default) or `"pipe"`.
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_protocol::net::is_tailnet_or_loopback;
@@ -103,16 +104,27 @@ fn main() {
     // hex, dir 0700, file 0600, legacy adoption). `LDMUX_TOKEN_FILE` moves it
     // out of the state dir; otherwise it lives at `<state_dir>/token`.
     let token_path_env = std::env::var("LDMUX_TOKEN_FILE").ok();
-    let token = ldmux_daemon::auth::load_or_create_token(
+    let token = match ldmux_daemon::auth::load_or_create_token(
         &state_dir.to_string_lossy(),
         token_path_env.as_deref(),
-    );
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ldmuxd: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // The control socket: `LDMUX_SOCK` or `<state_dir>/ldmuxd.sock`, through the
+    // one resolver every client uses, so they all look where the daemon binds.
+    let socket_path = PathBuf::from(ldmux_protocol::paths::resolve_socket_path());
 
     // Create the daemon. The keeper is the binary beside this one.
     let keeper_bin = std::env::current_exe()
         .map(|exe| keeper_beside(&exe))
         .unwrap_or_else(|_| PathBuf::from("ldmux-keeper"));
     let daemon = LdmuxDaemon::new(state_dir.clone(), keeper_bin)
+        .with_socket_path(socket_path.clone())
         .with_remote(remote_host.clone(), remote_port, token);
     // Wrap the daemon in an `Arc<tokio::sync::Mutex>` so the control socket's
     // spawned tasks can call `handle` (which takes `&mut self`).
@@ -123,6 +135,23 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let daemon_ref = daemon_arc.clone();
     rt.block_on(async move {
+        // The handlers go in **before** `start`: a SIGTERM that arrives while
+        // the daemon is starting is held by the stream and acted on as soon as
+        // start returns (so it is stopped, not killed half-started).
+        let mut sigterm = match tokio::signal::unix::signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ldmuxd: failed to install SIGTERM handler: {e}");
+                std::process::exit(1);
+            }
+        };
+        let mut sigint = match tokio::signal::unix::signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ldmuxd: failed to install SIGINT handler: {e}");
+                std::process::exit(1);
+            }
+        };
         // The daemon is inside the `Arc`. We need a `&mut` reference to call
         // `start`. The `Arc`'s `Mutex` gives us that.
         let mut d = daemon_ref.lock().await;
@@ -139,6 +168,8 @@ fn main() {
                     println!("ldmuxd already running");
                     std::process::exit(0);
                 }
+                // Half-started: give back what start took before exiting.
+                d.stop();
                 eprintln!("ldmuxd: {e}");
                 std::process::exit(1);
             }
@@ -146,24 +177,8 @@ fn main() {
         // Drop the mutable guard (the daemon is started).
         drop(d);
 
-        // Watch for SIGTERM/SIGINT (the graceful shutdown, the TS
-        // `process.on('SIGTERM', ...)`). When a signal is received,
-        // stop the daemon (release the lock, close streams, drop the
-        // daemon) and exit.
-        let mut sigterm = match tokio::signal::unix::signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("ldmuxd: failed to install SIGTERM handler: {e}");
-                std::process::exit(1);
-            }
-        };
-        let mut sigint = match tokio::signal::unix::signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("ldmuxd: failed to install SIGINT handler: {e}");
-                std::process::exit(1);
-            }
-        };
+        // Watch for SIGTERM/SIGINT (the graceful shutdown). When a signal is
+        // received, stop the daemon (release the lock, close streams) and exit.
         tokio::select! {
             _ = sigterm.recv() => {
                 eprintln!("ldmuxd: SIGTERM received, stopping");
@@ -172,9 +187,20 @@ fn main() {
                 eprintln!("ldmuxd: SIGINT received, stopping");
             }
         }
-        let mut d2 = daemon_ref.lock().await;
-        d2.stop();
-        drop(d2);
+        // A handler stuck holding the daemon lock (a wedged keeper, a hung window
+        // manager) must not make the daemon unstoppable: wait a few seconds for
+        // an orderly stop, then do what matters without the lock. The flock dies
+        // with the process, so the socket file is all that has to be removed.
+        match tokio::time::timeout(std::time::Duration::from_secs(3), daemon_ref.lock()).await {
+            Ok(mut d2) => d2.stop(),
+            Err(_) => {
+                eprintln!("ldmuxd: the daemon lock is busy; stopping without it");
+                let _ = std::fs::remove_file(&socket_path);
+            }
+        }
+        // Not a return: the runtime would wait for blocking tasks (a stream poll
+        // stuck on the keeper) before dropping.
+        std::process::exit(0);
     });
 }
 

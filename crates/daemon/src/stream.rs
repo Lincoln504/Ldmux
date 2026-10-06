@@ -30,8 +30,21 @@ use ldmux_protocol::keeper::{KeeperMessage, Snapshot};
 struct Sub {
     /// The subscriber's unique id (for removal by id, not by position).
     id: usize,
-    /// The subscriber (the `on_output`/`on_reset` callbacks).
-    sub: StreamSubscriber,
+    /// The subscriber (the `on_output`/`on_reset` callbacks). An `Arc` so a
+    /// delivery can clone the list and call out **after** the `subs` lock is
+    /// released: the callbacks take the connection's own lock, and the connection
+    /// takes `subs` (to unsubscribe) while holding it, so calling them under
+    /// `subs` is a lock-order inversion.
+    sub: Arc<StreamSubscriber>,
+}
+
+/// Lock a mutex, recovering the guard if a panicking holder poisoned it.
+///
+/// The state behind these locks is plain data that stays valid across a panic
+/// (a byte buffer, a subscriber list, a flag), and one handler's panic must not
+/// make every later call on the daemon panic too.
+pub(crate) fn relock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 // The trait-object fields are the complexity (the callbacks are `Send + Sync`
@@ -97,6 +110,14 @@ impl KeeperConn for SocketKeeperConn {
         use std::io::{Read, Write};
         let mut sock = std::os::unix::net::UnixStream::connect(&self.socket)
             .map_err(|e| format!("connect: {e}"))?;
+        // Bounded like `keeper_call`: this runs on a blocking thread, and a
+        // keeper that stops answering would otherwise pin it (and, for the poll
+        // thread, hold the stream's gate) forever.
+        let timeout = Some(std::time::Duration::from_millis(
+            ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+        ));
+        sock.set_read_timeout(timeout).map_err(|e| format!("timeout: {e}"))?;
+        sock.set_write_timeout(timeout).map_err(|e| format!("timeout: {e}"))?;
         let line = format!(
             "{}\n",
             serde_json::to_string(req).map_err(|e| e.to_string())?
@@ -114,7 +135,7 @@ impl KeeperConn for SocketKeeperConn {
                 break;
             }
         }
-        let nl = buf.iter().position(|&b| b == b'\n').unwrap();
+        let nl = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
         let line = String::from_utf8_lossy(&buf[..nl]).to_string();
         let res: KeeperMessage =
             serde_json::from_str(&line).map_err(|e| format!("parse: {e}"))?;
@@ -146,7 +167,7 @@ impl PaneStream {
     /// Chosen when the stream is made, from the persisted policy
     /// (`clipboard_policy`), so changing it needs no daemon restart.
     pub fn with_clipboard_write(self, on: bool) -> Self {
-        *self.sanitizer.lock().unwrap() = crate::sanitize::Sanitizer::new(on);
+        *self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()) = crate::sanitize::Sanitizer::new(on);
         self
     }
 
@@ -157,7 +178,7 @@ impl PaneStream {
 
     /// The number of subscribers.
     pub fn subscriber_count(&self) -> usize {
-        self.subs.lock().unwrap().len()
+        self.subs.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Subscribe a subscriber. Returns an unsubscribe fn.
@@ -167,7 +188,7 @@ impl PaneStream {
     pub fn subscribe(&self, sub: StreamSubscriber) -> (usize, Box<dyn Fn() + Send + Sync + '_>) {
         let id_for_close = self.register(sub);
         (id_for_close, Box::new(move || {
-            let mut subs = self.subs.lock().unwrap();
+            let mut subs = relock(&self.subs);
             // Remove by id (not by position — other subscribers may have
             // been added/removed since this one was pushed).
             subs.retain(|s| s.id != id_for_close);
@@ -184,7 +205,7 @@ impl PaneStream {
         let id_for_close = self.register(sub);
         let me = Arc::clone(self);
         (id_for_close, Box::new(move || {
-            let mut subs = me.subs.lock().unwrap();
+            let mut subs = relock(&me.subs);
             subs.retain(|s| s.id != id_for_close);
         }))
     }
@@ -193,8 +214,17 @@ impl PaneStream {
     /// and `subscribe_owned`).
     fn register(&self, sub: StreamSubscriber) -> usize {
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
-        self.subs.lock().unwrap().push(Sub { id, sub });
+        relock(&self.subs).push(Sub { id, sub: Arc::new(sub) });
         id
+    }
+
+    /// The subscribers as they are now, cloned out so a caller can invoke their
+    /// callbacks without holding `subs` (see [`Sub`]).
+    fn subscribers(&self) -> Vec<(usize, Arc<StreamSubscriber>)> {
+        relock(&self.subs)
+            .iter()
+            .map(|s| (s.id, Arc::clone(&s.sub)))
+            .collect()
     }
 
     /// Deliver `text` to every subscriber (the fanout), through the sanitizer.
@@ -207,14 +237,15 @@ impl PaneStream {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
-        let clean = self.sanitizer.lock().unwrap().push(text);
+        let clean = relock(&self.sanitizer).push(text);
         if clean.is_empty() {
             return;
         }
         let bytes = clean.as_bytes();
-        let subs = self.subs.lock().unwrap();
-        for sub in subs.iter().filter(|s| Some(s.id) != skip) {
-            (sub.sub.on_output)(bytes);
+        for (id, sub) in self.subscribers() {
+            if Some(id) != skip {
+                (sub.on_output)(bytes);
+            }
         }
     }
 
@@ -325,7 +356,7 @@ impl PaneStream {
     where
         F: FnOnce(&ldmux_protocol::keeper::SnapshotResult, u64),
     {
-        let _gate = self.gate.lock().unwrap();
+        let _gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         let mut sr = self.request_snapshot(history_lines, true)?;
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let tail = std::mem::take(&mut sr.tail);
@@ -352,11 +383,12 @@ impl PaneStream {
     pub fn close(&self, reason: &str) {
         self.closed.store(true, Ordering::Relaxed);
         self.poll_stop.store(true, Ordering::Relaxed);
-        let mut subs = self.subs.lock().unwrap();
-        for sub in subs.iter() {
+        // Take the list out, release the lock, then tell them: `on_reset` takes
+        // the connection's lock.
+        let subs = std::mem::take(&mut *relock(&self.subs));
+        for sub in subs {
             (sub.sub.on_reset)(reason);
         }
-        subs.clear();
     }
 
     /// One poll iteration: pull the keeper's buffered output and fan it out.
@@ -371,7 +403,7 @@ impl PaneStream {
         }
         // Held across the keeper call and the fanout: a snapshot must not slot
         // between "bytes taken from the keeper" and "bytes delivered".
-        let _gate = self.gate.lock().unwrap();
+        let _gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         let req = KeeperMessage::Peek(ldmux_protocol::keeper::Peek {
             session_id: self.session_id.clone(),
         });
@@ -382,18 +414,18 @@ impl PaneStream {
                 // watching (a fresh stream's first poll). It is not live output
                 // for anyone, and whoever subscribes next is sent a snapshot that
                 // already contains it. Drop it, along with any half-sequence.
-                if self.subs.lock().unwrap().is_empty() {
-                    self.utf8_carry.lock().unwrap().clear();
-                    self.sanitizer.lock().unwrap().reset();
+                if self.subs.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                    self.utf8_carry.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()).reset();
                     return Ok(());
                 }
                 if pr.lost {
                     // The keeper discarded output nobody was reading: whoever is
                     // watching now has a stale picture and must resync.
-                    self.utf8_carry.lock().unwrap().clear();
-                    self.sanitizer.lock().unwrap().reset();
-                    for sub in self.subs.lock().unwrap().iter() {
-                        (sub.sub.on_reset)("output was discarded while unread; resync from a snapshot");
+                    self.utf8_carry.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    self.sanitizer.lock().unwrap_or_else(|e| e.into_inner()).reset();
+                    for (_, sub) in self.subscribers() {
+                        (sub.on_reset)("output was discarded while unread; resync from a snapshot");
                     }
                 }
                 if !pr.data.is_empty()
@@ -411,7 +443,7 @@ impl PaneStream {
     /// (the pipeline downstream is `&str`), but a character that merely
     /// straddles two peeks is no longer corrupted.
     fn decode_chunk(&self, data: Vec<u8>) -> Option<String> {
-        let text = self.utf8_carry.lock().unwrap().decode(&data);
+        let text = self.utf8_carry.lock().unwrap_or_else(|e| e.into_inner()).decode(&data);
         (!text.is_empty()).then_some(text)
     }
 
@@ -1018,5 +1050,72 @@ mod tests {
             }
             assert_eq!(*got.lock().unwrap(), bytes, "split at {split}");
         }
+    }
+
+    /// The lock-order inversion: a connection holds its own lock and unsubscribes
+    /// (which takes `subs`), while the stream's thread holds `subs` and calls the
+    /// connection's callback (which takes the connection's lock). Both ends are
+    /// driven to the point of crossing; before the fix this deadlocked, so the
+    /// test waits on a channel with a deadline instead of joining.
+    fn crossing(close_instead_of_fanout: bool) {
+        let stream = Arc::new(PaneStream::new("s".into(), Box::new(TestKeeper)));
+        let conn: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+        let in_callback = Arc::new(AtomicBool::new(false));
+        let (c1, c2, f1, f2) = (conn.clone(), conn.clone(), in_callback.clone(), in_callback.clone());
+        let (id, unsub) = stream.subscribe_owned(StreamSubscriber {
+            on_output: Box::new(move |_| {
+                f1.store(true, Ordering::SeqCst);
+                drop(c1.lock().unwrap());
+            }),
+            on_reset: Box::new(move |_| {
+                f2.store(true, Ordering::SeqCst);
+                drop(c2.lock().unwrap());
+            }),
+        });
+        let _ = id;
+        // The connection side: take its lock first, wait for the stream's side to
+        // be inside the callback, then unsubscribe while still holding the lock.
+        let held = conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+        let s2 = stream.clone();
+        let tx2 = tx.clone();
+        std::thread::spawn(move || {
+            if close_instead_of_fanout {
+                s2.close("test");
+            } else {
+                s2.fanout("x");
+            }
+            let _ = tx2.send("stream side done");
+        });
+        let t0 = std::time::Instant::now();
+        while !in_callback.load(Ordering::SeqCst) {
+            assert!(t0.elapsed().as_secs() < 5, "the stream side never reached the callback");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Give the stream thread time to block on `conn`, still holding whatever it holds.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let tx3 = tx.clone();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            go_rx.recv().ok();
+            unsub();
+            let _ = tx3.send("unsubscribe done");
+        });
+        go_tx.send(()).unwrap();
+        // With the fix, unsubscribe finishes while the connection lock is held.
+        let first = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(first, Ok("unsubscribe done"), "unsubscribe must not wait on the stream's lock");
+        drop(held);
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok("stream side done"));
+    }
+
+    #[test]
+    fn fanout_and_a_connection_unsubscribing_do_not_deadlock() {
+        crossing(false);
+    }
+
+    #[test]
+    fn close_and_a_connection_unsubscribing_do_not_deadlock() {
+        crossing(true);
     }
 }
