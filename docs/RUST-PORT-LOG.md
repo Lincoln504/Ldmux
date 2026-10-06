@@ -1889,9 +1889,33 @@ What was measured, rather than only built, on the phone (`adb`, screenshots, and
 at the result): the launcher rows (one line, the folder, the amber "no window" on a
 headless session, the phone glyph on a phone-opened one), switching between two open
 pages (the background page releases the shell, the shown page takes it), the reclaim key
-(above), and the key rows. **Not** measured on the device: tap-to-cursor, the selection
-handles' geometry, and natural scrolling inside a full-screen TUI — those are covered by
-the Kotlin suite and by hand, not by a scripted multi-touch run.
+(above), and the key rows.
+
+**The three that were only hand-verified are scripted now (2026-10-05).** Each is
+measured against the pane's own state, not by eye:
+
+- **Tap-to-cursor.** Type `abcdef` at a prompt from the host, so the pane's cursor is at
+  column 29. Tap the cell where `abcdef` starts (`x=400` of row 0): the daemon's
+  `snapshot` reports **cursorX 23** — the exact cell the tap pointed at. Tap right of the
+  input: **cursorX 29** (readline clamps Right at the end). Tap left of the input:
+  **cursorX 23** again, which is readline clamping Left at the *start of the input* and is
+  the documented behaviour, not a dropped tap.
+- **Selection.** A long-press on the line produces the two handles (screenshot), and
+  releasing copies — the app has no copy button on purpose ("highlight → release copies
+  to system clipboard"). Proven round-trip: select text on screen, paste it into a
+  `cat > /tmp/clip_probe.txt` running in the pane through the landscape panel's `paste`,
+  and read the file back on the host: `^[[200~MARK_7788` — the selection arrived, wrapped
+  in the bracketed-paste markers the pane negotiated.
+- **Natural scrolling in a full-screen TUI.** Plain `less` on a 200-line file (the pane
+  reports `alternateOn: true`): a finger swipe up advances the view (1,2,3 → **17,18,19**
+  after two swipes) and a swipe down at the top does nothing, which is `less`'s own
+  behaviour at the top. The swipe became arrow keys, not keystrokes and not a local
+  scroll: the pane is in the alternate screen, where the client's scrollback does not
+  exist.
+
+The rotation the landscape check needed (`settings put system user_rotation 1`,
+`accelerometer_rotation 0`) was restored afterwards, and the scratch session, its
+directory and its temp files were removed.
 
 ### The reclaim is one key
 
