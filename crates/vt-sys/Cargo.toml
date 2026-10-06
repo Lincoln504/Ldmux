@@ -2,9 +2,14 @@
 name = "ldmux-vt-sys"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "Hand-written thin FFI over the vendored libghostty-vt C library (the one generic accessor + its enums), plus the ergonomic named-accessor wrapper"
-license = "MIT"
 
 [build-dependencies]
 
 [dependencies]
+
+[lints]
+workspace = true

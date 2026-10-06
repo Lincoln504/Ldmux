@@ -1,0 +1,19 @@
+name: audit
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd
+      - name: cargo audit
+        run: nix develop --command cargo audit --deny warnings

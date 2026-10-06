@@ -10,3 +10,15 @@ target/
 
 # Local backups taken before removing gmux; never part of the project.
 .gmux-removal-backup/
+
+# Nix build outputs and direnv state.
+result
+result-*
+.direnv/
+
+# Built artifacts and scratch.
+*.apk
+*.aab
+*.stamp
+.scratch/
+scratch/

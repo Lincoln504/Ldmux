@@ -2,5 +2,28 @@
 resolver = "2"
 members = ["crates/protocol", "crates/daemon", "crates/vt-sys", "crates/keeper", "crates/attach"]
 
+[workspace.package]
+# Verified with rustc 1.95.0 (builds) and 1.93.0 (fails: `if let` guards in
+# daemon/src/cwd.rs). 1.94 was not available to test, so 1.95 is the floor
+# actually proven. Edition 2024 alone would allow 1.85.
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+# `unsafe_code = "deny"` is deliberately not set here: every crate except
+# protocol (which uses #![forbid(unsafe_code)]) contains unsafe, and a deny
+# would need per-site #[allow] edits. Follow-up once the unsafe is annotated.
+# Enabling `undocumented_unsafe_blocks = "warn"` today turns
+# `clippy -D warnings` red (113 sites across attach/daemon/keeper/vt-sys), so
+# it stays off until those blocks get SAFETY comments. Then add it here.
+[workspace.lints.clippy]
+
 [profile.release]
 strip = "symbols"
+# Frame and length parsing must trap on overflow, never wrap silently.
+overflow-checks = true
+lto = "thin"
+codegen-units = 4
+# panic stays "unwind" (the default): the keeper and daemon contain a panic to
+# one tokio task / connection instead of aborting every PTY it owns.
+panic = "unwind"
