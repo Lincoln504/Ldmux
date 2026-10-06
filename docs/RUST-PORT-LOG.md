@@ -208,6 +208,70 @@ of `docs/SPEC.md` against the code, which turned up the three stale statements
 corrected in that file (the idle-client rule, the per-connection queue, and the two
 "still open" phase-4 items).
 
+## The daemon that would not start beside a stale socket, and the launcher that gave up (2026-10-06)
+
+A session-less terminal, and a phone that could not show it, traced back through
+four links of one chain. Every link is measured, and each fix has a test that was
+checked to fail without it.
+
+**The daemon exited when the keeper it needed was starting up.** `start` ran
+`keeper.ensure()` — which spawns a dead keeper and then waited for its **socket
+file to exist** — and then made its first real keeper call. A file that exists is
+not a keeper that answers: a killed keeper leaves its socket file behind, so the
+wait returned immediately on the leftover, the first call connected into a file
+nobody was listening on and got `ECONNREFUSED`, and `keeper_call`'s retry was
+gated on `!is_alive()` — which by then **had** retried for 500 ms and found the
+fresh keeper up, so the original refusal was returned as fatal. The daemon
+exited. systemd restarted it 2 s later. Measured in the journal on this box:
+`ldmuxd: connect: Connection refused (os error 111)` at 02:41:07,
+`Scheduled restart job` at 02:41:09.
+
+Two changes. `wait_for_keeper` now waits until the keeper **answers** (the
+connect that `is_alive` already retries), not until a file exists. And
+`keeper_call` retries on a **connect** failure, not on "the keeper looks dead" —
+which is what makes the retry safe, so `KeeperCallError` now carries a
+[`KeeperCallKind`] instead of being a bare string: a connect failure means the
+request never left this process (a retry cannot apply it twice), while a timeout
+or a read failure means the keeper may have run it already (retrying could type a
+paste twice or open two shells). Test:
+`a_daemon_starts_next_to_a_stale_keeper_socket`, which puts a stale socket in the
+state dir and a **slow** keeper beside it — the slowness is what makes the old
+failure deterministic instead of a race — and fails against the old code with
+exactly the journal's message.
+
+**`ldmux-terminal` gave up on the first failure, so a window opened while the
+daemon was starting became a plain terminal.** The fallback is deliberate (a
+terminal keybinding must always give a terminal) and it is logged, but the
+fallback shell is a **plain pty** — it is not a session, so `ldmux list` does not
+know it, no client can attach to it, and the phone cannot show it. At login the
+keybinding is racing the unit, and the race is easy to lose: measured
+`ldmux-terminal: no ldmux desk window, plain shell instead: ldmux: connect:
+Connection refused (os error 111)` at 02:41:00, with the daemon answering at
+02:41:09. The launcher now retries for up to 3 s, but **only while the daemon is
+absent** — after a failed `window` it asks `ping`, and gives up at once when the
+daemon answers, because a window that will not open will not fix itself in
+250 ms. Three tests in `terminal_launcher.rs` drive the script with a stub
+`ldmux`, a stub `alacritty` and a stub `logger`: the wait, the bounded fallback
+with the daemon's error in the log, and that a reachable daemon's window failure
+is not waited on. The wait test fails against the old launcher.
+
+**The phone showed nothing when a shell ended.** The launcher keeps only
+`attachable` sessions, and a dead session is not attachable, so an ending removed
+a row and said nothing — which reads as the app being broken rather than four
+shells being gone. The launcher now shows the last **five** endings under the
+open shells, struck through, with the daemon's own `endedReason` sentence, so the
+phone and `ldmux list` say the same thing about the same shell. `Session` on the
+phone learned `endedReason`, `endedSessions()` is the pure part and is tested
+(both the cap and that a live shell is not an ending), and the daemon's order is
+what makes "the last five" the newest — checked against `ldmux list`, which put
+the shell that ended at 07:24 before the one that ended at 22:00 the night before.
+
+**One more thing the chain exposed, left alone deliberately:** `ldmuxd` spawns
+the keeper from the bare name `ldmux-keeper` (`crates/daemon/src/bin/ldmuxd.rs`),
+i.e. through `PATH`. It works (the unit's `PATH` has `~/.local/bin`), but it
+means a daemon can be paired with a keeper of another version with no statement
+anywhere. Resolving it beside `current_exe()` would make version skew impossible.
+
 ## Findings log (durable, dated)
 
 - **2026-09-28, port opened.** Plan committed as operative (16cd5bf);
