@@ -112,6 +112,82 @@ async fn read_until(ws: &mut Ws, out: &mut Vec<u8>, needle: &str) -> bool {
     String::from_utf8_lossy(out).contains(needle)
 }
 
+/// The port the daemon actually bound (it is 0 in the config).
+async fn remote_port(arc: &Arc<tokio::sync::Mutex<LdmuxDaemon>>) -> u16 {
+    let v = arc
+        .lock()
+        .await
+        .handle("remote_info", serde_json::json!({}))
+        .await
+        .unwrap();
+    v["port"].as_u64().unwrap() as u16
+}
+
+/// An inbound frame larger than the cap closes the connection.
+///
+/// The TypeScript server was `new WebSocketServer({ maxPayload: 64 * 1024 })`
+/// and the port inherited tungstenite's 64 MiB default instead, so one message
+/// could make the daemon buffer 64 MiB. Nothing a client legitimately sends comes
+/// near 64 KiB (`input` is capped at 16 KiB, `key` at 32 names), and the limit is
+/// on reads only, so a large server→client snapshot is unaffected.
+#[tokio::test]
+async fn a_client_message_over_the_cap_closes_the_connection() {
+    use futures_util::stream::StreamExt;
+
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+    let mut keeper = std::process::Command::new(keeper_bin())
+        .arg(keeper_sock.to_string_lossy().as_ref())
+        .spawn()
+        .unwrap();
+    wait_socket(&keeper_sock).await;
+
+    let token = "cap-token";
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    arc.lock().await.start(&arc).await.unwrap();
+    let port = remote_port(&arc).await;
+
+    let mut ws = connect_authed(port, token).await;
+    // 1 MiB in one text frame: over the 64 KiB cap, far under tungstenite's
+    // 64 MiB default, so the difference is the daemon's config and nothing else.
+    let big = "x".repeat(1024 * 1024);
+    let payload = serde_json::json!({ "type": "input", "data": big }).to_string();
+    send(
+        &mut ws,
+        &serde_json::json!({ "type": "input", "data": big }),
+    )
+    .await;
+    let _ = payload;
+    // The server must close (or error) rather than accept it. Either way the
+    // stream ends: nothing else is coming.
+    let mut closed = false;
+    for _ in 0..100 {
+        match tokio::time::timeout(std::time::Duration::from_millis(50), ws.next()).await {
+            Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) | Ok(None) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Err(_))) => {
+                closed = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(closed, "a 1 MiB message must not be accepted");
+
+    arc.lock().await.stop();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn remote_end_to_end_attach_and_type() {
     let dir = scratch();
@@ -123,12 +199,15 @@ async fn remote_end_to_end_attach_and_type() {
         .unwrap();
     wait_socket(&keeper_sock).await;
 
-    let port: u16 = 49997;
     let token = "e2e-token";
+    // Port 0: the kernel picks, and the daemon reports what it bound. A fixed
+    // port made this file and `attach_client.rs` fight over 49997 — the same
+    // gate failing because two tests, or two runs of the gate, wanted one port.
     let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
-        .with_remote("127.0.0.1".to_string(), port, token.to_string());
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string());
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     arc.lock().await.start(&arc).await.unwrap();
+    let port = remote_port(&arc).await;
 
     let mut ws = connect_authed(port, token).await;
     let mut out: Vec<u8> = Vec::new();

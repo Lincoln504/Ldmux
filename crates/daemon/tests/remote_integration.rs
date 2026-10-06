@@ -102,7 +102,18 @@ async fn plain_get_status(port: u16, token: Option<&str>) -> u16 {
         .unwrap_or(0)
 }
 
-async fn start_daemon(dir: &std::path::Path, port: u16, token: &str) -> std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> {
+/// Boot a daemon with the remote on `port` (0 = let the kernel choose) and hand
+/// back the daemon plus the port it actually bound.
+///
+/// The three tests here used fixed ports (49995, 49996, 49971) and so did
+/// `remote_e2e.rs` (49997): two runs of the gate, or a stray listener, and the
+/// test fails for a reason that has nothing to do with the code. `attach_client.rs`
+/// already read the port back; this is the same fix for the rest.
+async fn start_daemon(
+    dir: &std::path::Path,
+    port: u16,
+    token: &str,
+) -> (std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>>, u16) {
     let keeper_sock = dir.join("keeper.sock");
     let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
     let fk_serve = fk.clone();
@@ -115,15 +126,23 @@ async fn start_daemon(dir: &std::path::Path, port: u16, token: &str) -> std::syn
         .with_remote("127.0.0.1".to_string(), port, token.to_string());
     let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
     arc.lock().await.start(&arc).await.unwrap();
-    arc
+    let bound = arc
+        .lock()
+        .await
+        .handle("remote_info", serde_json::json!({}))
+        .await
+        .unwrap()["port"]
+        .as_u64()
+        .unwrap() as u16;
+    (arc, bound)
 }
 
 #[tokio::test]
 async fn remote_contract_list_new_kill_close() {
     let dir = scratch();
-    let port: u16 = 49995;
+    let port: u16 = 0;
     let token = "test-token";
-    let arc = start_daemon(&dir, port, token).await;
+    let (arc, port) = start_daemon(&dir, port, token).await;
 
     let mut ws = connect_authed(port, token).await;
 
@@ -180,9 +199,9 @@ async fn remote_contract_list_new_kill_close() {
 #[tokio::test]
 async fn remote_rejects_a_missing_token_and_answers_the_probe() {
     let dir = scratch();
-    let port: u16 = 49996;
+    let port: u16 = 0;
     let token = "right-token";
-    let arc = start_daemon(&dir, port, token).await;
+    let (arc, port) = start_daemon(&dir, port, token).await;
 
     // A WS upgrade without the token is refused (the client never gets a socket).
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -207,9 +226,9 @@ async fn remote_rejects_a_missing_token_and_answers_the_probe() {
 #[tokio::test]
 async fn a_silent_peer_does_not_block_the_next_client() {
     let dir = scratch();
-    let port: u16 = 49971;
+    let port: u16 = 0;
     let token = "right-token";
-    let arc = start_daemon(&dir, port, token).await;
+    let (arc, port) = start_daemon(&dir, port, token).await;
 
     let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let started = std::time::Instant::now();
