@@ -1,23 +1,45 @@
 #!/bin/sh
 # super+Return. A terminal keybinding must always give a terminal, so this asks
-# ldmux for a desk window and falls back to a plain shell when it cannot have one
-# — a fresh boot before the unit is up, or a daemon that is down.
+# ldmux for a desk window and falls back to a plain shell when it cannot have
+# one — a fresh boot before the unit is up, or a daemon that is down.
 #
 # A desk window (`ldmux window`), not `ldmux run`: a bare shell nobody held made
 # the phone open it without asking, both typed into one pty, and closing the
 # window left the shell running (ADR-0010). The daemon opens the window itself
-# (alacritty running `ldmuxd attach`), so this wrapper spawns no terminal of its
-# own on success.
+# (alacritty running `ldmuxd attach`), so this wrapper spawns no terminal of
+# its own on success.
 #
 # The fallback is logged. It used to be silent, and a wrapper that could not
 # find the daemon made *every* window a plain shell for days with nothing saying
 # so.
-LDMUX="$HOME/.local/bin/ldmux"
+#
+# It waits first. A window opened at login — the commonest moment for this
+# keybinding, since the session is starting and so is the daemon — used to lose
+# the race by a couple of seconds and drop straight to the fallback. That
+# fallback shell is a plain pty: it is not a session, so no client can see it,
+# `ldmux list` does not know it, and the phone cannot open it. Measured on
+# 2026-10-06: this wrapper ran at 02:41:00, the daemon answered at 02:41:09
+# after a crash, and the terminal the user then started pi in was a plain
+# session-less shell (`no ldmux desk window, plain shell instead: ldmux:
+# connect: Connection refused (os error 111)`).
+#
+# Only a daemon that is *absent* is worth waiting for; the loop asks `ping`
+# after a failed window and gives up at once when the daemon answers, because
+# a terminal that will not open will not fix itself in 250 ms.
+LDMUX="${LDMUX:-$HOME/.local/bin/ldmux}"
 err=$(mktemp) || err=/dev/null
-if "$LDMUX" window "${PWD:-$HOME}" >/dev/null 2>"$err"; then
-  rm -f "$err"
-  exit 0
-fi
+tries=0
+while [ "$tries" -lt 12 ]; do
+  if "$LDMUX" window "${PWD:-$HOME}" >/dev/null 2>"$err"; then
+    rm -f "$err"
+    exit 0
+  fi
+  if "$LDMUX" ping >/dev/null 2>&1; then
+    break
+  fi
+  tries=$((tries + 1))
+  sleep 0.25
+done
 logger -t ldmux-terminal "no ldmux desk window, plain shell instead: $(head -c 300 "$err" 2>/dev/null)"
 [ "$err" = /dev/null ] || rm -f "$err"
 exec alacritty
