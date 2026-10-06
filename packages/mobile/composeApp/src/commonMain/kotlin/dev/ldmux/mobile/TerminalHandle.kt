@@ -223,17 +223,38 @@ interface TerminalHandle {
 }
 
 /**
+ * Whether a page should be connected: it is the one on screen, and the app is.
+ *
+ * The second half was missing and it was visible from the other end: backgrounding
+ * the app left the page attached for the whole [BackgroundSession.releaseGraceMs]
+ * grace, so a desk window went on saying "This shell is open on another device.
+ * Press r to take it back" — with no page in front of anyone, and nothing but an
+ * app in the background using the shell (2026-10-05).
+ *
+ * Nothing is lost by letting go: the shell is safe in the keeper on the host, the
+ * page keeps its last frame, and coming back to the app re-attaches — which takes
+ * the shell over, because arriving *is* the consent (ADR-0010).
+ */
+internal fun pageIsConnected(shown: Boolean, appOnScreen: Boolean): Boolean =
+    shown && appOnScreen
+
+/**
  * Create (or reuse) the native terminal surface for one session.
  *
  * [typing] is the app-wide typing mode: the surface focuses its input
  * connection (raising the keyboard) and the platform flips to portrait while it
  * is set.
  *
- * [active] is whether this page is the one on screen. The pager keeps a
- * neighbour composed so a swipe is instant, but a composed page must not stay
- * *connected*: that would stream output for a terminal nobody is looking at and,
- * because the client owns the pane geometry, resize the panes of sessions the
- * user is not on.
+ * [active] is whether this page is the one on screen **and the app is on screen**:
+ * the pager keeps a neighbour composed so a swipe is instant, but a composed page
+ * must not stay *connected*. That would stream output for a terminal nobody is
+ * looking at and, because the client owns the pane geometry, resize the panes of
+ * sessions the user is not on — and it would hold the claim, which is the same
+ * cost to somebody else's desk window: it sits on "This shell is open on another
+ * device. Press r to take it back" while nothing is using the shell.
+ *
+ * [pageIsConnected] is the rule. The second half of it was missing, and it was
+ * visible from the other end of the wire (2026-10-05).
  *
  * [keyboardRequest] changes each time the user asks for the keyboard. The page on
  * screen answers by taking focus and showing it, because a keyboard the system

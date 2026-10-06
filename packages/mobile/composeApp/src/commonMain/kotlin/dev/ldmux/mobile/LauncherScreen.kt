@@ -385,6 +385,25 @@ private fun ChoiceRow(
     inUse: Boolean = false,
     trailing: @Composable () -> Unit = {},
 ) {
+    // How much of the row's own width the overlaid controls take: a control is its
+    // glyph plus its own horizontal padding (`IconBtn`: 9.dp a side), and rows with
+    // controls carry two of them with the row's 6.dp between. Zero for a row with
+    // none, so a desk shell's address keeps the whole width.
+    val controlWidth = LocalTouch.current.icon + 18.dp
+    val trailingWidth = if (mobileShell) controlWidth * 2 + 6.dp else 0.dp
+    // **The row is one height, whatever it carries.** The per-shell controls are
+    // the tallest thing in any row — a control has a minimum touch height of
+    // [MinTouch] (36 dp compact) and the text has none — so laying them out beside
+    // the name made the two rows that carry them *thicker bars* than every other
+    // row (measured on the phone, 2026-10-05: 64 dp against 53 dp). They are drawn
+    // over the row's right end instead, matched to its height, so they cannot set
+    // it. Their width is reserved out of the text, which is why the address ends a
+    // little earlier on those rows.
+    //
+    // Two boxes and not a Box inside the Row: `matchParentSize` is what makes the
+    // controls take the row's height *after* the row has been measured without
+    // them, which is the whole trick.
+    Box(Modifier.fillMaxWidth()) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -397,7 +416,8 @@ private fun ChoiceRow(
             // The folder moved up beside the name, but the row keeps the height it
             // had with two lines: the list's rhythm must not change under the
             // finger. The 8.dp is the removed line's height, split over both sides.
-            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad + 8.dp),
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad + 8.dp)
+            .padding(end = trailingWidth),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // A tick box, because these *are* the multi-select: several become the set
@@ -443,11 +463,20 @@ private fun ChoiceRow(
                 )
             }
         }
+    }
+    // The controls, over the row's own right end. `matchParentSize` keeps them out
+    // of its measurement, and the height that is left is theirs at full touch size.
+    Row(
+        Modifier.matchParentSize().padding(end = 10.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         trailing()
         if (onKill != null) {
             Spacer(Modifier.width(6.dp))
             IconBtn(onClick = onKill, label = "close shell") { IconClose(Dim) }
         }
+    }
     }
 }
 

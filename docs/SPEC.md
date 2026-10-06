@@ -652,7 +652,17 @@ every VT mode — is closed.)
 - **A claim is on what the device is watching.** A connection that
   attaches to another shell releases the one it was on, unless another connection
   of the same device is still on it; a socket that closes releases after the
-  grace. So a shell that no device is watching is not held.
+  grace, and a claim with no connection behind it at all is given back after the
+  same grace. So a shell that no device is watching is not held — including the
+  shell a desk window's claim was taken *for*, when that window never attached:
+  it only takes a shell that is free, so an unbacked claim was a notice nobody
+  could clear without pressing `r` (2026-10-05).
+- **A phone page holds its shell only while the app is on screen.** Arriving at a
+  page takes the shell over (`takeover`), and leaving it — another page, the
+  launcher, the app going to the background — closes the connection, which
+  releases the claim. A page composed but off screen, or an app in the
+  background, is not a reader: the shell is safe in the keeper and the page keeps
+  its last frame.
 - **A displaced window acts on the session list.** If its shell is running and
   nobody holds it, it takes the shell back by itself — the device putting it down
   *is* the consent (ADR-0010). If the list has no running copy of its shell, it

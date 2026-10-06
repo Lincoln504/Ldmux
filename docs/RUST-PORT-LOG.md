@@ -2114,3 +2114,65 @@ machine. `RemoteServer` now reports the port it actually bound (a configured por
 means the kernel chose), and the daemon remembers it so `remote_info`, the pairing link and
 the QR all name the real one. The tests ask for 0 and read it back. The `deskWindow` variant
 of `ldmux live` was already gone.
+
+## A claim with no connection behind it, and an app nobody is looking at (2026-10-05)
+
+Reported from use, after the release fixes above: a desk window still sat on "This shell is
+open on another device. Press r to take it back" while the phone had **no shell open at
+all**. Two independent causes, both real, both found from that one report.
+
+**1. The claim was the desk's own, with nothing behind it.** `list` said `desktop` held the
+shell. `desktop` is the identity every desk window announces
+(`crates/attach/src/lib.rs:114`), and it is also the device the daemon claims a shell *to* on
+a window's behalf — `makeLive` and `deskWindow` take the claim with `takeover` before the
+window has attached (`daemon.rs:1258`, `:1334`). The window they took it for was already
+displaced (its connection is cut off and its `session_id` cleared — `notify_displaced`), so:
+
+- no connection of `desktop` was attached to that shell, so nothing backed the claim;
+- `release_after_grace` only releases a claim when the *closing* connection is a conn of the
+  holder with no other viewer of that session — and here nothing closed at all;
+- the displaced window only takes a shell that is **free**, and `list` said it was held, so it
+  waited. Forever. The one way out was pressing `r`, because `r` is a takeover: it works
+  against any holder.
+
+So a claim outlived every connection that could have justified it, and the daemon had the
+information to see that: it knows which connections are attached to what.
+
+**Fixed:** the sweep frees claims that have had no connection behind them for
+`CLAIM_GRACE_MS` (3 s, the same grace a closed socket's claims wait for a reconnect) and
+pushes a fresh session list, so the waiting window takes the shell back by itself. The grace
+is what makes this safe for the case the claim exists for: a window connecting takes a
+fraction of a second, and the claim is legitimately unbacked until it does. Tested three
+ways: `a_claim_with_no_connection_behind_it_is_given_back` (the timer: not inside the grace,
+not when a connection appears, from the moment it goes unbacked again, and a claim that moves
+to another device waits again), `a_claim_with_nothing_behind_it_does_not_strand_the_window`
+(the real desk window, the real claim, no key pressed — and it **fails** with the reconcile
+call disabled), and the whole suite.
+
+**2. The phone held the shell while the app was in the background, for 45 seconds.** A page is
+connected while it is the one on screen, and the app's own module says why that is not
+enough: "a phone in a pocket with a shell open … is a cost with no reader: nobody is looking
+at a terminal that is not on screen, and the shell is safe in the keeper on the host"
+(`AppLifecycle.kt`). The implementation only dropped the page after
+`BackgroundSession.releaseGraceMs = 45_000` (`App.kt:515`), so backgrounding the app left the
+shell claimed for up to 45 s — the desk window on the notice, with no page in front of anyone.
+That is exactly the report, and it is a second cause of it.
+
+**Fixed:** `pageIsConnected(shown, appOnScreen)` — a page connects only while it is the one on
+screen **and the app is on screen**. Nothing is lost: the page keeps its last frame, the shell
+keeps running in the keeper, and coming back re-attaches, which takes the shell over because
+arriving is the consent (ADR-0010). The 45 s grace now governs page *disposal* (freeing the
+engine), not the connection.
+
+**Measured on the phone** (motorola edge 2024, `adb` over Tailscale, 2026-10-05): the app's
+list before and after; see the row below.
+
+**3. The launcher's rows were not one height.** Reported in the same message: "shells that are
+started from phone have like a thicker bar". They did, and it was structural: the two
+per-shell controls (send-to-desktop, close) are the tallest thing in any row — a control has a
+minimum touch height of 36 dp, the text has none — so laying them out beside the name made the
+two rows that carry them taller than every other row. Measured on the device: **64 dp against
+53 dp**. Fixed by drawing the controls over the row's right end, matched to the row's own
+height (`Modifier.matchParentSize`, so they are measured *after* it and cannot set it) with
+their width reserved out of the address. Every row is 53 dp now, controls at full touch size,
+and the address simply ends a little earlier on those rows.

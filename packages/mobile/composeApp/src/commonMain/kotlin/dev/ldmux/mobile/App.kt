@@ -1155,12 +1155,16 @@ private fun TerminalArea(
               // shell going away is a page that stops being drawn.
                 val s = pages.getOrNull(page) ?: return@HorizontalPager
                 // Composed if it is within a swipe, connected only if it is the
-                // one on screen (see TerminalHandle.rememberTerminalSurface).
+                // one on screen *and the app is on screen* (see
+                // TerminalHandle.rememberTerminalSurface). An app in the
+                // background is not a reader, and holding the claim while nothing
+                // is looking at it is what left a desk window on "Press r to take
+                // it back" with no shell open anywhere (2026-10-05).
                 val handle = rememberTerminalSurface(
                     config,
                     s.id,
                     typing,
-                    active = s.id == shownId,
+                    active = pageIsConnected(s.id == shownId, AppLifecycle.foreground),
                     Modifier.fillMaxSize(),
                     keyboardRequest = keyboardRequest,
                 )

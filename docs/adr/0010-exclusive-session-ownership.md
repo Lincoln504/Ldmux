@@ -7,6 +7,23 @@
 > size being the canonical one. The keeper is the canonical geometry now; the
 > claim still hands the size over, which was the point.
 
+> **Amendment, 2026-10-05 — a claim is backed by a connection, or it is not a claim.**
+> A claim the daemon takes on a window's behalf (`makeLive`, `deskWindow`) is taken before
+> the window has attached, so it is legitimately unbacked for a fraction of a second. If it
+> stays unbacked past the grace (3 s, the same one a closed socket's claims wait for a
+> reconnect) the daemon gives it back. Found in use: a displaced desk window went on
+> "Press r to take it back" while nothing at all was using the shell — the claim was the
+> desk's own, taken for a window that never attached, and a window only takes a shell that
+> is free. Verified: the same window recovers on its own, with no key, and the test fails
+> with the release disabled.
+>
+> **Amendment, 2026-10-05 — an app in the background is not a reader.** A phone page holds
+> the shell it is showing, so a desk window waits for it. That is right, but only while the
+> page is being looked at: a page is now connected only while it is the one on screen *and*
+> the app is on screen. The shell is safe in the keeper, the page keeps its last frame, and
+> returning takes it back, because arriving is the consent. Before this the claim was held
+> for a 45 s background grace, which read from the desk as a shell held by nobody.
+>
 > **Amendment, 2026-10-05 — a released shell is not a held shell, and a dead one is not
 > held at all.** Three holes in the claiming model, found from one report (a displaced
 > desk window stayed on "press `r`" after the phone was done with the shell):

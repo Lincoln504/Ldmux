@@ -98,8 +98,9 @@ Server → client:
 | `{type:"desktop",inventory}` | answer to `desktop` |
 | `{type:"live",sessionId,ok,detail?}` | answer to `makelive` / `closelive` |
 | binary `Output` frame | live pane output (UTF-8) |
+| `{type:"error",code,message}` | `unknown_session`, `session_dead`, `not_attached`, `bad_json`, `resync`, `too_far_behind`, `input_too_large`, `not_holder`, `no_mouse`, `shell_foreground`, `bad_cell`, `bad_size`, `resize_failed`, … |
 
-Four things about `owned` and `sessions` that a client needs:
+Five things about `owned` and `sessions` that a client needs:
 
 - **A shell can have no owner.** `sessions` carries each shell's owner, so a client
   learns a shell was let go without having asked for anything. The desk attach client
@@ -119,7 +120,13 @@ Four things about `owned` and `sessions` that a client needs:
   shell releases the claim it held on the previous one, unless another connection of
   the same device is still on it. `close` from a phone on a shell the desk started is a
   *release*, not an end: the shell keeps running and is broadcast as unowned.
-| `{type:"error",code,message}` | `unknown_session`, `session_dead`, `not_attached`, `bad_json`, `resync`, `too_far_behind`, `input_too_large`, `not_holder`, `no_mouse`, `shell_foreground`, `bad_cell`, `bad_size`, `resize_failed`, … |
+- **A claim with no connection behind it is given back** after `CLAIM_GRACE_MS` (3 s),
+  and every client hears about it. The claim a shell is taken with on a window's behalf
+  (`makelive`, `deskwindow`) is taken *before* the window attaches, so the grace is what a
+  connecting window needs. Past it, a claim nothing is behind is a shell no device is
+  using and no device can take without pressing `r`: the displaced desk window waits for
+  its shell to be *free*, and it never is. The sweep that reaps silent connections reaps
+  these too.
 
 ### Attach ordering (why output is not lost)
 

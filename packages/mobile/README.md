@@ -156,6 +156,19 @@ small and grey beside it, at the thickness the two-line row had. A desk window s
 nothing in words — the row implies it; a shell this phone opened carries the phone glyph.
 The only state put into words is **"no window"**, in amber: it is an anomaly, not a state.
 
+**Every row is one height, whatever it carries.** The per-shell controls (send to desktop,
+close) are the tallest thing a row can hold — a control has a minimum touch height and the
+text has none — so laying them out beside the name made the rows that carry them thicker
+bars than the rest: measured on the phone, 64 dp against 53 dp (2026-10-05). They are drawn
+over the row's right end now, matched to the row's height (`Modifier.matchParentSize`, so
+they are measured after it and cannot set it), with their width reserved out of the address.
+
+**A page is connected only while it is the one on screen *and* the app is on screen**
+(`pageIsConnected`). An app in the background is not a reader, and holding the claim while
+nothing is looking at it left a desk window on "Press r to take it back" with no shell open
+anywhere. The shell is safe in the keeper, the page keeps its last frame, and coming back
+re-attaches — which takes the shell over, because arriving is the consent (ADR-0010).
+
 The terminal is resized to the viewport in both shapes: the client owns the geometry and
 the daemon sizes the session's pty to the grid the surface can actually paint (ADR-0008).
 
