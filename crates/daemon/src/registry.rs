@@ -134,13 +134,25 @@ impl Registry {
             version: 1,
             sessions: Vec::new(),
         };
+        // `order` and `sessions` are kept together, so neither lookup nor the
+        // serialisation should ever fail — but this runs on the maintenance
+        // tick, and an `unwrap` here would panic *inside* the daemon lock, which
+        // poisons the registry mutex and takes every later pass with it. A
+        // session skipped here is absent from the file for one tick and the
+        // keeper is the authority on what is running, so the next reconcile puts
+        // the truth back.
         for id in &self.order {
-            file.sessions.push(
-                serde_json::to_value(self.sessions.get(id).unwrap()).unwrap(),
-            );
+            if let Some(record) = self.sessions.get(id)
+                && let Ok(value) = serde_json::to_value(record)
+            {
+                file.sessions.push(value);
+            }
         }
         let tmp = format!("{}.tmp", self.path);
-        std::fs::write(&tmp, serde_json::to_string_pretty(&file).unwrap())?;
+        let Ok(text) = serde_json::to_string_pretty(&file) else {
+            return Err(std::io::Error::other("registry: could not serialise the file"));
+        };
+        std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -294,6 +306,28 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    /// A registry whose index and map disagree still saves.
+    ///
+    /// It cannot happen through the public API, which is exactly why it is worth
+    /// pinning: `save` is on the maintenance tick, and a panic there poisons the
+    /// mutex every later pass needs.
+    #[test]
+    fn a_registry_whose_order_and_map_disagree_still_saves() {
+        let dir = std::env::temp_dir().join(format!("ldmux-registry-save-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("registry.json");
+        let mut reg = Registry::new(path.to_string_lossy());
+        reg.upsert(record(Over { id: Some("keep".into()), ..Over::default() }));
+        reg.upsert(record(Over { id: Some("lost".into()), ..Over::default() }));
+        // Drop the record but keep the index entry: the disagreement.
+        reg.sessions.remove("lost");
+        reg.save().expect("save must not panic or fail");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("keep"), "the session it has is written: {on_disk}");
+        assert!(!on_disk.contains("lost"), "the one it does not have is skipped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// The TS test's `record()` helper: a complete record with overrides.
@@ -317,6 +351,7 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Over {
         id: Option<String>,
         keeper_name: Option<String>,
