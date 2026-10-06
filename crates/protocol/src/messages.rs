@@ -101,7 +101,10 @@ pub struct Caps {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CapsCapabilities {
-    pub control_mode: bool,
+    /// Whether this server serves older pages of a pane's scrollback (the
+    /// `scrollback` message). The sibling field was `controlMode`, a tmux
+    /// mechanism that no longer exists and that nothing read; it was removed
+    /// with the rest of the tmux vocabulary (2026-10-05).
     pub scrollback: bool,
 }
 
@@ -345,7 +348,7 @@ mod tests {
             rows: 24,
             snapshot_epoch: 7,
             capabilities: CapsCapabilities {
-                control_mode: true,
+
                 scrollback: true,
             },
         };
@@ -353,7 +356,6 @@ mod tests {
         assert_eq!(v["type"], "caps");
         assert_eq!(v["protocolVersion"], 1);
         assert_eq!(v["sessionId"], "s1");
-        assert_eq!(v["capabilities"]["controlMode"], true);
         assert_eq!(v["capabilities"]["scrollback"], true);
     }
 

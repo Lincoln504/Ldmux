@@ -373,7 +373,18 @@ async fn serve_accepted(
         write_http(&mut stream, 401, "unauthorized\n").await;
         return;
     }
-    let ws = match tokio_tungstenite::accept_async(stream).await {
+    // The inbound frame cap. The TypeScript server was `new WebSocketServer({
+    // maxPayload: 64 * 1024 })`, which closed the socket on anything larger; the
+    // port lost it and inherited tungstenite's 64 MiB default, so a client could
+    // make the daemon buffer 64 MiB in one message. The limit is on *reads* only
+    // (tungstenite enforces `max_message_size` when it decodes a message, and
+    // `max_frame_size` in `read_message_frame`), so server→client snapshots are
+    // unaffected however large they are. 64 KiB is far above every client
+    // message: `input` is capped at 16 KiB by the handler, `key` at 32 names.
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(64 * 1024))
+        .max_frame_size(Some(64 * 1024));
+    let ws = match tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
         Ok(ws) => ws,
         Err(e) => {
             eprintln!("ldmuxd: remote: upgrade failed from {peer}: {e}");
@@ -1210,7 +1221,7 @@ fn send_state(
         "cols": snap.cols,
         "rows": snap.rows,
         "snapshotEpoch": epoch,
-        "capabilities": {"controlMode": true, "scrollback": true},
+        "capabilities": {"scrollback": true},
     }));
     let mut snapshot = serde_json::json!({
         "type": "snapshot",
