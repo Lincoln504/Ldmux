@@ -281,7 +281,8 @@ thread), so the underflow could also have ended those.
 | stream subscriber callbacks (`stream.rs` `fanout_except`) | one panicking callback unwound into the poll thread and starved the other subscribers | each guarded |
 | in-place resync failure (`remote.rs` `resync_in_place`) | `resyncing` stayed set and `queue_output` dropped every byte of live output: frozen picture, pings answered | the connection is closed, which is the recovery every client already has |
 | attach vs. a concurrent last-disconnect (`remote.rs` `attach`) | `release_stream_if_idle` could close the stream between `stream_for` and `subscribe_owned`: a snapshot and then no output, ever | `stream.is_closed()` checked once subscribed (a subscribed stream cannot be dropped as idle); the client is told `resync` and re-attaches |
-| keeper `sessions` table and output buffers | `lock().unwrap()`: one panic while locked poisoned it and every later request, and the emulator thread, panicked | poison-tolerant `relock` (the daemon's own rule) |
+| keeper `sessions` table and output buffers | `lock().unwrap()`: one panic while locked poisoned it and every later request, and the emulator thread, panicked | poison-tolerant `relock` (the daemon's own rule); the last leftover, in `reap`, is gone too |
+| keeper reaper task (`keeper/src/lib.rs` `serve`) | a panic in one `reap()` pass ended the detached task for good: a shell that exited while nobody called the keeper stayed a zombie and its session stayed `running` for the life of the process | each pass runs through `survive`, so a panic costs the pass (`lib.rs`; pinned by `a_panicking_pass_does_not_end_the_loop`) |
 | `restored` claim deadlines (`daemon.rs`) | an entry outlived its claim until restart | pruned with the claims |
 
 Checked and found sound: `ws.rs` frame arithmetic (length judged before `as usize`,
@@ -294,6 +295,15 @@ panic containment (cleanup still runs), claims (`reconcile_claims` frees an unba
 claim after the grace), registry and `live_windows` pruning (`apply_reconcile`),
 `AttachClient`/`LdmuxClient` reconnect (backoff reset on `caps`/connect, `ended` and
 `wantTakeover` consumed, missed-pong close, every callback guarded).
+
+**Also from the second audit.** `registry.json` was written 0664 while `claims.json` and
+the sockets are 0600 (now 0600, `registry.rs` `save`). `emulator.rs` carried two
+contradictory comments about the engine's default scrollback (reconciled to the measured
+~1 MiB). The flood regression test covers only the legacy no-features path, so a smoke
+test of the shipped in-place path was added beside it
+(`crates/daemon/tests/desk_attach_flood.rs`). The keeper's emulator thread still has no
+`catch_unwind`, but a panic there closes the PTY master, the shell dies, and the reaper
+(the above fix) marks the session dead; only the panic line is lost.
 
 **Not done, and why.** The mobile client does not advertise `inplaceResync` or
 `sessionEnded`. It handles `error{resync}` by reconnecting, which works now that the

@@ -93,8 +93,10 @@ Product and mobile:
 Daemon and protocol:
 - **The keeper is a single point of failure** by design: if it dies, every shell ends.
   Its `sessions` table and output buffers are now poison-tolerant, so a panic while one is
-  locked no longer disables every later request, but **the running keeper is still the
-  old binary** until it is replaced (which ends every shell): this fix is on disk only.
+  locked no longer disables every later request, and its reaper task now survives a
+  panicking pass, so a shell that exits while nobody calls the keeper cannot be left
+  unreaped for the life of the process. **The running keeper is still the
+  old binary** until it is replaced (which ends every shell): these fixes are on disk only.
 - **Desk windows opened before 2026-10-06 22:07 run the old attach client** (no
   `inplaceResync`, no size re-assert). They stay correct against the fixed daemon; a window
   opened from now on takes the new path.

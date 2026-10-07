@@ -17,7 +17,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::rig::{Rig, hello};
+use common::rig::{Rig, hello, hello_features};
 use common::wsraw::Msg;
 
 #[tokio::test]
@@ -91,4 +91,74 @@ async fn a_desk_style_attach_to_a_flooding_shell_never_kills_the_connection() {
         notices > 0,
         "the attach backlog path was never taken, so this test proved nothing"
     );
+}
+
+/// The path the shipped desk window takes now. It advertises `inplaceResync`, so a
+/// backlog during the attach is repainted by the snapshot on the same socket and
+/// the legacy notice is never sent. The connection must still survive its first
+/// heartbeat.
+///
+/// This is a smoke test of the shipped path rather than a proof that the 1 MiB
+/// backlog was crossed: with `inplaceResync` the daemon marks nothing observable,
+/// so the regression itself stays pinned by the legacy-path test above and by the
+/// unit test for the in-place client.
+#[tokio::test]
+async fn an_in_place_desk_attach_to_a_flooding_shell_keeps_its_connection() {
+    let rig = Rig::start().await;
+    let (mut feeder, _) = rig.attach_with(&["inplaceResync"], false).await;
+    feeder
+        .send_json(&serde_json::json!({
+            "type": "input",
+            "data": "yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef | head -c 2000000000\n"
+        }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    for attempt in 0..5u32 {
+        let mut ws = rig.connect(None).await;
+        hello_features(&mut ws, &["inplaceResync"]).await;
+        ws.send_json(&serde_json::json!({
+            "type": "attach", "sessionId": rig.session, "cols": 158, "rows": 82
+        }))
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut snapshot = false;
+        while !snapshot && tokio::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match ws.next_within(left).await {
+                Some(Msg::Text(t)) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    assert!(
+                        !(v["type"] == "error" && v["code"] == "resync"),
+                        "attempt {attempt}: an in-place client must not get the legacy notice"
+                    );
+                    snapshot |= v["type"] == "snapshot";
+                }
+                Some(Msg::Binary(_)) => {}
+                Some(Msg::Close) | None => break,
+            }
+        }
+        assert!(snapshot, "attempt {attempt}: no snapshot");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        ws.send_json(&serde_json::json!({"type": "ping", "id": attempt}))
+            .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut ponged = false;
+        while !ponged && tokio::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match ws.next_within(left).await {
+                Some(Msg::Text(t)) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    ponged = v["type"] == "pong";
+                }
+                Some(Msg::Binary(_)) => {}
+                Some(Msg::Close) | None => break,
+            }
+        }
+        assert!(
+            ponged,
+            "attempt {attempt}: the connection died on the in-place path"
+        );
+    }
 }

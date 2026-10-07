@@ -182,6 +182,14 @@ impl Registry {
         {
             use std::io::Write;
             let mut f = std::fs::File::create(&tmp)?;
+            // The state directory is 0700, but `File::create` honours the umask
+            // and wrote this file 0664 while `claims.json` and the sockets are
+            // 0600. One rule for every plain file here.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
             f.write_all(text.as_bytes())?;
             f.sync_all()?;
         }

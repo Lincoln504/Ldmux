@@ -36,6 +36,31 @@ impl<T> Relock<T> for Mutex<T> {
     }
 }
 
+/// Run one pass of a detached background loop, catching a panic so it costs the
+/// pass and not the loop.
+///
+/// The keeper's loops are detached tasks: a panic in one is a journal line and
+/// then silence, and the keeper carries on serving requests while never again
+/// doing the thing the loop was for. The reaper is the one that matters most —
+/// with it dead, a shell that exits while nobody happens to call the keeper stays
+/// a zombie and its session stays `running` for the life of the process. The
+/// `sessions` table is poison-tolerant ([`Relock`]), so the next pass still gets a
+/// usable lock.
+pub(crate) fn survive(what: &'static str, pass: impl FnOnce()) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(pass)) {
+        Ok(()) => true,
+        Err(e) => {
+            let why = e
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic".to_string());
+            eprintln!("ldmux-keeper: {what} pass ended abnormally ({why}); the loop continues");
+            false
+        }
+    }
+}
+
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -354,6 +379,24 @@ mod out_buf_tests {
         assert!(m.is_poisoned());
         m.relock().push(b"still works");
         assert_eq!(m.relock().take().0, b"still works".to_vec());
+    }
+
+    /// A panic in one pass must not end the loop: the keeper's reaper is a
+    /// detached task, and a dead reaper leaves every later exit unreaped and every
+    /// dead session looking alive.
+    #[test]
+    fn a_panicking_pass_does_not_end_the_loop() {
+        let mut seen = Vec::new();
+        for i in 0..2 {
+            let ok = survive("test", || {
+                seen.push(i);
+                if i == 0 {
+                    panic!("a pass that fails");
+                }
+            });
+            assert_eq!(ok, i != 0, "pass {i}");
+        }
+        assert_eq!(seen, vec![0, 1], "the second pass still ran");
     }
 
     #[test]
@@ -1118,13 +1161,10 @@ impl Keeper {
         }
         // The backstop for a dead pane nobody released (see `DEAD_SESSION_TTL`).
         let now = std::time::Instant::now();
-        self.sessions
-            .lock()
-            .unwrap()
-            .retain(|_, s| match s.died_at {
-                Some(t) => now.duration_since(t) < DEAD_SESSION_TTL,
-                None => true,
-            });
+        self.sessions.relock().retain(|_, s| match s.died_at {
+            Some(t) => now.duration_since(t) < DEAD_SESSION_TTL,
+            None => true,
+        });
     }
 
     fn mark_dead(&self, pid: i32, exit: Option<Exit>) {
@@ -1468,7 +1508,12 @@ pub async fn serve(self_: &Arc<Keeper>, socket: &std::path::Path) -> std::io::Re
             loop {
                 tick.tick().await;
                 match weak.upgrade() {
-                    Some(k) => k.reap(),
+                    Some(k) => {
+                        // A panic ends the pass, not the reaper: the task is
+                        // detached, and a dead reaper would leave every later exit
+                        // unreaped and every dead session looking alive.
+                        let _ = survive("reap", || k.reap());
+                    }
                     None => return,
                 }
             }

@@ -49,12 +49,14 @@ use ldmux_vt_sys::{links, snapshot};
 /// plan calls for (plan §3.7/§3.4), and the ceiling a `snapshot --history`
 /// request is clamped to.
 ///
-/// **It has to be set.** A `Terminal` created without it retains nothing — the
-/// C API's default cap is the viewport — so every session had zero scrollback:
-/// `ldmux capture --history` returned the live screen, the `scrollback` message
-/// the phone pages history with had nothing to page, and `historySize` was 0
-/// after 300 lines of output (measured 2026-10-05). tmux had a history limit, so
-/// this was the port's to lose.
+/// **It has to be set.** A `Terminal` created without it keeps only the C API's
+/// own default, which is a small fraction of the plan's history (the byte budget
+/// binds first — measured ~1 MB, ~995 rows of 12,000, see
+/// [`MAX_SCROLLBACK_BYTES`]), so a session's scrollback was a fraction of what
+/// the plan calls for: `ldmux capture --history` returned almost the live screen,
+/// the `scrollback` message the phone pages history with had little to page, and
+/// `historySize` stayed far below what tmux kept (measured 2026-10-05). tmux had a
+/// history limit, so this was the port's to lose.
 pub(crate) const MAX_SCROLLBACK_LINES: usize = 10_000;
 
 /// The byte budget that goes with [`MAX_SCROLLBACK_LINES`].
