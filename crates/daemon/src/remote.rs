@@ -54,6 +54,79 @@ type Wr = Box<dyn AsyncWrite + Send + Unpin>;
 type WsRead = WsReader<Rd>;
 type WsWrite = WsWriter<Wr>;
 
+/// Control JSON counted against its connection's backlog.
+///
+/// **The accounting is a type, not a convention.** `queued_json` used to be a bare
+/// counter that one place incremented (`send_json_text`) and the writer
+/// decremented, while any call site could also `tx.send(Out::Json(..))` directly.
+/// One did (the attach-backlog fallback), the writer subtracted a message nobody
+/// had added, the counter wrapped below zero, and the next `send_json_text`
+/// panicked on `attempt to add with overflow` — taking the connection (and a desk
+/// window with it: "link lost, reconnecting") down.
+///
+/// Now the only way to make an `Out::Json` is [`QueuedJson::reserve`], which adds
+/// the length, and the only way it is ever un-counted is its `Drop`, which
+/// subtracts it exactly once: after the writer sent it, when the channel refused
+/// it, and when the connection ended with it still queued. A message cannot be
+/// subtracted without having been added, and cannot be left counted.
+mod queued {
+    use std::ops::Deref;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(super) struct QueuedJson {
+        text: String,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl QueuedJson {
+        /// Count `text` against `counter`, or `None` when that would put the
+        /// connection past `max` (the peer is not reading at all). Saturating, so a
+        /// counter that was somehow wrong degrades instead of panicking.
+        pub(super) fn reserve(
+            counter: &Arc<AtomicUsize>,
+            text: String,
+            max: usize,
+        ) -> Option<QueuedJson> {
+            let n = text.len();
+            let before = counter
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                    Some(c.saturating_add(n))
+                })
+                .unwrap_or_else(|c| c);
+            let queued = QueuedJson {
+                text,
+                counter: counter.clone(),
+            };
+            // Over the cap: dropping `queued` here gives the bytes back.
+            (before.saturating_add(n) <= max).then_some(queued)
+        }
+
+        pub(super) fn as_str(&self) -> &str {
+            &self.text
+        }
+    }
+
+    impl Deref for QueuedJson {
+        type Target = str;
+        fn deref(&self) -> &str {
+            &self.text
+        }
+    }
+
+    impl Drop for QueuedJson {
+        fn drop(&mut self) {
+            let n = self.text.len();
+            let _ = self
+                .counter
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                    Some(c.saturating_sub(n))
+                });
+        }
+    }
+}
+use queued::QueuedJson;
+
 /// One outbound WebSocket message.
 enum Wire<'a> {
     Text(&'a str),
@@ -166,8 +239,9 @@ enum Out {
     /// Pane output bytes (coalesced).
     Output(Vec<u8>),
     /// A JSON control message (flushes pending output first, so it cannot
-    /// overtake output it should follow).
-    Json(String),
+    /// overtake output it should follow). Built only through
+    /// [`ConnShared::send_json_text`], which is what counts it (see [`queued`]).
+    Json(QueuedJson),
     /// The pane's picture on this connection is stale (output was dropped for a
     /// slow link, or the keeper lost some): a client that advertised
     /// `inplaceResync` gets a fresh snapshot on this socket; any other gets the
@@ -278,26 +352,40 @@ struct ConnShared {
     inner: Mutex<ConnInner>,
     outstanding: AtomicUsize,
     /// Bytes of control JSON queued and not yet written (the snapshot / list
-    /// side of the backlog, which `outstanding` does not count).
-    queued_json: AtomicUsize,
+    /// side of the backlog, which `outstanding` does not count). Only
+    /// [`QueuedJson`] changes it.
+    queued_json: Arc<AtomicUsize>,
 }
 
 impl ConnShared {
+    fn with_inner(tx: tokio::sync::mpsc::UnboundedSender<Out>, inner: ConnInner) -> Self {
+        Self {
+            tx,
+            inner: Mutex::new(inner),
+            outstanding: AtomicUsize::new(0),
+            queued_json: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
     fn send_json(&self, value: &serde_json::Value) {
         self.send_json_text(value.to_string());
     }
 
     /// Queue one JSON text for the writer, bounded: a peer that has stopped
-    /// reading is closed once [`MAX_QUEUED_JSON_BYTES`] are waiting for it.
+    /// reading is closed once [`MAX_QUEUED_JSON_BYTES`] are waiting for it. The
+    /// one way a control message enters the channel.
+    ///
+    /// A message the channel refuses (the writer is gone) comes back inside the
+    /// `SendError` and is dropped there, which un-counts it. One still queued when
+    /// the connection ends is dropped with the channel, so nothing is left counted.
     fn send_json_text(&self, text: String) {
-        let n = text.len();
-        if self.queued_json.fetch_add(n, Ordering::Relaxed) + n > MAX_QUEUED_JSON_BYTES {
-            self.queued_json.fetch_sub(n, Ordering::Relaxed);
-            let _ = self.tx.send(Out::Close);
-            return;
-        }
-        if self.tx.send(Out::Json(text)).is_err() {
-            self.queued_json.fetch_sub(n, Ordering::Relaxed);
+        match QueuedJson::reserve(&self.queued_json, text, MAX_QUEUED_JSON_BYTES) {
+            Some(json) => {
+                let _ = self.tx.send(Out::Json(json));
+            }
+            None => {
+                let _ = self.tx.send(Out::Close);
+            }
         }
     }
 
@@ -776,12 +864,7 @@ pub(crate) fn parse_upgrade(
 /// The per-connection loop: read messages, enqueue responses, coalesce output.
 async fn handle_connection(rd: WsRead, wr: WsWrite, shared: Arc<Shared>, conn_id: u64) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
-    let conn = Arc::new(ConnShared {
-        tx,
-        inner: Mutex::new(ConnInner::new()),
-        outstanding: AtomicUsize::new(0),
-        queued_json: AtomicUsize::new(0),
-    });
+    let conn = Arc::new(ConnShared::with_inner(tx, ConnInner::new()));
     relock(&shared.conns).insert(conn_id, conn.clone());
 
     // The loop runs on its own task so a panic in a handler ends only that
@@ -896,11 +979,11 @@ async fn connection_loop(
                             break 'conn;
                         }
                     }
-                    Some(Out::Json(s)) => {
-                        let n = s.len();
+                    Some(Out::Json(json)) => {
                         let sent = flush_output(&mut ws, &mut pending, &conn, send_limit, &mut last_flush).await
-                            && send_bounded(&mut ws, Wire::Text(&s), send_limit).await;
-                        conn.queued_json.fetch_sub(n, Ordering::Relaxed);
+                            && send_bounded(&mut ws, Wire::Text(json.as_str()), send_limit).await;
+                        // Counted until it has left (or failed to leave) the daemon.
+                        drop(json);
                         if !sent {
                             break 'conn;
                         }
@@ -997,6 +1080,30 @@ fn queue_output(conn: &ConnShared, inner: &mut ConnInner, bytes: &[u8]) {
     if conn.tx.send(Out::Output(bytes.to_vec())).is_err() {
         // The writer is gone: nothing will ever drain this.
         conn.outstanding.fetch_sub(bytes.len(), Ordering::Relaxed);
+    }
+}
+
+/// Output that arrives between subscribe and the snapshot is held, bounded. Past
+/// [`MAX_PENDING_BYTES`] it is dropped: the snapshot this attach is about to send
+/// repaints everything dropped here, so only a client that cannot take a repaint on
+/// the same socket (no `inplaceResync`: the desk window, until it said so) is told
+/// to start over.
+///
+/// A function of its own because it is a place that once wrote to the channel
+/// directly. The notice goes through [`ConnShared::send_json`] like every other
+/// control message, which does not touch `inner` (the caller is holding it).
+fn hold_until_live(conn: &ConnShared, inner: &mut ConnInner, bytes: &[u8]) {
+    inner.pending.extend_from_slice(bytes);
+    inner.pending_bytes = inner.pending_bytes.saturating_add(bytes.len());
+    if inner.pending_bytes > MAX_PENDING_BYTES {
+        inner.pending.clear();
+        inner.pending_bytes = 0;
+        if !inner.features.inplace_resync {
+            conn.send_json(&serde_json::json!({
+                "type":"error","code":"resync",
+                "message":"output backlog exceeded while attaching"
+            }));
+        }
     }
 }
 
@@ -1777,7 +1884,6 @@ async fn attach(
     }
 
     // Subscribe (queueing output until `live`).
-    let tx = conn.tx.clone();
     let inner_for_cb = conn.clone();
     let cb_gen = gen_id;
     let sub = StreamSubscriber {
@@ -1789,24 +1895,7 @@ async fn attach(
             if inner.live {
                 queue_output(&inner_for_cb, &mut inner, bytes);
             } else {
-                inner.pending.extend_from_slice(bytes);
-                inner.pending_bytes += bytes.len();
-                if inner.pending_bytes > MAX_PENDING_BYTES {
-                    inner.pending.clear();
-                    inner.pending_bytes = 0;
-                    // The snapshot this attach is about to send repaints
-                    // everything dropped here; only a client that cannot take a
-                    // repaint on the same socket is told to start over.
-                    if !inner.features.inplace_resync {
-                        let _ = tx.send(Out::Json(
-                            serde_json::json!({
-                                "type":"error","code":"resync",
-                                "message":"output backlog exceeded while attaching"
-                            })
-                            .to_string(),
-                        ));
-                    }
-                }
+                hold_until_live(&inner_for_cb, &mut inner, bytes);
             }
         }),
         on_reset: Box::new({
@@ -2441,25 +2530,14 @@ mod tests {
     /// A connection whose writer never drains (a phone on a dead link).
     fn undrained_conn() -> (Arc<ConnShared>, tokio::sync::mpsc::UnboundedReceiver<Out>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
-        let conn = Arc::new(ConnShared {
+        let conn = Arc::new(ConnShared::with_inner(
             tx,
-            inner: Mutex::new(ConnInner {
-                disposed: false,
+            ConnInner {
                 live: true,
                 attach_gen: 1,
-                session_id: None,
-                record: None,
-                stream: None,
-                unsubscribe: None,
-                sub_id: None,
-                device: None,
-                pending: Vec::new(),
-                pending_bytes: 0,
                 ..ConnInner::new()
-            }),
-            outstanding: AtomicUsize::new(0),
-            queued_json: AtomicUsize::new(0),
-        });
+            },
+        ));
         (conn, rx)
     }
 
@@ -2550,25 +2628,7 @@ mod tests {
     fn the_caps_and_snapshot_pair_has_the_client_fields() {
         // Build a fake connection with a channel, then assert the two shapes.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
-        let conn = Arc::new(ConnShared {
-            tx,
-            inner: Mutex::new(ConnInner {
-                disposed: false,
-                live: false,
-                attach_gen: 0,
-                session_id: None,
-                record: None,
-                stream: None,
-                unsubscribe: None,
-                sub_id: None,
-                device: None,
-                pending: Vec::new(),
-                pending_bytes: 0,
-                ..ConnInner::new()
-            }),
-            outstanding: AtomicUsize::new(0),
-            queued_json: AtomicUsize::new(0),
-        });
+        let conn = Arc::new(ConnShared::with_inner(tx, ConnInner::new()));
         let snap = ldmux_protocol::keeper::SnapshotResult {
             session_id: "s".into(),
             cols: 80,
@@ -2754,6 +2814,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The regression: the attach-backlog notice used to go straight into the
+    /// channel, so the writer subtracted a length nobody had added, `queued_json`
+    /// wrapped below zero, and the next control message panicked on
+    /// `attempt to add with overflow` (the desk window's "link lost, reconnecting").
+    /// The notice is counted now, and the writer's subtraction balances it.
+    #[test]
+    fn the_attach_backlog_notice_is_counted_and_a_following_message_does_not_panic() {
+        let (conn, mut rx) = undrained_conn();
+        let chunk = vec![b'x'; 256 * 1024];
+        {
+            let mut inner = conn.inner.lock().unwrap();
+            inner.live = false;
+            // A client that said nothing about `inplaceResync` (the desk window).
+            for _ in 0..(MAX_PENDING_BYTES / chunk.len() + 1) {
+                hold_until_live(&conn, &mut inner, &chunk);
+            }
+            assert_eq!(inner.pending_bytes, 0, "the held output is dropped");
+        }
+        let Ok(Out::Json(notice)) = rx.try_recv() else {
+            panic!("the legacy client is told to resync");
+        };
+        assert!(notice.contains("\"resync\""));
+        assert_eq!(
+            conn.queued_json.load(Ordering::Relaxed),
+            notice.len(),
+            "the notice is counted while it is queued"
+        );
+        // The writer has sent it.
+        drop(notice);
+        assert_eq!(conn.queued_json.load(Ordering::Relaxed), 0);
+        // The next control message, which is where the old code panicked.
+        conn.send_json(&serde_json::json!({"type": "sessions", "sessions": []}));
+        assert!(matches!(rx.try_recv(), Ok(Out::Json(_))));
+    }
+
+    /// A client that can take a repaint on the same socket is not told anything:
+    /// the snapshot is the recovery.
+    #[test]
+    fn an_in_place_client_is_not_sent_a_resync_notice_for_the_attach_backlog() {
+        let (conn, mut rx) = undrained_conn();
+        let chunk = vec![b'x'; 256 * 1024];
+        let mut inner = conn.inner.lock().unwrap();
+        inner.live = false;
+        inner.features.inplace_resync = true;
+        for _ in 0..(MAX_PENDING_BYTES / chunk.len() + 1) {
+            hold_until_live(&conn, &mut inner, &chunk);
+        }
+        drop(inner);
+        assert!(rx.try_recv().is_err(), "nothing queued");
+        assert_eq!(conn.queued_json.load(Ordering::Relaxed), 0);
+    }
+
+    /// A message queued and never written (the connection ended first) must not
+    /// leave the counter high, and one sent into a channel with no reader is not
+    /// counted at all.
+    #[test]
+    fn control_json_that_is_never_written_is_not_left_counted() {
+        let (conn, rx) = undrained_conn();
+        for _ in 0..5 {
+            conn.send_json(&serde_json::json!({"type": "pong"}));
+        }
+        assert!(conn.queued_json.load(Ordering::Relaxed) > 0);
+        // The connection ends: the loop drops the receiver with messages in it.
+        drop(rx);
+        assert_eq!(conn.queued_json.load(Ordering::Relaxed), 0);
+        // And a send after that is refused by the channel and un-counted.
+        conn.send_json(&serde_json::json!({"type": "pong"}));
+        assert_eq!(conn.queued_json.load(Ordering::Relaxed), 0);
+    }
+
+    /// Whatever else goes wrong, the counter does not wrap: a message dropped
+    /// after the counter was reset (a mis-accounting) bottoms out at zero and the
+    /// next send still works.
+    #[test]
+    fn the_json_counter_saturates_instead_of_wrapping() {
+        let (conn, mut rx) = undrained_conn();
+        conn.send_json(&serde_json::json!({"type": "pong"}));
+        let queued = rx.try_recv().unwrap();
+        conn.queued_json.store(0, Ordering::Relaxed);
+        drop(queued);
+        assert_eq!(conn.queued_json.load(Ordering::Relaxed), 0);
+        // A counter at the top of the range does not overflow the next send.
+        conn.queued_json.store(usize::MAX, Ordering::Relaxed);
+        conn.send_json(&serde_json::json!({"type": "pong"}));
+        assert!(
+            matches!(rx.try_recv(), Ok(Out::Close)),
+            "past the cap closes, it does not panic"
+        );
+    }
+
     /// A control message queue is bounded: a peer that has stopped reading is
     /// closed once the cap is passed, not buffered without limit.
     #[test]
@@ -2811,10 +2961,12 @@ mod tests {
             }
             found.expect("the connection registered")
         };
-        // More than both kernel buffers can hold, straight into the writer.
-        let chunk = "y".repeat(1024 * 1024);
-        for _ in 0..48 {
-            let _ = conn.tx.send(Out::Json(chunk.clone()));
+        // More than both kernel buffers can hold, straight into the writer. Pane
+        // output, not control JSON: that is capped (and closes the connection) at
+        // `MAX_QUEUED_JSON_BYTES`, which would end it for a different reason.
+        let chunk = vec![b'y'; 256 * 1024];
+        for _ in 0..192 {
+            let _ = conn.tx.send(Out::Output(chunk.clone()));
         }
         let mut gone = false;
         for _ in 0..100 {

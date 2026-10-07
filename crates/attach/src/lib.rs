@@ -139,6 +139,27 @@ pub fn render_snapshot(s: &Snapshot) -> Vec<u8> {
 /// (`makeLive` claims the shell to this id before the window opens).
 const DESKTOP_DEVICE: &str = "desktop";
 
+/// What this window can take on the same socket, said once in its first `attach`
+/// (the daemon keeps it for the connection).
+///
+/// `inplaceResync`: when the picture goes stale (output dropped for a slow link, or
+/// more than the daemon will hold arriving while this window attaches to a busy
+/// shell) the daemon sends a fresh `snapshot` marked `resync`, which [`pump`]
+/// already paints like any other. Without it the daemon answers with the legacy
+/// `error`/`resync`, which costs a second attach and used to cost the connection
+/// (the daemon's byte accounting for that notice underflowed and panicked).
+/// `sessionEnded` is deliberately not claimed: this window ends on `session_dead`.
+const FEATURES: [&str; 1] = ["inplaceResync"];
+
+/// The first `attach` of a connection: the session, this window's size, and what it
+/// understands.
+fn first_attach(session_id: &str, cols: u64, rows: u64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "attach", "sessionId": session_id, "cols": cols, "rows": rows,
+        "features": FEATURES,
+    })
+}
+
 /// How often this client says something to the daemon.
 ///
 /// One number, because it is a property of the **protocol**, not of a client: the
@@ -550,13 +571,7 @@ where
         )
         .await?;
     }
-    send(
-        &mut sink,
-        &serde_json::json!({
-            "type": "attach", "sessionId": session_id, "cols": cols, "rows": rows
-        }),
-    )
-    .await?;
+    send(&mut sink, &first_attach(session_id, cols, rows)).await?;
 
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
@@ -813,7 +828,7 @@ where
 }
 #[cfg(test)]
 mod render_tests {
-    use super::{Snapshot, render_snapshot, should_reassert};
+    use super::{Snapshot, first_attach, render_snapshot, should_reassert};
 
     fn snap(screen: &str) -> Snapshot<'_> {
         Snapshot {
@@ -828,6 +843,19 @@ mod render_tests {
 
     /// Another device can resize the shared pane under a window whose own tty did
     /// not change. The window must take its size back once, and not spin doing it.
+    /// The window says what it can take, in the first attach (the daemon reads the
+    /// features off an `attach` as well as a `hello`, so a read-only mirror that
+    /// sends no `hello` is covered too).
+    #[test]
+    fn the_first_attach_advertises_in_place_resync() {
+        let m = first_attach("abc", 158, 82);
+        assert_eq!(m["type"], "attach");
+        assert_eq!(m["sessionId"], "abc");
+        assert_eq!(m["cols"], 158);
+        assert_eq!(m["rows"], 82);
+        assert_eq!(m["features"], serde_json::json!(["inplaceResync"]));
+    }
+
     #[test]
     fn a_snapshot_mismatch_re_asserts_the_size_once() {
         // In step: nothing to do.
