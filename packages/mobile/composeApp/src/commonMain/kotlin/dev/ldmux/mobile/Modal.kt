@@ -216,9 +216,11 @@ fun NewShellModal(
 /**
  * Choosing a desktop to put a shell on.
  *
- * Desktops **with windows on them**, and nothing else: a workspace you cannot see
- * is a workspace where a window goes missing, and "1 through 10" would offer nine
- * places nobody is looking at.
+ * The workspaces worth offering: the ones with windows on them, **and the one the
+ * user is looking at even when it is empty**. Leaving the focused workspace out was
+ * the bug this exists to fix: the only place a person wants a window is wherever
+ * they are, a fresh workspace has nothing on it yet, and the list refused to name
+ * it — so "send to desktop" offered a list of somewhere else, or nothing at all.
  *
  * Each one carries its windows as a parenthesised line under it, in ordinary
  * light text rather than as a title — that is enough to tell "the one with the
@@ -226,6 +228,14 @@ fun NewShellModal(
  * asked, and a list of window rows would be a list of things that are *not* the
  * choice.
  */
+internal fun choosableWorkspaces(
+    workspaces: List<DesktopWorkspace>,
+    windows: List<DesktopWindow>,
+): List<DesktopWorkspace> =
+    workspaces.filter { ws ->
+        ws.windowCount > 0 || ws.focused || ws.visible || windows.any { it.workspace == ws.name }
+    }
+
 @Composable
 fun DesktopPickerModal(
     workspaces: List<DesktopWorkspace>,
@@ -238,17 +248,17 @@ fun DesktopPickerModal(
     // Derived from the windows rather than from `windowCount`: the count is the
     // WM's number and the titles are what the user is choosing between, so the
     // list has to be able to show them.
-    val occupied = workspaces.filter { ws -> windows.any { it.workspace == ws.name } }
+    val choosable = choosableWorkspaces(workspaces, windows)
 
     ModalCard("send to desktop", onDismiss) {
-        if (occupied.isEmpty()) {
-            Text("No desktop has a window on it.", color = Dim, fontSize = 12.sp)
+        if (choosable.isEmpty()) {
+            Text("No desktop is available.", color = Dim, fontSize = 12.sp)
         } else {
             Column(
                 Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
             ) {
-                for (ws in occupied) {
+                for (ws in choosable) {
                     val titles = windows.filter { it.workspace == ws.name }
                         .joinToString(", ") { it.title.ifEmpty { it.appClass } }
                     val here = liveOn == ws.name
@@ -269,7 +279,12 @@ fun DesktopPickerModal(
                         )
                         // Ordinary size, light: a subtitle, not a heading. Wrapped
                         // rather than one long line, because window titles are long.
-                        Text("($titles)", color = Dim, fontSize = 12.sp)
+                        // An empty workspace says so, rather than showing a bare `()`.
+                        Text(
+                            if (titles.isEmpty()) "(empty)" else "($titles)",
+                            color = Dim,
+                            fontSize = 12.sp,
+                        )
                     }
                 }
             }

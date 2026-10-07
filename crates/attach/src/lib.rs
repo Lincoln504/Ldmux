@@ -175,6 +175,24 @@ pub fn tty_size_for_test() -> (u64, u64) {
     tty_size()
 }
 
+/// Whether a snapshot's grid means this window should re-assert its own size.
+///
+/// The pane is shared, so another device can have resized it. A window whose own
+/// tty never changed gets no SIGWINCH, so seeing the disagreement in a snapshot is
+/// the only notice it will ever get. Re-asserting once per mismatch (rather than on
+/// every snapshot) bounds it against a device that keeps resizing. A read-only
+/// mirror holds nothing and must never resize.
+fn should_reassert(
+    cols: u64,
+    rows: u64,
+    snap_cols: u64,
+    snap_rows: u64,
+    readonly: bool,
+    asserted: Option<(u64, u64)>,
+) -> bool {
+    !readonly && (cols, rows) != (snap_cols, snap_rows) && asserted != Some((cols, rows))
+}
+
 /// What a window leaves the terminal in when it exits, undone. Unconditional and
 /// idempotent: a snapshot establishes alternate screen, mouse reporting,
 /// application cursor and bracketed paste, and the pane's program can change them
@@ -548,6 +566,10 @@ where
     // each read alone turned both halves into U+FFFD in the user's shell.
     let mut in_utf8 = ldmux_protocol::utf8::Utf8Carry::new();
     let mut detached = false;
+    // The size this window last re-asserted after a snapshot disagreed with it.
+    // `None` means we are in step. Bounded so a device that keeps resizing the
+    // shared pane cannot make this an endless exchange.
+    let mut asserted: Option<(u64, u64)> = None;
 
     loop {
         tokio::select! {
@@ -563,6 +585,29 @@ where
                             Some("snapshot") => {
                                 detached = false;
                                 let snap = Snapshot::from_json(&v);
+                                // **The pane is shared, and a window keeps its own
+                                // size.** Another device that attached and resized
+                                // (then left) leaves the pty at its grid, and this
+                                // window — whose tty never changed, so it got no
+                                // SIGWINCH — would paint every row at the wrong
+                                // width for the rest of the session. Getting a
+                                // `snapshot` (rather than `owned`) means this window
+                                // holds the shell, so its own size is the one that
+                                // should win: re-assert it, once per mismatch.
+                                let mismatch = (cols, rows) != (snap.cols, snap.rows);
+                                if should_reassert(cols, rows, snap.cols, snap.rows, readonly, asserted)
+                                {
+                                    asserted = Some((cols, rows));
+                                    let _ = send(
+                                        &mut sink,
+                                        &serde_json::json!({
+                                            "type": "resize", "cols": cols, "rows": rows
+                                        }),
+                                    )
+                                    .await;
+                                } else if !mismatch {
+                                    asserted = None;
+                                }
                                 let out = render_snapshot(&snap);
                                 let _ = output.write_all(&out).await;
                                 let _ = output.flush().await;
@@ -764,7 +809,7 @@ where
 }
 #[cfg(test)]
 mod render_tests {
-    use super::{Snapshot, render_snapshot};
+    use super::{Snapshot, render_snapshot, should_reassert};
 
     fn snap(screen: &str) -> Snapshot<'_> {
         Snapshot {
@@ -775,6 +820,23 @@ mod render_tests {
             rows: 24,
             ..Default::default()
         }
+    }
+
+    /// Another device can resize the shared pane under a window whose own tty did
+    /// not change. The window must take its size back once, and not spin doing it.
+    #[test]
+    fn a_snapshot_mismatch_re_asserts_the_size_once() {
+        // In step: nothing to do.
+        assert!(!should_reassert(158, 82, 158, 82, false, None));
+        // The pane was resized by another device: take it back.
+        assert!(should_reassert(158, 82, 48, 17, false, None));
+        // Already re-asserted this size and the answer has not caught up: wait,
+        // do not send one resize per snapshot.
+        assert!(!should_reassert(158, 82, 48, 17, false, Some((158, 82))));
+        // A read-only mirror holds nothing and must never resize.
+        assert!(!should_reassert(158, 82, 48, 17, true, None));
+        // Once in step again, the next mismatch is a new one to answer.
+        assert!(should_reassert(158, 82, 48, 17, false, Some((100, 40))));
     }
 
     /// A bare LF moves down without returning the column, so the screen

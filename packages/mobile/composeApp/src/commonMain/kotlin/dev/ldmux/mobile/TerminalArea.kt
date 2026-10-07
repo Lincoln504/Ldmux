@@ -61,7 +61,23 @@ internal fun TerminalArea(
                 modifier = Modifier.align(Alignment.Center).padding(16.dp),
             )
         } else {
-            HorizontalPager(state = pagerState, beyondViewportPageCount = 2, modifier = Modifier.fillMaxSize()) { page ->
+            // **The page is keyed by the shell, not by the slot.** Without a key the
+            // pager reuses the composition at an index, so when the session list
+            // reorders (a shell dies, the daemon broadcasts a new list) the page at
+            // index N becomes a *different* shell with the *same* composed
+            // `pointerInput` blocks. Those blocks are keyed on `Unit` precisely so a
+            // gesture is not restarted mid-drag, so they kept the controller they
+            // were born with — the old shell's, already disposed by the holder that
+            // replaced it. Scroll, tap and selection then went to nothing, and only
+            // looked correct again after a rotation rebuilt the page. A key makes a
+            // different shell a different composition, and the gestures are born
+            // with the controller they act on.
+            HorizontalPager(
+                state = pagerState,
+                beyondViewportPageCount = 2,
+                key = { page -> pages.getOrNull(page)?.id ?: page },
+                modifier = Modifier.fillMaxSize(),
+            ) { page ->
               // One Box per page, and it is not cosmetic: a pager page stacks its
               // children only if the content is itself a Box. As two siblings the
               // overlay was laid out *after* a fillMaxSize terminal, i.e. below the

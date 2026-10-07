@@ -71,6 +71,17 @@ Product and mobile:
   clipboard has not been verified on a device.
 - **Tap-to-cursor** and a few **selection** rough edges (auto-scroll on drag,
   Compose renderer hardening: cursor blink, zoom). Detail in `docs/archive/STATE.md` §5.
+  The session-switching failures (scroll/tap/selection doing nothing after a switch)
+  are fixed; see `docs/MOBILE-STATE-AUDIT.md`.
+- **Live voice mode** (hands-free conversation with a coding agent): planned only,
+  in `docs/VOICE-MODE.md`. Nothing implemented; it needs an ADR and an amendment
+  to ADR-0009 before any code.
+- **Multi-client pane geometry** (confirmed on a device 2026-10-06): the phone set a
+  session's shared pane to 48x17 while the desk window's own tty was 158x82, so the
+  desk window rendered thin. One pane has one size, so two clients of different sizes
+  cannot both be right (ADR-0008 consequences). A desk window now re-asserts its own
+  size when a snapshot disagrees with its tty (`crates/attach`), so the holder wins;
+  the general per-client viewport question is still open (`docs/MOBILE-STATE-AUDIT.md` §3).
 - **iOS**: not started; needs a macOS host (`docs/IOS-DEVELOPMENT.md`).
 - **Mesh/LoRa**: investigated only (`docs/MESH-TRANSPORT.md`); no code, no radio
   measurements.

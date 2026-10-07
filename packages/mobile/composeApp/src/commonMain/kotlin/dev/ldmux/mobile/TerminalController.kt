@@ -306,8 +306,19 @@ class TerminalController(
                 ),
             )
             if (history) {
-                // The page-in this controller asked for has been answered.
-                historyRequested = true
+                // The page-in this controller asked for has been answered. Did it
+                // reach *deeper* than what we already held? A page-in replaces the
+                // scrollback with the keeper's newest `lines` rows, so asking for the
+                // same count again would be a round trip for the same rows. When it
+                // grew, the next ask doubles; when it did not, the keeper has no more
+                // and asking again would spin.
+                val afterTotal = engine.render()?.scrollTotal
+                if (afterTotal == null || afterTotal <= historyTotalBefore) {
+                    historyExhausted = true
+                } else {
+                    historyAskLines = (historyAskLines * 2).coerceAtMost(HISTORY_MAX_LINES)
+                }
+                historyLoading = false
                 if (historyRestoreAtTop) {
                     // The request was made from the top of what was loaded, and a page-in
                     // only adds rows above it. How many now sit above the row the user
@@ -319,8 +330,11 @@ class TerminalController(
                 }
             } else {
                 // An ordinary snapshot rebuilt the engine from the visible screen alone:
-                // whatever scrollback it held is gone, so a page-in can be asked for again.
-                historyRequested = false
+                // whatever scrollback it held is gone, so a page-in can be asked for again
+                // from the start.
+                historyExhausted = false
+                historyAskLines = HISTORY_FIRST_LINES
+                historyLoading = false
                 historyRestoreAtTop = false
             }
             if (keptSelection != null) {
@@ -653,7 +667,7 @@ class TerminalController(
      */
     private fun maybeExtendHistory() {
         val f = _frame.value ?: return
-        if (historyRequested || historyLoading) return
+        if (historyLoading || historyExhausted) return
         // The offset is counted from the top of what is loaded — 0 is the oldest
         // row and `total - len` is the live bottom — so 0 is the only place there
         // is older output to ask for. The old test compared the offset against
@@ -661,13 +675,24 @@ class TerminalController(
         // "not yet" and the daemon was never asked: the scrollback stopped at
         // whatever the client had happened to accumulate.
         if (f.scrollOffset > 0L) return
+        // Refused (no live socket): leave the latch clear so the next drag asks again.
+        // It used to be set before the send and cleared only by an arriving snapshot,
+        // so one refused request during a reconnect disabled history for the rest of
+        // the page's life.
+        if (!attach.scrollback(historyAskLines)) return
         historyLoading = true
         historyRestoreAtTop = true
-        attach.scrollback(MAX_HISTORY_LINES)
+        historyTotalBefore = f.scrollTotal
     }
 
+    /** A scrollback request is in flight: one at a time. */
     private var historyLoading = false
-    private var historyRequested = false
+    /** The keeper has no rows above what is loaded: stop asking. */
+    private var historyExhausted = false
+    /** Rows to ask for, doubling per page-in up to the daemon's cap. */
+    private var historyAskLines = HISTORY_FIRST_LINES
+    /** The engine's scrollback total when the outstanding request was made. */
+    private var historyTotalBefore = 0L
     /** The page-in was asked for from the top of what is loaded. */
     private var historyRestoreAtTop = false
 
@@ -680,6 +705,20 @@ class TerminalController(
      */
     override fun scrollToBottom() {
         engine.scrollToBottom()
+        renderNow()
+    }
+
+    /**
+     * Repaint from what the engine already holds.
+     *
+     * The one case that would otherwise be invisible: a snapshot that arrived before
+     * this surface had been laid out, so it was rendered into nothing and never
+     * re-rendered — because nothing about the pane changed afterwards, so no new
+     * snapshot was ever sent. `renderNow` emits a fresh frame object (the frame has
+     * no value equality), so the surface is asked to draw again. Declared on the
+     * handle and left as a no-op default there, so a test double still composes.
+     */
+    override fun repaint() {
         renderNow()
     }
 
@@ -865,7 +904,16 @@ class TerminalController(
     private companion object {
         const val DEFAULT_COLS = 120
         const val DEFAULT_ROWS = 40
-        const val MAX_HISTORY_LINES = 5000
+        /**
+         * Rows the first history page asks for. Small enough that the reply is a
+         * quick round trip, large enough to cover a screenful many times over.
+         */
+        const val HISTORY_FIRST_LINES = 5000
+        /**
+         * Ceiling on a history page. The daemon clamps a request to 20 000 and the
+         * keeper retains 10 000, so asking past this is bytes nobody will see.
+         */
+        const val HISTORY_MAX_LINES = 20000
         /** How long an unconfirmed prediction may stay on screen before we
          *  conclude the pane is not echoing. Roughly 2-3 mobile round trips. */
         const val STALE_MS = 900L

@@ -123,8 +123,11 @@ actual fun rememberTerminalSurface(
     LaunchedEffect(controller, config.predict) { controller.predict = config.predict }
 
     // Entering or leaving the foreground starts or drops the stream. The last
-    // painted frame stays, so swiping back is instant rather than blank.
-    LaunchedEffect(active) { controller.setActive(active) }
+    // painted frame stays, so swiping back is instant rather than blank. Keyed on
+    // the controller as well as the flag: a page that adopts a new controller while
+    // it stays active (a fresh connection) must start *that* stream, and
+    // `setActive(true)` on the old one would leave the new one unopened.
+    LaunchedEffect(controller, active) { controller.setActive(active) }
 
     val frame by controller.frame.collectAsState()
     val density = LocalDensity.current
@@ -262,11 +265,11 @@ actual fun rememberTerminalSurface(
     // was applied while the canvas had no size, and because the grid it computes
     // turns out to be the grid the pane already had, `setGrid` sends nothing and
     // no fresh snapshot follows.
-    LaunchedEffect(viewport) {
+    LaunchedEffect(controller, viewport) {
         if (viewport.width > 0 && viewport.height > 0) controller.repaint()
     }
 
-    LaunchedEffect(viewport, metrics.width, metrics.height) {
+    LaunchedEffect(controller, viewport, metrics.width, metrics.height) {
         if (viewport.width <= 0 || viewport.height <= 0) return@LaunchedEffect
         if (metrics.width <= 0f || metrics.height <= 0f) return@LaunchedEffect
         delay(250)
@@ -373,7 +376,7 @@ actual fun rememberTerminalSurface(
             Modifier
                 .fillMaxSize()
                 .onSizeChanged { viewport = it }
-                .pointerInput(Unit) {
+                .pointerInput(controller) {
                     // A tap places the cursor. The hit-test is the exact inverse of
                     // the draw below — both read the same GridPlacement, which is
                     // the fix for the recorded failure mode (pointer coordinates
@@ -427,7 +430,7 @@ actual fun rememberTerminalSurface(
                         },
                     )
                 }
-                .pointerInput(Unit) {
+                .pointerInput(controller) {
                     // **Selection: a long press chooses, a drag extends, a handle
                     // moves its own end.**
                     //
@@ -556,7 +559,7 @@ actual fun rememberTerminalSurface(
                         },
                     )
                 }
-                .pointerInput(Unit) {
+                .pointerInput(controller) {
                     // Two fingers change the font size, which changes how many
                     // cells fit, which resizes the shell. Narrow on purpose: it
                     // never consumes a single-finger event, so tap and scroll
@@ -580,7 +583,7 @@ actual fun rememberTerminalSurface(
                         },
                     )
                 }
-                .pointerInput(Unit) {
+                .pointerInput(controller) {
                     var carry = 0f
                     // Tracks the raw pointer motion of the drag in flight so that,
                     // if the finger is still moving when it lifts, the release
@@ -690,7 +693,7 @@ actual fun rememberTerminalSurface(
                 // scroll gestures below — and it consumes *only* when the touch begins
                 // on a handle, so a finger that misses one falls straight through and
                 // behaves exactly as it did before.
-                .pointerInput(Unit) {
+                .pointerInput(controller) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val bounds = currentFrame?.selection ?: return@awaitEachGesture
@@ -936,27 +939,36 @@ private suspend fun PointerInputScope.detectPinch(
     awaitEachGesture {
         var previous = 0f
         var zoomed = false
-        do {
-            val event = awaitPointerEvent()
-            val held = event.changes.filter { it.pressed }.take(2)
-            if (held.size == 2) {
-                val distance = (held[0].position - held[1].position).getDistance()
-                if (previous > 0f && distance > 0f) {
-                    val factor = distance / previous
-                    if (factor < 1f - slop || factor > 1f + slop) {
-                        zoomed = true
-                        onZoom(factor)
-                        held.forEach { it.consume() }
+        // **The end runs even when the gesture is cancelled.** `onEnd` clears the
+        // `pinching` flag that disables taps, and it used to be called only on the
+        // normal path. A `pointerInput` restart (a controller change) cancels the
+        // gesture mid-pinch, and the flag then stayed set for the life of the page:
+        // every tap on that shell was swallowed as "probably a pinch". A `finally`
+        // makes the flag's lifetime the gesture's, whatever ends it.
+        try {
+            do {
+                val event = awaitPointerEvent()
+                val held = event.changes.filter { it.pressed }.take(2)
+                if (held.size == 2) {
+                    val distance = (held[0].position - held[1].position).getDistance()
+                    if (previous > 0f && distance > 0f) {
+                        val factor = distance / previous
+                        if (factor < 1f - slop || factor > 1f + slop) {
+                            zoomed = true
+                            onZoom(factor)
+                            held.forEach { it.consume() }
+                        }
                     }
+                    previous = distance
+                } else {
+                    // Back to one finger: the next two-finger distance is a fresh
+                    // baseline, not a jump from wherever the last pinch left off.
+                    previous = 0f
                 }
-                previous = distance
-            } else {
-                // Back to one finger: the next two-finger distance is a fresh
-                // baseline, not a jump from wherever the last pinch left off.
-                previous = 0f
-            }
-        } while (event.changes.any { it.pressed })
-        if (zoomed) onEnd()
+            } while (event.changes.any { it.pressed })
+        } finally {
+            if (zoomed) onEnd()
+        }
     }
 }
 

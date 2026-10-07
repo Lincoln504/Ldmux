@@ -32,12 +32,15 @@ enum class SnapshotApply {
  * In order:
  *
  * - **No frame yet** — a rebuild; there is nothing to preserve.
+ * - **A history page-in reply** — a rebuild, deliberately: it *replaces* the scrollback
+ *   with a deeper one. This is checked **before** the grid, because an in-place replay
+ *   only re-establishes the visible screen; the history rows above it would be
+ *   dropped, leaving the user at the top of the same shallow scrollback with no way to
+ *   ask again. The reply is the deepest thing a snapshot carries, so it wins.
  * - **The screen changed** (primary <-> alternate since the last frame) — a rebuild:
  *   `?1049` cannot be sent into an engine that already holds both screens, because it
  *   switches them (see [snapshotBytes]).
  * - **The grid changed** — in place, the existing resize path.
- * - **A history page-in reply** — a rebuild, deliberately: it *replaces* the scrollback
- *   with a deeper one, and the user asked for it by reaching the top.
  * - **The viewport is anchored in history** — in place. The user is reading; a
  *   reconnect, a server resync or the stale-prediction check must not move them.
  * - **Otherwise** (the viewport follows live output) — a rebuild for the clean state.
@@ -53,9 +56,9 @@ fun planSnapshot(
     history: Boolean,
 ): SnapshotApply {
     if (current == null) return SnapshotApply.Rebuild
+    if (history) return SnapshotApply.Rebuild
     if (current.alternateOn != alternateOn) return SnapshotApply.Rebuild
     if (current.cols != cols || current.rows != rows) return SnapshotApply.ReplayInPlace
-    if (history) return SnapshotApply.Rebuild
     if (!current.viewportActive) return SnapshotApply.ReplayInPlace
     return SnapshotApply.Rebuild
 }

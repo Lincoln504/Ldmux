@@ -52,6 +52,23 @@ class SnapshotPlanTest {
     }
 
     @Test
+    fun `a history page-in that also changed the grid still rebuilds`() {
+        // The bug this pins: the grid check used to run first, so a page-in whose
+        // reply arrived after the pane was resized (another client, a rotation) was
+        // applied in place — which re-establishes only the visible screen, so the
+        // history rows above it were dropped and the user was left at the top of the
+        // same shallow scrollback, unable to ask again.
+        assertEquals(
+            SnapshotApply.Rebuild,
+            plan(testFrame(viewportActive = false), cols = 100, history = true),
+        )
+        assertEquals(
+            SnapshotApply.Rebuild,
+            plan(testFrame(viewportActive = true), rows = 30, history = true),
+        )
+    }
+
+    @Test
     fun `a resize replays in place whether or not the view is anchored`() {
         assertEquals(SnapshotApply.ReplayInPlace, plan(testFrame(viewportActive = true), cols = 100))
         assertEquals(SnapshotApply.ReplayInPlace, plan(testFrame(viewportActive = false), rows = 30))
