@@ -228,3 +228,75 @@ A read-only review of the first commit found four more things, all addressed:
 - **The desktop inventory is a dependency.** "Send to desktop" needs the daemon's
   `desktop` reading. With no window manager adapter the window opens without being
   placed (`place_with`, `desktop.rs:1109`) and the phone shows the daemon's own `detail`.
+
+## 4. "link lost, reconnecting" on a desk window (daemon, 2026-10-06)
+
+Seen when a shell opened on the phone was sent to the desktop. The window printed
+`ldmux: link lost, reconnecting` and came back. The journal says why:
+
+```
+ldmuxd: thread 'tokio-rt-worker' panicked at crates/daemon/src/remote.rs:294:12:
+attempt to add with overflow
+```
+
+**Cause.** A connection counts the bytes of control JSON it has queued (`queued_json`).
+`send_json_text` added each message and the writer subtracted it once written, but the
+attach-backlog notice (`error{resync}`, sent when more than 1 MiB of output arrives
+between subscribe and snapshot to a client without `inplaceResync`) was pushed straight
+into the channel. The writer subtracted a length nobody had added, the counter wrapped
+below zero, and the next `send_json_text` on that connection (the window's first
+heartbeat, a pong) panicked on the checked add. `overflow-checks` is on in release
+(`Cargo.toml`), so this is a panic and not a wrap. The panic ends that connection's task,
+which a desk window sees as a lost link and the phone sees as a dropped page.
+
+**Fix.** The accounting is now a type (`remote.rs`, `mod queued`). `Out::Json` carries a
+`QueuedJson`, which can only be made by `reserve` (counts it) and is un-counted exactly
+once by its `Drop`: after the writer sent it, when the channel refused it, or when the
+connection ended with it still queued. It cannot be subtracted without being added and
+cannot be left counted. The counter saturates, as does the output-side `outstanding`, so
+a future mis-accounting degrades instead of panicking. The notice goes through
+`send_json`. The desk window now advertises `inplaceResync` in its first `attach`
+(`crates/attach`, `FEATURES`), so a busy attach is repaired with a snapshot on the same
+socket and no longer costs a second attach.
+
+**Proof.** `crates/daemon/tests/desk_attach_flood.rs` attaches to a flooding shell with no
+`features` and sends the window's first heartbeat. Against the parent commit it fails at
+attempt 1 (`the connection died after the attach backlog notice`); with the fix it
+passes. A longer run of 60 attempts against the parent: 24 dead connections, each logged
+as `connection N task ended abnormally: ... attempt to add with overflow`; with the fix:
+0 dead, 102 notices.
+
+### 4.1 The same class, audited
+
+The failure that mattered was not the arithmetic but that **work that runs detached ends
+for good on its first panic, silently**. The same counter was read by `broadcast_sessions`
+(called by the maintenance task) and by `queue_output` (called from the per-shell poll
+thread), so the underflow could also have ended those.
+
+| Where | Was | Now |
+|---|---|---|
+| maintenance loop (`daemon.rs`) | a panic in a pass ended the loop: no more dead-shell, window or claim cleanup, with the daemon still answering | each pass runs on its own task (`survive`), a panic ends that pass |
+| claim reconcile and idle sweep (`remote.rs` `Shared::new`) | same | same fix |
+| per-shell stream poll thread (`daemon.rs` `stream_for`) | a panic ended the thread and left the stream in the map: a frozen terminal on every device with the link looking healthy | panic caught per pass |
+| stream subscriber callbacks (`stream.rs` `fanout_except`) | one panicking callback unwound into the poll thread and starved the other subscribers | each guarded |
+| in-place resync failure (`remote.rs` `resync_in_place`) | `resyncing` stayed set and `queue_output` dropped every byte of live output: frozen picture, pings answered | the connection is closed, which is the recovery every client already has |
+| attach vs. a concurrent last-disconnect (`remote.rs` `attach`) | `release_stream_if_idle` could close the stream between `stream_for` and `subscribe_owned`: a snapshot and then no output, ever | `stream.is_closed()` checked once subscribed (a subscribed stream cannot be dropped as idle); the client is told `resync` and re-attaches |
+| keeper `sessions` table and output buffers | `lock().unwrap()`: one panic while locked poisoned it and every later request, and the emulator thread, panicked | poison-tolerant `relock` (the daemon's own rule) |
+| `restored` claim deadlines (`daemon.rs`) | an entry outlived its claim until restart | pruned with the claims |
+
+Checked and found sound: `ws.rs` frame arithmetic (length judged before `as usize`,
+`hdr + 4 + len` bounded by `max_frame`, inflate bounded by `max_message`, `max - out.len()`
+only when `out.len() < max`), `OutBuf` (4 MiB cap, `lost`), `conns` (inserted once,
+removed by `disconnect` on every exit of the loop task, bounded by `MAX_CONNECTIONS` via
+a permit held for the connection's life), `resync_task` and `scrollback_task` (cleared on
+every exit of their tasks), `release_after_grace` (one sleep), the connection loop's
+panic containment (cleanup still runs), claims (`reconcile_claims` frees an unbacked
+claim after the grace), registry and `live_windows` pruning (`apply_reconcile`),
+`AttachClient`/`LdmuxClient` reconnect (backoff reset on `caps`/connect, `ended` and
+`wantTakeover` consumed, missed-pong close, every callback guarded).
+
+**Not done, and why.** The mobile client does not advertise `inplaceResync` or
+`sessionEnded`. It handles `error{resync}` by reconnecting, which works now that the
+daemon no longer panics on that path; advertising the features changes how every page
+repairs itself and needs a device to verify. Open items in `docs/STATE.md`.
+

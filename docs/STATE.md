@@ -82,12 +82,22 @@ Product and mobile:
   cannot both be right (ADR-0008 consequences). A desk window now re-asserts its own
   size when a snapshot disagrees with its tty (`crates/attach`), so the holder wins;
   the general per-client viewport question is still open (`docs/MOBILE-STATE-AUDIT.md` §3).
+- **The mobile client does not advertise `inplaceResync` / `sessionEnded`** (`AttachClient.kt`
+  sends neither): a stale picture costs it a reconnect rather than an in-place snapshot.
+  Fine since the daemon stopped panicking on that path (`docs/MOBILE-STATE-AUDIT.md` §4),
+  but advertising them is the cheaper repair and needs a device to verify.
 - **iOS**: not started; needs a macOS host (`docs/IOS-DEVELOPMENT.md`).
 - **Mesh/LoRa**: investigated only (`docs/MESH-TRANSPORT.md`); no code, no radio
   measurements.
 
 Daemon and protocol:
 - **The keeper is a single point of failure** by design: if it dies, every shell ends.
+  Its `sessions` table and output buffers are now poison-tolerant, so a panic while one is
+  locked no longer disables every later request, but **the running keeper is still the
+  old binary** until it is replaced (which ends every shell): this fix is on disk only.
+- **Desk windows opened before 2026-10-06 22:07 run the old attach client** (no
+  `inplaceResync`, no size re-assert). They stay correct against the fixed daemon; a window
+  opened from now on takes the new path.
 - **Endings are recorded** (`exitCode`, `exitSignal`, `endedKind`, `endedReason`; the
   `session_ended` message). The final screen of an ended shell is kept for 60 s only
   (SPEC §5.5); the final scrollback is not retained after that.

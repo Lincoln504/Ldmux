@@ -151,7 +151,8 @@ exactly the messages it always was.
   link, or the keeper discarded unread output), the daemon waits for the link to drain
   and sends a fresh `caps` plus a `snapshot` carrying `"resync": true` on the same
   socket, instead of `error{resync}` and a reconnect. A client without the feature gets
-  the legacy `error{code:"resync"}` and re-attaches.
+  the legacy `error{code:"resync"}` and re-attaches. The desk window (`ldmuxd attach`)
+  advertises it in its first `attach`.
 - **`sessionEnded`.** When the session ends, the client is sent `session_ended` (its
   `kind` is one of `exited`, `killed`, `closed`, `keeper_lost`, `window_closed`, or
   `ended` when the record is gone; `reason` is the sentence; `exitCode`/`exitSignal` are
