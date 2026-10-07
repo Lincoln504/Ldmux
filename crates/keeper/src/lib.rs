@@ -17,6 +17,25 @@
 mod emulator;
 pub mod scope;
 
+/// Lock a mutex, taking the guard back if a panicking holder poisoned it.
+///
+/// The keeper owns every PTY, so it is the one process whose state must outlive a
+/// bug: with `lock().unwrap()` a single panic while the `sessions` table (or a
+/// session's output buffer, which the emulator thread fills) was locked poisoned it,
+/// and every later request — and the emulator thread's next write — panicked too,
+/// until the keeper was useless and every shell with it. What these guard is plain
+/// data (a map, a byte queue) that is valid across a panic; the daemon's own `relock`
+/// makes the same call for the same reason.
+pub(crate) trait Relock<T> {
+    fn relock(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> Relock<T> for Mutex<T> {
+    fn relock(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -320,6 +339,23 @@ pub fn child_env(
 mod out_buf_tests {
     use super::*;
 
+    /// A panic while a lock is held must not make every later use of it panic: the
+    /// keeper owns every PTY, and a poisoned `sessions` table or output buffer used
+    /// to end all of them.
+    #[test]
+    fn a_poisoned_lock_is_recovered_not_fatal() {
+        let m = Arc::new(Mutex::new(OutBuf::default()));
+        let m2 = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("a holder that fails");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        m.relock().push(b"still works");
+        assert_eq!(m.relock().take().0, b"still works".to_vec());
+    }
+
     #[test]
     fn bytes_are_taken_once_in_order() {
         let mut o = OutBuf::default();
@@ -476,7 +512,7 @@ impl Keeper {
                 // drops the old session's handle and leaves its shell running
                 // with nobody able to reach it. (A dead session still holds its
                 // id until it is killed.)
-                let exists = |me: &Self| me.sessions.lock().unwrap().contains_key(&s.session_id);
+                let exists = |me: &Self| me.sessions.relock().contains_key(&s.session_id);
                 let dup = || format!("session already exists: {}", s.session_id);
                 if exists(self) {
                     return Err(dup());
@@ -486,7 +522,7 @@ impl Keeper {
                         // Checked again at insert: a second Spawn for the same id
                         // may have completed while this one was booting.
                         let lost_race = {
-                            let mut g = self.sessions.lock().unwrap();
+                            let mut g = self.sessions.relock();
                             if g.contains_key(&s.session_id) {
                                 Some(sess)
                             } else {
@@ -505,7 +541,7 @@ impl Keeper {
             }
             km::KeeperMessage::Kill(k) => {
                 let (pid, dead) = {
-                    let g = self.sessions.lock().unwrap();
+                    let g = self.sessions.relock();
                     match g.get(&k.session_id) {
                         Some(s) => (s.pid, s.dead),
                         None => return Err(format!("no such session: {}", k.session_id)),
@@ -518,7 +554,7 @@ impl Keeper {
                 if !dead {
                     terminate(pid).await;
                 }
-                self.sessions.lock().unwrap().remove(&k.session_id);
+                self.sessions.relock().remove(&k.session_id);
                 // The session is removed (the emulator thread exits), so the
                 // state fields are defaults (a dead pane's state is not read
                 // from a gone emulator); `dead` is the load-bearing field.
@@ -544,7 +580,7 @@ impl Keeper {
             }
             km::KeeperMessage::Write(w) => {
                 let (m, wl) = {
-                    let g = self.sessions.lock().unwrap();
+                    let g = self.sessions.relock();
                     match g.get(&w.session_id) {
                         Some(s) if !s.dead => {
                             // Input is activity too: a client typing into a
@@ -598,7 +634,7 @@ impl Keeper {
                 // `MAX_PANE_ROWS`).
                 let (cols, rows) = ldmux_protocol::clamp_pane_size(r.cols, r.rows);
                 let m = {
-                    let g = self.sessions.lock().unwrap();
+                    let g = self.sessions.relock();
                     match g.get(&r.session_id) {
                         Some(s) if !s.dead => (s.master.clone(), s.em.clone()),
                         _ => return Err(format!("no live session: {}", r.session_id)),
@@ -625,7 +661,7 @@ impl Keeper {
                     rows: rows as u16,
                 });
                 {
-                    let mut g = self.sessions.lock().unwrap();
+                    let mut g = self.sessions.relock();
                     if let Some(s) = g.get_mut(&r.session_id) {
                         s.cols = cols as u16;
                         s.rows = rows as u16;
@@ -635,7 +671,7 @@ impl Keeper {
             }
             km::KeeperMessage::Read(rd) => self.state_of(&rd.session_id).await,
             km::KeeperMessage::Peek(p) => {
-                let g = self.sessions.lock().unwrap();
+                let g = self.sessions.relock();
                 match g.get(&p.session_id) {
                     Some(s) => {
                         // The attach's stream pull. The reader task holds only the
@@ -645,7 +681,7 @@ impl Keeper {
                             // The original contract, kept for a daemon that
                             // predates the field: everything, as a byte array.
                             None => {
-                                let (data, lost) = s.out.lock().unwrap().take();
+                                let (data, lost) = s.out.relock().take();
                                 Ok(KeeperMessage::PeekResult(PeekResult {
                                     session_id: p.session_id.clone(),
                                     data,
@@ -656,7 +692,7 @@ impl Keeper {
                             }
                             Some(max) => {
                                 let max = max.clamp(1, km::PEEK_MAX_BYTES) as usize;
-                                let (data, lost, more) = s.out.lock().unwrap().take_up_to(max);
+                                let (data, lost, more) = s.out.relock().take_up_to(max);
                                 Ok(KeeperMessage::PeekResult(PeekResult::compact(
                                     p.session_id.clone(),
                                     &data,
@@ -674,7 +710,7 @@ impl Keeper {
             // the format is ours — plan §3.11(3)).
             km::KeeperMessage::Snapshot(s) => {
                 let (em, pid, dead) = {
-                    let g = self.sessions.lock().unwrap();
+                    let g = self.sessions.relock();
                     // A snapshot is valid for a dead pane too: the emulator
                     // thread keeps running after the master EOF (it services
                     // messages only) and the grid keeps its last content. The
@@ -725,7 +761,7 @@ impl Keeper {
                 // One `State` per session, read from each emulator (async).
                 // A session removed between listing and reading is skipped.
                 let ids: Vec<String> = {
-                    let g = self.sessions.lock().unwrap();
+                    let g = self.sessions.relock();
                     g.values().map(|s| s.id.clone()).collect()
                 };
                 let mut sessions = Vec::new();
@@ -736,7 +772,7 @@ impl Keeper {
                     }
                     // Read after the state, so a session that died between the
                     // two is simply absent rather than a zero.
-                    let g = self.sessions.lock().unwrap();
+                    let g = self.sessions.relock();
                     if let Some(sess) = g.get(&id) {
                         activity.insert(id.clone(), sess.activity.load(Ordering::Relaxed));
                     }
@@ -760,7 +796,7 @@ impl Keeper {
         // The emulator handle + the Session fields, without holding the lock
         // across the emulator round-trip.
         let (em, s_id, cols, rows, dead, pid, exit) = {
-            let g = self.sessions.lock().unwrap();
+            let g = self.sessions.relock();
             match g.get(id) {
                 Some(s) => (
                     s.em.clone(),
@@ -1061,7 +1097,7 @@ impl Keeper {
         // that cannot be surprised by a child spawned elsewhere (a `/proc`
         // reader, a future helper).
         let live: Vec<i32> = {
-            let g = self.sessions.lock().unwrap();
+            let g = self.sessions.relock();
             g.values().filter(|s| !s.dead).map(|s| s.pid).collect()
         };
         for pid in live {
@@ -1092,7 +1128,7 @@ impl Keeper {
     }
 
     fn mark_dead(&self, pid: i32, exit: Option<Exit>) {
-        let mut g = self.sessions.lock().unwrap();
+        let mut g = self.sessions.relock();
         let mut newly_dead = None;
         for s in g.values_mut() {
             if s.pid == pid && !s.dead {
@@ -1126,8 +1162,8 @@ impl Keeper {
     /// How many master bytes are currently buffered for a session (test/
     /// diagnostic: proves the keeper is reading the master).
     pub fn buffered_len(&self, id: &str) -> Option<usize> {
-        let g = self.sessions.lock().unwrap();
-        g.get(id).map(|s| s.out.lock().unwrap().q.len())
+        let g = self.sessions.relock();
+        g.get(id).map(|s| s.out.relock().q.len())
     }
 }
 

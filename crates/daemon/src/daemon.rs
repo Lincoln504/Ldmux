@@ -126,6 +126,29 @@ struct LiveWindow {
     pid: Option<i32>,
 }
 
+/// Run one pass of a background loop on its own task, so a panic in it ends that
+/// pass and not the loop.
+///
+/// The loops that keep the daemon honest (maintenance, the claim and idle sweep) are
+/// detached tasks: a panic in one is a journal line and then silence, and the daemon
+/// carries on answering requests while never again doing the thing the loop was for.
+/// The daemon lock is a `tokio` mutex, so a pass that panics while holding it
+/// releases it as it unwinds and the next pass is not blocked.
+pub(crate) async fn survive<F>(what: &'static str, pass: F) -> Option<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match tokio::spawn(pass).await {
+        Ok(v) => Some(v),
+        Err(e) => {
+            crate::stream::note_panic(what);
+            eprintln!("ldmuxd: {what} pass ended abnormally ({e}); the loop continues");
+            None
+        }
+    }
+}
+
 /// Is the process still there? The kernel's answer, and the only one for a
 /// window that is not ours (the TS `processAlive`).
 fn process_alive(pid: i32) -> bool {
@@ -1165,12 +1188,22 @@ impl LdmuxDaemon {
                     }
                     // A keeper that is restarting is not news. The slow steps run
                     // without the daemon lock (see `maintain_shared`).
-                    let (changed, shared) = LdmuxDaemon::maintain_shared(&maint_arc)
-                        .await
-                        .unwrap_or((false, None));
-                    if changed && let Some(shared) = shared {
-                        crate::remote::broadcast_sessions(&shared).await;
-                    }
+                    //
+                    // Each pass on its own task: a panic in one is that pass's, not
+                    // the loop's. This loop is what notices a shell that exited, a
+                    // window that closed and a claim nobody holds, so when it ended
+                    // (silently: a detached task's panic is only a journal line) the
+                    // daemon went on answering while never again cleaning up.
+                    let arc = maint_arc.clone();
+                    let pass = survive("maintenance", async move {
+                        let (changed, shared) = LdmuxDaemon::maintain_shared(&arc)
+                            .await
+                            .unwrap_or((false, None));
+                        if changed && let Some(shared) = shared {
+                            crate::remote::broadcast_sessions(&shared).await;
+                        }
+                    });
+                    pass.await;
                 }
             });
         }
@@ -1504,7 +1537,19 @@ impl LdmuxDaemon {
                     // A chunk with more behind it is followed at once; only an
                     // empty keeper buffer earns the sleep. A flood is therefore
                     // drained at the keeper socket's speed, in 64 KiB pieces.
-                    let more = poll_stream.poll_once().unwrap_or(false);
+                    //
+                    // A panic in a pass costs that pass: the thread is what delivers
+                    // this shell's output to every viewer, and when it ended the
+                    // stream stayed in the map with nobody polling it (a frozen
+                    // terminal on every device, with the link looking healthy).
+                    let more = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        poll_stream.poll_once()
+                    }))
+                    .unwrap_or_else(|_| {
+                        crate::stream::note_panic("a stream poll pass");
+                        Ok(false)
+                    })
+                    .unwrap_or(false);
                     if !more {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
@@ -2357,6 +2402,11 @@ impl LdmuxDaemon {
         // device's timestamp.
         self.unbacked_since
             .retain(|sid, (device, _)| claims.iter().any(|(s, d)| s == sid && d == device));
+        // A restore deadline is only about a claim that is still there: one whose
+        // claim was dropped (its shell ended) kept its entry for the life of the
+        // daemon.
+        self.restored
+            .retain(|sid, _| claims.iter().any(|(s, _)| s == sid));
         let mut freed = Vec::new();
         for (sid, device) in claims {
             if attached.contains(&(sid.clone(), device.clone())) {
@@ -3402,6 +3452,32 @@ mod tests {
         assert!(!d3.holds("s1", "phone"), "a freed claim is not resurrected");
     }
 
+    /// A restore deadline belongs to a claim that is still there: when the claim
+    /// goes (its record was pruned) the entry goes with it instead of living as long
+    /// as the daemon.
+    #[tokio::test]
+    async fn a_restore_deadline_does_not_outlive_its_claim() {
+        let dir = scratch();
+        let device = ldmux_protocol::rpc::DeviceInfo {
+            id: "phone".into(),
+            name: "phone".into(),
+            kind: "phone".into(),
+        };
+        let mut d1 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        d1.registry().upsert(running_record("s1"));
+        d1.claim("s1", &device, false);
+        d1.stop();
+        drop(d1);
+        let mut d2 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        d2.registry().upsert(running_record("s1"));
+        d2.load_claims();
+        assert_eq!(d2.restored.len(), 1);
+        // The record goes (reconcile's `ownership.retain`), and the next sweep tidies.
+        d2.ownership.retain(&HashSet::new());
+        d2.release_unbacked_claims(&HashSet::new(), d2.mono_ms());
+        assert!(d2.restored.is_empty(), "{:?}", d2.restored);
+    }
+
     /// `forget_session`: a dead session can be forgotten (removed from the
     /// registry); a running session cannot.
     #[tokio::test]
@@ -4299,6 +4375,28 @@ mod tests {
         let file = root.join("file");
         std::fs::write(&file, "x").unwrap();
         assert!(ensure_private_state_dir(&file).is_err());
+    }
+
+    /// A background loop's pass that panics costs that pass: the next one runs, and
+    /// the lock the panicking pass held is not left taken.
+    #[tokio::test]
+    async fn a_panicking_pass_does_not_end_the_loop_or_hold_its_lock() {
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(0u32));
+        let l = lock.clone();
+        let first = survive("test", async move {
+            let _g = l.lock().await;
+            panic!("a pass that fails while holding the daemon lock");
+        })
+        .await;
+        assert!(first.is_none());
+        let l = lock.clone();
+        let second = survive("test", async move {
+            *l.lock().await += 1;
+            7
+        })
+        .await;
+        assert_eq!(second, Some(7));
+        assert_eq!(*lock.lock().await, 1);
     }
 
     #[test]

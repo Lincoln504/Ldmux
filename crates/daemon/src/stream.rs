@@ -59,6 +59,27 @@ fn note_unbounded_keeper() {
     }
 }
 
+/// Say that a callback or a poll pass panicked, at most once every 30 s.
+///
+/// These run on the stream's poll thread at the speed of the shell's output, so a
+/// fault that repeats must not become a journal that is only that line.
+pub(crate) fn note_panic(what: &str) {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+    // `+ 1` so zero can mean "never said".
+    let now = START.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1;
+    let last = LAST_MS.load(Ordering::Relaxed);
+    if (last == 0 || now.saturating_sub(last) >= 30_000)
+        && LAST_MS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        eprintln!("ldmuxd: {what} panicked; carrying on (more are not repeated for 30 s)");
+    }
+}
+
 /// Lock a mutex, recovering the guard if a panicking holder poisoned it.
 ///
 /// The state behind these locks is plain data that stays valid across a panic
@@ -286,7 +307,15 @@ impl PaneStream {
         let bytes = clean.as_bytes();
         for (id, sub) in self.subscribers() {
             if Some(id) != skip {
-                (sub.on_output)(bytes);
+                // One subscriber's callback failing is that subscriber's problem:
+                // it must not stop the others getting this chunk, nor unwind into
+                // the poll thread (which would end it, and with it every viewer of
+                // this shell, silently).
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (sub.on_output)(bytes)))
+                    .is_err()
+                {
+                    note_panic("a stream subscriber's output callback");
+                }
             }
         }
     }
@@ -502,7 +531,13 @@ impl PaneStream {
                         .unwrap_or_else(|e| e.into_inner())
                         .reset();
                     for (_, sub) in self.subscribers() {
-                        (sub.on_reset)(RESET_LOST);
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            (sub.on_reset)(RESET_LOST)
+                        }))
+                        .is_err()
+                        {
+                            note_panic("a stream subscriber's reset callback");
+                        }
                     }
                 }
                 if !data.is_empty()
@@ -532,6 +567,13 @@ impl PaneStream {
     /// Stop the poll loop (the `drop_stream`/`stop` path).
     pub fn stop_polling(&self) {
         self.poll_stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the stream has been closed (dropped by the daemon). A subscriber
+    /// that registered after that is on a stream nothing will ever poll again:
+    /// see `remote::attach`.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 
     /// Whether the poll loop has been stopped.
@@ -1123,6 +1165,40 @@ mod tests {
             got,
             resets,
         )
+    }
+
+    /// A subscriber whose callback panics is that subscriber's fault: the others
+    /// still get the chunk and the panic does not unwind into the poll thread (which
+    /// would end it and freeze every viewer of the shell).
+    #[test]
+    fn a_panicking_subscriber_does_not_starve_the_others_or_end_the_poll() {
+        let s = stream();
+        let bad = StreamSubscriber {
+            on_output: Box::new(|_: &[u8]| panic!("a broken subscriber")),
+            on_reset: Box::new(|_| panic!("a broken subscriber")),
+        };
+        let (good, got, _) = collecting();
+        let (_b, _ub) = s.subscribe(bad);
+        let (_g, _ug) = s.subscribe(good);
+        s.fanout("hello");
+        assert_eq!(got.lock().unwrap().as_slice(), b"hello");
+        s.fanout(" again");
+        assert_eq!(got.lock().unwrap().as_slice(), b"hello again");
+    }
+
+    /// A subscriber that registers on a stream the daemon has since closed can tell:
+    /// `remote::attach` checks this once subscribed (a subscribed stream is never
+    /// dropped as idle, so after the check the stream is live for good).
+    #[test]
+    fn a_closed_stream_says_so_to_a_late_subscriber() {
+        let s = stream();
+        assert!(!s.is_closed());
+        s.close(RESET_SESSION_ENDED);
+        let (sub, got, _) = collecting();
+        let (_id, _un) = s.subscribe(sub);
+        assert!(s.is_closed());
+        s.fanout("nobody hears this");
+        assert!(got.lock().unwrap().is_empty());
     }
 
     /// The bytes still waiting in the keeper when a snapshot is taken are

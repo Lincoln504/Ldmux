@@ -392,7 +392,9 @@ impl ConnShared {
     /// Everything produced for this socket and not yet written: pane output and
     /// control JSON (snapshots, scrollback pages, lists) together.
     fn backlog_bytes(&self) -> usize {
-        self.outstanding.load(Ordering::Relaxed) + self.queued_json.load(Ordering::Relaxed)
+        self.outstanding
+            .load(Ordering::Relaxed)
+            .saturating_add(self.queued_json.load(Ordering::Relaxed))
     }
 
     fn send_error(&self, code: &str, message: &str) {
@@ -456,11 +458,20 @@ impl Shared {
                 if sweep_shared.stopped.load(Ordering::Relaxed) {
                     break;
                 }
-                reconcile_claims(&sweep_shared).await;
-                since_sweep += CLAIM_TICK_MS;
+                // Each pass on its own task (see `daemon::survive`): this loop is
+                // what frees claims nobody holds and reaps silent connections.
+                let pass = sweep_shared.clone();
+                crate::daemon::survive(
+                    "claim reconcile",
+                    async move { reconcile_claims(&pass).await },
+                )
+                .await;
+                since_sweep = since_sweep.saturating_add(CLAIM_TICK_MS);
                 if since_sweep >= sweep_step {
                     since_sweep = 0;
-                    sweep_once(&sweep_shared).await;
+                    let pass = sweep_shared.clone();
+                    crate::daemon::survive("idle sweep", async move { sweep_once(&pass).await })
+                        .await;
                 }
             }
         });
@@ -999,6 +1010,18 @@ async fn connection_loop(
     }
 }
 
+/// Give `n` bytes back to a connection's `outstanding` count, saturating at zero.
+///
+/// The count is a backlog probe read on every output chunk, and `backlog_bytes` adds
+/// it to `queued_json`: a count that wrapped below zero would be a panic there (the
+/// failure that took a connection down for `queued_json`), so a mis-accounting here
+/// degrades to "no backlog" instead.
+fn release_outstanding(outstanding: &AtomicUsize, n: usize) {
+    let _ = outstanding.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+        Some(c.saturating_sub(n))
+    });
+}
+
 /// Send every buffered output frame, then release those bytes from the
 /// connection's `outstanding` count (they have left the daemon).
 ///
@@ -1033,7 +1056,7 @@ async fn flush_output(
     };
     // Only now are the bytes off the daemon: a client that is not reading holds
     // this await open, and `outstanding` must keep counting them meanwhile.
-    conn.outstanding.fetch_sub(n, Ordering::Relaxed);
+    release_outstanding(&conn.outstanding, n);
     ok
 }
 
@@ -1076,10 +1099,14 @@ fn queue_output(conn: &ConnShared, inner: &mut ConnInner, bytes: &[u8]) {
             .send(Out::Resync("client is behind the link".into()));
         return;
     }
-    conn.outstanding.fetch_add(bytes.len(), Ordering::Relaxed);
+    conn.outstanding
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+            Some(c.saturating_add(bytes.len()))
+        })
+        .ok();
     if conn.tx.send(Out::Output(bytes.to_vec())).is_err() {
         // The writer is gone: nothing will ever drain this.
-        conn.outstanding.fetch_sub(bytes.len(), Ordering::Relaxed);
+        release_outstanding(&conn.outstanding, bytes.len());
     }
 }
 
@@ -1706,6 +1733,12 @@ async fn resync_in_place(conn: Arc<ConnShared>) {
             snapshot_and_go_live(&conn, &stream, sub, None, gen_id, &sid, SnapKind::Resync).await
     {
         conn.send_error("resync_failed", &e);
+        // `resyncing` is still set, and while it is `queue_output` drops every byte
+        // of live output: left like this the client is told once and then shows a
+        // frozen picture over a link that still answers pings. Ending the
+        // connection is the recovery every client already has (it reconnects and
+        // attaches, which clears the flag with a fresh snapshot).
+        let _ = conn.tx.send(Out::Close);
     }
     done(&conn);
 }
@@ -1951,6 +1984,26 @@ async fn attach(
             .lock()
             .await
             .release_stream_if_idle(&record.keeper_name);
+        return;
+    }
+    // The stream was handed out under the daemon lock and subscribed to after it
+    // was released. In between, another connection of the same shell can have
+    // closed (and `release_stream_if_idle` dropped) it, because at that moment
+    // nobody was subscribed — and a subscriber on a closed stream is sent a
+    // snapshot and then nothing, for good, with the link looking healthy. Once this
+    // connection is subscribed the stream cannot be dropped as idle, so one check
+    // here closes the window. The client's answer to `resync` is a fresh attach,
+    // which gets a live stream.
+    if stream.is_closed() {
+        stop_viewing(conn, shared).await;
+        conn.send_error("resync", "the stream ended while attaching");
+        // The claim stays: this device took the shell and its re-attach is the
+        // same device, which is `Acquired`; one that never comes back is an unbacked
+        // claim and is freed after the grace. The device it displaced is still owed
+        // its notice.
+        if let Some(prev) = displaced {
+            notify_displaced(shared, &prev.id, &session_id).await;
+        }
         return;
     }
 
@@ -2902,6 +2955,19 @@ mod tests {
             matches!(rx.try_recv(), Ok(Out::Close)),
             "past the cap closes, it does not panic"
         );
+    }
+
+    /// The output half of the backlog count has the same property: a release larger
+    /// than what was counted bottoms out at zero, and the sum the probe reads cannot
+    /// overflow even when both halves are at the top of the range.
+    #[test]
+    fn the_output_backlog_count_saturates_instead_of_wrapping() {
+        let (conn, _rx) = undrained_conn();
+        release_outstanding(&conn.outstanding, 5);
+        assert_eq!(conn.outstanding.load(Ordering::Relaxed), 0);
+        conn.outstanding.store(usize::MAX, Ordering::Relaxed);
+        conn.queued_json.store(usize::MAX, Ordering::Relaxed);
+        assert_eq!(conn.backlog_bytes(), usize::MAX);
     }
 
     /// A control message queue is bounded: a peer that has stopped reading is

@@ -31,7 +31,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::now_ms;
+use crate::{Relock, now_ms};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex, mpsc};
@@ -335,7 +335,7 @@ pub(crate) fn spawn(
                 }
                 let bytes = &buf[..n as usize];
                 term.write(bytes);
-                out.lock().unwrap().push(bytes);
+                out.relock().push(bytes);
                 // The pane said something: this is the activity clock
                 // (`lastActivityAt`). Stamped here — the one place every byte
                 // from the master passes — and not where the buffer is drained,
@@ -420,7 +420,7 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
             // Taken here, on the thread that feeds both the emulator and `out`,
             // so the tail is exactly the bytes the render already contains.
             let tail = if drain_output {
-                out.lock().unwrap().take().0
+                out.relock().take().0
             } else {
                 Vec::new()
             };
