@@ -110,6 +110,14 @@
  * shim refuses it (the shim buffers it in memory). */
 #define LDMUX_CLIPBOARD_MAX_BYTES (256u * 1024u)
 
+/* The history this engine retains, matching the keeper's own cap
+ * (`crates/keeper/src/emulator.rs`: 10 000 lines / 40 MiB). A history page-in from
+ * the host is only useful if the engine can hold it, and this bound is also what
+ * keeps a page-in from pinning megabytes on the phone. The engine's own default is
+ * not documented, so it is set rather than assumed. */
+#define LDMUX_SCROLLBACK_MAX_LINES 10000u
+#define LDMUX_SCROLLBACK_MAX_BYTES (40u * 1024u * 1024u)
+
 /**
  * Scroll deltas that mean "the ends", not a number of rows. They are sentinel
  * values rather than a separate function so a binding has one scroll call.

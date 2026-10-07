@@ -277,6 +277,18 @@ LdmuxTerminal *ldmux_terminal_new(uint16_t cols, uint16_t rows) {
     ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES,
                          &max_bytes);
   }
+  /* The history the phone keeps, set explicitly to the keeper's bound. The
+   * library's default is not documented and a page-in from the host is only
+   * useful if this engine can hold it; leaving it unset also left the phone's
+   * memory bound to whatever the default happened to be. */
+  {
+    size_t max_lines = LDMUX_SCROLLBACK_MAX_LINES;
+    size_t max_bytes = LDMUX_SCROLLBACK_MAX_BYTES;
+    ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                         &max_lines);
+    ghostty_terminal_set(t->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                         &max_bytes);
+  }
   /* GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ is deliberately left unset: enabling it
    * would let any program running in the shell read the user's clipboard, which
    * is a capability this app was never asked for. */

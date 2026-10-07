@@ -3,8 +3,10 @@
 > Status: **fixed on branch `fix/mobile-session-defects`** (2026-10-06). The gate is
 > green: `cargo test --workspace` (471 passed), `cargo clippy --workspace
 > --all-targets -- -D warnings`, `cargo fmt --check`, the Kotlin unit tests
-> (`:composeApp:testDebugUnitTest`), and the mobile TypeScript suite (18 passed).
-> Everything below names the code it is about, so a later reader can check it.
+> (`scripts/android.sh test`), the native shim tests (`scripts/android.sh native-test`,
+> 290 + 16 checks) and the mobile TypeScript suite (18 passed). §1.9 records
+> follow-ups from an independent review of the first commit. Everything below names
+> the code it is about, so a later reader can check it.
 
 This is the record of the investigation that started with two reported symptoms:
 after switching between open shells the terminal often could not be scrolled and
@@ -159,6 +161,30 @@ disagrees with this window's tty makes the window re-assert its own size
 device that keeps resizing cannot turn it into an exchange, and a `--readonly` mirror
 never resizes. Receiving a `snapshot` (rather than `owned`) means this window holds the
 shell, so its size is the one that should win.
+
+### 1.9 Follow-ups from an independent review
+
+A read-only review of the first commit found four more things, all addressed:
+
+- **The history latch was not cleared by an error reply.** `maybeExtendHistory` latches
+  only after a successful send and only a `snapshot` cleared it. The daemon answers a
+  failed scrollback with `scrollback_failed`/`not_attached` instead of a snapshot
+  (`remote.rs:1467,1523`), and live output does not clear the latch either, so on an idle
+  prompt history was disabled for the life of the page. `onServerError` now clears it
+  (`TerminalController.kt:863-872`).
+- **A `--readonly` mirror could resize the shared pane.** The SIGWINCH arm sent `resize`
+  with no guard while the new re-assert path had one. It is now gated the same way
+  (`crates/attach/src/lib.rs:755-768`).
+- **The client engine's scrollback cap was unset.** The page-in growth test reads the
+  *client* engine's `scrollTotal`, so it leaned on a library default that is not
+  documented, and phone memory was bounded by that same default. It is now set explicitly
+  to the keeper's bound, 10 000 lines / 40 MiB (`ldmux_terminal.h:113-121`,
+  `ldmux_terminal.c:280-293`), and the shim was rebuilt for both ABIs.
+- **A prune of ids absent from the session list was reverted.** It was added to stop a
+  dead id accumulating, but an absent id cannot keep the app on a blank terminal
+  (`chosenAlive` only looks at attachable shells), and the prune could drop a
+  just-created shell whose list entry took longer than the 10 s `goto` timeout. The
+  original "listed but not attachable" removal stands (`AppContent.kt:298-304`).
 
 ## 2. State-lifecycle audit: what was checked and found sound
 

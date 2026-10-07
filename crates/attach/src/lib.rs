@@ -757,11 +757,15 @@ where
                 if (c, r) != (cols, rows) {
                     cols = c;
                     rows = r;
-                    let _ = send(
-                        &mut sink,
-                        &serde_json::json!({ "type": "resize", "cols": cols, "rows": rows }),
-                    )
-                    .await;
+                    // A read-only mirror holds no claim and must not resize the shared
+                    // pane: only the device that owns the shell decides its geometry.
+                    if !readonly {
+                        let _ = send(
+                            &mut sink,
+                            &serde_json::json!({ "type": "resize", "cols": cols, "rows": rows }),
+                        )
+                        .await;
+                    }
                 }
             }
             // Speak on a schedule or the daemon reaps the socket and this window

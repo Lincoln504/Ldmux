@@ -861,6 +861,15 @@ class TerminalController(
      * not an error to report, it is the signal to use cursor motion instead.
      */
     private fun onServerError(code: String) {
+        // Any error may be the daemon's answer to the outstanding history request
+        // (`scrollback_failed`, or `not_attached` if the attach went away): such a
+        // request is answered with an error, not a snapshot, so the latch has to be
+        // cleared here or it stays set for the life of the page and history is
+        // silently disabled. Live output does not clear it either.
+        if (historyLoading) {
+            historyLoading = false
+            historyRestoreAtTop = false
+        }
         if (code != "no_mouse" && code != "shell_foreground") return
         mouseRefused = true
         pendingTapJob?.cancel()

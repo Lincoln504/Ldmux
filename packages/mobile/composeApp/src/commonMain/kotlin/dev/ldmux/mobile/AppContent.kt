@@ -296,19 +296,14 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         }
     }
     // Ended shells leave the selection too, so a shell id is never a page-to-be
-    // after its shell has gone. Two ways an id can be dead: the list still carries
-    // it and it is not attachable (it ended), or the list no longer carries it at
-    // all (the daemon has forgotten it). The second is pruned only once the list is
-    // authoritative — connected, non-empty, and not waiting for a shell that was
-    // just asked for and has not appeared in the list yet — so a reconnect's empty
-    // or stale list cannot drop a live page.
-    LaunchedEffect(sessions, connected, pendingOpens, gotoSessionId) {
-        val listed = sessions.mapTo(HashSet()) { it.id }
-        val gone = pageSelection.filter { id ->
-            !listed.contains(id) || sessions.any { it.id == id && !it.attachable }
-        }
-        val listIsAuthoritative = connected && sessions.isNotEmpty() && pendingOpens == 0 && gotoSessionId == null
-        if (gone.isNotEmpty() && listIsAuthoritative) pageSelection = pageSelection - gone.toSet()
+    // after its shell has gone. Only a shell the list still carries and says is not
+    // attachable is removed: an id absent from the list is left alone, because a
+    // list can be momentarily empty or stale and a shell that was just asked for is
+    // chosen before the list carries it. An absent id cannot keep the app on a blank
+    // terminal either — `chosenAlive` only looks at attachable shells.
+    LaunchedEffect(sessions) {
+        val gone = pageSelection.filter { id -> sessions.any { it.id == id && !it.attachable } }
+        if (gone.isNotEmpty()) pageSelection = pageSelection - gone.toSet()
     }
 
     // The notification's Disconnect is the launcher button pressed from outside
