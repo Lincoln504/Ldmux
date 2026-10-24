@@ -2250,3 +2250,136 @@ async fn a_hyperlink_survives_into_the_snapshot_live_and_in_history() {
     // A row with no link carries no OSC 8 at all.
     assert_eq!(with_history.text.matches(open).count(), 1);
 }
+
+// ---- the Kitty keyboard protocol -----------------------------------------
+
+/// A program that asks the Kitty keyboard protocol question is answered by the
+/// keeper, and the flags it pushed are what it is told.
+///
+/// This is the one thing that makes `Shift+Enter` reachable at all: `pi` gates
+/// its Shift+Enter handling on this reply and treats silence as "this terminal
+/// cannot tell the keys apart", which is why it submitted the line instead of
+/// inserting a newline. The engine parses the program's push but answers
+/// queries only through a write-back callback, and the keeper registers none.
+///
+/// `stty raw -echo` because the point is to see the bytes the program reads: in
+/// canonical mode the line discipline echoes escape characters as `^[` and the
+/// reply never reaches a reader.
+#[tokio::test]
+async fn a_kitty_keyboard_query_is_answered_by_the_keeper() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    keeper_call(
+        &s,
+        &spawn_req(
+            "kitty",
+            80,
+            24,
+            None,
+            Some(&["/bin/sh", "-c", "stty raw -echo; exec cat"]),
+        ),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+
+    let write = |data: &str| {
+        KeeperMessage::Write(Write {
+            session_id: "kitty".to_string(),
+            data: data.to_string(),
+        })
+    };
+
+    // Nothing pushed yet: the answer says so, rather than not arriving.
+    keeper_call(&s, &write("\x1b[?u"), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let seen = peek_for(&s, "kitty", "\x1b[?0u").await;
+    assert!(seen.contains("\x1b[?0u"), "no answer to the query: {seen:?}");
+
+    // Push the disambiguate flag. The emulator parses it; the state reports it.
+    keeper_call(&s, &write("\x1b[>1u"), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let mut flags = 0u8;
+    for _ in 0..200 {
+        if let Ok(KeeperMessage::State(st)) = keeper_call(
+            &s,
+            &KeeperMessage::Read(Read {
+                session_id: "kitty".to_string(),
+            }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        {
+            flags = st.kitty_keyboard;
+            if flags == 1 {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(flags, 1, "the pushed flag is in the pane state");
+
+    // The next query is answered with the pushed flags.
+    keeper_call(&s, &write("\x1b[?u"), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let seen = peek_for(&s, "kitty", "\x1b[?1u").await;
+    assert!(
+        seen.contains("\x1b[?1u"),
+        "the answer does not carry the pushed flag: {seen:?}"
+    );
+}
+
+/// A program that asks the terminal where the cursor is, or what it is, gets an
+/// answer.
+///
+/// These queries are dropped by the daemon's output sanitizer before any client
+/// sees them — a client's reply would arrive at the shell as typed input — so the
+/// only place they can be answered is the emulator that owns the grid. With no
+/// write-back registered they were answered by nobody: a UI that sizes itself from
+/// a cursor-position report blocked or guessed.
+#[tokio::test]
+async fn a_cursor_report_and_a_device_attributes_query_are_answered() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    keeper_call(
+        &s,
+        &spawn_req(
+            "queries",
+            80,
+            24,
+            None,
+            Some(&["/bin/sh", "-c", "stty raw -echo; exec cat"]),
+        ),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let write = |data: &str| {
+        KeeperMessage::Write(Write {
+            session_id: "queries".to_string(),
+            data: data.to_string(),
+        })
+    };
+
+    // DSR 6 = cursor position report, `CSI row ; col R`, cursor at the home cell.
+    keeper_call(&s, &write("\x1b[6n"), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let seen = peek_for(&s, "queries", "\x1b[1;1R").await;
+    assert!(seen.contains("\x1b[1;1R"), "no cursor report: {seen:?}");
+
+    // DA1 = `CSI c`, answered with a device-attributes report.
+    keeper_call(&s, &write("\x1b[c"), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let seen = peek_for(&s, "queries", "\x1b[?").await;
+    assert!(
+        seen.contains("\x1b[?") && seen.contains("c"),
+        "no device attributes: {seen:?}"
+    );
+}

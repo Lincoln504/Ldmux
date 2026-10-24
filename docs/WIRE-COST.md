@@ -143,6 +143,40 @@ At 4 KB the framing overhead is 128 frames x 8 bytes = 1 KB out of 514 KB, or 0.
 The trade is 0.2% more bytes for a much smaller unit of loss and a shorter time to
 first paint. That is worth taking, and it is a constant, not an architecture.
 
+### 5. Volume follows the link (2026-10-24)
+
+Sections 1–4 are about *what* is sent. This is about *how much*, which is the other
+half of "responsible on a slow link": a request that is fine at 20 ms is a stall at
+200 ms, and the difference is not the frame rate (the pacing already handles that) but
+the size of the one message a user is waiting on — a history page.
+
+- **The history page is sized by the link.** A `scrollback` reply is the visible screen
+  plus the requested rows, replayed into the client's emulator, and each further pull
+  re-sends everything older again, so a pull is quadratic in the number of pages.
+  5,000 rows of an 80-column screen is ~400 KB before compression: instant on a fast
+  link, a visible stall on a slow one. `FramePacing` now classifies the link
+  (`slow`, hysteresis 150/90 ms) and the first page is `1,000` rows on a slow link
+  against `5,000` on a fast one, with a `4,000`/`20,000` ceiling for the doubling the
+  controller does as the user keeps pulling. The policy is `historyPageLines()` /
+  `historyMaxLines()`, tested in `FramePacingTest`.
+- **A behind client is repaired in place.** The phone now advertises
+  `inplaceResync`, so a socket that falls past `WS_BACKLOG_BYTES` gets `caps` +
+  `snapshot` on the same socket rather than a reconnect — section 1's two-order-of-
+  magnitude lever, and the event that used to make ownership look like it had changed
+  hands (ADR-0010 amendment).
+- **A slow link is not a stuck one.** The drain waits for an in-place resync and a
+  deferred scrollback page used to have a fixed 10 s deadline; a 24 MB backlog on a
+  poor path is minutes of honest work, and closing that connection turned "slow" into
+  "reconnect and rebuild". The deadline now runs only while the unsent backlog is not
+  falling (`Drained` in `crates/daemon/src/remote.rs`). A link that is draining is
+  never declared stuck, and one that is not is still closed in 10 s.
+
+The direction of the repaint interval is the opposite and was already right: a slow
+link is painted *less* often (`RTT / 2`, clamped to 5–20 fps), because the frames
+would arrive after they were useful anyway. Volume is not like that: fewer frames cost
+nothing, but a smaller *page* costs the user scrollback, so it is only cut when the
+link cannot deliver it.
+
 ## The layer table
 
 | Layer | Measured cost | What can be done | Available win |
@@ -153,6 +187,8 @@ first paint. That is worth taking, and it is a constant, not an architecture.
 | compression | 7.1x on `ls -laR`, 4.2x on `ls -la`, 3.4x on a snapshot, 691x on a flood (Rust daemon) | permessage-deflate, negotiated when offered (ADR-0019) | taken |
 | frame header | 8 B x 32 = 0.05% | nothing worth doing | — |
 | coalescing | was 16 KB units | 4 KB units (done: `OUTPUT_FLUSH_BYTES`) | taken |
+| history page | 5,000 rows ≈ 400 KB, quadratic per pull | **1,000 rows** on a slow link (done: `FramePacing.historyPageLines`) | 5x per pull |
+| repair after falling behind | close + reconnect + rebuild | **caps + snapshot in place** when the client advertises `inplaceResync` (done on the phone) | section 1 |
 
 ## The two things that follow
 

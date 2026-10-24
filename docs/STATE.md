@@ -18,7 +18,7 @@ desk-window client, and a native mobile client.
 | FFI to libghostty-vt (static archive built by nix from the pinned commit) | `crates/vt-sys` | Implemented. Verified on x86_64 Linux (glibc); aarch64 Linux evaluates, unbuilt. |
 | Daemon: registry, ownership, remote WebSocket, streams, desktop + inventory, CLI | `crates/daemon` (`ldmuxd`, `ldmux`) | Implemented and deployed. |
 | Desk-window client (`ldmuxd attach`) | `crates/attach` | Implemented. |
-| Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. iOS not started. |
+| Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. Key bar: a 3x2 arrow pad in both modes, `paste` in portrait, sticky `Ctrl`/`Alt`/`Shift`. iOS not started. |
 
 There is no tmux and no TypeScript daemon: both were removed at D4 (2026-10-04,
 ADR-0018). tmux survives only as a dev-time reference in
@@ -69,6 +69,18 @@ Product and mobile:
 - **Clipboard write policy** (`ldmux clipboard-write on|off`, default off): the policy
   and the client's OSC 52 callback exist; a program's copy reaching the Android
   clipboard has not been verified on a device.
+- **Copying multiple lines on the phone inserts a line break between them** (reported
+  2026-10-14, not investigated): copied text pasted elsewhere (a chat such as pi) comes
+  out double-spaced, so the mobile copy path is the suspect.
+- **"The desktop took the shell back" when nobody touched it** — reproduced on the
+  device 2026-10-24 and fixed (ADR-0010 amendment): a page socket closing was treated
+  as a release after the same 3 s grace an unbacked claim gets, which is exactly the
+  phone's own reconnect floor, so a backgrounded app handed the shell to the waiting
+  desk window. A dropped link is now a suspicion for 15 s (`RECONNECT_GRACE_MS`), the
+  displacement names the holder instead of `null`, the phone clears the notice and
+  re-attaches when the `sessions` broadcast shows the shell free, and the desk window's
+  own notice wording stops inventing a device. **The running daemon and keeper are the
+  old binaries** (see below).
 - **Tap-to-cursor** and a few **selection** rough edges (auto-scroll on drag,
   Compose renderer hardening: cursor blink, zoom). Detail in `docs/archive/STATE.md` §5.
   The session-switching failures (scroll/tap/selection doing nothing after a switch)
@@ -82,10 +94,12 @@ Product and mobile:
   cannot both be right (ADR-0008 consequences). A desk window now re-asserts its own
   size when a snapshot disagrees with its tty (`crates/attach`), so the holder wins;
   the general per-client viewport question is still open (`docs/MOBILE-STATE-AUDIT.md` §3).
-- **The mobile client does not advertise `inplaceResync` / `sessionEnded`** (`AttachClient.kt`
-  sends neither): a stale picture costs it a reconnect rather than an in-place snapshot.
-  Fine since the daemon stopped panicking on that path (`docs/MOBILE-STATE-AUDIT.md` §4),
-  but advertising them is the cheaper repair and needs a device to verify.
+- **The mobile client advertises `inplaceResync`** (2026-10-24): a client that falls
+  behind is now repaired with `caps` + `snapshot` on the same socket instead of a
+  reconnect, which is the two-orders-of-magnitude lever in `docs/WIRE-COST.md` and the
+  event that used to make ownership look like it had changed hands. Not advertised:
+  `sessionEnded` (the ending still arrives as a `resync`/`session_dead`), which needs a
+  device check before it is claimed.
 - **iOS**: not started; needs a macOS host (`docs/IOS-DEVELOPMENT.md`).
 - **Mesh/LoRa**: investigated only (`docs/MESH-TRANSPORT.md`); no code, no radio
   measurements.
@@ -107,6 +121,29 @@ Daemon and protocol:
   Unix-socket RPC plus the WebSocket.
 - `snapshotEpoch` is sent in `caps` and never read by the client; `follow` is never sent.
 
+Shell environment (2026-10-24):
+- **`PATH` is inherited and floored, never replaced.** The units used to pin
+  `PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin`; every session inherits the unit's
+  environment, and the session shell is deliberately not a login shell, so a user whose
+  `PATH` lives in `.profile`/`.zprofile` lost every tool outside those four directories
+  inside ldmux. The units no longer set `PATH`; the keeper appends `~/.local/bin` and
+  the conventional system directories to whatever it inherits (`ensure_path_floor`).
+- **The launching terminal's identity is stripped** from a session (`TMUX`, `STY`,
+  `TERM_PROGRAM`, `KITTY_*`, `VTE_VERSION`, `WEZTERM_*`, `ALACRITTY_*`, `WT_*`, …): a
+  session is its own terminal, and a `TMUX` pointing at a socket it does not belong to
+  makes its own `tmux` clients misbehave.
+- **`SHELL` names the program that was exec'd** for a shell session (a `Spawn.command`
+  such as `pi` leaves `SHELL` naming the user's shell).
+- **`IUTF8` is set on the session pty.** Without it the line discipline erased one byte
+  per backspace in canonical mode, so a non-ASCII character took two to four deletes
+  and left half of one behind.
+- **A non-UTF-8 environment variable no longer refuses every spawn.** `std::env::vars()`
+  panics on one; the keeper and the desk-window launcher now use `vars_os()` and drop
+  what the JSON protocol cannot carry, saying so once.
+- **Scrollback caps are configurable**: `LDMUX_SCROLLBACK_LINES` and
+  `LDMUX_SCROLLBACK_BYTES` in `~/.config/ldmux/env` override the 10,000-line / 40 MiB
+  defaults.
+
 Platforms (see `docs/PLATFORMS.md`):
 - Only x86_64 Linux is built and run today; aarch64 Linux evaluates in the flake but is
   unbuilt, and macOS needs the engine derivation proven on darwin plus replacements for
@@ -123,7 +160,15 @@ Platforms (see `docs/PLATFORMS.md`):
 - **SAFETY comments for the 113 `unsafe` sites** (attach, daemon, keeper, vt-sys), then
   enable clippy's `undocumented_unsafe_blocks` in `[workspace.lints.clippy]`
   (`Cargo.toml` explains why it is off).
-- **Shift modifier in the daemon's key table**: it is never sent (`stream.rs`).
+- **The Kitty keyboard protocol is implemented, and the deployed keeper predates it**
+  (ADR-0022). The keeper's emulator now answers the terminal queries a program asks
+  (DA1, DSR/CPR, DECRQM, XTVERSION, the Kitty query, mode reports) through its
+  write-back; the daemon encodes a modified `Enter`/`Escape`/`Space` as `CSI u` when
+  the program has the protocol on; the phone latches `Shift` and sends `S-Enter`. End
+  to end in `crates/daemon/tests/kitty_keys.rs`. **Until the keeper is replaced**
+  (`nix run .#restart-keeper`, which ends every shell) `pi` on the phone still sees a
+  terminal without the protocol and `Shift+Enter` still submits; the phone can fall
+  back to the `Ctrl` latch then `j`, which `pi` also binds to a newline.
 - **`App.kt` is about 2,000 lines** and wants splitting.
 - **Unused selection bindings in the native engine** (`ldmux_terminal.c` / the JNI shim).
 - **Real-device verification of scroll-anchor replay**: a clear-screen in the replayed

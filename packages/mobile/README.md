@@ -251,14 +251,24 @@ pointed.
 - **Cursor**: drawn in its own one-cell canvas so the blink repaints one cell
   instead of the whole grid two or three times a second.
 - **Frame rate**: follows the measured round trip — `RTT/2`, clamped to
-  33–150 ms (`FramePacing.kt`). The sidebar shows `link 42 ms · 30 fps`.
+  50–200 ms (`FramePacing.kt`). The sidebar shows `link 42 ms · 20 fps`.
+- **Volume**: a history page is sized by the link (`FramePacing.historyPageLines`:
+  5,000 rows fast, 1,000 slow), and the page advertises `inplaceResync` so a client
+  that falls behind is repaired with a snapshot instead of a reconnect
+  (`docs/WIRE-COST.md`).
+- **Key bar**: portrait is three rows — navigation (`Esc Tab Home End PgUp PgDn`),
+  modifiers (`Ctrl Alt ⇧ C/c`), actions (`⌨ paste ⏎`) — with a 3x2 arrow pad
+  (`↑` over `← ↓ →`) at the trailing edge. Landscape uses the same `ArrowPad` in the
+  side panel. Modifiers latch for one following key; `⇧` then `⏎` is `Shift+Enter`
+  (a newline in `pi`, ADR-0022).
 
 ## Status
 
 - [x] KMP/Compose shell that builds, installs and runs.
 - [x] Settings persisted on device: one pairing row (`pair` opens the code
       scanner; paired shows the machine and `unpair`, ADR-0017), panel side,
-      predictive echo, control size, text size.
+      control size, text size. Predictive echo has no setting: it follows the
+      measured round trip (`FramePacing.predict`, on above 120 ms / off below 80 ms).
 - [x] **No top bar**: a slim side panel carries back/forward between open
       shells, the extra keys, `+shell` and settings.
 - [x] Session list + `new`/`kill` over the daemon's WebSocket; one page per live

@@ -42,8 +42,11 @@ async fn a_desk_style_attach_to_a_flooding_shell_never_kills_the_connection() {
             "type": "attach", "sessionId": rig.session, "cols": 158, "rows": 82
         }))
         .await;
-        // Let the attach finish and the writer go quiet.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // Let the attach finish and the writer go quiet. Generous on purpose:
+        // `cargo test --workspace` runs every test binary at once on one machine,
+        // and a 2 GB flood beside twenty other suites can take far longer than it
+        // does alone. A tight budget here failed the gate once in three runs.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut snapshot = false;
         while !snapshot && tokio::time::Instant::now() < deadline {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -65,7 +68,7 @@ async fn a_desk_style_attach_to_a_flooding_shell_never_kills_the_connection() {
         // The window's first heartbeat. A dead connection answers nothing.
         ws.send_json(&serde_json::json!({"type": "ping", "id": attempt}))
             .await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut ponged = false;
         while !ponged && tokio::time::Instant::now() < deadline {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -143,7 +146,7 @@ async fn an_in_place_desk_attach_to_a_flooding_shell_keeps_its_connection() {
 
         ws.send_json(&serde_json::json!({"type": "ping", "id": attempt}))
             .await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut ponged = false;
         while !ponged && tokio::time::Instant::now() < deadline {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());

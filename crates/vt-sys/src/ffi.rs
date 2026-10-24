@@ -22,6 +22,15 @@ pub struct GhosttyString {
     pub len: usize,
 }
 
+/// Callback the terminal invokes with the bytes it wants written back to the
+/// pty: the answers to the queries it is asked (DA1, DSR/CPR, DECRQM, the Kitty
+/// keyboard query, mode reports).
+///
+/// `void (*)(GhosttyTerminal, void* userdata, const uint8_t* data, size_t len)`
+/// — see `GhosttyTerminalWritePtyFn` in the vendored header.
+pub type WritePtyFn =
+    unsafe extern "C" fn(GhosttyTerminal, *mut c_void, *const u8, usize);
+
 /// The allocator interface. We always pass NULL to mean "use the default"
 /// (libc malloc/free), so only the shape is needed here.
 #[repr(C)]

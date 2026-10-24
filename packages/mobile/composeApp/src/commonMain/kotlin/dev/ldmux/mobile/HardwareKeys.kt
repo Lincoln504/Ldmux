@@ -18,6 +18,11 @@ package dev.ldmux.mobile
  *
  * Shift on other named keys goes out as the `S-` prefix (`S-Left`, `M-C-S-End`) when
  * the caller says the daemon knows it (`shiftKeys`); otherwise it is dropped.
+ *
+ * Enter, Escape and Space carry `S-` too. They have no legacy shifted byte, but
+ * the daemon does have one under the Kitty keyboard protocol (`S-Enter` is
+ * `CSI 13;2u`), and that is the newline in `pi`. On a daemon without the protocol
+ * the name collapses to the unshifted key, so sending it costs nothing.
  */
 data class HardwareKey(
     /** The protocol key name for a non-character key (`Left`, `F5`, `Enter`...), else null. */
@@ -59,11 +64,17 @@ sealed interface HardwareAction {
 }
 
 /**
- * Keys whose shifted form is a different sequence (`CSI 1;2 A`...). Shift on
- * Enter, Escape, Backspace or Space sends the same byte, so those never carry `S-`.
+ * Named keys that can carry `S-`.
+ *
+ * Most have a legacy xterm encoding (`CSI 1;2 A`). Enter, Escape and Space have
+ * none — legacy shift on them is the same byte — but they do under the Kitty
+ * keyboard protocol, which is the only way `Shift+Enter` reaches a program as a
+ * distinct key. Backspace is left out: no encoder we speak produces a useful
+ * `S-BSpace`, and `C-BSpace` already means what people expect.
  */
 private val SHIFTABLE_NAMED: Set<String> = setOf(
-    "Tab", "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert",
+    "Tab", "Enter", "Escape", "Space",
+    "Up", "Down", "Left", "Right", "Home", "End", "PageUp", "PageDown", "Insert",
     "Delete", "DC", "IC", "PPage", "NPage",
     "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
 )

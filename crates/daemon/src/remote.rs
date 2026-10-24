@@ -160,17 +160,66 @@ const SNAPSHOT_ALLOWANCE_BYTES: usize = 4 * 1024 * 1024;
 /// A scrollback page is served at most this often, and not while the previous
 /// page (or any snapshot) is still more than [`WS_BACKLOG_BYTES`] from the wire.
 const SCROLLBACK_MIN_INTERVAL_MS: u64 = 200;
-/// How long an in-place resync, or a deferred scrollback page, waits for the link
-/// to drain before the connection is declared stuck and closed.
+/// How long an in-place resync, or a deferred scrollback page, waits **without
+/// the unsent backlog moving** before the connection is declared stuck and closed.
+///
+/// Without movement, not elapsed: a slow link that is draining is not stuck. A
+/// 24 MB backlog to a phone on a poor path is minutes of honest work, and a fixed
+/// allowance turned "slow" into "disconnected" — the client then reconnects,
+/// rebuilds the terminal and asks again. See [`Drained`].
 const DRAIN_WAIT_MS: u64 = 10_000;
+
+/// A wait for a socket to drain, with a deadline that only runs while nothing is
+/// draining.
+///
+/// It exists because of the difference between *slow* and *stuck*. Every caller
+/// here is waiting for the same thing ("the unsent backlog is small enough to send
+/// more"), and the only fact that distinguishes a patient wait from a wedged one
+/// is whether the backlog is falling.
+struct Drained {
+    last: usize,
+    deadline: tokio::time::Instant,
+}
+
+impl Drained {
+    fn new() -> Self {
+        Self {
+            last: usize::MAX,
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_millis(DRAIN_WAIT_MS),
+        }
+    }
+
+    /// Whether the wait has run out: true only when the backlog has not fallen for
+    /// [`DRAIN_WAIT_MS`]. Progress extends the deadline.
+    fn stuck(&mut self, backlog: usize) -> bool {
+        if backlog < self.last {
+            self.last = backlog;
+            self.deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(DRAIN_WAIT_MS);
+            return false;
+        }
+        tokio::time::Instant::now() > self.deadline
+    }
+}
 /// Unsent output on one socket past this means the link, not the terminal, is
 /// behind — answer `resync` instead of building a history the client cannot show.
 const WS_BACKLOG_BYTES: usize = 64 * 1024;
 /// Silence that means the other end has gone.
 const WS_IDLE_MS: u64 = 20_000;
 /// How long a closed socket's claims wait for the same device to come back.
-/// The same grace an unbacked claim gets ([`crate::daemon::CLAIM_GRACE_MS`]).
-const RELEASE_GRACE_MS: u64 = crate::daemon::CLAIM_GRACE_MS;
+///
+/// **Not the unbacked-claim grace.** That one answers "how long may a claim
+/// stand before the window behind it attaches" (a fraction of a second) and
+/// [`crate::daemon::CLAIM_GRACE_MS`] is right for it. This one answers a
+/// different question — how long may a *working* connection be gone before its
+/// shell is put down — and the client's own reconnect floor is the number that
+/// matters: after a network change the phone spends `NETWORK_PROBE_MS` (2.5 s)
+/// deciding the old socket is dead and then `RETRY_BASE_MS` (400 ms, plus
+/// jitter) before re-attaching. Sharing the 3 s claim grace made a dropped link
+/// indistinguishable from a deliberate release at exactly the moment the phone
+/// re-attached, and a desk window waiting on the shell took it in between: the
+/// phone then reported "open on desktop" for a shell nobody had taken.
+const RELEASE_GRACE_MS: u64 = crate::daemon::RECONNECT_GRACE_MS;
 /// How often claims are checked for a connection behind them.
 const CLAIM_TICK_MS: u64 = 1_000;
 /// How long one write to the socket may take before the peer is declared gone.
@@ -1662,9 +1711,10 @@ async fn serve_scrollback(conn: &Arc<ConnShared>, lines: u64) {
 /// newest scrollback request that arrived meanwhile. A link that never drains
 /// ends the connection (the send deadline would have anyway).
 async fn deferred_scrollback(conn: Arc<ConnShared>) {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(DRAIN_WAIT_MS);
+    let mut drained = Drained::new();
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let backlog = conn.backlog_bytes();
         let ready = {
             let mut inner = relock(&conn.inner);
             if inner.disposed {
@@ -1685,7 +1735,7 @@ async fn deferred_scrollback(conn: Arc<ConnShared>) {
         match ready {
             Some(Some(lines)) => return serve_scrollback(&conn, lines).await,
             Some(None) => return,
-            None if tokio::time::Instant::now() > deadline => {
+            None if drained.stuck(backlog) => {
                 relock(&conn.inner).scrollback_task = false;
                 let _ = conn.tx.send(Out::Close);
                 return;
@@ -1708,12 +1758,12 @@ async fn resync_in_place(conn: Arc<ConnShared>) {
         inner.resync_task = true;
     }
     let done = |conn: &Arc<ConnShared>| relock(&conn.inner).resync_task = false;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(DRAIN_WAIT_MS);
+    let mut drained = Drained::new();
     while conn.backlog_bytes() > WS_BACKLOG_BYTES / 2 {
         if relock(&conn.inner).disposed {
             return done(&conn);
         }
-        if tokio::time::Instant::now() > deadline {
+        if drained.stuck(conn.backlog_bytes()) {
             let _ = conn.tx.send(Out::Close);
             return done(&conn);
         }
@@ -1827,6 +1877,10 @@ async fn attach(
         if let Some(device) = &device {
             match d.claim(&session_id, device, takeover) {
                 crate::ownership::ClaimResult::Acquired { previous, .. } => {
+                    // This claim has a connection behind it, so it is the
+                    // device's to keep while it reconnects
+                    // (`RECONNECT_GRACE_MS`), not a window's unbacked claim.
+                    d.mark_backed(&session_id, &device.id);
                     displaced = previous;
                 }
                 crate::ownership::ClaimResult::HeldBy { device: holder } => {
@@ -2097,6 +2151,32 @@ async fn snapshot_and_go_live(
 /// Notify every connection of `device_id` that it no longer holds `session_id`,
 /// and cut it off (the TS `notifyDisplaced`).
 async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &str) {
+    // Name the device that has it now, and leave a device alone if it has the
+    // shell back already.
+    //
+    // `owner: null` used to be the whole message, and the phone turned null into
+    // the words "another device" (`TerminalController.kt`): a made-up device, in
+    // a notice that is supposed to say who to ask. The daemon knows the holder
+    // here; the claim is the same one the takeover just wrote.
+    //
+    // The re-check is for the interleaving two takeovers allow: each attach
+    // calls this *after* it has released the daemon lock and gone live, so a
+    // device that was displaced and has since taken the shell back must not be
+    // cut off by the older takeover's late notice.
+    let (still_held, holder) = {
+        let d = shared.daemon.lock().await;
+        let held = d.holds(session_id, device_id);
+        let holder = d.ownership().owner(session_id).map(|c| SessionOwner {
+            id: c.device.id.clone(),
+            name: c.device.name.clone(),
+            kind: c.device.kind.clone(),
+            since: c.since.max(0) as u64,
+        });
+        (held, holder)
+    };
+    if still_held {
+        return;
+    }
     let conns: Vec<Arc<ConnShared>> = {
         let map = relock(&shared.conns);
         map.values().cloned().collect()
@@ -2120,7 +2200,11 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
         if !viewing {
             continue;
         }
-        c.send_json(&serde_json::json!({"type":"owned","sessionId":session_id,"owner":null}));
+        c.send_json(&serde_json::json!({
+            "type": "owned",
+            "sessionId": session_id,
+            "owner": holder,
+        }));
         // Cut it off: unsubscribe and forget the stream.
         let (keeper_name, unsub) = {
             let mut inner = relock(&c.inner);

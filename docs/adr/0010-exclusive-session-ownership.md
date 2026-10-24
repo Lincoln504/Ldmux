@@ -262,3 +262,51 @@ not open at all.)
 
 Pinned (originally by the TypeScript `desk-window.test.ts`, now in `crates/daemon/src/ownership.rs` and `crates/daemon/tests/`), each case checked to fail
 with its fix removed.
+
+## Amendment — 2026-10-24: a dropped link is a suspicion, not a release
+
+Reported on a phone: "it says the desktop took it over, and the desktop was not
+taking it over". Reproduced on the device (2026-10-24) while the desk window for that
+shell was open and idle:
+
+1. the phone's app went to the background (to another app), so its page socket closed;
+2. the daemon released the phone's claim after the **3 s** claim grace — the same
+   number used for a claim taken on a window's behalf that has not attached yet;
+3. the phone's own reconnect floor after a link change is `NETWORK_PROBE_MS` (2.5 s)
+   plus `RETRY_BASE_MS` (0.4 s), so the phone's polite re-attach landed *on* the
+   expiry, and every retry after it landed past it;
+4. the waiting desk window saw `owner: null` in the `sessions` broadcast and
+   re-attached by itself — the behaviour this ADR already specifies for "the holder
+   let go";
+5. the phone's re-attach was refused, and the refusal carried `"owner": null`, which
+   the client rendered as a device name it invented ("another device").
+
+### What changed
+
+- **Two graces, one meaning each.** `CLAIM_GRACE_MS` (3 s) stays the answer to "how
+  long may a claim stand that was taken for a window which has not attached", and
+  `RECONNECT_GRACE_MS` (15 s) answers "how long may a claim outlive the working
+  connection that held it". The daemon tells them apart with `ever_backed`: a claim
+  made by a connection that attached is its device's until the reconnect grace runs
+  out, even though the claim is momentarily unbacked. Sized against the client's own
+  reconnect policy, not against impatience.
+- **The displacement names the new holder.** `notify_displaced` sends the owner object
+  it already knows instead of `null`. Both clients had been turning `null` into a
+  device that does not exist; the desk client did the same in its notice.
+- **A stale displacement is dropped.** `notify_displaced` re-checks that the
+  connection's device still does *not* hold the shell before cutting it, so two
+  takeovers close together cannot cut off a device that has already taken the shell
+  back.
+- **The phone heals itself.** It parses the `sessions` broadcast (it used to drop it as
+  an unknown type) and, when its shell becomes free, clears the notice and re-attaches
+  without a takeover — a shell nobody holds is not a steal. A takeover notice no
+  longer survives the link going down.
+- **The wording stops inventing a device.** An unnamed displacement renders "open
+  elsewhere"; a named one renders "open on <name>".
+
+### What did not change
+
+The desk window still takes a free shell by itself. That is this ADR's rule ("a device
+that puts a shell down is not using it"), and a 15 s grace keeps a blip out of it.
+Making the desk ask before reclaiming after a *transport* failure needs a reason on
+the wire ("released" vs "disconnected") and is not done.

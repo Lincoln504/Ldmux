@@ -1,12 +1,19 @@
 package dev.ldmux.mobile
 
 /**
- * The sticky modifier keys: Ctrl and Alt, latched for exactly one following key.
+ * The sticky modifier keys: Ctrl, Alt and Shift, latched for exactly one
+ * following key.
  *
  * "Sticky" is the point. A phone keyboard has no way to hold a chord — you
  * cannot press Ctrl and `c` at the same instant with one finger, and the keys
  * live in a sidebar you would have to hold with a second hand while reaching for
  * a third. So the modifier is a mode: arm it, press one key, and it disarms.
+ *
+ * Shift is latched for the same reason a soft keyboard cannot provide one at the
+ * same moment as another key: **Shift+Enter is a newline** in a TUI such as
+ * `pi`, and the only way to produce it from the bar is to arm Shift and press
+ * the bar's Enter. It also gives Shift+Tab, and Shift on arrows and Home/End
+ * for the programs that select with them.
  *
  * ## How a modified key is delivered: always by name
  *
@@ -22,14 +29,19 @@ package dev.ldmux.mobile
  * so every Ctrl chord now takes the same path.
  */
 
-/** Which modifiers are armed. Both may be armed at once. */
-data class Modifiers(val ctrl: Boolean = false, val alt: Boolean = false) {
-    val armed: Boolean get() = ctrl || alt
+/** Which modifiers are armed. Any combination of them may be armed at once. */
+data class Modifiers(
+    val ctrl: Boolean = false,
+    val alt: Boolean = false,
+    val shift: Boolean = false,
+) {
+    val armed: Boolean get() = ctrl || alt || shift
 
-    /** Arm or disarm one modifier, leaving the other alone. */
+    /** Arm or disarm one modifier, leaving the others alone. */
     fun toggled(which: StickyKey): Modifiers = when (which) {
         StickyKey.Ctrl -> copy(ctrl = !ctrl)
         StickyKey.Alt -> copy(alt = !alt)
+        StickyKey.Shift -> copy(shift = !shift)
     }
 
     /** Disarm everything — after a key has consumed them, or on a tap. */
@@ -41,7 +53,7 @@ data class Modifiers(val ctrl: Boolean = false, val alt: Boolean = false) {
  * owns that name in every file that draws anything, and a shadowed enum is a
  * compile error in the exact place this is used.
  */
-enum class StickyKey { Ctrl, Alt }
+enum class StickyKey { Ctrl, Alt, Shift }
 
 /**
  * What to do with a key press once the modifiers are known.
@@ -137,7 +149,9 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
     // sequence that is. Some of the sidebar's own keys are already named that
     // way (`C-c`), so any existing prefix is stripped and rebuilt rather than
     // stacked into `C-C-c`, which is not a key.
-    val base = key.removePrefix("M-").removePrefix("C-")
+    //
+    // The wire's order is `M-C-S-<base>`: Shift is the innermost prefix.
+    val base = key.removePrefix("M-").removePrefix("C-").removePrefix("S-")
     if (base !in NAMED_KEYS && base.length != 1) return ModifiedKey.Named(key)
     var prefix = ""
     if (mods.alt) prefix += "M-"
@@ -145,6 +159,11 @@ fun modifiedKey(key: String, mods: Modifiers): ModifiedKey {
     // the modifier), so a latched Ctrl is spent by them without being named: `C-Escape`
     // and `C-Enter` are not keys any program is waiting for.
     if (mods.ctrl && base !in CTRL_INERT) prefix += "C-"
+    // Shift, unlike Ctrl, *is* a key on Escape, Enter and Space: under the Kitty
+    // keyboard protocol `S-Enter` is `CSI 13;2u`, which is the newline in `pi`.
+    // A daemon without the protocol collapses it to the unshifted key, so the
+    // name is always safe to send.
+    if (mods.shift) prefix += "S-"
     return ModifiedKey.Named(if (prefix.isEmpty()) base else prefix + base)
 }
 

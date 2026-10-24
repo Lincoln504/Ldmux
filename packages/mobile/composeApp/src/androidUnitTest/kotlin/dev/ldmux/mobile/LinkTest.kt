@@ -54,7 +54,7 @@ class LinkTest {
     fun `only the connection fields decide whether a page reconnects`() {
         // A display setting must not rebuild a page: a rebuild reconnects, and the
         // first attach takes the shell over (ADR-0010).
-        assertEquals(paired.connectionKey, paired.copy(fontSp = 20f, predict = true, side = "right", compact = false).connectionKey)
+        assertEquals(paired.connectionKey, paired.copy(fontSp = 20f, side = "right", compact = false).connectionKey)
         assertTrue(paired.connectionKey != paired.copy(token = "f".repeat(64)).connectionKey)
         assertTrue(paired.connectionKey != paired.copy(host = "100.64.0.1:7625").connectionKey)
         assertTrue(paired.connectionKey != paired.unpaired().connectionKey)

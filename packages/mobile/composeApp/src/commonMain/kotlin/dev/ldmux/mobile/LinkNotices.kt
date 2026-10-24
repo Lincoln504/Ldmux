@@ -45,6 +45,9 @@ internal fun BoxScope.LinkNotice(text: String) {
  */
 @Composable
 internal fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
+    // Empty means the daemon did not name the device. Saying "another device" would
+    // be inventing a name for it; "elsewhere" says what is known and no more.
+    val line = if (holder.isEmpty()) "open elsewhere" else "open on $holder"
     Box(
         Modifier
             .fillMaxSize()
@@ -64,7 +67,7 @@ internal fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("open on $holder", color = Fg, fontSize = 15.sp)
+            Text(line, color = Fg, fontSize = 15.sp)
             Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
             AccentBtn("take it over", Modifier.width(220.dp)) { onTakeOver() }
         }

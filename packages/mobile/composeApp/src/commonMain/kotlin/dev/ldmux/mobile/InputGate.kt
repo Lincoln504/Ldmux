@@ -23,18 +23,20 @@ data class InputGate(
  * - [connected]: the socket is up.
  * - [heldElsewhere]: another device owns the shell, so the daemon would refuse input
  *   and a prediction would be painted and then withdrawn.
- * - [predictSetting], [alternateScreen], [passwordPrompt]: the existing prediction gates.
+ * - [predict], [alternateScreen], [passwordPrompt]: the prediction gates.
+ *   [predict] is not a setting: it is the link being slow enough that painted text
+ *   is better than waiting (see [FramePacing.predict]).
  */
 fun inputGate(
     connected: Boolean,
     heldElsewhere: Boolean,
-    predictSetting: Boolean,
+    predict: Boolean,
     alternateScreen: Boolean,
     passwordPrompt: Boolean,
 ): InputGate {
     val send = connected && !heldElsewhere
     return InputGate(
         canSend = send,
-        canPredict = send && predictSetting && !alternateScreen && !passwordPrompt,
+        canPredict = send && predict && !alternateScreen && !passwordPrompt,
     )
 }

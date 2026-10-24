@@ -72,7 +72,8 @@ pub struct ReconcileResult {
 /// `list`, and a desk window the user closed stays recorded for good.
 const MAINTENANCE_INTERVAL_MS: u64 = 2000;
 
-/// How long a claim may stand with no connection behind it.
+/// How long a claim may stand with no connection behind it **that never had
+/// one**.
 ///
 /// A claim is taken on a window's behalf *before* the window has attached
 /// (`makeLive`, `deskWindow`), so it is legitimately unbacked while the window
@@ -81,10 +82,22 @@ const MAINTENANCE_INTERVAL_MS: u64 = 2000;
 /// displaced desk window waits for its shell to be *free*, so it stays on
 /// "Press r to take it back" for good. Found in use, 2026-10-05.
 ///
-/// The same grace a closed socket's claims wait for a reconnect (`remote.rs`):
-/// one question — how long may a claim outlive the connection that made it —
-/// and one answer.
-pub(crate) const CLAIM_GRACE_MS: u64 = 3_000;
+/// A claim whose connection *went away* is a different question and gets
+/// [`RECONNECT_GRACE_MS`]; the daemon knows which is which from
+/// [`LdmuxDaemon::ever_backed`].
+pub const CLAIM_GRACE_MS: u64 = 3_000;
+
+/// How long a claim outlives the connection that was using it, waiting for the
+/// same device to come back.
+///
+/// Sized against the client's own reconnect policy, not against impatience:
+/// when the phone's link drops it spends `NETWORK_PROBE_MS` (2.5 s) deciding the
+/// old socket is dead, then `RETRY_BASE_MS` (400 ms, plus jitter) before the
+/// first attach and backs off from there. The old 3 s grace landed *on* that
+/// first retry, and the sweep released the shell the moment the phone tried to
+/// come back — so a dropped link became a real handover to a waiting desk
+/// window, and the phone reported a takeover nobody had made.
+pub const RECONNECT_GRACE_MS: u64 = 15_000;
 
 /// How much history `capture --history` asks for: the TypeScript's own cap
 /// (`HISTORY_CAPTURE_LINES`, `origin/main:packages/daemon/src/tmux/control-plane.ts:200`),
@@ -314,6 +327,18 @@ pub struct LdmuxDaemon {
     /// (the device that holds it is part of the value, so a claim that moves
     /// starts its wait again). See [`LdmuxDaemon::release_unbacked_claims`].
     unbacked_since: std::collections::HashMap<String, (String, u64)>,
+    /// `(session, device)` claims that have had a connection attached to that
+    /// session at least once.
+    ///
+    /// It is what separates the two reasons a claim can have no connection
+    /// behind it, and the two have different graces: a claim taken on a
+    /// window's behalf that never attached is nobody's ([`CLAIM_GRACE_MS`]),
+    /// while a claim whose working connection went away belongs to that device
+    /// and is waiting for it ([`RECONNECT_GRACE_MS`]). Without this the sweep
+    /// released a phone's shell three seconds after a dropped link — exactly
+    /// when the phone re-attaches — and a waiting desk window took it, which the
+    /// phone reported as "the desktop took it over".
+    ever_backed: std::collections::HashSet<(String, String)>,
     /// The single-instance lock (the `ldmuxd.lock` pid lockfile); `Drop`
     /// releases it.
     lock: DaemonLock,
@@ -414,6 +439,7 @@ impl LdmuxDaemon {
             control_handle: None,
             sessions_dirty: false,
             unbacked_since: HashMap::new(),
+            ever_backed: std::collections::HashSet::new(),
             live_windows: HashMap::new(),
             desktop_device: ldmux_protocol::rpc::DeviceInfo {
                 id: "desktop".into(),
@@ -1707,15 +1733,16 @@ impl LdmuxDaemon {
                 // name converted to its byte sequence (the TS `sendText` +
                 // `sendKey` are separate operations, but both write to the PTY;
                 // concatenating into one `Write` is equivalent).
-                // Cursor keys depend on the pane's DECCKM mode (`Read` answers it).
-                let app_cursor = match self
+                // Cursor keys depend on the pane's DECCKM mode and a modified
+                // Enter on its Kitty keyboard flags (`Read` answers both).
+                let (app_cursor, kitty) = match self
                     .keeper_call(&km::KeeperMessage::Read(km::Read {
                         session_id: record.keeper_name.clone(),
                     }))
                     .await
                 {
-                    Ok(km::KeeperMessage::State(st)) => st.app_cursor,
-                    _ => false,
+                    Ok(km::KeeperMessage::State(st)) => (st.app_cursor, st.kitty_keyboard),
+                    _ => (false, 0),
                 };
                 let mut input: Vec<u8> = Vec::new();
                 if !text.is_empty() {
@@ -1726,7 +1753,9 @@ impl LdmuxDaemon {
                         let ks = k.as_str().unwrap_or("");
                         // An unknown name is refused rather than typed into the
                         // shell: see `key_name_to_bytes`.
-                        input.extend(crate::stream::key_name_to_bytes_in(ks, app_cursor)?);
+                        input.extend(crate::stream::key_name_to_bytes_in_mode(
+                            ks, app_cursor, kitty,
+                        )?);
                     }
                 }
                 let data =
@@ -2365,8 +2394,22 @@ impl LdmuxDaemon {
         r
     }
 
+    /// Record that a claim has a connection behind it now.
+    ///
+    /// A claim with no connection behind it gets one of two graces
+    /// (see [`RECONNECT_GRACE_MS`]): a claim taken on a
+    /// window's behalf is nobody's after [`CLAIM_GRACE_MS`], and a claim whose
+    /// connection went away belongs to its device for the reconnect grace.
+    /// Called by the attach path, which is the one place a claim is made on
+    /// behalf of a live connection.
+    pub fn mark_backed(&mut self, session_id: &str, device_id: &str) {
+        self.ever_backed
+            .insert((session_id.to_string(), device_id.to_string()));
+    }
+
     /// Release claims that no connection is behind, once they have been that way
-    /// for [`CLAIM_GRACE_MS`].
+    /// for [`CLAIM_GRACE_MS`] (or [`RECONNECT_GRACE_MS`], for a claim that had a
+    /// connection before it went away).
     ///
     /// `attached` is the set of `(session, device)` pairs that have a connection
     /// *attached to that session right now* — the remote's view, since only it
@@ -2402,6 +2445,10 @@ impl LdmuxDaemon {
         // device's timestamp.
         self.unbacked_since
             .retain(|sid, (device, _)| claims.iter().any(|(s, d)| s == sid && d == device));
+        // Bounded by the claims that exist, like the clock above: a device that
+        // held a shell fit only matters while the shell is still claimed.
+        self.ever_backed
+            .retain(|(sid, device)| claims.iter().any(|(s, d)| s == sid && d == device));
         // A restore deadline is only about a claim that is still there: one whose
         // claim was dropped (its shell ended) kept its entry for the life of the
         // daemon.
@@ -2410,6 +2457,7 @@ impl LdmuxDaemon {
         let mut freed = Vec::new();
         for (sid, device) in claims {
             if attached.contains(&(sid.clone(), device.clone())) {
+                self.ever_backed.insert((sid.clone(), device.clone()));
                 self.unbacked_since.remove(&sid);
                 self.restored.remove(&sid);
                 continue;
@@ -2428,7 +2476,17 @@ impl LdmuxDaemon {
                     now
                 }
             };
-            if now.saturating_sub(since) >= CLAIM_GRACE_MS {
+            // A claim that has had a connection behind it belongs to its
+            // device until the reconnect grace runs out; one that never did
+            // was taken on a window's behalf and is nobody's after the short
+            // grace. Same question as before, but the answer depends on which
+            // of the two this claim is.
+            let grace = if self.ever_backed.contains(&(sid.clone(), device.clone())) {
+                RECONNECT_GRACE_MS
+            } else {
+                CLAIM_GRACE_MS
+            };
+            if now.saturating_sub(since) >= grace {
                 self.unbacked_since.remove(&sid);
                 self.release_claim(&sid, &device);
                 freed.push(sid);
@@ -3263,8 +3321,17 @@ mod tests {
             "the wait runs from when it went unbacked again"
         );
         assert!(d.holds("s3", "desktop"));
+        // This claim *has* had a connection behind it, so it is its device's to
+        // keep while that device reconnects: the short grace that frees a claim
+        // taken on a window's behalf does not free it.
+        assert!(
+            d.release_unbacked_claims(&with_s2(&[]), 4_100 + CLAIM_GRACE_MS)
+                .is_empty(),
+            "a claim that was backed gets the reconnect grace, not the claim grace"
+        );
+        assert!(d.holds("s3", "desktop"));
         assert_eq!(
-            d.release_unbacked_claims(&with_s2(&[]), 4_100 + CLAIM_GRACE_MS),
+            d.release_unbacked_claims(&with_s2(&[]), 4_100 + RECONNECT_GRACE_MS),
             vec!["s3".to_string()]
         );
 

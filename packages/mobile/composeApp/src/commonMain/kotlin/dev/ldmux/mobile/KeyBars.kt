@@ -19,8 +19,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
@@ -103,37 +105,64 @@ internal fun PortraitBar(
                 IconKeyboard(if (keyboardUp) Accent else Dim, box = LocalTouch.current.icon)
             }
         }
+        val clipboard = LocalClipboardManager.current
         PortraitKeyRow(
             listOf(
                 "Esc" to { press("Escape") },
                 "Tab" to { press("Tab") },
-                "\u2190" to { press("Left") },
-                "\u2191" to { press("Up") },
-                "\u2193" to { press("Down") },
-                "\u2192" to { press("Right") },
-            ),
-            leading = menuHere,
-        )
-        // Home/End and the page keys have no soft-keyboard equivalent and no
-        // gesture, so they need a row of their own here. Landscape keeps its own
-        // copy in the panel; neither mode has a scrollback that can stand in for
-        // PageUp/PageDown inside a full-screen program.
-        PortraitKeyRow(
-            listOf(
                 "Home" to { press("Home") },
                 "End" to { press("End") },
                 "PgUp" to { press("PageUp") },
                 "PgDn" to { press("PageDown") },
             ),
+            leading = menuHere,
         )
-        PortraitKeyRow(
-            // From `Keys.kt`, so the list the user sees is the list the C/d guard
-            // checks. It used to be written here, and the guard read a constant this
-            // call site had stopped using.
-            portraitControlKeys(onSticky, press),
-            leading = keyboardHere,
-            active = listOf(modifiers.ctrl, modifiers.alt, false, false, false, false, false),
-        )
+        // The typing half of the bar and the arrow block share the width, two rows
+        // each.
+        //
+        // The arrows are the 3x2 block from `ARROW_PAD_ROWS` at the trailing edge —
+        // up above down, left and right either side of it — because a direction is a
+        // position. Four arrows in one row (`← ↑ ↓ →`) make the reader parse four
+        // words in sequence to find one, and put up beside the others rather than
+        // over down. This is the arrangement a thumb already knows from a D-pad, and
+        // it is the same composable in landscape, so the two modes cannot drift.
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(
+                Modifier.weight(4f),
+                verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
+            ) {
+                PortraitKeyRow(
+                    // From `Keys.kt`, so the list the user sees is the list the C/d
+                    // guard checks. It used to be written here, and the guard read a
+                    // constant this call site had stopped using.
+                    portraitControlKeys(onSticky, press),
+                    active = listOf(modifiers.ctrl, modifiers.alt, modifiers.shift, false),
+                )
+                PortraitKeyRow(
+                    listOf(
+                        // The only clipboard control in portrait. Copy is the
+                        // system's own (a selection, then the copy action), so paste
+                        // is the one thing no gesture provides, and landscape has had
+                        // it all along.
+                        "paste" to {
+                            clipboard.getText()?.text
+                                ?.takeIf { it.isNotEmpty() }
+                                ?.let { handle?.paste(it) }
+                        },
+                        "\u23ce" to { press("Enter") },
+                    ),
+                    leading = keyboardHere,
+                    // Enter takes twice a key's width: it ends every line, and a
+                    // wide target is one a thumb finds without looking.
+                    weights = listOf(1f, 2f),
+                )
+            }
+            ArrowPad(Modifier.weight(3f), press, gap = LocalTouch.current.rowPad)
+        }
         // No microphone: portrait has the keyboard, and the keyboard has its own.
         // Two microphones is one too many.
     }
@@ -153,6 +182,8 @@ private fun PortraitKeyRow(
     keys: List<Pair<String, () -> Unit>>,
     leading: (@Composable RowScope.() -> Unit)? = null,
     active: List<Boolean> = emptyList(),
+    /** Per-key share of the row; a missing entry is one. */
+    weights: List<Float> = emptyList(),
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -161,7 +192,12 @@ private fun PortraitKeyRow(
     ) {
         leading?.invoke(this)
         keys.forEachIndexed { i, (label, action) ->
-            KeyBtn(label, Modifier.weight(1f), active.getOrElse(i) { false }, action)
+            KeyBtn(
+                label,
+                Modifier.weight(weights.getOrElse(i) { 1f }),
+                active.getOrElse(i) { false },
+                action,
+            )
         }
     }
 }
@@ -246,4 +282,49 @@ internal fun KeyRow(keys: List<Pair<String, () -> Unit>>, active: List<Boolean> 
             KeyBtn(label, Modifier.weight(1f), active.getOrElse(i) { false }) { action() }
         }
     }
+}
+
+/**
+ * The four arrows as a block, in the shape a direction has: `Up` over `Down`, with
+ * `Left` and `Right` either side of it ([ARROW_PAD_ROWS]).
+ *
+ * One composable for both modes. Portrait gives it a third of the bar beside the
+ * typing keys, landscape gives it the panel's whole width; the empty corner cells
+ * are what keep `Up` centred over `Down` rather than sliding to the edge of
+ * whatever width it is handed.
+ */
+@Composable
+internal fun ArrowPad(
+    modifier: Modifier = Modifier,
+    press: (String) -> Unit,
+    gap: Dp = 5.dp,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(gap)) {
+        ARROW_PAD_ROWS.forEach { row ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(gap),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                row.forEach { key ->
+                    if (key == null) {
+                        // An empty cell keeps the columns: it is the corner of the
+                        // cross, not a missing key.
+                        Box(Modifier.weight(1f))
+                    } else {
+                        KeyBtn(glyphFor(key), Modifier.weight(1f)) { press(key) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The glyph a protocol key name draws as. */
+private fun glyphFor(name: String): String = when (name) {
+    "Up" -> "\u2191"
+    "Down" -> "\u2193"
+    "Left" -> "\u2190"
+    "Right" -> "\u2192"
+    else -> name
 }

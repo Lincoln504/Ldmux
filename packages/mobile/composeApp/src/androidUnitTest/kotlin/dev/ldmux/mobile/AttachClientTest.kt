@@ -131,6 +131,33 @@ class AttachClientTest {
     }
 
     @Test
+    fun `the session list says which shells are free`() {
+        // The page used to drop this frame as unknown, so a "held elsewhere" notice
+        // could not clear itself when the holder let go.
+        assertEquals(
+            AttachMessage.Sessions(mapOf("s1" to null, "s2" to "desk")),
+            parseAttachMessage(
+                """{"type":"sessions","sessions":[
+                    {"id":"s1","owner":null},
+                    {"id":"s2","owner":{"name":"desk"}},
+                    {"owner":{"name":"no-id"}}
+                ]}""",
+            ),
+        )
+    }
+
+    @Test
+    fun `the page advertises the in-place resync it can actually apply`() {
+        // Without this the daemon repairs a client that fell behind by closing the
+        // socket: a reconnect (and, on the phone, an ownership round trip) instead
+        // of one snapshot on the socket that is already open.
+        val hello = helloMessage(testConfig(), PAGE_FEATURES)
+        assertTrue(hello.contains(""""features":["inplaceResync"]"""), hello)
+        // A client that says nothing is not claimed to understand anything.
+        assertFalse(helloMessage(testConfig()).contains("features"))
+    }
+
+    @Test
     fun `a pong carries its id when it has one`() {
         assertEquals(AttachMessage.Pong(7), parseAttachMessage("""{"type":"pong","id":7}"""))
         assertEquals(AttachMessage.Pong(null), parseAttachMessage("""{"type":"pong"}"""))

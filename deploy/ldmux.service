@@ -90,9 +90,17 @@ Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 EnvironmentFile=-%h/.config/ldmux/env
 
 # The binaries are named by absolute path (a window manager or the user manager may
-# have no useful PATH), and the daemon finds its keeper beside itself. PATH here is only
-# what the shells the daemon spawns see; `~/.local/bin` is first so `ldmux` is on it.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# have no useful PATH), and the daemon finds its keeper beside itself.
+#
+# **No `PATH=` here.** Every shell the daemon spawns inherits this unit's
+# environment, so a pinned PATH became the shell's PATH — and the session shell is
+# deliberately not a login shell, so a user whose PATH lives in `.profile` or
+# `.zprofile` lost every tool outside it (`nix`, `cargo`, `mise`, Homebrew, `snap`:
+# "command not found" inside ldmux, present in their own terminal). The user
+# manager already carries the user's PATH; the keeper adds `~/.local/bin` and the
+# conventional system directories as a *floor* (`ensure_path_floor` in the
+# keeper), so the result is the user's environment plus what ldmux itself needs.
+# To add to it for a shell, put it in `~/.config/ldmux/env` below.
 ExecStart=@BIN_DIR@/ldmuxd
 
 [Install]

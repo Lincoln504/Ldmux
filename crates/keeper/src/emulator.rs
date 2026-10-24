@@ -76,9 +76,34 @@ pub(crate) const MAX_SCROLLBACK_BYTES: usize = 40 * 1024 * 1024;
 /// scrollback that does not exist.
 fn new_terminal(cols: u16, rows: u16) -> Result<Terminal, ldmux_vt_sys::FfiError> {
     let term = Terminal::new(cols, rows)?;
-    term.set_max_scrollback(MAX_SCROLLBACK_LINES);
-    term.set_max_scrollback_bytes(MAX_SCROLLBACK_BYTES);
+    let (lines, bytes) = scrollback_limits();
+    term.set_max_scrollback(lines);
+    term.set_max_scrollback_bytes(bytes);
     Ok(term)
+}
+
+/// The scrollback caps, from the environment when the user set one.
+///
+/// A constant is the wrong shape for this one: it stands in for tmux's
+/// `history-limit`, which every multiplexer makes configurable, and a user who
+/// deliberately runs a deeper (or shallower) history is configuring their shell
+/// session, not the multiplexer that happens to host it. The keeper reads these
+/// once per terminal, so a change in `~/.config/ldmux/env` reaches new sessions.
+///
+/// Bad or absent values fall back to the defaults, never to zero: a typo must not
+/// silently disable scrollback.
+pub(crate) fn scrollback_limits() -> (usize, usize) {
+    let read = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(default)
+    };
+    (
+        read("LDMUX_SCROLLBACK_LINES", MAX_SCROLLBACK_LINES),
+        read("LDMUX_SCROLLBACK_BYTES", MAX_SCROLLBACK_BYTES),
+    )
 }
 
 /// One unit of work the request handlers hand the emulator thread.
@@ -114,7 +139,40 @@ pub struct StateOutcome {
     pub mouse_sgr: bool,
     pub app_cursor: bool,
     pub bracketed_paste: bool,
+    /// The Kitty keyboard protocol flags the program has set, as a bitset (see
+    /// [`ldmux_vt_sys::Terminal::kitty_keyboard_flags`]). The daemon encodes a
+    /// modified Enter from this: legacy bytes cannot carry the modifier.
+    pub kitty_keyboard: u8,
     pub history_size: u32,
+}
+
+/// The terminal's write-back: the answers to the queries a program asks it.
+///
+/// Registered on each session's emulator (`set_write_pty`), with the pty master
+/// as the userdata. This is the one answerer: the daemon's sanitizer drops these
+/// queries before any client sees them (a client's reply would arrive as typed
+/// input), and no client could answer for the grid agreeably anyway.
+///
+/// The header forbids calling back into the terminal from a callback. Writing to
+/// a pty master is a syscall, so this is that and nothing else.
+///
+/// SAFETY: called synchronously from `Terminal::write`; `userdata` is the pty
+/// master fd packed in a pointer, and `data`/`len` describe a buffer valid for
+/// the call.
+unsafe extern "C" fn write_pty_cb(
+    _terminal: ldmux_vt_sys::ffi::GhosttyTerminal,
+    userdata: *mut std::os::raw::c_void,
+    data: *const u8,
+    len: usize,
+) {
+    if userdata.is_null() || data.is_null() || len == 0 {
+        return;
+    }
+    let fd = userdata as isize as libc::c_int;
+    // SAFETY: `fd` is the master this thread owns and `data`/`len` a live buffer.
+    // A partial write is not retried: a reply this small that does not fit means
+    // the pane is gone, and the next read reports it.
+    unsafe { libc::write(fd, data as *const libc::c_void, len) };
 }
 
 /// The result of a render: the grid's geometry + the rendered text (one SGR
@@ -252,6 +310,15 @@ pub(crate) fn spawn(
             let fd = master.as_raw_fd();
             let wake_fd = waker.as_ref().map(|w| w.as_raw_fd()).unwrap_or(-1);
             let mut buf = [0u8; 4096];
+            // The emulator answers the queries a program asks (DA1, DSR/CPR,
+            // DECRQM, the Kitty keyboard query, mode reports) by writing back to
+            // the pty. `fd` is the master this thread owns, packed as the
+            // userdata; the terminal never outlives this thread.
+            // SAFETY: see `write_pty_cb`; the fd is valid for as long as the
+            // emulator is used and the callback does nothing but write to it.
+            unsafe {
+                term.set_write_pty(write_pty_cb, fd as isize as *mut std::os::raw::c_void);
+            }
             let mut reading = true;
             loop {
                 // 1. A waiting message is serviced before any I/O.
@@ -336,6 +403,7 @@ pub(crate) fn spawn(
                     continue;
                 }
                 let bytes = &buf[..n as usize];
+                // The terminal answers its own queries from inside this call.
                 term.write(bytes);
                 out.relock().push(bytes);
                 // The pane said something: this is the activity clock
@@ -452,6 +520,7 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
                 mouse_sgr: term.mode(MODE_SGR_MOUSE),
                 app_cursor: term.mode(MODE_APP_CURSOR),
                 bracketed_paste: term.mode(MODE_BRACKETED_PASTE),
+                kitty_keyboard: term.kitty_keyboard_flags(),
                 history_size: term.scrollback_rows() as u32,
             });
         }

@@ -35,11 +35,14 @@ fun portraitControlKeys(
     // and then a d.
     "Ctrl" to { onSticky(StickyKey.Ctrl) },
     "Alt" to { onSticky(StickyKey.Alt) },
+    // Shift is a latch for the same reason as the other two: `Shift+Enter` is a
+    // newline in a TUI (`pi` binds it), and a soft keyboard cannot hold Shift
+    // while the bar's Enter is pressed. It also gives Shift+Tab and shift-arrows.
+    "\u21e7" to { onSticky(StickyKey.Shift) },
     controlLabel("C-c") to { press("C-c") },
-    "|" to { press("|") },
-    "-" to { press("-") },
-    "/" to { press("/") },
-    "\u23ce" to { press("Enter") },
+    // `|`, `-` and `/` were here and are gone: the soft keyboard produces all
+    // three with one press, and the width they took is the arrow block's and the
+    // paste key's. Landscape keeps them, because landscape has no soft keyboard.
 )
 
 /**
@@ -55,4 +58,21 @@ fun panelControlKeys(press: (String) -> Unit): List<Pair<String, () -> Unit>> = 
     "|" to { press("|") },
     "-" to { press("-") },
     "/" to { press("/") },
+)
+
+/**
+ * The four arrows as a **position**, not a list.
+ *
+ * Row 1 is `null, Up, null`; row 2 is `Left, Down, Right`. `null` is an empty
+ * cell, and it is what puts `Up` directly above `Down` and `Left`/`Right` either
+ * side of it, so the block reads as a direction instead of four words in a row.
+ *
+ * It lives here, as data, so a layout change and the test that guards it read the
+ * same thing. The bar rendered `← ↑ ↓ →` inline for a long time and nothing
+ * noticed, because there was nothing to notice: the shape was a call site, not a
+ * value.
+ */
+val ARROW_PAD_ROWS: List<List<String?>> = listOf(
+    listOf(null, "Up", null),
+    listOf("Left", "Down", "Right"),
 )

@@ -35,7 +35,6 @@ actual object AppPrefs {
     private const val KEY_TOKEN = "token"
     private const val KEY_PAIR_NAME = "pair_name"
     private const val KEY_SIDE = "side"
-    private const val KEY_PREDICT = "predict"
     private const val KEY_FONT = "font_sp"
     private const val KEY_COMPACT = "compact"
     private const val KEY_DEVICE_ID = "device_id"
@@ -57,7 +56,6 @@ actual object AppPrefs {
             token = sp.getString(KEY_TOKEN, null) ?: "",
             pairName = sp.getString(KEY_PAIR_NAME, null) ?: "",
             side = sp.getString(KEY_SIDE, null) ?: LdmuxConfig.DEFAULT.side,
-            predict = sp.getBoolean(KEY_PREDICT, LdmuxConfig.DEFAULT.predict),
             fontSp = sp.getFloat(KEY_FONT, LdmuxConfig.DEFAULT_FONT_SP)
                 .coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
             compact = sp.getBoolean(KEY_COMPACT, LdmuxConfig.DEFAULT.compact),
@@ -73,7 +71,6 @@ actual object AppPrefs {
             .putString(KEY_TOKEN, config.token)
             .putString(KEY_PAIR_NAME, config.pairName)
             .putString(KEY_SIDE, config.side)
-            .putBoolean(KEY_PREDICT, config.predict)
             .putFloat(KEY_FONT, config.fontSp)
             .putBoolean(KEY_COMPACT, config.compact)
             .putString(KEY_DEVICE_ID, config.deviceId)

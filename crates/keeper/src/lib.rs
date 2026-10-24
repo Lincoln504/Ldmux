@@ -347,17 +347,134 @@ pub use ldmux_protocol::keeper::{CHILD_COLORTERM, CHILD_TERM};
 pub fn child_env(
     mut env: Vec<(String, String)>,
     extra: Option<&[(String, String)]>,
+    // The shell that will actually be exec'd, when this is a shell and not a
+    // `Spawn.command`. It becomes `SHELL`, so a program that runs "the user's
+    // shell" runs the one this session has.
+    shell: Option<&str>,
 ) -> Vec<(String, String)> {
+    // The environment descends from whatever launched the daemon, and some of it
+    // describes *that* terminal rather than this session's. Inherited, they lie:
+    // a `TMUX` pointing at a socket this session does not belong to makes `tmux`
+    // commands inside it attach to the wrong server or fail, and a
+    // `TERM_PROGRAM` that contradicts `TERM` makes capability detection branch
+    // for a terminal the session is not running in — the same class of bug that
+    // hid the Kitty keyboard protocol from `pi`. A session is its own terminal;
+    // the identity of the terminal the daemon happened to start from is not
+    // information the session can use.
+    env.retain(|(k, _)| !TERMINAL_IDENTITY_VARS.contains(&k.as_str()));
+    ensure_path_floor(&mut env);
     let mut set = |k: &str, v: &str| {
         env.retain(|(ek, _)| ek != k);
         env.push((k.to_string(), v.to_string()));
     };
     set("TERM", CHILD_TERM);
     set("COLORTERM", CHILD_COLORTERM);
+    if let Some(shell) = shell {
+        set("SHELL", shell);
+    }
     for (k, v) in extra.unwrap_or(&[]) {
         set(k, v);
     }
     env
+}
+
+/// Variables that name *the terminal the daemon was started from*, not the one
+/// the session runs in. Stripped by [`child_env`]; see the comment there.
+const TERMINAL_IDENTITY_VARS: &[&str] = &[
+    // Multiplexers: a stale socket path makes their own clients misbehave.
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    // Terminal-emulator identities, one per emulator that exports one.
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "COLORFGBG",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_LISTEN_ON",
+    "KITTY_INSTALLATION_DIR",
+    "VTE_VERSION",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_LOG",
+    "ALACRITTY_WINDOW_ID",
+    "KONSOLE_VERSION",
+    "GNOME_TERMINAL_SERVICE",
+    "GNOME_TERMINAL_SCREEN",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+];
+
+/// Make sure a session's `PATH` has what it needs even when the keeper was
+/// started with a bare one.
+///
+/// This is a **floor, never a replacement**. The unit files used to pin
+/// `PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin` for the daemon and the
+/// keeper, and the session's `PATH` is the keeper's — so a shell whose `PATH`
+/// lives in `.profile` or `.zprofile` (which never run, because the session shell
+/// is deliberately not a login shell) got exactly four directories: a `nix`,
+/// `cargo`, `mise`, `asdf`, `snap` or Homebrew tool was "command not found"
+/// inside ldmux and present in the user's own terminal.
+///
+/// The directories below are the ones ldmux itself owns the need for: its own
+/// binary directory, and the two conventional user-binary directories. Anything
+/// else is the user's environment's business and is inherited untouched.
+fn ensure_path_floor(env: &mut Vec<(String, String)>) {
+    const FLOOR: &[&str] = &["/usr/local/bin", "/usr/bin", "/bin"];
+    let home = env
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| v.clone());
+    let current = env
+        .iter()
+        .find(|(k, _)| k == "PATH")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let mut parts: Vec<String> = current
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    let user_local = home.as_ref().map(|h| format!("{h}/.local/bin"));
+    for dir in user_local.iter().map(String::as_str).chain(FLOOR.iter().copied()) {
+        if !parts.iter().any(|p| p == dir) {
+            parts.push(dir.to_string());
+        }
+    }
+    env.retain(|(k, _)| k != "PATH");
+    env.push(("PATH".to_string(), parts.join(":")));
+}
+
+/// The keeper's own environment, as text.
+///
+/// **Not `std::env::vars()`**: that panics on a variable whose name or value is
+/// not valid Unicode, and this is the path that creates a session — one such
+/// variable anywhere in the environment would have made every `new` fail. The
+/// keeper's protocol is JSON, so a non-UTF-8 pair has no representation to carry
+/// and is dropped, once per spawn rather than silently forever.
+pub fn utf8_env() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut dropped = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        match (k.into_string(), v.into_string()) {
+            (Ok(k), Ok(v)) => out.push((k, v)),
+            (k, _v) => dropped.push(k.unwrap_or_else(|bad| bad.to_string_lossy().into_owned())),
+        }
+    }
+    if !dropped.is_empty() {
+        eprintln!(
+            "ldmux-keeper: not passing {} environment variable(s) that are not valid UTF-8: {}",
+            dropped.len(),
+            dropped.join(", ")
+        );
+    }
+    out
 }
 
 #[cfg(test)]
@@ -444,22 +561,81 @@ mod child_env_tests {
     }
     #[test]
     fn term_defaults_when_the_parent_has_none() {
-        let e = child_env(vec![("LANG".into(), "C".into())], None);
+        let e = child_env(vec![("LANG".into(), "C".into())], None, None);
         assert_eq!(get(&e, "TERM"), Some("xterm-256color"));
         assert_eq!(get(&e, "COLORTERM"), Some("truecolor"));
         assert_eq!(get(&e, "LANG"), Some("C"));
     }
     #[test]
     fn an_inherited_term_is_replaced() {
-        let e = child_env(vec![("TERM".into(), "dumb".into())], None);
+        let e = child_env(vec![("TERM".into(), "dumb".into())], None, None);
         assert_eq!(get(&e, "TERM"), Some("xterm-256color"));
         assert_eq!(e.iter().filter(|(k, _)| k == "TERM").count(), 1);
     }
     #[test]
     fn spawn_env_wins() {
         let x = vec![("TERM".to_string(), "vt100".to_string())];
-        let e = child_env(vec![], Some(&x));
+        let e = child_env(vec![], Some(&x), None);
         assert_eq!(get(&e, "TERM"), Some("vt100"));
+    }
+
+    /// The terminal the daemon was started from is not the terminal the session
+    /// runs in. Inherited, these make `tmux`/`screen` clients inside a session
+    /// reach for a socket that is not theirs and make capability detection branch
+    /// for an emulator that is not drawing the grid.
+    #[test]
+    fn the_launching_terminals_identity_is_stripped() {
+        let e = child_env(
+            vec![
+                ("TMUX".into(), "/tmp/tmux-1000/default,123,0".into()),
+                ("TERM_PROGRAM".into(), "WezTerm".into()),
+                ("KITTY_WINDOW_ID".into(), "7".into()),
+                ("VTE_VERSION".into(), "7600".into()),
+                ("KEEP".into(), "yes".into()),
+            ],
+            None,
+            None,
+        );
+        for k in ["TMUX", "TERM_PROGRAM", "KITTY_WINDOW_ID", "VTE_VERSION"] {
+            assert_eq!(get(&e, k), None, "{k} must not reach the session");
+        }
+        assert_eq!(get(&e, "KEEP"), Some("yes"), "nothing else is touched");
+    }
+
+    /// `SHELL` names the shell the session is actually running, so a program that
+    /// spawns "the user's shell" gets the same one.
+    #[test]
+    fn shell_is_the_program_that_was_exec_d() {
+        let e = child_env(vec![("SHELL".into(), "/bin/bash".into())], None, Some("/usr/bin/fish"));
+        assert_eq!(get(&e, "SHELL"), Some("/usr/bin/fish"));
+        // A `Spawn.command` is not a shell: SHELL keeps naming the user's shell.
+        let e = child_env(vec![("SHELL".into(), "/bin/bash".into())], None, None);
+        assert_eq!(get(&e, "SHELL"), Some("/bin/bash"));
+    }
+
+    /// `PATH` is inherited and *added to*, never replaced: a user's own
+    /// directories are theirs, and the ones ldmux needs are a floor under them.
+    #[test]
+    fn path_is_a_floor_not_a_replacement() {
+        let e = child_env(
+            vec![
+                ("HOME".into(), "/home/u".into()),
+                ("PATH".into(), "/home/u/.nix-profile/bin:/usr/bin".into()),
+            ],
+            None,
+            None,
+        );
+        let path = get(&e, "PATH").unwrap();
+        let parts: Vec<&str> = path.split(':').collect();
+        assert_eq!(parts[0], "/home/u/.nix-profile/bin", "the user's own comes first");
+        assert!(parts.contains(&"/home/u/.local/bin"), "{path}");
+        assert!(parts.contains(&"/usr/bin"), "{path}");
+        assert_eq!(parts.iter().filter(|p| **p == "/usr/bin").count(), 1, "no duplicates: {path}");
+        // No PATH at all: the floor still exists, so a shell can find its tools.
+        let e = child_env(vec![("HOME".into(), "/home/u".into())], None, None);
+        let path = get(&e, "PATH").unwrap();
+        assert!(path.contains("/usr/bin"), "{path}");
+        assert!(path.contains("/home/u/.local/bin"), "{path}");
     }
 }
 
@@ -614,6 +790,7 @@ impl Keeper {
                     mouse_sgr: false,
                     app_cursor: false,
                     bracketed_paste: false,
+                    kitty_keyboard: 0,
                     history_size: 0,
                     foreground: String::new(),
                     cwd: String::new(),
@@ -883,6 +1060,7 @@ impl Keeper {
             mouse_sgr: st.mouse_sgr,
             app_cursor: st.app_cursor,
             bracketed_paste: st.bracketed_paste,
+            kitty_keyboard: st.kitty_keyboard,
             history_size: st.history_size as u64,
             foreground,
             cwd,
@@ -921,6 +1099,30 @@ impl Keeper {
         set_cloexec(master.as_raw_fd());
         set_cloexec(slave.as_raw_fd());
 
+        // `IUTF8`, which `openpty` does not set: without it the line discipline
+        // erases one *byte* per backspace in canonical mode, so a non-ASCII
+        // character takes two to four deletes and leaves half of one behind.
+        // Programmers' line editors (readline, zle, fish) manage their own editing
+        // and never show this, which is why it went unnoticed; `cat > file`,
+        // `read`, `ed` and any prompt reading a line raw do show it.
+        {
+            // SAFETY: `slave` is an open pty slave we own; `tcgetattr` fills a
+            // `termios` it writes to a live, aligned local, and `tcsetattr` reads
+            // the same one back. `IUTF8` is a kernel `tcflag_t` bit that the
+            // `nix` flag set does not name, which is why this is raw.
+            let fd = slave.as_raw_fd();
+            // SAFETY: a zeroed `termios` is the value `tcgetattr` overwrites; it
+            // is not read before that call writes it.
+            let mut tio: libc::termios = unsafe { std::mem::zeroed() };
+            // SAFETY: `fd` is the open slave and `tio` is a live, aligned
+            // `termios`.
+            if unsafe { libc::tcgetattr(fd, &mut tio) } == 0 {
+                tio.c_iflag |= libc::IUTF8 as libc::tcflag_t;
+                // SAFETY: as above: the same open fd and the same live struct.
+                unsafe { libc::tcsetattr(fd, libc::TCSANOW, &tio) };
+            }
+        }
+
         // The child becomes its own session (`setsid`) so `group_kill` takes
         // the whole process group down, and the slave is its 0/1/2 (the
         // controlling terminal). We fork+exec ourselves — NOT
@@ -950,6 +1152,9 @@ impl Keeper {
             Some(cmd) if !cmd.is_empty() => cmd.clone(),
             _ => self.shell.clone(),
         };
+        // A `Spawn.command` (the `pi` kind) is not a shell: `SHELL` must keep
+        // naming the user's shell in that case.
+        let shell_argv = s.command.is_none().then(|| argv_s.first().cloned()).flatten();
         let prog_s = argv_s
             .first()
             .cloned()
@@ -963,7 +1168,7 @@ impl Keeper {
                     .map_err(|e| std::io::Error::other(format!("CString: {e}")))
             })
             .collect::<Result<_, _>>()?;
-        let env = child_env(std::env::vars().collect(), s.env.as_deref());
+        let env = child_env(utf8_env(), s.env.as_deref(), shell_argv.as_deref());
         let envp_cstrings: Vec<std::ffi::CString> = env
             .iter()
             .map(|(k, v)| std::ffi::CString::new(format!("{k}={v}")))

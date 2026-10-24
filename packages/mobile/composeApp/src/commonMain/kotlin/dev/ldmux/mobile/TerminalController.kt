@@ -100,10 +100,11 @@ class TerminalController(
     val shiftKeys: Boolean get() = attach.shiftKeys
 
     /**
-     * Predictive echo, live: a display setting, so it changes on this controller
-     * rather than rebuilding it (a rebuild reconnects, see [LdmuxConfig.connectionKey]).
+     * Whether typed text is shown before the shell echoes it (see
+     * [FramePacing.predict]). Read from the pacing, never set by the user: it is a
+     * fact about the link at this moment.
      */
-    var predict: Boolean = config.predict
+    private val predict: Boolean get() = pacing.predict
 
     private val _link = MutableStateFlow(LinkStats(0, FramePacing.MIN_INTERVAL_MS, false))
 
@@ -186,7 +187,11 @@ class TerminalController(
             // not because anything is broken (ADR-0010). Surfaced rather than
             // retried: retrying on its own is exactly the silent steal the rule
             // exists to prevent.
-            _ownedBy.value = holder ?: "another device"
+            // The name the daemon gave, or empty when it gave none: the UI says
+            // "open elsewhere" for empty. It used to invent the words "another
+            // device" out of a null, which reads like a device that exists and was
+            // the sentence the user quoted back as "the desktop took it over".
+            _ownedBy.value = holder ?: ""
         }
         attach.onRtt = { sample ->
             // A round trip is proof the socket is there, whatever it said before.
@@ -205,8 +210,23 @@ class TerminalController(
             _ownedBy.value = null
             _ended.value = true
         }
+        attach.onSessions = { owners ->
+            // The holder let go (`owner: null`, or it is us): the shell is free and
+            // this page can attach again. Without this the notice was final until
+            // the user tapped: the socket stayed healthy, so nothing reconnected,
+            // and the daemon never pushed "it is free now" through the one frame
+            // that said so.
+            val mine = owners[sessionId]
+            if (owners.containsKey(sessionId) && _ownedBy.value != null && mine == null) {
+                _ownedBy.value = null
+                attach.reconnectNow()
+            }
+        }
         attach.onOffline = {
             linkOffline = true
+            // A takeover notice from before the link dropped describes a state
+            // nobody has confirmed since; the offline notice is the honest one.
+            _ownedBy.value = null
             pacing.onDisconnected()
             _link.value = linkStats()
         }
@@ -316,7 +336,7 @@ class TerminalController(
                 if (afterTotal == null || afterTotal <= historyTotalBefore) {
                     historyExhausted = true
                 } else {
-                    historyAskLines = (historyAskLines * 2).coerceAtMost(HISTORY_MAX_LINES)
+                    historyAskLines = (historyAskLines * 2).coerceAtMost(pacing.historyMaxLines())
                 }
                 historyLoading = false
                 if (historyRestoreAtTop) {
@@ -333,7 +353,7 @@ class TerminalController(
                 // whatever scrollback it held is gone, so a page-in can be asked for again
                 // from the start.
                 historyExhausted = false
-                historyAskLines = HISTORY_FIRST_LINES
+                historyAskLines = pacing.historyPageLines()
                 historyLoading = false
                 historyRestoreAtTop = false
             }
@@ -593,7 +613,7 @@ class TerminalController(
     private fun gate(): InputGate = inputGate(
         connected = attach.isConnected,
         heldElsewhere = _ownedBy.value != null,
-        predictSetting = predict,
+        predict = predict,
         alternateScreen = modes.alternateOn,
         passwordPrompt = _frame.value?.passwordInput == true,
     )
@@ -689,8 +709,15 @@ class TerminalController(
     private var historyLoading = false
     /** The keeper has no rows above what is loaded: stop asking. */
     private var historyExhausted = false
-    /** Rows to ask for, doubling per page-in up to the daemon's cap. */
-    private var historyAskLines = HISTORY_FIRST_LINES
+    /**
+     * Rows to ask for, doubling per page-in up to the link's cap.
+     *
+     * Seeded from the link ([FramePacing.historyPageLines]) rather than from a
+     * constant: a history page on a slow link is the largest message in the
+     * protocol, and asking for 5,000 rows to a link that answers in 200 ms is a
+     * stall the user reads as a broken terminal.
+     */
+    private var historyAskLines = FramePacing.HISTORY_FIRST_LINES
     /** The engine's scrollback total when the outstanding request was made. */
     private var historyTotalBefore = 0L
     /** The page-in was asked for from the top of what is loaded. */
@@ -917,12 +944,13 @@ class TerminalController(
          * Rows the first history page asks for. Small enough that the reply is a
          * quick round trip, large enough to cover a screenful many times over.
          */
-        const val HISTORY_FIRST_LINES = 5000
+        /** Kept for the tests and the default: the pacing owns the live value. */
+        const val HISTORY_FIRST_LINES = FramePacing.HISTORY_FIRST_LINES
         /**
          * Ceiling on a history page. The daemon clamps a request to 20 000 and the
          * keeper retains 10 000, so asking past this is bytes nobody will see.
          */
-        const val HISTORY_MAX_LINES = 20000
+        const val HISTORY_MAX_LINES = FramePacing.HISTORY_MAX_LINES
         /** How long an unconfirmed prediction may stay on screen before we
          *  conclude the pane is not echoing. Roughly 2-3 mobile round trips. */
         const val STALE_MS = 900L

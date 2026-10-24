@@ -20,8 +20,10 @@ either. It is deliberately simple:
 - **Light on the network by construction.** Output is coalesced on the daemon, the
   WebSocket negotiates `permessage-deflate` when the client offers it (7x on a directory
   listing, 3-4x on a screenful; ADR-0019, `docs/WIRE-COST.md`), the client repaints on
-  its own clock rather than per packet, and predictive local echo is available (off by
-  default) — `docs/PREDICTIVE-ECHO.md`.
+  its own clock rather than per packet, and predictive local echo turns itself on when
+  the round trip passes ~120 ms and off below ~80 ms (no setting) —
+  `docs/PREDICTIVE-ECHO.md`. On a slow link the client also asks for smaller history
+  pages and is repaired with a snapshot instead of a reconnect (`docs/WIRE-COST.md`).
 
 > **Status: the Rust daemon is deployed and running.** `crates/daemon`
 > (`ldmuxd`) is the live daemon under the systemd user unit; the keeper owns the
@@ -121,10 +123,11 @@ Implemented and tested (run the gate for the counts; open items are in
 - `packages/mobile` — native KMP + Compose Multiplatform client (Android first).
   A Compose `Canvas` renderer over a **libghostty-vt** emulator behind a narrow
   JNI seam; client-driven pane resize; **the shell view follows the device's
-  rotation and the app owns the keyboard** — portrait is typing with a two-row
+  rotation and the app owns the keyboard** — portrait is typing with a three-row
   bar, landscape is the side panel, and there is no flip button; the launcher
-  holds portrait (ADR-0011); scrollback, cursor rendering, tap-to-position, and
-  predictive local echo at a low, adaptive frame rate. See
+  holds portrait (ADR-0011); scrollback, cursor rendering, tap-to-position, a spatial
+  arrow pad and a `paste` key in both modes, sticky Ctrl/Alt/Shift (so `Shift+Enter`
+  is a newline), and predictive local echo at a low, adaptive frame rate. See
   [`docs/NATIVE-TERMINAL.md`](docs/NATIVE-TERMINAL.md) and
   [`packages/mobile/README.md`](packages/mobile/README.md).
 - The daemon serves **no** static files. `GET /ws` is the only endpoint; a plain

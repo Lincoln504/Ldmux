@@ -11,6 +11,8 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
@@ -56,14 +58,34 @@ internal fun JsonObject.objects(key: String): List<JsonObject> =
  * Built in one place: the session-list client and the per-shell client each built
  * this by hand, so the two could disagree about what a phone announces.
  */
-internal fun helloMessage(config: LdmuxConfig): String = buildJsonObject {
-    put("type", "hello")
-    putJsonObject("device") {
-        put("id", config.deviceId)
-        put("name", config.deviceLabel)
-        put("kind", "phone")
-    }
-}.toString()
+internal fun helloMessage(config: LdmuxConfig, features: List<String> = emptyList()): String =
+    buildJsonObject {
+        put("type", "hello")
+        putJsonObject("device") {
+            put("id", config.deviceId)
+            put("name", config.deviceLabel)
+            put("kind", "phone")
+        }
+        if (features.isNotEmpty()) {
+            // What this client understands, so the daemon can answer additively. A
+            // client that says nothing gets exactly the messages it always got.
+            putJsonArray("features") { features.forEach { add(it) } }
+        }
+    }.toString()
+
+/**
+ * The features an attached page advertises.
+ *
+ * `inplaceResync` is the one that matters to a phone: without it, a client that
+ * falls behind its socket is repaired by **closing the connection** — which costs
+ * a reconnect (seconds of the user's life, and the one event that makes ownership
+ * look like it changed hands), an attach, a fresh snapshot and a rebuilt engine.
+ * With it the daemon sends a `caps` + `snapshot` marked `resync` on the same
+ * socket, which the client already applies in place. That is the same repair for a
+ * fraction of the bytes: it is the one lever `docs/WIRE-COST.md` measures at two
+ * orders of magnitude.
+ */
+internal val PAGE_FEATURES: List<String> = listOf("inplaceResync")
 
 /**
  * The daemon's HTTP status for a plain `GET /ws`, or null when nothing answered.

@@ -285,6 +285,15 @@ pub struct State {
     pub app_cursor: bool,
     /// Bracketed paste (DEC 2004) is on.
     pub bracketed_paste: bool,
+    /// The Kitty keyboard protocol flags the program has set (`CSI > Ps u`, a
+    /// push, `CSI = Ps ; Pm u`, a set, `CSI < u`, a pop), as a bitset.
+    ///
+    /// Additive with a `serde(default)`: an older keeper does not send it and
+    /// the daemon then encodes keys exactly as it did before (0 = protocol
+    /// off), which is the same thing a program that never asked for the
+    /// protocol sees.
+    #[serde(default)]
+    pub kitty_keyboard: u8,
     /// The scrollback rows (from `scrollback_rows`).
     pub history_size: u64,
     /// The foreground command (`/proc/<pid>/comm`); empty for a dead pane.

@@ -37,10 +37,14 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 
 # What every shell inherits, the same as it did when the daemon spawned the keeper:
-# the state dir (the `ldmux` CLI finds the daemon through it), the per-machine
-# settings, and a PATH with ~/.local/bin first so `ldmux` is on it.
+# the state dir (the `ldmux` CLI finds the daemon through it) and the per-machine
+# settings.
+#
+# **No `PATH=` here** (see `ldmux.service`): this unit's environment *is* every
+# session's environment, so pinning PATH here replaced the user's. The keeper adds
+# `~/.local/bin` and the conventional system directories as a floor and leaves the
+# rest of the inherited PATH alone.
 Environment=LDMUX_STATE_DIR=%t/ldmux
 Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 EnvironmentFile=-%h/.config/ldmux/env
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=@BIN_DIR@/ldmux-keeper %t/ldmux/keeper.sock

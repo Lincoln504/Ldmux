@@ -178,7 +178,7 @@ class ModifiersTest {
         // And the lists are not empty, so a `contains` on an empty list cannot be
         // what makes the assertions above pass. A guard that passes because it is
         // looking at nothing is the failure mode this test was written while having.
-        assertEquals(7, portrait.size)
+        assertEquals(4, portrait.size)
         assertEquals(4, panel.size)
     }
 
@@ -192,5 +192,42 @@ class ModifiersTest {
         // to a whole row without special-casing.
         assertEquals("Tab", controlLabel("Tab"))
         assertEquals("|", controlLabel("|"))
+    }
+
+    /**
+     * Shift is a latch like Ctrl and Alt, and it is the only way the bar can produce
+     * `Shift+Enter` — the newline in `pi`. The wire spelling is `M-C-S-<key>`.
+     */
+    @Test
+    fun `shift is carried on named keys, innermost`() {
+        assertEquals("S-Enter", named("Enter", Modifiers(shift = true)))
+        assertEquals("S-Tab", named("Tab", Modifiers(shift = true)))
+        assertEquals("M-C-S-Up", named("Up", Modifiers(ctrl = true, alt = true, shift = true)))
+        // A shifted character is the character: the keyboard already produced it.
+        assertEquals("a", literal("a", Modifiers(shift = true)))
+    }
+
+    @Test
+    fun `shift is spent like the other latches`() {
+        val t = spendLatchOnFirst("x", Modifiers(shift = true))
+        assertEquals("x", t.head)
+        assertEquals(Modifiers(shift = true), t.headModifiers)
+        assertEquals(Modifiers(), t.latchAfter)
+    }
+
+    /**
+     * The arrows are a block, not a row: `Up` over `Down`, `Left` and `Right` either
+     * side of it. Both bars render this value, so this test guards both.
+     */
+    @Test
+    fun `the arrow pad is a cross`() {
+        assertEquals(2, ARROW_PAD_ROWS.size)
+        assertEquals(listOf(null, "Up", null), ARROW_PAD_ROWS[0])
+        assertEquals(listOf("Left", "Down", "Right"), ARROW_PAD_ROWS[1])
+        assertEquals(
+            "Up",
+            ARROW_PAD_ROWS[0][ARROW_PAD_ROWS[1].indexOf("Down")],
+            "Up is directly above Down",
+        )
     }
 }

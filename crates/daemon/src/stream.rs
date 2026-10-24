@@ -340,18 +340,18 @@ impl PaneStream {
         // Arrow keys depend on the pane's cursor-key mode (DECCKM), which only
         // the keeper's emulator knows. One cheap `Read` per batch; if it fails
         // the normal-mode encoding is the best guess.
-        let app_cursor =
+        let (app_cursor, kitty) =
             match self
                 .keeper
                 .call(&KeeperMessage::Read(ldmux_protocol::keeper::Read {
                     session_id: self.session_id.clone(),
                 })) {
-                Ok(KeeperMessage::State(st)) => st.app_cursor,
-                _ => false,
+                Ok(KeeperMessage::State(st)) => (st.app_cursor, st.kitty_keyboard),
+                _ => (false, 0),
             };
         let mut bytes: Vec<u8> = Vec::new();
         for key in keys {
-            bytes.extend(key_name_to_bytes_in(key, app_cursor)?);
+            bytes.extend(key_name_to_bytes_in_mode(key, app_cursor, kitty)?);
         }
         let text = String::from_utf8(bytes).map_err(|e| format!("invalid key bytes: {e}"))?;
         self.keeper
@@ -610,6 +610,27 @@ pub fn key_name_to_bytes(name: &str) -> Result<Vec<u8>, String> {
 /// `kcuu1=\EOA` and ignores `ESC [ A`. Modified forms are `CSI 1;m x` in
 /// either mode.
 pub fn key_name_to_bytes_in(name: &str, app_cursor: bool) -> Result<Vec<u8>, String> {
+    key_name_to_bytes_in_mode(name, app_cursor, 0)
+}
+
+/// [`key_name_to_bytes_in`] for a pane whose program has turned the Kitty
+/// keyboard protocol on (`kitty_flags` are the flags it set, from the keeper's
+/// emulator).
+///
+/// The protocol exists for exactly the keys xterm has no encoding for: a
+/// **modified Enter, Escape or Space**. Under xterm's tables `S-Enter` and
+/// `Enter` are the same byte (CR), so the modifier had nowhere to go and `pi`
+/// submitted the line instead of inserting a newline. With the disambiguate flag
+/// (1) set, the same key is `CSI 13 ; 2 u`, which every program that asked for
+/// the protocol parses.
+///
+/// Only those keys change. Every other key keeps its legacy encoding, which
+/// the protocol's own parsers still accept (and which older programs require).
+pub fn key_name_to_bytes_in_mode(
+    name: &str,
+    app_cursor: bool,
+    kitty_flags: u8,
+) -> Result<Vec<u8>, String> {
     let unknown = || format!("unknown key name: {name}");
     // Modifier prefixes, in the order the client writes them: `M-` then `C-`.
     let (alt, rest) = match name.strip_prefix("M-") {
@@ -629,9 +650,28 @@ pub fn key_name_to_bytes_in(name: &str, app_cursor: bool) -> Result<Vec<u8>, Str
     if base.is_empty() {
         return Err(unknown());
     }
-    // xterm's modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
+    // xterm's modifier parameter: 1 + shift(1) + alt(2) + ctrl(4). It is also
+    // the Kitty protocol's modifier parameter.
     let m = 1 + u8::from(shift) + if alt { 2 } else { 0 } + if ctrl { 4 } else { 0 };
     let modified = alt || ctrl || shift;
+
+    // Kitty keyboard protocol: a modified key with no legacy encoding is a CSI-u
+    // sequence, but only once the program has asked for the protocol. Sending
+    // one to a program that has not asked would type the sequence at it.
+    //
+    // Shift+Tab is left alone: back-tab (`CSI Z`) is what every program that
+    // reads it expects, protocol or not, and `pi` matches it either way.
+    if modified && kitty_flags & 1 != 0 {
+        let codepoint = match base {
+            "Enter" => Some(13u8),
+            "Escape" => Some(27),
+            "Space" => Some(32),
+            _ => None,
+        };
+        if let Some(cp) = codepoint {
+            return Ok(format!("\x1b[{cp};{m}u").into_bytes());
+        }
+    }
 
     // Keys that are one byte (or an escape-prefixed byte) whatever the modifier.
     let simple = |byte: u8| -> Vec<u8> {
@@ -875,6 +915,33 @@ mod key_name_tests {
         assert_eq!(k("C-Up", true), Ok(esc("ESC[1;5A")));
         assert_eq!(k("PageUp", true), Ok(esc("ESC[5~")));
         assert_eq!(k("F5", true), Ok(esc("ESC[15~")));
+    }
+
+    /// The Kitty keyboard protocol is the only encoding that carries a modifier
+    /// on Enter, Escape or Space. `pi` reads `CSI 13 ; 2 u` as Shift+Enter and
+    /// `\r` as Enter, so this is what makes a newline possible from the phone.
+    ///
+    /// Only ever under the protocol: an unasked-for `CSI u` is typed at the
+    /// program as text.
+    #[test]
+    fn kitty_encodes_the_keys_with_no_legacy_modifier_form() {
+        use super::key_name_to_bytes_in_mode as k;
+        // Protocol off: unchanged, the modifier has nowhere to go.
+        assert_eq!(k("S-Enter", false, 0), Ok(b"\r".to_vec()));
+        assert_eq!(k("C-Enter", false, 0), Ok(b"\r".to_vec()));
+        // Protocol on (disambiguate, bit 1): CSI u with `1 + modifiers`.
+        assert_eq!(k("S-Enter", false, 1), Ok(b"\x1b[13;2u".to_vec()));
+        assert_eq!(k("C-Enter", false, 1), Ok(b"\x1b[13;5u".to_vec()));
+        assert_eq!(k("M-S-Enter", false, 1), Ok(b"\x1b[13;4u".to_vec()));
+        assert_eq!(k("S-Escape", false, 1), Ok(b"\x1b[27;2u".to_vec()));
+        assert_eq!(k("C-S-Space", false, 1), Ok(b"\x1b[32;6u".to_vec()));
+        // Plain keys stay legacy even with the protocol on: every protocol
+        // parser accepts them and older programs require them.
+        assert_eq!(k("Enter", false, 1), Ok(b"\r".to_vec()));
+        assert_eq!(k("S-Tab", false, 1), Ok(b"\x1b[Z".to_vec()));
+        // Event types or alternate keys without disambiguate (2, 4) are not
+        // enough: a modified Enter is still ambiguous.
+        assert_eq!(k("S-Enter", false, 4), Ok(b"\r".to_vec()));
     }
 
     /// Shift (`S-`) composes with every named key the table supports, in xterm's

@@ -72,4 +72,83 @@ class FramePacingTest {
         p.onRttSample(-5)
         assertFalse(p.measured, "a negative round trip is not evidence of anything")
     }
+
+    /**
+     * Prediction is a fact about the link, not a setting: it comes on when the
+     * round trip is slow enough that painted text beats waiting for the echo.
+     */
+    @Test
+    fun `prediction stays off while the link is unmeasured or fast`() {
+        val p = FramePacing()
+        assertFalse(p.predict, "an assumed round trip is not evidence of a slow link")
+        p.onRttSample(40)
+        assertFalse(p.predict)
+    }
+
+    @Test
+    fun `prediction turns on above the threshold`() {
+        val p = FramePacing()
+        p.onRttSample((FramePacing.PREDICT_ON_MS + 30).toLong())
+        assertTrue(p.predict)
+    }
+
+    @Test
+    fun `prediction has hysteresis so a link on the boundary does not flap`() {
+        val p = FramePacing()
+        p.onRttSample((FramePacing.PREDICT_ON_MS + 10).toLong())
+        assertTrue(p.predict)
+        // Between the two thresholds: neither on nor off. Still on.
+        val between = ((FramePacing.PREDICT_ON_MS + FramePacing.PREDICT_OFF_MS) / 2).toLong()
+        p.onRttSample(between)
+        assertTrue(p.predict, "between the thresholds the current answer stands")
+        // Below the lower threshold it goes off, and stays off until the upper one.
+        p.onRttSample((FramePacing.PREDICT_OFF_MS - 10).toLong())
+        assertFalse(p.predict)
+        p.onRttSample(between)
+        assertFalse(p.predict, "between the thresholds the current answer stands, off too")
+    }
+
+    @Test
+    fun `a dropped connection drops the prediction`() {
+        val p = FramePacing()
+        p.onRttSample(600)
+        assertTrue(p.predict)
+        p.onDisconnected()
+        assertFalse(p.predict, "there is nothing to predict against on a dead link")
+    }
+
+    /**
+     * Volume is sized by the link: a history page on a slow link is the largest
+     * message the protocol carries, and it is followed by a full engine rebuild.
+     */
+    @Test
+    fun `a slow link asks for a smaller history page`() {
+        val p = FramePacing()
+        assertFalse(p.slow, "an unmeasured link is not called slow")
+        assertEquals(FramePacing.HISTORY_FIRST_LINES, p.historyPageLines())
+        assertEquals(FramePacing.HISTORY_MAX_LINES, p.historyMaxLines())
+
+        p.onRttSample((FramePacing.SLOW_ON_MS + 20).toLong())
+        assertTrue(p.slow)
+        assertEquals(FramePacing.HISTORY_FIRST_SLOW_LINES, p.historyPageLines())
+        assertEquals(FramePacing.HISTORY_MAX_SLOW_LINES, p.historyMaxLines())
+        assertTrue(
+            FramePacing.HISTORY_FIRST_SLOW_LINES < FramePacing.HISTORY_FIRST_LINES,
+            "the slow page must actually be smaller",
+        )
+    }
+
+    @Test
+    fun `the slow class has hysteresis too`() {
+        val p = FramePacing()
+        p.onRttSample((FramePacing.SLOW_ON_MS + 10).toLong())
+        assertTrue(p.slow)
+        val between = ((FramePacing.SLOW_ON_MS + FramePacing.SLOW_OFF_MS) / 2).toLong()
+        p.onRttSample(between)
+        assertTrue(p.slow, "between the thresholds the answer stands")
+        p.onRttSample((FramePacing.SLOW_OFF_MS - 10).toLong())
+        assertFalse(p.slow)
+        p.onRttSample(between)
+        assertFalse(p.slow)
+    }
 }

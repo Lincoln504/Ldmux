@@ -102,8 +102,12 @@ class HardwareKeysTest {
         assertEquals(HardwareAction.Press("C-S-Tab"), key(named = "Tab", shift = true, ctrl = true, shiftKeys = true))
         // Shift+Tab alone stays BTab: every daemon knows it, and it is the same bytes.
         assertEquals(HardwareAction.Press("BTab"), key(named = "Tab", shift = true, shiftKeys = true))
-        // No shifted form exists for these; Shift is dropped and the name is unchanged.
-        assertEquals(HardwareAction.Press("Enter"), key(named = "Enter", shift = true, shiftKeys = true))
+        // Enter, Escape and Space carry `S-` too: they have no legacy shifted byte,
+        // but the daemon has one under the Kitty keyboard protocol, and `S-Enter` is
+        // the newline in `pi`.
+        assertEquals(HardwareAction.Press("S-Enter"), key(named = "Enter", shift = true, shiftKeys = true))
+        assertEquals(HardwareAction.Press("S-Escape"), key(named = "Escape", shift = true, shiftKeys = true))
+        // Backspace has no useful shifted form; Shift is dropped.
         assertEquals(HardwareAction.Press("BSpace"), key(named = "BSpace", shift = true, shiftKeys = true))
         // Unshifted keys never gain a prefix.
         assertEquals(HardwareAction.Press("C-Left"), key(named = "Left", ctrl = true, shiftKeys = true))

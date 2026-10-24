@@ -196,6 +196,30 @@ engine from scratch (`TerminalController.onSnapshot`; a resize replays the captu
 screen into the live engine instead), "discard the prediction" is one snapshot
 request, not a diff-undo. The architecture already has the recovery primitive.
 
+### 5.2.1 When it turns on: the link, not a setting (2026-10-24)
+
+Prediction used to be a settings toggle, off by default. That is the wrong shape for
+the decision: whether typed text should appear before the shell echoes it is a fact
+about the link at this moment, not a preference, and a user is in the worst position
+to judge it — the moment they would want it on is the moment the settings screen is
+slow to open too. It is now automatic and has no setting.
+
+- **Two thresholds, from the smoothed round trip** (`FramePacing.predict`): on at
+  `PREDICT_ON_MS` (120 ms), off at `PREDICT_OFF_MS` (80 ms). One threshold flaps: a
+  link sitting on the number turns prediction on and off every other sample, and a
+  flashing prediction is worse than none.
+- **An unmeasured link is treated as fast.** The assumed round trip is 40 ms, and
+  predicting on a guess is the dishonesty the gate exists to prevent. A reconnected
+  link decides again from its first real sample.
+- **A dropped connection turns it off** with the rest of the pacing state.
+- **The gates around it are unchanged**: input only (never named keys), never on the
+  alternate screen, never at a password prompt.
+
+120 ms is the point where a keystroke stops feeling immediate; 80 ms is comfortably
+below it and matches the hysteresis-style bands mosh and VS Code use for their own
+rendering decisions (VS Code's local echo turns on at 30 ms, which is aggressive; the
+echo here is a full re-render, not a dimmed overlay).
+
 ### 5.3 Phase 3 — adaptive frame rate (done)
 
 Coalesce output frames and repaint on a schedule bounded by the link, so a

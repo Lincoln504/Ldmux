@@ -632,7 +632,13 @@ fn merge_session_env(own: &[(String, String)], manager: &str) -> Env {
 /// display of its own (it was started before the session was). Cached briefly,
 /// because the maintenance pass asks every couple of seconds.
 pub(crate) async fn session_env() -> Env {
-    let own: Env = std::env::vars().collect();
+    // `std::env::vars()` panics on a name or value that is not valid Unicode, and
+    // this builds every window's environment: one such variable would have made
+    // every desk window unlaunchable. A pair with no UTF-8 representation is
+    // dropped (said once), which is the same rule the session spawn uses.
+    let own: Env = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
     if env_get(&own, "DISPLAY").is_some() || env_get(&own, "WAYLAND_DISPLAY").is_some() {
         return own;
     }

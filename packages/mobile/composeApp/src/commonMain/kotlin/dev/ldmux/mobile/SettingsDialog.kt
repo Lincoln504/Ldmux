@@ -32,7 +32,6 @@ internal fun SettingsDialog(
     onUnpair: () -> Unit,
 ) {
     var side by remember { mutableStateOf(current.side) }
-    var predict by remember { mutableStateOf(current.predict) }
     var fontSp by remember { mutableStateOf(current.fontSp) }
     var compact by remember { mutableStateOf(current.compact) }
 
@@ -51,16 +50,6 @@ internal fun SettingsDialog(
                     Text("panel", color = Dim, fontSize = 12.sp)
                     MiniTextButton(onClick = { side = "left" }) { Text("left", color = if (side == "left") Accent else Dim) }
                     MiniTextButton(onClick = { side = "right" }) { Text("right", color = if (side == "right") Accent else Dim) }
-                }
-                Box(Modifier.height(LocalTouch.current.rowPad))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("predictive echo", color = Dim, fontSize = 12.sp)
-                    MiniTextButton(onClick = { predict = false }) {
-                        Text("off", color = if (!predict) Accent else Dim)
-                    }
-                    MiniTextButton(onClick = { predict = true }) {
-                        Text("on", color = if (predict) Accent else Dim)
-                    }
                 }
                 Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -106,7 +95,6 @@ internal fun SettingsDialog(
                 onSave(
                     current.copy(
                         side = side,
-                        predict = predict,
                         fontSp = fontSp.coerceIn(LdmuxConfig.MIN_FONT_SP, LdmuxConfig.MAX_FONT_SP),
                         compact = compact,
                     ),

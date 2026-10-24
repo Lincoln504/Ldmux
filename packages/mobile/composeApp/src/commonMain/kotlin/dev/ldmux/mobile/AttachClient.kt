@@ -71,7 +71,24 @@ internal sealed interface AttachMessage {
 
     data class Error(val code: String) : AttachMessage
     data object MouseDelivered : AttachMessage
+
+    /**
+     * Held by another device; [holder] is its name, or `null` when the daemon
+     * did not say (an older daemon, or a displacement frame it built before it
+     * started naming the new holder).
+     */
     data class Owned(val holder: String?) : AttachMessage
+
+    /**
+     * The session-list broadcast, which every client on the socket receives.
+     *
+     * [owners] maps a session id to the name of the device holding it, `null`
+     * when it is free. The attached page used to parse this as an unknown type
+     * and drop it, which is why a "held elsewhere" notice could not clear itself
+     * when the holder let go: the fact it needed was arriving on the socket the
+     * whole time.
+     */
+    data class Sessions(val owners: Map<String, String?>) : AttachMessage
 }
 
 /** The control message in [text], or null when it is not one this client understands. */
@@ -102,6 +119,16 @@ internal fun parseAttachMessage(text: String): AttachMessage? {
         "error" -> AttachMessage.Error(root.text("code").ifEmpty { "error" })
         "mousedelivered" -> AttachMessage.MouseDelivered
         "owned" -> AttachMessage.Owned((root["owner"] as? JsonObject)?.optionalText("name")?.ifEmpty { null })
+        "sessions" -> AttachMessage.Sessions(
+            root.objects("sessions").mapNotNull { s ->
+                val id = s.text("id")
+                if (id.isEmpty()) {
+                    null
+                } else {
+                    id to (s.obj("owner") as? JsonObject)?.optionalText("name")?.ifEmpty { null }
+                }
+            }.toMap(),
+        )
         else -> null
     }
 }
@@ -189,6 +216,15 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     var onOwned: ((holder: String?) -> Unit)? = null
     /**
+     * The session-list broadcast, which every client on the socket receives.
+     *
+     * A page needs one fact from it: whether its shell is still held by another
+     * device. It was parsed as an unknown type and dropped, so a "held elsewhere"
+     * notice could not clear itself when the holder let go — the fact was arriving
+     * on this socket the whole time.
+     */
+    var onSessions: ((Map<String, String?>) -> Unit)? = null
+    /**
      * The shell is gone (ended, or unknown to the daemon). The loop stops: there
      * is nothing to re-attach to, and retrying it forever is a page that polls a
      * corpse.
@@ -268,8 +304,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      * Closing rather than waiting: the loop's own retry has a deliberate pause
      * before it reconnects, and a user who just tapped "take it over" should not
      * watch that pause.
+     *
+     * Also the way a page re-attaches after its shell became *free*: a shell that
+     * nobody holds is not a steal, so no takeover is armed — the next attach is the
+     * same polite one a reconnect sends.
      */
-    private fun reconnectNow() {
+    internal fun reconnectNow() {
         val current = ws ?: return
         scope?.launch { runCatching { current.close() } }
     }
@@ -331,7 +371,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     // Say who we are first, exactly as the session-list client
                     // does. A connection with no identity holds nothing, so the
                     // daemon would have no claim to refuse a second device with.
-                    send(Frame.Text(helloMessage(config)))
+                    send(Frame.Text(helloMessage(config, PAGE_FEATURES)))
                     send(Frame.Text(
                         buildJsonObject {
                             put("type", "attach")
@@ -508,6 +548,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 guarded("error") { onError?.invoke(code) }
             }
             AttachMessage.MouseDelivered -> guarded("mouse") { onMouseDelivered?.invoke() }
+            is AttachMessage.Sessions -> guarded("sessions") { onSessions?.invoke(msg.owners) }
             is AttachMessage.Owned -> {
                 // Refused, not broken: the shell is held by another device. Told
                 // as an ordinary outcome so the UI can offer to take it over

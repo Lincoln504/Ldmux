@@ -120,7 +120,6 @@ actual fun rememberTerminalSurface(
     // mid-compose) leaked a connected controller that held the shell with no owner.
     val holder = remember(config.connectionKey, sessionId) { ControllerHolder(config, sessionId, active) }
     val controller = holder.controller
-    LaunchedEffect(controller, config.predict) { controller.predict = config.predict }
 
     // Entering or leaving the foreground starts or drops the stream. The last
     // painted frame stays, so swiping back is instant rather than blank. Keyed on

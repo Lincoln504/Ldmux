@@ -166,7 +166,8 @@ Tailscale only, and far less functionality than dooboxes.
    `pi` can be run inside a session like any other program.
 3. **G3 — Mobile app, two modes that follow the device.** Landscape: terminal
    ~3/4 and a configurable left/right control panel. Portrait: terminal with a
-   compact two-row bar above the keyboard. The shell view follows the device's
+   compact three-row key bar above the keyboard (a navigation row, a modifier row, and
+   an actions row with a 3x2 arrow pad at the trailing edge; amended 2026-10-24). The shell view follows the device's
    rotation and the app owns the keyboard; there is no flip button, and the
    launcher holds portrait (ADR-0011). *(Earlier text said "landscape-only",
    then "chosen by an explicit button"; both are superseded.)*
@@ -265,7 +266,7 @@ Tailscale only, and far less functionality than dooboxes.
 |-----------|----------|------|
 | **`ldmuxd`** (daemon) | Rust (`crates/daemon`) | Talks to the keeper; pane streaming + snapshots; session registry; WS over tailnet; spawn/kill; optional i3 window helper. |
 | **`ldmux`** (CLI) | Rust (`crates/daemon`, `bin/ldmux`) | `ping`, `list`, `desktop`, `new`, `shell`, `run`, `window`, `send`, `key`, `capture`, `snapshot`, `kill`, `close`, `forget`, `adopt`, `mirror`, `live`, `unlive`, `remote`, `code`, `pair` (plus `clipboard-write`). Unix-socket local control. (`attach` is `ldmuxd attach` via `run`/`mirror`; `install-extension` is gone with the extension. Installer and `doctor` work is in progress on this branch and is not specified here.) |
-| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, two-row bar above the keyboard) and landscape (side panel); the launcher holds portrait and the shell view follows the device's rotation, while the app owns the keyboard — no flip button (ADR-0011 and its amendment); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
+| **Mobile app** | Kotlin Multiplatform + Compose Multiplatform | Portrait (typing, three-row key bar above the keyboard) and landscape (side panel); the launcher holds portrait and the shell view follows the device's rotation, while the app owns the keyboard — no flip button (ADR-0011 and its amendment); native renderer — libghostty-vt over JNI, painted on a Compose `Canvas`; Ktor WebSocket; client-owned pane geometry; predictive echo; tap-to-cursor; foreground service pending. |
 | **Desktop mirror / live window** | shell + WM | `i3-msg exec -- <terminal> --class ldmux-live-<id> -e <abs ldmuxd> attach <id>`, then a criteria-targeted `move to workspace number <N>` once the window exists. **Never** `workspace N; exec …` — that moves the user's view. The terminal is `desktop::terminal()` — `LDMUX_TERMINAL`, default `alacritty` — so another emulator is one value rather than one edit per window kind, and `ldmux mirror` is the same argv with `--readonly`. See docs/DESKTOP-INTEGRATION.md; terminal selection and window launching are being reworked on this branch (see docs/PLATFORMS.md), so treat this row as the pre-change description. |
 
 ### 4.3 Why the daemon is a separate process
@@ -329,6 +330,12 @@ pi() {
 | `LDMUX_SESSION_NAME` | the keeper session id (`ldmux-<session id>`). |
 | `LDMUX_KEEPER_SOCK` | the keeper's Unix socket path. |
 | `TERM` / `COLORTERM` | `xterm-256color` / `truecolor`: what the keeper's emulator is (set by the keeper and stated again in the daemon's spawn env). |
+| `SHELL` | the program the session actually exec'd (a `pi`-kind `Spawn.command` leaves it naming the user's shell). |
+| `PATH` | **inherited, and floored**: the unit's `PATH` (the user manager's) plus `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, `/bin` if missing. Never replaced — a session shell is not a login shell, so a user's `.profile`/`.zprofile` PATH would otherwise never apply. |
+
+Variables that name the terminal the daemon was started from (`TMUX`, `STY`,
+`TERM_PROGRAM`, `KITTY_*`, `VTE_VERSION`, `WEZTERM_*`, `ALACRITTY_*`, `WT_*`, `COLORFGBG`, …)
+are **stripped**: a session is its own terminal (2026-10-24).
 
 `LDMUX_DAEMON_TOKEN` is **not** implemented: children reach the daemon through
 the Unix socket, whose 0600 permission plus a 0700 state dir is the boundary.
@@ -770,7 +777,7 @@ every VT mode — is closed.)
 
 > **Superseded by [ADR-0011](adr/0011-screen-orientation.md).** The device owns the
 > rotation of the shell view and the app owns the keyboard: portrait is typing with
-> a two-row bar, landscape is the side panel, and there is no flip button. The
+> a three-row bar, landscape is the side panel, and there is no flip button. The
 > launcher and its dialogs hold portrait (ADR-0011 amendment).
 > Android never ignores it, because nothing is being requested.
 
@@ -791,14 +798,27 @@ every VT mode — is closed.)
 
 ### 7.3 Input & keys
 
-- Extra-keys bar always visible (FR-15); **sticky modifiers** built — Ctrl/Alt
-  latch for exactly one following key. Every modified key — characters included
-  — is sent as a protocol key name (`C-a`, `M-f`, `M-C-Left`), and the daemon's
-  `key_name_to_bytes` (`crates/daemon/src/stream.rs`) is the one place that turns
-  a name into bytes, so the client never computes an encoding. The key-name
+- Extra-keys bar always visible (FR-15); **sticky modifiers** built — Ctrl, Alt
+  and Shift latch for exactly one following key (Shift added 2026-10-24: it is the
+  only way the bar can produce `Shift+Enter`, which is a newline in a TUI such as
+  `pi`). Every modified key — characters included — is sent as a protocol key name
+  (`C-a`, `M-f`, `M-C-S-Left`), and the daemon's `key_name_to_bytes` (now
+  `key_name_to_bytes_in_mode`, `crates/daemon/src/stream.rs`) is the one place that
+  turns a name into bytes, so the client never computes an encoding. The key-name
   vocabulary is the protocol's own (`Enter`, `Tab`, `BSpace`, `DC`, `IC`,
-  `PPage`, `NPage`, `C-<letter>`, ...); an unknown name is an error, never typed
-  into the shell.
+  `PPage`, `NPage`, `S-Enter`, `C-<letter>`, ...); an unknown name is an error,
+  never typed into the shell.
+- **The four arrows are a spatial pad, not a row** (2026-10-24): `Up` above `Down`,
+  `Left` and `Right` either side of it, in both modes. One composable
+  (`ArrowPad`), driven by `ARROW_PAD_ROWS` in `Keys.kt`, so portrait and landscape
+  cannot drift.
+- **Portrait carries `paste`** (2026-10-24). Copy is the platform's own (a
+  selection, then the copy action); paste is the one thing no gesture provides, and
+  landscape has had it all along.
+- **Modified `Enter`, `Escape` and `Space` use the Kitty keyboard protocol when the
+  program has asked for it** (`CSI 13;2u` for `Shift+Enter`, ADR-0022). Without the
+  protocol the encoding is the legacy one (Enter = `CR`, Shift collapsed), so an
+  old daemon or a program that never asked sees exactly what it always saw.
 - **There is no copy-mode.** The client scrolls its own buffer, and a full-screen
   app on the alternate screen has no scrollback to page through. (The tmux-era
   copy-mode toggle, its `copymode` message and the `paneInMode` flag were removed

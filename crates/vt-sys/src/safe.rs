@@ -194,6 +194,61 @@ impl Terminal {
         self.get_bool(ffi::DATA_MOUSE_TRACKING)
     }
 
+    /// Give the terminal somewhere to write its own replies.
+    ///
+    /// A terminal answers what it is asked: device attributes (DA1), cursor
+    /// position and status reports (DSR/CPR), mode reports (DECRQM), its version
+    /// (XTVERSION), the Kitty keyboard query, mouse/alternate-screen reports. The
+    /// emulator parses those queries perfectly and then, with no write-back
+    /// registered, drops the answer on the floor — and the daemon's sanitizer
+    /// stops them reaching a client (a client's answer would arrive as typed
+    /// input). So a program inside a session that asked "where is the cursor"
+    /// waited forever, and `pi` could not learn that the terminal distinguishes
+    /// `Shift+Enter` from `Enter`.
+    ///
+    /// `userdata` is handed back to every call; the keeper passes its pty master.
+    ///
+    /// # Safety
+    ///
+    /// `f` must be safe to call synchronously from inside `write`, must not
+    /// re-enter the terminal, and must not retain `data` after returning.
+    /// `userdata` must stay valid for the terminal's lifetime.
+    pub unsafe fn set_write_pty(&mut self, f: ffi::WritePtyFn, userdata: *mut c_void) {
+        // SAFETY: `self.ptr` is the live terminal this value owns; `userdata`'s
+        // contract is the caller's (see above); this option's value type is a
+        // plain `void*` the library only stores and hands back.
+        let _ = unsafe {
+            ffi::ghostty_terminal_set(self.ptr, ffi::OPT_USERDATA, userdata as *const c_void)
+        };
+        // SAFETY: as above, and this option's value type is a function pointer
+        // with the `GhosttyTerminalWritePtyFn` shape.
+        let _ = unsafe {
+            ffi::ghostty_terminal_set(self.ptr, ffi::OPT_WRITE_PTY, f as *const c_void)
+        };
+    }
+
+    /// The Kitty keyboard protocol flags the program has set (`CSI > Ps u`),
+    /// as a bitset: 1 disambiguate, 2 event types, 4 alternate keys, 8 all keys
+    /// as escape codes, 16 associated text.
+    ///
+    /// The daemon needs this to encode a modified Enter, Escape or Space: those
+    /// keys have no legacy byte sequence that carries the modifier, so a
+    /// terminal without the protocol cannot tell `Shift+Enter` from `Enter`.
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        let mut v: u8 = 0;
+        // SAFETY: `self.ptr` is the live terminal this value owns;
+        // `DATA_KITTY_KEYBOARD_FLAGS` writes one `GhosttyKittyKeyFlags` (the
+        // header says `uint8_t *`), and `v` is a live, aligned `u8`.
+        let _ = unsafe {
+            ffi::ghostty_terminal_get(
+                self.ptr,
+                ffi::DATA_KITTY_KEYBOARD_FLAGS,
+                &mut v as *mut _ as *mut c_void,
+            )
+        };
+        v
+    }
+
     /// The current value of a terminal mode, queried through `DATA_MODE`.
     /// `mode` is the packed mode identifier (a bare value for DEC private
     /// modes: 25 = cursor visible, 1006 = SGR mouse, 2004 = bracketed

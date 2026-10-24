@@ -51,6 +51,9 @@ pub struct FakeSession {
     pub mouse_sgr: bool,
     pub app_cursor: bool,
     pub bracketed_paste: bool,
+    /// The Kitty keyboard protocol flags the fake program has set. A test that
+    /// wants the daemon to encode a modified Enter sets bit 1.
+    pub kitty_keyboard: u8,
     pub history_size: u16,
     /// The pane's foreground command (`/proc/<pid>/comm`); the fake reports a
     /// fixed name for a live pane and empty for a dead one (a reaped pid may
@@ -266,6 +269,7 @@ impl FakeKeeper {
             mouse_sgr: s.mouse_sgr,
             app_cursor: s.app_cursor,
             bracketed_paste: s.bracketed_paste,
+            kitty_keyboard: s.kitty_keyboard,
             history_size: s.history_size as u64,
             foreground,
             cwd,

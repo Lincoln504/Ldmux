@@ -173,9 +173,13 @@ async fn handover_size_and_close_does_not_detach() {
     let caps_b = next_of_type(&mut b, "caps").await;
     assert_eq!(caps_b["cols"], 80);
     let owned_a = next_of_type(&mut a, "owned").await;
-    assert!(
-        owned_a["owner"].is_null(),
-        "A is told it lost the shell: {owned_a}"
+    // The displacement names the device that has the shell now. It used to send
+    // `owner: null`, which both clients rendered as a device invented on the
+    // spot ("another device"), in a notice whose whole point is to say who has
+    // it and who to ask.
+    assert_eq!(
+        owned_a["owner"]["id"], "B",
+        "A is told it lost the shell, and to whom: {owned_a}"
     );
     assert_eq!(
         arc.lock().await.ownership().owner(&id).unwrap().device.id,
@@ -192,9 +196,9 @@ async fn handover_size_and_close_does_not_detach() {
     let caps_a2 = next_of_type(&mut a, "caps").await;
     assert_eq!(caps_a2["cols"], 100);
     let owned_b = next_of_type(&mut b, "owned").await;
-    assert!(
-        owned_b["owner"].is_null(),
-        "B is told it lost the shell: {owned_b}"
+    assert_eq!(
+        owned_b["owner"]["id"], "A",
+        "B is told it lost the shell, and to whom: {owned_b}"
     );
     assert_eq!(
         arc.lock().await.ownership().owner(&id).unwrap().device.id,
@@ -227,7 +231,24 @@ async fn handover_size_and_close_does_not_detach() {
     assert_eq!(arc.lock().await.get_session(&id).unwrap().status, "running");
 
     // After the release grace the claim is freed — and the session still lives.
-    tokio::time::sleep(Duration::from_millis(3500)).await;
+    //
+    // Asked of the sweep with a later clock rather than slept through: the
+    // grace is 15 s, sized against the phone's own reconnect policy, and a test
+    // that sleeps it is a test somebody deletes. Past three seconds the claim
+    // must still be B's (the regression that made a dropped link a handover).
+    assert_eq!(
+        arc.lock().await.ownership().owner(&id).unwrap().device.id,
+        "B",
+        "a dropped link is not a release at the old three-second mark"
+    );
+    {
+        let mut d = arc.lock().await;
+        let nobody = std::collections::HashSet::new();
+        // The first sweep is what starts the clock; the second is a later tick.
+        let t0 = d.mono_ms();
+        d.release_unbacked_claims(&nobody, t0);
+        d.release_unbacked_claims(&nobody, t0 + ldmux_daemon::daemon::RECONNECT_GRACE_MS + 1_000);
+    }
     assert!(
         arc.lock().await.ownership().owner(&id).is_none(),
         "the grace releases the claim"
@@ -463,9 +484,9 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
     .await;
     let _ = next_of_type(&mut phone, "caps").await;
     let owned = next_of_type(&mut desk, "owned").await;
-    assert!(
-        owned["owner"].is_null(),
-        "the desk window is told it lost the shell"
+    assert_eq!(
+        owned["owner"]["id"], "phone-1",
+        "the desk window is told it lost the shell, and to whom: {owned}"
     );
 
     // The phone puts it down. That is a release, and the desk window has to be
@@ -512,4 +533,112 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
         h.arc.lock().await.get_session(&id).unwrap().status,
         "running"
     );
+}
+
+/// A phone whose socket drops has not let go of its shell, and the shell waits
+/// for it long enough to come back.
+///
+/// This is the reported bug: on a poor link the phone said the desktop had taken
+/// the shell, and no person had touched the desktop. Two things combined. A
+/// closed socket's claim was released after the same three seconds an unbacked
+/// claim gets — and three seconds is exactly what the phone spends noticing its
+/// own link is dead (`NETWORK_PROBE_MS` 2.5 s) and re-attaching (`RETRY_BASE_MS`
+/// 0.4 s). The waiting desk window took the free shell in that window, and the
+/// phone's polite re-attach was then refused with the desk named as the holder.
+///
+/// The fix is one number with one meaning: a *working* connection gets a grace
+/// sized against the client's own reconnect floor, separate from the fraction of
+/// a second a window that has not attached yet is allowed.
+#[tokio::test]
+async fn a_dropped_socket_keeps_its_claim_long_enough_to_reconnect() {
+    let (h, ids) = Harness::new(1).await;
+    let id = ids[0].clone();
+
+    // The desk window holds the shell, then the phone takes it and the desk
+    // waits, exactly as when a shell is opened on the phone.
+    let mut desk = connect(h.port, &h.token).await;
+    send(
+        &mut desk,
+        serde_json::json!({"type":"hello","device":{"id":"desk-1","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut desk,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30}),
+    )
+    .await;
+    let _ = next_of_type(&mut desk, "caps").await;
+
+    let mut phone = connect(h.port, &h.token).await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"hello","device":{"id":"phone-1","name":"phone","kind":"phone"}}),
+    )
+    .await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24,"takeover":true}),
+    )
+    .await;
+    let _ = next_of_type(&mut phone, "caps").await;
+    let _ = next_of_type(&mut desk, "owned").await;
+
+    // The link dies. Nothing else: no release, no close request.
+    drop(phone);
+
+    // Four seconds later — past the old three-second grace, and past the point
+    // where the phone's first retry lands — the claim is still the phone's, so
+    // no waiting window has advanced on a transport failure. Asked of the same
+    // sweep the tick runs, with a later clock, rather than slept through.
+    {
+        let mut d = h.arc.lock().await;
+        let nobody = std::collections::HashSet::new();
+        let t0 = d.mono_ms();
+        d.release_unbacked_claims(&nobody, t0); // starts the unbacked clock
+        let freed = d.release_unbacked_claims(&nobody, t0 + 4_000);
+        assert!(
+            freed.is_empty(),
+            "a dropped socket is a suspicion, not a release"
+        );
+        assert_eq!(
+            d.ownership().owner(&id).map(|c| c.device.id.clone()),
+            Some("phone-1".to_string()),
+            "a dropped socket is a suspicion, not a release"
+        );
+    }
+
+    // A desk attach inside the grace is refused, truthfully, with the holder
+    // named — not granted the shell.
+    let mut eager = connect(h.port, &h.token).await;
+    send(
+        &mut eager,
+        serde_json::json!({"type":"hello","device":{"id":"desk-2","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut eager,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":90,"rows":20}),
+    )
+    .await;
+    let refused = next_of_type(&mut eager, "owned").await;
+    assert_eq!(refused["owner"]["id"], "phone-1");
+
+    // The phone comes back as itself, without a takeover, and it is the same
+    // holder asking for what it already has.
+    let mut again = connect(h.port, &h.token).await;
+    send(
+        &mut again,
+        serde_json::json!({"type":"hello","device":{"id":"phone-1","name":"phone","kind":"phone"}}),
+    )
+    .await;
+    send(
+        &mut again,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24}),
+    )
+    .await;
+    let caps = next_of_type(&mut again, "caps").await;
+    assert_eq!(caps["cols"], 80, "the reconnect keeps the shell");
+    drop(again);
+    drop(desk);
+    drop(eager);
 }

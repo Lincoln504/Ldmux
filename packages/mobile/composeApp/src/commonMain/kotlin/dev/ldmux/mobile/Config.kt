@@ -17,12 +17,6 @@ data class LdmuxConfig(
     val token: String,
     val side: String = "left",
     /**
-     * Show typed text before the server echoes it (docs/PREDICTIVE-ECHO.md).
-     * Off by default: it trades a little honesty for a lot of latency, and a
-     * prompt that does not echo is exactly where the trade is most visible.
-     */
-    val predict: Boolean = false,
-    /**
      * Terminal font size. It is a client setting because the client owns the
      * geometry: a bigger font means fewer cells fit, and the client tells the
      * daemon the grid it can paint, so the pane reflows to match instead of

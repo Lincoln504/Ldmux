@@ -233,14 +233,10 @@ internal fun SidePanel(
                 ),
             )
             PanelDivider()
-            KeyRow(
-                listOf(
-                    "←" to { press("Left") },
-                    "↑" to { press("Up") },
-                    "↓" to { press("Down") },
-                    "→" to { press("Right") },
-                ),
-            )
+            // The arrows are the same block portrait uses ([ArrowPad]), not a row:
+            // up over down, left and right either side. A direction is a position,
+            // and landscape had the same four-in-a-row shape portrait did.
+            ArrowPad(Modifier.fillMaxWidth(), press, gap = 6.dp)
             PanelDivider()
             KeyRow(
                 listOf(
