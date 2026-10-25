@@ -25,26 +25,55 @@ async fn shift_enter_reaches_a_program_as_a_distinct_kitty_key() {
 
     // What `pi` does at startup: push the disambiguate flag and ask what the
     // terminal has. The shell printing the push is enough for the keeper's
-    // emulator to parse it, exactly as a program's stdout would be.
-    ws.send_json(&serde_json::json!({"type":"input","data":"printf '\\033[>1u'\n"}))
+    // emulator to parse it, exactly as a program's stdout would be. Then read raw
+    // input, so what the daemon writes is what the test observes rather than a line
+    // editor's idea of it.
+    //
+    // **The marker is the synchronisation, not a sleep.** Everything after it in the
+    // same stream happened after the push, so a client that has read "READY" is
+    // looking at a keeper whose state already carries the flag. A fixed sleep was
+    // enough alone (600 ms) and not under `cargo test --workspace`: the key then
+    // arrived while the flags were still 0, the daemon encoded a plain `CR`, and the
+    // test waited the full 60 s for a sequence that was never due.
+    // **The program prints the query on stdout** — that is how a program asks a
+    // terminal — then reads the answer. `cat -v` because the keeper drops a *reply*
+    // from the pane's output (a reply is not content, and an echoed one would be
+    // answered for ever, `without_kitty_replies`); `-v` renders what the program read
+    // so this test can see it.
+    ws.send_json(&serde_json::json!({
+        "type":"input",
+        "data":"printf '\\033[>1u\\033[?u'; stty raw -echo; exec cat -v\n",
+    }))
+    .await;
+    // **The answer to the query is the synchronisation.** `pi` pushes the flag and
+    // asks what the terminal has, and it treats keys as protocol keys only after the
+    // answer arrives — so this is the program's own handshake, not a proxy for it.
+    // Seeing `CSI ? 1 u` proves the keeper's emulator parsed the push *and* is the
+    // instance answering, which is exactly the state a later key batch reads.
+    //
+    // A sleep was the first version of this and it was wrong in both directions: 600
+    // ms was enough alone and not under load (the key then arrived with flags 0 and
+    // the daemon wrote a plain `CR`), and "READY" is not a sync either — output is
+    // forwarded to clients slightly ahead of the state a `Read` answers with, which
+    // is why the flag can be visible and not yet in effect.
+    let mut out = Vec::new();
+    ws.until_output(&mut out, "^[[?1u", Duration::from_millis(300))
         .await;
-    // Then read raw input, so what the daemon writes is what the test observes
-    // rather than a line editor's idea of it.
-    ws.send_json(&serde_json::json!({"type":"input","data":"stty raw -echo; exec cat\n"}))
-        .await;
-    // Long enough for the shell to run both commands on a loaded machine.
-    tokio::time::sleep(Duration::from_millis(600)).await;
 
     ws.send_json(&serde_json::json!({"type":"key","keys":["S-Enter"]}))
         .await;
-    let mut out = Vec::new();
-    ws.until_output(&mut out, "\u{1b}[13;2u", Duration::from_millis(300))
+    // `^[[13;2u` is what the program read, rendered: the daemon wrote
+    // `ESC [ 1 3 ; 2 u` into the pane.
+    ws.until_output(&mut out, "^[[13;2u", Duration::from_millis(300))
         .await;
 
     // And a plain Enter is still `CR`: a protocol parser accepts it, and programs
     // that never asked for the protocol require it.
     ws.send_json(&serde_json::json!({"type":"key","keys":["Enter"]}))
         .await;
-    ws.until_output(&mut out, "\r", Duration::from_millis(300))
+    // A fresh buffer: `out` already holds what was read before this key, and a
+    // needle found in that proves nothing. `^M` is a `CR` as `cat -v` renders it.
+    let mut after = Vec::new();
+    ws.until_output(&mut after, "^M", Duration::from_millis(300))
         .await;
 }

@@ -169,10 +169,75 @@ unsafe extern "C" fn write_pty_cb(
         return;
     }
     let fd = userdata as isize as libc::c_int;
-    // SAFETY: `fd` is the master this thread owns and `data`/`len` a live buffer.
-    // A partial write is not retried: a reply this small that does not fit means
-    // the pane is gone, and the next read reports it.
+    // **Never block here.** The master is blocking (opened by `openpty`, never set
+    // `O_NONBLOCK`), and this callback runs on the thread that also drains the
+    // master. A program that asks a query and does not read its input — a `cat`
+    // fed binary, a child busy on its own work — fills the pty input queue, and a
+    // blocking write would wedge that thread: the child would wait on our write,
+    // we would wait on the child's read, and the session would stop draining
+    // output. It is reachable only since the keeper started answering queries at
+    // all, and it reads exactly like a hung shell.
+    //
+    // `poll` with a zero timeout answers "can this be written now" without
+    // touching the fd, and a dropped reply costs nothing: it is the answer to a
+    // question about a terminal, and the program will ask again (or has already
+    // given up on this one).
+    let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+    // SAFETY: one `pollfd` of ours, nfds 1, zero timeout. `fd` is the master this
+    // thread owns and `data`/`len` a live buffer.
+    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+    if ready <= 0 || pfd.revents & libc::POLLOUT == 0 {
+        return;
+    }
+    // SAFETY: as above; a partial write is not retried, for the same reason — a
+    // reply this small that does not fit means the pane is gone, and the next read
+    // reports it.
     unsafe { libc::write(fd, data as *const libc::c_void, len) };
+}
+
+/// Drop the *reply* form of the Kitty keyboard query from the output stream.
+///
+/// The write-back writes a reply into the pty master, i.e. to the program's input.
+/// A program that echoes what it reads (`cat`, a pager, a shell with echo on) turns
+/// it back into output, the emulator parses it, and — because the parameterised
+/// form is also a query-shaped sequence — answers it again. That loop never stops:
+/// measured 2026-10-25 at about sixty replies a second through a pane running `cat`,
+/// growing the pane and the wire at once.
+///
+/// The **question** is the bare `CSI ? u`; the **answer** is `CSI ? <params> u`, and
+/// a reply is never a question — so the parameterised form is dropped before the
+/// emulator sees it, and the loop cannot start. Programs push the protocol with
+/// `CSI > <params> u`, which is untouched.
+fn without_kitty_replies(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    const PREFIX: &[u8] = b"\x1b[?";
+    fn is_param(b: u8) -> bool {
+        b.is_ascii_digit() || b == b';'
+    }
+    if !bytes.windows(PREFIX.len()).any(|w| w == PREFIX) {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.len() > PREFIX.len() + 1
+            && rest.starts_with(PREFIX)
+            && rest[PREFIX.len()].is_ascii_digit()
+        {
+            // Walk the parameters; a `u` right after them ends the sequence.
+            let mut j = PREFIX.len();
+            while j < rest.len() && is_param(rest[j]) {
+                j += 1;
+            }
+            if j < rest.len() && rest[j] == b'u' {
+                i += j + 1;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// The result of a render: the grid's geometry + the rendered text (one SGR
@@ -403,9 +468,13 @@ pub(crate) fn spawn(
                     continue;
                 }
                 let bytes = &buf[..n as usize];
+                // A reply the terminal wrote can come back as output when a program
+                // echoes its input (see `without_kitty_replies`): dropping it here is
+                // what stops a reply from being answered for ever.
+                let bytes = without_kitty_replies(bytes);
                 // The terminal answers its own queries from inside this call.
-                term.write(bytes);
-                out.relock().push(bytes);
+                term.write(&bytes);
+                out.relock().push(&bytes);
                 // The pane said something: this is the activity clock
                 // (`lastActivityAt`). Stamped here — the one place every byte
                 // from the master passes — and not where the buffer is drained,

@@ -2264,50 +2264,74 @@ async fn a_hyperlink_survives_into_the_snapshot_live_and_in_history() {
 ///
 /// `stty raw -echo` because the point is to see the bytes the program reads: in
 /// canonical mode the line discipline echoes escape characters as `^[` and the
-/// reply never reaches a reader.
+/// A program that asks for the Kitty keyboard protocol is answered, and the pane's
+/// state reports the flags it asked for.
+///
+/// The emulator parses a program's push (`CSI > <flags> u`) but answers queries only
+/// through a write-back callback, and the keeper used to register none — so the query
+/// went unanswered, `pi` treated the terminal as unable to tell a modified key from a
+/// plain one, and `Shift+Enter` submitted the line instead of inserting a newline.
+///
+/// **The program prints the query**, the way a real one does, and reads the answer.
+/// (The previous version wrote the query into the pane's *input* and relied on `cat`
+/// echoing it back for the emulator to see, which is not a program asking a
+/// terminal; it also meant the answer was re-answered for ever.)
+///
+/// `cat -v` because the keeper drops a *reply* from the pane's output: a reply is not
+/// content, and an echoed one would be answered again (see `without_kitty_replies`).
+/// `-v` renders the answer cat read as `^[[?0u`, which is not a reply and is kept.
 #[tokio::test]
 async fn a_kitty_keyboard_query_is_answered_by_the_keeper() {
     let socket = socket_path();
     let _k = boot(&socket).await;
     let s = socket.to_string_lossy().into_owned();
+
+    // Nothing pushed yet: the answer says so, rather than not arriving.
     keeper_call(
         &s,
         &spawn_req(
-            "kitty",
+            "kitty0",
             80,
             24,
             None,
-            Some(&["/bin/sh", "-c", "stty raw -echo; exec cat"]),
+            Some(&[
+                "/bin/sh",
+                "-c",
+                "printf '\\033[?u'; stty raw -echo; exec cat -v",
+            ]),
+        ),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let seen = peek_for(&s, "kitty0", "^[[?0u").await;
+    assert!(seen.contains("^[[?0u"), "no answer to the query: {seen:?}");
+
+    // A program that pushes the disambiguate flag first, then asks.
+    keeper_call(
+        &s,
+        &spawn_req(
+            "kitty1",
+            80,
+            24,
+            None,
+            Some(&[
+                "/bin/sh",
+                "-c",
+                "printf '\\033[>1u\\033[?u'; stty raw -echo; exec cat -v",
+            ]),
         ),
         DEFAULT_TIMEOUT_MS,
     )
     .await
     .unwrap();
 
-    let write = |data: &str| {
-        KeeperMessage::Write(Write {
-            session_id: "kitty".to_string(),
-            data: data.to_string(),
-        })
-    };
-
-    // Nothing pushed yet: the answer says so, rather than not arriving.
-    keeper_call(&s, &write("\x1b[?u"), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap();
-    let seen = peek_for(&s, "kitty", "\x1b[?0u").await;
-    assert!(seen.contains("\x1b[?0u"), "no answer to the query: {seen:?}");
-
-    // Push the disambiguate flag. The emulator parses it; the state reports it.
-    keeper_call(&s, &write("\x1b[>1u"), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap();
     let mut flags = 0u8;
     for _ in 0..200 {
         if let Ok(KeeperMessage::State(st)) = keeper_call(
             &s,
             &KeeperMessage::Read(Read {
-                session_id: "kitty".to_string(),
+                session_id: "kitty1".to_string(),
             }),
             DEFAULT_TIMEOUT_MS,
         )
@@ -2322,24 +2346,77 @@ async fn a_kitty_keyboard_query_is_answered_by_the_keeper() {
     }
     assert_eq!(flags, 1, "the pushed flag is in the pane state");
 
-    // The next query is answered with the pushed flags.
-    keeper_call(&s, &write("\x1b[?u"), DEFAULT_TIMEOUT_MS)
-        .await
-        .unwrap();
-    let seen = peek_for(&s, "kitty", "\x1b[?1u").await;
+    // ...and the answer carries it.
+    let seen = peek_for(&s, "kitty1", "^[[?1u").await;
     assert!(
-        seen.contains("\x1b[?1u"),
+        seen.contains("^[[?1u"),
         "the answer does not carry the pushed flag: {seen:?}"
     );
 }
 
-/// A program that asks the terminal where the cursor is, or what it is, gets an
-/// answer.
+/// A terminal reply that comes back as *output* is not answered again.
 ///
-/// These queries are dropped by the daemon's output sanitizer before any client
-/// sees them — a client's reply would arrive at the shell as typed input — so the
-/// only place they can be answered is the emulator that owns the grid. With no
-/// write-back registered they were answered by nobody: a UI that sizes itself from
+/// The write-back writes `CSI ? 1 u` into the pty master, i.e. into the program's
+/// input. A program that echoes what it reads (`cat`, a pager, a shell with echo on)
+/// turns that into output, the emulator parses it — and, because the parameterised
+/// form is query-shaped, answers it again. That loop never stops: measured
+/// 2026-10-25 at about sixty replies a second through a pane running `cat`, filling
+/// the pane and the wire at once. A reply is not content, so the keeper drops it from
+/// the output stream before the emulator sees it.
+#[tokio::test]
+async fn the_keeper_does_not_answer_its_own_reply() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy().into_owned();
+    keeper_call(
+        &s,
+        &spawn_req(
+            "replyloop",
+            80,
+            24,
+            None,
+            // The program asks (on stdout), then echoes its input raw — which is
+            // what turned a reply into a question before the filter existed.
+            Some(&[
+                "/bin/sh",
+                "-c",
+                "printf '\\033[?u'; stty raw -echo; exec cat",
+            ]),
+        ),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let write = |data: &str| {
+        KeeperMessage::Write(Write {
+            session_id: "replyloop".to_string(),
+            data: data.to_string(),
+        })
+    };
+
+    // The answer to the program's own query was written into the pane's input, and
+    // `cat` echoes it raw: without the filter this is where the loop began.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // A reply written into the pane as the write-back would, followed by a marker the
+    // echo will carry. The marker proves the pane is alive and echoing; the reply
+    // itself must never come back as output for the emulator to answer again.
+    keeper_call(&s, &write("\x1b[?1uMARKER"), DEFAULT_TIMEOUT_MS)
+        .await
+        .unwrap();
+    let after = peek_for(&s, "replyloop", "MARKER").await;
+    assert!(after.contains("MARKER"), "the pane stopped echoing: {after:?}");
+    // The reply form is `CSI ? <flags> u`; the program's own *query* (`CSI ? u`) is
+    // in the same buffer and is not a reply. The caret-notation echo of the answer
+    // (`^[[?0u`) is text, not a sequence, and is not one either.
+    for reply in ["\u{1b}[?0u", "\u{1b}[?1u"] {
+        assert!(
+            !after.contains(reply),
+            "a reply reached the emulator as output ({reply:?}), which is the loop: {after:?}"
+        );
+    }
+}
+
 /// a cursor-position report blocked or guessed.
 #[tokio::test]
 async fn a_cursor_report_and_a_device_attributes_query_are_answered() {

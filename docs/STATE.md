@@ -94,6 +94,32 @@ Product and mobile:
   cannot both be right (ADR-0008 consequences). A desk window now re-asserts its own
   size when a snapshot disagrees with its tty (`crates/attach`), so the holder wins;
   the general per-client viewport question is still open (`docs/MOBILE-STATE-AUDIT.md` §3).
+- **A terminal reply never re-enters the emulator.** An answer goes into the pty
+  master (the program's input), and a program that echoes what it reads turns it back
+  into output — which the emulator would answer again, for ever (measured 2026-10-25
+  at ~60 replies a second through a pane running `cat`). The keeper drops the
+  parameterised reply form (`CSI ? <flags> u`) from the output stream; the bare query
+  and the push are untouched (`without_kitty_replies`, `crates/keeper/src/emulator.rs`).
+- **A reply to a terminal query is dropped rather than queued.** The keeper's
+  write-back writes from the emulator thread, and the pty master is blocking, so a
+  program that asks and does not read (a `cat` fed binary) could have wedged the
+  thread that also drains the master — output would stop and the session would read
+  as hung. The callback asks `poll(POLLOUT, 0)` first and drops the reply when the
+  queue is full (`crates/keeper/src/emulator.rs`). Reachable only since the keeper
+  started answering queries at all.
+- **A history page is sized when the user asks, not when the page attaches**, and it
+  is never smaller than what is already loaded. A reply *replaces* the scrollback, so
+  a slow-link cap (4,000 rows) applied to a fast-link page (5,000 rows already held)
+  would have shortened the history and then looked like "the keeper has no more", and
+  the client would have stopped asking for good. `maybeExtendHistory` in
+  `TerminalController.kt` now treats a cap at or below what is held as exhausted.
+- **A deliberate leave costs the other device up to 15 s.** The reclaim grace is one
+  number for every socket close, because there is no detach message on the wire: a
+  phone returning to the launcher and a phone whose link died look the same to the
+  daemon. The consequence is that a waiting desk window reclaims a shell the phone
+  put down after up to `RECONNECT_GRACE_MS`, where it used to be 3 s. Fixing it
+  properly needs a client "I am leaving" message (the client closes its socket
+  without one), and that is a protocol change, not a constant.
 - **The mobile client advertises `inplaceResync`** (2026-10-24): a client that falls
   behind is now repaired with `caps` + `snapshot` on the same socket instead of a
   reconnect, which is the two-orders-of-magnitude lever in `docs/WIRE-COST.md` and the
@@ -131,8 +157,10 @@ Shell view: pages are the user's, numbered 1..N (2026-10-25):
   one shell was enough to trigger it (reported 2026-10-25). Measured on the host
   2026-10-25: with eight live shells, `ldmux send d8a750218a 'echo x'` moved that row
   from position 8 to position 1 in `ldmux list` — a page's index is a different shell
-  after one keystroke. An id a momentarily stale list does not carry keeps its index
-  rather than being dropped and re-appended.
+  after one keystroke. An id a momentarily stale list does not carry keeps its place in
+  the order rather than being dropped and re-appended (it is omitted from the pages
+  while it is missing, so the pages after it sit one earlier, and it returns at its
+  own index).
 - **The number is the page number, in both places.** The header reads
   `3 / 5 shells`, and the launcher's tick box shows the page a chosen row will become
   (`ordinalIn`), in the order the rows were ticked — so the row you ticked first is
@@ -142,6 +170,19 @@ Shell view: pages are the user's, numbered 1..N (2026-10-25):
   version was `[null, Up, null]` over the row of three, which drew the same cross and
   left two blank cells where a thumb goes (reported 2026-10-25). The list has no
   `null` in it, so the layout cannot grow one back.
+
+Desk window liveness (2026-10-25):
+- **A window cannot freeze silently any more.** One was found frozen and small — pane
+  46x22 (a phone's grid) in a 158x40 window, no claim, no notice, and zero read
+  syscalls in twenty seconds — after the phone that had used that shell died. The
+  keepalive was a `select!` branch and the loop was stuck elsewhere, so nothing was
+  pinged and nothing reconnected. The attach client now bounds its receive wait
+  (`read_stall_limit`) and every send (`SEND_TIMEOUT_MS`), and retries a refused size
+  re-assert (`REASSERT_RETRY`). Measurements and the full account:
+  `docs/DESKTOP-INTEGRATION.md` §"A window that goes quiet".
+- **Known gap**: the write to the window's own pty is still unbounded. A terminal
+  that stops taking output holds the client there — not this incident (the terminal
+  repainted on the next snapshot), and not guessed at.
 
 Shell environment (2026-10-24):
 - **`PATH` is inherited and floored, never replaced.** The units used to pin

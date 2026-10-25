@@ -51,6 +51,16 @@ Consequences:
   the master and nothing else — the header forbids re-entering the terminal from a
   callback.
 
+**A reply is not content, so it never re-enters the emulator.** The write-back writes
+the answer into the pty master, which is the program's *input*. A program that echoes
+what it reads (a `cat`, a pager, a shell with echo on) turns the answer back into
+output, the emulator parses it, and the parameterised reply form (`CSI ? <flags> u`)
+is query-shaped — so it answers it again, and again: measured 2026-10-25 at about
+sixty replies a second, filling the pane and the wire. The keeper therefore drops the
+parameterised form from the output stream before the emulator sees it
+(`without_kitty_replies`). The *question* is the bare `CSI ? u`, the *push* is
+`CSI > <flags> u`, and neither is touched.
+
 **The daemon encodes a modified Enter/Escape/Space as `CSI u` when — and only when —
 the program has the protocol on.** `key_name_to_bytes_in_mode` takes the flags the
 keeper's emulator reports, and for those three keys (the only ones with no legacy
@@ -92,8 +102,9 @@ exactly as before.
 
 ## Verification
 
-- `crates/keeper/tests/keeper.rs`: the query is answered with the pushed flags, and a
-  cursor report and a device-attributes query are answered.
+- `crates/keeper/tests/keeper.rs`: the query is answered with the pushed flags (both
+  before and after a push), a cursor report and a device-attributes query are
+  answered, and an echoed reply is never answered again.
 - `crates/daemon/src/stream.rs`: `S-Enter` → `CSI 13;2u` only with the flag on.
 - `crates/daemon/tests/kitty_keys.rs`: end to end — a program pushes the flag, the
   client sends `S-Enter`, the pane receives `CSI 13;2u`; plain Enter is still `CR`.
