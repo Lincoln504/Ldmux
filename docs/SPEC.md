@@ -795,6 +795,15 @@ every VT mode — is closed.)
   left/right **edge strip** (20 px), because a horizontal drag inside the
   terminal belongs to the running program (dooboxes `MOBILE_TERMINAL_UX` §5).
   The pager lists sessions; tap to jump. Switching is instant.
+- **The page order is the user's, and a page number is stable** (amended
+  2026-10-25). A page is a shell the user opened, in the order they opened it:
+  `pageOrder` is a list of ids and `pagesInOrder` maps it through the session list,
+  which is *not* an ordering authority — the daemon sorts live sessions by last
+  activity, so using it as one made the page at index N a different shell whenever
+  any shell printed anything (the screen slid between shells and returned on its
+  own). An id a momentarily stale list does not carry keeps its index. The header
+  reads `3 / 5 shells`, and the launcher's tick box shows the page a chosen row will
+  become, in the order the rows were chosen.
 
 ### 7.3 Input & keys
 

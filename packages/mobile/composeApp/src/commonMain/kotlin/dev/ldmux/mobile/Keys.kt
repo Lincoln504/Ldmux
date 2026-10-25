@@ -63,16 +63,23 @@ fun panelControlKeys(press: (String) -> Unit): List<Pair<String, () -> Unit>> = 
 /**
  * The four arrows as a **position**, not a list.
  *
- * Row 1 is `null, Up, null`; row 2 is `Left, Down, Right`. `null` is an empty
- * cell, and it is what puts `Up` directly above `Down` and `Left`/`Right` either
- * side of it, so the block reads as a direction instead of four words in a row.
+ * Row 1 is `Up` alone; row 2 is `Left, Down, Right`. `Up` takes the whole width of
+ * the pad, which puts it directly over `Down` and `Left`/`Right` either side of it,
+ * so the block reads as a direction instead of four words in a row.
+ *
+ * The first version of this was `null, Up, null` over `Left, Down, Right`: an
+ * *empty cell* above each of `Left` and `Right`. It drew the same picture and left
+ * two holes in the bar — a cell that is not a key, in the one place a thumb goes
+ * without looking (reported on the phone, 2026-10-25: "blank button spaces above
+ * the left and right arrows"). The list has no `null` in it any more, so the
+ * layout cannot grow a blank back: every item is a key.
  *
  * It lives here, as data, so a layout change and the test that guards it read the
  * same thing. The bar rendered `← ↑ ↓ →` inline for a long time and nothing
  * noticed, because there was nothing to notice: the shape was a call site, not a
  * value.
  */
-val ARROW_PAD_ROWS: List<List<String?>> = listOf(
-    listOf(null, "Up", null),
+val ARROW_PAD_ROWS: List<List<String>> = listOf(
+    listOf("Up"),
     listOf("Left", "Down", "Right"),
 )

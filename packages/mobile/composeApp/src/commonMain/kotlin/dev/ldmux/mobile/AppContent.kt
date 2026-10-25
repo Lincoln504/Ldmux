@@ -104,7 +104,22 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // some other shell, possibly one on the desk — claimed it and resized it to the
     // phone, and only then scrolled to the new one. A page is a hold on a shell,
     // so nothing is a page that was not asked for.
-    var pageSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
+    //
+    // **A list, not a set: the order is the user's.** The pages used to be
+    // `attachable.filter { it.id in selection }`, which means the daemon's session
+    // order — and that order is *last activity first* (`sessions.sort_by` in
+    // `crates/daemon/src/daemon.rs`), so every shell that printed anything moved to
+    // the front of the list. With several shells open, the page at index N became a
+    // different shell whenever any of them produced output: the pager's content
+    // changed under the finger, the watcher below scrolled to put the shell back
+    // where it belonged, and the next broadcast did it again. Measured on the phone
+    // 2026-10-25: typing in one shell made the screen slide between shells and
+    // return, which is what "it acts like it is swiping but comes back" was.
+    //
+    // A shell's page number is now fixed when it is opened and stays fixed while
+    // the terminal is open (it only shifts when a page is closed). Going back to the
+    // launcher picks again, and picks in the launcher's order.
+    var pageOrder by remember { mutableStateOf<List<String>>(emptyList()) }
 
     // **The connection follows the pairing, and only the pairing.** A display
     // setting changes nothing here. A new pairing (or none) is a different machine:
@@ -115,7 +130,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         if (config.connectionKey == connectedKey) return@LaunchedEffect
         connectedKey = config.connectionKey
         client.reconfigure(config)
-        pageSelection = emptySet()
+        pageOrder = emptyList()
         showLauncher = true
     }
     // Whether the portrait bar's menu is open. It lives here, at App()'s top
@@ -143,7 +158,10 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     var gotoSessionId by remember { mutableStateOf<String?>(null) }
 
     val attachable = sessions.filter { it.attachable }
-    val pages = attachable.filter { it.id in pageSelection }
+    // In the user's order, and an id the list does not carry right now keeps its
+    // place: a session list that is momentarily stale (a reconnect, a broadcast in
+    // flight) is not the user closing a shell.
+    val pages = pagesInOrder(pageOrder, attachable)
 
     // A shell asked for in a directory joins the selection as soon as it exists.
     // The shell the daemon made joins the pages. This is the whole reason it
@@ -155,7 +173,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         if (ids.isEmpty()) return@LaunchedEffect
         // Every id the gesture asked for, not only the last one: the daemon answers
         // a create one at a time and one gesture can ask for several.
-        pageSelection = pageSelection + ids.toSet()
+        pageOrder = addToOrder(pageOrder, ids)
         pendingOpens = (pendingOpens - ids.size).coerceAtLeast(0)
         // ...and go to it. Creating a shell and staying on the screen that created it
         // is a shell the user cannot reach; this used to work only because the
@@ -251,7 +269,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // socket stops too (it is restarted on return, below).
     DisposableEffect(client) {
         val removeRelease = AppLifecycle.setReleaseHandler {
-            pageSelection = emptySet()
+            pageOrder = emptyList()
             showLauncher = true
             client.stop()
         }
@@ -286,12 +304,12 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // Not while the list could be stale or incomplete: offline, a lost link is not
     // an ended shell; and a shell just asked for is chosen before the list carries
     // it (`gotoSessionId` is set until the pager reaches it).
-    val chosenAlive = attachable.any { it.id in pageSelection }
+    val chosenAlive = attachable.any { it.id in pageOrder }
     LaunchedEffect(chosenAlive, connected, pendingOpens, gotoSessionId, showLauncher) {
         // Not conditioned on the selection being non-empty: the effect below prunes
         // ended ids from it, and may do so first.
         if (!showLauncher && connected && pendingOpens == 0 && gotoSessionId == null && !chosenAlive) {
-            pageSelection = emptySet()
+            pageOrder = emptyList()
             showLauncher = true
         }
     }
@@ -302,8 +320,8 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // chosen before the list carries it. An absent id cannot keep the app on a blank
     // terminal either — `chosenAlive` only looks at attachable shells.
     LaunchedEffect(sessions) {
-        val gone = pageSelection.filter { id -> sessions.any { it.id == id && !it.attachable } }
-        if (gone.isNotEmpty()) pageSelection = pageSelection - gone.toSet()
+        val gone = pageOrder.filter { id -> sessions.any { it.id == id && !it.attachable } }
+        if (gone.isNotEmpty()) pageOrder = pageOrder - gone.toSet()
     }
 
     // The notification's Disconnect is the launcher button pressed from outside
@@ -312,7 +330,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     LaunchedEffect(Unit) {
         DisconnectRequests.requests.collect {
             DisconnectRequests.handled()
-            pageSelection = emptySet()
+            pageOrder = emptyList()
             showLauncher = true
         }
     }
@@ -320,7 +338,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // Back means the same thing as the launcher button: it leaves the terminal
     // and lets go. It is not a second way to do it — it is the same call.
     BackToLauncher(enabled = terminalOpen) {
-        pageSelection = emptySet()
+        pageOrder = emptyList()
         showLauncher = true
     }
 
@@ -638,7 +656,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
             },
             onOpen = { picked ->
                 // The chosen shells become the pages, and nothing else is one.
-                pageSelection = picked.map { it.sessionId }.toSet()
+                pageOrder = picked.map { it.sessionId }
                 showLauncher = false
             },
             onKill = { killTarget = it },
@@ -742,7 +760,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                             // *hold* on a shell, and holding shells you are not
                             // looking at is how the phone keeps a session someone
                             // else might want.
-                            pageSelection = emptySet()
+                            pageOrder = emptyList()
                             showLauncher = true
                         },
                         press = press,
@@ -771,7 +789,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         // to, which is not the same signal as the session list: the
                         // list arrives when the list socket is up, and a page left
                         // behind is a frozen frame with nothing to read.
-                        onShellGone = { id -> pageSelection = pageSelection - id },
+                        onShellGone = { id -> pageOrder = pageOrder - id },
                     )
                     VoiceBanner(voice, Modifier.align(Alignment.TopStart))
                 }
@@ -805,7 +823,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         // back to it lets go of everything: a page is a *hold* on a
                         // shell, and holding shells you are not looking at is how
                         // the phone keeps a session someone else might want.
-                        pageSelection = emptySet()
+                        pageOrder = emptyList()
                         showLauncher = true
                     },
                     modifiers = currentHandle?.modifiers ?: Modifiers(),

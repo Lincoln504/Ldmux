@@ -220,14 +220,18 @@ class ModifiersTest {
      * side of it. Both bars render this value, so this test guards both.
      */
     @Test
-    fun `the arrow pad is a cross`() {
+    fun `the arrow pad is a cross with no empty cells`() {
         assertEquals(2, ARROW_PAD_ROWS.size)
-        assertEquals(listOf(null, "Up", null), ARROW_PAD_ROWS[0])
+        assertEquals(listOf("Up"), ARROW_PAD_ROWS[0])
         assertEquals(listOf("Left", "Down", "Right"), ARROW_PAD_ROWS[1])
+        // Every cell is a key. The first version had `null, Up, null` over the row
+        // of three, which drew the same cross and left two blank cells above `Left`
+        // and `Right` — reported on the phone 2026-10-25. `Up` is one wide key now,
+        // so it is centred over `Down` by taking the space.
         assertEquals(
-            "Up",
-            ARROW_PAD_ROWS[0][ARROW_PAD_ROWS[1].indexOf("Down")],
-            "Up is directly above Down",
+            listOf("Up", "Left", "Down", "Right"),
+            ARROW_PAD_ROWS.flatten(),
+            "no blank cells: every item in the pad is a key",
         )
     }
 }

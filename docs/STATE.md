@@ -18,7 +18,7 @@ desk-window client, and a native mobile client.
 | FFI to libghostty-vt (static archive built by nix from the pinned commit) | `crates/vt-sys` | Implemented. Verified on x86_64 Linux (glibc); aarch64 Linux evaluates, unbuilt. |
 | Daemon: registry, ownership, remote WebSocket, streams, desktop + inventory, CLI | `crates/daemon` (`ldmuxd`, `ldmux`) | Implemented and deployed. |
 | Desk-window client (`ldmuxd attach`) | `crates/attach` | Implemented. |
-| Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. Key bar: a 3x2 arrow pad in both modes, `paste` in portrait, sticky `Ctrl`/`Alt`/`Shift`. iOS not started. |
+| Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. Key bar: a 3x2 arrow pad in both modes (no empty cells), `paste` in portrait, sticky `Ctrl`/`Alt`/`Shift`. Pages keep the order they were opened in. iOS not started. |
 
 There is no tmux and no TypeScript daemon: both were removed at D4 (2026-10-04,
 ADR-0018). tmux survives only as a dev-time reference in
@@ -120,6 +120,28 @@ Daemon and protocol:
 - **SPEC §5.4** (REST surface) is aspirational and marked so; the shipped surface is the
   Unix-socket RPC plus the WebSocket.
 - `snapshotEpoch` is sent in `caps` and never read by the client; `follow` is never sent.
+
+Shell view: pages are the user's, numbered 1..N (2026-10-25):
+- **A page keeps the order it was opened in.** `pageOrder` is a list of session ids
+  (`pagesInOrder`, `packages/mobile/.../PageOrder.kt`), not a set filtered through the
+  session list. The session list is the daemon's, sorted **last activity first**
+  (`sessions.sort_by` in `crates/daemon/src/daemon.rs`), so the page at index N used
+  to become a different shell every time any shell printed anything: with several
+  shells open the screen slid between shells and came back on its own, and typing in
+  one shell was enough to trigger it (reported 2026-10-25). Measured on the host
+  2026-10-25: with eight live shells, `ldmux send d8a750218a 'echo x'` moved that row
+  from position 8 to position 1 in `ldmux list` — a page's index is a different shell
+  after one keystroke. An id a momentarily stale list does not carry keeps its index
+  rather than being dropped and re-appended.
+- **The number is the page number, in both places.** The header reads
+  `3 / 5 shells`, and the launcher's tick box shows the page a chosen row will become
+  (`ordinalIn`), in the order the rows were ticked — so the row you ticked first is
+  page 1, which is the page the pager will show first.
+- **No empty cells in the key bar.** `ARROW_PAD_ROWS` is `[Up]` over
+  `[Left, Down, Right]`: `Up` is one full-width key centred over `Down`. The first
+  version was `[null, Up, null]` over the row of three, which drew the same cross and
+  left two blank cells where a thumb goes (reported 2026-10-25). The list has no
+  `null` in it, so the layout cannot grow one back.
 
 Shell environment (2026-10-24):
 - **`PATH` is inherited and floored, never replaced.** The units used to pin

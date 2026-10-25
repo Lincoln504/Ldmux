@@ -256,9 +256,14 @@ pointed.
   5,000 rows fast, 1,000 slow), and the page advertises `inplaceResync` so a client
   that falls behind is repaired with a snapshot instead of a reconnect
   (`docs/WIRE-COST.md`).
+- **Page order and numbering**: a page is a shell you opened, in the order you
+  opened it (`PageOrder.kt`), never the daemon's last-activity order — that order
+  changes whenever any shell prints, and following it made the screen slide between
+  shells and come back on its own (2026-10-25). The header reads `3 / 5 shells`, and
+  the launcher's tick box shows the page a chosen row will become.
 - **Key bar**: portrait is three rows — navigation (`Esc Tab Home End PgUp PgDn`),
   modifiers (`Ctrl Alt ⇧ C/c`), actions (`⌨ paste ⏎`) — with a 3x2 arrow pad
-  (`↑` over `← ↓ →`) at the trailing edge. Landscape uses the same `ArrowPad` in the
+  (`↑` over `← ↓ →`, no empty cells: `↑` is one full-width key) at the trailing edge. Landscape uses the same `ArrowPad` in the
   side panel. Modifiers latch for one following key; `⇧` then `⏎` is `Shift+Enter`
   (a newline in `pi`, ADR-0022).
 

@@ -75,9 +75,12 @@ fun LauncherScreen(
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
 ) {
-    // Which shells and pi sessions are chosen. Keys, not objects, so a list that
-    // refreshes under the user does not silently drop a selection.
-    var chosen by remember { mutableStateOf(setOf<String>()) }
+    // Which shells and pi sessions are chosen, **in the order they were chosen**.
+    // Keys, not objects, so a list that refreshes under the user does not silently
+    // drop a selection; a list, not a set, because the order is the page order —
+    // page 1 is the first row you ticked, and that number is drawn in the row
+    // (see `ChoiceRow`) so the tick box says what it is doing.
+    var chosen by remember { mutableStateOf(listOf<String>()) }
     var newShellOpen by remember { mutableStateOf(false) }
     // Which shell the desktop picker is choosing for. Null means closed.
     var pickerFor by remember { mutableStateOf<Session?>(null) }
@@ -148,6 +151,9 @@ fun LauncherScreen(
                         stateWarn = e.state == NO_WINDOW_STATE,
                         inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
+                        // The page this row becomes, 1-based, in the same numbering
+                        // the pager's header shows.
+                        ordinal = ordinalIn(entries, chosen, e.key),
                         onClick = { chosen = toggle(chosen, e.key) },
                         // Closing is the launcher's alone, and it is offered only
                         // for a shell this phone started: a shell opened at the
@@ -206,7 +212,10 @@ fun LauncherScreen(
 
         Spacer(Modifier.height(LocalTouch.current.rowPad))
         // Opening what is chosen is the screen's one action, so it has the width.
-        val pickedNow = entries.filter { it.key in chosen }
+        // In the order chosen, and skipping anything that left the list while it was
+        // chosen — a shell can die between two taps, and a page number that counts a
+        // row nobody can see is a number that disagrees with the pager.
+        val pickedNow = chosen.mapNotNull { key -> entries.firstOrNull { it.key == key } }
         // Drawn like the rows above it (and like `+ shell`): the list's own
         // background and shape, rather than a filled accent bar.
         Box(
@@ -383,6 +392,8 @@ private fun ChoiceRow(
     mobileShell: Boolean = false,
     /** A phone is connected to it: a shade of its own, between plain and chosen. */
     inUse: Boolean = false,
+    /** The page this row becomes when opened (1-based), when it is chosen. */
+    ordinal: Int? = null,
     trailing: @Composable () -> Unit = {},
 ) {
     // How much of the row's own width the overlaid controls take: a control is its
@@ -420,8 +431,12 @@ private fun ChoiceRow(
             .padding(end = trailingWidth),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // A tick box, because these *are* the multi-select: several become the set
-        // you page through.
+        // A tick box that becomes a number, because these *are* the multi-select:
+        // several become the pages you swipe through, and the order matters — page 1
+        // is the first one ticked. A tick said "one of several" and left the reader
+        // to guess which page this would be; the number says it, and it is the same
+        // number the pager's header shows (`1 / 3 shells`). With one row ticked it
+        // is `1`, so the control still answers "is this chosen" at a glance.
         Box(
             Modifier
                 .size(LocalTouch.current.check)
@@ -430,7 +445,19 @@ private fun ChoiceRow(
                 .border(1.5.dp, if (chosen) Chosen else Dim, RadiusSmall),
             contentAlignment = Alignment.Center,
         ) {
-            if (chosen) IconCheck(Bg, box = LocalTouch.current.check - 6.dp)
+            if (chosen) {
+                if (ordinal != null) {
+                    Text(
+                        "$ordinal",
+                        color = Bg,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                    )
+                } else {
+                    IconCheck(Bg, box = LocalTouch.current.check - 6.dp)
+                }
+            }
         }
         Spacer(Modifier.width(10.dp))
         // One line: what it is, then where it is, then (only if it is news) its
@@ -497,8 +524,21 @@ private fun HeaderIcon(label: String, onClick: () -> Unit, content: @Composable 
 }
 
 /** Add or remove a key from a selection, without mutating the set. */
-private fun toggle(current: Set<String>, key: String): Set<String> =
+private fun toggle(current: List<String>, key: String): List<String> =
     if (key in current) current - key else current + key
+
+/**
+ * The 1-based page a row would become, or null when it is not chosen.
+ *
+ * Counted over the rows that are still in the list (`ordinalIn` is why `pickedNow`
+ * and this agree): a shell that died after being ticked must not keep its number
+ * taken, or the launcher would say "open (2)" and show `1` and `3`.
+ */
+internal fun ordinalIn(entries: List<LauncherEntry>, chosen: List<String>, key: String): Int? {
+    if (key !in chosen) return null
+    val visible = chosen.filter { k -> entries.any { it.key == k } }
+    return visible.indexOf(key).takeIf { it >= 0 }?.plus(1)
+}
 
 /**
  * The second action, deliberately not a filled button.

@@ -289,9 +289,11 @@ internal fun KeyRow(keys: List<Pair<String, () -> Unit>>, active: List<Boolean> 
  * `Left` and `Right` either side of it ([ARROW_PAD_ROWS]).
  *
  * One composable for both modes. Portrait gives it a third of the bar beside the
- * typing keys, landscape gives it the panel's whole width; the empty corner cells
- * are what keep `Up` centred over `Down` rather than sliding to the edge of
- * whatever width it is handed.
+ * typing keys, landscape gives it the panel's whole width. Each row divides its
+ * own width between its own keys, so a row of one key is one full-width key: `Up`
+ * is centred over `Down` by taking the space above it, not by standing in a
+ * three-cell row with two empty cells beside it (which is what it was, and what
+ * the user saw as blank buttons).
  */
 @Composable
 internal fun ArrowPad(
@@ -307,13 +309,7 @@ internal fun ArrowPad(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 row.forEach { key ->
-                    if (key == null) {
-                        // An empty cell keeps the columns: it is the corner of the
-                        // cross, not a missing key.
-                        Box(Modifier.weight(1f))
-                    } else {
-                        KeyBtn(glyphFor(key), Modifier.weight(1f)) { press(key) }
-                    }
+                    KeyBtn(glyphFor(key), Modifier.weight(1f)) { press(key) }
                 }
             }
         }
