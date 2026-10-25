@@ -49,6 +49,23 @@ reason. `controller` was not.
   a controller that changes for any other reason (a re-pair changing the connection
   key) restarts them too.
 
+#### 1.1.1 The reorder itself (2026-10-25)
+
+Both fixes above made a *reorder* survivable. They did not remove it — and the
+reorder was a visible bug on its own, reported as "when you type or do anything it
+acts like it is swiping between screens but then it comes back": the page at index N
+became a different shell every time any shell printed anything (typing in a shell is
+a shell printing something), so the pager followed the list and the watcher that
+keeps the shown shell on screen pushed it back. Measured on the host with eight live
+shells: `ldmux send d8a750218a 'echo x'` moved that row from position 8 to position 1
+in `ldmux list`.
+
+The list is not an ordering authority and is no longer used as one. `pageOrder` is a
+list of session ids in the order the user opened them (`PageOrder.kt`), and
+`pagesInOrder` maps it through the session list. A shell joins the end, once; an id a
+momentarily stale list does not carry keeps its index. The pager's key stays, because
+it is still what makes a different shell a different composition.
+
 ### 1.2 Effects that captured a stale controller
 
 **Cause.** Three `LaunchedEffect`s called the controller but were not keyed on it, so
