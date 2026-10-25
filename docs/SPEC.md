@@ -801,9 +801,11 @@ every VT mode — is closed.)
   which is *not* an ordering authority — the daemon sorts live sessions by last
   activity, so using it as one made the page at index N a different shell whenever
   any shell printed anything (the screen slid between shells and returned on its
-  own). An id a momentarily stale list does not carry keeps its index. The header
-  reads `3 / 5 shells`, and the launcher's tick box shows the page a chosen row will
-  become, in the order the rows were chosen.
+  own). An id a momentarily stale list does not carry keeps its place in the order (it
+  is omitted from the pages while it is missing, so later pages sit one earlier, and
+  it returns at its own index). Opening from the launcher always lands on page 1. The
+  header reads `3 / 5 shells`, and the launcher's tick box shows the page a chosen row
+  will become, in the order the rows were chosen.
 
 ### 7.3 Input & keys
 

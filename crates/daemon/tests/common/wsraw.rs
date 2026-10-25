@@ -256,6 +256,14 @@ impl RawWs {
 
     /// Read OUTPUT until `needle` shows up, then keep reading until the link has
     /// been quiet for `quiet` (so a workload's trailing frames are counted).
+    ///
+    /// A needle that never arrives is a failure after a generous bounded wait.
+    /// **The wait is sliced and the deadline is explicit**, not "one call that times
+    /// out": a message arriving before the deadline used to restart the whole call,
+    /// so a client that was being sent something every few hundred milliseconds
+    /// waited forever (measured 2026-10-25: a test hung for the whole 40-minute
+    /// workspace run). No keepalive is sent here either — a ping is answered with a
+    /// pong, a pong is a message, and a ping loop is the same hang.
     pub async fn until_output(
         &mut self,
         out: &mut Vec<u8>,
@@ -263,24 +271,23 @@ impl RawWs {
         quiet: std::time::Duration,
     ) {
         let mut seen = needle.is_empty() || String::from_utf8_lossy(out).contains(needle);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            let wait = if seen {
-                quiet
-            } else {
-                // Generous: a loaded machine runs this beside a whole test suite.
-                std::time::Duration::from_secs(60)
-            };
+            let wait = if seen { quiet } else { std::time::Duration::from_millis(500) };
             let before = out.len();
             match self.next_within(wait).await {
                 Some(Msg::Binary(b)) => decode_output(&b, out),
                 Some(Msg::Text(_)) => {}
                 Some(Msg::Close) => panic!("closed"),
                 None => {
-                    assert!(
-                        seen,
-                        "never saw {needle:?}; tail {:?}",
-                        String::from_utf8_lossy(&out[out.len().saturating_sub(300)..])
-                    );
+                    if !seen {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "never saw {needle:?}; tail {:?}",
+                            String::from_utf8_lossy(&out[out.len().saturating_sub(300)..])
+                        );
+                        continue;
+                    }
                     return;
                 }
             }

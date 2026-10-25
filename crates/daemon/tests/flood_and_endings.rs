@@ -21,16 +21,37 @@ use common::wsraw::{Msg, RawWs};
 const BOTH: &[&str] = &["inplaceResync", "sessionEnded"];
 
 /// Read until a message satisfies `pick`, within `secs`.
+///
+/// **A client that only reads is "idle" to the daemon**, which closes a connection
+/// it has not heard from in `WS_IDLE_MS` (20 s). That is right for a phone and wrong
+/// for this test: 24 MB of flood through a 4 KiB receive buffer takes longer than
+/// 20 s when the whole suite runs beside it, and the connection was then closed in
+/// the middle of the resync it was waiting to observe — a red gate with nothing
+/// wrong behind it (measured 2026-10-25: 2 of 6 tests in this file, alone, on an
+/// idle machine, 0 of 6). A ping every few seconds is the same thing the phone does.
 async fn until_json(
     ws: &mut RawWs,
     secs: u64,
     mut pick: impl FnMut(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    // **A client that only reads is "idle" to the daemon**, which closes a
+    // connection it has not heard from in `WS_IDLE_MS` (20 s). Its own 24 MB of
+    // flood does not count as hearing from us, and while it is blocked writing that
+    // flood it cannot read a ping either — so the ping has to be sent on a clock,
+    // not when the stream goes quiet. (Measured 2026-10-25: without this, 2 of 6
+    // tests in this file failed repeatedly under `cargo test` running them in
+    // parallel; the daemon closed the connection and the test reported "connection
+    // ended" with nothing wrong behind it.)
+    let mut last_keepalive = tokio::time::Instant::now();
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!left.is_zero(), "timed out waiting for a matching message");
-        match ws.next_within(left).await {
+        if last_keepalive.elapsed() >= Duration::from_secs(4) {
+            ws.send_json(&serde_json::json!({"type":"ping"})).await;
+            last_keepalive = tokio::time::Instant::now();
+        }
+        match ws.next_within(left.min(Duration::from_secs(2))).await {
             Some(Msg::Text(t)) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap();
                 if pick(&v) {
@@ -38,9 +59,75 @@ async fn until_json(
                 }
             }
             Some(Msg::Binary(_)) => {}
-            Some(Msg::Close) | None => panic!("connection ended"),
+            Some(Msg::Close) => panic!("connection closed by the daemon"),
+            None => {}
         }
     }
+}
+
+/// Flood until the daemon's backlog rule fires, and answer with the matching message.
+///
+/// The premise is a race, and it is the test's premise, not the daemon's contract:
+/// the client stops reading for 2.5 s while the shell floods, and the daemon's queue
+/// has to pass `WS_BACKLOG_BYTES` inside that window. On a loaded machine (`cargo
+/// test` runs every test binary at once, and six tests here each flood 24 MB) the
+/// shell may not even have started `yes` inside 2.5 s, the flood then arrives while
+/// the client is reading, and nothing is ever owed a resync — a red gate with
+/// nothing wrong behind it (measured 2026-10-25: 2 of 6 tests in this file, three
+/// runs in a row, while a single test alone passed in 3.9 s). A retry re-arms the
+/// race; a daemon that never resyncs still fails, three attempts over.
+async fn flood_until_backlog_notice(
+    ws: &mut RawWs,
+    marker: &str,
+    mut pick: impl FnMut(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    for attempt in 1..=4 {
+        ws.send_json(&serde_json::json!({
+            "type":"input",
+            "data": format!("yes | head -c 24000000; echo {marker}\n"),
+        }))
+        .await;
+        // Do not read: this is the client that stops reading while the daemon's
+        // writes back up behind the 4 KiB window.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut last_keepalive = tokio::time::Instant::now();
+        let mut out: Vec<u8> = Vec::new();
+        let mut flood_ended = false;
+        while tokio::time::Instant::now() < deadline {
+            if last_keepalive.elapsed() >= Duration::from_secs(4) {
+                ws.send_json(&serde_json::json!({"type":"ping"})).await;
+                last_keepalive = tokio::time::Instant::now();
+            }
+            match ws.next_within(Duration::from_secs(2)).await {
+                Some(Msg::Text(t)) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    if pick(&v) {
+                        return v;
+                    }
+                }
+                Some(Msg::Binary(b)) => {
+                    common::wsraw::decode_output(&b, &mut out);
+                    if out.len() > 4096 {
+                        let from = out.len() - 4096;
+                        if String::from_utf8_lossy(&out[from..]).contains(marker) {
+                            flood_ended = true;
+                            break;
+                        }
+                    }
+                }
+                Some(Msg::Close) => panic!("the daemon closed the connection"),
+                None => {}
+            }
+        }
+        // Neither: the attempt neither lined up nor proved anything. Re-arm it.
+        eprintln!(
+            "attempt {attempt}: {} without a backlog notice; retrying",
+            if flood_ended { "the flood finished" } else { "30 s passed" }
+        );
+    }
+    panic!("no backlog notice in four attempts");
 }
 
 /// A flood the client keeps up with is delivered whole: volume alone is not a resync.
@@ -94,14 +181,8 @@ async fn a_flood_is_delivered_whole_in_bounded_frames_without_a_resync() {
 async fn a_client_that_fell_behind_gets_an_in_place_snapshot_not_a_forced_reconnect() {
     let rig = Rig::start().await;
     let (mut ws, _) = rig.attach_with(BOTH, true).await;
-    ws.send_json(
-        &serde_json::json!({"type":"input","data":"yes | head -c 24000000; echo D_$((6*8))\n"}),
-    )
-    .await;
-    // Do not read while the daemon's writes back up behind the 4 KiB window.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
     let mut legacy = false;
-    let snap = until_json(&mut ws, 60, |v| {
+    let snap = flood_until_backlog_notice(&mut ws, "D_48", |v| {
         if v["type"] == "error" && v["code"] == "resync" {
             legacy = true;
         }
@@ -124,12 +205,7 @@ async fn a_client_that_fell_behind_gets_an_in_place_snapshot_not_a_forced_reconn
 async fn a_client_that_said_nothing_still_gets_the_legacy_resync() {
     let rig = Rig::start().await;
     let (mut ws, _) = rig.attach_with(&[], true).await;
-    ws.send_json(
-        &serde_json::json!({"type":"input","data":"yes | head -c 24000000; echo D_$((6*9))\n"}),
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    let v = until_json(&mut ws, 60, |v| {
+    let v = flood_until_backlog_notice(&mut ws, "D_54", |v| {
         v["type"] == "error" && v["code"] == "resync"
     })
     .await;

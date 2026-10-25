@@ -351,9 +351,13 @@ class TerminalController(
             } else {
                 // An ordinary snapshot rebuilt the engine from the visible screen alone:
                 // whatever scrollback it held is gone, so a page-in can be asked for again
-                // from the start.
+                // from the start — and from a size decided *when the user asks*, not
+                // now. This used to seed the ask here, and "here" is attach time, when
+                // there is no round trip to classify the link by, so the first page was
+                // always the fast-link one (5,000 rows, ~400 KB) even on a link that had
+                // already been measured as slow a second later.
                 historyExhausted = false
-                historyAskLines = pacing.historyPageLines()
+                historyAskLines = 0
                 historyLoading = false
                 historyRestoreAtTop = false
             }
@@ -699,9 +703,29 @@ class TerminalController(
         // It used to be set before the send and cleared only by an arriving snapshot,
         // so one refused request during a reconnect disabled history for the rest of
         // the page's life.
-        if (!attach.scrollback(historyAskLines)) return
+        // **Never ask for less than is already loaded.** The reply *replaces* the
+        // scrollback with the newest `lines` rows, so a smaller ask is a shrink: the
+        // history the user can scroll back through gets shorter, and the reply then
+        // also looks like "the keeper has no more" (`afterTotal <= before`), so the
+        // client stops asking for good. Reachable since the page size started
+        // following the link: a link that turns slow caps the ask at 4,000 while
+        // 5,000 rows are loaded.
+        val held = f.scrollTotal.toInt()
+        val cap = pacing.historyMaxLines()
+        // The size the user asked for, decided now: the link's classification is
+        // current, and a first pull on a slow link is the small one.
+        val base = if (historyAskLines > 0) historyAskLines else pacing.historyPageLines()
+        val ask = maxOf(base, held + 1).coerceAtMost(cap)
+        if (ask <= held) {
+            // The link cannot deliver a deeper page than what is already loaded, so
+            // there is nothing to ask for — and asking would hand back less.
+            historyExhausted = true
+            return
+        }
+        if (!attach.scrollback(ask)) return
         historyLoading = true
         historyRestoreAtTop = true
+        historyAskLines = ask
         historyTotalBefore = f.scrollTotal
     }
 
@@ -717,7 +741,7 @@ class TerminalController(
      * protocol, and asking for 5,000 rows to a link that answers in 200 ms is a
      * stall the user reads as a broken terminal.
      */
-    private var historyAskLines = FramePacing.HISTORY_FIRST_LINES
+    private var historyAskLines = 0
     /** The engine's scrollback total when the outstanding request was made. */
     private var historyTotalBefore = 0L
     /** The page-in was asked for from the top of what is loaded. */

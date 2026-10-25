@@ -158,9 +158,9 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     var gotoSessionId by remember { mutableStateOf<String?>(null) }
 
     val attachable = sessions.filter { it.attachable }
-    // In the user's order, and an id the list does not carry right now keeps its
-    // place: a session list that is momentarily stale (a reconnect, a broadcast in
-    // flight) is not the user closing a shell.
+    // In the user's order. An id the list does not carry right now keeps its place
+    // *in the order* — it is not dropped and re-appended — so it comes back at its
+    // own index; while it is missing, the pages after it sit one earlier.
     val pages = pagesInOrder(pageOrder, attachable)
 
     // A shell asked for in a directory joins the selection as soon as it exists.
@@ -432,6 +432,13 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         }
     }
 
+    // A pager that is showing nothing has no shell on screen, and the id the
+    // watcher below consults is what the *next* open navigates from. Left set, a
+    // later visit to the launcher and a fresh pick reopened on a page nobody chose.
+    LaunchedEffect(pageOrder.isEmpty()) {
+        if (pageOrder.isEmpty()) shownSessionId.value = null
+    }
+
     // **The page is the user's, and the pager loses it on a re-measure.**
     //
     // A `PagerState` re-derives its position when the viewport changes size rather
@@ -655,8 +662,18 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                 }
             },
             onOpen = { picked ->
-                // The chosen shells become the pages, and nothing else is one.
+                // The chosen shells become the pages, and nothing else is one, in the
+                // order they were ticked — page 1 is the first row ticked, which is
+                // the number the row's badge showed.
                 pageOrder = picked.map { it.sessionId }
+                // **...and the pager starts on page 1.** The pager and the shell it
+                // last showed outlive a visit to the launcher (both are declared
+                // above the launcher/terminal switch), so without this the pager
+                // opened on whatever index it was left parked on: tick three shells
+                // and land on page 2, with the header disagreeing with the badges.
+                // Same mechanism as `+ shell`, so there is one way to arrive at a
+                // page rather than two.
+                picked.firstOrNull()?.let { gotoSessionId = it.sessionId }
                 showLauncher = false
             },
             onKill = { killTarget = it },

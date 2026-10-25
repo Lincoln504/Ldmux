@@ -13,10 +13,12 @@ package dev.ldmux.mobile
  * the index it had been at. Typing in one shell was enough to make the screen look
  * like it was swiping between shells.
  *
- * An id the list does not carry *right now* keeps its place rather than being
- * pulled out and appended later: a session list that is momentarily stale (a
- * reconnect, a broadcast in flight) is not the user closing a shell, and a page that
- * jumps two places because the list blinked is the same class of fault.
+ * An id the list does not carry *right now* keeps its place in the order rather
+ * than being pulled out and appended later: a session list that is momentarily stale
+ * (a reconnect, a broadcast in flight) is not the user closing a shell. It is omitted
+ * from the pages while it is missing — so a page after it sits one earlier — and it
+ * returns at its own index, which is what stops a list that blinks from permuting
+ * the set the user is paging through.
  *
  * Duplicates are dropped: the same shell twice would be two pages on one pty, and
  * two claims on a shell is what ADR-0010 exists to prevent.
