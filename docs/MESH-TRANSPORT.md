@@ -191,6 +191,15 @@ making `direct` worse, and `direct` is not allowed to justify making mesh mode h
 
 ---
 
+## Carriage (2026-10-24)
+
+The carriage questions this document left open are answered in
+[`MESH-GATEWAY.md`](MESH-GATEWAY.md): the companion binary request gives 143 B
+of application data (142 B of record) and raw custom gives 160 B, the binary
+path zero-pads and does not strip, and ARQ belongs to the end-to-end session
+because the record layer never retransmits. The terminal model below still
+stands; only the carriage changed.
+
 ## Review (2026-10-06)
 
 Conclusions of a design review. Nothing here is implemented.
@@ -220,12 +229,25 @@ Conclusions of a design review. Nothing here is implemented.
    text command is capped at **160 B**, and a text message carries 5 B of
    timestamp/type overhead (whether that 5 B counts against the 160 is unmeasured).
    Raw/custom packets (type `0x0F`) have no MeshCore cipher; whether the companion API
-   can send them is unmeasured. Per-packet budget after the ADR-0020 record layer (24 B
+   can send them is unmeasured.
+   **Corrected 2026-10-24 (read, not assumed):** the companion API *can* send raw
+   custom, two ways. `CMD_SEND_RAW_DATA` (25) is `[25][path_len][path][payload]`,
+   direct-route only, and the firmware rejects a negative path length with "flood, not
+   supported (yet)". `CMD_SEND_RAW_PACKET` (65) takes a whole serialised packet. Both
+   bypass the cipher and the padding, so both are exact-length, capped by the 176 B
+   companion frame rather than by the 184 B packet. Separately, the **binary request**
+   path (`CMD_SEND_BINARY_REQ`, 50) gives 143 B of application payload and zero-pads
+   to 16 B without stripping on receipt. Numbers and sources: `MESH-GATEWAY.md` §2–3. Per-packet budget after the ADR-0020 record layer (24 B
    of overhead): **160** application bytes over raw/custom, 136 over text with binary,
    96 over text with Base64.
 6. **ARQ, ordering and de-duplication are unspecified.** MeshCore flood routing
    duplicates and reorders; acknowledgement, fragmentation and retransmission need a
    design of their own, above the authenticated record (seam named in ADR-0020 section 5).
+   **Answered 2026-10-24:** ADR-0020 already settles it. The record layer never
+   retransmits, a retransmission is a new record with a new counter, and duplicates are
+   removed by the receiver's sliding window. Gateway-side ARQ is therefore impossible for
+   a blind relay: resending identical ciphertext reuses the counter and the window drops
+   it as a replay. `MESH-GATEWAY.md` §4.
 7. **Timers are over budget.** The direct-path values are tuned for a link whose round
    trip is tens of milliseconds. Each needs a per-profile value:
 

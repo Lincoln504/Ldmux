@@ -25,6 +25,14 @@ ADR-0018). tmux survives only as a dev-time reference in
 `scripts/regen_parity_golden.sh`. Node is a dev tool for `nix run .#mobile-test` and two
 scripts, not for the Rust gate.
 
+## Mesh transport
+
+Design only, nothing implemented. `docs/MESH-TRANSPORT.md` asks whether a terminal
+over MeshCore is plausible. `docs/MESH-GATEWAY.md` answers the carriage: 142 B of
+record on the phone's uplink, 160 B on the host's, an explicit record length because
+the binary path zero-pads without stripping, and ARQ owned by the ADR-0020 session
+rather than by any relay. Latest position: design only.
+
 ## What is deployed
 
 - `systemctl --user` units `ldmux` (source `deploy/ldmux.service`, runs
