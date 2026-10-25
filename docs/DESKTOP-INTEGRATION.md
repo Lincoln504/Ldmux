@@ -199,3 +199,43 @@ directory. A path typed on the phone should be: absolute (or prefixed with
 `$HOME` before it is sent), resolved with `realpathSync` so symlinks cannot
 escape, then required to be the home directory or under it, and only then checked
 for existence and directory-ness.
+## A window that goes quiet (2026-10-25)
+
+The desk window is `ldmuxd attach`, and it is the only client whose liveness depends
+on itself: the daemon reaps a connection it has not *heard from*, and a window that
+stops *hearing* has nothing watching it.
+
+**What was found**, on the `lora` window, after the phone that had been using that
+shell died: the pane was **46x22** (a phone's grid) inside a **158x40** window, the
+window showed a frozen frame with no notice, the session had **no claim**
+(`owner: null`), the client's connection to the daemon was ESTAB with empty queues,
+and its process made **zero read syscalls in twenty seconds** while writing eight
+bytes every four seconds. The shell was fine throughout (its `pi` finished its work;
+the next snapshot showed it). Every other window held its shell; this one held
+nothing and never learned the shell was free, because it never read the `sessions`
+broadcast that said so. A `systemctl --user restart ldmux` revived it at its own
+size, which is the proof that the pane and the daemon were healthy and the *client's
+receive path* was not.
+
+**Three holes, three fixes** (`crates/attach/src/lib.rs`):
+
+- **Silence is now fatal within a bounded time** (`read_stall_limit`, seven ping
+  intervals and never under 15 s). The keepalive is a `select!` branch, and that is
+  its weakness: a loop stuck elsewhere never reaches it, so nothing is pinged, no
+  pong is missed, and nothing reconnects. The receive wait itself is bounded now, so
+  a link that delivers nothing ends the connection instead of the window.
+- **Every write is bounded** (`SEND_TIMEOUT_MS`, 10 s). A `send` awaiting a flush
+  that never completes holds the whole loop — no keys, no keepalive, no reconnect.
+- **A refused size re-assert is retried** (`REASSERT_RETRY`, 2 s). The latch that
+  stopped an endless exchange with a resizing device also made a *refused* re-assert
+  permanent: the window sent its size while another device held the shell, the daemon
+  refused it, and the latch stayed set — so when the phone left, the window kept
+  painting the phone's grid.
+
+**The rule, stated once**: a client's liveness must not depend on the loop that the
+stall can block. The mobile client already does this (its pinger is a separate
+coroutine that closes the socket after three missed pongs); the desk client now has
+the equivalent as timeouts on its two waits. What is *not* bounded is the write to the
+window's own pty: a terminal that stops taking output holds the client there. That is
+not what this incident was (the terminal repainted as soon as a snapshot arrived), and
+it is left as a known gap rather than guessed at.

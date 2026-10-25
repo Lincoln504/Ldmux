@@ -175,6 +175,49 @@ const PING_INTERVAL_MS: u64 = 4_000;
 /// and on a sleeping radio or a NAT that forgot the flow it does not notice.
 const MAX_MISSED_PONGS: u32 = 3;
 
+/// How long the receive side may be **completely silent** before the connection is
+/// declared lost.
+///
+/// The keepalive above is a `select!` branch, and that is its weakness: a loop that
+/// is stuck in another branch never reaches it, so nothing is pinged, no pong is
+/// missed, and nothing reconnects. A window was found frozen exactly that way
+/// (2026-10-25): pane 46x22 (a phone's grid) in a 158x40 window, no claim, no notice,
+/// zero read syscalls in twenty seconds, and only a daemon restart revived it. The
+/// socket was fine on paper; nothing ever came from it.
+///
+/// The pongs are what this measures: one arrives every `PING_INTERVAL_MS` while the
+/// daemon is there, so a quiet spell this long means the receive path is dead
+/// whatever the socket claims. Derived from the interval rather than written beside
+/// it, so the two cannot disagree.
+fn read_stall_limit(ping_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis((ping_ms.max(1) * 7).max(15_000))
+}
+
+/// The longest a single frame write may wait for a socket that will not take it.
+///
+/// The same stall, on the other side: a `send` awaiting a flush that never completes
+/// holds the whole loop, so neither the next keystroke nor the keepalive runs. Ten
+/// seconds is longer than any local write and far shorter than a person's patience.
+const SEND_TIMEOUT_MS: u64 = 10_000;
+
+/// How long a size re-assert stands before it may be sent again.
+///
+/// The latch that stopped a device from answering a resizing device for ever also
+/// made a *refused* re-assert permanent: a window whose shell was held by the phone
+/// sent its size, the daemon refused it, and the latch stayed set, so when the phone
+/// left the window kept painting the phone's grid (2026-10-25). Retried at this
+/// interval, an exchange with a device that keeps resizing is one message per two
+/// seconds — bounded, and nothing like the per-snapshot storm the latch prevented.
+const REASSERT_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a size re-assert that was already sent may be sent again.
+fn may_reassert_again(
+    sent_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    sent_at.is_some_and(|t| now.saturating_duration_since(t) >= REASSERT_RETRY)
+}
+
 /// The terminal size of fd 0 (the window's pty), or 80x24.
 fn tty_size() -> (u64, u64) {
     // SAFETY: `winsize` is a plain C struct of four `u16`s, for which the
@@ -585,13 +628,19 @@ where
     // `None` means we are in step. Bounded so a device that keeps resizing the
     // shared pane cannot make this an endless exchange.
     let mut asserted: Option<(u64, u64)> = None;
+    let mut asserted_at: Option<std::time::Instant> = None;
 
+    let stall = read_stall_limit(ping_ms);
     loop {
         tokio::select! {
-            msg = stream.next() => {
+            // **Bounded silence, not just a closed socket.** A receive path that
+            // stops delivering never looks broken to the OS (see
+            // `read_stall_limit`), so the window has to give up on it and reconnect.
+            msg = tokio::time::timeout(stall, stream.next()) => {
                 match msg {
-                    None | Some(Err(_)) => return Ok(Outcome::Lost),
-                    Some(Ok(Message::Text(t))) => {
+                    Err(_) => return Ok(Outcome::Lost),
+                    Ok(None) | Ok(Some(Err(_))) => return Ok(Outcome::Lost),
+                    Ok(Some(Ok(Message::Text(t)))) => {
                         let v: serde_json::Value = match serde_json::from_str(t.as_ref()) {
                             Ok(v) => v,
                             Err(_) => continue,
@@ -610,9 +659,16 @@ where
                                 // holds the shell, so its own size is the one that
                                 // should win: re-assert it, once per mismatch.
                                 let mismatch = (cols, rows) != (snap.cols, snap.rows);
+                                // A refusenik latch: a re-assert the daemon refused
+                                // (the shell was somebody else's) must be retried once
+                                // the wait is over, or the window stays at their grid.
+                                if !mismatch || may_reassert_again(asserted_at, std::time::Instant::now()) {
+                                    asserted = None;
+                                }
                                 if should_reassert(cols, rows, snap.cols, snap.rows, readonly, asserted)
                                 {
                                     asserted = Some((cols, rows));
+                                    asserted_at = Some(std::time::Instant::now());
                                     let _ = send(
                                         &mut sink,
                                         &serde_json::json!({
@@ -716,7 +772,7 @@ where
                             _ => {}
                         }
                     }
-                    Some(Ok(Message::Binary(b))) => {
+                    Ok(Some(Ok(Message::Binary(b)))) => {
                         if let Ok(r) = decode_frames(&b) {
                             for f in r.frames {
                                 if f.type_ == ft::OUTPUT {
@@ -822,10 +878,57 @@ where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
-    sink.send(Message::Text(value.to_string().into()))
-        .await
-        .map_err(|e| e.to_string())
+    // Bounded: a write the socket will not take must end the connection, not hold
+    // the loop (see `SEND_TIMEOUT_MS`).
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(SEND_TIMEOUT_MS),
+        sink.send(Message::Text(value.to_string().into())),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("send timed out".to_string()),
+    }
 }
+#[cfg(test)]
+mod stall_tests {
+    use super::{may_reassert_again, read_stall_limit};
+    use std::time::{Duration, Instant};
+
+    /// A window whose receive path went silent must give up on it.
+    ///
+    /// The keepalive is a `select!` branch, so a loop stuck elsewhere never reaches
+    /// it: measured on a frozen window 2026-10-25 with zero read syscalls in twenty
+    /// seconds and no reconnection, because nothing was missed — nothing was sent.
+    #[test]
+    fn a_stalled_receive_path_is_given_up_on() {
+        assert!(read_stall_limit(4_000) >= Duration::from_secs(15));
+        assert_eq!(read_stall_limit(4_000), Duration::from_secs(28));
+        // Never shorter than a person's patience, whatever a caller passes.
+        assert_eq!(read_stall_limit(1), Duration::from_secs(15));
+        // And it scales with the ping interval rather than being written beside it.
+        assert_eq!(read_stall_limit(60_000), Duration::from_secs(420));
+    }
+
+    /// A refused size re-assert is retried; a fresh one is not sent twice at once.
+    #[test]
+    fn a_refused_size_reassert_is_retried_after_the_wait() {
+        let now = Instant::now();
+        // Never sent: nothing to retry.
+        assert!(!may_reassert_again(None, now));
+        // Just sent: do not send again (the storm the latch prevented).
+        assert!(!may_reassert_again(Some(now), now));
+        // Sent a moment ago, still inside the wait.
+        assert!(!may_reassert_again(
+            Some(now - Duration::from_millis(500)),
+            now
+        ));
+        // The wait is over: the pane is still the other device's, so ask again.
+        assert!(may_reassert_again(Some(now - Duration::from_secs(3)), now));
+    }
+}
+
 #[cfg(test)]
 mod render_tests {
     use super::{Snapshot, first_attach, render_snapshot, should_reassert};
