@@ -129,22 +129,63 @@ The mesh profile is designed **as if EU868's 1 % duty cycle applied, even on
 US915**. A terminal stream is the one traffic class that could become a
 nuisance if unmanaged, so the budget is enforced rather than trusted.
 
-- Default **36 s of transmit airtime per hour**, the EU868 1 % equivalent.
-- The phone-side gateway meters its own transmit estimate and enforces the
-  budget for the active session only. LDMUX traffic is metered; MeshMore's own
-  chat and telemetry are not, and neither is any robot traffic.
-- The meter accumulates the firmware's timeout **estimate**
-  (`calcFloodTimeoutMillisFor` / `calcDirectTimeoutMillisFor`). It is not
-  measurement, and it cannot see repeater retransmissions or collisions. Call
-  it an estimate everywhere it is surfaced, including the UI.
-- When the budget is spent the gateway stops sending and reports "throttled".
-  LDMUX must degrade gracefully: queue, show the throttle, and never assume a
-  send succeeded.
+**A budget is per-transmitter and local.** Each end meters its own
+transmissions against its own duty cycle. A carrier cannot and must not throttle
+the peer's airtime: the phone's radio and the host's radio are separate
+transmitters with separate obligations. So ldmux's mesh gateway enforces the
+policy on the host's own downlink, and MeshMore enforces it on the phone's
+uplink. Neither has authority over the other.
 
-The measured wire costs in [`WIRE-COST.md`](WIRE-COST.md) are the reason this
-matters: one keystroke echo is 9 bytes, `ls -la` is 1,254, and `ls -laR` is
-514,758. At 36 s of airtime per hour, a few `ls -laR` invocations exhaust the
-budget for the hour. The mesh profile is for deliberate work, not browsing.
+- Default **36 s of transmit airtime per hour**, the EU868 1 % equivalent.
+- The meter accumulates the firmware's timeout **estimate**. It is not
+  measurement, and it cannot see repeater retransmissions or collisions. Call it
+  an estimate everywhere it is surfaced.
+- When the budget is spent the sender stops sending and reports it. The receiver
+  must degrade gracefully: show the throttle and never assume a send succeeded.
+
+### 6.1 The budget in packets, which is the number that matters
+
+36 s per hour sounds generous until it is converted. Airtime per packet is
+ADR-0020's estimate (Semtech formula, **not measured and not checked against the
+Semtech document**), and 136 B is the downlink application payload from §2:
+
+| Preset | s/packet | Records per hour | KB per hour | A 2 KB snapshot needs |
+|---|---|---|---|---|
+| SF7/500 kHz | 0.08 | 450 | 61.2 | 1 s |
+| SF7/125 kHz | 0.30 | 120 | 16.3 | 4 s |
+| SF10/250 kHz | 0.90 | 40 | 5.4 | 13 s |
+| **SF11/62.5 kHz** | **7.50** | **4.8** | **0.7** | **110 s** |
+
+The last row decides the profile. On MeshCore's longest-range preset, a whole
+hour of duty-cycle budget buys **under five packets**, and one terminal snapshot
+would cost three hours of it. There is therefore no point in a budget override:
+the transfer has to be small by construction.
+
+### 6.2 So the output is bounded at the source
+
+This is not a compromise, it is what the measurements already said. `ls -laR`
+is 514,758 bytes and the user sees 24 lines; substituting state for history
+turns that into one ~2,000 B snapshot ([`WIRE-COST.md`](WIRE-COST.md) §1). The
+mesh profile goes further: **state of now only, never replayed history** (the
+`mesh` column in [`MESH-TRANSPORT.md`](MESH-TRANSPORT.md)).
+
+The bound is applied where the output is produced, on the host:
+
+- cap a mesh reply at **1,500 B**, and
+- further cap it to what the remaining budget affords:
+  `floor(budgetRemaining / airtimePerPacket) * 136` bytes.
+
+On SF7/125 kHz that is the 1,500 B cap, about 11 records and 3.3 s of airtime.
+On SF11/62.5 kHz it is roughly 550 B, four records and 30 s, which still holds a
+screenful of last lines.
+
+The measured wire costs in [`WIRE-COST.md`](WIRE-COST.md) are why the cap is on
+volume and not on frames: one keystroke echo is 9 bytes and `ls -la` is 1,254,
+so a frame is not expensive. The bytes are in sending history the user cannot
+keep, and the answer is not to send it.
+
+**No raise path in v1.** If a genuine need for a larger transfer appears later,
+an owner-only raise is additive. Nothing in the profile requires it now.
 
 ## 7. Timers
 
@@ -180,24 +221,28 @@ The mockup header in `MESH-TRANSPORT.md` (line mode, chunking, a byte-stream
 fallback for pagers) still stands. This document changes the carriage, not the
 terminal model.
 
-## 9. Open decisions
+## 9. Decisions taken
 
-Carried from the MeshMore side, where the architecture of record lives.
+Settled on the MeshMore side, 2026-10-24. Recorded here because they bind this
+profile.
 
-1. **iOS.** A suspended iOS app cannot serve a loopback listener, so the
-   two-app gateway is Android-only as designed. On iOS either the gateway runs
-   only in the foreground, or LDMUX must reach the host directly. This is a
-   blocker for the iOS mesh path, not for Android.
-2. **Contact provisioning.** The binary request path needs the host to already
-   be a MeshCore contact on the phone's radio. Someone has to add it. Options:
-   an explicit step in MeshMore's UI, one narrowly-scoped exception in the
-   gateway, or manual out-of-band setup.
-3. **Unknown-frame policy.** The gateway proposed here ignores unknown frame
-   types and closes only on malformed framing, which lets the frame set grow.
-   The alternative is a strict close, which is fail-closed but freezes the set.
-4. **Crypto capabilities.** The ML-KEM stage is negotiated **inside** the
-   session, not in the L2 handshake: a blind gateway cannot know or attest the
-   host's capabilities. Confirm that the ML-KEM exchange stays end to end.
+1. **iOS is tailnet only.** LDMUX on iOS gets no MeshCore support and no
+   gateway. The two-app gateway is Android-only. A suspended iOS app cannot
+   serve a loopback listener anyway, so this is agreement with the platform
+   rather than a restriction.
+2. **Contact provisioning is a user-visible step in MeshMore's UI**, not a
+   gateway write. The gateway keeps performing no companion writes, and `BIND`
+   fails cleanly when the host is not yet a contact.
+3. **Airtime is per-transmitter and local** (§6). No `BUDGET` frame and no
+   cross-end throttle, because a carrier has no authority over the peer's
+   transmissions.
+4. **No budget raise in v1**, because the output is bounded at the source
+   (§6.2).
+5. **Unknown L2 frame types are ignored**; only malformed framing and a bad
+   version close the connection, so the frame set can grow without a flag day.
+6. **Crypto capabilities stay inside the session.** The ML-KEM stage is
+   negotiated end to end, never in the L2 handshake, because a blind gateway
+   cannot know or attest the host's capabilities.
 
 ## 10. Provenance
 
