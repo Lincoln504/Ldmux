@@ -213,6 +213,35 @@ keep, and the answer is not to send it.
 **No raise path in v1.** If a genuine need for a larger transfer appears later,
 an owner-only raise is additive. Nothing in the profile requires it now.
 
+## 6.3 What this link is, stated honestly
+
+The arithmetic decides the UX, and the honest description is **not** "a
+terminal".
+
+| Preset | Records/hour | A command with a 5-record reply | So |
+|---|---|---|---|
+| SF7/500 kHz | 450 | 6 records | about 75/hour |
+| SF7/125 kHz | 120 | 6 records | about 20/hour |
+| SF10/250 kHz | 40 | 6 records | about 6/hour |
+| SF11/62.5 kHz | 4.8 | 6 records | **cannot complete one** |
+
+At MeshCore's longest-range preset the budget does not afford a single
+command-and-reply in an hour. The mesh profile is a **low-rate command
+channel**: send a command, receive the last lines of its output, minutes later.
+
+This agrees with what this repository already concluded. The `mesh` column in
+[`MESH-TRANSPORT.md`](MESH-TRANSPORT.md) is "plain lines", "one uplink per
+command", "backlog never replayed", and the client's terminal engine is
+**unused**. The carriage document does not change that; it makes the numbers
+behind it explicit.
+
+What it means for LDMUX's UI:
+
+- No live cursor, no per-keystroke echo, no spinner that implies a second.
+- Present the budget as **operations left this hour**, not seconds.
+- Timestamp every reply, because "minutes later" is normal.
+- Never imply delivery. The carrier cannot know, so the UI must not suggest it.
+
 ## 7. Timers
 
 The direct-path timer values are tuned for a link whose round trip is tens of
@@ -226,6 +255,25 @@ milliseconds. On the mesh they are all wrong.
 
 The gateway adds **no heartbeat of its own**. TCP keepalive plus a status frame
 is enough, and L3 already has `PING`/`PONG`.
+
+## 7.1 Contract details the client must honour
+
+Three things the L2 contract carries that are easy to miss and expensive to get
+wrong.
+
+**Records carry a sequence number.** `RECORD` is `seq(1) + record` and
+`SEND_RESULT` echoes the same `seq`. A gateway queue can hold several records
+while one is in flight, so an unattributed refusal would leave the client unable
+to tell which of its records failed.
+
+**Capacity is advertised, not assumed.** `BIND_OK` reports the largest uplink
+record the peer's path actually allows, because `cmd_send_raw_data` accepts
+`174 − path_len`. A long path therefore shrinks the record, and a client sized to
+the absolute ceiling would spend airtime on sends the radio refuses. Size to the
+advertised number. The floor is 160 B, which still fits a 14-hop path.
+
+**Only malformed framing closes the connection.** An unknown frame type is
+delivered and ignored, so the frame set can grow without a flag day.
 
 ## 8. What LDMUX has to build
 
