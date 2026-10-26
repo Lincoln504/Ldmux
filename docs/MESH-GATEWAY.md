@@ -28,55 +28,65 @@ That split is what makes this cheap: the transport-specific knowledge stays in
 MeshMore, where the BLE link already lives, and LDMUX gains a socket client
 with no radio code at all.
 
-## 2. The two carriages, with real numbers
+## 2. The carriage: two phases, because one of them is much cheaper
 
-Both directions ride different MeshCore mechanisms, and the phone's uplink is
-much tighter than the host's downlink.
+**Corrected 2026-10-24 after reading the firmware.** Raw custom is not a
+host-only option. The companion radio wired for `PAYLOAD_TYPE_RAW_CUSTOM`
+delivers it to the app as `PUSH_CODE_RAW_DATA` (`MyMesh::onRawDataRecv`,
+`src/Mesh.cpp:295`), and `createRawData` copies bytes verbatim with no cipher
+and no padding (`src/Mesh.cpp:589-603`). So **stock companion firmware at both
+ends** can carry it. No firmware fork on either side.
 
-| | phone → host | host → phone |
+Raw custom is also exact-length, which removes the delimiter problem, and it
+carries more. `CMD_SEND_RAW_DATA` is `[25][path_len][path][payload]` inside a
+176-byte companion frame, so the datagram is `174 − path_len`; a three-hop path
+still allows 171.
+
+The catch is routing: `RAW_CUSTOM` is direct-only in both directions
+(`src/Mesh.cpp:292-297` delivers it only when `isRouteDirect()`, and the flood
+forward is commented out). A path must exist first, and a path comes from a
+flooded exchange.
+
+| | **Phase A — discovery** | **Phase B — established** |
 |---|---|---|
-| Mechanism | companion binary request (`CMD_SEND_BINARY_REQ`, `0x32`) | `PAYLOAD_TYPE_RAW_CUSTOM` packet |
-| Cipher / padding | AES-ECB, zero-padded to 16 B | none — bytes copied verbatim |
-| Datagram budget | 143 B | 184 B packet, 172 B observable at the phone |
-| Record ceiling | **142 B** (1 B length + record) | **160 B** |
-| Application bytes after the 24 B record header | **118 B** | **136 B** |
+| When | no path, or the path went stale | a path is known |
+| Uplink | `CMD_SEND_BINARY_REQ`, flooded | `CMD_SEND_RAW_DATA`, direct |
+| Downlink | the firmware's flooded `PATH + RESPONSE` return | `PAYLOAD_TYPE_RAW_CUSTOM`, direct |
+| Cipher / padding | AES-ECB, zero-padded to 16 B | **none, exact length** |
+| Datagram | 143 B | 174 − path_len |
+| Record | 142 B (1 B length + record) | **172 B** |
+| Application after the 24 B record header | 118 B | **148 B** |
 
-Three caps stack on the phone's uplink and the smallest binds: the 176 B
-companion frame (`MAX_FRAME_SIZE`), the `sendRequest` guard (163 B), and the
-`createDatagram` guard (163 B). A binary request spends 1 B on the opcode and
-32 B on the peer public key, leaving 143 B, and one more byte goes to the
-record length.
+Phase A exists to teach both ends a path, and one exchange does it: a flooded
+request makes the responder build a `PATH + RESPONSE` return and flood it back,
+which delivers the answer and the reverse path together
+(`src/helpers/BaseChatMesh.cpp:286-306`). It is small by nature — the ADR-0020
+handshake is 121 B then 50 B — so 118 B of application is enough.
 
-The host side is a full MeshCore node, not a companion, so it reaches the
-184 B packet ceiling directly.
+Phase B is where the throughput lives: **148 B against 118**, with no delimiter
+at all.
 
-**A wider phone uplink exists and is not used yet.** `CMD_SEND_RAW_DATA` (25)
-and `CMD_SEND_RAW_PACKET` (65) both bypass the cipher and the padding and reach
-about 172 B. Neither can flood: `CMD_SEND_RAW_DATA` rejects a negative path
-length with "flood, not supported (yet)", and repeaters do not forward
-`PAYLOAD_TYPE_RAW_CUSTOM`. So a flooded first contact still needs the binary
-request path. Using raw data for the steady state is a later optimisation, not
-a v1 dependency.
+**A wider Phase A exists and is not used.** `CMD_SEND_RAW_PACKET` (65) injects a
+whole serialised packet, bypassing the cipher and the padding, but it cannot
+flood, so it does not solve the one problem Phase A exists for.
 
-## 3. Delimitation, and why the record carries its own length
+## 3. Delimitation, and why it is only a Phase A problem
 
 The binary request path encrypts with AES-ECB and zero-pads the final block to
 16 bytes. The receiving side does **not** strip that padding: the decryptor
 returns the full block multiple and its own header comment warns that "dest may
 contain trailing zero bytes in final block".
 
-So a record cannot be delimited by the datagram length, and stripping trailing
-zeros is not safe: one record in 256 ends in a byte the strip would eat. This
-is a real corruption rate on every packet, not a theoretical one.
+So a Phase A record cannot be delimited by the datagram length, and stripping
+trailing zeros is not safe: one record in 256 ends in a byte the strip would
+eat. Phase A therefore carries **one byte of record length**, costing one byte
+of the 143 and removing the whole class of problem.
 
-The gateway therefore carries **one byte of record length** as the first byte of
-the datagram. It costs one byte of the 143 and it removes the entire class of
-problem. The host's direction needs no prefix, because raw custom is copied
-verbatim.
+Phase B needs nothing. Raw custom is exact-length, so the datagram length *is*
+the record length.
 
-A retransmission making the record a different length is not possible: the
-record is produced once by the session and only the carrier repeats it, and the
-carrier does not repeat it at all (§4).
+A retransmission changing a record's length is not possible: the record is
+produced once by the session, and the carrier does not retransmit (§4).
 
 ## 4. ARQ: the session owns it, the gateway must not
 
@@ -105,23 +115,36 @@ Consequences to design around:
   received it, and it must not claim to. A `delivered` field would be a lie.
 - **Duplicate suppression happens once**, in the receiver's counter window.
 
-## 5. Discovery: the first exchange floods both ways
+## 5. Discovery and path refresh
+
+Phase A exists for one reason and should be used for nothing else.
 
 A flooded request makes the responder build a path return and flood it back, so
-the reply simultaneously delivers the answer and teaches the requester the
-return path. The first exchange is therefore flooded **both** ways, not "flood
-out, direct back". After that, a path is known and the cheaper direct route
-applies.
+the reply delivers the answer and teaches the requester the return path at the
+same time. The first exchange is flooded **both** ways, not "flood out, direct
+back". After it, both ends know a path and Phase B applies.
 
-Two consequences for sizing:
+Two sizing consequences:
 
 - A flooded reply carries `path_len + path + extra_type` inside the encrypted
-  body, so the reply budget **shrinks by the hop count**. Treating the downlink
-  as a fixed 160 B is correct only for raw custom, and raw custom needs a known
-  path.
-- First contact must go through the binary request path, because raw custom
-  cannot flood. That is the only reason the binary request path is still
-  needed at all.
+  body, so its budget shrinks with hop count. Phase A's 118 B is a ceiling, not
+  a promise.
+- Phase A must be used for the handshake, because Phase B cannot flood. That is
+  the whole reason the binary request path survives in the design.
+
+**Paths go stale and fail silently.** The radio learns better paths as traffic
+flows and signals it with `PUSH_CODE_PATH_UPDATED` (0x81), which carries only
+the peer's public key (`MyMesh.cpp:404-410`), so the app must re-read the contact
+to get the new `out_path`. The firmware's own comment warns the app may not be
+connected when that push happens, so a re-read on reconnect is also required.
+
+A wrong path does not error: the radio sends into the void. So the receiver of
+silence cannot distinguish a lost record from a stale path. The gateway treats
+"no response within the session's timeout" as a path failure, issues
+`CMD_RESET_PATH` (0x0D) so the next send floods, and returns to Phase A.
+
+That reset is cheap and it is the only remedy the companion API offers, which is
+why the timeout is the trigger rather than any radio-level signal.
 
 ## 6. Airtime: this is a terminal on a shared band
 
@@ -151,10 +174,13 @@ Semtech document**), and 136 B is the downlink application payload from §2:
 
 | Preset | s/packet | Records per hour | KB per hour | A 2 KB snapshot needs |
 |---|---|---|---|---|
-| SF7/500 kHz | 0.08 | 450 | 61.2 | 1 s |
-| SF7/125 kHz | 0.30 | 120 | 16.3 | 4 s |
-| SF10/250 kHz | 0.90 | 40 | 5.4 | 13 s |
+| SF7/500 kHz | 0.08 | 450 | 66.6 | 1 s |
+| SF7/125 kHz | 0.30 | 120 | 17.8 | 4 s |
+| SF10/250 kHz | 0.90 | 40 | 5.9 | 13 s |
 | **SF11/62.5 kHz** | **7.50** | **4.8** | **0.7** | **110 s** |
+
+148 B is the Phase B application payload. Phase A is smaller and carries only
+the handshake.
 
 The last row decides the profile. On MeshCore's longest-range preset, a whole
 hour of duty-cycle budget buys **under five packets**, and one terminal snapshot
@@ -173,9 +199,9 @@ The bound is applied where the output is produced, on the host:
 
 - cap a mesh reply at **1,500 B**, and
 - further cap it to what the remaining budget affords:
-  `floor(budgetRemaining / airtimePerPacket) * 136` bytes.
+  `floor(budgetRemaining / airtimePerPacket) * 148` bytes.
 
-On SF7/125 kHz that is the 1,500 B cap, about 11 records and 3.3 s of airtime.
+On SF7/125 kHz that is the 1,500 B cap, about 10 records and 3 s of airtime.
 On SF11/62.5 kHz it is roughly 550 B, four records and 30 s, which still holds a
 screenful of last lines.
 
