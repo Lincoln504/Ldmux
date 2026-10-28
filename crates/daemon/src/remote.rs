@@ -313,6 +313,9 @@ struct Features {
     /// "sessionEnded": the end of a session is a `session_ended` message, and a
     /// recently ended session can be attached to for its final screen.
     session_ended: bool,
+    /// "speechChannel": the client wants `speech` messages (voice mode). A client that does
+    /// not say so is never sent one.
+    speech: bool,
 }
 
 impl Features {
@@ -322,6 +325,7 @@ impl Features {
         Some(Features {
             inplace_resync: has("inplaceResync"),
             session_ended: has("sessionEnded"),
+            speech: has("speechChannel"),
         })
     }
 }
@@ -2222,6 +2226,32 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
             d.release_stream_if_idle(&keeper_name);
         }
     }
+}
+
+/// Hand a `speech` message to every connection that is viewing `session_id` and advertised
+/// `speechChannel`. Returns how many got it. The daemon relays and nothing more: it does not
+/// chunk, summarise or hold state about what is being said.
+pub(crate) fn deliver_speech(
+    shared: &Arc<Shared>,
+    session_id: &str,
+    message: &serde_json::Value,
+) -> usize {
+    let text = message.to_string();
+    let conns: Vec<Arc<ConnShared>> = relock(&shared.conns).values().cloned().collect();
+    let mut delivered = 0;
+    for c in conns {
+        let wants = {
+            let inner = relock(&c.inner);
+            !inner.disposed
+                && inner.features.speech
+                && inner.session_id.as_deref() == Some(session_id)
+        };
+        if wants {
+            c.send_json_text(text.clone());
+            delivered += 1;
+        }
+    }
+    delivered
 }
 
 /// Send the session list to one connection.

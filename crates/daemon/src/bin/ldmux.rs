@@ -123,6 +123,9 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux window [cwd]\n  Create a shell and open it in a new desk window (the terminal is chosen by LDMUX_TERMINAL_CMD, LDMUX_TERMINAL, $TERMINAL, then known emulators)."
         }
         "send" => "ldmux send <id> <text...>\n  Type text into a session.",
+        "speak" => {
+            "ldmux speak <id> [--final] [--id <message-id>] [--stdin] [text...]\n  Send text for the phone to say aloud, to the clients viewing a session in voice mode. Without --stdin the text is the remaining arguments."
+        }
         "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
         "capture" => {
             "ldmux capture <id> [--history]\n  Print the session's screen (with --history, its scrollback too)."
@@ -270,7 +273,7 @@ fn print_mesh_session(v: &serde_json::Value) {
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|speak|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
     );
 }
 
@@ -287,6 +290,9 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--json",
         "--name",
         "--rw",
+        "--final",
+        "--id",
+        "--stdin",
         "--terminal",
         "--title",
         "--workspace",
@@ -488,6 +494,40 @@ async fn main() {
             .await;
             if let Err(e) = r {
                 die(&e, &sock);
+            }
+        }
+        "speak" => {
+            let pos = positional(rest, &["--id"]);
+            let id = pos.first().copied().unwrap_or("");
+            let text: String = if rest.iter().any(|a| a == "--stdin") {
+                let mut buf = String::new();
+                if std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).is_err() {
+                    eprintln!("ldmux speak: could not read standard input");
+                    std::process::exit(1);
+                }
+                buf.trim_end().to_owned()
+            } else {
+                pos.get(1..).unwrap_or(&[]).join(" ")
+            };
+            let mut params = serde_json::json!({
+                "sessionId": id,
+                "text": text,
+                "final": rest.iter().any(|a| a == "--final"),
+            });
+            if let Some(message_id) = flag(rest, "--id") {
+                params["id"] = serde_json::json!(message_id);
+            }
+            match daemon_call::<serde_json::Value, serde_json::Value>(&sock, "speech", &params)
+                .await
+            {
+                Ok(v) => {
+                    let delivered = v
+                        .get("delivered")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    println!("said to {delivered} client(s)");
+                }
+                Err(e) => die(&e, &sock),
             }
         }
         "key" => {

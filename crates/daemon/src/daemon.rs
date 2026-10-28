@@ -350,6 +350,9 @@ pub struct LdmuxDaemon {
     /// The connection table and sweep every listener serves into (the tailnet
     /// WebSocket and the local attach socket).
     conn_shared: Option<std::sync::Arc<crate::remote::Shared>>,
+    /// The last `speech` sequence number handed out per session. Ordering on the phone is
+    /// this number, not arrival order.
+    speech_seq: std::collections::HashMap<String, u64>,
     /// The local attach socket's accept loop.
     local_handle: Option<tokio::task::JoinHandle<()>>,
     /// The per-session streams (the `Arc<PaneStream>` per keeper session).
@@ -415,6 +418,10 @@ impl Drop for LdmuxDaemon {
     }
 }
 
+/// The most text one `speech` call may carry. A spoken summary is a few sentences; a runaway
+/// answer is refused rather than queued on a phone.
+pub const SPEECH_MAX_BYTES: usize = 4096;
+
 impl LdmuxDaemon {
     /// A daemon rooted at `state_dir`, whose keeper binary is `keeper_bin`.
     ///
@@ -434,6 +441,7 @@ impl LdmuxDaemon {
             remote: None,
             remote_cfg: None,
             conn_shared: None,
+            speech_seq: std::collections::HashMap::new(),
             local_handle: None,
             streams: HashMap::new(),
             control_handle: None,
@@ -1665,6 +1673,49 @@ impl LdmuxDaemon {
             // The MeshMore link, if this machine has one. Always answerable, so
             // a client can tell "disabled" from "broken" without guessing.
             "mesh.status" => Ok(crate::mesh::status_json()),
+            // Voice mode (docs/VOICE-MODE.md section 6): relay what an agent wants said to the
+            // clients viewing the session that asked for it. Validation only; no speech logic.
+            "speech" => {
+                let id = params
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if text.trim().is_empty() {
+                    return Err("speech text is empty".to_string());
+                }
+                if text.len() > SPEECH_MAX_BYTES {
+                    return Err(format!("speech text is over {SPEECH_MAX_BYTES} bytes"));
+                }
+                let message_id = params.get("id").and_then(|v| v.as_str());
+                if message_id.is_some_and(|m| m.is_empty() || m.len() > 64) {
+                    return Err("speech id must be 1 to 64 bytes".to_string());
+                }
+                let is_final = params
+                    .get("final")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if self.registry.get(id).is_none() {
+                    return Err(format!("no such session: {id}"));
+                }
+                let seq = {
+                    let n = self.speech_seq.entry(id.to_owned()).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                let message = serde_json::json!({
+                    "type": "speech",
+                    "sessionId": id,
+                    "id": message_id,
+                    "text": text,
+                    "final": is_final,
+                    "seq": seq,
+                });
+                let delivered = self.conn_shared.as_ref().map_or(0, |shared| {
+                    crate::remote::deliver_speech(shared, id, &message)
+                });
+                Ok(serde_json::json!({ "seq": seq, "delivered": delivered }))
+            }
             "ping" => Ok(serde_json::json!({
                 "pong": true,
                 "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,

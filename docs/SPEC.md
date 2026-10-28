@@ -673,6 +673,12 @@ capabilities {scrollback}}`, `snapshot {…state fields…, history?, resync?}`,
 messages it always got. `inplaceResync` — a stale picture is repaired with `caps` +
 `snapshot{resync:true}` on the same socket. `sessionEnded` — the end of a session is a
 `session_ended` message (and a just-ended session can be attached for its final screen).
+`speechChannel` — the client is in (or can enter) voice mode and wants `speech` messages:
+`{"type":"speech","sessionId","id","text","final","seq"}`, sent to every connection
+viewing that session and advertising this feature, never to one that did not. `seq` rises per
+session and is the ordering. Produced by the daemon RPC `speech` (`{sessionId, text, id?,
+final?}`, text 1 to 4096 bytes) and `ldmux speak`; the daemon relays and holds no speech state
+(`docs/VOICE-MODE.md`).
 Writes (`input`, `key`, `mouseclick`) need a `hello` and the holding device
 (`hello_required`, `not_holder`); `new`, `kill`, `close`, `makelive`, `closelive` need a
 `hello`; delivery failures are `input_failed`, `kill_failed`, `close_failed`.

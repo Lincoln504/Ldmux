@@ -148,6 +148,18 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     let (code, out, err) = run_cli(&["send", &session_id, "echo hi"], &dir_str).await;
     assert_eq!(code, 0, "send failed: {out} {err}");
 
+    // `speak` — text for the phone to say. No client is watching, so it is said to nobody, and
+    // the CLI says so rather than pretending. An empty text is refused with a message.
+    let (code, out, err) = run_cli(&["speak", &session_id, "All", "done."], &dir_str).await;
+    assert_eq!(code, 0, "speak failed: {out} {err}");
+    assert!(out.contains("said to 0 client(s)"), "speak output: {out}");
+    let (code, _out, err) = run_cli(&["speak", &session_id], &dir_str).await;
+    assert_ne!(code, 0, "an empty speak must fail");
+    assert!(err.contains("empty"), "speak empty stderr: {err}");
+    let (code, _out, err) = run_cli(&["speak", "no-such", "hi"], &dir_str).await;
+    assert_ne!(code, 0);
+    assert!(err.contains("no such session"), "{err}");
+
     // `capture` — capture the screen (the fake keeper's snapshot text is
     // empty by default, so the screen is empty).
     let (code, out, err) = run_cli(&["capture", &session_id], &dir_str).await;
