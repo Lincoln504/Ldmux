@@ -301,8 +301,10 @@ Small, and none of it is radio code.
 1. A KMP `MeshMoreGatewayClient`: a socket client, the L2 frame codec, pairing,
    reconnect with backoff, and the credit-window backpressure the gateway
    imposes so a client cannot outrun a one-packet-at-a-time radio.
-2. A compact encoding for the L3 control messages the mesh profile actually
-   carries. **The existing `crates/protocol` frames cannot cross this link**:
+2. **Host side done 2026-10-28 (ADR-0025); phone side open.** A compact encoding for the L3
+   control messages the mesh profile actually carries. It is `crates/protocol/src/mesh_term.rs`
+   (plain-text row diffs) with the shell bridge in `crates/daemon/src/mesh_bridge.rs`; the phone's
+   port and attach driver are what remain. Original text: **The existing `crates/protocol` frames cannot cross this link**:
    they are JSON with a 16 MiB payload ceiling. The mesh profile needs its own
    binary encoding of the subset, defined end to end inside the Noise session
    and therefore opaque to the gateway.

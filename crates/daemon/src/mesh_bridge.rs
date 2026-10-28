@@ -16,7 +16,7 @@
 //!   never left holding half of a change the host believes it delivered.
 //! - **A new handshake drops every attach.** The phone must `Attach` again; nothing carries over
 //!   a session that ended.
-//! - **Nothing here knows a radio.** `rg -i 'meshcore|lora|spreading' crates/daemon` stays empty.
+//! - **Nothing here knows a radio.** The section 13 grep over the daemon crates stays at zero hits.
 
 use std::collections::HashMap;
 use std::sync::Arc;

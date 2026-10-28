@@ -76,18 +76,27 @@ repo needs to know a frequency, a spreading factor or a preset.
   JVM, but the Android build of the library has only been packaged (`assembleDebug` includes it
   for arm64-v8a and x86_64), never run on a phone. `MESH_SESSION_BUILT` is `true`; a device where
   the library does not load reports `SessionNotBuilt`.
-- **`MESH_TERMINAL_BUILT` is `false`.** A saved mesh route resolves to `TerminalNotBuilt`, opens
-  nothing and does not fall back to the tailnet (`LdmuxConfig.endpoint` is null for it). The route
-  is not offered for selection until this flips, and it flips with the compact terminal encoding
-  and the shell bridge below, not before.
-- **The phone has nowhere to keep the host key, the PSK or its own static key.** The session API
-  takes them as arguments; the QR v2 ceremony below is what would put them in the Keystore, so
-  `resolveRoute` is always given `hasPeer = false` today.
+- **`MESH_TERMINAL_BUILT` is still `false`, and the host half of what it waits for now exists**
+  (2026-10-28, ADR-0025). A saved mesh route resolves to `TerminalNotBuilt`, opens nothing and does
+  not fall back to the tailnet (`LdmuxConfig.endpoint` is null for it). What is **missing for the
+  flip is phone-side only**: (a) a Kotlin port of `crates/protocol/src/mesh_term.rs` checked
+  against its pinned byte vectors, (b) the attach driver that connects `MeshGatewayClient` +
+  `MeshSession` + that codec and paints the mirrored rows on the terminal surface, and (c) a way
+  to get the keys onto the phone (the QR v2 ceremony, below). Without (c) no device can hold a
+  mesh pairing, so flipping the flag earlier would only change which error is shown.
+- **The phone now has somewhere to keep the host key, the PSK and its own static key**:
+  `MeshSessionKeys` / `MeshSessionKeyStore` (129-byte versioned blob, Android Keystore, shared
+  `KeystoreBlob` with the token store; 5 JVM tests). Nothing outside tests saves to it, because
+  the ceremony that delivers the keys is not built; `resolveRoute` is still given
+  `hasPeer = false` until it is.
 - **Padding to 64/128/ceiling buckets** (ADR-0020 section 4). Records are not padded, so
   record sizes leak. A reserved flag bit is the planned place for a padded form.
-- **The compact terminal encoding** that goes inside the stream, and the bridge from
-  `take_inbound` / `send` to real shells. The stream carries bytes for a shell id; nothing yet
-  interprets them.
+- **The compact terminal encoding, host side: done** (ADR-0025). `ldmux_protocol::mesh_term`
+  (17 tests) is plain-text row diffs in messages of at most 133 bytes; `ldmux_daemon::mesh_bridge`
+  (11 unit + 3 integration tests, one over the real session and a fake gateway speaking real L2
+  frames) attaches a phone to a shell through the keeper's grid, and `ldmuxd` runs it when
+  `LDMUX_MESH_PSK` is set. **Phone side: not done** (see the flag above). Full-screen programs are
+  poor on this link by physics: a full 200x100 screen is about 150 records against 58 an hour.
 - **The pairing ceremony**: QR version 2 carrying the gateway public key and the PSK (ADR-0020
   section 6). Today the PSK is an environment variable and the gateway key is printed by
   `ldmuxd` and `ldmux mesh status`.

@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-10-28). Implements the dependency decision ADR-0020 deferred
 ("`snow` is not on the AGENTS.md dependency allowlist: adding it needs a decision then").
 
-- **Related:** ADR-0020 (mesh link security), `docs/MESH-GATEWAY.md`, `docs/STATE.md`
+- **Related:** ADR-0025 (what runs inside the session), ADR-0020 (mesh link security), `docs/MESH-GATEWAY.md`, `docs/STATE.md`
 - **Scope:** `crates/session` only. Nothing else in the workspace depends on these crates.
 
 ## Context

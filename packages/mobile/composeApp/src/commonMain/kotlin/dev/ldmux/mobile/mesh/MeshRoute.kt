@@ -28,11 +28,12 @@ expect val currentPlatform: MobilePlatform
 const val MESH_SESSION_BUILT: Boolean = true
 
 /**
- * Whether a shell can be carried over the session. **It cannot yet**: the session moves bytes
- * for a shell number, but the compact terminal encoding and the daemon's shell bridge are not
- * built (`docs/STATE.md`, "What the L3 session still needs"). Until they are, a saved `Mesh`
- * route resolves to [MeshRouteProblem.TerminalNotBuilt] and nothing is opened. Flip it in the
- * change that lands them, and not before: a route that says "bound" over a link that cannot
+ * Whether a shell can be carried over the session. **It cannot yet.** The host half exists
+ * (ADR-0025: the row encoding in `crates/protocol` and the daemon's shell bridge), but the phone
+ * has no port of the encoding and no attach driver, and no way to receive the session keys (the
+ * QR v2 ceremony). `docs/STATE.md` lists the three. Until they exist, a saved `Mesh` route
+ * resolves to [MeshRouteProblem.TerminalNotBuilt] and nothing is opened. Flip it in the change
+ * that lands them, and not before: a route that says "bound" over a link that cannot
  * show a shell is the dishonest state this flag exists to prevent.
  */
 const val MESH_TERMINAL_BUILT: Boolean = false
