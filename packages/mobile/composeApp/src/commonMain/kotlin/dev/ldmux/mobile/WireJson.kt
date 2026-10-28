@@ -84,8 +84,12 @@ internal fun helloMessage(config: LdmuxConfig, features: List<String> = emptyLis
  * socket, which the client already applies in place. That is the same repair for a
  * fraction of the bytes: it is the one lever `docs/WIRE-COST.md` measures at two
  * orders of magnitude.
+ *
+ * `speechChannel` says this client can take `speech` messages (voice mode). It is advertised
+ * always, because features are fixed at `hello` and voice mode can be switched on later; the
+ * messages are rare and small, and are dropped unless voice mode is on and the shell is on screen.
  */
-internal val PAGE_FEATURES: List<String> = listOf("inplaceResync")
+internal val PAGE_FEATURES: List<String> = listOf("inplaceResync", "speechChannel")
 
 /**
  * The daemon's HTTP status for a plain `GET /ws`, or null when nothing answered.

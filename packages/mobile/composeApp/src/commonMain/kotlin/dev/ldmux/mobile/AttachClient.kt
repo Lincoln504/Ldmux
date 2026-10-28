@@ -89,6 +89,12 @@ internal sealed interface AttachMessage {
      * whole time.
      */
     data class Sessions(val owners: Map<String, String?>) : AttachMessage
+
+    /**
+     * Something the agent wants said aloud (Channel A, `docs/VOICE-MODE.md` section 3.5). Sent
+     * only to a client that advertised `speechChannel`. Untrusted text: spoken, never run.
+     */
+    data class Speech(val speech: dev.ldmux.mobile.voice.SpeechEvent) : AttachMessage
 }
 
 /** The control message in [text], or null when it is not one this client understands. */
@@ -129,6 +135,20 @@ internal fun parseAttachMessage(text: String): AttachMessage? {
                 }
             }.toMap(),
         )
+        "speech" -> {
+            val text = root.text("text")
+            if (text.isBlank()) {
+                null
+            } else {
+                AttachMessage.Speech(
+                    dev.ldmux.mobile.voice.SpeechEvent(
+                        text = text,
+                        id = root.optionalText("id")?.takeIf { it.isNotEmpty() },
+                        final = if (root["final"] == null) true else root.flag("final"),
+                    ),
+                )
+            }
+        }
         else -> null
     }
 }
@@ -224,6 +244,9 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      * on this socket the whole time.
      */
     var onSessions: ((Map<String, String?>) -> Unit)? = null
+
+    /** The agent has something to say (the daemon's `speech` message). */
+    var onSpeech: ((dev.ldmux.mobile.voice.SpeechEvent) -> Unit)? = null
     /**
      * The shell is gone (ended, or unknown to the daemon). The loop stops: there
      * is nothing to re-attach to, and retrying it forever is a page that polls a
@@ -549,6 +572,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             }
             AttachMessage.MouseDelivered -> guarded("mouse") { onMouseDelivered?.invoke() }
             is AttachMessage.Sessions -> guarded("sessions") { onSessions?.invoke(msg.owners) }
+            is AttachMessage.Speech -> guarded("speech") { onSpeech?.invoke(msg.speech) }
             is AttachMessage.Owned -> {
                 // Refused, not broken: the shell is held by another device. Told
                 // as an ordinary outcome so the UI can offer to take it over

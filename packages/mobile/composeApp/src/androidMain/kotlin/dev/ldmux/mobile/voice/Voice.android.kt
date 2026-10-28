@@ -41,6 +41,9 @@ actual object Dictation {
 
     actual val listening: Boolean get() = recognizer != null
 
+    /** The host activity, for the sibling [SpeechOutput] that needs a Context too. */
+    internal fun hostActivity(): Activity? = host?.get()
+
     /** Called once, by the activity, so this side can reach a Context of its own. */
     fun attachHost(activity: Activity) {
         host = WeakReference(activity)

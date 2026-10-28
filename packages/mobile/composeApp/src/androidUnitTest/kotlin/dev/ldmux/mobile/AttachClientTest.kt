@@ -152,9 +152,23 @@ class AttachClientTest {
         // socket: a reconnect (and, on the phone, an ownership round trip) instead
         // of one snapshot on the socket that is already open.
         val hello = helloMessage(testConfig(), PAGE_FEATURES)
-        assertTrue(hello.contains(""""features":["inplaceResync"]"""), hello)
+        assertTrue(hello.contains(""""features":["inplaceResync","speechChannel"]"""), hello)
         // A client that says nothing is not claimed to understand anything.
         assertFalse(helloMessage(testConfig()).contains("features"))
+    }
+
+    @Test
+    fun `a speech message parses to a speech event and a blank one is ignored`() {
+        assertEquals(
+            AttachMessage.Speech(dev.ldmux.mobile.voice.SpeechEvent("Done.", "m1", false)),
+            parseAttachMessage("""{"type":"speech","sessionId":"s","id":"m1","text":"Done.","final":false,"seq":3}"""),
+        )
+        assertEquals(
+            AttachMessage.Speech(dev.ldmux.mobile.voice.SpeechEvent("Hi", null, true)),
+            parseAttachMessage("""{"type":"speech","text":"Hi","id":null}"""),
+        )
+        assertEquals(null, parseAttachMessage("""{"type":"speech","text":"  "}"""))
+        assertEquals(null, parseAttachMessage("""{"type":"speech"}"""))
     }
 
     @Test
