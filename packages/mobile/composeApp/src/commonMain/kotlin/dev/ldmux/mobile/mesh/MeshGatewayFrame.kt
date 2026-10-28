@@ -167,6 +167,13 @@ data class MeshStatus(
     val batteryPercent: Int?,
     /** The gateway's OWN transmit airtime this hour, 0.1 s units. An estimate, display only. */
     val txAirtimeTenthsThisHour: Int,
+    /**
+     * Records of the current uplink size that still fit this hour's budget (0..255, 255 means
+     * "255 or more"), computed BY THE GATEWAY from the radio's real preset. Null when an older
+     * gateway did not send the sixth byte. LDMUX reads this and never derives it: doing so would
+     * need radio parameters, which this app must not know.
+     */
+    val opsLeftThisHour: Int? = null,
 ) {
     val radioConnected: Boolean get() = radioState == RADIO_CONNECTED
 
@@ -250,6 +257,7 @@ object MeshMessages {
             rssiDbm = if (rssi == MeshGateway.UNKNOWN_RSSI) null else rssi,
             batteryPercent = if (battery == MeshGateway.UNKNOWN_BATTERY) null else battery,
             txAirtimeTenthsThisHour = u8(f, 3) or (u8(f, 4) shl 8),
+            opsLeftThisHour = if (f.payload.size >= 6) u8(f, 5) else null,
         )
     }
 

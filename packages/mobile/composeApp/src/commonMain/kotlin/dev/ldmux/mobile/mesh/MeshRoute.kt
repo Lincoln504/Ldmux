@@ -99,20 +99,9 @@ fun capabilitiesOf(route: MeshRoute): RouteCapabilities = when (route) {
 const val MESH_RATE_NOTICE: String =
     "Low-rate command channel over LoRa. Replies take minutes, not milliseconds, and a sent command is not a delivered one."
 
-/**
- * Operations left this hour, from the gateway's airtime figure.
- *
- * The gateway reports its own transmit airtime this hour in 0.1 s units. The budget is
- * per-transmitter (36 s default). An "operation" is one uplink record plus its reply, so the
- * caller supplies the airtime one record costs on the radio's real preset; this returns 0
- * rather than a negative number when the budget is spent.
+/*
+ * Operations left this hour is NOT computed here. It arrives in `STATUS` as
+ * [MeshStatus.opsLeftThisHour], derived by the gateway from the radio's real preset. A function
+ * that took airtime-per-record would make this app carry radio knowledge, which the architecture
+ * forbids (meshmore-sns-architecture.md, responsibility matrix).
  */
-fun operationsLeft(
-    txAirtimeTenthsThisHour: Int,
-    budgetSeconds: Int = 36,
-    airtimePerRecordMs: Int,
-): Int {
-    require(airtimePerRecordMs > 0) { "airtime per record must be positive" }
-    val leftMs = budgetSeconds * 1000 - txAirtimeTenthsThisHour * 100
-    return if (leftMs <= 0) 0 else leftMs / airtimePerRecordMs
-}

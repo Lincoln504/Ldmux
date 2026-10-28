@@ -3,7 +3,6 @@ package dev.ldmux.mobile.mesh
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class MeshRouteTest {
@@ -58,15 +57,5 @@ class MeshRouteTest {
         assertTrue(m.timestampReplies); assertTrue(m.budgetInOperations)
         val t = capabilitiesOf(MeshRoute.Tailnet)
         assertTrue(t.liveCursor && t.keystrokeEcho && t.streamingOutput)
-    }
-
-    @Test
-    fun `operations left is the budget over per-record airtime and floors at zero`() {
-        // USA/Canada preset: 613 ms per 176 B record (MESH-GATEWAY / radio-config doc).
-        assertEquals(58, operationsLeft(0, 36, 613))
-        assertEquals(42, operationsLeft(100, 36, 613)) // 10.0 s used
-        assertEquals(0, operationsLeft(360, 36, 613))
-        assertEquals(0, operationsLeft(5000, 36, 613))
-        assertFailsWith<IllegalArgumentException> { operationsLeft(0, 36, 0) }
     }
 }

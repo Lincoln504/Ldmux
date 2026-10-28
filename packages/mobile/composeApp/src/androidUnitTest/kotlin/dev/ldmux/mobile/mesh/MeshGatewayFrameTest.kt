@@ -53,6 +53,22 @@ class MeshGatewayFrameTest {
     }
 
     @Test
+    fun `status carries the gateway's own operations-left byte, never derived here`() {
+        // Vector produced by the Dart reference: opsLeftThisHour 42, then the clamp at 255.
+        val a = MeshMessages.readStatus(MeshFrameDecoder().add(hex("4d47014000060000a65734122a")).single())!!
+        assertEquals(42, a.opsLeftThisHour)
+        assertEquals(0x1234, a.txAirtimeTenthsThisHour)
+        val b = MeshMessages.readStatus(MeshFrameDecoder().add(hex("4d47014000060000a6573412ff")).single())!!
+        assertEquals(255, b.opsLeftThisHour)
+    }
+
+    @Test
+    fun `an older five-byte status has no operations-left value, not zero`() {
+        val s = MeshMessages.readStatus(MeshFrameDecoder().add(hex("4d47014000050002a6573412")).single())!!
+        assertNull(s.opsLeftThisHour)
+    }
+
+    @Test
     fun `status decodes signed rssi, 16-bit little-endian airtime, and the two sentinels`() {
         val s = MeshMessages.readStatus(MeshFrameDecoder().add(hex("4d47014000050002a6573412")).single())!!
         assertEquals(2, s.radioState)
