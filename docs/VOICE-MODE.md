@@ -1,7 +1,12 @@
 # Live voice mode: hands-free conversation with a coding agent
 
-> **Status: research + design. Nothing in this document is implemented.** Written
-> 2026-10-06. This is the plan of record for a future feature; it is deliberately
+> **Status, 2026-10-28: partly implemented.** Built and tested: the daemon `speech` relay and
+> `ldmux speak`, the phone's OSC 1338 parser and `speech` message parser, `VoiceMode`, the
+> chunker, `VoiceDriver`, an Android `TextToSpeech` speaker, and the pi extension
+> (`packages/pi-voice-extension`, ADR-0022). **Not built:** the UI toggle that creates a
+> `VoiceDriver`, a separate voice-activity detector (Android's `SpeechRecognizer` endpoints on its
+> own), iOS, on-device verification of any of it, and real-pi verification of the extension
+> beyond unit tests with a faked pi API. See section 15. Written 2026-10-06. This is the plan of record for a future feature; it is deliberately
 > not an ADR, because no decision has been taken. Before implementation it needs
 > an ADR (a new one, plus an amendment to ADR-0009's "no pi extension" half) and
 > a `docs/SPEC.md` section. Every claim about the current code below names how it
@@ -412,3 +417,25 @@ in-band channel is an OSC, and the phone parses it, or it does not exist.
 - A `speak` tool instead of a fence. Costs a model round trip per turn.
 - Putting the speech channel on the daemon's byte fanout as a synthetic OSC.
   Cute, but it makes the wire carry a lie and a reattach loses it.
+
+## 15. What exists, 2026-10-28
+
+| Piece | Where | State |
+|---|---|---|
+| Daemon `speech` RPC, `speechChannel` feature, `ldmux speak` | `crates/daemon/src/{daemon,remote}.rs`, `bin/ldmux.rs` | Built. `tests/speech_relay.rs` (4) and the extended `cli_full_lifecycle`. |
+| OSC 1338 parser | `voice/SpeechOsc.kt` | Built. 12 tests: every split point, oversize, malformed, unknown version, other OSCs. 1338 is not claimed by the engine (ghostty `d5eba8d`, `osc.zig`, the `.@"133"` arm marks the next digit invalid). |
+| `speech` message on the page socket | `AttachClient.kt`, `WireJson.kt` | Built. The page advertises `speechChannel` always, because features are fixed at `hello`. |
+| `VoiceMode`, `chunkForSpeech`, `VoiceDriver` | `voice/` | Built, pure. 28 tests. |
+| `SpeechOutput` (TTS + audio focus) | `androidMain/.../SpeechOutput.android.kt` | Built, compiles, **not run on a device**. |
+| pi extension | `packages/pi-voice-extension` | Built. 11 `node --test` tests against a faked pi API and a fake daemon socket. Loads in pi 1.1 without error output; the `/voice` round trip inside a real session was not observed. |
+
+**Corrections to this document made while building.** Section 3.2 named
+`GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` as the mechanism (wrong, see section 3.2's correction).
+Section 5 said `pi.registerMarkdownTransformer` strips the fence: it exists in pi's typings
+(`types.d.ts:1252`) and is used, but it only changes what the interactive transcript renders, not
+what the model sees.
+
+**Remaining.** The in-app toggle and indicator (a `VoiceDriver` per app, `bind` on page change
+with the holder flag), the microphone permission flow around `Dictation`, a measured
+thinking-timeout, and the multi-shell announcement behaviour (dropped and counted today, off by
+design).

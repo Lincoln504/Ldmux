@@ -1,0 +1,9 @@
+{
+  "name": "ldmux-pi-voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "pi extension: speaks a short summary of each answer through the ldmux daemon (docs/VOICE-MODE.md, ADR-0022).",
+  "pi": { "extensions": ["./index.ts"] },
+  "scripts": { "test": "node --test test/*.test.ts" }
+}
