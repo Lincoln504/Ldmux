@@ -85,6 +85,12 @@ repo needs to know a frequency, a spreading factor or a preset.
   nothing acts on it yet).
 - **Real-radio measurement**: the session has run only against a fake gateway.
 
+## Voice mode
+
+Partly built 2026-10-28; `docs/VOICE-MODE.md` section 15 is the table. The daemon relay and CLI, the
+phone's two parsers, `VoiceMode`, an Android speaker and the pi extension exist and are tested.
+The in-app toggle, a separate VAD, iOS and any on-device run do not.
+
 ## What is deployed
 
 - `systemctl --user` units `ldmux` (source `deploy/ldmux.service`, runs
