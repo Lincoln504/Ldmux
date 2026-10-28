@@ -45,6 +45,7 @@ pub mod base64;
 pub mod frames;
 pub mod keeper;
 pub mod keeper_call;
+pub mod mesh_term;
 pub mod messages;
 pub mod net;
 pub mod pairing;
