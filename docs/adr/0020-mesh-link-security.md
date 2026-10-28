@@ -1,7 +1,9 @@
 # ADR-0020 — Mesh link security: an end-to-end Noise session inside MeshCore
 
-**Status:** Proposed (2026-10-06). Design only; nothing in this ADR is implemented.
-What does exist is the unencrypted L2 link this session would ride on: `crates/mesh`
+**Status:** Proposed (2026-10-06); partly implemented 2026-10-28 on the daemon side:
+`crates/session` has the handshake, the record layout and the ARQ, and ADR-0021 decided the
+crypto dependency. The phone side, padding, the pairing QR and the ML-KEM stage are not built.
+The link beneath it: `crates/mesh`
 and the daemon's `mesh.status`, verified against a real radio on 2026-10-28.
 
 - **Date:** 2026-10-06

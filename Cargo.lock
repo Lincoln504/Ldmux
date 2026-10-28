@@ -338,6 +338,7 @@ dependencies = [
  "ldmux-attach",
  "ldmux-mesh",
  "ldmux-protocol",
+ "ldmux-session",
  "ldmux-vt-sys",
  "nix",
  "rand",

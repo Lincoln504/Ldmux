@@ -221,6 +221,50 @@ fn print_mesh_status(v: &serde_json::Value) {
     {
         println!("retries  {reconnects}");
     }
+    if let Some(session) = v.get("session") {
+        print_mesh_session(session);
+    }
+}
+
+/// The L3 session's lines. `off` is a one-liner; everything else is facts the session knows.
+fn print_mesh_session(v: &serde_json::Value) {
+    let text = |key: &str| v.get(key).and_then(|t| t.as_str()).map(str::to_owned);
+    let number = |key: &str| v.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let state = text("state").unwrap_or_else(|| "unknown".to_owned());
+    if state == "off" {
+        println!("session  off (set LDMUX_MESH_PSK in the daemon's environment to enable it)");
+        return;
+    }
+    println!("session  {state}");
+    if let Some(key) = text("publicKey") {
+        println!("  gateway key  {key}");
+    }
+    match text("peerKey") {
+        Some(key) => println!("  phone key    {key} (pinned)"),
+        None => println!("  phone key    none yet"),
+    }
+    println!(
+        "  handshakes   {} accepted, {} refused",
+        number("handshakes"),
+        number("handshakesRefused")
+    );
+    println!(
+        "  records      {} sent, {} retransmitted, {} dropped, {} pending",
+        number("sent"),
+        number("retransmits"),
+        number("dropped"),
+        number("pending")
+    );
+    println!("  received     {} bytes", number("receivedBytes"));
+    if number("budgetStalls") > 0 {
+        println!(
+            "  held back    {} times by the airtime budget",
+            number("budgetStalls")
+        );
+    }
+    if let Some(err) = text("lastError") {
+        println!("  last         {err}");
+    }
 }
 
 /// Print the usage line.

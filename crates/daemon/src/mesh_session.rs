@@ -1,0 +1,576 @@
+//! The daemon's end of the L3 session: the gateway side of the Noise handshake, then the
+//! encrypted, ordered stream over opaque L2 records.
+//!
+//! [`SessionHost`] is synchronous and holds no socket and no clock: the L2 loop in
+//! [`crate::mesh`] feeds it records and time and sends what it returns. That keeps every
+//! rule here (airtime budget, handshake gating, persistence, bounded queues) testable
+//! without a radio, and keeps all radio knowledge on the far side of the L2 contract.
+//!
+//! Persistence is two files in the state directory, both `0600`:
+//!
+//! - `mesh-session.key`: the gateway's static key, 64 bytes (private then public), made on
+//!   first use. `snow` cannot derive a public key from a private one, so both are stored.
+//! - `mesh-pairing.json`: the pinned phone key and the last accepted handshake timestamp.
+//!   If this cannot be written, the handshake is **refused**: an unrecorded timestamp
+//!   would reopen replay of message 1.
+
+use std::collections::VecDeque;
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use ldmux_session::arq::{Delivered, Limits, Stats};
+use ldmux_session::handshake::{self, HandshakeError, Keypair, PairingEntry, Responder};
+use ldmux_session::{Inbound, Session};
+
+/// Records an accepted handshake before it is answered.
+pub type Persister = Box<dyn FnMut(&PairingEntry) -> std::io::Result<()> + Send>;
+
+/// Inbound application bytes the daemon keeps for its (future) terminal bridge. Bounded: a
+/// consumer that is not draining makes the oldest go, it does not make memory grow.
+pub const INBOUND_MAX: usize = 1024;
+/// Chunks the application may have queued toward the phone.
+pub const OUTBOUND_MAX_BYTES: usize = 8 * 1024;
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct SessionSnapshot {
+    /// `off` (no PSK configured), `waiting` (no handshake on this link yet), `established`.
+    /// A session that dies (retries exhausted, peer close) goes back to `waiting` with the
+    /// reason in `last_error`.
+    pub state: &'static str,
+    /// The gateway's static public key, hex: what a phone must be given to pair.
+    pub public_key: String,
+    /// The pinned phone key, hex, once one has handshaken.
+    pub peer_key: Option<String>,
+    pub handshakes: u32,
+    pub handshakes_refused: u32,
+    pub sent: u32,
+    pub retransmits: u32,
+    pub received_bytes: u64,
+    pub dropped: u32,
+    pub pending: usize,
+    pub budget_stalls: u32,
+    pub last_error: Option<String>,
+}
+
+impl SessionSnapshot {
+    #[must_use]
+    pub fn off() -> Self {
+        Self {
+            state: "off",
+            ..Self::default()
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.state,
+            "publicKey": self.public_key,
+            "peerKey": self.peer_key,
+            "handshakes": self.handshakes,
+            "handshakesRefused": self.handshakes_refused,
+            "sent": self.sent,
+            "retransmits": self.retransmits,
+            "receivedBytes": self.received_bytes,
+            "dropped": self.dropped,
+            "pending": self.pending,
+            "budgetStalls": self.budget_stalls,
+            "lastError": self.last_error,
+        })
+    }
+}
+
+/// What the gateway's side of one L2 connection knows about the session.
+pub struct SessionHost {
+    responder: Responder,
+    pairing: PairingEntry,
+    persist: Persister,
+    session: Option<Session>,
+    /// Handshake replies waiting for budget. Sent before any session record.
+    outbox: VecDeque<Vec<u8>>,
+    next_index: u8,
+    record_limit: usize,
+    pub inbound: VecDeque<(u8, Vec<u8>)>,
+    refused: u32,
+    handshakes: u32,
+    last_error: Option<String>,
+    queued_bytes: usize,
+}
+
+impl SessionHost {
+    pub fn new(
+        static_key: Keypair,
+        pairing: PairingEntry,
+        record_limit: usize,
+        persist: Persister,
+    ) -> Self {
+        Self {
+            responder: Responder::new(static_key),
+            pairing,
+            persist,
+            session: None,
+            outbox: VecDeque::new(),
+            next_index: 1,
+            record_limit,
+            inbound: VecDeque::new(),
+            refused: 0,
+            handshakes: 0,
+            last_error: None,
+            queued_bytes: 0,
+        }
+    }
+
+    /// One record arrived from the tunnel. `now_ms` is monotonic (ARQ timers); `wall_ms` is Unix
+    /// time (the handshake timestamp window).
+    pub fn on_record(&mut self, now_ms: u64, wall_ms: u64, record: &[u8]) {
+        match record.first().copied() {
+            Some(handshake::KIND_MSG1) => self.on_handshake(wall_ms, now_ms, record),
+            Some(ldmux_session::record::KIND_TRANSPORT) => {
+                let Some(session) = self.session.as_mut() else {
+                    // Transport data with no session: stale after a restart. Not an error
+                    // worth a message per record; the phone will handshake again.
+                    self.last_error = Some("transport record with no session".to_owned());
+                    return;
+                };
+                match session.receive(now_ms, record) {
+                    Ok(Inbound::Data(chunks)) => self.take(chunks),
+                    Ok(Inbound::Quiet) => {}
+                    Ok(Inbound::Closed) => {
+                        self.session = None;
+                        self.last_error = Some("the phone closed the session".to_owned());
+                    }
+                    Err(e) => self.last_error = Some(format!("record dropped: {e:?}")),
+                }
+            }
+            _ => self.last_error = Some("unknown record kind".to_owned()),
+        }
+    }
+
+    fn take(&mut self, chunks: Vec<Delivered>) {
+        for c in chunks {
+            if self.inbound.len() >= INBOUND_MAX {
+                self.inbound.pop_front();
+            }
+            self.inbound.push_back((c.shell, c.payload));
+        }
+    }
+
+    fn on_handshake(&mut self, wall_ms: u64, now_ms: u64, msg1: &[u8]) {
+        let index = self.next_index;
+        let accepted =
+            match self
+                .responder
+                .accept(std::slice::from_ref(&self.pairing), wall_ms, msg1, index)
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    self.refused += 1;
+                    self.last_error = Some(format!("handshake refused: {}", describe(e)));
+                    return;
+                }
+            };
+        let mut updated = self.pairing.clone();
+        updated.pinned = Some(accepted.remote_static);
+        updated.last_timestamp_ms = accepted.timestamp_ms;
+        if let Err(e) = (self.persist)(&updated) {
+            self.refused += 1;
+            self.last_error = Some(format!("handshake refused: could not record it ({e})"));
+            return;
+        }
+        match Session::new(accepted.established, self.record_limit, now_ms) {
+            Ok(session) => {
+                self.pairing = updated;
+                self.session = Some(session);
+                self.outbox.clear();
+                self.outbox.push_back(accepted.reply);
+                self.next_index = self.next_index.wrapping_add(1).max(1);
+                self.handshakes += 1;
+                self.last_error = None;
+            }
+            Err(e) => {
+                self.refused += 1;
+                self.last_error = Some(format!("session refused: {e:?}"));
+            }
+        }
+    }
+
+    /// Queue application bytes toward the phone. Fails, visibly, when there is no session or the
+    /// queue is full; it never buffers across a gap.
+    pub fn send(&mut self, shell: u8, bytes: &[u8]) -> Result<(), String> {
+        let Some(session) = self.session.as_mut() else {
+            return Err("no session is established".to_owned());
+        };
+        if self.queued_bytes + bytes.len() > OUTBOUND_MAX_BYTES {
+            return Err("the outbound queue is full".to_owned());
+        }
+        session.send(shell, bytes).map_err(|e| format!("{e:?}"))?;
+        self.queued_bytes += bytes.len();
+        Ok(())
+    }
+
+    /// Records to hand to the tunnel now: at most `min(records_left, l2_slots)`, handshake
+    /// replies first.
+    pub fn poll(&mut self, now_ms: u64, limits: Limits) -> Vec<Vec<u8>> {
+        let mut budget = limits.records_left.min(limits.l2_slots);
+        let mut out = Vec::new();
+        while budget > 0 {
+            match self.outbox.pop_front() {
+                Some(r) => {
+                    out.push(r);
+                    budget -= 1;
+                }
+                None => break,
+            }
+        }
+        if let Some(session) = self.session.as_mut() {
+            // A handshake reply still waiting for budget must not be overtaken by data.
+            if self.outbox.is_empty() {
+                let rest = Limits {
+                    records_left: budget,
+                    l2_slots: budget,
+                };
+                match session.poll(now_ms, rest) {
+                    Ok(records) => out.extend(records),
+                    Err(e) => self.last_error = Some(format!("seal failed: {e:?}")),
+                }
+                self.queued_bytes = session_pending_bytes(session, self.queued_bytes);
+            }
+            if session.arq().failure().is_some() {
+                self.last_error =
+                    Some("the phone stopped acknowledging: retries exhausted".to_owned());
+                self.session = None;
+                self.queued_bytes = 0;
+            }
+        }
+        out
+    }
+
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.session.as_ref().and_then(|s| s.arq().next_deadline())
+    }
+
+    #[must_use]
+    pub fn established(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// `true` when there is something that needs `poll` soon.
+    #[must_use]
+    pub fn wants_poll(&self) -> bool {
+        !self.outbox.is_empty() || self.session.as_ref().is_some_and(|s| s.arq().pending() > 0)
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> SessionSnapshot {
+        let stats: Stats = self
+            .session
+            .as_ref()
+            .map(|s| s.arq().stats())
+            .unwrap_or_default();
+        SessionSnapshot {
+            state: if self.session.is_some() {
+                "established"
+            } else {
+                "waiting"
+            },
+            public_key: hex(&self.responder.static_key.public),
+            peer_key: self.pairing.pinned.map(|k| hex(&k)),
+            handshakes: self.handshakes,
+            handshakes_refused: self.refused,
+            sent: stats.sent,
+            retransmits: stats.retransmits,
+            received_bytes: stats.delivered_bytes,
+            dropped: self.session.as_ref().map_or(0, |s| s.dropped),
+            pending: self.session.as_ref().map_or(0, |s| s.arq().pending()),
+            budget_stalls: stats.budget_stalls,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+/// The byte count still queued is not tracked per chunk by the ARQ, so once it has nothing
+/// pending the counter resets; otherwise it keeps its (conservative, over-) estimate.
+fn session_pending_bytes(session: &Session, current: usize) -> usize {
+    if session.arq().pending() == 0 {
+        0
+    } else {
+        current
+    }
+}
+
+fn describe(e: HandshakeError) -> &'static str {
+    match e {
+        HandshakeError::Malformed => "malformed",
+        HandshakeError::BadFilter => "unknown or wrong pre-shared key",
+        HandshakeError::Stale => "timestamp outside the window (is the phone's clock right?)",
+        HandshakeError::Replay => "replayed or out-of-order timestamp",
+        HandshakeError::PinMismatch => "a different phone key presented the pairing's key",
+        HandshakeError::Crypto => "cryptographic failure",
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Both files, loaded or created.
+pub struct SessionFiles {
+    pub key: Keypair,
+    pub pairing: PairingEntry,
+    pairing_path: PathBuf,
+}
+
+impl SessionFiles {
+    /// The pairing as last written to disk. Each L2 connection starts from this, not from the
+    /// copy loaded at startup: the handshake timestamp an earlier connection accepted must
+    /// still bar a replay of that same message 1 after a reconnect.
+    pub fn current_pairing(&self) -> PairingEntry {
+        match fs::read_to_string(&self.pairing_path)
+            .ok()
+            .as_deref()
+            .and_then(parse_pairing)
+        {
+            Some((pinned, last)) => PairingEntry {
+                psk: self.pairing.psk,
+                pinned,
+                last_timestamp_ms: last,
+            },
+            None => self.pairing.clone(),
+        }
+    }
+}
+
+impl SessionFiles {
+    /// `psk` comes from the environment; everything else lives in `state_dir`.
+    pub fn load(state_dir: &Path, psk: [u8; 32]) -> Result<Self, String> {
+        let key_path = state_dir.join("mesh-session.key");
+        let key = match fs::read(&key_path) {
+            Ok(b) if b.len() == 64 => {
+                let mut private = [0u8; 32];
+                let mut public = [0u8; 32];
+                private.copy_from_slice(&b[..32]);
+                public.copy_from_slice(&b[32..]);
+                Keypair::from_parts(private, public)
+            }
+            Ok(_) => return Err(format!("{} is not a 64-byte key file", key_path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let key = Keypair::generate().map_err(|e| format!("{e:?}"))?;
+                let mut bytes = Vec::with_capacity(64);
+                bytes.extend_from_slice(&key.private);
+                bytes.extend_from_slice(&key.public);
+                write_private(&key_path, &bytes).map_err(|e| e.to_string())?;
+                key
+            }
+            Err(e) => return Err(format!("{}: {e}", key_path.display())),
+        };
+        let pairing_path = state_dir.join("mesh-pairing.json");
+        let (pinned, last) = match fs::read_to_string(&pairing_path) {
+            Ok(text) => parse_pairing(&text)
+                .ok_or_else(|| format!("{} is unreadable", pairing_path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, 0),
+            Err(e) => return Err(format!("{}: {e}", pairing_path.display())),
+        };
+        Ok(Self {
+            key,
+            pairing: PairingEntry {
+                psk,
+                pinned,
+                last_timestamp_ms: last,
+            },
+            pairing_path,
+        })
+    }
+
+    /// A copy of the static key (each L2 connection builds its own host).
+    #[must_use]
+    pub fn clone_key(&self) -> Keypair {
+        Keypair::from_parts(self.key.private, self.key.public)
+    }
+
+    /// The closure the host calls to record an accepted handshake.
+    pub fn persister(&self) -> Persister {
+        let path = self.pairing_path.clone();
+        Box::new(move |p: &PairingEntry| {
+            let json = serde_json::json!({
+                "pinned": p.pinned.map(|k| hex(&k)),
+                "lastTimestampMs": p.last_timestamp_ms,
+            });
+            write_private(&path, json.to_string().as_bytes())
+        })
+    }
+}
+
+fn parse_pairing(text: &str) -> Option<(Option<[u8; 32]>, u64)> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let last = v.get("lastTimestampMs")?.as_u64()?;
+    let pinned = match v.get("pinned")? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) if s.len() == 64 => {
+            let mut k = [0u8; 32];
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+            }
+            Some(k)
+        }
+        _ => return None,
+    };
+    Some((pinned, last))
+}
+
+/// Write a secret file `0600` from the first byte, atomically (write a sibling, then rename).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ldmux_session::arq::Limits;
+    use ldmux_session::handshake::Initiator;
+    use std::sync::{Arc, Mutex};
+
+    const PSK: [u8; 32] = [5; 32];
+    const WALL: u64 = 1_800_000_000_000;
+
+    fn host(persist_ok: bool) -> (SessionHost, [u8; 32], Arc<Mutex<Vec<PairingEntry>>>) {
+        let key = Keypair::generate().unwrap();
+        let public = key.public;
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let s = Arc::clone(&saved);
+        let persist: Persister = Box::new(move |p| {
+            if !persist_ok {
+                return Err(std::io::Error::other("disk full"));
+            }
+            s.lock().unwrap().push(p.clone());
+            Ok(())
+        });
+        let h = SessionHost::new(
+            key,
+            PairingEntry {
+                psk: PSK,
+                pinned: None,
+                last_timestamp_ms: 0,
+            },
+            172,
+            persist,
+        );
+        (h, public, saved)
+    }
+
+    #[test]
+    fn a_handshake_is_answered_only_within_budget_and_recorded_first() {
+        let (mut h, gw_pub, saved) = host(true);
+        let phone = Keypair::generate().unwrap();
+        let (_i, m1) = Initiator::start(&phone, &gw_pub, &PSK, WALL).unwrap();
+        h.on_record(0, WALL, &m1);
+        assert!(h.established());
+        assert_eq!(
+            saved.lock().unwrap().len(),
+            1,
+            "the timestamp is persisted before the reply"
+        );
+        // No airtime: the reply is held, not dropped.
+        assert!(
+            h.poll(
+                0,
+                Limits {
+                    records_left: 0,
+                    l2_slots: 8
+                }
+            )
+            .is_empty()
+        );
+        assert!(h.wants_poll());
+        let out = h.poll(
+            1,
+            Limits {
+                records_left: 1,
+                l2_slots: 8,
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 50);
+    }
+
+    #[test]
+    fn when_the_pairing_cannot_be_recorded_the_handshake_is_refused() {
+        let (mut h, gw_pub, _) = host(false);
+        let phone = Keypair::generate().unwrap();
+        let (_i, m1) = Initiator::start(&phone, &gw_pub, &PSK, WALL).unwrap();
+        h.on_record(0, WALL, &m1);
+        assert!(!h.established());
+        assert!(
+            h.snapshot()
+                .last_error
+                .unwrap()
+                .contains("could not record")
+        );
+    }
+
+    #[test]
+    fn a_wrong_psk_or_stale_clock_is_refused_with_a_reason_and_counted() {
+        let (mut h, gw_pub, _) = host(true);
+        let phone = Keypair::generate().unwrap();
+        let (_i, bad) = Initiator::start(&phone, &gw_pub, &[1; 32], WALL).unwrap();
+        h.on_record(0, WALL, &bad);
+        assert!(h.snapshot().last_error.unwrap().contains("pre-shared key"));
+        let (_i, old) = Initiator::start(&phone, &gw_pub, &PSK, WALL - 3_600_000).unwrap();
+        h.on_record(0, WALL, &old);
+        assert!(h.snapshot().last_error.unwrap().contains("clock"));
+        assert_eq!(h.snapshot().handshakes_refused, 2);
+        assert!(!h.established());
+    }
+
+    #[test]
+    fn nothing_is_sent_without_a_session_and_the_queue_is_bounded() {
+        let (mut h, gw_pub, _) = host(true);
+        assert!(h.send(0, b"x").is_err());
+        let phone = Keypair::generate().unwrap();
+        let (_i, m1) = Initiator::start(&phone, &gw_pub, &PSK, WALL).unwrap();
+        h.on_record(0, WALL, &m1);
+        assert!(h.send(0, &vec![0u8; OUTBOUND_MAX_BYTES]).is_ok());
+        assert!(h.send(0, b"x").unwrap_err().contains("full"));
+    }
+
+    #[test]
+    fn the_files_are_0600_and_the_key_and_pin_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("ldmux-session-files-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = SessionFiles::load(&dir, PSK).unwrap();
+        let mode = |n: &str| fs::metadata(dir.join(n)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("mesh-session.key"), 0o600);
+        let mut persist = a.persister();
+        persist(&PairingEntry {
+            psk: PSK,
+            pinned: Some([9; 32]),
+            last_timestamp_ms: 77,
+        })
+        .unwrap();
+        assert_eq!(mode("mesh-pairing.json"), 0o600);
+        let b = SessionFiles::load(&dir, PSK).unwrap();
+        assert_eq!(
+            b.key.public, a.key.public,
+            "the gateway key is stable across restarts"
+        );
+        assert_eq!(b.pairing.pinned, Some([9; 32]));
+        assert_eq!(b.pairing.last_timestamp_ms, 77);
+        fs::write(dir.join("mesh-session.key"), b"short").unwrap();
+        assert!(
+            SessionFiles::load(&dir, PSK).is_err(),
+            "a corrupt key is an error, not a new key"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

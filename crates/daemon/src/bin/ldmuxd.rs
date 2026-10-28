@@ -131,6 +131,18 @@ fn main() {
         }
     };
 
+    let mesh_session = match ldmux_daemon::mesh::SessionSetup::from_env(&state_dir) {
+        Ok(setup) => setup,
+        Err(e) => {
+            eprintln!("ldmuxd: {e}");
+            std::process::exit(1);
+        }
+    };
+    if mesh_session.is_some() && mesh_cfg.is_none() {
+        eprintln!("ldmuxd: LDMUX_MESH_PSK is set but the link is not (LDMUX_MESH_ADDR, _TOKEN, _PEER)");
+        std::process::exit(1);
+    }
+
     // Wrap the daemon in an `Arc<tokio::sync::Mutex>` so the control socket's
     // spawned tasks can call `handle` (which takes `&mut self`).
     let daemon_arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
@@ -148,7 +160,10 @@ fn main() {
                 }
                 shown
             });
-            ldmux_daemon::mesh::MeshRuntime::start(cfg).install();
+            if let Some(session) = &mesh_session {
+                println!("ldmuxd: mesh session on; gateway key {}", session.public_key_hex());
+            }
+            ldmux_daemon::mesh::MeshRuntime::start_with_session(cfg, mesh_session).install();
         }
         // The handlers go in **before** `start`: a SIGTERM that arrives while
         // the daemon is starting is held by the stream and acted on as soon as

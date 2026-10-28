@@ -14,17 +14,27 @@
 //! LDMUX_MESH_PEER   615f431f...           the peer's public key, 64 hex chars
 //! ```
 //!
-//! All three or none. A partial configuration is a startup error rather than a
+//! A fourth, optional, `LDMUX_MESH_PSK` (64 hex characters, the pairing's pre-shared key)
+//! turns on the L3 session ([`crate::mesh_session`]); without it, downlink records are
+//! dropped with a visible `last_error`, as before.
+//!
+//! All three of the first group or none. A partial configuration is a startup error rather than a
 //! silent no-op: a daemon that looks configured and is not is worse than one
 //! that refuses to guess.
 
+use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ldmux_mesh::client::MeshClient;
-use ldmux_mesh::constants::{CAP_STATUS_PUSH, FrameType, RadioState, SendOutcome};
+use ldmux_mesh::constants::{CAP_STATUS_PUSH, CREDIT_WINDOW, FrameType, RadioState, SendOutcome};
 use ldmux_mesh::frame::MeshError;
 use ldmux_mesh::messages;
+use ldmux_session::arq::Limits;
+use tokio::sync::Notify;
+
+use crate::mesh_session::{INBOUND_MAX, SessionFiles, SessionHost, SessionSnapshot};
 
 /// The three settings that turn the link on.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -91,6 +101,34 @@ impl MeshConfig {
     }
 }
 
+/// The L3 session's configuration: the pairing's PSK and the files beside the other state.
+pub struct SessionSetup {
+    files: SessionFiles,
+}
+
+impl SessionSetup {
+    /// `Ok(None)` when `LDMUX_MESH_PSK` is not set.
+    pub fn from_env(state_dir: &Path) -> Result<Option<Self>, String> {
+        let Ok(text) = std::env::var("LDMUX_MESH_PSK") else {
+            return Ok(None);
+        };
+        let psk = parse_hex::<32>(&text, "LDMUX_MESH_PSK")?;
+        Ok(Some(Self::new(state_dir, psk)?))
+    }
+
+    pub fn new(state_dir: &Path, psk: [u8; 32]) -> Result<Self, String> {
+        Ok(Self {
+            files: SessionFiles::load(state_dir, psk)?,
+        })
+    }
+
+    /// The gateway's public key, hex: what a phone must be given to pair.
+    #[must_use]
+    pub fn public_key_hex(&self) -> String {
+        hex(&self.files.key.public)
+    }
+}
+
 fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
     let text = text.trim();
     if text.len() != N * 2 {
@@ -132,6 +170,8 @@ pub struct MeshSnapshot {
     pub last_error: Option<String>,
     /// How many times the supervisor has reconnected.
     pub reconnects: u32,
+    /// The L3 session on top of the link.
+    pub session: SessionSnapshot,
 }
 
 impl MeshSnapshot {
@@ -148,6 +188,7 @@ impl MeshSnapshot {
             tx_airtime_tenths: 0,
             last_error: None,
             reconnects: 0,
+            session: SessionSnapshot::off(),
         }
     }
 
@@ -165,14 +206,24 @@ impl MeshSnapshot {
             "txAirtimeTenths": self.tx_airtime_tenths,
             "lastError": self.last_error,
             "reconnects": self.reconnects,
+            "session": self.session.to_json(),
         })
     }
+}
+
+/// Bytes crossing between the daemon and the session task.
+#[derive(Default)]
+struct Exchange {
+    outbound: VecDeque<(u8, Vec<u8>)>,
+    inbound: VecDeque<(u8, Vec<u8>)>,
 }
 
 /// The running link, shared with the RPC handler.
 #[derive(Clone)]
 pub struct MeshRuntime {
     snapshot: Arc<Mutex<MeshSnapshot>>,
+    exchange: Arc<Mutex<Exchange>>,
+    wake: Arc<Notify>,
 }
 
 static GLOBAL: OnceLock<MeshRuntime> = OnceLock::new();
@@ -183,12 +234,50 @@ impl MeshRuntime {
     /// Never fails: a link that is down is a state, and the daemon must start
     /// whether or not a radio is attached. Failures land in the snapshot.
     pub fn start(cfg: MeshConfig) -> Self {
-        let snapshot = Arc::new(Mutex::new(MeshSnapshot::new(&cfg)));
+        Self::start_with_session(cfg, None)
+    }
+
+    /// As [`Self::start`], with the L3 session if `session` is given.
+    pub fn start_with_session(cfg: MeshConfig, session: Option<SessionSetup>) -> Self {
+        let mut first = MeshSnapshot::new(&cfg);
+        if let Some(setup) = &session {
+            first.session = SessionSnapshot {
+                state: "waiting",
+                public_key: setup.public_key_hex(),
+                peer_key: setup.files.pairing.pinned.map(|k| hex(&k)),
+                ..SessionSnapshot::default()
+            };
+        }
+        let snapshot = Arc::new(Mutex::new(first));
         let runtime = Self {
             snapshot: Arc::clone(&snapshot),
+            exchange: Arc::new(Mutex::new(Exchange::default())),
+            wake: Arc::new(Notify::new()),
         };
-        tokio::spawn(supervise(cfg, snapshot));
+        tokio::spawn(supervise(cfg, session, runtime.clone()));
         runtime
+    }
+
+    /// Queue bytes for `shell` toward the phone. Fails, visibly, unless a session is
+    /// established; bytes are never held across a gap in the session.
+    pub fn send(&self, shell: u8, bytes: &[u8]) -> Result<(), String> {
+        if self.snapshot().session.state != "established" {
+            return Err("no session is established".to_owned());
+        }
+        let mut ex = self.exchange.lock().map_err(|_| "poisoned".to_owned())?;
+        ex.outbound.push_back((shell, bytes.to_vec()));
+        drop(ex);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Application bytes the phone has sent, in order, `(shell, bytes)`.
+    #[must_use]
+    pub fn take_inbound(&self) -> Vec<(u8, Vec<u8>)> {
+        self.exchange
+            .lock()
+            .map(|mut ex| ex.inbound.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// Makes this runtime the one the RPC handler answers from.
@@ -224,6 +313,7 @@ impl MeshRuntime {
             "txAirtimeTenths": 0,
             "lastError": serde_json::Value::Null,
             "reconnects": 0,
+            "session": SessionSnapshot::off().to_json(),
         })
     }
 }
@@ -238,7 +328,8 @@ pub fn status_json() -> serde_json::Value {
 }
 
 /// One connection's lifetime, then a reconnect.
-async fn supervise(cfg: MeshConfig, snapshot: Arc<Mutex<MeshSnapshot>>) {
+async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: MeshRuntime) {
+    let snapshot = Arc::clone(&runtime.snapshot);
     let mut backoff = Duration::from_secs(1);
     let mut reconnects: u32 = 0;
     loop {
@@ -246,7 +337,7 @@ async fn supervise(cfg: MeshConfig, snapshot: Arc<Mutex<MeshSnapshot>>) {
             s.state = "connecting";
             s.last_error = None;
         });
-        match session(&cfg, &snapshot).await {
+        match session(&cfg, &runtime, setup.as_mut()).await {
             Ok(()) => {
                 set(&snapshot, |s| {
                     s.state = "down";
@@ -265,6 +356,9 @@ async fn supervise(cfg: MeshConfig, snapshot: Arc<Mutex<MeshSnapshot>>) {
             s.reconnects = reconnects;
             s.records_left = None;
             s.uplink_record_max = None;
+            if s.session.state != "off" {
+                s.session.state = "waiting";
+            }
         });
         tokio::time::sleep(backoff).await;
         // Capped: a radio that is off for an hour should not be dialled every
@@ -279,8 +373,19 @@ fn set(snapshot: &Arc<Mutex<MeshSnapshot>>, f: impl FnOnce(&mut MeshSnapshot)) {
     }
 }
 
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// One connected session, from handshake to close.
-async fn session(cfg: &MeshConfig, snapshot: &Arc<Mutex<MeshSnapshot>>) -> Result<(), MeshError> {
+async fn session(
+    cfg: &MeshConfig,
+    runtime: &MeshRuntime,
+    setup: Option<&mut SessionSetup>,
+) -> Result<(), MeshError> {
+    let snapshot = &runtime.snapshot;
     let mut client = MeshClient::connect(&cfg.addr).await?;
     set(snapshot, |s| s.state = "handshaking");
     let handshake = client
@@ -293,44 +398,125 @@ async fn session(cfg: &MeshConfig, snapshot: &Arc<Mutex<MeshSnapshot>>) -> Resul
         s.last_error = None;
     });
 
+    // The L3 host lives as long as this L2 connection: a reconnect means a new handshake
+    // (ADR-0020 section 3), so nothing here outlives the socket.
+    let mut host: Option<SessionHost> = setup.as_ref().map(|s| {
+        let key = crate::mesh_session::SessionFiles::clone_key(&s.files);
+        SessionHost::new(
+            key,
+            s.files.current_pairing(),
+            usize::from(handshake.bind.uplink_record_max),
+            s.files.persister(),
+        )
+    });
+    let started = Instant::now();
+    let mut budget: Option<u8> = None;
+    let mut awaiting: u8 = 0;
+    let mut seq: u8 = 0;
+
     loop {
-        let frame = client.recv().await?;
-        match frame.kind {
-            FrameType::Status => {
-                let status = messages::read_status(&frame)?;
-                set(snapshot, |s| {
-                    s.radio_state = Some(status.radio_state);
-                    s.rssi = status.rssi;
-                    s.battery_percent = status.battery_percent;
-                    s.tx_airtime_tenths = status.tx_airtime_tenths_this_hour;
-                    if status.ops_left_this_hour.is_some() {
-                        s.records_left = status.ops_left_this_hour;
+        let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let wait = host
+            .as_ref()
+            .and_then(SessionHost::next_deadline)
+            .map_or(Duration::from_secs(3600), |d| {
+                Duration::from_millis(d.saturating_sub(now_ms))
+            });
+        tokio::select! {
+            frame = client.recv() => {
+                let frame = frame?;
+                match frame.kind {
+                    FrameType::Status => {
+                        let status = messages::read_status(&frame)?;
+                        if status.ops_left_this_hour.is_some() {
+                            budget = status.ops_left_this_hour;
+                        }
+                        set(snapshot, |s| {
+                            s.radio_state = Some(status.radio_state);
+                            s.rssi = status.rssi;
+                            s.battery_percent = status.battery_percent;
+                            s.tx_airtime_tenths = status.tx_airtime_tenths_this_hour;
+                            if status.ops_left_this_hour.is_some() {
+                                s.records_left = status.ops_left_this_hour;
+                            }
+                        });
                     }
-                });
-            }
-            FrameType::Recv => {
-                // The L3 session that consumes records does not exist yet, so a
-                // downlink record is deliberately dropped here rather than
-                // queued forever. Recorded as an error so it is visible.
-                set(snapshot, |s| {
-                    s.last_error =
-                        Some("a downlink record arrived; no session consumes them yet".to_owned());
-                });
-            }
-            FrameType::SendResult => {
-                let result = messages::read_send_result(&frame)?;
-                if result.outcome == SendOutcome::ErrBusy {
-                    set(snapshot, |s| {
-                        s.last_error = Some("the radio refused a record (busy)".to_owned());
-                    });
+                    FrameType::Recv => {
+                        let record = messages::read_recv(&frame)?;
+                        match host.as_mut() {
+                            Some(h) => {
+                                let now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                                h.on_record(now, now_unix_ms(), &record.0);
+                            }
+                            None => set(snapshot, |s| {
+                                s.last_error = Some(
+                                    "a downlink record arrived; no session is configured (LDMUX_MESH_PSK)"
+                                        .to_owned(),
+                                );
+                            }),
+                        }
+                    }
+                    FrameType::SendResult => {
+                        awaiting = awaiting.saturating_sub(1);
+                        let result = messages::read_send_result(&frame)?;
+                        if result.outcome == SendOutcome::ErrBusy {
+                            set(snapshot, |s| {
+                                s.last_error = Some("the radio refused a record (busy)".to_owned());
+                            });
+                        }
+                    }
+                    FrameType::Close => {
+                        let reason = messages::read_close(&frame)?;
+                        return Err(MeshError::Refused("close", reason.code()));
+                    }
+                    _ => {}
                 }
             }
-            FrameType::Close => {
-                let reason = messages::read_close(&frame)?;
-                return Err(MeshError::Refused("close", reason.code()));
-            }
-            _ => {}
+            () = tokio::time::sleep(wait) => {}
+            () = runtime.wake.notified() => {}
         }
+
+        let Some(h) = host.as_mut() else { continue };
+        let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // Application bytes queued by the daemon go into the ARQ; a refusal is shown, not hidden.
+        let queued: Vec<(u8, Vec<u8>)> = runtime
+            .exchange
+            .lock()
+            .map(|mut ex| ex.outbound.drain(..).collect())
+            .unwrap_or_default();
+        for (shell, bytes) in queued {
+            if let Err(e) = h.send(shell, &bytes) {
+                set(snapshot, |s| {
+                    s.last_error = Some(format!("session send refused: {e}"))
+                });
+            }
+        }
+
+        // The budget is the gateway's own number. Unknown means zero: a gateway that has not
+        // said how much airtime is left has not allowed anything.
+        let limits = Limits {
+            records_left: budget.unwrap_or(0),
+            l2_slots: CREDIT_WINDOW.saturating_sub(awaiting),
+        };
+        for record in h.poll(now_ms, limits) {
+            client.send_record(seq, &record).await?;
+            seq = seq.wrapping_add(1);
+            awaiting = awaiting.saturating_add(1);
+            budget = budget.map(|b| b.saturating_sub(1));
+            set(snapshot, |s| s.records_left = budget);
+        }
+
+        let view = h.snapshot();
+        if let Ok(mut ex) = runtime.exchange.lock() {
+            while let Some(item) = h.inbound.pop_front() {
+                if ex.inbound.len() >= INBOUND_MAX {
+                    ex.inbound.pop_front();
+                }
+                ex.inbound.push_back(item);
+            }
+        }
+        set(snapshot, |s| s.session = view);
     }
 }
 

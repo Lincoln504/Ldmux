@@ -502,3 +502,22 @@ own arithmetic: 36 s of airtime per hour divided by a 176-byte frame at
 
 Note what is *not* owed: the daemon must never speak MeshCore. It talks L2 to
 this process, which owns the radio.
+
+## 13. The L3 session, daemon side, 2026-10-28
+
+The boundary did not move: the gateway still carries opaque records and the session is
+LDMUX's. What changed is that the daemon now consumes `RECV`. With `LDMUX_MESH_PSK` set, a
+record starting `0x11` is a handshake message 1 and `0x13` is a transport record
+(`crates/daemon/src/mesh_session.rs`); anything else is dropped with a reason in
+`mesh.status`'s `session.lastError`. Without it the old behaviour holds (dropped, visibly).
+
+Facts a gateway implementer can rely on:
+
+- Every record the daemon hands over, handshake reply and retransmission included, is
+  charged against the last `opsLeftThisHour` it saw, and an unreported budget is zero.
+  `crates/daemon/tests/mesh_session.rs` pins it (and was mutation-checked: replacing the
+  budget with 255 fails `the_daemon_never_transmits_past_the_records_the_gateway_says_remain`).
+- The daemon keeps at most `CREDIT_WINDOW` (8) records awaiting `SEND_RESULT`.
+- A reconnect to the gateway means a new handshake. The session never outlives the L2 socket.
+- The carrier still exports only `RECORD_MAX`. Payload is 144 bytes per record at 172, and
+  that figure is in `ldmux_session::arq`, not here.
