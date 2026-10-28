@@ -18,7 +18,7 @@ package dev.ldmux.mobile.mesh
 class MeshSession internal constructor(
     private val lib: SessionLib,
     handle: Long,
-) {
+) : SessionPort {
     private var handle: Long = handle
 
     /** Whether this session can still be used. False after [close]. */
@@ -41,7 +41,7 @@ class MeshSession internal constructor(
      * Queue bytes for [shell]. All or nothing: [QueueOutcome.Full] leaves the queue as it was, and
      * the caller slows down rather than the session growing.
      */
-    fun send(shell: Int, bytes: ByteArray): QueueOutcome {
+    override fun send(shell: Int, bytes: ByteArray): QueueOutcome {
         require(shell in 0..255) { "shell must fit one byte" }
         return when (val rc = lib.send(live(), shell, bytes)) {
             SessionLib.OK -> QueueOutcome.Queued
@@ -56,7 +56,7 @@ class MeshSession internal constructor(
      * index, decode) changes no state and comes back as [Received.Rejected]: it is evidence of a
      * noisy link or an attacker, not of a broken session, so it does not end it.
      */
-    fun receive(nowMs: Long, record: ByteArray): Received {
+    override fun receive(nowMs: Long, record: ByteArray): Received {
         val rc = lib.receive(live(), nowMs, record)
         return when {
             rc == SessionLib.RX_QUIET -> Received.Quiet
@@ -86,7 +86,7 @@ class MeshSession internal constructor(
      * `SEND_RESULT`). An unknown budget is the caller's to pass as 0: this class does not guess.
      * Each returned array is one sealed record, ready for `MeshGatewayClient.send`.
      */
-    fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray> {
+    override fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray> {
         val n = lib.poll(live(), nowMs, recordsLeft.coerceIn(0, 255), l2Slots.coerceIn(0, 255))
         if (n < 0) throw sessionFailure(n, "poll")
         val out = ArrayList<ByteArray>(n)
@@ -102,13 +102,13 @@ class MeshSession internal constructor(
     }
 
     /** End the session once everything queued is acknowledged. */
-    fun requestClose() {
+    override fun requestClose() {
         val rc = lib.close(live())
         if (rc != SessionLib.OK) throw sessionFailure(rc, "close")
     }
 
     /** What the ARQ says about itself. Cheap; call as often as the UI needs. */
-    fun health(nowMs: Long): SessionHealth {
+    override fun health(nowMs: Long): SessionHealth {
         val bits = lib.status(live(), nowMs)
         if (bits < 0) throw sessionFailure(bits, "status")
         return SessionHealth(
@@ -121,7 +121,7 @@ class MeshSession internal constructor(
     }
 
     /** When the ARQ next wants a [poll], in the caller's clock, or null if it does not. */
-    fun nextDeadlineMs(): Long? {
+    override fun nextDeadlineMs(): Long? {
         val out = LongArray(1)
         return when (val rc = lib.nextDeadline(live(), out)) {
             1 -> out[0]
@@ -131,7 +131,7 @@ class MeshSession internal constructor(
     }
 
     /** Free the native session. Safe to call twice. */
-    fun close() {
+    override fun close() {
         val h = handle
         handle = 0L
         if (h != 0L) lib.free(h)
@@ -177,13 +177,13 @@ class PendingHandshake internal constructor(
     private val lib: SessionLib,
     private var handle: Long,
     /** Message 1, 121 bytes: send it as one record. */
-    val message1: ByteArray,
-) {
+    override val message1: ByteArray,
+) : HandshakePort {
     /**
      * Consume message 2. [recordLimit] is `BIND_OK`'s advertised record size, so the layout is
      * sized to what the radio will accept. The native handshake is consumed whatever the outcome.
      */
-    fun finish(message2: ByteArray, recordLimit: Int, nowMs: Long): MeshSession {
+    override fun finish(message2: ByteArray, recordLimit: Int, nowMs: Long): MeshSession {
         val h = handle
         check(h != 0L) { "handshake already finished or abandoned" }
         handle = 0L
@@ -193,7 +193,7 @@ class PendingHandshake internal constructor(
         return MeshSession(lib, out[0])
     }
 
-    fun abandon() {
+    override fun abandon() {
         val h = handle
         handle = 0L
         if (h != 0L) lib.initiatorFree(h)

@@ -94,19 +94,19 @@ class MeshGatewayClient(
     private val port: Int = MeshGateway.DEFAULT_PORT,
     private val capabilities: Int = MeshGateway.CAP_STATUS_PUSH,
     private val handshakeTimeoutMs: Long = 8_000,
-) {
+) : GatewayPort {
     init {
         require(token.size == MeshGateway.PAIRING_TOKEN_BYTES) { "pairing token must be 16 bytes" }
         require(peerPubKey.size == MeshGateway.PEER_KEY_BYTES) { "peer public key must be 32 bytes" }
     }
 
     private val _state = MutableStateFlow(MeshLinkState.Idle)
-    val state: StateFlow<MeshLinkState> = _state.asStateFlow()
+    override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
 
     private val _status = MutableStateFlow<MeshStatus?>(null)
 
     /** The last pushed `STATUS`, or null before the first. */
-    val status: StateFlow<MeshStatus?> = _status.asStateFlow()
+    override val status: StateFlow<MeshStatus?> = _status.asStateFlow()
 
     private val _received = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
 
@@ -114,12 +114,12 @@ class MeshGatewayClient(
      * Downlink records. **Lossy by firmware design**: the radio drops raw data when no app is
      * connected and never queues it (`MyMesh.cpp:811-816`), so absence is not evidence.
      */
-    val received: SharedFlow<ByteArray> = _received.asSharedFlow()
+    override val received: SharedFlow<ByteArray> = _received.asSharedFlow()
 
     private val uplink = MutableStateFlow(0)
 
     /** Largest uplink record for the current path, from `BIND_OK`. 0 until bound. */
-    val uplinkRecordMax: Int get() = uplink.value
+    override val uplinkRecordMax: Int get() = uplink.value
 
     private val closed = MutableStateFlow(false)
     private val started = MutableStateFlow(false)
@@ -180,7 +180,7 @@ class MeshGatewayClient(
      * spend airtime on one the radio would reject. The result is what the radio did; a
      * `SentDirect` is not a delivery.
      */
-    suspend fun send(record: ByteArray): MeshSendResult {
+    override suspend fun send(record: ByteArray): MeshSendResult {
         val s = _state.value
         if (s != MeshLinkState.Bound && s != MeshLinkState.RadioUnavailable) {
             throw MeshGatewayException(s, "not bound")
@@ -242,7 +242,7 @@ class MeshGatewayClient(
     }
 
     /** Idempotent. Closes the socket exactly once and fails every pending [send]. */
-    fun close() {
+    override fun close() {
         teardown(MeshLinkState.Closed, null)
     }
 
