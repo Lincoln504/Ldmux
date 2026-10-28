@@ -135,8 +135,16 @@ impl SessionSetup {
         ldmux_protocol::pairing::MeshKeys {
             host_key: self.files.key.public,
             psk: self.files.pairing.psk,
+            host_radio: host_radio_from_env(),
         }
     }
+}
+
+/// `LDMUX_MESH_SELF`: this host's own MeshCore radio public key (64 hex), if the operator says
+/// so. The daemon does not own the radio and cannot learn it; it is only passed along so a phone
+/// can bind it. A malformed value is ignored with no key rather than a wrong one.
+fn host_radio_from_env() -> Option<[u8; 32]> {
+    parse_hex::<32>(&std::env::var("LDMUX_MESH_SELF").ok()?, "LDMUX_MESH_SELF").ok()
 }
 
 fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
@@ -345,7 +353,11 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
         .ok_or_else(|| {
             "no mesh session is configured (set LDMUX_MESH_PSK, with the link variables)".to_owned()
         })?;
-    Ok(serde_json::json!({ "hostKey": hex(&keys.host_key), "psk": hex(&keys.psk) }))
+    Ok(serde_json::json!({
+        "hostKey": hex(&keys.host_key),
+        "psk": hex(&keys.psk),
+        "hostRadio": keys.host_radio.map(|r| hex(&r)),
+    }))
 }
 
 /// The answer to `mesh.status`: the snapshot, or the disabled shape.

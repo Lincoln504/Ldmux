@@ -176,9 +176,15 @@ fn mesh_keys_from_json(v: &serde_json::Value) -> Option<ldmux_protocol::pairing:
         }
         Some(out)
     }
+    // hostRadio is optional, but if present it must be a key, not something that is dropped.
+    let host_radio = match v.get("hostRadio") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(_) => Some(key(v, "hostRadio")?),
+    };
     Some(ldmux_protocol::pairing::MeshKeys {
         host_key: key(v, "hostKey")?,
         psk: key(v, "psk")?,
+        host_radio,
     })
 }
 
@@ -1190,6 +1196,17 @@ mod mesh_keys_tests {
         assert!(mesh_keys_from_json(&json!({"hostKey": k})).is_none());
         assert!(mesh_keys_from_json(&json!({"hostKey": k, "psk": "ab"})).is_none());
         assert!(mesh_keys_from_json(&json!({"hostKey": k, "psk": "zz".repeat(32)})).is_none());
+        let with =
+            mesh_keys_from_json(&json!({"hostKey": k, "psk": k, "hostRadio": "cd".repeat(32)}))
+                .unwrap();
+        assert_eq!(with.host_radio, Some([0xcd; 32]));
+        assert_eq!(
+            mesh_keys_from_json(&json!({"hostKey": k, "psk": k, "hostRadio": null}))
+                .unwrap()
+                .host_radio,
+            None
+        );
+        assert!(mesh_keys_from_json(&json!({"hostKey": k, "psk": k, "hostRadio": "ab"})).is_none());
     }
 }
 

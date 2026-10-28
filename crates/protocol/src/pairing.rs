@@ -17,7 +17,8 @@
 //!   Optional, at most 64 characters.
 //! - `v` is this format's version. A link with a version the app does not know
 //!   is refused rather than guessed at.
-//! - **Mesh keys (optional, ADR-0020 section 6):** `mv=1&mk=<64 hex>&psk=<64 hex>` add the
+//! - **Mesh keys (optional, ADR-0020 section 6):** `mv=1&mk=<64 hex>&psk=<64 hex>` (and an
+//!   optional `mr=<64 hex>`, the host's MeshCore radio public key the phone binds) add the
 //!   daemon's session public key and the pairing's pre-shared secret, so a phone can use the
 //!   mesh route. The link stays `v=1`: a scanner that predates mesh ignores parameters it does
 //!   not know (the contract since v1) and pairs the tailnet route exactly as before. A link that
@@ -50,6 +51,9 @@ pub struct MeshKeys {
     pub host_key: [u8; 32],
     /// The pairing's pre-shared secret (32 bytes).
     pub psk: [u8; 32],
+    /// The host's MeshCore radio public key, which the phone's gateway binds. Optional: the
+    /// daemon does not own the radio and learns this only if told (`LDMUX_MESH_SELF`).
+    pub host_radio: Option<[u8; 32]>,
 }
 
 // A secret never appears in a Debug print.
@@ -98,6 +102,9 @@ pub fn pairing_link_with_mesh(
         fields.push(("mv", MESH_KEYS_VERSION.to_string()));
         fields.push(("mk", hex32(&m.host_key)));
         fields.push(("psk", hex32(&m.psk)));
+        if let Some(r) = &m.host_radio {
+            fields.push(("mr", hex32(r)));
+        }
     }
     let q: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
     Ok(format!("ldmux://pair?{}", q.join("&")))
@@ -142,6 +149,7 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
     let mut mv: Option<String> = None;
     let mut mk: Option<String> = None;
     let mut psk: Option<String> = None;
+    let mut mr: Option<String> = None;
     for part in query.split('&') {
         if part.is_empty() {
             continue;
@@ -160,6 +168,7 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
             "mv" if mv.is_none() => mv = Some(decoded),
             "mk" if mk.is_none() => mk = Some(decoded),
             "psk" if psk.is_none() => psk = Some(decoded),
+            "mr" if mr.is_none() => mr = Some(decoded),
             _ => {}
         }
     }
@@ -175,7 +184,7 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
         return None;
     }
     // Mesh keys: all or nothing, and well formed.
-    let mesh = if mv.is_none() && mk.is_none() && psk.is_none() {
+    let mesh = if mv.is_none() && mk.is_none() && psk.is_none() && mr.is_none() {
         None
     } else {
         if mv.as_deref() != Some("1") {
@@ -184,6 +193,10 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
         Some(MeshKeys {
             host_key: parse_hex32(mk.as_deref()?)?,
             psk: parse_hex32(psk.as_deref()?)?,
+            host_radio: match mr.as_deref() {
+                Some(r) => Some(parse_hex32(r)?),
+                None => None,
+            },
         })
     };
     Some((p, mesh))
@@ -488,6 +501,7 @@ mod tests {
             let want = c["mesh"].as_object().map(|m| MeshKeys {
                 host_key: unhex32(m["hostKey"].as_str().unwrap()),
                 psk: unhex32(m["psk"].as_str().unwrap()),
+                host_radio: m.get("hostRadio").and_then(|r| r.as_str()).map(unhex32),
             });
             assert_eq!(mesh, want, "{}", c["link"]);
             // The plain parser agrees on the pairing and never sees the keys.
@@ -517,6 +531,7 @@ mod tests {
         let keys = MeshKeys {
             host_key: unhex32(c["mesh"]["hostKey"].as_str().unwrap()),
             psk: unhex32(c["mesh"]["psk"].as_str().unwrap()),
+            host_radio: None,
         };
         let link = pairing_link_with_mesh(&p, Some(&keys)).unwrap();
         // The fixture's own link is the canonical serialisation.
@@ -552,6 +567,7 @@ mod tests {
         let k = MeshKeys {
             host_key: [7; 32],
             psk: [9; 32],
+            host_radio: Some([3; 32]),
         };
         let shown = format!("{k:?}");
         assert!(!shown.contains('7') && !shown.contains('9'), "{shown}");

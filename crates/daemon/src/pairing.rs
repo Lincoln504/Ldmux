@@ -244,6 +244,7 @@ mod tests {
         let keys = MeshKeys {
             host_key: [0x11; 32],
             psk: [0x22; 32],
+            host_radio: Some([0x33; 32]),
         };
         let (pairing, link) =
             pairing_for_with_mesh(&live("100.100.0.1", 7625), "debian", Some(&keys)).unwrap();
