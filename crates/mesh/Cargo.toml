@@ -1,0 +1,17 @@
+[package]
+name = "ldmux-mesh"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The L2 MeshMore gateway client: the frame contract and a loopback socket. Carries no radio knowledge."
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "time", "rt", "macros", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
+
+[lints]
+workspace = true

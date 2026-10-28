@@ -469,11 +469,11 @@ the same port, which is the `ENABLE_USB_INTERFACE` difference above.
 
 ### What LDMUX still owes
 
-- **A Rust L2 client in `ldmuxd`.** The host gateway listens on loopback exactly
-  like the phone's does, so the daemon needs the same ten-frame client the
-  mobile app has. `GatewayClient` (Dart) and `MeshGatewayClient` (Kotlin) are the
-  two reference implementations; the frame set is in section 7.
-- The compact L3 encoding and the daemon listener (section 11, unchanged).
+- **Wire `crates/mesh` into the daemon.** The client now exists
+  (`ldmux-mesh`: frame codec, decoder, loopback client, 19 tests, clippy clean,
+  tokio its only dependency). What remains is the daemon side: a listener task
+  that owns the connection, the compact L3 encoding, and an RPC/CLI surface.
+- The mobile route is still not wired into the launcher (section 11).
 
 Note what is *not* owed: the daemon must never speak MeshCore. It talks L2 to
 this process, which owns the radio.
