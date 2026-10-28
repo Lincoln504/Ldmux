@@ -122,19 +122,50 @@ pi extension --(JSON line over LDMUX_SOCKET)--> ldmux daemon --(new `speech` WS 
 
 ### 3.2 Channel B — a private OSC in the byte stream (universal, but not from pi)
 
-- A program prints e.g. `ESC ] 271828 ; ... BEL`. The daemon sanitizer passes it
-  (it only drops OSC 52 and colour queries), the phone sees it in `feed`, and a
-  registered `GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` callback surfaces it exactly
-  as OSC 52 is surfaced today.
+- A program prints e.g. `ESC ] 1338 ; {"v":1,"kind":"say","text":"..."} BEL`. The
+  daemon sanitizer passes it, the phone sees it in `feed`, and a small parser in
+  Kotlin surfaces it.
 - It needs **no wire change and no daemon change**, and it works for *anything*
   in a shell that prints the sequence, which is the "works with anything" wish.
 - **It cannot be emitted by a pi extension.** pi's extension API has no raw
   terminal write; the TUI owns stdout and a raw write risks desyncing its diffing
   renderer. So Channel B is a bonus for other programs, not the pi path.
-- Also choose an OSC number libghostty does not already claim (52/1337/5522 are
+- Choose an OSC number libghostty does not already claim (52/1337/5522 are
   clipboard; 0/2 title; 7 pwd; 8 hyperlink; 9/777 notification; 9;4 progress).
 
-### 3.3 Rejected channels
+**Corrected 2026-10-28: the mechanism.** This document previously said the
+emulator's `GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` callback would surface a
+private OSC. It would not. `terminal.h:345-356` states that **only APC sequences
+are reported**, and OSC 52 has its own dedicated callback
+(`GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE`). The real mechanism is the raw byte
+stream: `TerminalController.feed` receives the bytes before `engine.write`
+(`TerminalController.kt:397-398`), so a Kotlin parser sees the sequence with no
+native change at all.
+
+**And APC is not an alternative.** It is the sequence type the engine does
+report, and it is tempting for exactly that reason, but the daemon drops every
+DCS/SOS/PM/APC string whole (`crates/daemon/src/sanitize.rs:12,163`; test
+`drops_dcs_sos_pm_apc_strings`). Whitelisting one APC would reopen the class of
+hole that policy closes, and APC is how kitty sends terminal *commands*. So the
+in-band channel is an OSC, and the phone parses it, or it does not exist.
+
+**Guards, because the byte stream is arbitrary code's output:**
+
+- Speak only when voice mode is on, the session is bound, and it is on screen.
+- Cap the payload; drop an over-long or malformed sequence rather than truncating
+  it into something that gets spoken.
+- Handle a sequence split across two `feed` chunks (the sanitizer already keeps
+  per-stream state for exactly this reason).
+- Version the payload; ignore an unknown `v` or `kind`.
+- Never feed speech text back as input.
+
+### 3.3 Channel C — a second stream on the host (does not exist)
+
+- A PTY has exactly one output. There is no fd 3 to read: the keeper allocates a
+  pty pair and gives the child a single slave. A second stream means a second
+  socket, which is Channel A with more moving parts.
+
+### 3.4 Rejected channels
 
 - **Grid scraping.** Read the rendered cells for a sentinel. Wrapping, scrollback,
   differential redraws and escape interleaving make this a reimplementation of
@@ -148,7 +179,7 @@ pi extension --(JSON line over LDMUX_SOCKET)--> ldmux daemon --(new `speech` WS 
 - **`process.stdout.write` from the extension.** Undocumented, interleaves with
   the renderer, and is exactly the fragility this document exists to avoid.
 
-### 3.4 A and B in plain terms
+### 3.4a A and B in plain terms
 
 | | Channel A (daemon message) | Channel B (private OSC) |
 |---|---|---|
@@ -161,7 +192,22 @@ pi extension --(JSON line over LDMUX_SOCKET)--> ldmux daemon --(new `speech` WS 
 | Works for non-pi programs | no | yes |
 | Emittable by a pi extension today | yes | **no** |
 
-Recommended: **build A, keep B in reserve** for the universal case.
+### 3.5 Decision, 2026-10-28
+
+- **The pi path is Channel A.** pi is the agent by decision, and pi cannot emit
+  an OSC, so A is the only path that can carry its speech. One RPC arm, one
+  server-to-client message, behind a client capability.
+- **Channel B is built as well, and it is the same event.** The phone has one
+  handler with two producers: the typed message from the daemon, and an OSC parsed
+  out of the byte stream. Any program in the shell can therefore be voiced, and
+  an own-CLI agent later needs no protocol work at all.
+- **They are not redundant.** A covers the agent, which is the product. B covers
+  everything else, costs no host code, and is the only path that survives
+  replacing pi with a program we write.
+- **Not a protocol field for speech.** The transport should carry what the
+  transport must interpret. Speech needs no ordering, priority or delivery
+  guarantee beyond the stream it is already in, and a field would make speech
+  impossible for any program that is not speaking the RPC.
 
 ## 4. Architecture and separation of concerns
 
