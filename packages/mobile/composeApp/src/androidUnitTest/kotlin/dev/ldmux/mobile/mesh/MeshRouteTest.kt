@@ -29,16 +29,34 @@ class MeshRouteTest {
     fun `mesh on Android needs a token first, then a peer, then it resolves`() {
         assertEquals(
             MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.NeedsToken),
-            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false, sessionBuilt = true),
         )
         assertEquals(
             MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.NeedsPeer),
-            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = false),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = false, sessionBuilt = true),
         )
         assertEquals(
             MeshRouteResolution.Use(MeshRoute.Mesh),
-            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = true),
         )
+    }
+
+    @Test
+    fun `until the phone can speak the session, mesh says so before asking for a token`() {
+        assertEquals(false, MESH_SESSION_BUILT, "flip together with the session client")
+        val expected = MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.SessionNotBuilt)
+        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false))
+        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true))
+        // iOS is still reported as its own, truer problem.
+        assertEquals(
+            MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.NotOnThisPlatform),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Ios, hasToken = true, hasPeer = true),
+        )
+    }
+
+    @Test
+    fun `this build knows which platform it is`() {
+        assertEquals(MobilePlatform.Android, currentPlatform)
     }
 
     @Test

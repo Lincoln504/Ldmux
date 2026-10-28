@@ -12,6 +12,21 @@ enum class MeshRoute { Tailnet, Mesh }
 /** The platforms the mobile app ships on. iOS is tailnet only: no MeshCore, no gateway. */
 enum class MobilePlatform { Android, Ios }
 
+/**
+ * The platform this build runs on. Only `androidTarget` exists in `composeApp/build.gradle.kts`,
+ * so [MobilePlatform.Ios] is a spec value with no build variant yet: when an iOS target is
+ * added the compiler will demand its `actual` here, which is the point of declaring it.
+ */
+expect val currentPlatform: MobilePlatform
+
+/**
+ * Whether this app can speak the end-to-end session (ADR-0020) over the mesh link. The daemon
+ * end exists; the phone end does not. While this is `false` a saved `Mesh` route resolves to
+ * [MeshRouteProblem.SessionNotBuilt] instead of opening a gateway link that nothing can use.
+ * Flip it in the same change that lands the phone's session client, and not before.
+ */
+const val MESH_SESSION_BUILT: Boolean = false
+
 /** Routes the user may pick on [platform]. The mesh option does not exist on iOS at all. */
 fun availableRoutes(platform: MobilePlatform): List<MeshRoute> = when (platform) {
     MobilePlatform.Android -> listOf(MeshRoute.Tailnet, MeshRoute.Mesh)
@@ -22,6 +37,9 @@ fun availableRoutes(platform: MobilePlatform): List<MeshRoute> = when (platform)
 enum class MeshRouteProblem {
     /** `Mesh` is saved, but this platform has no gateway (iOS). Fails visibly, never falls back. */
     NotOnThisPlatform,
+
+    /** The route exists in the model but this build cannot yet speak the session over it. */
+    SessionNotBuilt,
 
     /** No pairing token for the MeshMore gateway yet. */
     NeedsToken,
@@ -45,11 +63,15 @@ fun resolveRoute(
     platform: MobilePlatform,
     hasToken: Boolean,
     hasPeer: Boolean,
+    sessionBuilt: Boolean = MESH_SESSION_BUILT,
 ): MeshRouteResolution {
     if (saved == MeshRoute.Tailnet) return MeshRouteResolution.Use(MeshRoute.Tailnet)
     if (MeshRoute.Mesh !in availableRoutes(platform)) {
         return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NotOnThisPlatform)
     }
+    // Checked before the token: asking the user to pair a route that cannot work yet is a
+    // trap, so the first thing they are told is the real reason.
+    if (!sessionBuilt) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.SessionNotBuilt)
     if (!hasToken) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsToken)
     if (!hasPeer) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsPeer)
     return MeshRouteResolution.Use(MeshRoute.Mesh)
@@ -71,6 +93,7 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
 
 fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
     MeshRouteProblem.NotOnThisPlatform -> "mesh route is not available on this device"
+    MeshRouteProblem.SessionNotBuilt -> "mesh route is not finished in this build"
     MeshRouteProblem.NeedsToken -> "mesh · needs pairing token"
     MeshRouteProblem.NeedsPeer -> "mesh · needs the host radio's public key"
 }
