@@ -139,7 +139,9 @@ fn main() {
         }
     };
     if mesh_session.is_some() && mesh_cfg.is_none() {
-        eprintln!("ldmuxd: LDMUX_MESH_PSK is set but the link is not (LDMUX_MESH_ADDR, _TOKEN, _PEER)");
+        eprintln!(
+            "ldmuxd: LDMUX_MESH_PSK is set but the link is not (LDMUX_MESH_ADDR, _TOKEN, _PEER)"
+        );
         std::process::exit(1);
     }
 
@@ -161,9 +163,22 @@ fn main() {
                 shown
             });
             if let Some(session) = &mesh_session {
-                println!("ldmuxd: mesh session on; gateway key {}", session.public_key_hex());
+                println!(
+                    "ldmuxd: mesh session on; gateway key {}",
+                    session.public_key_hex()
+                );
             }
-            ldmux_daemon::mesh::MeshRuntime::start_with_session(cfg, mesh_session).install();
+            let session_on = mesh_session.is_some();
+            let runtime = ldmux_daemon::mesh::MeshRuntime::start_with_session(cfg, mesh_session);
+            runtime.clone().install();
+            // The shell bridge (ADR-0025): the phone attaches to a shell through the session
+            // and gets plain-text rows. It only exists when there is a session to carry it.
+            if session_on {
+                let host = ldmux_daemon::mesh_bridge::DaemonHost(daemon_ref.clone());
+                tokio::spawn(ldmux_daemon::mesh_bridge::run(
+                    ldmux_daemon::mesh_bridge::Bridge::new(host, runtime),
+                ));
+            }
         }
         // The handlers go in **before** `start`: a SIGTERM that arrives while
         // the daemon is starting is held by the stream and acted on as soon as
