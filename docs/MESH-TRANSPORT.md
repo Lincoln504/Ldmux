@@ -1,7 +1,8 @@
 # Mesh transport (LoRa) — is a terminal over MeshCore plausible?
 
 Target: **MeshCore** (Meshtastic appears below only as a comparison).
-Status: **investigated, not implemented.** This records what is known, what it costs,
+Status: **the L3 session is investigated, not implemented.** The L2 link beneath it now
+is: see `MESH-GATEWAY.md` section 12 and `STATE.md`. This records what is known, what it costs,
 and what is still unanswered. It is not a plan of record and nothing reads it at
 runtime.
 
@@ -202,7 +203,8 @@ stands; only the carriage changed.
 
 ## Review (2026-10-06)
 
-Conclusions of a design review. Nothing here is implemented.
+Conclusions of a design review. Nothing in *this* document is implemented: the L2 link
+and its daemon surface are, but the L3 session that would carry keystrokes is not.
 
 1. **Line mode is not a general terminal.** The `mesh` profile as written (plain lines,
    one uplink per command) ignores programs that use the alternate screen (editors,
