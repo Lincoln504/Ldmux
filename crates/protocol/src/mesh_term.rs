@@ -1128,4 +1128,139 @@ mod tests {
             }
         }
     }
+
+    // ── the shared fixture ─────────────────────────────────────────────────
+    //
+    // The Kotlin port in the mobile app reads `test/fixtures/mesh-term-vectors.json`. It is
+    // generated here, from the Rust encoder, so the port is checked against bytes it did not
+    // produce. This test fails when the file differs from what the encoder makes now; rerun with
+    // `LDMUX_REGEN_FIXTURES=1 cargo test -p ldmux-protocol mesh_term_fixture` to rewrite it.
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    fn message_json(m: &Message) -> serde_json::Value {
+        use serde_json::json;
+        match m {
+            Message::Attach { version, selector } => {
+                json!({"kind":"attach","version":version,"selector":selector})
+            }
+            Message::Input(b) => json!({"kind":"input","bytes":hex(b)}),
+            Message::Resync => json!({"kind":"resync"}),
+            Message::Detach => json!({"kind":"detach"}),
+            Message::Profile { version, cols, rows, unsupported } => json!({
+                "kind":"profile","version":version,"cols":cols,"rows":rows,"unsupported":unsupported}),
+            Message::Rows { epoch, full, patches } => json!({
+                "kind":"rows","epoch":epoch,"full":full,
+                "patches": patches.iter().map(|p| json!({"y":p.y,"append":p.append,"text":p.text})).collect::<Vec<_>>()}),
+            Message::Commit { epoch, cursor_x, cursor_y, flags } => json!({
+                "kind":"commit","epoch":epoch,"cursorX":cursor_x,"cursorY":cursor_y,"flags":flags}),
+            Message::Closed { reason } => json!({"kind":"closed","reason":reason}),
+        }
+    }
+
+    fn fixture_value() -> serde_json::Value {
+        use serde_json::json;
+        let messages = vec![
+            Message::Attach { version: 1, selector: "ab12".into() },
+            Message::Attach { version: 1, selector: String::new() },
+            Message::Input(b"\x03".to_vec()),
+            Message::Input(b"ls -la\r".to_vec()),
+            Message::Resync,
+            Message::Detach,
+            Message::Profile { version: 1, cols: 80, rows: 24, unsupported: unsupported::ALL_V1 },
+            Message::Rows { epoch: 1, full: true, patches: vec![Patch { y: 2, append: false, text: "ok".into() }] },
+            Message::Rows {
+                epoch: 0xBEEF,
+                full: false,
+                patches: vec![
+                    Patch { y: 0, append: false, text: "héllo 漢".into() },
+                    Patch { y: 255, append: true, text: String::new() },
+                ],
+            },
+            Message::Commit { epoch: 0x0102, cursor_x: 5, cursor_y: 6, flags: 1 },
+            Message::Closed { reason: closed::EXITED },
+        ];
+        let msg_cases: Vec<_> = messages
+            .iter()
+            .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
+            .collect();
+
+        // A scripted session: each step is one screen the host reads, the bytes the Differ
+        // produces for it, and what the reference Mirror holds after applying them.
+        let long: String = "x".repeat(130);
+        let steps_in: Vec<Screen> = vec![
+            screen(&["$ ", "", ""], 20),
+            screen(&["$ ls", "a.txt  b.txt", ""], 20),
+            Screen { cursor_x: 9, cursor_y: 2, ..screen(&["$ ls", "a.txt  b.txt", "$"], 20) },
+            screen(&["$ ls", &long, "héllo 漢"], 255),
+            Screen { alternate: true, ..screen(&["$ ls", &long, "héllo 漢"], 255) },
+            screen(&["one", "two"], 40),
+        ];
+        let mut differ = Differ::new();
+        let mut mirror = Mirror::new();
+        let mut steps = Vec::new();
+        for sc in &steps_in {
+            let msgs = differ.update(sc);
+            let mut stream = Vec::new();
+            for m in &msgs {
+                stream.extend(m.encode().unwrap());
+                mirror.apply(m);
+            }
+            steps.push(json!({
+                "screen": {"cols":sc.cols,"rows":sc.rows,"cursorX":sc.cursor_x,"cursorY":sc.cursor_y,
+                           "alternate":sc.alternate,"dead":sc.dead,"lines":sc.lines},
+                "stream": hex(&stream),
+                "messages": msgs.iter().map(message_json).collect::<Vec<_>>(),
+                "mirror": {"lines":mirror.lines,"cursorX":mirror.cursor.0,"cursorY":mirror.cursor.1,
+                           "flags":mirror.flags,"epoch":mirror.epoch,
+                           "profile": mirror.profile.map(|(c,r,u)| json!({"cols":c,"rows":r,"unsupported":u}))},
+            }));
+        }
+
+        // Streams that are not a clean run of messages.
+        let unknown = [0x7e, 0x02, 0xaa, 0xbb, 0x04, 0x00];
+        let mut d = Decoder::new();
+        let unknown_out = d.push(&unknown).unwrap();
+        let malformed = [0x83, 0x01, 0x00, 0x04, 0x00]; // Commit with a 1-byte body, then Detach
+        let mut d = Decoder::new();
+        let malformed_out = d.push(&malformed).unwrap();
+        let oversize = [0x82, 0xad, 0x02]; // length 301
+        let mut d = Decoder::new();
+        let oversize_out = d.push(&oversize);
+        let streams = json!({
+            "unknownTagSkipped": {"hex": hex(&unknown), "messages": unknown_out.iter().map(|r| message_json(r.as_ref().unwrap())).collect::<Vec<_>>()},
+            "malformedBodyCostsOneMessage": {"hex": hex(&malformed),
+                "results": malformed_out.iter().map(|r| match r {
+                    Ok(m) => message_json(m),
+                    Err(e) => json!({"error": format!("{e:?}")}),
+                }).collect::<Vec<_>>()},
+            "oversizeBody": {"hex": hex(&oversize), "fatal": oversize_out.is_err()},
+        });
+
+        json!({
+            "//": "Generated by crates/protocol/src/mesh_term.rs (fixture_value). Do not edit by hand: LDMUX_REGEN_FIXTURES=1 cargo test -p ldmux-protocol mesh_term_fixture. Read by the app's MeshTermCodecTest.",
+            "limits": {"maxBody":MAX_BODY,"maxInput":MAX_INPUT,"maxSegment":MAX_SEGMENT,"maxSelector":MAX_SELECTOR,
+                       "maxRowsBody":MAX_ROWS_BODY,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
+                       "version":VERSION,"unsupportedAllV1":unsupported::ALL_V1},
+            "messages": msg_cases,
+            "script": steps,
+            "streams": streams,
+        })
+    }
+
+    #[test]
+    fn mesh_term_fixture_matches_the_encoder() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/test/fixtures/mesh-term-vectors.json");
+        let want = fixture_value();
+        if std::env::var("LDMUX_REGEN_FIXTURES").is_ok() {
+            let mut text = serde_json::to_string_pretty(&want).unwrap();
+            text.push('\n');
+            std::fs::write(path, text).unwrap();
+        }
+        let have: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture missing: regenerate it")).unwrap();
+        assert_eq!(have, want, "mesh-term-vectors.json is stale: regenerate it");
+    }
 }
