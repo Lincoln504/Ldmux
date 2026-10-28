@@ -428,8 +428,8 @@ MeshMore repo, because it is the MeshMore side of the boundary:
 
 `meshmore_sns_app/packages/meshcore_host/`
 
-- `serial_framing.dart`: the firmware's USB-serial framing, `'>' len_lo len_hi`
-  outbound and `'<' len_lo len_hi` inbound, 176-byte ceiling
+- `serial_framing.dart`: the firmware's USB-serial framing, `'<' len_lo len_hi`
+  host to radio and `'>' len_lo len_hi` radio to host, 176-byte ceiling
   (`src/helpers/ArduinoSerialInterface.cpp:19-70`,
   `src/helpers/BaseSerialInterface.h:5`). Unlike BLE, serial is a byte stream, so
   the decoder is incremental and keeps state across reads.
@@ -461,6 +461,11 @@ So the two-radio fleet maps cleanly:
 
 The host radio must be reflashed. Until it is, this process correctly refuses to
 start with a message saying why, rather than hanging.
+
+Verified on a real HELTEC-BASE on 2026-10-28: the USB image answers, reports
+`v1.17.1-silent`, 4366 mV, 350/350 contacts and `pathHashMode 0`, and answers a
+64-byte zero-hop raw frame with `OK`. The BLE image answers nothing at all on
+the same port, which is the `ENABLE_USB_INTERFACE` difference above.
 
 ### What LDMUX still owes
 
