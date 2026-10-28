@@ -392,6 +392,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ldmux-session-ffi"
+version = "0.1.0"
+dependencies = [
+ "ldmux-mesh",
+ "ldmux-session",
+]
+
+[[package]]
 name = "ldmux-vt-sys"
 version = "0.1.0"
 

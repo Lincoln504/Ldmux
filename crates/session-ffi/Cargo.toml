@@ -1,0 +1,21 @@
+[package]
+name = "ldmux-session-ffi"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The C ABI over ldmux-session, for the phone (JNI today, Swift later). The only crate in the L3 stack that contains unsafe."
+
+[lib]
+name = "ldmux_session_ffi"
+# staticlib: linked into the JNI shim by packages/mobile/native/build-session.sh.
+# rlib: so this crate's own tests can call the ABI like C would.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+ldmux-session = { path = "../session" }
+ldmux-mesh = { path = "../mesh" }
+
+[lints]
+workspace = true
