@@ -13,9 +13,46 @@ package dev.ldmux.mobile
  * goes, and a QR code is untrusted input: a link to a host outside the tailnet is
  * not a pairing, whoever printed it.
  */
-data class Pairing(val host: String, val token: String, val name: String)
+data class Pairing(
+    val host: String,
+    val token: String,
+    val name: String,
+    /**
+     * The mesh route's keys, when the link carried them (`mv=1&mk=<64 hex>&psk=<64 hex>`). Null for
+     * every link a pre-mesh CLI makes, and then the pairing is exactly what it always was.
+     */
+    val mesh: MeshKeyMaterial? = null,
+)
+
+/**
+ * What a pairing link hands the phone for the mesh route: the daemon's session public key and
+ * the pairing's pre-shared secret (ADR-0020). Both are credentials: never in [toString], never
+ * logged. Equality is by content so a pairing compares as a value.
+ */
+class MeshKeyMaterial(
+    val hostKey: ByteArray,
+    val psk: ByteArray,
+    /** The host's MeshCore radio public key, which the gateway binds. Null when the daemon was not told it. */
+    val hostRadio: ByteArray? = null,
+) {
+    init {
+        require(hostKey.size == 32 && psk.size == 32 && (hostRadio == null || hostRadio.size == 32)) {
+            "mesh keys are 32 bytes each"
+        }
+    }
+
+    override fun equals(other: Any?) =
+        other is MeshKeyMaterial && hostKey.contentEquals(other.hostKey) && psk.contentEquals(other.psk) &&
+            (hostRadio?.contentEquals(other.hostRadio) ?: (other.hostRadio == null))
+
+    override fun hashCode() = 31 * (31 * hostKey.contentHashCode() + psk.contentHashCode()) + (hostRadio?.contentHashCode() ?: 0)
+    override fun toString() = "MeshKeyMaterial(..)"
+}
 
 const val PAIRING_VERSION = 1
+/** The mesh-key part's own version (`mv`). */
+const val MESH_KEYS_VERSION = 1
+private val HEX32 = Regex("^[0-9a-f]{64}$")
 private val TOKEN = Regex("^[0-9a-f]{64}$")
 private const val NAME_MAX = 64
 
@@ -36,9 +73,24 @@ fun parsePairingLink(link: String): Pairing? {
         if (key !in params) params[key] = value
     }
     if (params["v"] != PAIRING_VERSION.toString()) return null
-    val p = Pairing(host = params["host"] ?: "", token = params["token"] ?: "", name = params["name"] ?: "")
+    // Mesh keys are all or nothing. A link that carries any of them and gets one wrong is refused
+    // whole: a half-formed secret is never quietly dropped, and never downgraded to tailnet-only.
+    val mesh: MeshKeyMaterial? = if ("mv" !in params && "mk" !in params && "psk" !in params && "mr" !in params) {
+        null
+    } else {
+        if (params["mv"] != MESH_KEYS_VERSION.toString()) return null
+        val mk = params["mk"] ?: return null
+        val psk = params["psk"] ?: return null
+        if (!HEX32.matches(mk) || !HEX32.matches(psk)) return null
+        val mr = params["mr"]
+        if (mr != null && !HEX32.matches(mr)) return null
+        MeshKeyMaterial(unhex(mk), unhex(psk), mr?.let(::unhex))
+    }
+    val p = Pairing(host = params["host"] ?: "", token = params["token"] ?: "", name = params["name"] ?: "", mesh = mesh)
     return if (pairingProblem(p) == null) p else null
 }
+
+private fun unhex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
 /**
  * What the confirmation dialog shows, with nothing hidden by the machine's own name.

@@ -44,11 +44,15 @@ class MeshRouteWiringTest {
         assertNull(mesh.endpoint, "the single choke point every socket is built from")
         assertEquals(LinkState.RouteUnavailable, initialLink(mesh))
         val problem = mesh.routeProblem()
-        // Shells over mesh are not built, so that is the first thing the user is told.
-        assertEquals(MeshRouteProblem.TerminalNotBuilt, problem)
+        // Both layers are built now, so with nothing stored the first thing missing is the keys.
+        assertEquals(MeshRouteProblem.NeedsSessionKeys, problem)
         val label = linkLabel(LinkState.RouteUnavailable, mesh)
         assertTrue(label.startsWith(mesh.pairedName), label)
-        assertTrue("mesh" in label && "not built" in label, label)
+        assertTrue("mesh" in label && "pairing code" in label, label)
+        // With the keys but no token, then no peer: each is named in turn, never papered over.
+        assertEquals(MeshRouteProblem.NeedsToken, mesh.routeProblem(hasSessionKeys = true))
+        assertEquals(MeshRouteProblem.NeedsPeer, mesh.routeProblem(hasSessionKeys = true, hasToken = true))
+        assertNull(mesh.routeProblem(hasSessionKeys = true, hasToken = true, hasPeer = true))
     }
 
     @Test

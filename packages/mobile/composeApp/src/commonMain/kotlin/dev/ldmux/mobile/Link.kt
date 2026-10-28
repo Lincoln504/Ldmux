@@ -1,5 +1,7 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshEnrollment
+import dev.ldmux.mobile.mesh.MeshRouteProblem
 import dev.ldmux.mobile.mesh.meshProblemLabel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,14 +52,19 @@ fun linkStateFromProbe(status: Int?): LinkState = when (status) {
 }
 
 /** The launcher's line under the title: what it is paired with, and how that is going. */
-fun linkLabel(state: LinkState, config: LdmuxConfig): String = when (state) {
+fun linkLabel(
+    state: LinkState,
+    config: LdmuxConfig,
+    /** Why the saved route cannot run, when the caller has read the real credentials. */
+    problem: MeshRouteProblem? = config.routeProblem(),
+): String = when (state) {
     LinkState.Unpaired -> "unpaired"
     LinkState.Online -> config.pairedName
     LinkState.Connecting -> "${config.pairedName} · connecting"
     LinkState.Unreachable -> "${config.pairedName} · unreachable"
     LinkState.Rejected -> "${config.pairedName} · rejected"
     LinkState.RouteUnavailable ->
-        "${config.pairedName} · ${config.routeProblem()?.let(::meshProblemLabel) ?: "mesh route unavailable"}"
+        "${config.pairedName} · ${problem?.let(::meshProblemLabel) ?: "mesh route unavailable"}"
 }
 /** The link a config starts in: unpaired, blocked on its route, or connecting. */
 fun initialLink(config: LdmuxConfig): LinkState = when {
@@ -74,7 +81,12 @@ fun initialLink(config: LdmuxConfig): LinkState = when {
  * made correctly in all three. This is where pairing and unpairing happen too, and
  * what the rest of the app observes.
  */
-class ConfigStore(initial: LdmuxConfig, private val persist: (LdmuxConfig) -> Unit) {
+class ConfigStore(
+    initial: LdmuxConfig,
+    /** Where a pairing's mesh keys go (null: this build keeps none). Never part of the config. */
+    private val mesh: MeshEnrollment? = null,
+    private val persist: (LdmuxConfig) -> Unit,
+) {
     private val _config = MutableStateFlow(initial)
     val config: StateFlow<LdmuxConfig> = _config
 
@@ -84,9 +96,17 @@ class ConfigStore(initial: LdmuxConfig, private val persist: (LdmuxConfig) -> Un
         _config.value = next
     }
 
-    fun pair(p: Pairing) = update(_config.value.paired(p))
+    fun pair(p: Pairing) {
+        val previous = _config.value.host
+        // Keys first: a pairing that carried them and could not store them must not look complete.
+        mesh?.onPaired(previous, p)
+        update(_config.value.paired(p))
+    }
 
-    fun unpair() = update(_config.value.unpaired())
+    fun unpair() {
+        mesh?.onUnpaired()
+        update(_config.value.unpaired())
+    }
 }
 
 /** How long the "why did that fail" request may take before the answer is "unreachable". */

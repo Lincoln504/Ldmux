@@ -69,3 +69,30 @@ class MeshSessionKeyStoreTest {
         pending.abandon()
     }
 }
+
+class MeshSessionKeyBlobV2Test {
+    private fun keys(radio: ByteArray?) =
+        MeshSessionKeys(ByteArray(32) { 1 }, ByteArray(32) { 2 }, ByteArray(32) { 3 }, ByteArray(32) { 4 }, radio)
+
+    @Test
+    fun `a blob with a radio key is version 2 and round trips`() {
+        val b = keys(ByteArray(32) { 9 }).encode()
+        assertEquals(161, b.size)
+        assertEquals(2, b[0].toInt())
+        assertContentEquals(ByteArray(32) { 9 }, MeshSessionKeys.decode(b)!!.hostRadio)
+    }
+
+    @Test
+    fun `a version 1 blob still loads, with no radio key`() {
+        val b = keys(null).encode()
+        assertEquals(129, b.size)
+        assertNull(MeshSessionKeys.decode(b)!!.hostRadio)
+    }
+
+    @Test
+    fun `a wrong length for either version is needs-pairing, never a crash`() {
+        assertNull(MeshSessionKeys.decode(ByteArray(0)))
+        assertNull(MeshSessionKeys.decode(ByteArray(161) { if (it == 0) 1 else 0 }))
+        assertNull(MeshSessionKeys.decode(ByteArray(129) { if (it == 0) 2 else 0 }))
+    }
+}

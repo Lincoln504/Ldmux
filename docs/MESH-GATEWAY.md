@@ -301,10 +301,10 @@ Small, and none of it is radio code.
 1. A KMP `MeshMoreGatewayClient`: a socket client, the L2 frame codec, pairing,
    reconnect with backoff, and the credit-window backpressure the gateway
    imposes so a client cannot outrun a one-packet-at-a-time radio.
-2. **Host side done 2026-10-28 (ADR-0025); phone side open.** A compact encoding for the L3
+2. **Done 2026-10-28 (ADR-0025), host and phone; neither has run on a radio or a device.** A compact encoding for the L3
    control messages the mesh profile actually carries. It is `crates/protocol/src/mesh_term.rs`
    (plain-text row diffs) with the shell bridge in `crates/daemon/src/mesh_bridge.rs`; the phone's
-   port and attach driver are what remain. Original text: **The existing `crates/protocol` frames cannot cross this link**:
+   port (`MeshTerm.kt`), attach driver (`MeshTermDriver`) and screen (`MeshTerminalScreen`) were built the same day. Original text: **The existing `crates/protocol` frames cannot cross this link**:
    they are JSON with a 16 MiB payload ceiling. The mesh profile needs its own
    binary encoding of the subset, defined end to end inside the Noise session
    and therefore opaque to the gateway.
@@ -397,7 +397,7 @@ Also: the gateway's airtime estimate is only correct for the radio preset it is 
 - **Superseded 2026-10-28 (the route is now wired as far as it can honestly go):** `LdmuxConfig.route`
   is persisted, `LdmuxConfig.endpoint` is null for a non-tailnet route so neither `LdmuxClient` nor
   `AttachClient` opens anything, and the launcher shows `LinkState.RouteUnavailable` with the
-  reason. It still cannot carry a shell (`MESH_TERMINAL_BUILT = false`). The original line follows.
+  reason. **Superseded later the same day:** `MESH_TERMINAL_BUILT` is now `true` and `App()` shows the reduced mesh terminal for a resolvable mesh route; a route that cannot run still opens nothing. The original line follows.
 - The mesh route is **not wired into the launcher or the terminal surface**. Those drive the
   daemon WebSocket and the terminal engine. Nothing exists on the other end of a mesh route
   yet (the compact L3 encoding in section 8 item 2 and the daemon listener below), so a UI

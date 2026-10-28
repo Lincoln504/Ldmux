@@ -42,12 +42,13 @@ class MeshRouteTest {
     }
 
     @Test
-    fun `the session is built, the shell carrier is not, and mesh says so before asking for a token`() {
+    fun `both layers are built, and an unbuilt layer is still reported before credentials`() {
         assertEquals(true, MESH_SESSION_BUILT, "MeshSession exists and is tested against the real library")
-        assertEquals(false, MESH_TERMINAL_BUILT, "flip with the compact terminal encoding and the shell bridge")
-        val expected = MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.TerminalNotBuilt)
-        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false, sessionBuilt = true))
-        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = true))
+        assertEquals(true, MESH_TERMINAL_BUILT, "the codec, the attach driver and the key storage exist")
+        assertEquals(
+            MeshRouteResolution.Use(MeshRoute.Mesh),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = true),
+        )
         // A device that could not load the library is told that first: it is the earlier layer.
         assertEquals(
             MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.SessionNotBuilt),

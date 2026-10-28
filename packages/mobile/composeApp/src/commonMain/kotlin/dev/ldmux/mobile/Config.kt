@@ -89,9 +89,13 @@ data class LdmuxConfig(
      * the app opens is built from [endpoint], so a non-tailnet route that cannot run opens
      * **nothing** (it never falls back to the tailnet), and the launcher says why.
      */
-    fun routeProblem(hasToken: Boolean = false, hasPeer: Boolean = false): MeshRouteProblem? {
+    fun routeProblem(
+        hasToken: Boolean = false,
+        hasPeer: Boolean = false,
+        hasSessionKeys: Boolean = false,
+    ): MeshRouteProblem? {
         if (!isPaired || route == MeshRoute.Tailnet) return null
-        return (resolveRoute(route, currentPlatform, hasToken, hasPeer) as? MeshRouteResolution.Unusable)?.problem
+        return (resolveRoute(route, currentPlatform, hasToken, hasPeer, hasSessionKeys = hasSessionKeys) as? MeshRouteResolution.Unusable)?.problem
     }
 
     val panelLeft: Boolean get() = side != "right"

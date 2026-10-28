@@ -140,7 +140,7 @@ impl SessionSetup {
     }
 }
 
-/// `LDMUX_MESH_SELF`: this host's own MeshCore radio public key (64 hex), if the operator says
+/// `LDMUX_MESH_SELF`: this host's own radio public key (64 hex), if the operator says
 /// so. The daemon does not own the radio and cannot learn it; it is only passed along so a phone
 /// can bind it. A malformed value is ignored with no key rather than a wrong one.
 fn host_radio_from_env() -> Option<[u8; 32]> {

@@ -76,7 +76,8 @@ repo needs to know a frequency, a spreading factor or a preset.
   JVM, but the Android build of the library has only been packaged (`assembleDebug` includes it
   for arm64-v8a and x86_64), never run on a phone. `MESH_SESSION_BUILT` is `true`; a device where
   the library does not load reports `SessionNotBuilt`.
-- **`MESH_TERMINAL_BUILT` is still `false`, and the host half of what it waits for now exists**
+- **`MESH_TERMINAL_BUILT` is `true` (2026-10-28, ADR-0025) and the phone side exists; the route is still not reachable on a real device.** The three items this flag waited for were built: (a) `MeshTerm.kt`, a Kotlin port checked against `crates/protocol/test/fixtures/mesh-term-vectors.json`, which the Rust encoder writes (11 tests); (b) `MeshTermDriver` plus `MeshTerminalScreen`, the attach driver and the reduced terminal (26 fake-port tests, and one over the real Rust session through the JNI shim); (c) key delivery, below. `resolveRoute` reports the truth for every combination (`MeshRouteTruthTest`, 8). **Still missing for a device to actually use it:** a route picker (nothing can save `route = Mesh`), a way to enter the MeshMore gateway token (no scanner for MeshMore's token QR, so a saved mesh route stops at `NeedsToken`), and any device run. The original text follows.
+- **(Superseded) `MESH_TERMINAL_BUILT` was `false`, and the host half of what it waited for existed**
   (2026-10-28, ADR-0025). A saved mesh route resolves to `TerminalNotBuilt`, opens nothing and does
   not fall back to the tailnet (`LdmuxConfig.endpoint` is null for it). What is **missing for the
   flip is phone-side only**: (a) a Kotlin port of `crates/protocol/src/mesh_term.rs` checked
@@ -84,7 +85,8 @@ repo needs to know a frequency, a spreading factor or a preset.
   `MeshSession` + that codec and paints the mirrored rows on the terminal surface, and (c) a way
   to get the keys onto the phone (the QR v2 ceremony, below). Without (c) no device can hold a
   mesh pairing, so flipping the flag earlier would only change which error is shown.
-- **The phone now has somewhere to keep the host key, the PSK and its own static key**:
+- **Key delivery is built (2026-10-28).** `ldmux code --mesh` and `ldmux pair --mesh` fetch the session public key and the PSK from the daemon (`mesh.pairing` RPC) and append `mv=1&mk=…&psk=…` (and `mr=…` when `LDMUX_MESH_SELF` names the host's radio key) to the same `v=1` link, so an older scanner still pairs the tailnet route from the same code. The phone parses it (`Pairing.mesh`), generates a fresh static keypair, and stores everything through `MeshEnrollment` into the Keystore blob (v2 blob = 161 bytes when a radio key is present). A re-scan replaces the keys, pairing with another machine forgets the old machine's keys, unpairing forgets them. A link carrying a partial or malformed mesh part is refused whole. **The BIND radio key is only as good as `LDMUX_MESH_SELF`:** without it the phone holds session keys but `hasPeer` is false and the route says `NeedsPeer`.
+- **(Superseded) The phone had somewhere to keep the host key, the PSK and its own static key**:
   `MeshSessionKeys` / `MeshSessionKeyStore` (129-byte versioned blob, Android Keystore, shared
   `KeystoreBlob` with the token store; 5 JVM tests). Nothing outside tests saves to it, because
   the ceremony that delivers the keys is not built; `resolveRoute` is still given
@@ -97,9 +99,7 @@ repo needs to know a frequency, a spreading factor or a preset.
   frames) attaches a phone to a shell through the keeper's grid, and `ldmuxd` runs it when
   `LDMUX_MESH_PSK` is set. **Phone side: not done** (see the flag above). Full-screen programs are
   poor on this link by physics: a full 200x100 screen is about 150 records against 58 an hour.
-- **The pairing ceremony**: QR version 2 carrying the gateway public key and the PSK (ADR-0020
-  section 6). Today the PSK is an environment variable and the gateway key is printed by
-  `ldmuxd` and `ldmux mesh status`.
+- **The pairing ceremony: built as `ldmux code --mesh`** (see above), as the same `v=1` link plus optional parameters rather than a `v=2` link. Hex rather than base64url. Nothing yet rotates the PSK from the CLI: it is still `LDMUX_MESH_PSK`.
 - **The optional ML-KEM stage** and the handshake-on-rekey trigger (`needs_rekey` exists;
   nothing acts on it yet).
 - **Real-radio measurement**: the session has run only against a fake gateway.
@@ -328,7 +328,7 @@ Platforms (see `docs/PLATFORMS.md`):
 - **Mesh work** (ADR-0020, ADR-0023, `docs/MESH-TRANSPORT.md`): the link, the RPC, the CLI
   and the gateway side of the L3 session exist. Missing: the phone's Noise client (a
   decision), the compact encoding and the shell bridge, the pairing ceremony, and the mobile
-  route wiring.
+  route wiring. **Superseded 2026-10-28:** all four now exist. What remains: a route picker, MeshMore token entry, a device run, and a real-radio run.
 - **A tailnet IP appears in test fixtures** (`crates/daemon/src/pairing.rs` and others).
 - **The git `user.name` is misconfigured** as `user.email`; commits carry that name.
 

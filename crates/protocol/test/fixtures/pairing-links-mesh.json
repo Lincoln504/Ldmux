@@ -1,5 +1,5 @@
 {
-  "//": "The mesh-keys part of the pairing link (ADR-0020 section 6), pinned from both sides: crates/protocol/src/pairing.rs and the app's PairingTest read this file. mv=1&mk=<64 lowercase hex>&psk=<64 lowercase hex>, all or none; an optional mr=<64 hex> carries the host's MeshCore radio public key.",
+  "//": "The mesh-keys part of the pairing link (ADR-0020 section 6), pinned from both sides: crates/protocol/src/pairing.rs and the app's PairingTest read this file. mv=1&mk=<64 lowercase hex>&psk=<64 lowercase hex>, all or none; an optional mr=<64 hex> carries the host's radio public key.",
   "valid": [
     {
       "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian",

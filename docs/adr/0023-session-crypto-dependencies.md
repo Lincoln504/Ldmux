@@ -91,7 +91,7 @@ and `subtle` carry it. Both are permissive; neither was previously in the lockfi
   `packages/mobile/native/build-session.sh host|android` (the staticlib needs no linker, so cargo
   needs no NDK configuration). `MESH_SESSION_BUILT` is now `true` and is combined with whether the
   library loaded on the device. What stays `false` is `MESH_TERMINAL_BUILT`, because carrying a
-  shell needs the compact encoding and the bridge, neither of which exists. Cost accepted: the
+  shell needs the compact encoding and the bridge, neither of which existed then. (Update 2026-10-28, later: both exist, see ADR-0025, and the flag is `true`.) Cost accepted: the
   mobile build now needs a Rust toolchain for the session library (the JVM tests build the host
   variant themselves, and the ABI test fails loudly, not silently, if that cannot run).
 

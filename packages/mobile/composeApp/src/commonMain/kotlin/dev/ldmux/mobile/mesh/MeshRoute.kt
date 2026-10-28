@@ -28,15 +28,16 @@ expect val currentPlatform: MobilePlatform
 const val MESH_SESSION_BUILT: Boolean = true
 
 /**
- * Whether a shell can be carried over the session. **It cannot yet.** The host half exists
- * (ADR-0025: the row encoding in `crates/protocol` and the daemon's shell bridge), but the phone
- * has no port of the encoding and no attach driver, and no way to receive the session keys (the
- * QR v2 ceremony). `docs/STATE.md` lists the three. Until they exist, a saved `Mesh` route
- * resolves to [MeshRouteProblem.TerminalNotBuilt] and nothing is opened. Flip it in the change
- * that lands them, and not before: a route that says "bound" over a link that cannot
- * show a shell is the dishonest state this flag exists to prevent.
+ * Whether a shell can be carried over the session. It can, as of 2026-10-28 (ADR-0025): the Kotlin
+ * port of the row encoding (`MeshTerm`, held to the Rust encoder's bytes), the attach driver
+ * (`MeshTermDriver`), the reduced-terminal screen (`MeshTerminalScreen`) and the key delivery
+ * (`ldmux code --mesh`, `MeshEnrollment`) exist and are tested. **True does not mean usable**:
+ * [resolveRoute] still reports every missing credential, the library not loading, and iOS, and
+ * nothing is opened for a route that resolves to a problem. What is *not* built is a way to pick
+ * the route (no picker UI) and a way to enter the MeshMore gateway token (no scanner for it), so
+ * on a real device a saved mesh route currently stops at `NeedsToken`. `docs/STATE.md` has the list.
  */
-const val MESH_TERMINAL_BUILT: Boolean = false
+const val MESH_TERMINAL_BUILT: Boolean = true
 
 /** Whether the native session library loaded on this device. */
 fun sessionLibAvailable(): Boolean = loadSessionLib() != null
@@ -72,8 +73,11 @@ enum class MeshRouteProblem {
     /** The session library is not in this build, or did not load on this device. */
     SessionNotBuilt,
 
-    /** The session exists, but carrying a shell over it (compact encoding, bridge) does not. */
+    /** Kept for a build that ships the session without the terminal profile; the shipped flag is true. */
     TerminalNotBuilt,
+
+    /** No session keys: the pairing code was not scanned with `ldmux code --mesh`, or the keys could not be stored. */
+    NeedsSessionKeys,
 
     /** No pairing token for the MeshMore gateway yet. */
     NeedsToken,
@@ -99,6 +103,8 @@ fun resolveRoute(
     hasPeer: Boolean,
     sessionBuilt: Boolean = MESH_SESSION_BUILT && sessionLibAvailable(),
     terminalBuilt: Boolean = MESH_TERMINAL_BUILT,
+    /** The phone holds the L3 session keys (`MeshSessionKeyStore.hasPeer`). */
+    hasSessionKeys: Boolean = true,
 ): MeshRouteResolution {
     if (saved == MeshRoute.Tailnet) return MeshRouteResolution.Use(MeshRoute.Tailnet)
     if (MeshRoute.Mesh !in availableRoutes(platform)) {
@@ -108,6 +114,7 @@ fun resolveRoute(
     // trap, so the first thing they are told is the real reason.
     if (!sessionBuilt) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.SessionNotBuilt)
     if (!terminalBuilt) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.TerminalNotBuilt)
+    if (!hasSessionKeys) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsSessionKeys)
     if (!hasToken) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsToken)
     if (!hasPeer) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsPeer)
     return MeshRouteResolution.Use(MeshRoute.Mesh)
@@ -132,6 +139,7 @@ fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
     MeshRouteProblem.NotOnThisPlatform -> "mesh route is not available on this device"
     MeshRouteProblem.SessionNotBuilt -> "mesh · session library unavailable on this device"
     MeshRouteProblem.TerminalNotBuilt -> "mesh · shells over mesh are not built yet"
+    MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a pairing code made with ldmux code --mesh"
     MeshRouteProblem.NeedsToken -> "mesh · needs pairing token"
     MeshRouteProblem.NeedsPeer -> "mesh · needs the host radio's public key"
 }

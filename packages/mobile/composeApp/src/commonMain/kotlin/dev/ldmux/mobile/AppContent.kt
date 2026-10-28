@@ -1,5 +1,7 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshRouteResolution
+import dev.ldmux.mobile.mesh.currentMeshResolution
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -642,7 +644,13 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         HoldOrientation(OrientationPolicy.Portrait)
         Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         LauncherScreen(
-            status = linkLabel(link, config),
+            status = linkLabel(
+                link, config,
+                // Read the real credentials only when the label is about the mesh route.
+                problem = if (link == LinkState.RouteUnavailable) {
+                    (currentMeshResolution(config.route) as? MeshRouteResolution.Unusable)?.problem
+                } else null,
+            ),
             link = link,
             sessions = sessions,
             desktop = desktop,

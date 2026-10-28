@@ -18,7 +18,7 @@
 //! - `v` is this format's version. A link with a version the app does not know
 //!   is refused rather than guessed at.
 //! - **Mesh keys (optional, ADR-0020 section 6):** `mv=1&mk=<64 hex>&psk=<64 hex>` (and an
-//!   optional `mr=<64 hex>`, the host's MeshCore radio public key the phone binds) add the
+//!   optional `mr=<64 hex>`, the host's radio public key the phone binds) add the
 //!   daemon's session public key and the pairing's pre-shared secret, so a phone can use the
 //!   mesh route. The link stays `v=1`: a scanner that predates mesh ignores parameters it does
 //!   not know (the contract since v1) and pairs the tailnet route exactly as before. A link that
@@ -51,7 +51,7 @@ pub struct MeshKeys {
     pub host_key: [u8; 32],
     /// The pairing's pre-shared secret (32 bytes).
     pub psk: [u8; 32],
-    /// The host's MeshCore radio public key, which the phone's gateway binds. Optional: the
+    /// The host's radio public key, which the phone's gateway binds. Optional: the
     /// daemon does not own the radio and learns this only if told (`LDMUX_MESH_SELF`).
     pub host_radio: Option<[u8; 32]>,
 }

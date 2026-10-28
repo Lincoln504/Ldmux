@@ -2,7 +2,7 @@
 
 **Status:** Proposed (2026-10-06); partly implemented 2026-10-28 on the daemon side:
 `crates/session` has the handshake, the record layout and the ARQ, and ADR-0023 decided the
-crypto dependency. The phone calls that Rust session through a C ABI (ADR-0023, update 2026-10-28), tested in a JVM and not yet on a device. The terminal encoding exists on the host (ADR-0025, 2026-10-28) and not on the phone. Padding, the pairing QR and the ML-KEM stage are not built.
+crypto dependency. The phone calls that Rust session through a C ABI (ADR-0023, update 2026-10-28), tested in a JVM and not yet on a device. (Update 2026-10-28, later: the phone side of the encoding, the attach driver and key delivery by `ldmux code --mesh` exist too; the link is `v=1` plus `mv/mk/psk[/mr]`, not a `v=2` link, and the keys are hex.) The terminal encoding exists on the host (ADR-0025, 2026-10-28) and not on the phone. Padding, the pairing QR and the ML-KEM stage are not built.
 The link beneath it: `crates/mesh`
 and the daemon's `mesh.status`, verified against a real radio on 2026-10-28.
 
@@ -300,7 +300,7 @@ pairing. Compare ADR-0017: the bearer token is shared and unpair is not revocati
 a per-pairing PSK is the per-device revocation that ADR named as follow-up for the
 mesh path only.
 
-**QR additions** (version 2 of the link, same `ldmux://pair` scheme): gateway static
+**QR additions** (**built 2026-10-28 as the same `v=1` link plus optional `mv=1&mk=<64 hex>&psk=<64 hex>[&mr=<64 hex>]`, not a `v=2` link, so a scanner that predates mesh still pairs the tailnet route from the same code; hex rather than base64url. The original text follows.** Version 2 of the link, same `ldmux://pair` scheme): gateway static
 public key (32 B, 43 characters Base64url), PSK (32 B, 43 characters), and the gateway's
 MeshCore address material if carriage B or a directed path is used (32 B, 43
 characters), plus a profile field. The current link is about 85 characters; the
