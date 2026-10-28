@@ -273,7 +273,11 @@ impl RawWs {
         let mut seen = needle.is_empty() || String::from_utf8_lossy(out).contains(needle);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            let wait = if seen { quiet } else { std::time::Duration::from_millis(500) };
+            let wait = if seen {
+                quiet
+            } else {
+                std::time::Duration::from_millis(500)
+            };
             let before = out.len();
             match self.next_within(wait).await {
                 Some(Msg::Binary(b)) => decode_output(&b, out),

@@ -120,6 +120,17 @@ fn main() {
     let daemon = LdmuxDaemon::new(state_dir.clone(), keeper_bin)
         .with_socket_path(socket_path.clone())
         .with_remote(remote_host.clone(), remote_port, token);
+    // The MeshMore link, if this machine has a gateway. Started before the
+    // runtime is built would be wrong (it needs a reactor), so it is installed
+    // inside `block_on` below.
+    let mesh_cfg = match ldmux_daemon::mesh::MeshConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("ldmuxd: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // Wrap the daemon in an `Arc<tokio::sync::Mutex>` so the control socket's
     // spawned tasks can call `handle` (which takes `&mut self`).
     let daemon_arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
@@ -129,6 +140,16 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let daemon_ref = daemon_arc.clone();
     rt.block_on(async move {
+        if let Some(cfg) = mesh_cfg {
+            println!("ldmuxd: mesh link to {} (peer {})", cfg.addr, {
+                let mut shown = String::new();
+                for byte in &cfg.peer[..4] {
+                    shown.push_str(&format!("{byte:02x}"));
+                }
+                shown
+            });
+            ldmux_daemon::mesh::MeshRuntime::start(cfg).install();
+        }
         // The handlers go in **before** `start`: a SIGTERM that arrives while
         // the daemon is starting is held by the stream and acted on as soon as
         // start returns (so it is stopped, not killed half-started).

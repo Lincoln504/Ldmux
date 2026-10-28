@@ -33,6 +33,7 @@ pub mod desktop_inventory;
 pub mod exec;
 pub mod fake_keeper;
 pub mod keeper_supervisor;
+pub mod mesh;
 pub mod ownership;
 pub mod pairing;
 pub mod proc;

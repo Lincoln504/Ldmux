@@ -1662,6 +1662,9 @@ impl LdmuxDaemon {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         match method {
+            // The MeshMore link, if this machine has one. Always answerable, so
+            // a client can tell "disabled" from "broken" without guessing.
+            "mesh.status" => Ok(crate::mesh::status_json()),
             "ping" => Ok(serde_json::json!({
                 "pong": true,
                 "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,

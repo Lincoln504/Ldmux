@@ -124,7 +124,11 @@ async fn flood_until_backlog_notice(
         // Neither: the attempt neither lined up nor proved anything. Re-arm it.
         eprintln!(
             "attempt {attempt}: {} without a backlog notice; retrying",
-            if flood_ended { "the flood finished" } else { "30 s passed" }
+            if flood_ended {
+                "the flood finished"
+            } else {
+                "30 s passed"
+            }
         );
     }
     panic!("no backlog notice in four attempts");

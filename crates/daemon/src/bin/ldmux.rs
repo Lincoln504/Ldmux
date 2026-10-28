@@ -144,6 +144,9 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "remote" => {
             "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening."
         }
+        "mesh" => {
+            "ldmux mesh [status] [--json]\n  The MeshMore link: state, the peer, the record budget left this hour, and the radio's own reading. Anything about frequencies lives on the gateway, not here."
+        }
         "code" => "ldmux code\n  Print a QR code the phone app scans to pair.",
         "pair" => "ldmux pair\n  Print the pairing link.",
         "clipboard-write" => {
@@ -153,10 +156,77 @@ fn command_help(cmd: &str) -> Option<&'static str> {
     })
 }
 
+/// The human form of `mesh.status`.
+///
+/// Sentinels are printed as words, never as numbers: `-128` is not a weak
+/// signal and `255` is not a full battery.
+fn print_mesh_status(v: &serde_json::Value) {
+    let text = |key: &str| v.get(key).and_then(|t| t.as_str()).map(str::to_owned);
+    if let Some("disabled") = text("state").as_deref() {
+        println!("mesh: no link configured on this host");
+        println!(
+            "\nset LDMUX_MESH_ADDR, LDMUX_MESH_TOKEN and LDMUX_MESH_PEER in the daemon's environment"
+        );
+        return;
+    }
+    println!(
+        "state    {}",
+        text("state").unwrap_or_else(|| "unknown".to_owned())
+    );
+    if let Some(addr) = text("addr") {
+        println!("gateway  {addr}");
+    }
+    if let Some(peer) = text("peer") {
+        println!("peer     {peer}");
+    }
+    match v.get("uplinkRecordMax").and_then(serde_json::Value::as_u64) {
+        Some(capacity) => println!("capacity {capacity} B per record"),
+        None => println!("capacity unknown (not bound yet)"),
+    }
+    match v.get("recordsLeft").and_then(serde_json::Value::as_u64) {
+        Some(255) => println!("budget   255 or more records left this hour"),
+        Some(left) => println!("budget   {left} records left this hour"),
+        None => println!("budget   unknown (the gateway has not reported it)"),
+    }
+    let radio = match v.get("radioState").and_then(serde_json::Value::as_u64) {
+        Some(0) => "connected",
+        Some(1) => "disconnected",
+        Some(2) => "radio lost",
+        Some(3) => "no contact",
+        _ => "unknown",
+    };
+    println!("radio    {radio}");
+    let rssi = v.get("rssi").and_then(serde_json::Value::as_i64);
+    let battery = v.get("batteryPercent").and_then(serde_json::Value::as_u64);
+    let signal = match rssi {
+        Some(-128) | None => "no reading".to_owned(),
+        Some(dbm) => format!("{dbm} dBm"),
+    };
+    let charge = match battery {
+        Some(255) | None => "not reported".to_owned(),
+        Some(percent) => format!("{percent}%"),
+    };
+    println!("signal   {signal}, battery {charge}");
+    if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
+        println!(
+            "airtime  {:.1} s this hour (gateway's own estimate)",
+            tenths as f64 / 10.0
+        );
+    }
+    if let Some(err) = text("lastError") {
+        println!("last     {err}");
+    }
+    if let Some(reconnects) = v.get("reconnects").and_then(serde_json::Value::as_u64)
+        && reconnects > 0
+    {
+        println!("retries  {reconnects}");
+    }
+}
+
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
     );
 }
 
@@ -520,6 +590,26 @@ async fn main() {
                 Err(e) => {
                     die(&e, &sock);
                 }
+            }
+        }
+        "mesh" => {
+            let sub = rest.first().map(String::as_str).unwrap_or("status");
+            if sub != "status" {
+                eprintln!("ldmux mesh: unknown subcommand '{sub}'");
+                eprintln!("usage: ldmux mesh status [--json]");
+                std::process::exit(2);
+            }
+            let r: Result<serde_json::Value, CallError> =
+                daemon_call(&sock, "mesh.status", &serde_json::json!({})).await;
+            match r {
+                Ok(v) => {
+                    if rest.iter().any(|a| a == "--json") {
+                        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                    } else {
+                        print_mesh_status(&v);
+                    }
+                }
+                Err(e) => die(&e, &sock),
             }
         }
         "desktop" => {

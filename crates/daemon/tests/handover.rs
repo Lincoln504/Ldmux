@@ -247,7 +247,10 @@ async fn handover_size_and_close_does_not_detach() {
         // The first sweep is what starts the clock; the second is a later tick.
         let t0 = d.mono_ms();
         d.release_unbacked_claims(&nobody, t0);
-        d.release_unbacked_claims(&nobody, t0 + ldmux_daemon::daemon::RECONNECT_GRACE_MS + 1_000);
+        d.release_unbacked_claims(
+            &nobody,
+            t0 + ldmux_daemon::daemon::RECONNECT_GRACE_MS + 1_000,
+        );
     }
     assert!(
         arc.lock().await.ownership().owner(&id).is_none(),
