@@ -88,6 +88,7 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
     MeshLinkState.ProtocolMismatch -> "mesh · gateway version mismatch"
     MeshLinkState.Unreachable -> "mesh · MeshMore not running"
     MeshLinkState.Refused -> "mesh · refused (re-pair, or add the host as a contact)"
+    MeshLinkState.SessionFailed -> "mesh · host not answering"
     MeshLinkState.Closed -> "mesh · closed"
 }
 

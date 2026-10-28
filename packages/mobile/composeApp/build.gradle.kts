@@ -85,3 +85,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 }
+
+// The L3 session is Rust behind a C ABI (native/ldmux_session.h). The JVM unit tests load the
+// real library, so build its host variant first and point java.library.path at it. A failure
+// here is not fatal to the build: MeshSessionAbiTest fails loudly with the reason, and every
+// test that does not need the library still runs.
+val sessionHostDir = rootProject.layout.projectDirectory.dir("native/build/host").asFile
+val buildSessionHost = tasks.register<Exec>("buildSessionHost") {
+    workingDir = rootProject.layout.projectDirectory.dir("native").asFile
+    environment("JAVA_HOME", System.getProperty("java.home"))
+    commandLine("./build-session.sh", "host")
+    isIgnoreExitValue = true
+    outputs.upToDateWhen { false }
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(buildSessionHost)
+    systemProperty("java.library.path", sessionHostDir.absolutePath)
+}

@@ -42,8 +42,18 @@ enum class MeshLinkState {
     /** Nothing is listening on the gateway port: MeshMore is not running, or its switch is off. */
     Unreachable,
 
-    /** The token was refused (rotated or revoked), or the host is not a MeshCore contact. */
+    /**
+     * The token was refused (rotated or revoked), the host is not a MeshCore contact, or the host
+     * rejected the session handshake (wrong pairing secret, a different phone key pinned, a stale
+     * or replayed timestamp). All of them are cured by pairing again.
+     */
     Refused,
+
+    /**
+     * The end-to-end session beneath a bound link gave up: the host stopped answering, or the
+     * native session could not run. The L2 link may be fine; the far end is not.
+     */
+    SessionFailed,
 
     /** Closed by the gateway or by us. Reconnect is the caller's decision, never automatic. */
     Closed,
