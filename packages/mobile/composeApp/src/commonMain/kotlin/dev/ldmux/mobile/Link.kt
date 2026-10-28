@@ -1,5 +1,6 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.meshProblemLabel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -25,6 +26,12 @@ enum class LinkState {
      * only on refresh or a new pairing.
      */
     Rejected,
+    /**
+     * Paired, but the chosen route is not the tailnet and cannot run (iOS, session library
+     * missing, shells over mesh not built, no token). Nothing is opened and nothing falls back to
+     * the tailnet: the user chose mesh, so the reason is shown (`LdmuxConfig.routeProblem`).
+     */
+    RouteUnavailable,
 }
 
 /**
@@ -49,6 +56,14 @@ fun linkLabel(state: LinkState, config: LdmuxConfig): String = when (state) {
     LinkState.Connecting -> "${config.pairedName} · connecting"
     LinkState.Unreachable -> "${config.pairedName} · unreachable"
     LinkState.Rejected -> "${config.pairedName} · rejected"
+    LinkState.RouteUnavailable ->
+        "${config.pairedName} · ${config.routeProblem()?.let(::meshProblemLabel) ?: "mesh route unavailable"}"
+}
+/** The link a config starts in: unpaired, blocked on its route, or connecting. */
+fun initialLink(config: LdmuxConfig): LinkState = when {
+    !config.isPaired -> LinkState.Unpaired
+    config.endpoint == null -> LinkState.RouteUnavailable
+    else -> LinkState.Connecting
 }
 
 /**

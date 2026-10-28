@@ -1,5 +1,11 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshRoute
+import dev.ldmux.mobile.mesh.MeshRouteProblem
+import dev.ldmux.mobile.mesh.MeshRouteResolution
+import dev.ldmux.mobile.mesh.currentPlatform
+import dev.ldmux.mobile.mesh.resolveRoute
+
 /**
  * Everything the app remembers: the pairing, and the few display settings.
  *
@@ -49,6 +55,13 @@ data class LdmuxConfig(
      * falls back to the host.
      */
     val pairName: String = "",
+    /**
+     * How this pairing is reached (`docs/MESH-GATEWAY.md`). A choice persisted beside the pairing,
+     * **not a second credential**: the mesh token lives in the Keystore and the session secret
+     * arrives with the pairing ceremony. The default is the tailnet, which is every existing
+     * install, so a device that never chose mesh behaves exactly as before.
+     */
+    val route: MeshRoute = MeshRoute.Tailnet,
 ) {
     /**
      * Paired means there is somewhere to connect and something to connect with — and
@@ -69,7 +82,17 @@ data class LdmuxConfig(
     val pairedName: String get() = pairName.ifEmpty { host }
 
     /** How to reach the daemon, or null when unpaired. */
-    val endpoint: Endpoint? get() = if (isPaired) Endpoint(host, token) else null
+    val endpoint: Endpoint? get() = if (isPaired && route == MeshRoute.Tailnet) Endpoint(host, token) else null
+
+    /**
+     * Why a paired config has no [endpoint], or null. This is the transport choice: every socket
+     * the app opens is built from [endpoint], so a non-tailnet route that cannot run opens
+     * **nothing** (it never falls back to the tailnet), and the launcher says why.
+     */
+    fun routeProblem(hasToken: Boolean = false, hasPeer: Boolean = false): MeshRouteProblem? {
+        if (!isPaired || route == MeshRoute.Tailnet) return null
+        return (resolveRoute(route, currentPlatform, hasToken, hasPeer) as? MeshRouteResolution.Unusable)?.problem
+    }
 
     val panelLeft: Boolean get() = side != "right"
 
@@ -85,7 +108,11 @@ data class LdmuxConfig(
      * a reconnect on the first attach takes the shell over (ADR-0010) — so a font
      * change used to take every open shell back from the desk.
      */
-    val connectionKey: String get() = "$host|$token|$deviceId|$deviceLabel"
+    val connectionKey: String
+        get() = "$host|$token|$deviceId|$deviceLabel" +
+            // Appended only off the tailnet, so a tailnet device's key is byte-for-byte what it
+            // was and nothing rebuilds on upgrade; choosing a route does rebuild the page.
+            if (route == MeshRoute.Tailnet) "" else "|route=${route.name}"
 
     companion object {
         const val DEFAULT_FONT_SP = 12f

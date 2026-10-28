@@ -1,6 +1,7 @@
 package dev.ldmux.mobile
 
 import android.content.Context
+import dev.ldmux.mobile.mesh.meshRouteFromStored
 
 /**
  * The config, persisted in SharedPreferences, and this install's identity.
@@ -39,6 +40,7 @@ actual object AppPrefs {
     private const val KEY_COMPACT = "compact"
     private const val KEY_DEVICE_ID = "device_id"
     private const val KEY_DEVICE_LABEL = "device_label"
+    private const val KEY_ROUTE = "route"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -61,6 +63,7 @@ actual object AppPrefs {
             compact = sp.getBoolean(KEY_COMPACT, LdmuxConfig.DEFAULT.compact),
             deviceId = deviceId,
             deviceLabel = label,
+            route = meshRouteFromStored(sp.getString(KEY_ROUTE, null)),
         )
     }
 
@@ -75,6 +78,7 @@ actual object AppPrefs {
             .putBoolean(KEY_COMPACT, config.compact)
             .putString(KEY_DEVICE_ID, config.deviceId)
             .putString(KEY_DEVICE_LABEL, config.deviceLabel)
+            .putString(KEY_ROUTE, config.route.name)
             .apply()
     }
 }

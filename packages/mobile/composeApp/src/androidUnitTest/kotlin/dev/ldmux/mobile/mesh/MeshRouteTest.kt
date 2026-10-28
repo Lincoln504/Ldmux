@@ -29,24 +29,30 @@ class MeshRouteTest {
     fun `mesh on Android needs a token first, then a peer, then it resolves`() {
         assertEquals(
             MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.NeedsToken),
-            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false, sessionBuilt = true),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false, sessionBuilt = true, terminalBuilt = true),
         )
         assertEquals(
             MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.NeedsPeer),
-            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = false, sessionBuilt = true),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = false, sessionBuilt = true, terminalBuilt = true),
         )
         assertEquals(
             MeshRouteResolution.Use(MeshRoute.Mesh),
-            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = true),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = true, terminalBuilt = true),
         )
     }
 
     @Test
-    fun `until the phone can speak the session, mesh says so before asking for a token`() {
-        assertEquals(false, MESH_SESSION_BUILT, "flip together with the session client")
-        val expected = MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.SessionNotBuilt)
-        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false))
-        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true))
+    fun `the session is built, the shell carrier is not, and mesh says so before asking for a token`() {
+        assertEquals(true, MESH_SESSION_BUILT, "MeshSession exists and is tested against the real library")
+        assertEquals(false, MESH_TERMINAL_BUILT, "flip with the compact terminal encoding and the shell bridge")
+        val expected = MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.TerminalNotBuilt)
+        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = false, hasPeer = false, sessionBuilt = true))
+        assertEquals(expected, resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = true))
+        // A device that could not load the library is told that first: it is the earlier layer.
+        assertEquals(
+            MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.SessionNotBuilt),
+            resolveRoute(MeshRoute.Mesh, MobilePlatform.Android, hasToken = true, hasPeer = true, sessionBuilt = false),
+        )
         // iOS is still reported as its own, truer problem.
         assertEquals(
             MeshRouteResolution.Unusable(MeshRoute.Mesh, MeshRouteProblem.NotOnThisPlatform),

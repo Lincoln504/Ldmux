@@ -190,7 +190,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
     val connected: StateFlow<Boolean> = _connected
 
     /** The link as one value (see [LinkState]); [connected] is its `Online` case. */
-    private val _link = MutableStateFlow(if (config.isPaired) LinkState.Connecting else LinkState.Unpaired)
+    private val _link = MutableStateFlow(initialLink(config))
     val link: StateFlow<LinkState> = _link
 
     /**
@@ -448,13 +448,13 @@ class LdmuxClient(private var config: LdmuxConfig) {
         _sessions.value = emptyList()
         _desktop.value = null
         _connected.value = false
-        _link.value = if (config.isPaired) LinkState.Connecting else LinkState.Unpaired
-        scope?.let { s -> if (config.isPaired) job = s.launch { loop() } }
+        _link.value = initialLink(config)
+        scope?.let { s -> if (config.endpoint != null) job = s.launch { loop() } }
     }
 
     fun start(scope: CoroutineScope) {
         this.scope = scope
-        if (job?.isActive == true || !config.isPaired) return
+        if (job?.isActive == true || config.endpoint == null) return
         if (_link.value != LinkState.Online) _link.value = LinkState.Connecting
         job = scope.launch { loop() }
     }
