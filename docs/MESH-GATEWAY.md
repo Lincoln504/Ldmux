@@ -475,5 +475,12 @@ the same port, which is the `ENABLE_USB_INTERFACE` difference above.
   that owns the connection, the compact L3 encoding, and an RPC/CLI surface.
 - The mobile route is still not wired into the launcher (section 11).
 
+Verified end to end on 2026-10-28, real radio, USB serial:
+`ldmuxd` (this repo) → `crates/mesh` → MeshMore host gateway → HELTEC-BASE.
+`ldmux mesh status` printed `state ready`, `capacity 172 B per record`,
+`budget 58 records left this hour`, `radio connected`. The 58 is the governor's
+own arithmetic: 36 s of airtime per hour divided by a 176-byte frame at
+612 ms plus the 2-byte on-air overhead.
+
 Note what is *not* owed: the daemon must never speak MeshCore. It talks L2 to
 this process, which owns the radio.
