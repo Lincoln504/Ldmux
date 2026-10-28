@@ -59,7 +59,8 @@ pieces:
    X25519 + ChaCha20-Poly1305), then add the crate.
 2. The record layout on top of the session: the ADR fixes 6 clear bytes, 2 inner
    bytes and a 16-byte tag, which leaves 148 application bytes per 172-byte
-   record.
+   record. That 148 is this layer's arithmetic and lives nowhere else: the
+   carrier exports only `RECORD_MAX = 172`.
 3. The ARQ state machine (sequence, ack, retransmit), which must never be given
    to the gateway: the gateway cannot know whether the peer received anything.
 

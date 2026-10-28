@@ -475,6 +475,24 @@ the same port, which is the `ENABLE_USB_INTERFACE` difference above.
   that owns the connection, the compact L3 encoding, and an RPC/CLI surface.
 - The mobile route is still not wired into the launcher (section 11).
 
+**Two pairing ceremonies are by design.** LDMUX issues its own tailnet grant, so
+it works with no MeshMore installed; MeshMore issues the mesh grant because it
+owns the radio. They are different secrets for different reach, and neither can
+replace the other. The asymmetry to fix is on this side: the daemon token, which
+grants shell control, sits in plain preferences while the mesh token is in the
+Android Keystore.
+
+**Device identity does not belong in L2.** The gateway is two independent hops,
+each terminated by a blind carrier, so an identity placed in the L2 handshake
+would be visible to MeshMore and would still not reach the daemon that keys
+ownership. It goes in the end-to-end session handshake instead, which LDMUX owns.
+
+**Record contents are ours, not the carrier's.** The gateway used to export
+`applicationBytesPerRecord = 148` (172 − a 24-byte header and tag from ADR-0020).
+That made a MeshMore package and a MeshMore test depend on this repo's session
+layout. It is removed: the carrier promises a 172-byte record arrives intact, and
+148 = 172 − 24 is arithmetic for the session layer here.
+
 Verified end to end on 2026-10-28, real radio, USB serial:
 `ldmuxd` (this repo) → `crates/mesh` → MeshMore host gateway → HELTEC-BASE.
 `ldmux mesh status` printed `state ready`, `capacity 172 B per record`,
