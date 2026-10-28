@@ -1,4 +1,4 @@
-# ADR-0022: A pi extension returns, for voice only
+# ADR-0024: A pi extension returns, for voice only
 
 **Status:** Accepted (2026-10-28). Amends the "no pi extension" half of ADR-0009.
 

@@ -1,6 +1,6 @@
 # ldmux-pi-voice
 
-A pi extension for voice mode (ADR-0022, `docs/VOICE-MODE.md`). Inert unless pi runs inside an
+A pi extension for voice mode (ADR-0024, `docs/VOICE-MODE.md`). Inert unless pi runs inside an
 ldmux shell (`LDMUX=1`, `LDMUX_SOCKET`, `LDMUX_SESSION_ID`).
 
 - `/voice on|off` toggles it; the state is stored with `pi.appendEntry("ldmux-voice", ...)` and

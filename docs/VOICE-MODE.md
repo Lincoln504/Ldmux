@@ -3,7 +3,7 @@
 > **Status, 2026-10-28: partly implemented.** Built and tested: the daemon `speech` relay and
 > `ldmux speak`, the phone's OSC 1338 parser and `speech` message parser, `VoiceMode`, the
 > chunker, `VoiceDriver`, an Android `TextToSpeech` speaker, and the pi extension
-> (`packages/pi-voice-extension`, ADR-0022). **Not built:** the UI toggle that creates a
+> (`packages/pi-voice-extension`, ADR-0024). **Not built:** the UI toggle that creates a
 > `VoiceDriver`, a separate voice-activity detector (Android's `SpeechRecognizer` endpoints on its
 > own), iOS, on-device verification of any of it, and real-pi verification of the extension
 > beyond unit tests with a faked pi API. See section 15. Written 2026-10-06. This is the plan of record for a future feature; it is deliberately

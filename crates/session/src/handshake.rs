@@ -78,7 +78,7 @@ impl Keypair {
     }
 
     /// Rebuild a stored keypair. Both halves are stored: `snow` exposes no way to derive the
-    /// public half from the private one, and ADR-0021 deliberately adds no curve crate for it.
+    /// public half from the private one, and ADR-0023 deliberately adds no curve crate for it.
     #[must_use]
     pub fn from_parts(private: [u8; 32], public: [u8; 32]) -> Self {
         Self { private, public }

@@ -1,4 +1,4 @@
-# ADR-0021: The L3 session's crypto dependencies (`snow`, `hmac`, `sha2`, `zeroize`)
+# ADR-0023: The L3 session's crypto dependencies (`snow`, `hmac`, `sha2`, `zeroize`)
 
 **Status:** Accepted (2026-10-28). Implements the dependency decision ADR-0020 deferred
 ("`snow` is not on the AGENTS.md dependency allowlist: adding it needs a decision then").

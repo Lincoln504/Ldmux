@@ -24,7 +24,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "Unicode-3.0",
     "BSD-2-Clause",
-    # curve25519-dalek and subtle, both via snow (ADR-0021).
+    # curve25519-dalek and subtle, both via snow (ADR-0023).
     "BSD-3-Clause",
     "Unlicense",
 ]

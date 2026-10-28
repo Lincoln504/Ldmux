@@ -1,7 +1,7 @@
 # Mesh transport (LoRa) — is a terminal over MeshCore plausible?
 
 Target: **MeshCore** (Meshtastic appears below only as a comparison).
-Status: **the L3 session exists on the daemon side (`crates/session`, ADR-0021); the phone side and the terminal encoding do not.** The L2 link beneath it now
+Status: **the L3 session exists on the daemon side (`crates/session`, ADR-0023); the phone side and the terminal encoding do not.** The L2 link beneath it now
 is: see `MESH-GATEWAY.md` section 12 and `STATE.md`. This records what is known, what it costs,
 and what is still unanswered. It is not a plan of record and nothing reads it at
 runtime.

@@ -1201,6 +1201,9 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0018** | **Session layer:** `crates/keeper` owns the PTYs and runs libghostty-vt; supersedes ADR-0001, ADR-0015 and ADR-0006 §2; tmux and TypeScript removed. |
 | **ADR-0020** | **Mesh link security (Proposed):** end-to-end Noise IKpsk2 session (X25519, ChaCha20-Poly1305, 256-bit PSK from the QR; optional ML-KEM stage) inside MeshCore, which is treated as an untrusted transport. Design only. |
 | **ADR-0021** | **Keeper as a unit, shells as scopes:** `ldmux-keeper.service` runs the keeper; the daemon starts it with `systemctl --user start`; each shell is moved into its own transient scope under `ldmux-shells.slice` (never blocking the shell on failure); detached-spawn fallback without systemd. Amends ADR-0015/0018's restart-survival mechanism. |
+| **ADR-0022** | **The terminal answers its own queries:** the keeper's emulator answers DA/DSR, DECRQM, XTVERSION, kitty-keyboard and window-size queries so they never reach the client, and modified Enter uses the Kitty keyboard protocol (`CSI 13;2u` for `Shift+Enter`). |
+| **ADR-0023** | **The L3 session's crypto dependencies:** `snow` (Noise `IKpsk2_25519_ChaChaPoly_SHA256`) plus `hmac`, `sha2` and `zeroize` in `crates/session` only, with `default-features = false` so the C-backed `ring` stays out. No hand-rolled cryptography. |
+| **ADR-0024** | **A pi extension returns, for voice only:** a pi-side extension publishes the assistant's spoken summary to the daemon over `LDMUX_SOCKET`; it registers no sessions. Amends the no-extension half of ADR-0009 for voice alone. |
 
 ADR-0006 to ADR-0015 (divergences, native engine, UI modes, the Node runtime,
 exclusive ownership, orientation, background/sleep, cross-platform seams, text

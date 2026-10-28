@@ -1,7 +1,7 @@
 # ADR-0020 — Mesh link security: an end-to-end Noise session inside MeshCore
 
 **Status:** Proposed (2026-10-06); partly implemented 2026-10-28 on the daemon side:
-`crates/session` has the handshake, the record layout and the ARQ, and ADR-0021 decided the
+`crates/session` has the handshake, the record layout and the ARQ, and ADR-0023 decided the
 crypto dependency. The phone side, padding, the pairing QR and the ML-KEM stage are not built.
 The link beneath it: `crates/mesh`
 and the daemon's `mesh.status`, verified against a real radio on 2026-10-28.
@@ -427,7 +427,7 @@ evidence.
   open cannot disturb one (`src/stateless_transportstate.rs`, `read_message(&self, nonce, ...)`).
 - **STALE: the ring reasoning in section 2.** "SHA-256 rather than BLAKE2s because snow's ring
   resolver offers SHA-256/512 but not BLAKE2" is true of the ring resolver, but snow's default
-  RustCrypto resolver offers SHA256 and is what ADR-0021 uses. The suite is unchanged.
+  RustCrypto resolver offers SHA256 and is what ADR-0023 uses. The suite is unchanged.
 - **Implemented:** handshake message sizes 121 B and 50 B match the table in section 2 exactly
   (`handshake_messages_are_the_adr_sizes`), and the record layout of section 3 is
   `record.rs`. Not implemented: padding (section 4), the QR additions (section 6), the optional

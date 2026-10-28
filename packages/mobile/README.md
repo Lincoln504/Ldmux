@@ -266,7 +266,7 @@ pointed.
   modifiers (`Ctrl Alt ⇧ C/c`), actions (`⌨ paste ⏎`) — with a 3x2 arrow pad
   (`↑` over `← ↓ →`, no empty cells: `↑` is one full-width key) at the trailing edge. Landscape uses the same `ArrowPad` in the
   side panel. Modifiers latch for one following key; `⇧` then `⏎` is `Shift+Enter`
-  (a newline in `pi`, ADR-0022).
+  (a newline in `pi`, ADR-0024).
 
 ## Status
 
