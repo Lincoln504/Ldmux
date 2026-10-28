@@ -342,3 +342,13 @@ Every number above was read, not assumed:
 Firmware read at `companion-v1.17.1` (`d929643`). The companion protocol
 document is the same one `crates/protocol` is written against for the direct
 path; nothing here changes the direct path.
+
+## Addendum, 2026-10-28: the radio does not queue downlink raw data
+
+`onRawDataRecv` pushes `PUSH_CODE_RAW_DATA` (0x84) only `if (_serial->isConnected())`; otherwise it logs and drops it (`MyMesh.cpp:811-816` in `companion-v1.17.1`). Unlike channel data (`onChannelDataRecv` calls `addToOfflineQueue`), raw custom is **not** held for a reconnecting app. Consequences for this contract:
+
+- A Phase B record that arrives while the phone's BLE link is down is lost, silently.
+- The gateway cannot detect or replay it. The session layer's own retransmission (ADR-0020: a new record with a new counter) is the only recovery, which is what section 4 already assumes. Do not describe `RECV` as reliable downlink.
+- `PUSH_CODE_RAW_DATA` has no sender identity (`[84][snr][rssi][0xFF][payload]`), so binding a peer remains the gateway's job.
+
+Also: the gateway's airtime estimate is only correct for the radio preset it is configured for. The flat 4 ms/byte default fits 62.5 kHz SF7 (613 ms per 176 B). EU/UK Narrow is 1656 ms, 2.4x higher. The app must build the estimator from the radio's real parameters (`AirtimeEstimator.lora`).
