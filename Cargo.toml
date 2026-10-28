@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/daemon", "crates/vt-sys", "crates/keeper", "crates/attach", "crates/mesh"]
+members = ["crates/protocol", "crates/daemon", "crates/vt-sys", "crates/keeper", "crates/attach", "crates/mesh", "crates/session"]
 
 [workspace.package]
 # Verified with rustc 1.95.0 (builds) and 1.93.0 (fails: `if let` guards in
