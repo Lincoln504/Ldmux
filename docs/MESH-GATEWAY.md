@@ -420,3 +420,55 @@ raw send is answered by OK/ERR, so `SentFlood` can only come from Phase A. The r
 server advertises `statusPush` only and does not enforce the credit window of section 8
 item 1, so the client has no credit logic. `STATUS` uses `rssi == -128` and
 `battery == 0xFF` as "unknown" (`constants.dart`), mapped to null here.
+
+## 12. Host side, 2026-10-28: the radio owner now exists, the daemon client does not
+
+The gateway process beside `ldmuxd` is no longer a diagram. It lives in the
+MeshMore repo, because it is the MeshMore side of the boundary:
+
+`meshmore_sns_app/packages/meshcore_host/`
+
+- `serial_framing.dart`: the firmware's USB-serial framing, `'>' len_lo len_hi`
+  outbound and `'<' len_lo len_hi` inbound, 176-byte ceiling
+  (`src/helpers/ArduinoSerialInterface.cpp:19-70`,
+  `src/helpers/BaseSerialInterface.h:5`). Unlike BLE, serial is a byte stream, so
+  the decoder is incremental and keeps state across reads.
+- `serial_transport.dart`: a `MeshcoreTransport` over that framing.
+- `serial_mesh_sender.dart`: the host twin of the phone's `MeshSender`. Same
+  contract, same L1 codec. It adds one thing BLE did not need: an explicit
+  one-at-a-time queue, because the firmware's raw-data reply is a bare
+  `writeOKFrame` with no correlation tag, so two sends in flight cannot be told
+  apart.
+- `bin/meshmore_gateway.dart`: the process. Opens the port (`stty` configures
+  the TTY, `dart:io` moves the bytes), handshakes, builds the governor from the
+  radio's **actual** preset read out of `SELF_INFO`, then starts the same L2
+  `Gateway` the phone runs.
+
+### The firmware constraint this exposed
+
+The env that is flashed on the phone-side radio, `heltec_v4_companion_radio_ble`,
+does **not** define `ENABLE_USB_INTERFACE`
+(`variants/heltec_v4/platformio.ini:202-225`). Only
+`heltec_v4_companion_radio_usb` does (`:182-190`). One Heltec cannot be both a
+BLE companion and a USB companion under these envs.
+
+So the two-radio fleet maps cleanly:
+
+| Radio | Firmware env | Attached by | Owner |
+|---|---|---|---|
+| phone-side | `heltec_v4_companion_radio_ble` | BLE | MeshMore app |
+| host-side | `heltec_v4_companion_radio_usb` | USB serial | `meshcore_host` |
+
+The host radio must be reflashed. Until it is, this process correctly refuses to
+start with a message saying why, rather than hanging.
+
+### What LDMUX still owes
+
+- **A Rust L2 client in `ldmuxd`.** The host gateway listens on loopback exactly
+  like the phone's does, so the daemon needs the same ten-frame client the
+  mobile app has. `GatewayClient` (Dart) and `MeshGatewayClient` (Kotlin) are the
+  two reference implementations; the frame set is in section 7.
+- The compact L3 encoding and the daemon listener (section 11, unchanged).
+
+Note what is *not* owed: the daemon must never speak MeshCore. It talks L2 to
+this process, which owns the radio.
