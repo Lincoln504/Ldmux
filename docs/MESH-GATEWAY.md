@@ -392,6 +392,10 @@ Also: the gateway's airtime estimate is only correct for the radio preset it is 
 
 **Not built, on purpose:**
 
+- **Superseded 2026-10-28 (the route is now wired as far as it can honestly go):** `LdmuxConfig.route`
+  is persisted, `LdmuxConfig.endpoint` is null for a non-tailnet route so neither `LdmuxClient` nor
+  `AttachClient` opens anything, and the launcher shows `LinkState.RouteUnavailable` with the
+  reason. It still cannot carry a shell (`MESH_TERMINAL_BUILT = false`). The original line follows.
 - The mesh route is **not wired into the launcher or the terminal surface**. Those drive the
   daemon WebSocket and the terminal engine. Nothing exists on the other end of a mesh route
   yet (the compact L3 encoding in section 8 item 2 and the daemon listener below), so a UI
@@ -473,7 +477,7 @@ the same port, which is the `ENABLE_USB_INTERFACE` difference above.
   (`ldmux-mesh`: frame codec, decoder, loopback client, 19 tests, clippy clean,
   tokio its only dependency). What remains is the daemon side: a listener task
   that owns the connection, the compact L3 encoding, and an RPC/CLI surface.
-- The mobile route is still not wired into the launcher (section 11).
+- The mobile route is still not wired into the launcher (section 11). **Superseded 2026-10-28:** see the entry above; it is wired to the config, the transport choke point and the link state, and resolves to `TerminalNotBuilt`.
 
 **Two pairing ceremonies are by design.** LDMUX issues its own tailnet grant, so
 it works with no MeshMore installed; MeshMore issues the mesh grant because it

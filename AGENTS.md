@@ -69,7 +69,7 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
   direct-dependency allowlist: `tokio`, `tokio-tungstenite`, `serde`, `serde_json`,
   `futures-util`, `uuid`, `nix`, `rand`, and `flate2` with the pure-Rust `miniz_oxide`
   backend (permessage-deflate, ADR-0019; no C, no system zlib), and, in `crates/session` only,
-  `snow`, `hmac`, `sha2`, `zeroize` (ADR-0023; no C, no `ring`). `deny.toml` bans TLS
+  `snow`, `hmac`, `sha2`, `zeroize` (ADR-0023; no C, no `ring`; `crates/session-ffi` adds none of its own and is the only crate that exposes the session over a C ABI). `deny.toml` bans TLS
   stacks and HTTP clients. Adding a dependency needs an ADR line; edition 2024; tests in-crate (`#[cfg(test)]`)
   or `tests/`; match the style of the surrounding crate.
 - **Daemon is a separate process.** Clients talk to it over the Unix socket; the

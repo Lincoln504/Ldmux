@@ -43,7 +43,9 @@ What exists, 2026-10-28:
 | Daemon link + `mesh.status` + `ldmux mesh status` | `crates/daemon/src/mesh.rs`, `bin/ldmux.rs` | Implemented, 10 tests, live against a real radio 2026-10-28: `ready`, 172 B capacity, 58 records left. |
 | L3 session (Rust) | `crates/session` (`ldmux-session`) | Implemented, 36 tests, clippy clean. Noise `IKpsk2_25519_ChaChaPoly_SHA256` over `snow` (ADR-0023), the 6+2+16 record, a 64-record replay window, ARQ. Pure: no I/O. |
 | Session host in the daemon | `crates/daemon/src/mesh_session.rs`, `mesh.rs` | Implemented. Enabled by `LDMUX_MESH_PSK`. 5 unit + 4 integration tests against a fake gateway speaking the real L2 frames. `mesh.status` gained a `session` object. |
-| L2 client (Kotlin) | `packages/mobile/.../mesh` | Implemented, JVM-tested. Not wired into the launcher. |
+| L3 session as a C ABI | `crates/session-ffi` (`ldmux-session-ffi`), `packages/mobile/native/ldmux_session.h`, `ldmux_session_jni.c`, `build-session.sh` | Implemented, 13 tests that call the ABI the way C does (whole handshake, a sealed record each way, budget bound, tamper, double free, nulls). ADR-0023 update. |
+| L3 session (Kotlin) | `packages/mobile/.../mesh/MeshSession.kt`, `SessionLib.kt`, `NativeMeshSession.kt` | Implemented. `MeshSessionAbiTest`: 11 tests that load the real library in a JVM and run the phone against the daemon's side. No crypto in Kotlin. Not exercised on a device. |
+| L2 client (Kotlin) | `packages/mobile/.../mesh` | Implemented, JVM-tested. The route is wired into `LdmuxConfig`, the transport choke point (`endpoint`) and `LinkState`; it carries no shell yet. |
 | Radio owner | MeshMore repo, `packages/meshcore_host` | Implemented and run against a real HELTEC-BASE on 2026-10-28 (USB serial). |
 
 Nothing here speaks MeshCore except the MeshMore gateway, and nothing in this
@@ -69,10 +71,18 @@ repo needs to know a frequency, a spreading factor or a preset.
 
 **Still lacks.**
 
-- **The phone's end.** The Kotlin client has no Noise implementation, and no maintained
-  Kotlin Multiplatform handshake library exists (ADR-0023). Options: Kotlin implementation of
-  the same suite, JNI over `crates/session`, or a different suite. A product decision.
-  Until it is made `MESH_SESSION_BUILT` stays `false` and a saved mesh route says so.
+- **A device run of the phone's end.** The Kotlin client calls the Rust session through
+  `libldmux_session.so` (ADR-0023, update 2026-10-28) and is tested against the real library in a
+  JVM, but the Android build of the library has only been packaged (`assembleDebug` includes it
+  for arm64-v8a and x86_64), never run on a phone. `MESH_SESSION_BUILT` is `true`; a device where
+  the library does not load reports `SessionNotBuilt`.
+- **`MESH_TERMINAL_BUILT` is `false`.** A saved mesh route resolves to `TerminalNotBuilt`, opens
+  nothing and does not fall back to the tailnet (`LdmuxConfig.endpoint` is null for it). The route
+  is not offered for selection until this flips, and it flips with the compact terminal encoding
+  and the shell bridge below, not before.
+- **The phone has nowhere to keep the host key, the PSK or its own static key.** The session API
+  takes them as arguments; the QR v2 ceremony below is what would put them in the Keystore, so
+  `resolveRoute` is always given `hasPeer = false` today.
 - **Padding to 64/128/ceiling buckets** (ADR-0020 section 4). Records are not padded, so
   record sizes leak. A reserved flag bit is the planned place for a padded form.
 - **The compact terminal encoding** that goes inside the stream, and the bridge from

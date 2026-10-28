@@ -2,7 +2,7 @@
 
 **Status:** Proposed (2026-10-06); partly implemented 2026-10-28 on the daemon side:
 `crates/session` has the handshake, the record layout and the ARQ, and ADR-0023 decided the
-crypto dependency. The phone side, padding, the pairing QR and the ML-KEM stage are not built.
+crypto dependency. The phone calls that Rust session through a C ABI (ADR-0023, update 2026-10-28), tested in a JVM and not yet on a device. Padding, the pairing QR, the ML-KEM stage and the terminal encoding are not built.
 The link beneath it: `crates/mesh`
 and the daemon's `mesh.status`, verified against a real radio on 2026-10-28.
 

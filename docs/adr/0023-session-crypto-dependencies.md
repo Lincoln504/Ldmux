@@ -79,10 +79,27 @@ and `subtle` carry it. Both are permissive; neither was previously in the lockfi
   `MESH_SESSION_BUILT` in `packages/mobile/.../mesh/MeshRoute.kt` stays `false` and the route
   reports itself unfinished.
 
+  **Update 2026-10-28: taken.** The architecture already fixed it (one implementation of the
+  suite, no hand-rolled crypto in Kotlin, nothing duplicated per platform), so the phone calls
+  this crate: `crates/session-ffi` exposes it as a C ABI (`packages/mobile/native/ldmux_session.h`),
+  `ldmux_session_jni.c` is a thin JNI shim, and `MeshSession` (commonMain) drives it. The ABI is
+  deliberately small and pull-style: handles are opaque, every output is copied into a caller
+  buffer, free nulls the caller's slot, no global state, a panic is a status code. The library
+  is a **separate** `libldmux_session.so` rather than part of `libldmux_terminal.so`, because the
+  terminal library is shipped prebuilt from the libghostty pipeline and linking a Rust staticlib
+  into it would make every session change rebuild libghostty. It is built by
+  `packages/mobile/native/build-session.sh host|android` (the staticlib needs no linker, so cargo
+  needs no NDK configuration). `MESH_SESSION_BUILT` is now `true` and is combined with whether the
+  library loaded on the device. What stays `false` is `MESH_TERMINAL_BUILT`, because carrying a
+  shell needs the compact encoding and the bridge, neither of which exists. Cost accepted: the
+  mobile build now needs a Rust toolchain for the session library (the JVM tests build the host
+  variant themselves, and the ABI test fails loudly, not silently, if that cannot run).
+
 ## Consequences
 
 - **+** No hand-rolled crypto; the suite is checked against an independent vector.
 - **+** Four direct dependencies in one crate; no TLS or HTTP stack, no C.
 - **+** The pure layering (`crates/session` has no I/O) keeps the swap contained.
 - **−** A new unaudited-library risk the ADR names instead of burying.
-- **−** The phone has no implementation yet.
+- **−** The phone's implementation is the same Rust code behind an FFI boundary, so the unsafe
+  surface is one crate (`crates/session-ffi`, 13 ABI tests) and the mobile build gains a Rust step.
