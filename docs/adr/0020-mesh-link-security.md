@@ -404,3 +404,32 @@ anyone who photographs the code holds the PSK.
 - Cross-reference: payload compression, if used, would sit **above** the record layer,
   and compressing before encrypting leaks length per input; see ADR-0019 before enabling
   it on this link.
+
+## Update, 2026-10-28: figures this ADR stated that the firmware and the code have since settled
+
+The text above is left as written. Where it is now wrong, the correction is here, with its
+evidence.
+
+- **CORRECTION: the raw/custom payload is not 184 bytes, and application bytes are not 160.**
+  The table in section 3 (`A. raw/custom | 184 | 160`) takes MeshCore's 184-byte packet
+  ceiling. The companion command that sends raw data is `[0x19][path_len][path][payload]`
+  inside a 176-byte companion frame, which accepts `174 - path_len` payload bytes
+  (`MyMesh.cpp:1515-1530`, `BaseSerialInterface.h:5`). At the carrier's ceiling a record is
+  **172** bytes, and after the 24-byte overhead there are **148** application bytes, of which
+  the ARQ header takes 4 (`crates/session/src/record.rs`, `arq.rs`). The B rows (136, 96) are
+  unaffected by this but stay unmeasured.
+- **ANSWERED: "whether the companion API can send raw/custom (0x0F) packets".** It can: the
+  command above exists in the pinned firmware. What stays unmeasured is a raw record crossing a
+  real mesh to a real peer; the live run of 2026-10-28 reached the radio and read its contact
+  table but did not send an uplink record.
+- **ANSWERED: "whether a failed open leaves the counter untouched".** `snow`'s
+  `StatelessTransportState` takes the nonce as an argument and holds no counter, so a failed
+  open cannot disturb one (`src/stateless_transportstate.rs`, `read_message(&self, nonce, ...)`).
+- **STALE: the ring reasoning in section 2.** "SHA-256 rather than BLAKE2s because snow's ring
+  resolver offers SHA-256/512 but not BLAKE2" is true of the ring resolver, but snow's default
+  RustCrypto resolver offers SHA256 and is what ADR-0021 uses. The suite is unchanged.
+- **Implemented:** handshake message sizes 121 B and 50 B match the table in section 2 exactly
+  (`handshake_messages_are_the_adr_sizes`), and the record layout of section 3 is
+  `record.rs`. Not implemented: padding (section 4), the QR additions (section 6), the optional
+  ML-KEM stage, and acting on the rekey trigger.
+- **Not in this ADR, decided in code:** the ARQ (`arq.rs`). Its defaults are judgement calls.
