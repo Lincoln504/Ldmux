@@ -17,6 +17,14 @@
 //!   Optional, at most 64 characters.
 //! - `v` is this format's version. A link with a version the app does not know
 //!   is refused rather than guessed at.
+//! - **Mesh keys (optional, ADR-0020 section 6):** `mv=1&mk=<64 hex>&psk=<64 hex>` add the
+//!   daemon's session public key and the pairing's pre-shared secret, so a phone can use the
+//!   mesh route. The link stays `v=1`: a scanner that predates mesh ignores parameters it does
+//!   not know (the contract since v1) and pairs the tailnet route exactly as before. A link that
+//!   carries *any* mesh field must carry all of them, correctly formed, or it is refused
+//!   outright: a half-formed secret is never silently dropped. The PSK is as sensitive as the
+//!   token (anyone who photographs the code holds it), so it is never logged or printed apart
+//!   from the link itself.
 //!
 //! Port of `packages/protocol/src/pairing.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`). The
 //! `encodeURIComponent`/`URL`/`URLSearchParams` primitives are replaced by
@@ -35,6 +43,25 @@ pub struct Pairing {
     pub name: String,
 }
 
+/// The mesh route's keys, as carried by a link (`mv=1&mk=…&psk=…`).
+#[derive(Clone, PartialEq, Eq)]
+pub struct MeshKeys {
+    /// The daemon's static session public key (X25519, 32 bytes).
+    pub host_key: [u8; 32],
+    /// The pairing's pre-shared secret (32 bytes).
+    pub psk: [u8; 32],
+}
+
+// A secret never appears in a Debug print.
+impl std::fmt::Debug for MeshKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MeshKeys { .. }")
+    }
+}
+
+/// The mesh-key format version carried in `mv`.
+pub const MESH_KEYS_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingError(pub String);
 
@@ -48,6 +75,14 @@ impl std::error::Error for PairingError {}
 /// The link for `p`. Errors on a pairing the app would refuse, so the CLI
 /// never shows one.
 pub fn pairing_link(p: &Pairing) -> Result<String, PairingError> {
+    pairing_link_with_mesh(p, None)
+}
+
+/// As [`pairing_link`], with the mesh keys appended when given.
+pub fn pairing_link_with_mesh(
+    p: &Pairing,
+    mesh: Option<&MeshKeys>,
+) -> Result<String, PairingError> {
     if let Some(problem) = pairing_problem(p) {
         return Err(PairingError(problem));
     }
@@ -59,6 +94,11 @@ pub fn pairing_link(p: &Pairing) -> Result<String, PairingError> {
     if !p.name.is_empty() {
         fields.push(("name", enc(&p.name)));
     }
+    if let Some(m) = mesh {
+        fields.push(("mv", MESH_KEYS_VERSION.to_string()));
+        fields.push(("mk", hex32(&m.host_key)));
+        fields.push(("psk", hex32(&m.psk)));
+    }
     let q: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
     Ok(format!("ldmux://pair?{}", q.join("&")))
 }
@@ -69,6 +109,12 @@ pub fn pairing_link(p: &Pairing) -> Result<String, PairingError> {
 /// case-sensitive and a `#fragment` is dropped. A repeated parameter reads as
 /// its first value (as `URLSearchParams.get` does).
 pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
+    parse_pairing_link_full(link).map(|(p, _)| p)
+}
+
+/// The pairing and, when the link carries them, the mesh keys. `None` when the link is not a
+/// valid pairing **or** carries a malformed or partial set of mesh fields.
+pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)> {
     let link = link.trim();
     // Compared as bytes: `link[..12]` panics when byte 12 falls inside a
     // multibyte character. A match proves the first 12 bytes are ASCII, so the
@@ -93,6 +139,9 @@ pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
     let mut host: Option<String> = None;
     let mut token: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut mv: Option<String> = None;
+    let mut mk: Option<String> = None;
+    let mut psk: Option<String> = None;
     for part in query.split('&') {
         if part.is_empty() {
             continue;
@@ -108,6 +157,9 @@ pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
             "host" if host.is_none() => host = Some(decoded),
             "token" if token.is_none() => token = Some(decoded),
             "name" if name.is_none() => name = Some(decoded),
+            "mv" if mv.is_none() => mv = Some(decoded),
+            "mk" if mk.is_none() => mk = Some(decoded),
+            "psk" if psk.is_none() => psk = Some(decoded),
             _ => {}
         }
     }
@@ -122,7 +174,39 @@ pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
     if pairing_problem(&p).is_some() {
         return None;
     }
-    Some(p)
+    // Mesh keys: all or nothing, and well formed.
+    let mesh = if mv.is_none() && mk.is_none() && psk.is_none() {
+        None
+    } else {
+        if mv.as_deref() != Some("1") {
+            return None;
+        }
+        Some(MeshKeys {
+            host_key: parse_hex32(mk.as_deref()?)?,
+            psk: parse_hex32(psk.as_deref()?)?,
+        })
+    };
+    Some((p, mesh))
+}
+
+fn hex32(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Exactly 64 lowercase hex characters, as 32 bytes.
+fn parse_hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Split `address:port` (IPv6 bracketed). `None` when it is not that shape.
@@ -371,5 +455,105 @@ mod tests {
         // 134 bytes is what a version-6 code holds at level L (41 modules, 25
         // terminal rows with the quiet zone).
         assert!(link.len() <= 134, "link too long: {}", link.len());
+    }
+
+    // ── mesh keys ─────────────────────────────────────────────────────────
+
+    fn mesh_fixture() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test/fixtures/pairing-links-mesh.json"
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn unhex32(s: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn mesh_fixture_valid_links_parse_to_their_pairing_and_keys() {
+        let f = mesh_fixture();
+        let valid = f["valid"].as_array().unwrap();
+        assert!(valid.len() >= 3);
+        for c in valid {
+            let (p, mesh) = parse_pairing_link_full(c["link"].as_str().unwrap()).expect("valid");
+            assert_eq!(p.host, c["pairing"]["host"].as_str().unwrap());
+            assert_eq!(p.token, c["pairing"]["token"].as_str().unwrap());
+            assert_eq!(p.name, c["pairing"]["name"].as_str().unwrap());
+            let want = c["mesh"].as_object().map(|m| MeshKeys {
+                host_key: unhex32(m["hostKey"].as_str().unwrap()),
+                psk: unhex32(m["psk"].as_str().unwrap()),
+            });
+            assert_eq!(mesh, want, "{}", c["link"]);
+            // The plain parser agrees on the pairing and never sees the keys.
+            assert_eq!(parse_pairing_link(c["link"].as_str().unwrap()), Some(p));
+        }
+    }
+
+    #[test]
+    fn mesh_fixture_invalid_links_are_refused_outright_not_downgraded() {
+        for c in mesh_fixture()["invalid"].as_array().unwrap() {
+            let link = c["link"].as_str().unwrap();
+            assert!(parse_pairing_link_full(link).is_none(), "{}", c["why"]);
+            // Not even the tailnet half survives: a half-formed secret is not dropped quietly.
+            assert!(parse_pairing_link(link).is_none(), "{}", c["why"]);
+        }
+    }
+
+    #[test]
+    fn the_serialiser_round_trips_and_stays_v1() {
+        let f = mesh_fixture();
+        let c = &f["valid"][1];
+        let p = Pairing {
+            host: c["pairing"]["host"].as_str().unwrap().into(),
+            token: c["pairing"]["token"].as_str().unwrap().into(),
+            name: c["pairing"]["name"].as_str().unwrap().into(),
+        };
+        let keys = MeshKeys {
+            host_key: unhex32(c["mesh"]["hostKey"].as_str().unwrap()),
+            psk: unhex32(c["mesh"]["psk"].as_str().unwrap()),
+        };
+        let link = pairing_link_with_mesh(&p, Some(&keys)).unwrap();
+        // The fixture's own link is the canonical serialisation.
+        assert_eq!(link, c["link"].as_str().unwrap());
+        assert!(link.starts_with("ldmux://pair?v=1&"));
+        assert_eq!(
+            parse_pairing_link_full(&link),
+            Some((p.clone(), Some(keys)))
+        );
+        // Without keys it is byte-for-byte the old link.
+        assert_eq!(
+            pairing_link_with_mesh(&p, None).unwrap(),
+            pairing_link(&p).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_pre_mesh_scanner_pairs_the_tailnet_from_a_mesh_link() {
+        // The v1 rule is "unknown parameters are ignored". Model a scanner with no mesh code by
+        // stripping the three fields: what is left is exactly the plain link.
+        let c = &mesh_fixture()["valid"][1];
+        let with = c["link"].as_str().unwrap();
+        let plain = mesh_fixture()["valid"][0]["link"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(with.starts_with(&plain));
+        assert_eq!(parse_pairing_link(with), parse_pairing_link(&plain),);
+    }
+
+    #[test]
+    fn mesh_keys_never_print() {
+        let k = MeshKeys {
+            host_key: [7; 32],
+            psk: [9; 32],
+        };
+        let shown = format!("{k:?}");
+        assert!(!shown.contains('7') && !shown.contains('9'), "{shown}");
     }
 }

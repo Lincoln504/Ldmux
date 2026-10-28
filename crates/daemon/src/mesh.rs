@@ -127,6 +127,16 @@ impl SessionSetup {
     pub fn public_key_hex(&self) -> String {
         hex(&self.files.key.public)
     }
+
+    /// What a phone is given to use the mesh route: this daemon's session public key and the
+    /// pairing's PSK. Secret material: it leaves this process only as the pairing link.
+    #[must_use]
+    pub fn pairing_keys(&self) -> ldmux_protocol::pairing::MeshKeys {
+        ldmux_protocol::pairing::MeshKeys {
+            host_key: self.files.key.public,
+            psk: self.files.pairing.psk,
+        }
+    }
 }
 
 fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
@@ -221,6 +231,8 @@ struct Exchange {
 /// The running link, shared with the RPC handler.
 #[derive(Clone)]
 pub struct MeshRuntime {
+    /// The keys a phone needs to pair for the mesh route; `None` when no session is configured.
+    pairing_keys: Option<ldmux_protocol::pairing::MeshKeys>,
     snapshot: Arc<Mutex<MeshSnapshot>>,
     exchange: Arc<Mutex<Exchange>>,
     wake: Arc<Notify>,
@@ -250,6 +262,7 @@ impl MeshRuntime {
         }
         let snapshot = Arc::new(Mutex::new(first));
         let runtime = Self {
+            pairing_keys: session.as_ref().map(SessionSetup::pairing_keys),
             snapshot: Arc::clone(&snapshot),
             exchange: Arc::new(Mutex::new(Exchange::default())),
             wake: Arc::new(Notify::new()),
@@ -278,6 +291,12 @@ impl MeshRuntime {
             .lock()
             .map(|mut ex| ex.inbound.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// The keys for a mesh pairing link, or `None` when no session is configured.
+    #[must_use]
+    pub fn pairing_keys(&self) -> Option<&ldmux_protocol::pairing::MeshKeys> {
+        self.pairing_keys.as_ref()
     }
 
     /// Makes this runtime the one the RPC handler answers from.
@@ -316,6 +335,17 @@ impl MeshRuntime {
             "session": SessionSnapshot::off().to_json(),
         })
     }
+}
+
+/// The answer to `mesh.pairing`: the keys for a mesh pairing link, hex. An error says what is
+/// missing; the secret is never in an error or a log line.
+pub fn pairing_json() -> Result<serde_json::Value, String> {
+    let keys = MeshRuntime::global()
+        .and_then(MeshRuntime::pairing_keys)
+        .ok_or_else(|| {
+            "no mesh session is configured (set LDMUX_MESH_PSK, with the link variables)".to_owned()
+        })?;
+    Ok(serde_json::json!({ "hostKey": hex(&keys.host_key), "psk": hex(&keys.psk) }))
 }
 
 /// The answer to `mesh.status`: the snapshot, or the disabled shape.
@@ -526,6 +556,29 @@ mod tests {
 
     const TOKEN: &str = "00112233445566778899aabbccddeeff";
     const PEER: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn the_pairing_keys_are_this_daemons_public_key_and_the_configured_secret() {
+        let dir = std::env::temp_dir().join(format!("ldmux-pairing-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let psk = [0x5au8; 32];
+        let setup = SessionSetup::new(&dir, psk).unwrap();
+        let keys = setup.pairing_keys();
+        assert_eq!(keys.psk, psk);
+        assert_eq!(hex(&keys.host_key), setup.public_key_hex());
+        // A second load reads the same key from disk, so a re-printed QR does not change it.
+        let again = SessionSetup::new(&dir, psk).unwrap();
+        assert_eq!(again.pairing_keys().host_key, keys.host_key);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mesh_pairing_with_no_session_is_an_error_that_names_the_variable() {
+        // No runtime is installed in a unit test, so this is the no-session answer.
+        let e = pairing_json().unwrap_err();
+        assert!(e.contains("LDMUX_MESH_PSK"), "{e}");
+    }
 
     #[test]
     fn no_variables_means_disabled() {

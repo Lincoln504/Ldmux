@@ -9,7 +9,10 @@
 //! output meant to connect a phone pointed it at a port where nothing
 //! listened.
 
-use ldmux_protocol::{net::AddressKind, pairing::Pairing};
+use ldmux_protocol::{
+    net::AddressKind,
+    pairing::{MeshKeys, Pairing},
+};
 
 /// The listen facts the pairing is built from.
 pub struct ListenInfo {
@@ -60,7 +63,16 @@ impl PairingProblem {
 /// the CLI's whole job is to print this (the TS `encodeQr` +
 /// `renderQrTerminal`).
 pub fn code_text(info: &ListenInfo, name: &str) -> Result<String, PairingProblem> {
-    let (pairing, link) = pairing_for(info, name)?;
+    code_text_with_mesh(info, name, None)
+}
+
+/// As [`code_text`], with the mesh keys in the link when given.
+pub fn code_text_with_mesh(
+    info: &ListenInfo,
+    name: &str,
+    mesh: Option<&MeshKeys>,
+) -> Result<String, PairingProblem> {
+    let (pairing, link) = pairing_for_with_mesh(info, name, mesh)?;
     let code =
         crate::qr::encode_qr(&link, crate::qr::Ecc::L).map_err(PairingProblem::LinkRejected)?;
     Ok(format!(
@@ -73,6 +85,15 @@ pub fn code_text(info: &ListenInfo, name: &str) -> Result<String, PairingProblem
 
 /// The pairing a phone should use, or a problem saying what to fix.
 pub fn pairing_for(info: &ListenInfo, name: &str) -> Result<(Pairing, String), PairingProblem> {
+    pairing_for_with_mesh(info, name, None)
+}
+
+/// As [`pairing_for`], with the mesh keys appended to the link when given.
+pub fn pairing_for_with_mesh(
+    info: &ListenInfo,
+    name: &str,
+    mesh: Option<&MeshKeys>,
+) -> Result<(Pairing, String), PairingProblem> {
     if !info.listening {
         return Err(PairingProblem::NotUpYet);
     }
@@ -104,7 +125,7 @@ pub fn pairing_for(info: &ListenInfo, name: &str) -> Result<(Pairing, String), P
         token: info.token.clone(),
         name,
     };
-    let link = ldmux_protocol::pairing::pairing_link(&pairing)
+    let link = ldmux_protocol::pairing::pairing_link_with_mesh(&pairing, mesh)
         .map_err(|e| PairingProblem::LinkRejected(e.0))?;
     Ok((pairing, link))
 }
@@ -215,5 +236,32 @@ mod tests {
             Err(PairingProblem::LoopbackOnly) => {}
             other => panic!("expected LoopbackOnly, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_mesh_link_carries_the_keys_stays_v1_and_still_fits_a_code() {
+        use ldmux_protocol::pairing::{MeshKeys, parse_pairing_link_full};
+        let keys = MeshKeys {
+            host_key: [0x11; 32],
+            psk: [0x22; 32],
+        };
+        let (pairing, link) =
+            pairing_for_with_mesh(&live("100.100.0.1", 7625), "debian", Some(&keys)).unwrap();
+        assert!(link.starts_with("ldmux://pair?v=1&"), "{link}");
+        assert_eq!(
+            parse_pairing_link_full(&link),
+            Some((pairing, Some(keys.clone())))
+        );
+        // Without keys it is the old link, byte for byte.
+        let (_, plain) = pairing_for(&live("100.100.0.1", 7625), "debian").unwrap();
+        assert!(link.starts_with(&plain));
+        assert!(!plain.contains("psk="));
+        // The longer link still encodes as a QR code.
+        let text = code_text_with_mesh(&live("100.100.0.1", 7625), "debian", Some(&keys)).unwrap();
+        assert!(text.contains("debian"));
+        assert!(
+            !text.contains(&"22".repeat(32)),
+            "the code text must not print the secret as text"
+        );
     }
 }

@@ -150,12 +150,35 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "mesh" => {
             "ldmux mesh [status] [--json]\n  The MeshMore link: state, the peer, the record budget left this hour, and the radio's own reading. Anything about frequencies lives on the gateway, not here."
         }
-        "code" => "ldmux code\n  Print a QR code the phone app scans to pair.",
-        "pair" => "ldmux pair\n  Print the pairing link.",
+        "code" => {
+            "ldmux code [--mesh]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together)."
+        }
+        "pair" => {
+            "ldmux pair [--mesh]\n  Print the pairing link. --mesh adds the mesh keys, which are secret."
+        }
         "clipboard-write" => {
             "ldmux clipboard-write on|off\n  Allow or refuse terminal programs writing the clipboard."
         }
         _ => return None,
+    })
+}
+
+/// The keys in a `mesh.pairing` answer, or `None` when either is not 64 hex characters.
+fn mesh_keys_from_json(v: &serde_json::Value) -> Option<ldmux_protocol::pairing::MeshKeys> {
+    fn key(v: &serde_json::Value, k: &str) -> Option<[u8; 32]> {
+        let s = v.get(k)?.as_str()?;
+        if s.len() != 64 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(out)
+    }
+    Some(ldmux_protocol::pairing::MeshKeys {
+        host_key: key(v, "hostKey")?,
+        psk: key(v, "psk")?,
     })
 }
 
@@ -288,6 +311,7 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--cwd",
         "--history",
         "--json",
+        "--mesh",
         "--name",
         "--rw",
         "--final",
@@ -858,8 +882,31 @@ async fn main() {
                     .unwrap_or(false),
             };
             let name = machine_hostname();
+            // The mesh keys come from the daemon that holds them, never from this process's
+            // environment, and only when asked for.
+            let mesh_keys = if rest.iter().any(|a| a == "--mesh") {
+                let r: Result<serde_json::Value, CallError> =
+                    daemon_call(&sock, "mesh.pairing", &serde_json::json!({})).await;
+                let v = match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        die(&e, &sock);
+                    }
+                };
+                match mesh_keys_from_json(&v) {
+                    Some(k) => Some(k),
+                    None => {
+                        eprintln!(
+                            "ldmux: the daemon's mesh.pairing answer was not two 64-hex keys"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
             if cmd == "code" {
-                match ldmux_daemon::pairing::code_text(&info, &name) {
+                match ldmux_daemon::pairing::code_text_with_mesh(&info, &name, mesh_keys.as_ref()) {
                     Ok(text) => print!("{text}"),
                     Err(problem) => {
                         eprintln!("ldmux: {}", problem.message(&info.hostname));
@@ -867,7 +914,8 @@ async fn main() {
                     }
                 }
             } else {
-                match ldmux_daemon::pairing::pairing_for(&info, &name) {
+                match ldmux_daemon::pairing::pairing_for_with_mesh(&info, &name, mesh_keys.as_ref())
+                {
                     Ok((_pairing, link)) => println!("{link}"),
                     Err(problem) => {
                         eprintln!("ldmux: {}", problem.message(&info.hostname));
@@ -1126,6 +1174,22 @@ async fn main() {
             print_usage();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod mesh_keys_tests {
+    use super::mesh_keys_from_json;
+    use serde_json::json;
+
+    #[test]
+    fn two_64_hex_keys_parse_and_anything_else_does_not() {
+        let k = "ab".repeat(32);
+        let ok = mesh_keys_from_json(&json!({"hostKey": k, "psk": k})).unwrap();
+        assert_eq!(ok.host_key, [0xab; 32]);
+        assert!(mesh_keys_from_json(&json!({"hostKey": k})).is_none());
+        assert!(mesh_keys_from_json(&json!({"hostKey": k, "psk": "ab"})).is_none());
+        assert!(mesh_keys_from_json(&json!({"hostKey": k, "psk": "zz".repeat(32)})).is_none());
     }
 }
 

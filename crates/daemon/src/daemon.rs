@@ -1673,6 +1673,9 @@ impl LdmuxDaemon {
             // The MeshMore link, if this machine has one. Always answerable, so
             // a client can tell "disabled" from "broken" without guessing.
             "mesh.status" => Ok(crate::mesh::status_json()),
+            // The keys a phone needs for the mesh route (QR link `mv=1&mk=…&psk=…`). The control
+            // socket is the user's own, as for `remote_info`'s bearer token.
+            "mesh.pairing" => crate::mesh::pairing_json(),
             // Voice mode (docs/VOICE-MODE.md section 6): relay what an agent wants said to the
             // clients viewing the session that asked for it. Validation only; no speech logic.
             "speech" => {
