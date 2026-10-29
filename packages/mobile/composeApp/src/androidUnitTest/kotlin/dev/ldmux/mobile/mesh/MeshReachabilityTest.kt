@@ -289,6 +289,22 @@ class MeshReachabilityTest {
     }
 
     @Test
+    fun `a mesh-only link from outside the app is asked about, never silently applied, and says what it is`() {
+        val a = dev.ldmux.mobile.inboundPairing(meshOnlyLink, tailnet)
+        val ask = assertIs<dev.ldmux.mobile.InboundPairing.Ask>(a)
+        assertTrue(ask.pairing.isMeshOnly)
+        // The same link twice is still asked: mesh keys are never "already paired".
+        assertIs<dev.ldmux.mobile.InboundPairing.Ask>(dev.ldmux.mobile.inboundPairing(meshOnlyLink, LdmuxConfig.DEFAULT))
+        assertIs<dev.ldmux.mobile.InboundPairing.Invalid>(dev.ldmux.mobile.inboundPairing("ldmux://pair?v=1&name=x", tailnet))
+        val prompt = dev.ldmux.mobile.pairingPrompt(ask.pairing)
+        assertTrue("mesh route only" in prompt.address)
+        assertEquals("0505…0505", prompt.fingerprint, "the daemon's public session key, which is what can be compared on the host")
+        // The pairing row (tailnet) names the mesh-only code instead of calling it junk.
+        val out = dev.ldmux.mobile.scanOutcome(dev.ldmux.mobile.ScanResult.Code(meshOnlyLink))
+        assertEquals(dev.ldmux.mobile.PairOutcome.Problem("mesh-only code: scan it under mesh route"), out)
+    }
+
+    @Test
     fun `the screen plan needs no tailnet pairing, and a gateway endpoint travels with it`() {
         val lib = assertNotNull(loadSessionLib(), "the ABI tests load the real library, so this must too")
         val keyStore = InMemoryMeshSessionKeyStore().also { it.save(keys.withRadio(ByteArray(32) { 7 })) }

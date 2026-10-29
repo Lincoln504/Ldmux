@@ -33,14 +33,19 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
     val prompt = pairingPrompt(p)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("pair with this computer?", color = Fg) },
+        title = { Text(if (p.isMeshOnly) "use this computer over mesh?" else "pair with this computer?", color = Fg) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (prompt.name.isNotEmpty()) PairingFact("name", prompt.name)
                 PairingFact("address", prompt.address)
-                PairingFact("token", prompt.fingerprint)
+                PairingFact(if (p.isMeshOnly) "key" else "token", prompt.fingerprint)
                 Text(
-                    "Everything you type will be sent to this address.",
+                    if (p.isMeshOnly) {
+                        "Everything you type will be sent over the MeshMore radio link to this computer. " +
+                            "Your tailnet pairing is not changed."
+                    } else {
+                        "Everything you type will be sent to this address."
+                    },
                     color = Dim,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 4.dp),

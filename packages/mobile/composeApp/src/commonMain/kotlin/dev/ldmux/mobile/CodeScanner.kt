@@ -35,12 +35,15 @@ sealed interface PairOutcome {
 }
 
 fun scanOutcome(result: ScanResult): PairOutcome = when (result) {
-    is ScanResult.Code -> parsePairingLink(result.text)?.let { PairOutcome.Paired(it) } ?: PairOutcome.Problem(NOT_A_CODE)
+    is ScanResult.Code -> parsePairingLink(result.text)?.let { PairOutcome.Paired(it) }
+        // A real ldmux code, but for the mesh route: say where it goes instead of calling it junk.
+        ?: if (parseScannedPairing(result.text)?.isMeshOnly == true) PairOutcome.Problem(MESH_ONLY_CODE) else PairOutcome.Problem(NOT_A_CODE)
     ScanResult.Cancelled -> PairOutcome.Nothing
     ScanResult.Unavailable -> PairOutcome.Problem("scanner unavailable")
 }
 
 internal const val NOT_A_CODE = "not an ldmux code"
+internal const val MESH_ONLY_CODE = "mesh-only code: scan it under mesh route"
 
 /**
  * Pairing links opened from outside the app: the system camera, a message, a
@@ -77,8 +80,10 @@ sealed interface InboundPairing {
 }
 
 fun inboundPairing(link: String, current: LdmuxConfig): InboundPairing {
-    val p = parsePairingLink(link) ?: return InboundPairing.Invalid
-    return if (current.isPaired && current.host == p.host && current.token == p.token) {
+    // A mesh-only link is a pairing too, and is always asked about: it is never "the same" as a
+    // tailnet pairing, and it must not silently replace the mesh keys either.
+    val p = parseScannedPairing(link) ?: return InboundPairing.Invalid
+    return if (!p.isMeshOnly && current.isPaired && current.host == p.host && current.token == p.token) {
         InboundPairing.Same(p)
     } else {
         InboundPairing.Ask(p)

@@ -134,11 +134,21 @@ data class PairingPrompt(
 )
 
 fun pairingPrompt(p: Pairing): PairingPrompt =
-    PairingPrompt(
-        name = sanitizeDisplayName(p.name),
-        address = p.host,
-        fingerprint = tokenFingerprint(p.token),
-    )
+    if (p.isMeshOnly) {
+        // No daemon address and no token exist. What the user can compare against `ldmux code
+        // --mesh-only` on the host is the daemon's public session key, so that is the fingerprint.
+        PairingPrompt(
+            name = sanitizeDisplayName(p.name),
+            address = "mesh route only (no tailnet address)",
+            fingerprint = tokenFingerprint(p.mesh!!.hostKey.joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }),
+        )
+    } else {
+        PairingPrompt(
+            name = sanitizeDisplayName(p.name),
+            address = p.host,
+            fingerprint = tokenFingerprint(p.token),
+        )
+    }
 
 /**
  * A name made safe to draw next to an address.

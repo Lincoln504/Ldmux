@@ -1,6 +1,15 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshRoute
+import dev.ldmux.mobile.mesh.MeshRouteActions
 import dev.ldmux.mobile.mesh.MeshRouteResolution
+import dev.ldmux.mobile.mesh.applyGatewayScan
+import dev.ldmux.mobile.mesh.applyMeshPairingScan
+import dev.ldmux.mobile.mesh.availableRoutes
+import dev.ldmux.mobile.mesh.currentPlatform
+import dev.ldmux.mobile.mesh.meshSessionKeyStore
+import dev.ldmux.mobile.mesh.meshTokenStore
+import dev.ldmux.mobile.mesh.readMeshCredentials
 import dev.ldmux.mobile.mesh.currentMeshResolution
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -909,6 +918,15 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                 showSettings = false
             },
             onUnpair = { store.unpair() },
+            mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
+                MeshRouteActions(
+                    credentials = { readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first },
+                    onPairing = { text -> applyMeshPairingScan(text, store) },
+                    onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()) },
+                    onConfig = { store.update(it) },
+                    onUnpair = { store.unpairMesh() },
+                )
+            } else null,
         )
     }
 }

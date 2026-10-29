@@ -20,6 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.ldmux.mobile.mesh.MeshRouteActions
+import dev.ldmux.mobile.mesh.MeshRouteSection
 
 @Composable
 internal fun SettingsDialog(
@@ -30,6 +32,8 @@ internal fun SettingsDialog(
     onPaired: (Pairing) -> Unit,
     /** Forget the pairing now (ADR-0017). */
     onUnpair: () -> Unit,
+    /** The mesh route's setup (hidden where there is no mesh route). */
+    mesh: MeshRouteActions? = null,
 ) {
     var side by remember { mutableStateOf(current.side) }
     var fontSp by remember { mutableStateOf(current.fontSp) }
@@ -45,6 +49,16 @@ internal fun SettingsDialog(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 PairingRow(current, onPaired, onUnpair)
+                if (mesh != null) {
+                    MeshRouteSection(
+                        current = current,
+                        readCredentials = mesh.credentials,
+                        onMeshPairing = mesh.onPairing,
+                        onGatewayCode = mesh.onGatewayCode,
+                        onConfig = mesh.onConfig,
+                        onUnpairMesh = mesh.onUnpair,
+                    )
+                }
                 Box(Modifier.height(LocalTouch.current.rowPad * 2))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("panel", color = Dim, fontSize = 12.sp)
