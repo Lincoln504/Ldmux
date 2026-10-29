@@ -33,9 +33,9 @@ const val MESH_SESSION_BUILT: Boolean = true
  * (`MeshTermDriver`), the reduced-terminal screen (`MeshTerminalScreen`) and the key delivery
  * (`ldmux code --mesh`, `MeshEnrollment`) exist and are tested. **True does not mean usable**:
  * [resolveRoute] still reports every missing credential, the library not loading, and iOS, and
- * nothing is opened for a route that resolves to a problem. What is *not* built is a way to pick
- * the route (no picker UI) and a way to enter the MeshMore gateway token (no scanner for it), so
- * on a real device a saved mesh route currently stops at `NeedsToken`. `docs/STATE.md` has the list.
+ * nothing is opened for a route that resolves to a problem. Since 2026-10-29 Settings has a route
+ * picker and a scanner for MeshMore's gateway code (`MeshRouteSection`, `meshSetupView`), so the
+ * route is reachable; what has still not happened is any run on a device. `docs/STATE.md` has the list.
  */
 const val MESH_TERMINAL_BUILT: Boolean = true
 

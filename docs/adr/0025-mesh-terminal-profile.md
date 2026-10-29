@@ -63,6 +63,21 @@ A patch is `y u8 | flags u8 (bit0 append) | n u8 | n UTF-8 bytes`; a row over 12
 - A mostly empty 80x24 screen with a four-line prompt: 2 records or fewer (`an_ordinary_screen_costs_a_handful_of_records`).
 - A completely full 200x100 screen is about 20,600 bytes, 150 records. **That does not fit an hour of airtime and no encoding makes it fit.** The profile does not hide this: the governor stalls it and `mesh.status` shows the stall. Full-screen programs are therefore poor on this link by physics, and the `ALTERNATE` flag tells the phone it is looking at one.
 
+## Update, 2026-10-29: List and Sessions (choosing a shell over the link)
+
+The profile could not say which shells exist, so a host running more than one answered `Closed(AMBIGUOUS)` to the phone's empty selector and the attach ended. Two messages are added, both within the existing framing and the 144-byte record rule:
+
+| tag | direction | name | body |
+|---|---|---|---|
+| 0x05 | phone to host | `List` | empty |
+| 0x85 | host to phone | `Sessions` | `flags u8` (bit 0 = last page), then entries `id_len u8, id, label_len u8, label` |
+
+- An `id` is at most 40 bytes (it is the `Attach` selector), a `label` at most 24, both cut at a character boundary. At most 16 shells are listed.
+- A page is packed to 130 bytes so it fits one record; a longer list is several `Sessions` messages and only the last has `last` set. **No shells is one empty page with `last` set**, so "none" is an answer and not silence.
+- The host attaches nothing on `List`. The phone chooses, and `Attach(id)` with an id from the list is unambiguous.
+- Pinned in `mesh-term-vectors.json` (`messages`, `limits`, and `sessionPages`, a 7-shell list spanning records); both codecs are held to it.
+- **Phone behaviour, and a deliberate deviation from "request the list when the selector is empty".** The driver still sends `Attach("")` first. The host takes the one shell when there is exactly one (the common case) and costs no extra record on a link that allows about 58 an hour; `Closed(NOT_FOUND)` becomes the `NoShells` state; `Closed(AMBIGUOUS)` is the cue to send `List`. One shell attaches, several show a picker (`Choose`), none is stated. `choose(id)` accepts only an id the host listed. A shell named explicitly that is ambiguous still ends visibly with no picker.
+
 ## Not supported, and how the client knows
 
 `Profile.unsupported` is a bitmask the client must render as absent: scrollback, colour and text attributes, hyperlinks, mouse, images, resize (the phone renders the host's geometry; the pane is never resized from the mesh, because the keeper's geometry is canonical, ADR-0018), clipboard. A version-1 host sets all of them. The phone must show "reduced profile" and must not offer a control the mask says is missing.
@@ -75,4 +90,4 @@ A patch is `y u8 | flags u8 (bit0 append) | n u8 | n UTF-8 bytes`; a row over 12
 
 ## Not decided
 
-Styled rows, a smaller cell-delta form, selecting a shell over the link, a per-message checksum (the AEAD tag already covers every record), and the pairing ceremony that tells the phone which shell to attach.
+Styled rows, a smaller cell-delta form, a per-message checksum (the AEAD tag already covers every record). **Selecting a shell over the link: decided 2026-10-29, above** (this line used to list it, and the ceremony, as undecided).

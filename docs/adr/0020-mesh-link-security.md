@@ -310,6 +310,8 @@ the standard capacity table recalled from memory, **unverified**. The tailnet ho
 restriction in ADR-0017 does not apply to mesh pairing. As ADR-0017 notes for the token,
 anyone who photographs the code holds the PSK.
 
+**Update 2026-10-29: the sentence "the tailnet host restriction does not apply to mesh pairing" is now true of the implementation, and was not before.** Every link carried the daemon's tailnet address and bearer token, and a link without them was refused, so a phone that never reaches the tailnet was handed a token that grants full shell control and cannot use it, and `isPaired` (the tailnet pairing) still gated the mesh route. `ldmux code|pair --mesh-only` now makes `ldmux://pair?v=1&name=...&mv=1&mk=...&psk=...[&mr=...]` with no `host` and no `token`; the parser takes a link with neither only when it carries a complete set of mesh keys, and refuses one with `host` or `token` alone. The tailnet reader refuses a mesh-only link, so it cannot be mistaken for a tailnet pairing. On the phone, the mesh route no longer requires `isPaired`.
+
 **Attacker outcomes.**
 
 | Attacker | Learns / can do |

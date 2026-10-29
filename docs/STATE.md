@@ -76,7 +76,7 @@ repo needs to know a frequency, a spreading factor or a preset.
   JVM, but the Android build of the library has only been packaged (`assembleDebug` includes it
   for arm64-v8a and x86_64), never run on a phone. `MESH_SESSION_BUILT` is `true`; a device where
   the library does not load reports `SessionNotBuilt`.
-- **`MESH_TERMINAL_BUILT` is `true` (2026-10-28, ADR-0025) and the phone side exists; the route is still not reachable on a real device.** The three items this flag waited for were built: (a) `MeshTerm.kt`, a Kotlin port checked against `crates/protocol/test/fixtures/mesh-term-vectors.json`, which the Rust encoder writes (11 tests); (b) `MeshTermDriver` plus `MeshTerminalScreen`, the attach driver and the reduced terminal (26 fake-port tests, and one over the real Rust session through the JNI shim); (c) key delivery, below. `resolveRoute` reports the truth for every combination (`MeshRouteTruthTest`, 8). **Still missing for a device to actually use it:** a route picker (nothing can save `route = Mesh`), a way to enter the MeshMore gateway token (no scanner for MeshMore's token QR, so a saved mesh route stops at `NeedsToken`), and any device run. The original text follows.
+- **`MESH_TERMINAL_BUILT` is `true` (2026-10-28, ADR-0025) and the phone side exists; the route is still not reachable on a real device.** The three items this flag waited for were built: (a) `MeshTerm.kt`, a Kotlin port checked against `crates/protocol/test/fixtures/mesh-term-vectors.json`, which the Rust encoder writes (11 tests); (b) `MeshTermDriver` plus `MeshTerminalScreen`, the attach driver and the reduced terminal (26 fake-port tests, and one over the real Rust session through the JNI shim); (c) key delivery, below. `resolveRoute` reports the truth for every combination (`MeshRouteTruthTest`, 8). **Superseded 2026-10-29: the route is now reachable from Settings** (see the next bullet). The original text follows: still missing for a device to actually use it: a route picker (nothing can save `route = Mesh`), a way to enter the MeshMore gateway token (no scanner for MeshMore's token QR, so a saved mesh route stops at `NeedsToken`), and any device run.
 - **(Superseded) `MESH_TERMINAL_BUILT` was `false`, and the host half of what it waited for existed**
   (2026-10-28, ADR-0025). A saved mesh route resolves to `TerminalNotBuilt`, opens nothing and does
   not fall back to the tailnet (`LdmuxConfig.endpoint` is null for it). What is **missing for the
@@ -340,10 +340,17 @@ Platforms (see `docs/PLATFORMS.md`):
   history may push content into scrollback; checked in tests, not on a phone.
 - **Keeper replacement is needed to get bounded peeks** on a machine whose keeper predates
   them; it ends every shell, so it waits for a convenient moment.
+- **The mesh route is reachable from Settings (2026-10-29), and still has not run on a device.**
+  - *Two pairings.* `LdmuxConfig.host/token` are the daemon's. The mesh pairing is a loopback `meshGateway` endpoint (default `127.0.0.1:41731`, a setting, not a constant) plus the gateway token and the L3 keys, which stay in the Keystore. A device may have either or both; a mesh-only config has no endpoint, so it cannot open a tailnet connection, and a tailnet config's `connectionKey` is byte-identical to before. Tests: `MeshReachabilityTest`.
+  - *Entry points.* Settings has a mesh section (hidden on iOS): three credentials as present/missing in ceremony order, a scanner for `ldmux code --mesh` / `--mesh-only`, a scanner for MeshMore's gateway code (refused until the session keys exist), a route picker that offers only routes that can run, and "forget mesh pairing". `ldmux code --mesh-only` hands a radio-only phone the keys and no daemon token.
+  - *MeshMore's code.* `meshmore://gateway?v=1&host=127.0.0.1:<port>&token=<32 hex>`; a bare token still reads as the default endpoint; a non-loopback host is refused. L2 grant only: no key material.
+  - *Choosing a shell.* ADR-0025 gains `List`/`Sessions`; the driver shows one shell attached, a picker for several, a stated "none".
+  - *Defects found on the way.* Unpairing left the MeshMore gateway token in the Keystore (now cleared with the keys); `MeshRouteWiringTest` pinned the contradiction that a mesh-route device with no daemon reads as "unpaired".
+  - *Still not done:* any run on a phone or a radio; the Keystore, scanner and Compose screen were never exercised on a device. The route works only while MeshMore is running on the same phone with its gateway on (its foreground service). Not done either: PSK rotation, padding, ML-KEM, rekey, an iOS build.
 - **Mesh work** (ADR-0020, ADR-0023, `docs/MESH-TRANSPORT.md`): the link, the RPC, the CLI
   and the gateway side of the L3 session exist. Missing: the phone's Noise client (a
   decision), the compact encoding and the shell bridge, the pairing ceremony, and the mobile
-  route wiring. **Superseded 2026-10-28:** all four now exist. What remains: a route picker, MeshMore token entry, a device run, and a real-radio run.
+  route wiring. **Superseded 2026-10-28:** all four now exist. What remained then: a route picker, MeshMore token entry, a device run, and a real-radio run. **Superseded 2026-10-29:** the picker and the token entry exist; the device run and the real-radio run remain.
 - **A tailnet IP appears in test fixtures** (`crates/daemon/src/pairing.rs` and others).
 - **The git `user.name` is misconfigured** as `user.email`; commits carry that name.
 
