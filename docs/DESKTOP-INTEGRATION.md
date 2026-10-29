@@ -15,7 +15,11 @@
 > (`<control>-attach.sock`), so it needs no tailnet and no token. The daemon needs
 > `DISPLAY` or `WAYLAND_DISPLAY` from its own environment or the user manager
 > (`systemctl --user import-environment`); `ldmux mirror` uses the same argv with
-> `--readonly`. Only the i3 adapter is measured; the sway and hyprland rows in the table
+> `--readonly`. That completion applies only to the daemon's desktop work (window
+> launch, window-manager tools). **The shells** inherit the keeper's environment — the
+> daemon's — so they lack the display variables, and display-dependent programs in an
+> ldmux shell fail (open item in `docs/STATE.md`). Only the i3 adapter is measured; the
+> sway and hyprland rows in the table
 > below are still untested. The `i3-msg exec` findings below describe the old launch path
 > and are kept as the record of what was measured.
 

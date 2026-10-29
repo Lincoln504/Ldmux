@@ -218,6 +218,21 @@ Product and mobile:
   wired. No radio measurements of the link itself.
 
 Daemon and protocol:
+- **Shells do not carry the desktop session's display environment.** The keeper
+  spawns shells with the keeper's own environment (`child_env`,
+  `crates/keeper/src/lib.rs`), which is the daemon's; the daemon is started by the
+  user manager at boot, before login, so it has no `DISPLAY`, `WAYLAND_DISPLAY`,
+  `XAUTHORITY` or `XDG_SESSION_TYPE`, and the shells inherit that absence.
+  Display-dependent programs in an ldmux shell fail: redshift's wayland, randr and
+  vidmode methods all exit with `XOpenDisplay` errors (verified 2026-10-28 on this
+  box, Xfce on lightdm, display `:0`; the daemon's and keeper's process
+  environments carry no display variables). The daemon's desktop path already
+  solves this for desk windows — `session_env()` in
+  `crates/daemon/src/desktop.rs` completes the daemon's environment from
+  `systemctl --user show-environment` (the `deploy/ldmux.service` header) — but the
+  keeper's spawn path does not merge those variables in, so the shells stay blind
+  to the desktop. Candidate fix: the keeper overlays the session variables into
+  `Spawn.env` at spawn time.
 - **The keeper is a single point of failure** by design: if it dies, every shell ends.
   Its `sessions` table and output buffers are now poison-tolerant, so a panic while one is
   locked no longer disables every later request, and its reaper task now survives a
