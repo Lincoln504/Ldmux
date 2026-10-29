@@ -51,6 +51,13 @@ class MeshTermCodecTest {
             )
             "commit" -> TermMessage.Commit(i("epoch"), i("cursorX"), i("cursorY"), i("flags"))
             "closed" -> TermMessage.Closed(i("reason"))
+            "list" -> TermMessage.ListRequest
+            "sessions" -> TermMessage.Sessions(
+                o["last"]!!.jsonPrimitive.boolean,
+                o["entries"]!!.jsonArray.map {
+                    SessionEntry(it.jsonObject["id"]!!.jsonPrimitive.content, it.jsonObject["label"]!!.jsonPrimitive.content)
+                },
+            )
             else -> error("unknown fixture kind $kind")
         }
     }
@@ -65,6 +72,8 @@ class MeshTermCodecTest {
         assertEquals(n("maxInput"), MeshTerm.MAX_INPUT)
         assertEquals(n("maxSegment"), MeshTerm.MAX_SEGMENT)
         assertEquals(n("maxSelector"), MeshTerm.MAX_SELECTOR)
+        assertEquals(n("maxLabel"), MeshTerm.MAX_LABEL)
+        assertEquals(n("maxSessions"), MeshTerm.MAX_SESSIONS)
         assertEquals(n("maxRowsBody"), MeshTerm.MAX_ROWS_BODY)
         assertEquals(n("maxMessage"), MeshTerm.MAX_MESSAGE)
         assertEquals(n("recordPayload"), MeshTerm.RECORD_PAYLOAD)
@@ -77,7 +86,7 @@ class MeshTermCodecTest {
     @Test
     fun everyMessageEncodesToExactlyTheBytesRustWrote() {
         val cases = fixture["messages"]!!.jsonArray
-        assertTrue(cases.size >= 10)
+        assertTrue(cases.size >= 14)
         for (c in cases) {
             val m = message(c.jsonObject["message"]!!)
             assertEquals(c.jsonObject["hex"]!!.jsonPrimitive.content, hex(m.encode()), "encode $m")
@@ -91,6 +100,37 @@ class MeshTermCodecTest {
             val got = decodeAll(unhex(c.jsonObject["hex"]!!.jsonPrimitive.content))
             assertEquals(listOf<TermItem>(TermItem.Message(want)), got)
         }
+    }
+
+    @Test
+    fun theHostsSessionPagesDecodeAndTheLastOneIsTheOnlyLastOne() {
+        val pages = fixture["sessionPages"]!!.jsonObject["pages"]!!.jsonArray
+        assertTrue(pages.size > 1, "the fixture must exercise a list spanning records")
+        val d = TermDecoder()
+        val got = ArrayList<TermMessage.Sessions>()
+        for ((i, c) in pages.withIndex()) {
+            val bytes = unhex(c.jsonObject["hex"]!!.jsonPrimitive.content)
+            assertTrue(bytes.size <= MeshTerm.RECORD_PAYLOAD, "page $i is $bytes.size bytes")
+            assertEquals(c.jsonObject["hex"]!!.jsonPrimitive.content, hex(message(c.jsonObject["message"]!!).encode()))
+            for (item in d.push(bytes)) got += (item as TermItem.Message).message as TermMessage.Sessions
+        }
+        assertEquals(pages.size, got.size)
+        assertEquals(List(got.size) { it == got.size - 1 }, got.map { it.last })
+        val input = fixture["sessionPages"]!!.jsonObject["input"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
+        assertEquals(input, got.flatMap { g -> g.entries.map { it.id } })
+    }
+
+    @Test
+    fun brokenOrOversizeSessionsAreRefused() {
+        assertFailsWith<TermEncodeException> {
+            TermMessage.Sessions(true, listOf(SessionEntry("x".repeat(MeshTerm.MAX_SELECTOR + 1), ""))).encode()
+        }
+        assertFailsWith<TermEncodeException> {
+            TermMessage.Sessions(true, listOf(SessionEntry("a", "y".repeat(MeshTerm.MAX_LABEL + 1)))).encode()
+        }
+        // an entry that claims 5 bytes of id with 1 following, and a List with a body
+        val got = decodeAll(byteArrayOf(0x85.toByte(), 3, 1, 5, 'a'.code.toByte(), 0x05, 1, 0))
+        assertEquals(listOf<TermItem>(TermItem.Malformed(0x85), TermItem.Malformed(0x05)), got)
     }
 
     @Test

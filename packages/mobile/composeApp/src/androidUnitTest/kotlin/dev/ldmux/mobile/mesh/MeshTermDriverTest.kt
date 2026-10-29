@@ -120,6 +120,91 @@ class MeshTermDriverTest {
         assertEquals(listOf<TermMessage>(TermMessage.Attach(1, "")), sess.messages())
     }
 
+    // ── choosing a shell ───────────────────────────────────────────────────────────────
+
+    private fun ent(id: String, label: String = "") = SessionEntry(id, label)
+    private suspend fun probed(d: MeshTermDriver) { d.start(); d.onRecord(byteArrayOf(2)) }
+
+    @Test
+    fun `an ambiguous host is a question, not an ending, and nothing is attached until the user chooses`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS))
+        assertEquals(MeshTermView.Listing, d.view.value)
+        assertEquals(listOf<TermMessage>(TermMessage.Attach(1, ""), TermMessage.ListRequest), sess.messages())
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11", "RCNT"), ent("bb22", "pi"))))
+        assertEquals(MeshTermView.Choose(listOf(ent("aa11", "RCNT"), ent("bb22", "pi"))), d.view.value)
+        assertEquals(2, sess.messages().size, "choosing is the user's: no Attach was sent for them")
+    }
+
+    @Test
+    fun `choosing sends the chosen id, and an id the host did not list sends nothing`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        assertEquals(false, d.choose("zz99"))
+        assertEquals(2, sess.messages().size)
+        assertEquals(true, d.choose("bb22"))
+        assertEquals(TermMessage.Attach(1, "bb22"), sess.messages().last())
+        assertEquals(false, d.choose("aa11"), "a second choice after attaching is refused")
+        deliver(d, profile, rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+        assertIs<MeshTermView.Live>(d.view.value)
+    }
+
+    @Test
+    fun `a list spanning several records is complete only at the last page`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(false, listOf(ent("aa11"))))
+        assertEquals(MeshTermView.Listing, d.view.value, "one page is not the answer")
+        assertEquals(false, d.choose("aa11"))
+        deliver(d, TermMessage.Sessions(true, listOf(ent("bb22"))))
+        assertEquals(MeshTermView.Choose(listOf(ent("aa11"), ent("bb22"))), d.view.value)
+    }
+
+    @Test
+    fun `no shell is its own state, and asking again that finds exactly one attaches it`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.NOT_FOUND))
+        assertEquals(MeshTermView.NoShells, d.view.value)
+        d.refresh()
+        assertEquals(TermMessage.ListRequest, sess.messages().last())
+        assertEquals(MeshTermView.Listing, d.view.value)
+        deliver(d, TermMessage.Sessions(true, listOf(ent("cc33"))))
+        assertEquals(TermMessage.Attach(1, "cc33"), sess.messages().last())
+    }
+
+    @Test
+    fun `a list that comes back empty is no shells`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, emptyList()))
+        assertEquals(MeshTermView.NoShells, d.view.value)
+    }
+
+    @Test
+    fun `a Sessions nobody asked for attaches nothing`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        val before = sess.messages().size
+        deliver(d, TermMessage.Sessions(true, listOf(ent("zz"))))
+        assertEquals(before, sess.messages().size)
+        assertIs<MeshTermView.Live>(d.view.value)
+    }
+
+    @Test
+    fun `a named shell that is ambiguous or missing still ends visibly, with no picker`() = runBlocking<Unit> {
+        val d = MeshTermDriver(gw, { hs }, selector = "ab", clock = { now })
+        probed(d)
+        assertEquals(TermMessage.Attach(1, "ab"), sess.messages().single())
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS))
+        assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.AMBIGUOUS), d.view.value)
+    }
+
+    @Test
+    fun `the picker states are different values from every other not-working state`() {
+        val states = listOf(
+            MeshTermView.Listing, MeshTermView.Choose(listOf(ent("a"))), MeshTermView.NoShells,
+            MeshTermView.ProfileMissing, MeshTermView.Handshaking,
+        )
+        assertEquals(states.size, states.map { meshTermLabel(it) }.toSet().size)
+    }
+
     @Test
     fun `the three failure cases are three different values`() = runBlocking<Unit> {
         val down = MeshTermView.LinkDown(MeshLinkState.Unreachable)

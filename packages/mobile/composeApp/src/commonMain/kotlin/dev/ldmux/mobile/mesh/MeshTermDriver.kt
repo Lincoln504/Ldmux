@@ -85,6 +85,15 @@ sealed interface MeshTermView {
     /** Session established and `Attach` sent, but the host has not described a terminal yet. */
     data object ProfileMissing : MeshTermView
 
+    /** No shell was named, so the host was asked which are running and has not finished answering. */
+    data object Listing : MeshTermView
+
+    /** The host runs more than one shell and none was named: the user must choose. Nothing is guessed. */
+    data class Choose(val entries: List<SessionEntry>) : MeshTermView
+
+    /** The host answered and runs no shell. [MeshTermDriver.refresh] asks again. */
+    data object NoShells : MeshTermView
+
     /** The host described a terminal. [absent] is what this link cannot carry: show it, do not offer it. */
     data class Live(
         val screen: MeshScreen,
@@ -148,6 +157,12 @@ class MeshTermDriver(
     private var resyncing = false
     private var unsupported = 0
     private var terminalView: MeshTermView? = null
+
+    /** What is known about which shell to attach (only used when no selector was given). */
+    private enum class Pick { NotNeeded, Probing, Listing, Choosing, None, Attached }
+    private var pick = Pick.NotNeeded
+    private var pages = ArrayList<SessionEntry>()
+    private var choices: List<SessionEntry> = emptyList()
     /** A recoverable gateway problem (radio out). Cleared when the link is bound again. */
     private var linkProblem: MeshLinkState? = null
 
@@ -202,6 +217,11 @@ class MeshTermDriver(
             }
             session = s
             _view.value = MeshTermView.ProfileMissing
+            // Nothing named: attach with an empty selector first. The host takes the one shell if
+            // there is exactly one (the common case, and no extra record on a link that allows
+            // about 58 an hour), answers Closed(NOT_FOUND) for none and Closed(AMBIGUOUS) for
+            // several, and only then does the driver ask which (below). It never guesses an id.
+            pick = if (selector.isEmpty()) Pick.Probing else Pick.Attached
             queue(TermMessage.Attach(MeshTerm.VERSION, selector))
             pump()
             return@withLock
@@ -255,6 +275,28 @@ class MeshTermDriver(
         if (out == InputOutcome.Accepted) pump()
         publish()
         out
+    }
+
+    /**
+     * Choose one of the shells the host listed. Only an id from the host's own list is accepted:
+     * anything else returns false and sends nothing, so a stale picker cannot attach a guess.
+     */
+    suspend fun choose(id: String): Boolean = lock.withLock {
+        if (session == null || terminalView != null || pick != Pick.Choosing) return@withLock false
+        if (choices.none { it.id == id }) return@withLock false
+        pick = Pick.Attached
+        queue(TermMessage.Attach(MeshTerm.VERSION, id))
+        pump(); publish()
+        true
+    }
+
+    /** Ask the host which shells are running again (after [MeshTermView.NoShells], or from the picker). */
+    suspend fun refresh() = lock.withLock {
+        if (session == null || terminalView != null) return@withLock
+        if (pick == Pick.None || pick == Pick.Choosing) {
+            pick = Pick.Listing; pages = ArrayList()
+            queue(TermMessage.ListRequest); pump(); publish()
+        }
     }
 
     /** Ask the host for the whole screen again. */
@@ -324,6 +366,7 @@ class MeshTermDriver(
     private fun handle(m: TermMessage) {
         when (m) {
             is TermMessage.Profile -> {
+                if (pick == Pick.Probing) pick = Pick.Attached
                 unsupported = m.unsupported
                 mirror.apply(m)
                 held.clear(); lastEpoch = null; painted = false
@@ -334,9 +377,31 @@ class MeshTermDriver(
                 held += m
             }
             is TermMessage.Commit -> commit(m)
-            is TermMessage.Closed -> terminalView = MeshTermView.HostClosed(m.reason)
+            is TermMessage.Closed -> when {
+                // The answer to an empty-selector attach: not an ending, a question for the user.
+                pick == Pick.Probing && m.reason == MeshTerm.Closed.AMBIGUOUS -> {
+                    pick = Pick.Listing; pages = ArrayList(); queue(TermMessage.ListRequest)
+                }
+                pick == Pick.Probing && m.reason == MeshTerm.Closed.NOT_FOUND -> pick = Pick.None
+                else -> terminalView = MeshTermView.HostClosed(m.reason)
+            }
+            is TermMessage.Sessions -> onSessions(m)
             // Phone→host messages from a host are not ours to act on.
             else -> {}
+        }
+    }
+
+    /** A page of the shell list. Ignored unless a list was asked for, so a stray one cannot attach anything. */
+    private fun onSessions(m: TermMessage.Sessions) {
+        if (pick != Pick.Listing) return
+        pages.addAll(m.entries)
+        if (!m.last) return
+        val all = pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
+        pages = ArrayList()
+        when (all.size) {
+            0 -> pick = Pick.None
+            1 -> { pick = Pick.Attached; queue(TermMessage.Attach(MeshTerm.VERSION, all[0].id)) }
+            else -> { pick = Pick.Choosing; choices = all }
         }
     }
 
@@ -399,7 +464,12 @@ class MeshTermDriver(
         _view.value = when {
             session == null && handshake == null -> MeshTermView.Idle
             handshake != null -> MeshTermView.Handshaking
-            mirror.profile == null -> MeshTermView.ProfileMissing
+            mirror.profile == null -> when (pick) {
+                Pick.Listing -> MeshTermView.Listing
+                Pick.Choosing -> MeshTermView.Choose(choices)
+                Pick.None -> MeshTermView.NoShells
+                else -> MeshTermView.ProfileMissing
+            }
             else -> {
                 val left = gateway.status.value?.opsLeftThisHour
                 val pending = session?.let { runCatching { it.health(clock()).pending }.getOrDefault(0) } ?: 0

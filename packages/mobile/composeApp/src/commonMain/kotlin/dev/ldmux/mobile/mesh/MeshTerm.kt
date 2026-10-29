@@ -24,6 +24,10 @@ object MeshTerm {
     const val MAX_INPUT = 96
     const val MAX_SEGMENT = 120
     const val MAX_SELECTOR = 40
+    /** Longest shell label in a `Sessions` entry. */
+    const val MAX_LABEL = 24
+    /** Most shells a host lists. */
+    const val MAX_SESSIONS = 16
     const val MAX_BUFFER = 4096
 
     /** `Profile.unsupported` bits: features this link does not carry. A set bit means "absent". */
@@ -56,11 +60,16 @@ object MeshTerm {
     internal const val T_INPUT = 0x02
     internal const val T_RESYNC = 0x03
     internal const val T_DETACH = 0x04
+    internal const val T_LIST = 0x05
+    internal const val T_SESSIONS = 0x85
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
     internal const val T_COMMIT = 0x83
     internal const val T_CLOSED = 0x84
 }
+
+/** One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector. */
+data class SessionEntry(val id: String, val label: String)
 
 data class TermPatch(val y: Int, val append: Boolean, val text: String)
 
@@ -77,6 +86,10 @@ sealed interface TermMessage {
     data class Rows(val epoch: Int, val full: Boolean, val patches: List<TermPatch>) : TermMessage
     data class Commit(val epoch: Int, val cursorX: Int, val cursorY: Int, val flags: Int) : TermMessage
     data class Closed(val reason: Int) : TermMessage
+    /** Phone to host: which shells are running? */
+    data object ListRequest : TermMessage
+    /** Host to phone: one page of the answer; [last] marks the final page (an empty list is one empty last page). */
+    data class Sessions(val last: Boolean, val entries: List<SessionEntry>) : TermMessage
 }
 
 /** A field is over its limit, or an `Input` is empty. Nothing is truncated: the caller decides. */
@@ -147,6 +160,21 @@ fun TermMessage.encode(): ByteArray {
         is TermMessage.Closed -> {
             body.add(u8(reason, "reason"))
             MeshTerm.T_CLOSED
+        }
+        TermMessage.ListRequest -> MeshTerm.T_LIST
+        is TermMessage.Sessions -> {
+            body.add(if (last) 1 else 0)
+            for (e in entries) {
+                val id = e.id.encodeToByteArray()
+                val label = e.label.encodeToByteArray()
+                if (id.size > MeshTerm.MAX_SELECTOR || label.size > MeshTerm.MAX_LABEL) {
+                    throw TermEncodeException("session entry too long")
+                }
+                body.add(id.size.toByte()); id.forEach { body.add(it) }
+                body.add(label.size.toByte()); label.forEach { body.add(it) }
+            }
+            if (body.size > MeshTerm.MAX_ROWS_BODY) throw TermEncodeException("sessions body too long")
+            MeshTerm.T_SESSIONS
         }
     }
     val out = ArrayList<Byte>(body.size + 3)
@@ -261,6 +289,26 @@ class TermDecoder {
             MeshTerm.T_COMMIT ->
                 if (body.size == 5) ok(TermMessage.Commit(le16(body, 0), b(body, 2), b(body, 3), b(body, 4))) else Parsed.Bad
             MeshTerm.T_CLOSED -> if (body.size == 1) ok(TermMessage.Closed(b(body, 0))) else Parsed.Bad
+            MeshTerm.T_LIST -> if (body.isEmpty()) ok(TermMessage.ListRequest) else Parsed.Bad
+            MeshTerm.T_SESSIONS -> {
+                if (body.isEmpty()) return Parsed.Bad
+                val entries = ArrayList<SessionEntry>()
+                var p = 1
+                fun field(max: Int): String? {
+                    if (p >= body.size) return null
+                    val n = b(body, p)
+                    if (n > max || body.size - (p + 1) < n) return null
+                    val t = utf8(body.copyOfRange(p + 1, p + 1 + n)) ?: return null
+                    p += 1 + n
+                    return t
+                }
+                while (p < body.size) {
+                    val id = field(MeshTerm.MAX_SELECTOR) ?: return Parsed.Bad
+                    val label = field(MeshTerm.MAX_LABEL) ?: return Parsed.Bad
+                    entries += SessionEntry(id, label)
+                }
+                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries))
+            }
             else -> Parsed.Unknown
         }
     }

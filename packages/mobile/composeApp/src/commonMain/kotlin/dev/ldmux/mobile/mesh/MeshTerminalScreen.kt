@@ -97,6 +97,23 @@ fun MeshTerminalScreen(creds: MeshCredentials, lib: SessionLib, onLeave: () -> U
         } else {
             // Not live: say which of the not-working cases it is, and offer nothing to type into.
             Text(meshTermLabel(view), color = Dim, fontSize = 12.sp)
+            when (val v = view) {
+                // The host's own list, verbatim: choosing sends that id and nothing is guessed.
+                is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for (e in v.entries) {
+                        Text(
+                            meshShellLine(e),
+                            color = Fg,
+                            fontSize = 13.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                                .clickable { scope.launch { conn.driver.choose(e.id) } },
+                        )
+                    }
+                }
+                MeshTermView.NoShells -> AccentBtn("ask again") { scope.launch { conn.driver.refresh() } }
+                else -> {}
+            }
         }
     }
 }

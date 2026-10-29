@@ -81,6 +81,9 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     is MeshTermView.LinkDown -> meshLinkLabel(view.link)
     MeshTermView.Handshaking -> "mesh · securing the link (can take minutes)"
     MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
+    MeshTermView.Listing -> "mesh · asking the host which shells are running"
+    is MeshTermView.Choose -> "mesh · choose a shell"
+    MeshTermView.NoShells -> "mesh · the host is running no shell"
     is MeshTermView.Live -> when {
         view.resyncing -> "mesh · resyncing the screen"
         !view.painted -> "mesh · attached, no screen yet"
@@ -138,3 +141,7 @@ fun meshScreenFor(config: dev.ldmux.mobile.LdmuxConfig): Pair<MeshCredentials, S
     )
     return if (resolution is MeshRouteResolution.Use && creds != null) creds to lib else null
 }
+
+/** One picker line: the label when the host gave one, then the id the choice will send. */
+fun meshShellLine(e: SessionEntry): String =
+    if (e.label.isEmpty()) e.id else "${e.label}  (${e.id.take(8)})"
