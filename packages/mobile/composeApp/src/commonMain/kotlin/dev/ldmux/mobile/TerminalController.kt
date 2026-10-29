@@ -82,23 +82,10 @@ class TerminalController(
      * section 3.5). Both arrive here, so a listener sees one stream of events and never which
      * channel carried them.
      */
-    var onSpeech: ((dev.ldmux.mobile.voice.SpeechEvent) -> Unit)? = null
-    private val speechOsc = dev.ldmux.mobile.voice.SpeechOscParser()
-    private val recentSpeechIds = ArrayDeque<String>()
+    private val speech = dev.ldmux.mobile.voice.SpeechIntake()
 
-    /**
-     * A reconnect can replay recent output, and a program can say the same thing on both
-     * channels; a message that carries an id is spoken once. One without an id cannot be told
-     * from a repeat and is passed on.
-     */
-    private fun deliverSpeech(e: dev.ldmux.mobile.voice.SpeechEvent) {
-        val id = e.id
-        if (id != null) {
-            if (id in recentSpeechIds) return
-            recentSpeechIds.addLast(id)
-            while (recentSpeechIds.size > 16) recentSpeechIds.removeFirst()
-        }
-        onSpeech?.invoke(e)
+    override fun setSpeechListener(listener: ((dev.ldmux.mobile.voice.SpeechEvent) -> Unit)?) {
+        speech.listener = listener
     }
 
     /** Server-reported terminal modes (affects input encoding later). */
@@ -235,7 +222,7 @@ class TerminalController(
             _ownedBy.value = null
             _ended.value = true
         }
-        attach.onSpeech = { deliverSpeech(it) }
+        attach.onSpeech = { speech.deliver(it) }
         attach.onSessions = { owners ->
             // The holder let go (`owner: null`, or it is us): the shell is free and
             // this page can attach again. Without this the notice was final until
@@ -298,7 +285,7 @@ class TerminalController(
      */
     private fun applySnapshot(cols: Int, rows: Int, screen: String, history: Boolean, m: TerminalModes) {
         // A sequence half-read before a rebuild must not complete against the new picture.
-        speechOsc.reset()
+        speech.resetParser()
         // A snapshot is the truth: any outstanding prediction is settled by it (this is
         // also the recovery path after a mispredict).
         predictor.reset()
@@ -425,7 +412,7 @@ class TerminalController(
     private fun feed(bytes: ByteArray, length: Int = bytes.size) {
         // Observe, never remove: the engine ignores OSC 1338 (see `SpeechOscParser`), so the
         // same bytes still go to it. Only parsed when someone is listening.
-        if (onSpeech != null) speechOsc.feed(bytes, length).forEach { deliverSpeech(it) }
+        speech.feedBytes(bytes, length)
         engine.write(bytes, length)
         // Read the clipboard slot only when someone can take it. The read both
         // answers and *consumes*, so draining it with no handler installed would

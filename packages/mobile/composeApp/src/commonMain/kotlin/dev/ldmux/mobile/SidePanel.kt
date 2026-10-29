@@ -148,6 +148,8 @@ internal fun SidePanel(
     handles: Map<String, TerminalHandle>,
     onKill: (Session) -> Unit,
     onVoice: () -> Unit,
+    voiceOn: Boolean = false,
+    onVoiceMode: () -> Unit = {},
     onLauncher: () -> Unit,
     press: (String) -> Unit,
     shownId: String?,
@@ -208,6 +210,9 @@ internal fun SidePanel(
                     val text = clipboard.getText()?.text
                     if (!text.isNullOrEmpty()) handle?.paste(text)
                 }
+                // Voice mode: hands-free, bound to this shell. Not the same control as the mic,
+                // which is one dictation: this one keeps listening and speaks the agent's reply.
+                KeyBtn("voice", Modifier.weight(1f), active = voiceOn) { onVoiceMode() }
                 IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
             }
             PanelDivider()

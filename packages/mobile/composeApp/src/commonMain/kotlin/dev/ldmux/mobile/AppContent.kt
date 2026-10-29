@@ -53,6 +53,9 @@ import androidx.compose.runtime.setValue
 import dev.ldmux.mobile.voice.Dictation
 import dev.ldmux.mobile.voice.VoiceState
 import dev.ldmux.mobile.voice.VoiceBanner
+import dev.ldmux.mobile.voice.VoiceController
+import dev.ldmux.mobile.voice.VoicePhaseBanner
+import dev.ldmux.mobile.voice.newCapture
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -278,6 +281,9 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // Deliberately the same mechanism as the launcher button: dropping the pages
     // *is* the detach, so there is one way for a shell to be let go of. The launcher
     // socket stops too (it is restarted on return, below).
+    // Voice mode: one controller for the app, bound below to whichever shell is on screen. It
+    // is created here (above the lifecycle hook that has to be able to stop it).
+    val voiceCtl = remember { VoiceController(capture = newCapture()) }
     DisposableEffect(client) {
         val removeRelease = AppLifecycle.setReleaseHandler {
             pageOrder = emptyList()
@@ -286,7 +292,10 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         }
         // A microphone that outlives the screen is a microphone nobody asked for, and
         // it is stopped at once, not after the grace.
-        val removeVoice = AppLifecycle.onBackground { Dictation.stop() }
+        val removeVoice = AppLifecycle.onBackground {
+            Dictation.stop()
+            voiceCtl.shutdown()
+        }
         onDispose {
             removeRelease()
             removeVoice()
@@ -579,6 +588,34 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
         Dictation.stop()
     }
 
+    // Voice mode follows the shell on screen, and only that one. Three things are bound here
+    // together, because a mismatch between them is the bug this exists to prevent:
+    //  * the shell's id and handle (what is typed into, and which shell's speech is heard);
+    //  * whether this device holds it (only the holder may open the microphone or submit);
+    //  * the speech listener, set on this shell's controller alone. A shell that is not on
+    //    screen has none, so its speech is not even parsed (see TerminalHandle.setSpeechListener).
+    DisposableEffect(shownSessionId.value, currentHandle) {
+        val sid = shownSessionId.value
+        val h = currentHandle
+        h?.setSpeechListener(if (sid == null) null else { e -> voiceCtl.say(sid, e) })
+        if (h == null || sid == null) voiceCtl.bind(null, null, false)
+        onDispose { h?.setSpeechListener(null) }
+    }
+    val ownedByOther = currentHandle?.ownedBy?.collectAsState()?.value
+    LaunchedEffect(shownSessionId.value, currentHandle, ownedByOther) {
+        val sid = shownSessionId.value
+        val h = currentHandle
+        if (sid != null && h != null) voiceCtl.bind(sid, h, holder = ownedByOther == null)
+    }
+    LaunchedEffect(voiceCtl) {
+        // A monotonic clock: only differences matter to the machine, and wall time can jump.
+        val start = kotlin.time.TimeSource.Monotonic.markNow()
+        while (true) {
+            voiceCtl.tick(start.elapsedNow().inWholeMilliseconds)
+            delay(1000)
+        }
+    }
+
     // The banner is feedback rather than a notification. It is drawn over the
     // terminal, so a line that stays is a row of the terminal that stays covered —
     // and a failure that has been read, or never will be, is not worth that. Refused
@@ -586,7 +623,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
     // hiding the only explanation of why the microphone does nothing would leave the
     // button looking broken.
     LaunchedEffect(voice) {
-        if (voice is VoiceState.Failed || voice == VoiceState.Unavailable) {
+        if (voice is VoiceState.Failed || voice == VoiceState.Unavailable || voice == VoiceState.NoSpeech) {
             delay(4000)
             voice = VoiceState.Idle
         }
@@ -776,6 +813,8 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         client,
                         handles,
                         onKill = { killTarget = it },
+                        voiceOn = voiceCtl.enabled,
+                        onVoiceMode = { voiceCtl.toggle() },
                         onVoice = {
                             // The sink is the handle that is on screen *now*, taken
                             // once: a transcript cannot be retargeted afterwards,
@@ -826,6 +865,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                         onShellGone = { id -> pageOrder = pageOrder - id },
                     )
                     VoiceBanner(voice, Modifier.align(Alignment.TopStart))
+                    VoicePhaseBanner(voiceCtl.phase, voiceCtl.notice, Modifier.align(Alignment.BottomStart))
                 }
                 if (!portrait && chrome && !config.panelLeft) panel()
             }

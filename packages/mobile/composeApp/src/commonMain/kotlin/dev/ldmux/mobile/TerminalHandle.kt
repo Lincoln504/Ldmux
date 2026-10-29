@@ -199,6 +199,15 @@ interface TerminalHandle {
     fun takeOver() {}
 
     /**
+     * Where this shell's speech goes (`docs/VOICE-MODE.md` section 3.5): the daemon's `speech`
+     * message and an OSC 1338 in the byte stream both arrive here as one event type.
+     *
+     * Set only on the shell that voice mode is bound to. A shell with no listener does not even
+     * parse the OSC, so speech from a shell that is not on screen is ignored at the source.
+     */
+    fun setSpeechListener(listener: ((dev.ldmux.mobile.voice.SpeechEvent) -> Unit)?) {}
+
+    /**
      * Repaint from what the engine already holds.
      *
      * For the one case that would otherwise be invisible: a snapshot that arrived

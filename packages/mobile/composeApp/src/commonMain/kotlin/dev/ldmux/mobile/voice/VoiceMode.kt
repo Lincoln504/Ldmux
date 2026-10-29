@@ -47,6 +47,13 @@ sealed interface VoiceEvent {
 
     data object PermissionDenied : VoiceEvent
     data object NoRecogniser : VoiceEvent
+
+    /**
+     * The only recogniser on this phone is a cloud one: what is said leaves the device. Voice
+     * mode listens continuously, so unlike a one-shot dictation the user cannot be expected to
+     * notice and stop it. Refused unless [VoicePolicy.allowCloud] says the user opted in.
+     */
+    data object CloudRecogniser : VoiceEvent
     data class Fault(val reason: String) : VoiceEvent
 
     /** The submit reached the shell. */
@@ -62,7 +69,15 @@ sealed interface VoiceEvent {
     /** The user spoke over the answer (only acted on when barge-in is enabled). */
     data object BargeIn : VoiceEvent
 
-    /** Time passing, for the thinking timeout. */
+    /**
+     * The recogniser ended without a transcript: it timed out, or heard nothing it could
+     * use. In a continuous loop that is silence, not a fault, so the machine reopens it
+     * (bounded by [VoicePolicy.maxIdleRestarts], so a recogniser that returns instantly
+     * every time ends in [VoicePhase.Failed] rather than spinning).
+     */
+    data object RecogniserIdle : VoiceEvent
+
+    /** Time passing, for the thinking timeout and the long-silence exit. */
     data class Tick(val nowMs: Long) : VoiceEvent
 }
 
@@ -84,6 +99,12 @@ sealed interface VoiceEffect {
 data class VoicePolicy(
     /** Without a speech event after a submit, reopen the microphone after this long. */
     val thinkingTimeoutMs: Long = 120_000,
+    /** Listening this long with no voice at all leaves the mode, so the mic is not open forever. */
+    val longSilenceMs: Long = 60_000,
+    /** Whether a cloud recogniser may be used. Off: it is never silently switched to. */
+    val allowCloud: Boolean = false,
+    /** Consecutive empty recogniser sessions tolerated before voice mode reports a fault. */
+    val maxIdleRestarts: Int = 30,
     /** Whether talking over the answer stops it. Off: the mic is muted while speaking. */
     val bargeIn: Boolean = false,
     /** Utterances that mean "stop", not a command. Compared lowercased and trimmed. */
@@ -101,7 +122,7 @@ data class VoicePolicy(
  *  - Speech text never becomes a [VoiceEffect.Submit]: only a transcript does.
  *  - A runaway answer is chunked and capped ([chunkForSpeech]); a truncation is announced.
  */
-class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
+class VoiceMode(val policy: VoicePolicy = VoicePolicy()) {
     var phase: VoicePhase = VoicePhase.Idle
         private set
 
@@ -114,8 +135,12 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
     private var holder = false
     private val queue = ArrayDeque<String>()
     private var finalSeen = true
-    private var thinkingSince = 0L
-    private var now = 0L
+    // Times are unset (-1) until the first Tick says what the clock is. Stamping them with a
+    // made-up 0 meant the first real Tick (epoch milliseconds) looked like hours had passed.
+    private var thinkingSince = UNSET
+    private var lastActivity = UNSET
+    private var now = UNSET
+    private var idleRestarts = 0
 
     fun handle(event: VoiceEvent): List<VoiceEffect> {
         val fx = ArrayList<VoiceEffect>()
@@ -140,7 +165,11 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
             }
             VoiceEvent.MicOpened -> if (phase == VoicePhase.Interrupted) phase = VoicePhase.Listening
             VoiceEvent.Heard -> when (phase) {
-                VoicePhase.Listening -> phase = VoicePhase.Capturing
+                VoicePhase.Listening -> {
+                    phase = VoicePhase.Capturing
+                    markActive()
+                }
+                VoicePhase.Capturing -> markActive()
                 VoicePhase.Speaking -> if (policy.bargeIn) interrupt(fx)
                 else -> {}
             }
@@ -168,6 +197,17 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
                 phase = VoicePhase.Thinking
                 thinkingSince = now
             }
+            VoiceEvent.RecogniserIdle -> if (phase == VoicePhase.Listening || phase == VoicePhase.Capturing) {
+                idleRestarts++
+                if (idleRestarts > policy.maxIdleRestarts) {
+                    stopEverything(fx)
+                    phase = VoicePhase.Failed("the recogniser keeps returning nothing")
+                } else {
+                    // Capturing -> Listening: whatever was half-heard produced no text.
+                    phase = VoicePhase.Listening
+                    fx += VoiceEffect.OpenMic
+                }
+            }
             VoiceEvent.LongSilence -> if (phase == VoicePhase.Listening || phase == VoicePhase.Capturing) {
                 fx += VoiceEffect.CloseMic
                 phase = VoicePhase.Idle
@@ -177,6 +217,13 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
             VoiceEvent.PermissionDenied -> {
                 stopEverything(fx)
                 phase = VoicePhase.Denied(VoiceDenial.Permission)
+            }
+            VoiceEvent.CloudRecogniser -> if (!policy.allowCloud) {
+                stopEverything(fx)
+                phase = VoicePhase.Unavailable
+                fx += VoiceEffect.Notice("voice mode needs on-device recognition; this phone only has a cloud recogniser, so audio would leave it")
+            } else {
+                fx += VoiceEffect.Notice("cloud recognition: what you say leaves the phone")
             }
             VoiceEvent.NoRecogniser -> {
                 stopEverything(fx)
@@ -196,9 +243,16 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
             VoiceEvent.BargeIn -> if (phase == VoicePhase.Speaking && policy.bargeIn) interrupt(fx)
             is VoiceEvent.Tick -> {
                 now = event.nowMs
+                if (thinkingSince == UNSET) thinkingSince = now
+                if (lastActivity == UNSET) lastActivity = now
                 if (phase == VoicePhase.Thinking && now - thinkingSince >= policy.thinkingTimeoutMs) {
                     fx += VoiceEffect.Notice("no spoken reply; listening again")
                     openMic(fx)
+                } else if (phase == VoicePhase.Listening && now - lastActivity >= policy.longSilenceMs) {
+                    fx += VoiceEffect.CloseMic
+                    phase = VoicePhase.Idle
+                    enabled = false
+                    fx += VoiceEffect.Notice("voice mode ended: no speech for a while")
                 }
             }
         }
@@ -258,10 +312,17 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
         fx += VoiceEffect.OpenMic
     }
 
+    /** Voice was heard, or the microphone has just been handed back: restart both clocks. */
+    private fun markActive() {
+        lastActivity = now
+        idleRestarts = 0
+    }
+
     private fun openMic(fx: MutableList<VoiceEffect>) {
         if (sessionId != null && holder && enabled) {
             fx += VoiceEffect.OpenMic
             phase = VoicePhase.Listening
+            markActive()
         } else {
             startListeningIfAllowed(fx)
         }
@@ -274,6 +335,7 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
             !holder -> VoicePhase.Denied(VoiceDenial.NotHolder)
             else -> {
                 fx += VoiceEffect.OpenMic
+                markActive()
                 VoicePhase.Listening
             }
         }
@@ -286,3 +348,5 @@ class VoiceMode(private val policy: VoicePolicy = VoicePolicy()) {
         fx += VoiceEffect.CloseMic
     }
 }
+
+private const val UNSET: Long = -1L

@@ -106,7 +106,6 @@ actual object Dictation {
         }
         recognizer = sr
         sr.setRecognitionListener(listener)
-        onState?.invoke(if (cloud) VoiceState.ListeningCloud else VoiceState.Listening)
         sr.startListening(
             Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -118,6 +117,9 @@ actual object Dictation {
                 putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             },
         )
+        // Reported *after* listening has started, not before: a caller that refuses a cloud
+        // recogniser reacts by calling stop(), which must find a recogniser that is running.
+        onState?.invoke(if (cloud) VoiceState.ListeningCloud else VoiceState.Listening)
     }
 
     private fun create(ctx: Context): SpeechRecognizer? = runCatching {
@@ -158,16 +160,29 @@ actual object Dictation {
             if (!text.isNullOrBlank()) onState?.invoke(VoiceState.Partial(text, cloud))
         }
 
+        // The recogniser is released *before* the state is reported. A caller that reacts by
+        // listening again (continuous voice mode) re-enters toggle(), which would otherwise see
+        // a recogniser still held and switch dictation off instead of starting it.
         override fun onResults(results: Bundle?) {
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-            if (!text.isNullOrBlank()) onText?.invoke(normalize(text))
-            onState?.invoke(VoiceState.Idle)
             finish()
+            if (!text.isNullOrBlank()) {
+                onText?.invoke(normalize(text))
+                onState?.invoke(VoiceState.Idle)
+            } else {
+                // A session that ended with no words is silence, not success: say so, so a
+                // continuous caller reopens it instead of waiting on a recogniser that is gone.
+                onState?.invoke(VoiceState.NoSpeech)
+            }
         }
 
         override fun onError(error: Int) {
-            onState?.invoke(VoiceState.Failed(errorName(error)))
             finish()
+            when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
+                    onState?.invoke(VoiceState.NoSpeech)
+                else -> onState?.invoke(VoiceState.Failed(errorName(error)))
+            }
         }
     }
 
