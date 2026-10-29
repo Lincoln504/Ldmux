@@ -151,10 +151,10 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux mesh [status] [--json]\n  The MeshMore link: state, the peer, the record budget left this hour, and the radio's own reading. Anything about frequencies lives on the gateway, not here."
         }
         "code" => {
-            "ldmux code [--mesh]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together)."
+            "ldmux code [--mesh | --mesh-only]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together). --mesh-only carries the mesh keys and nothing of the tailnet: no address, no daemon token, for a phone that will only ever reach this machine by radio."
         }
         "pair" => {
-            "ldmux pair [--mesh]\n  Print the pairing link. --mesh adds the mesh keys, which are secret."
+            "ldmux pair [--mesh | --mesh-only]\n  Print the pairing link. --mesh adds the mesh keys, which are secret. --mesh-only prints a link with the mesh keys and no tailnet address or token."
         }
         "clipboard-write" => {
             "ldmux clipboard-write on|off\n  Allow or refuse terminal programs writing the clipboard."
@@ -318,6 +318,7 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--history",
         "--json",
         "--mesh",
+        "--mesh-only",
         "--name",
         "--rw",
         "--final",
@@ -862,6 +863,44 @@ async fn main() {
             // can scan (`code`), or the same pairing as a link (`pair`). Both
             // refuse a daemon a phone cannot reach instead of printing a link
             // that goes nowhere (the TS rule, ADR-0016/ADR-0017).
+            let mesh_only = rest.iter().any(|a| a == "--mesh-only");
+            if mesh_only && rest.iter().any(|a| a == "--mesh") {
+                eprintln!("ldmux: --mesh and --mesh-only are alternatives, not both");
+                std::process::exit(2);
+            }
+            if mesh_only {
+                let r: Result<serde_json::Value, CallError> =
+                    daemon_call(&sock, "mesh.pairing", &serde_json::json!({})).await;
+                let v = match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        die(&e, &sock);
+                    }
+                };
+                let Some(keys) = mesh_keys_from_json(&v) else {
+                    eprintln!("ldmux: the daemon's mesh.pairing answer was not two 64-hex keys");
+                    std::process::exit(1);
+                };
+                let name = machine_hostname();
+                if cmd == "code" {
+                    match ldmux_daemon::pairing::mesh_only_code_text(&name, &keys) {
+                        Ok(text) => print!("{text}"),
+                        Err(problem) => {
+                            eprintln!("ldmux: {}", problem.message(""));
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    match ldmux_protocol::pairing::mesh_only_link(&name, &keys) {
+                        Ok(link) => println!("{link}"),
+                        Err(e) => {
+                            eprintln!("ldmux: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                return;
+            }
             let r: Result<serde_json::Value, CallError> =
                 daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
             let v = match r {

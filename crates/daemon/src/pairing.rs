@@ -83,6 +83,20 @@ pub fn code_text_with_mesh(
     ))
 }
 
+/// The mesh-only link and its QR: no tailnet address and no daemon bearer token, so it needs no
+/// listening daemon and hands a radio-only phone nothing it cannot use.
+pub fn mesh_only_code_text(name: &str, mesh: &MeshKeys) -> Result<String, PairingProblem> {
+    let link = ldmux_protocol::pairing::mesh_only_link(name, mesh)
+        .map_err(|e| PairingProblem::LinkRejected(e.0))?;
+    let code =
+        crate::qr::encode_qr(&link, crate::qr::Ecc::L).map_err(PairingProblem::LinkRejected)?;
+    Ok(format!(
+        "{}{}  (mesh only)\n",
+        crate::qr::render_qr_terminal(&code, 1),
+        name
+    ))
+}
+
 /// The pairing a phone should use, or a problem saying what to fix.
 pub fn pairing_for(info: &ListenInfo, name: &str) -> Result<(Pairing, String), PairingProblem> {
     pairing_for_with_mesh(info, name, None)
@@ -264,5 +278,22 @@ mod tests {
             !text.contains(&"22".repeat(32)),
             "the code text must not print the secret as text"
         );
+    }
+
+    #[test]
+    fn a_mesh_only_code_needs_no_listening_daemon_and_names_no_address() {
+        let keys = MeshKeys {
+            host_key: [7; 32],
+            psk: [9; 32],
+            host_radio: None,
+        };
+        let text = mesh_only_code_text("debian", &keys).expect("renders");
+        assert!(text.trim_end().ends_with("debian  (mesh only)"), "{text}");
+        let link = ldmux_protocol::pairing::mesh_only_link("debian", &keys).unwrap();
+        assert!(!link.contains("host=") && !link.contains("token="));
+        // The tailnet reader refuses it; the full reader takes it as keys and a name only.
+        assert_eq!(ldmux_protocol::pairing::parse_pairing_link(&link), None);
+        let (p, m) = ldmux_protocol::pairing::parse_pairing_link_full(&link).unwrap();
+        assert!(p.host.is_empty() && p.token.is_empty() && m == Some(keys));
     }
 }

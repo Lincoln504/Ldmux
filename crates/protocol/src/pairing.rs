@@ -110,13 +110,46 @@ pub fn pairing_link_with_mesh(
     Ok(format!("ldmux://pair?{}", q.join("&")))
 }
 
+/// A link that carries **only** the mesh route: no daemon address and no daemon bearer token
+/// (`ldmux://pair?v=1&name=…&mv=1&mk=…&psk=…`).
+///
+/// For a phone that will reach this machine by radio and never by the tailnet. The daemon's
+/// bearer token grants full shell control over the tailnet, so handing it to a device that
+/// cannot use it is a privilege that device should not hold (ADR-0020: the tailnet rule "does
+/// not apply to mesh pairing"). A scanner that predates this refuses the link, since it has no
+/// `host`, which is the safe outcome.
+pub fn mesh_only_link(name: &str, mesh: &MeshKeys) -> Result<String, PairingError> {
+    let name: String = name
+        .chars()
+        .filter(|c| !((*c as u32) <= 0x1f || (*c as u32) == 0x7f))
+        .take(64)
+        .collect();
+    let mut fields: Vec<(&'static str, String)> = vec![("v", PAIRING_VERSION.to_string())];
+    if !name.is_empty() {
+        fields.push(("name", enc(&name)));
+    }
+    fields.push(("mv", MESH_KEYS_VERSION.to_string()));
+    fields.push(("mk", hex32(&mesh.host_key)));
+    fields.push(("psk", hex32(&mesh.psk)));
+    if let Some(r) = &mesh.host_radio {
+        fields.push(("mr", hex32(r)));
+    }
+    let q: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    Ok(format!("ldmux://pair?{}", q.join("&")))
+}
+
 /// The pairing in `link`, or `None` if it is not a valid ldmux pairing link.
 ///
 /// Scheme and host are case-insensitive (a URL normalises them); the query is
 /// case-sensitive and a `#fragment` is dropped. A repeated parameter reads as
 /// its first value (as `URLSearchParams.get` does).
+///
+/// A mesh-only link (no `host`, no `token`) is **not** a tailnet pairing, so this returns `None`
+/// for it: use [`parse_pairing_link_full`] to read one.
 pub fn parse_pairing_link(link: &str) -> Option<Pairing> {
-    parse_pairing_link_full(link).map(|(p, _)| p)
+    parse_pairing_link_full(link)
+        .map(|(p, _)| p)
+        .filter(|p| !p.host.is_empty())
 }
 
 /// The pairing and, when the link carries them, the mesh keys. `None` when the link is not a
@@ -175,12 +208,20 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
     if v.as_deref() != Some("1") {
         return None;
     }
+    let mesh_only = host.is_none() && token.is_none();
     let p = Pairing {
         host: host.unwrap_or_default(),
         token: token.unwrap_or_default(),
         name: name.unwrap_or_default(),
     };
-    if pairing_problem(&p).is_some() {
+    // Neither host nor token is a mesh-only link, but only if it then carries mesh keys (checked
+    // below): with neither and no keys it is nothing. One of the two alone is always refused.
+    if mesh_only {
+        if name_problem(&p.name) || (mv.is_none() && mk.is_none() && psk.is_none() && mr.is_none())
+        {
+            return None;
+        }
+    } else if pairing_problem(&p).is_some() {
         return None;
     }
     // Mesh keys: all or nothing, and well formed.
@@ -248,6 +289,14 @@ pub fn split_host(host: &str) -> Option<(String, u16)> {
         return None;
     }
     Some((addr.to_string(), parse_port(port_s)?))
+}
+
+/// A name the link may not carry (too long, or with a control character).
+fn name_problem(name: &str) -> bool {
+    name.chars().count() > 64
+        || name
+            .chars()
+            .any(|c| (0x00u32..=0x1f).contains(&(c as u32)) || c as u32 == 0x7f)
 }
 
 fn pairing_problem(p: &Pairing) -> Option<String> {
@@ -546,6 +595,34 @@ mod tests {
             pairing_link_with_mesh(&p, None).unwrap(),
             pairing_link(&p).unwrap()
         );
+    }
+
+    #[test]
+    fn mesh_only_links_carry_no_daemon_address_or_token_and_are_not_tailnet_pairings() {
+        let f = mesh_fixture();
+        let only = f["meshOnly"].as_array().unwrap();
+        assert!(only.len() >= 2);
+        for c in only {
+            let link = c["link"].as_str().unwrap();
+            assert!(!link.contains("host=") && !link.contains("token="));
+            let (p, mesh) = parse_pairing_link_full(link).expect("valid mesh-only");
+            assert_eq!((p.host.as_str(), p.token.as_str()), ("", ""));
+            assert_eq!(p.name, c["name"].as_str().unwrap());
+            let m = mesh.expect("keys");
+            assert_eq!(hex32(&m.host_key), c["mesh"]["hostKey"].as_str().unwrap());
+            // The plain, tailnet reader must not take it for a tailnet pairing.
+            assert_eq!(parse_pairing_link(link), None);
+            // And the serialiser makes exactly this link.
+            assert_eq!(mesh_only_link(&p.name, &m).unwrap(), link);
+        }
+    }
+
+    #[test]
+    fn half_a_tailnet_pairing_is_refused_even_with_valid_mesh_keys() {
+        for c in mesh_fixture()["meshOnlyInvalid"].as_array().unwrap() {
+            let link = c["link"].as_str().unwrap();
+            assert!(parse_pairing_link_full(link).is_none(), "{}", c["why"]);
+        }
     }
 
     #[test]

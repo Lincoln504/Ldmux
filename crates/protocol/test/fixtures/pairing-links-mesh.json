@@ -101,5 +101,50 @@
       "why": "empty mr",
       "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf&mr="
     }
+  ],
+  "meshOnly": [
+    {
+      "link": "ldmux://pair?v=1&name=debian&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "name": "debian",
+      "mesh": {
+        "hostKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+      }
+    },
+    {
+      "link": "ldmux://pair?v=1&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf&mr=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "name": "",
+      "mesh": {
+        "hostKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "hostRadio": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+      }
+    }
+  ],
+  "meshOnlyInvalid": [
+    {
+      "why": "no host, no token and no keys is nothing",
+      "link": "ldmux://pair?v=1&name=debian"
+    },
+    {
+      "why": "token without host",
+      "link": "ldmux://pair?v=1&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    },
+    {
+      "why": "host without token",
+      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    },
+    {
+      "why": "mesh-only with a half-formed key",
+      "link": "ldmux://pair?v=1&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "why": "mesh-only with a wrong-length key",
+      "link": "ldmux://pair?v=1&mv=1&mk=00&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    },
+    {
+      "why": "mesh-only with a control character in the name",
+      "link": "ldmux://pair?v=1&name=a%01b&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+    }
   ]
 }
