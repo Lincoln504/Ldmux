@@ -3,7 +3,7 @@
 # Throwaway everything under /tmp/voice-live; PI_CODING_AGENT_DIR points there, so ~/.pi is untouched.
 # A stub OpenAI-compatible model server answers with a `say` fence only if the system prompt carries
 # the voice section; a stub daemon socket records the `speech` RPC line it receives.
-# Usage: test/live/live.sh        (needs `pi` on PATH; no network, no real model)
+# Usage: tool/live/live.sh        (needs `pi` on PATH; no network, no real model)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"; W=/tmp/voice-live
 rm -rf "$W"; mkdir -p "$W"/{agent,work,sessions,prov,thrower}

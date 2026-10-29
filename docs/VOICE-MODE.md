@@ -448,9 +448,9 @@ in-band channel is an OSC, and the phone parses it, or it does not exist.
 | Barge-in capture | `voice/Vad.kt` (`CapturePort`), `androidMain/.../Capture.android.kt` | Built, compiles, **not run on a device**. Opened only while an answer is spoken and barge-in is on. Echo of the phone's own speaker is unmeasured. |
 | `VoiceController`, side-panel toggle, banner | `voice/VoiceController.kt`, `SidePanel.kt`, `AppContent.kt` | Built. Bound to the shell on screen; ownership-gated; shut down when the app goes to the background. `VoiceControllerTest` 16. Landscape side panel only, like the mic. |
 | `SpeechOutput` (TTS + audio focus) | `androidMain/.../SpeechOutput.android.kt` | Built, compiles, **not run on a device**. |
-| pi extension | `packages/pi-voice-extension` | Built. 11 `node --test` tests against a faked pi API, plus `test/live/live.sh` against a real pi 1.4.0 (below). |
+| pi extension | `packages/pi-voice-extension` | Built. 11 `node --test` tests against a faked pi API, plus `tool/live/live.sh` against a real pi 1.4.0 (below). |
 
-**Live evidence for the extension, 2026-10-29.** `packages/pi-voice-extension/test/live/live.sh` drives
+**Live evidence for the extension, 2026-10-29.** `packages/pi-voice-extension/tool/live/live.sh` drives
 pi 1.4.0 in `--mode rpc` with an isolated `PI_CODING_AGENT_DIR` (`~/.pi` untouched), a stub
 OpenAI-compatible model that answers with a `say` fence only when the system prompt contains the
 voice section, and a stub daemon socket that records the `speech` line. Observed:
@@ -507,5 +507,5 @@ recognition.
 **Counts (2026-10-29).** `./gradlew --offline :composeApp:testDebugUnitTest --rerun-tasks`: 589 pass, 0
 fail (542 before). Voice classes: `VadTest` 11, `VoiceLoopTest` 20, `VoiceControllerTest` 16, with the
 earlier four. `cargo test -p ldmux-daemon --test speech_relay`: 4. `node --test` in the extension: 11,
-and `test/live/live.sh` (needs `pi`). Mutation checks: stamping the timers with 0 fails 2 tests;
+and `tool/live/live.sh` (needs `pi`). Mutation checks: stamping the timers with 0 fails 2 tests;
 never stopping the barge-in capture fails 2.
