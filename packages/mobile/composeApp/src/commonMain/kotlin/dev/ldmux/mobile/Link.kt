@@ -1,6 +1,8 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshEnrollOutcome
 import dev.ldmux.mobile.mesh.MeshEnrollment
+import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshRouteProblem
 import dev.ldmux.mobile.mesh.meshProblemLabel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -68,6 +70,10 @@ fun linkLabel(
 }
 /** The link a config starts in: unpaired, blocked on its route, or connecting. */
 fun initialLink(config: LdmuxConfig): LinkState = when {
+    // A mesh-only device has no tailnet pairing, and that is not "unpaired": the mesh route has its
+    // own credentials. It is blocked on its route (shown by `routeProblem`) or, if it can run, the
+    // mesh screen replaces this surface.
+    config.route == MeshRoute.Mesh -> LinkState.RouteUnavailable
     !config.isPaired -> LinkState.Unpaired
     config.endpoint == null -> LinkState.RouteUnavailable
     else -> LinkState.Connecting
@@ -96,17 +102,45 @@ class ConfigStore(
         _config.value = next
     }
 
-    fun pair(p: Pairing) {
+    /**
+     * Apply a scanned pairing. A tailnet pairing replaces the daemon's address and token as it
+     * always did. A **mesh-only** pairing ([Pairing.isMeshOnly]) enrols the mesh keys and touches
+     * nothing of the tailnet pairing: it has no daemon to offer, and it must not erase one.
+     * Returns what happened to the mesh keys.
+     */
+    fun pair(p: Pairing): MeshEnrollOutcome {
         val previous = _config.value.host
         // Keys first: a pairing that carried them and could not store them must not look complete.
-        mesh?.onPaired(previous, p)
-        update(_config.value.paired(p))
+        val outcome = mesh?.onPaired(previous, p) ?: MeshEnrollOutcome.NoMeshKeys
+        if (p.isMeshOnly) {
+            // Only the display name, and only if this device has none: the machine's name is the
+            // tailnet pairing's, and a mesh-only code must not rename it.
+            val c = _config.value
+            if (c.pairName.isEmpty() && c.host.isEmpty() && p.name.isNotEmpty()) update(c.copy(pairName = p.name))
+        } else {
+            update(_config.value.paired(p))
+        }
+        return outcome
     }
 
+    /** Forget the machine: the tailnet pairing and, with it, the mesh keys and the gateway token. */
     fun unpair() {
         mesh?.onUnpaired()
-        update(_config.value.unpaired())
+        update(_config.value.unpaired().withoutMesh())
     }
+
+    /**
+     * Forget **only** the mesh pairing: the session keys, the gateway token and the gateway
+     * endpoint. The tailnet pairing is untouched. If the mesh route was the saved route it goes
+     * back to the tailnet, so the saved route is never one whose credentials were just deleted.
+     */
+    fun unpairMesh() {
+        mesh?.onUnpaired()
+        update(_config.value.withoutMesh())
+    }
+
+    private fun LdmuxConfig.withoutMesh(): LdmuxConfig =
+        copy(meshGateway = "", route = MeshRoute.Tailnet)
 }
 
 /** How long the "why did that fail" request may take before the answer is "unreachable". */

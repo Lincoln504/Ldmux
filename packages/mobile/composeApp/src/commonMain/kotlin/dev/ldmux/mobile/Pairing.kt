@@ -22,7 +22,14 @@ data class Pairing(
      * every link a pre-mesh CLI makes, and then the pairing is exactly what it always was.
      */
     val mesh: MeshKeyMaterial? = null,
-)
+) {
+    /**
+     * A link made with `ldmux code --mesh-only`: the mesh keys and a name, **no daemon address
+     * and no daemon bearer token**. It cannot pair the tailnet (there is nothing to connect to),
+     * and a phone given one holds no credential that grants shell control over the tailnet.
+     */
+    val isMeshOnly: Boolean get() = host.isEmpty() && token.isEmpty() && mesh != null
+}
 
 /**
  * What a pairing link hands the phone for the mesh route: the daemon's session public key and
@@ -56,8 +63,18 @@ private val HEX32 = Regex("^[0-9a-f]{64}$")
 private val TOKEN = Regex("^[0-9a-f]{64}$")
 private const val NAME_MAX = 64
 
-/** The pairing in [link], or null if it is not a valid ldmux pairing link. */
-fun parsePairingLink(link: String): Pairing? {
+/**
+ * The **tailnet** pairing in [link], or null if it is not a valid ldmux pairing link. A mesh-only
+ * link is not one (it has no daemon to pair), so this returns null for it, exactly as Rust's
+ * `parse_pairing_link` does: every caller of this function can keep assuming `host` is an address.
+ */
+fun parsePairingLink(link: String): Pairing? = parseScannedPairing(link)?.takeIf { !it.isMeshOnly }
+
+/**
+ * Any pairing link a person may scan: a tailnet pairing (with or without mesh keys) or a
+ * mesh-only link. The mirror of Rust's `parse_pairing_link_full`.
+ */
+fun parseScannedPairing(link: String): Pairing? {
     val s = link.trim()
     val prefix = "ldmux://pair"
     if (!s.startsWith(prefix, ignoreCase = true)) return null
@@ -87,6 +104,11 @@ fun parsePairingLink(link: String): Pairing? {
         MeshKeyMaterial(unhex(mk), unhex(psk), mr?.let(::unhex))
     }
     val p = Pairing(host = params["host"] ?: "", token = params["token"] ?: "", name = params["name"] ?: "", mesh = mesh)
+    // Neither host nor token is a mesh-only link, and only valid if the mesh keys were present
+    // (parsed above). One of the two alone, or neither with no keys, is refused.
+    if ("host" !in params && "token" !in params) {
+        return if (mesh != null && nameOk(p.name)) p else null
+    }
     return if (pairingProblem(p) == null) p else null
 }
 
@@ -160,6 +182,8 @@ fun sanitizeDisplayName(name: String, max: Int = NAME_MAX): String {
 /** `3fa9…c01d`: enough to compare by eye, far too little to be the secret. */
 fun tokenFingerprint(token: String): String =
     if (token.length < 8) "" else token.take(4).lowercase() + "\u2026" + token.takeLast(4).lowercase()
+
+private fun nameOk(name: String) = name.length <= NAME_MAX && name.none { it.code < 0x20 || it.code == 0x7f }
 
 private fun pairingProblem(p: Pairing): String? {
     val hp = splitHost(p.host) ?: return "host"

@@ -79,6 +79,5 @@ class MeshTermHostTest {
         // the tailnet path does not read them.
         val tailnet = LdmuxConfig(host = "100.100.0.1:7625", token = "0".repeat(64))
         assertNull(meshScreenFor(tailnet))
-        assertNull(meshScreenFor(LdmuxConfig.DEFAULT.copy(route = MeshRoute.Mesh)), "unpaired: nothing to attach to")
     }
 }

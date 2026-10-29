@@ -7,6 +7,7 @@ import dev.ldmux.mobile.mesh.MeshTerminalScreen
 import dev.ldmux.mobile.mesh.meshScreenFor
 import dev.ldmux.mobile.mesh.libraryKeypair
 import dev.ldmux.mobile.mesh.meshSessionKeyStore
+import dev.ldmux.mobile.mesh.meshTokenStore
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -36,7 +37,7 @@ fun App() {
     // both. A setting that reached only some of the controls would be worse than no
     // setting: the whole reason this one exists is that the app disagreed with
     // itself about the same control in two places.
-    val store = remember { ConfigStore(AppPrefs.load(), MeshEnrollment(meshSessionKeyStore(), ::libraryKeypair), AppPrefs::save) }
+    val store = remember { ConfigStore(AppPrefs.load(), MeshEnrollment(meshSessionKeyStore(), meshTokenStore(), ::libraryKeypair), AppPrefs::save) }
     val config by store.config.collectAsState()
     MaterialTheme(colorScheme = LdmuxColors) {
         CompositionLocalProvider(
@@ -48,7 +49,12 @@ fun App() {
             // shows why and opens nothing. The tailnet path below is exactly what it was.
             val mesh = meshScreenFor(config)
             if (mesh != null) {
-                MeshTerminalScreen(mesh.first, mesh.second, onLeave = { store.update(config.copy(route = MeshRoute.Tailnet)) })
+                MeshTerminalScreen(
+                    mesh,
+                    // Leaving goes back to the tailnet only if there is a daemon to go back to. A mesh-only
+                    // device has none, so it stays on the setup (the launcher, which says why).
+                    onLeave = { store.update(config.copy(route = MeshRoute.Tailnet)) },
+                )
             } else {
                 AppContent(config, store)
             }

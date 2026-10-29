@@ -45,9 +45,9 @@ import kotlinx.coroutines.launch
  * on `send`, capped at [MeshTerm.MAX_INPUT] bytes. Nothing here knows a radio parameter.
  */
 @Composable
-fun MeshTerminalScreen(creds: MeshCredentials, lib: SessionLib, onLeave: () -> Unit) {
+fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val conn = remember(creds) { MeshTermConnection(meshSocketFactory(), scope, creds, lib) }
+    val conn = remember(plan) { MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint) }
     LaunchedEffect(conn) { conn.run() }
     DisposableEffect(conn) { onDispose { conn.close() } }
     val view by conn.driver.view.collectAsState()

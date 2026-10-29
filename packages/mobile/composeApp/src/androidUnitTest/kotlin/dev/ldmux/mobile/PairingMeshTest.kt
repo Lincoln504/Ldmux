@@ -66,6 +66,41 @@ class PairingMeshTest {
     }
 
     @Test
+    fun `mesh-only links parse to keys and a name, carry no daemon credential, and are not tailnet pairings`() {
+        val only = fixture["meshOnly"]!!.jsonArray
+        assertTrue(only.size >= 2)
+        for (c in only) {
+            val o = c.jsonObject
+            val link = o["link"]!!.jsonPrimitive.content
+            val p = parseScannedPairing(link)
+            assertNotNull(p, link)
+            assertTrue(p.isMeshOnly)
+            assertEquals("", p.host); assertEquals("", p.token)
+            assertEquals(o["name"]!!.jsonPrimitive.content, p.name)
+            val mo = o["mesh"]!!.jsonObject
+            assertEquals(
+                MeshKeyMaterial(
+                    unhex(mo["hostKey"]!!.jsonPrimitive.content), unhex(mo["psk"]!!.jsonPrimitive.content),
+                    mo["hostRadio"]?.jsonPrimitive?.content?.let(::unhex),
+                ),
+                p.mesh,
+            )
+            // The tailnet reader must not take it for a tailnet pairing.
+            assertNull(parsePairingLink(link))
+        }
+    }
+
+    @Test
+    fun `half a tailnet pairing, or a broken mesh-only link, is refused whole`() {
+        val bad = fixture["meshOnlyInvalid"]!!.jsonArray
+        assertTrue(bad.size >= 6)
+        for (c in bad) {
+            val o = c.jsonObject
+            assertNull(parseScannedPairing(o["link"]!!.jsonPrimitive.content), o["why"]!!.jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `a v1 link is the pairing it always was`() {
         val tok = "0123456789abcdef".repeat(4)
         val p = parsePairingLink("ldmux://pair?v=1&host=100.100.0.1:7625&token=$tok&name=debian")

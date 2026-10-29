@@ -60,7 +60,10 @@ class MeshRouteWiringTest {
         val unpaired = mesh.unpaired()
         assertEquals(MeshRoute.Mesh, unpaired.route, "unpairing forgets the host, not the preference")
         assertEquals("", unpaired.token)
-        assertEquals(LinkState.Unpaired, initialLink(unpaired))
+        // The mesh route has its own credentials, so "no daemon" is not "unpaired" for it: it is
+        // blocked on the mesh route's missing pieces, which the launcher then names.
+        // (Before 2026-10-29 this read Unpaired, which made a mesh-only device unreachable.)
+        assertEquals(LinkState.RouteUnavailable, initialLink(unpaired))
         val store = ConfigStore(tailnet) { }
         store.update(store.config.value.copy(route = MeshRoute.Mesh))
         assertEquals(MeshRoute.Mesh, store.config.value.route)

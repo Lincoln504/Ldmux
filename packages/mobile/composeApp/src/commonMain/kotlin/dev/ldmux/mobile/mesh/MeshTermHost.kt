@@ -36,10 +36,12 @@ class MeshTermConnection(
     scope: CoroutineScope,
     private val creds: MeshCredentials,
     private val lib: SessionLib,
+    /** MeshMore's gateway on this phone (the saved one, or the default). */
+    endpoint: MeshGatewayEndpoint = MeshGatewayEndpoint.DEFAULT,
     private val wallMs: () -> Long = { Clock.System.now().toEpochMilliseconds() },
     selector: String = "",
 ) {
-    private val gateway = MeshGatewayClient(sockets, scope, creds.token, creds.hostRadio)
+    private val gateway = MeshGatewayClient(sockets, scope, creds.token, creds.hostRadio, host = endpoint.host, port = endpoint.port)
     private val origin = TimeSource.Monotonic.markNow()
     private val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
 
@@ -126,20 +128,38 @@ fun currentMeshResolution(route: MeshRoute): MeshRouteResolution {
     )
 }
 
+/** Everything the mesh screen needs: the credentials, the library, and where the gateway is. */
+class MeshScreenPlan(val creds: MeshCredentials, val lib: SessionLib, val endpoint: MeshGatewayEndpoint)
+
 /**
- * The credentials and library to show the mesh terminal with, or null when the saved route is
- * not mesh or cannot run (in which case the caller shows the normal app and its stated reason).
+ * What to show the mesh terminal with, or null when the saved route is not mesh or cannot run (in
+ * which case the caller shows the normal app and its stated reason). **Not gated on the tailnet
+ * pairing**: a mesh-only device has no daemon host or token and is still a complete mesh pairing.
  * Tailnet configs return null without touching secure storage.
  */
-fun meshScreenFor(config: dev.ldmux.mobile.LdmuxConfig): Pair<MeshCredentials, SessionLib>? {
-    if (config.route != MeshRoute.Mesh || !config.isPaired) return null
-    val (state, creds) = readMeshCredentials(meshSessionKeyStore(), meshTokenStore())
-    val lib = loadSessionLib() ?: return null
+fun meshScreenFor(config: dev.ldmux.mobile.LdmuxConfig): MeshScreenPlan? {
+    if (config.route != MeshRoute.Mesh) return null
+    return meshScreenPlan(config, meshSessionKeyStore(), meshTokenStore(), loadSessionLib())
+}
+
+/** [meshScreenFor] with its inputs passed in, so the rule is testable without a Keystore. */
+fun meshScreenPlan(
+    config: dev.ldmux.mobile.LdmuxConfig,
+    keys: MeshSessionKeyStore,
+    tokens: MeshTokenStore,
+    lib: SessionLib?,
+    platform: MobilePlatform = currentPlatform,
+    terminalBuilt: Boolean = MESH_TERMINAL_BUILT,
+): MeshScreenPlan? {
+    if (config.route != MeshRoute.Mesh) return null
+    val (state, creds) = readMeshCredentials(keys, tokens)
+    if (lib == null) return null
     val resolution = resolveRoute(
-        config.route, currentPlatform,
+        config.route, platform,
         hasToken = state.hasToken, hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
+        sessionBuilt = MESH_SESSION_BUILT, terminalBuilt = terminalBuilt,
     )
-    return if (resolution is MeshRouteResolution.Use && creds != null) creds to lib else null
+    return if (resolution is MeshRouteResolution.Use && creds != null) MeshScreenPlan(creds, lib, config.meshGatewayEndpoint) else null
 }
 
 /** One picker line: the label when the host gave one, then the id the choice will send. */
