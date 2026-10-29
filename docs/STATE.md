@@ -106,9 +106,12 @@ repo needs to know a frequency, a spreading factor or a preset.
 
 ## Voice mode
 
-Partly built 2026-10-28; `docs/VOICE-MODE.md` section 15 is the table. The daemon relay and CLI, the
-phone's two parsers, `VoiceMode`, an Android speaker and the pi extension exist and are tested.
-The in-app toggle, a separate VAD, iOS and any on-device run do not.
+Built and unit-tested 2026-10-29; `docs/VOICE-MODE.md` section 15 is the table. Daemon relay and CLI
+(4 integration tests), the phone's two parsers behind `SpeechIntake`, `VoiceMode`/`VoiceDriver`/
+`VoiceController`, a VAD with barge-in capture, the Android speaker, microphone loop and capture,
+a landscape side-panel toggle, and the pi extension (11 node tests plus a live harness against a
+real pi 1.4.0). Mobile suite 589 pass. **Not done:** iOS, any run on a device, a UI control for
+cloud recognition and barge-in (both off), and a portrait entry point.
 
 ## What is deployed
 
@@ -170,9 +173,11 @@ Product and mobile:
   Compose renderer hardening: cursor blink, zoom). Detail in `docs/archive/STATE.md` §5.
   The session-switching failures (scroll/tap/selection doing nothing after a switch)
   are fixed; see `docs/MOBILE-STATE-AUDIT.md`.
-- **Live voice mode** (hands-free conversation with a coding agent): planned only,
-  in `docs/VOICE-MODE.md`. Nothing implemented; it needs an ADR and an amendment
-  to ADR-0009 before any code.
+- **Live voice mode** (hands-free conversation with a coding agent): built and unit-tested,
+  not run on a device (see the "Voice mode" section above and `docs/VOICE-MODE.md` section 15).
+  *CORRECTION 2026-10-29: this bullet used to read "planned only ... Nothing implemented; it
+  needs an ADR and an amendment to ADR-0009 before any code." The ADRs are 0024 (voice
+  extension, amending ADR-0009) and the code exists.*
 - **Multi-client pane geometry** (confirmed on a device 2026-10-06): the phone set a
   session's shared pane to 48x17 while the desk window's own tty was 158x82, so the
   desk window rendered thin. One pane has one size, so two clients of different sizes

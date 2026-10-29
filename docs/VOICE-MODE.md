@@ -1,13 +1,16 @@
 # Live voice mode: hands-free conversation with a coding agent
 
-> **Status, 2026-10-28: partly implemented.** Built and tested: the daemon `speech` relay and
-> `ldmux speak`, the phone's OSC 1338 parser and `speech` message parser, `VoiceMode`, the
-> chunker, `VoiceDriver`, an Android `TextToSpeech` speaker, and the pi extension
-> (`packages/pi-voice-extension`, ADR-0024). **Not built:** the UI toggle that creates a
-> `VoiceDriver`, a separate voice-activity detector (Android's `SpeechRecognizer` endpoints on its
-> own), iOS, on-device verification of any of it, and real-pi verification of the extension
-> beyond unit tests with a faked pi API. See section 15. Written 2026-10-06. This is the plan of record for a future feature; it is deliberately
-> not an ADR, because no decision has been taken. Before implementation it needs
+> **Status, 2026-10-29: implemented and unit-tested; not yet run on a device.** Built: the daemon
+> `speech` relay and `ldmux speak`; the phone's OSC 1338 parser and `speech` message parser behind
+> one `SpeechIntake`; `VoiceMode` (with the silence exit, bounded recogniser restarts and a
+> cloud refusal), `VoiceDriver`, `VoiceController`, a voice-activity detector and a barge-in
+> capture, the Android speaker, microphone loop and capture, the side-panel toggle; and the pi
+> extension (`packages/pi-voice-extension`, ADR-0024), now observed inside a real pi 1.4.0. **Not
+> built:** iOS, any run on a device (AudioRecord, SpeechRecognizer, TextToSpeech and the Compose
+> wiring are compiled and tested through their pure logic only), a VAD-gated recogniser start
+> (see section 15), a cloud opt-in control, and a toggle in portrait. See section 15. Written 2026-10-06, as a plan;
+> where it has since been built, section 15 says what is true. It is deliberately
+> not an ADR for the channel choice (section 3.5 is the decision of record). Originally: Before implementation it needed
 > an ADR (a new one, plus an amendment to ADR-0009's "no pi extension" half) and
 > a `docs/SPEC.md` section. Every claim about the current code below names how it
 > was checked.
@@ -137,6 +140,20 @@ pi extension --(JSON line over LDMUX_SOCKET)--> ldmux daemon --(new `speech` WS 
   renderer. So Channel B is a bonus for other programs, not the pi path.
 - Choose an OSC number libghostty does not already claim (52/1337/5522 are
   clipboard; 0/2 title; 7 pwd; 8 hyperlink; 9/777 notification; 9;4 progress).
+
+**The format, with an example.** One line of JSON between `ESC ] 1338 ;` and a terminator (BEL or
+`ESC \`). Any program can print it; from a shell:
+
+```sh
+printf '\033]1338;{"v":1,"kind":"say","text":"The build finished.","id":"b1"}\007'
+```
+
+Fields: `v` (must be 1), `kind` (must be `say`), `text` (required), `id` (optional, at most 64 bytes;
+a message with an id is spoken once even if it arrives on both channels), `final` (optional,
+default true: false means more of this turn follows, so the microphone stays released). The
+payload is capped at 4096 bytes and a larger one is dropped whole. It is spoken, never typed and
+never run. `voice/SpeechOsc.kt`, `voice/SpeechIntake.kt`; tests `SpeechOscTest`,
+`VoiceControllerTest`.
 
 **Corrected 2026-10-28: the mechanism.** This document previously said the
 emulator's `GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` callback would surface a
@@ -425,9 +442,53 @@ in-band channel is an OSC, and the phone parses it, or it does not exist.
 | Daemon `speech` RPC, `speechChannel` feature, `ldmux speak` | `crates/daemon/src/{daemon,remote}.rs`, `bin/ldmux.rs` | Built. `tests/speech_relay.rs` (4) and the extended `cli_full_lifecycle`. |
 | OSC 1338 parser | `voice/SpeechOsc.kt` | Built. 12 tests: every split point, oversize, malformed, unknown version, other OSCs. 1338 is not claimed by the engine (ghostty `d5eba8d`, `osc.zig`, the `.@"133"` arm marks the next digit invalid). |
 | `speech` message on the page socket | `AttachClient.kt`, `WireJson.kt` | Built. The page advertises `speechChannel` always, because features are fixed at `hello`. |
-| `VoiceMode`, `chunkForSpeech`, `VoiceDriver` | `voice/` | Built, pure. 28 tests. |
+| `SpeechIntake` (OSC parse + daemon message, id dedupe, listener gating) | `voice/SpeechIntake.kt` | Built, pure. Extracted 2026-10-29 from `TerminalController`, which cannot be built in a JVM test, so none of it had been tested. Tests in `VoiceControllerTest`. |
+| `VoiceMode`, `chunkForSpeech`, `VoiceDriver` | `voice/` | Built, pure. `VoiceModeTest` 18, `VoiceDriverTest` 4, `SpeechChunkerTest` 6, `VoiceLoopTest` 20. |
+| Voice-activity detector | `voice/Vad.kt` | Built, pure, over plain PCM. `VadTest` 11: silence, quiet noise, voice, hiss rejected by crossing rate, click, hangover, steady hum absorbed, barge-in strictness. |
+| Barge-in capture | `voice/Vad.kt` (`CapturePort`), `androidMain/.../Capture.android.kt` | Built, compiles, **not run on a device**. Opened only while an answer is spoken and barge-in is on. Echo of the phone's own speaker is unmeasured. |
+| `VoiceController`, side-panel toggle, banner | `voice/VoiceController.kt`, `SidePanel.kt`, `AppContent.kt` | Built. Bound to the shell on screen; ownership-gated; shut down when the app goes to the background. `VoiceControllerTest` 16. Landscape side panel only, like the mic. |
 | `SpeechOutput` (TTS + audio focus) | `androidMain/.../SpeechOutput.android.kt` | Built, compiles, **not run on a device**. |
-| pi extension | `packages/pi-voice-extension` | Built. 11 `node --test` tests against a faked pi API and a fake daemon socket. Loads in pi 1.1 without error output; the `/voice` round trip inside a real session was not observed. |
+| pi extension | `packages/pi-voice-extension` | Built. 11 `node --test` tests against a faked pi API, plus `test/live/live.sh` against a real pi 1.4.0 (below). |
+
+**Live evidence for the extension, 2026-10-29.** `packages/pi-voice-extension/test/live/live.sh` drives
+pi 1.4.0 in `--mode rpc` with an isolated `PI_CODING_AGENT_DIR` (`~/.pi` untouched), a stub
+OpenAI-compatible model that answers with a `say` fence only when the system prompt contains the
+voice section, and a stub daemon socket that records the `speech` line. Observed:
+
+- A deliberately throwing second extension is reported at load (`Failed to load extension ...
+  CONTROL: deliberate load failure`), so a clean start means something.
+- `/voice on` appends `{"customType":"ldmux-voice","data":{"enabled":true}}` and notifies; request 1
+  carries `VOICE MODE IS ON`, request 2 (after `/voice off`) does not.
+- Exactly one `speech` RPC reaches the socket, `{"method":"speech","params":{"sessionId":"s1","text":"All done. The stub answered in voice mode.","final":true,"id":"s1-..."}}`.
+- The setting survives `--continue`; outside ldmux nothing registers and nothing is sent; with the
+  socket absent the agent still completes and one warning is shown across two turns.
+- In the interactive TUI (tmux) the transcript shows `Here is the detailed answer.` and the
+  `say` fence is hidden.
+
+What this does not prove: a real model's compliance with the prompt (the stub always complies),
+or the phone side. **Correction (2026-10-29) to the previous version of this table**, which read
+"Loads in pi 1.1 without error output; the `/voice` round trip inside a real session was not
+observed": it was observed, on pi 1.4.0, as above. The earlier doubt came from print mode, which
+shows nothing for a handled slash command; RPC mode reports both load errors and extension
+notifications.
+
+**Deviation from section 7 and the work order: no VAD-gated recogniser start.** Android's
+`SpeechRecognizer` endpoints on its own, and it holds the microphone in another process, so
+running an `AudioRecord` beside it to decide when to start it would either contend for the input
+or clip the first words. Listening therefore stays with the recogniser (a timeout or no-match is
+reported as `NoSpeech`, which the machine treats as silence and reopens, bounded by
+`maxIdleRestarts`; `longSilenceMs` ends the mode). The VAD is used where it is safe and needed:
+while the answer is spoken, with the recogniser closed, to detect barge-in. Whether `AudioRecord`
+and `SpeechRecognizer` can share the input on a given Android version was not verified.
+
+**Cloud recognition is refused, not announced.** `VoicePolicy.allowCloud` is false, and nothing in
+the UI sets it. Voice mode listens continuously, so a recogniser that sends audio off the phone is
+a standing leak, not a one-shot the user can watch. A phone with no on-device recogniser gets
+`Unavailable` and a notice. The one-shot mic button keeps its banner.
+
+**A latent bug found and fixed.** `VoiceMode` stamped its timers with 0, so the first `Tick` (a
+clock value) read as hours of silence or an expired thinking timeout. They are now unset until
+the first tick. Tests `the first tick is an anchor` and mutation check below.
 
 **Corrections to this document made while building.** Section 3.2 named
 `GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` as the mechanism (wrong, see section 3.2's correction).
@@ -435,7 +496,16 @@ Section 5 said `pi.registerMarkdownTransformer` strips the fence: it exists in p
 (`types.d.ts:1252`) and is used, but it only changes what the interactive transcript renders, not
 what the model sees.
 
-**Remaining.** The in-app toggle and indicator (a `VoiceDriver` per app, `bind` on page change
-with the holder flag), the microphone permission flow around `Dictation`, a measured
-thinking-timeout, and the multi-shell announcement behaviour (dropped and counted today, off by
-design).
+**Remaining.** iOS (`SFSpeechRecognizer`, `AVSpeechSynthesizer`, an `AVAudioEngine` capture; the
+seams are `expect`/`actual` so these are leaves); a run of any of it on a device, especially barge-in
+echo, `AudioRecord` beside `SpeechRecognizer`, and TTS audio focus; a measured thinking timeout;
+a UI control for `allowCloud`, `bargeIn` (off by default) and the stop phrases; a portrait entry
+point; the multi-shell announcement behaviour (dropped and counted, off by design); and a live
+`/voice` round trip with a real model. Out of scope, unchanged: a wake word, silent cloud
+recognition.
+
+**Counts (2026-10-29).** `./gradlew --offline :composeApp:testDebugUnitTest --rerun-tasks`: 589 pass, 0
+fail (542 before). Voice classes: `VadTest` 11, `VoiceLoopTest` 20, `VoiceControllerTest` 16, with the
+earlier four. `cargo test -p ldmux-daemon --test speech_relay`: 4. `node --test` in the extension: 11,
+and `test/live/live.sh` (needs `pi`). Mutation checks: stamping the timers with 0 fails 2 tests;
+never stopping the barge-in capture fails 2.

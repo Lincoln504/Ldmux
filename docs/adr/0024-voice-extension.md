@@ -2,6 +2,13 @@
 
 **Status:** Accepted (2026-10-28). Amends the "no pi extension" half of ADR-0009.
 
+**Update 2026-10-29.** The extension has now been observed inside a real pi 1.4.0 (RPC mode, an isolated
+agent directory, a stub model and a stub daemon socket): load, `/voice on` persisted and restored,
+the prompt section present only while on, exactly one `speech` RPC, inert outside ldmux, and a
+dead socket warned once. Evidence and harness: `packages/pi-voice-extension/test/live/live.sh`,
+`docs/VOICE-MODE.md` section 15. The consequence "the fenced block stays in the model's context"
+below was confirmed: the stored assistant message still contains it. Original text unchanged.
+
 - **Related:** ADR-0009 (removed the pi extension), ADR-0010 (ownership), ADR-0013 (platform
   seams), `docs/VOICE-MODE.md` (section 3.5 is the decision of record for the channels)
 - **Scope:** `packages/pi-voice-extension`, the daemon `speech` RPC, the phone's voice mode.
