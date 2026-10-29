@@ -4,10 +4,12 @@
     "maxBody": 300,
     "maxBuffer": 4096,
     "maxInput": 96,
+    "maxLabel": 24,
     "maxMessage": 133,
     "maxRowsBody": 130,
     "maxSegment": 120,
     "maxSelector": 40,
+    "maxSessions": 16,
     "recordPayload": 144,
     "unsupportedAllV1": 127,
     "version": 1
@@ -115,6 +117,37 @@
       "message": {
         "kind": "closed",
         "reason": 3
+      }
+    },
+    {
+      "hex": "0500",
+      "message": {
+        "kind": "list"
+      }
+    },
+    {
+      "hex": "850101",
+      "message": {
+        "entries": [],
+        "kind": "sessions",
+        "last": true
+      }
+    },
+    {
+      "hex": "851f000861623132636433340452434e5404656635360a68c3a96c6c6f20e6bca2",
+      "message": {
+        "entries": [
+          {
+            "id": "ab12cd34",
+            "label": "RCNT"
+          },
+          {
+            "id": "ef56",
+            "label": "héllo 漢"
+          }
+        ],
+        "kind": "sessions",
+        "last": false
       }
     }
   ],
@@ -484,6 +517,104 @@
       "stream": "81050128027f00820f0600010000036f6e6501000374776f83050600020000"
     }
   ],
+  "sessionPages": {
+    "input": [
+      {
+        "id": "00ffffffffffffffffffffffffffffff",
+        "label": "shell number 0 long label"
+      },
+      {
+        "id": "01ffffffffffffffffffffffffffffff",
+        "label": "shell number 1 long label"
+      },
+      {
+        "id": "02ffffffffffffffffffffffffffffff",
+        "label": "shell number 2 long label"
+      },
+      {
+        "id": "03ffffffffffffffffffffffffffffff",
+        "label": "shell number 3 long label"
+      },
+      {
+        "id": "04ffffffffffffffffffffffffffffff",
+        "label": "shell number 4 long label"
+      },
+      {
+        "id": "05ffffffffffffffffffffffffffffff",
+        "label": "shell number 5 long label"
+      },
+      {
+        "id": "06ffffffffffffffffffffffffffffff",
+        "label": "shell number 6 long label"
+      }
+    ],
+    "pages": [
+      {
+        "hex": "857500203030666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722030206c6f6e67206c616265203031666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722031206c6f6e67206c616265",
+        "message": {
+          "entries": [
+            {
+              "id": "00ffffffffffffffffffffffffffffff",
+              "label": "shell number 0 long labe"
+            },
+            {
+              "id": "01ffffffffffffffffffffffffffffff",
+              "label": "shell number 1 long labe"
+            }
+          ],
+          "kind": "sessions",
+          "last": false
+        }
+      },
+      {
+        "hex": "857500203032666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722032206c6f6e67206c616265203033666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722033206c6f6e67206c616265",
+        "message": {
+          "entries": [
+            {
+              "id": "02ffffffffffffffffffffffffffffff",
+              "label": "shell number 2 long labe"
+            },
+            {
+              "id": "03ffffffffffffffffffffffffffffff",
+              "label": "shell number 3 long labe"
+            }
+          ],
+          "kind": "sessions",
+          "last": false
+        }
+      },
+      {
+        "hex": "857500203034666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722034206c6f6e67206c616265203035666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722035206c6f6e67206c616265",
+        "message": {
+          "entries": [
+            {
+              "id": "04ffffffffffffffffffffffffffffff",
+              "label": "shell number 4 long labe"
+            },
+            {
+              "id": "05ffffffffffffffffffffffffffffff",
+              "label": "shell number 5 long labe"
+            }
+          ],
+          "kind": "sessions",
+          "last": false
+        }
+      },
+      {
+        "hex": "853b01203036666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722036206c6f6e67206c616265",
+        "message": {
+          "entries": [
+            {
+              "id": "06ffffffffffffffffffffffffffffff",
+              "label": "shell number 6 long labe"
+            }
+          ],
+          "kind": "sessions",
+          "last": true
+        }
+      }
+    ]
+  },
   "streams": {
     "malformedBodyCostsOneMessage": {
       "hex": "8301000400",

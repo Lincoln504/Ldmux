@@ -22,7 +22,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ldmux_protocol::keeper::SnapshotResult;
-use ldmux_protocol::mesh_term::{DecodeError, Decoder, Differ, Message, Screen, VERSION, closed};
+use ldmux_protocol::mesh_term::{
+    DecodeError, Decoder, Differ, Message, Screen, VERSION, closed, session_pages,
+};
 
 /// The session as the bridge sees it.
 pub trait Link {
@@ -41,6 +43,14 @@ pub trait Link {
 pub trait Host {
     /// Ids of the running shells.
     async fn running(&mut self) -> Vec<String>;
+    /// `(id, label)` of the running shells, for the phone's picker. The default has no labels.
+    async fn listing(&mut self) -> Vec<(String, String)> {
+        self.running()
+            .await
+            .into_iter()
+            .map(|id| (id, String::new()))
+            .collect()
+    }
     async fn screen(&mut self, id: &str) -> Result<Screen, String>;
     async fn input(&mut self, id: &str, bytes: &[u8]) -> Result<(), String>;
 }
@@ -251,6 +261,10 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     }
                 }
             }
+            Message::List => {
+                let listing = self.host.listing().await;
+                self.reply(shell, &session_pages(&listing));
+            }
             Message::Input(bytes) => {
                 let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
                     return;
@@ -292,6 +306,31 @@ impl Host for DaemonHost {
                 a.iter()
                     .filter(|s| s.get("status").and_then(|x| x.as_str()) == Some("running"))
                     .filter_map(|s| s.get("id").and_then(|x| x.as_str()).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn listing(&mut self) -> Vec<(String, String)> {
+        let Ok(v) = self
+            .0
+            .lock()
+            .await
+            .handle("list", serde_json::json!({}))
+            .await
+        else {
+            return Vec::new();
+        };
+        v.get("sessions")
+            .and_then(|s| s.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|s| s.get("status").and_then(|x| x.as_str()) == Some("running"))
+                    .filter_map(|s| {
+                        let id = s.get("id").and_then(|x| x.as_str())?;
+                        let label = s.get("title").and_then(|x| x.as_str()).unwrap_or("");
+                        Some((id.to_owned(), label.to_owned()))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -392,6 +431,13 @@ mod tests {
     impl Host for FakeHost {
         async fn running(&mut self) -> Vec<String> {
             self.0.lock().unwrap().running.clone()
+        }
+        async fn listing(&mut self) -> Vec<(String, String)> {
+            let s = self.0.lock().unwrap();
+            s.running
+                .iter()
+                .map(|id| (id.clone(), format!("label of {id}")))
+                .collect()
         }
         async fn screen(&mut self, id: &str) -> Result<Screen, String> {
             let s = self.0.lock().unwrap();
@@ -658,6 +704,78 @@ mod tests {
         assert_eq!(reason(2), closed::AMBIGUOUS);
         assert_eq!(reason(3), closed::VERSION);
         assert!(!b.attached(0) && !b.attached(1) && !b.attached(2) && !b.attached(3));
+    }
+
+    /// Every `Sessions` page the host sent on `shell`.
+    fn sessions_seen(link: &FakeLink, shell: u8) -> Vec<Message> {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        for (s, bytes) in link.0.lock().unwrap().sent.iter() {
+            if *s == shell {
+                for item in d.push(bytes).unwrap() {
+                    if let m @ Message::Sessions { .. } = item.unwrap() {
+                        out.push(m);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn list_answers_with_every_running_shell_and_never_guesses() {
+        for (n, expect_pages_min) in [(0usize, 1usize), (1, 1), (6, 2)] {
+            let (mut b, host, link) = setup();
+            host.0.lock().unwrap().running = (0..n)
+                .map(|i| format!("{i:02}{}", "e".repeat(30)))
+                .collect();
+            phone_says(&link, 4, &Message::List);
+            b.tick().await;
+            let pages = sessions_seen(&link, 4);
+            assert!(
+                pages.len() >= expect_pages_min,
+                "n={n}: {} pages",
+                pages.len()
+            );
+            let mut ids = Vec::new();
+            for (i, m) in pages.iter().enumerate() {
+                let Message::Sessions { last, entries } = m else {
+                    unreachable!()
+                };
+                assert_eq!(*last, i + 1 == pages.len());
+                ids.extend(entries.iter().map(|e| e.id.clone()));
+            }
+            assert_eq!(ids.len(), n, "n={n}");
+            // Listing attaches nothing: the phone must choose.
+            assert!(!b.attached(4), "n={n}: a list is not an attach");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_chosen_id_attaches_what_was_listed() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().running = vec!["abcd-1".into(), "abcd-2".into()];
+        host.0
+            .lock()
+            .unwrap()
+            .screens
+            .insert("abcd-2".into(), screen(&["two"]));
+        phone_says(&link, 4, &Message::List);
+        b.tick().await;
+        let Message::Sessions { entries, .. } = &sessions_seen(&link, 4)[0] else {
+            panic!()
+        };
+        assert_eq!(entries[1].id, "abcd-2");
+        phone_says(
+            &link,
+            4,
+            &Message::Attach {
+                version: 1,
+                selector: entries[1].id.clone(),
+            },
+        );
+        b.tick().await;
+        assert!(b.attached(4));
     }
 
     #[tokio::test]

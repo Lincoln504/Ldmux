@@ -27,10 +27,12 @@
 //! | 0x02 | phone→host | `Input` | 1..=[`MAX_INPUT`] raw bytes for the shell |
 //! | 0x03 | phone→host | `Resync` | empty: "send me the whole screen again" |
 //! | 0x04 | phone→host | `Detach` | empty |
+//! | 0x05 | phone→host | `List` | empty: "which shells are running?" (ADR-0025, 2026-10-29 addition) |
 //! | 0x81 | host→phone | `Profile` | `version u8`, `cols u8`, `rows u8`, `unsupported u16 LE` |
 //! | 0x82 | host→phone | `Rows` | `epoch u16 LE`, `flags u8` (bit 0 = full), then patches |
 //! | 0x83 | host→phone | `Commit` | `epoch u16 LE`, `cursor_x u8`, `cursor_y u8`, `flags u8` |
 //! | 0x84 | host→phone | `Closed` | `reason u8` |
+//! | 0x85 | host→phone | `Sessions` | `flags u8` (bit 0 = last page), then entries `id_len u8 \| id \| label_len u8 \| label` |
 //!
 //! A patch is `y u8 | flags u8 (bit 0 = append) | n u8 | n bytes of UTF-8`. A row longer than
 //! [`MAX_SEGMENT`] bytes is sent as a first segment (replace) and further segments (append).
@@ -57,6 +59,11 @@ pub const MAX_MESSAGE: usize = 1 + 2 + MAX_ROWS_BODY;
 pub const RECORD_PAYLOAD: usize = 144;
 /// Most bytes in one `Input` message.
 pub const MAX_INPUT: usize = 96;
+/// Most bytes of a shell label in a `Sessions` entry (cut at a character boundary by the host).
+pub const MAX_LABEL: usize = 24;
+/// Most shells a host lists. A host with more lists the first this many and says nothing else:
+/// a picker of more than this is not usable at one record a minute anyway.
+pub const MAX_SESSIONS: usize = 16;
 /// Most bytes of text in one row segment.
 pub const MAX_SEGMENT: usize = 120;
 /// Longest `Attach` selector.
@@ -111,6 +118,13 @@ pub struct Patch {
     pub text: String,
 }
 
+/// One running shell in a `Sessions` reply: its id (usable as an `Attach` selector) and a label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Attach {
@@ -140,8 +154,18 @@ pub enum Message {
     Closed {
         reason: u8,
     },
+    /// Phone asks which shells are running.
+    List,
+    /// One page of the answer. `last` is set on the final page; an empty list is one page with
+    /// `last` set and no entries.
+    Sessions {
+        last: bool,
+        entries: Vec<SessionEntry>,
+    },
 }
 
+const T_LIST: u8 = 0x05;
+const T_SESSIONS: u8 = 0x85;
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
 const T_RESYNC: u8 = 0x03;
@@ -251,6 +275,23 @@ impl Message {
                 body.push(*reason);
                 T_CLOSED
             }
+            Self::List => T_LIST,
+            Self::Sessions { last, entries } => {
+                body.push(u8::from(*last));
+                for e in entries {
+                    if e.id.len() > MAX_SELECTOR || e.label.len() > MAX_LABEL {
+                        return Err(EncodeError::TooLong);
+                    }
+                    body.push(e.id.len() as u8);
+                    body.extend_from_slice(e.id.as_bytes());
+                    body.push(e.label.len() as u8);
+                    body.extend_from_slice(e.label.as_bytes());
+                }
+                if body.len() > MAX_ROWS_BODY {
+                    return Err(EncodeError::TooLong);
+                }
+                T_SESSIONS
+            }
         };
         let mut out = Vec::with_capacity(body.len() + 3);
         out.push(tag);
@@ -325,7 +366,33 @@ impl Message {
                 flags: body[4],
             },
             T_CLOSED if body.len() == 1 => Self::Closed { reason: body[0] },
-            T_RESYNC | T_DETACH | T_PROFILE | T_COMMIT | T_CLOSED => {
+            T_LIST if body.is_empty() => Self::List,
+            T_SESSIONS => {
+                let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
+                let mut entries = Vec::new();
+                while !rest.is_empty() {
+                    let mut field = |max: usize| -> Result<String, DecodeError> {
+                        let (&n, tail) = rest.split_first().ok_or(bad.clone())?;
+                        let n = usize::from(n);
+                        if n > max || tail.len() < n {
+                            return Err(bad.clone());
+                        }
+                        let text = std::str::from_utf8(&tail[..n])
+                            .map_err(|_| bad.clone())?
+                            .to_owned();
+                        rest = &tail[n..];
+                        Ok(text)
+                    };
+                    let id = field(MAX_SELECTOR)?;
+                    let label = field(MAX_LABEL)?;
+                    entries.push(SessionEntry { id, label });
+                }
+                Self::Sessions {
+                    last: flags & 1 == 1,
+                    entries,
+                }
+            }
+            T_RESYNC | T_DETACH | T_PROFILE | T_COMMIT | T_CLOSED | T_LIST => {
                 return Err(bad);
             }
             _ => return Ok(None), // unknown tag: skipped, not fatal
@@ -385,6 +452,46 @@ impl Decoder {
         }
         Ok(out)
     }
+}
+
+/// Cut `text` to at most `max` bytes at a character boundary.
+fn cut(text: &str, max: usize) -> String {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// The `Sessions` pages for a list of `(id, label)`: at most [`MAX_SESSIONS`] entries, ids and
+/// labels cut to their limits, each page packed up to [`MAX_ROWS_BODY`] so it fits one record,
+/// the final page flagged `last`. Always at least one page, so "no shells" is an answer.
+#[must_use]
+pub fn session_pages(sessions: &[(String, String)]) -> Vec<Message> {
+    let mut pages: Vec<Vec<SessionEntry>> = vec![Vec::new()];
+    let mut size = 1; // the flags byte
+    for (id, label) in sessions.iter().take(MAX_SESSIONS) {
+        let e = SessionEntry {
+            id: cut(id, MAX_SELECTOR),
+            label: cut(label, MAX_LABEL),
+        };
+        let cost = 2 + e.id.len() + e.label.len();
+        if size + cost > MAX_ROWS_BODY {
+            pages.push(Vec::new());
+            size = 1;
+        }
+        size += cost;
+        pages.last_mut().expect("never empty").push(e);
+    }
+    let n = pages.len();
+    pages
+        .into_iter()
+        .enumerate()
+        .map(|(i, entries)| Message::Sessions {
+            last: i + 1 == n,
+            entries,
+        })
+        .collect()
 }
 
 // ───────────────────────────── the screen ─────────────────────────────
@@ -769,6 +876,127 @@ mod tests {
         roundtrip(&Message::Closed {
             reason: closed::EXITED,
         });
+    }
+
+    fn sh(n: usize) -> Vec<(String, String)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("{i:02x}{}", "f".repeat(30)),
+                    format!("shell number {i} long label"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_and_sessions_have_exact_bytes() {
+        assert_eq!(Message::List.encode().unwrap(), [0x05, 0x00]);
+        // no shells: one page, `last`, no entries
+        assert_eq!(
+            session_pages(&[]),
+            vec![Message::Sessions {
+                last: true,
+                entries: vec![]
+            }]
+        );
+        assert_eq!(
+            session_pages(&[]).remove(0).encode().unwrap(),
+            [0x85, 0x01, 0x01]
+        );
+        let one = Message::Sessions {
+            last: true,
+            entries: vec![SessionEntry {
+                id: "ab".into(),
+                label: "x".into(),
+            }],
+        };
+        // flags 1, id_len 2 "ab", label_len 1 "x"
+        assert_eq!(
+            one.encode().unwrap(),
+            [0x85, 0x06, 0x01, 0x02, b'a', b'b', 0x01, b'x']
+        );
+        roundtrip(&Message::List);
+        roundtrip(&one);
+    }
+
+    #[test]
+    fn sessions_pages_fit_one_record_and_say_which_is_last() {
+        for n in [0usize, 1, 2, 3, 7, MAX_SESSIONS, MAX_SESSIONS + 5] {
+            let pages = session_pages(&sh(n));
+            let mut total = 0;
+            for (i, m) in pages.iter().enumerate() {
+                let bytes = m.encode().unwrap();
+                assert!(
+                    bytes.len() <= MAX_MESSAGE,
+                    "n={n} page {i} is {} bytes",
+                    bytes.len()
+                );
+                assert!(bytes.len() <= RECORD_PAYLOAD);
+                let Message::Sessions { last, entries } = m else {
+                    panic!()
+                };
+                assert_eq!(*last, i + 1 == pages.len(), "only the final page is last");
+                total += entries.len();
+            }
+            assert_eq!(
+                total,
+                n.min(MAX_SESSIONS),
+                "n={n}: nothing lost, nothing past the cap"
+            );
+        }
+        assert!(
+            session_pages(&sh(7)).len() > 1,
+            "a long list really does span records"
+        );
+    }
+
+    #[test]
+    fn sessions_survive_any_chunking_and_cut_at_char_boundaries() {
+        let list = vec![("é".repeat(30), "漢".repeat(20))]; // 60-byte id, 60-byte label
+        let pages = session_pages(&list);
+        let mut stream = Vec::new();
+        for m in &pages {
+            stream.extend(m.encode().unwrap());
+        }
+        let mut d = Decoder::new();
+        let mut got = Vec::new();
+        for b in &stream {
+            for item in d.push(&[*b]).unwrap() {
+                got.push(item.unwrap());
+            }
+        }
+        assert_eq!(got, pages);
+        let Message::Sessions { entries, .. } = &got[0] else {
+            panic!()
+        };
+        assert!(entries[0].id.len() <= MAX_SELECTOR && entries[0].label.len() <= MAX_LABEL);
+        assert!(
+            entries[0].id.chars().all(|c| c == 'é'),
+            "never half a character"
+        );
+    }
+
+    #[test]
+    fn oversize_or_broken_sessions_are_refused() {
+        let bad = Message::Sessions {
+            last: true,
+            entries: vec![SessionEntry {
+                id: "x".repeat(MAX_SELECTOR + 1),
+                label: String::new(),
+            }],
+        };
+        assert_eq!(bad.encode(), Err(EncodeError::TooLong));
+        // entry claims 5 bytes of id but only 1 follows
+        let mut d = Decoder::new();
+        let out = d.push(&[0x85, 0x03, 0x01, 0x05, b'a']).unwrap();
+        assert_eq!(out, vec![Err(DecodeError::Malformed(0x85))]);
+        // a `List` with a body is malformed
+        let mut d = Decoder::new();
+        assert_eq!(
+            d.push(&[0x05, 0x01, 0x00]).unwrap(),
+            vec![Err(DecodeError::Malformed(0x05))]
+        );
     }
 
     #[test]
@@ -1171,6 +1399,10 @@ mod tests {
             } => json!({
                 "kind":"commit","epoch":epoch,"cursorX":cursor_x,"cursorY":cursor_y,"flags":flags}),
             Message::Closed { reason } => json!({"kind":"closed","reason":reason}),
+            Message::List => json!({"kind":"list"}),
+            Message::Sessions { last, entries } => json!({
+                "kind":"sessions","last":last,
+                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label})).collect::<Vec<_>>()}),
         }
     }
 
@@ -1229,7 +1461,37 @@ mod tests {
             Message::Closed {
                 reason: closed::EXITED,
             },
+            Message::List,
+            Message::Sessions {
+                last: true,
+                entries: vec![],
+            },
+            Message::Sessions {
+                last: false,
+                entries: vec![
+                    SessionEntry {
+                        id: "ab12cd34".into(),
+                        label: "RCNT".into(),
+                    },
+                    SessionEntry {
+                        id: "ef56".into(),
+                        label: "héllo 漢".into(),
+                    },
+                ],
+            },
         ];
+        let many: Vec<(String, String)> = (0..7)
+            .map(|i| {
+                (
+                    format!("{i:02x}{}", "f".repeat(30)),
+                    format!("shell number {i} long label"),
+                )
+            })
+            .collect();
+        let page_cases: Vec<_> = session_pages(&many)
+            .iter()
+            .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
+            .collect();
         let msg_cases: Vec<_> = messages
             .iter()
             .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
@@ -1297,9 +1559,10 @@ mod tests {
         json!({
             "//": "Generated by crates/protocol/src/mesh_term.rs (fixture_value). Do not edit by hand: LDMUX_REGEN_FIXTURES=1 cargo test -p ldmux-protocol mesh_term_fixture. Read by the app's MeshTermCodecTest.",
             "limits": {"maxBody":MAX_BODY,"maxInput":MAX_INPUT,"maxSegment":MAX_SEGMENT,"maxSelector":MAX_SELECTOR,
-                       "maxRowsBody":MAX_ROWS_BODY,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
+                       "maxRowsBody":MAX_ROWS_BODY,"maxLabel":MAX_LABEL,"maxSessions":MAX_SESSIONS,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
                        "version":VERSION,"unsupportedAllV1":unsupported::ALL_V1},
             "messages": msg_cases,
+            "sessionPages": {"input": many.iter().map(|(i,l)| json!({"id":i,"label":l})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,
             "streams": streams,
         })
