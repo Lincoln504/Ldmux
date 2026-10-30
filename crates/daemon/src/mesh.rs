@@ -529,6 +529,19 @@ async fn session(
     let mut seq: u8 = 0;
 
     loop {
+        // **Anything queued for the phone leaves now.** Waiting on the wake notification alone
+        // left a record sitting in the outbound queue for as long as whichever deadline the ARQ
+        // was waiting on: measured on the device as eleven seconds between the bridge queueing a
+        // screen update and the loop handing it to the radio. A non-empty queue is its own wake
+        // reason, and checking it costs one mutex per iteration.
+        let has_outbound = runtime
+            .exchange
+            .lock()
+            .map(|ex| !ex.outbound.is_empty())
+            .unwrap_or(false);
+        if has_outbound {
+            // Fall through to the body without sleeping.
+        } else {
         let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let wait = host
             .as_ref()
@@ -589,6 +602,7 @@ async fn session(
             () = tokio::time::sleep(wait) => {}
             () = runtime.wake.notified() => {}
         }
+        }
 
         let Some(h) = host.as_mut() else { continue };
         let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -623,12 +637,22 @@ async fn session(
                 CREDIT_WINDOW.saturating_sub(awaiting),
             );
         }
+        let sent_now = polled.len();
+        let pending_now = h.snapshot().pending;
         for record in polled {
             client.send_record(seq, &record).await?;
             seq = seq.wrapping_add(1);
             awaiting = awaiting.saturating_add(1);
             budget = budget.map(|b| b.saturating_sub(1));
             set(snapshot, |s| s.records_left = budget);
+        }
+        // **Drain what is sendable before sleeping.** The loop used to send one poll's worth and
+        // then wait for the ARQ's next deadline, so a screen update of six records could take
+        // eleven seconds to leave while the link sat idle in between. If the poll returned records
+        // and the window still has room, go round again now; a poll that returns nothing falls
+        // through to the normal wait, so this cannot spin.
+        if sent_now > 0 && awaiting < CREDIT_WINDOW && pending_now > 0 {
+            continue;
         }
 
         let view = h.snapshot();
