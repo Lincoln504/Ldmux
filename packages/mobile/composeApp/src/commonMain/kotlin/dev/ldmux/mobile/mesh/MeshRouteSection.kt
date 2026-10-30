@@ -66,7 +66,11 @@ internal fun MeshRouteSection(
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
             Text(meshProblemLabel(it.problem), color = Dim, fontSize = 11.sp)
         }
+        // One verb, two targets: "scan ldmux code" and "scan MeshMore code" as whole labels did
+        // not fit one row at any text size, and the second wrapped to a line that was clipped. The
+        // verb is stated once; the buttons name only what is being scanned.
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("scan", color = Dim, fontSize = 12.sp)
             MiniTextButton(onClick = {
                 note = null
                 CodeScanner.scan { r ->
@@ -79,7 +83,7 @@ internal fun MeshRouteSection(
                         ScanResult.Unavailable -> "scanner unavailable"
                     }
                 }
-            }) { Text("scan ldmux code", color = Accent, fontSize = 12.sp) }
+            }) { Text("ldmux", color = Accent, fontSize = 12.sp, maxLines = 1) }
             MiniTextButton(onClick = {
                 note = null
                 CodeScanner.scan { r ->
@@ -92,7 +96,7 @@ internal fun MeshRouteSection(
                         ScanResult.Unavailable -> "scanner unavailable"
                     }
                 }
-            }) { Text("scan MeshMore code", color = Accent, fontSize = 12.sp) }
+            }) { Text("MeshMore", color = Accent, fontSize = 12.sp, maxLines = 1) }
         }
         // Same-phone pairing cannot be scanned: MeshMore's code is displayed by the other app on
         // this very screen, so there is nothing for this camera to point at. Typing or pasting the

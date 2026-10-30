@@ -10,9 +10,11 @@ import dev.ldmux.mobile.mesh.meshSessionKeyStore
 import dev.ldmux.mobile.mesh.meshTokenStore
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.material3.LocalTextStyle
@@ -47,14 +49,18 @@ fun App() {
             // The mesh route replaces the whole terminal surface, not a part of it: it is a different,
             // reduced terminal (ADR-0025). Anything that cannot run is left to AppContent, which
             // shows why and opens nothing. The tailnet path below is exactly what it was.
+            // Leaving the mesh screen is a **view** change, not a configuration change. It used
+            // to rewrite the saved route to tailnet, so a person who looked away once came back to
+            // "unreachable" and had to re-pair to find the mesh again — the route they chose was
+            // silently abandoned. The saved route stays; this flag only decides which surface is
+            // drawn now, and choosing the mesh route in Settings brings it back.
+            var showApp by remember { mutableStateOf(false) }
+            LaunchedEffect(config.route) {
+                if (config.route == MeshRoute.Mesh) showApp = false
+            }
             val mesh = meshScreenFor(config)
-            if (mesh != null) {
-                MeshTerminalScreen(
-                    mesh,
-                    // Leaving goes back to the tailnet only if there is a daemon to go back to. A mesh-only
-                    // device has none, so it stays on the setup (the launcher, which says why).
-                    onLeave = { store.update(config.copy(route = MeshRoute.Tailnet)) },
-                )
+            if (mesh != null && !showApp) {
+                MeshTerminalScreen(mesh, onLeave = { showApp = true })
             } else {
                 AppContent(config, store)
             }

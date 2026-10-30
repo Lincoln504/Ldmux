@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -17,7 +18,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.mesh.MeshRouteActions
@@ -47,7 +50,17 @@ internal fun SettingsDialog(
         // is how a pure grey card picked up a violet cast on a black screen.
         tonalElevation = 0.dp,
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
+            // A bounded scroll area, not an unbounded column inside a dialog. Material gives the
+            // text slot `wrapContentHeight`, so a long settings list grew past the dialog and drew
+            // under the button row: the last controls were clipped and could not be reached. A
+            // max height derived from the screen keeps every row reachable by scrolling, at any
+            // text size, and leaves room for the title and the buttons.
+            val maxHeight: Dp = (LocalConfiguration.current.screenHeightDp * 0.55f).dp
+            Column(
+                Modifier
+                    .heightIn(max = maxHeight)
+                    .verticalScroll(rememberScrollState()),
+            ) {
                 PairingRow(current, onPaired, onUnpair)
                 if (mesh != null) {
                     MeshRouteSection(
