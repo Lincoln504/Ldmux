@@ -86,6 +86,11 @@ impl MeshConfig {
     }
 
     /// The process environment's configuration.
+    ///
+    /// `LDMUX_MESH_STATE` names the host gateway's state file, which already holds the
+    /// loopback address, the pairing token and both radio public keys. Explicit variables
+    /// win key by key, so an operator can move the port without rewriting anything, and the
+    /// file is read only when a value is missing.
     pub fn from_env() -> Result<Option<Self>, String> {
         let vars: Vec<(String, String)> =
             ["LDMUX_MESH_ADDR", "LDMUX_MESH_TOKEN", "LDMUX_MESH_PEER"]
@@ -96,8 +101,75 @@ impl MeshConfig {
                         .map(|value| ((*key).to_owned(), value))
                 })
                 .collect();
-        let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let explicit: Vec<(&str, &str)> =
+            vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        if explicit.len() == 3 {
+            return Self::from_pairs(explicit);
+        }
+        let Some(path) = std::env::var("LDMUX_MESH_STATE").ok().filter(|p| !p.trim().is_empty())
+        else {
+            return Self::from_pairs(explicit);
+        };
+        let file = Self::from_state_file(std::path::Path::new(&path))?;
+        let mut merged: Vec<(String, String)> = Vec::new();
+        if let Some(f) = &file {
+            merged.push(("LDMUX_MESH_ADDR".to_owned(), f.addr.clone()));
+            merged.push((
+                "LDMUX_MESH_TOKEN".to_owned(),
+                f.token.iter().map(|b| format!("{b:02x}")).collect(),
+            ));
+            merged.push((
+                "LDMUX_MESH_PEER".to_owned(),
+                f.peer.iter().map(|b| format!("{b:02x}")).collect(),
+            ));
+        }
+        for (key, value) in &vars {
+            if let Some(slot) = merged.iter_mut().find(|(k, _)| k == key) {
+                slot.1 = value.clone();
+            } else {
+                merged.push((key.clone(), value.clone()));
+            }
+        }
+        let pairs: Vec<(&str, &str)> =
+            merged.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         Self::from_pairs(pairs)
+    }
+
+    /// Configuration from a host gateway's state file (`meshmore_gateway --state`).
+    ///
+    /// The gateway knows its own address, its token and the radio public keys; the daemon
+    /// must not learn anything else about the radio, and this file carries nothing else.
+    /// `Ok(None)` when the file exists but names no gateway yet.
+    pub fn from_state_file(path: &std::path::Path) -> Result<Option<Self>, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("LDMUX_MESH_STATE {} is unreadable: {e}", path.display()))?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("LDMUX_MESH_STATE {} is not JSON: {e}", path.display()))?;
+        let get = |key: &str| json.get(key).and_then(serde_json::Value::as_str);
+        let (Some(addr), Some(token), Some(peer)) =
+            (get("gatewayAddr"), get("pairingToken"), get("peerKey"))
+        else {
+            return Ok(None);
+        };
+        Self::from_pairs([
+            ("LDMUX_MESH_ADDR", addr),
+            ("LDMUX_MESH_TOKEN", token),
+            ("LDMUX_MESH_PEER", peer),
+        ])
+    }
+
+    /// This radio's public key from the same state file, when `LDMUX_MESH_SELF` is unset.
+    #[must_use]
+    pub fn self_key_from_env() -> Option<[u8; 32]> {
+        if let Ok(text) = std::env::var("LDMUX_MESH_SELF") {
+            if let Ok(key) = parse_hex::<32>(&text, "LDMUX_MESH_SELF") {
+                return Some(key);
+            }
+        }
+        let path = std::env::var("LDMUX_MESH_STATE").ok()?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+        parse_hex::<32>(json.get("radioKey")?.as_str()?, "radioKey").ok()
     }
 }
 
@@ -144,7 +216,7 @@ impl SessionSetup {
 /// so. The daemon does not own the radio and cannot learn it; it is only passed along so a phone
 /// can bind it. A malformed value is ignored with no key rather than a wrong one.
 fn host_radio_from_env() -> Option<[u8; 32]> {
-    parse_hex::<32>(&std::env::var("LDMUX_MESH_SELF").ok()?, "LDMUX_MESH_SELF").ok()
+    MeshConfig::self_key_from_env()
 }
 
 fn parse_hex<const N: usize>(text: &str, what: &str) -> Result<[u8; N], String> {
@@ -679,4 +751,50 @@ mod tests {
         }
         assert_eq!(json["peer"], "ab".repeat(32));
     }
+
+    fn state_file(dir: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(dir);
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("gateway.json");
+        std::fs::write(&file, body).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_gateway_state_file_supplies_address_token_and_peer() {
+        // The host gateway resolves the peer radio by name and publishes both keys, so the
+        // daemon never needs a 64-hex copy. The file carries nothing about radio parameters.
+        let file = state_file(
+            "ldmux-mesh-state-ok",
+            &format!(
+                r#"{{"gatewayAddr":"127.0.0.1:41731","pairingToken":"{TOKEN}","peerKey":"{PEER}","radioKey":"{PEER}"}}"#
+            ),
+        );
+        let cfg = MeshConfig::from_state_file(&file).unwrap().expect("configured");
+        assert_eq!(cfg.addr, "127.0.0.1:41731");
+        assert_eq!(cfg.token[15], 0xff);
+        assert_eq!(cfg.peer[31], 0x1f);
+    }
+
+    #[test]
+    fn a_state_file_without_a_resolved_peer_configures_nothing() {
+        // `--peer-name` unresolved writes a null peerKey. A daemon that guessed a peer would
+        // send records into the wrong path, so absence is "not configured", not "any peer".
+        let file = state_file(
+            "ldmux-mesh-state-nopeer",
+            &format!(r#"{{"gatewayAddr":"127.0.0.1:41731","pairingToken":"{TOKEN}","peerKey":null}}"#),
+        );
+        assert!(MeshConfig::from_state_file(&file).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unreadable_state_file_names_itself() {
+        let path = std::env::temp_dir().join("ldmux-mesh-state-missing.json");
+        let _ = std::fs::remove_file(&path);
+        let err = MeshConfig::from_state_file(&path).unwrap_err();
+        assert!(err.contains("LDMUX_MESH_STATE"), "{err}");
+        assert!(err.contains("unreadable"), "{err}");
+    }
+
 }

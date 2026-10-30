@@ -527,3 +527,28 @@ Facts a gateway implementer can rely on:
 - A reconnect to the gateway means a new handshake. The session never outlives the L2 socket.
 - The carrier still exports only `RECORD_MAX`. Payload is 144 bytes per record at 172, and
   that figure is in `ldmux_session::arq`, not here.
+
+## Configuring the host without copying keys (2026-10-29)
+
+The firmware's raw-data push carries no sender key: `PUSH_CODE_RAW_DATA` is
+`[0x84][snr][rssi][0xFF][payload]` (`examples/companion_radio/MyMesh.cpp:800-811`).
+So the host must be told which radio it talks to exactly once, and a 64-hex public
+key is the wrong way to say it — the radio already knows its contacts by name.
+
+Host side, one word and one file:
+
+```
+meshmore_gateway --port /dev/ttyACM1 --peer-name HELTEC-BASE --state <state.json>
+ldmuxd            # with LDMUX_MESH_STATE=<state.json> and LDMUX_MESH_PSK=<64 hex>
+```
+
+The gateway resolves the name against the radio's own contact table (refusing with
+the names it does hold when the name is unknown), and writes `gatewayAddr`,
+`pairingToken`, `radioKey` (its own) and `peerKey` into the state file, 0600 and
+merged so a token rotation keeps them. The daemon reads address, token and peer
+from that file; `LDMUX_MESH_SELF` comes from the same file's `radioKey` when it is
+not set. Explicit environment variables still win key by key, so a port can be
+moved without rewriting the file.
+
+Nothing about radio parameters crosses that boundary: the file holds addresses and
+public keys, which is what section 13 permits.
