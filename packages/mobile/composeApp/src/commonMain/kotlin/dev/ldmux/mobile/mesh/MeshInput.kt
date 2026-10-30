@@ -178,9 +178,9 @@ class MeshInputBatcher(
 
     companion object {
         /** Quiet that means "done typing for now": about one round trip at the default preset. */
-        const val IDLE_MS = 700L
+        const val IDLE_MS = 60L
         /** The longest a byte waits, however steadily the user types. */
-        const val MAX_HOLD_MS = 2_500L
+        const val MAX_HOLD_MS = 600L
         /** More than this unsent is refused rather than queued for an hour. */
         const val CAPACITY = 1_024
         private const val CR: Byte = 0x0D
