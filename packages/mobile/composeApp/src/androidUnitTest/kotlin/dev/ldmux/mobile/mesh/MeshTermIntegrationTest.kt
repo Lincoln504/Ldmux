@@ -120,9 +120,10 @@ class MeshTermIntegrationTest {
         driver.tick()
         assertEquals(1, gw.sent.size)
 
-        // --- the host ends the shell and the phone says so and stops accepting input.
+        // --- the shell ends: the phone asks for the list again on the same session, and input is
+        // not accepted until it has attached one. A closed shell is not a closed link.
         deliver(hostSays(TermMessage.Closed(MeshTerm.Closed.EXITED)))
-        assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.EXITED), driver.view.value)
+        assertEquals(MeshTermView.Listing, driver.view.value)
         assertEquals(InputOutcome.NotLive, driver.input(byteArrayOf(1)))
         driver.detach(); host.close()
     }

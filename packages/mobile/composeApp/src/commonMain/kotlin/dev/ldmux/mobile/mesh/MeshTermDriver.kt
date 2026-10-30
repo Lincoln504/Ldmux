@@ -510,6 +510,12 @@ class MeshTermDriver(
                     pick = Pick.Listing; pages = ArrayList(); queue(TermMessage.ListRequest)
                 }
                 pick == Pick.Probing && m.reason == MeshTerm.Closed.NOT_FOUND -> pick = Pick.None
+                // **A shell that ended is not a link that ended.** The session is alive and this host
+                // still has other shells, so the answer is the list the user picked from, exactly as
+                // the tailnet route returns to its launcher when a shell exits. Ending the session
+                // here would spend a whole handshake (minutes on this link) to reach a screen the
+                // host can supply in one record. Everything the ended shell left is dropped first.
+                m.reason == MeshTerm.Closed.EXITED -> backToList()
                 else -> terminalView = MeshTermView.HostClosed(m.reason)
             }
             is TermMessage.Sessions -> onSessions(m)
@@ -534,6 +540,20 @@ class MeshTermDriver(
      * anything. A list asked for to choose a shell may attach (one entry) or ask the user; a list
      * asked for by the header only fills [shells].
      */
+    /** Forget the ended attach and ask the host what it has now. The session is untouched. */
+    private fun backToList() {
+        mirror = RowMirror()
+        held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
+        hostVersion = 0
+        attachedId = null
+        terminalView = null
+        pick = Pick.Listing
+        pages = ArrayList()
+        choices = emptyList()
+        publishShells()
+        queue(TermMessage.ListRequest)
+    }
+
     private fun onSessions(m: TermMessage.Sessions) {
         if (pick != Pick.Listing && !listingForHeader) return
         pages.addAll(m.entries)

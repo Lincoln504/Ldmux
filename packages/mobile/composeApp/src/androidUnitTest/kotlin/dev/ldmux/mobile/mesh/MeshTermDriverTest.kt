@@ -408,10 +408,24 @@ class MeshTermDriverTest {
     }
 
     @Test
-    fun `the host closing the attach is its own state and stops input`() = runBlocking<Unit> {
+    fun `a shell that ended goes back to the list, not to a dead link`() = runBlocking<Unit> {
+        // The rule this used to assert (EXITED means HostClosed, which stops every later record) was
+        // wrong for the one case it actually happens in: the session is alive and the host still has
+        // other shells. Quitting a shell at a desk returns you to the launcher there; here it must
+        // return to the list, or leaving a shell costs a whole handshake to see the others again.
         val d = driver(); live(d)
         deliver(d, TermMessage.Closed(MeshTerm.Closed.EXITED))
-        assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.EXITED), d.view.value)
+        assertEquals(MeshTermView.Listing, d.view.value)
+        assertEquals(InputOutcome.NotLive, d.input(byteArrayOf(1)))
+    }
+
+    @Test
+    fun `a close that is not an ending still stops the attach`() = runBlocking<Unit> {
+        // VERSION is the phone and the host disagreeing about the wire, not a shell ending: there is
+        // nothing to list, and the header's refresh is what starts a fresh handshake.
+        val d = driver(); live(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.VERSION))
+        assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.VERSION), d.view.value)
         assertEquals(InputOutcome.NotLive, d.input(byteArrayOf(1)))
     }
 
