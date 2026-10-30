@@ -325,6 +325,11 @@ class MeshTermDriver(
         if (requestedFit == key) return
         requestedFit = key
         queue(TermMessage.Resize(cols, rows))
+        // The resize recreates the phone's engine at the new grid, so whatever is on it is gone:
+        // the host resizes the pty and, without this, sends nothing at all, which measured on the
+        // device as a blank terminal until the shell was left and re-entered. Asking for the whole
+        // screen in the same breath costs one record and makes the resize visible immediately.
+        queue(TermMessage.Resync)
     }
 
     private suspend fun sendToShell(message: TermMessage): InputOutcome {
