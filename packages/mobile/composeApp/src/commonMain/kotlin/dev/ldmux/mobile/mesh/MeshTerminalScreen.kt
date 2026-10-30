@@ -50,6 +50,7 @@ import dev.ldmux.mobile.LocalTouch
 import dev.ldmux.mobile.TerminalSurfaceFor
 import dev.ldmux.mobile.AppHeader
 import dev.ldmux.mobile.ChoiceRow
+import dev.ldmux.mobile.RouteChoice
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
@@ -76,7 +77,14 @@ import kotlinx.coroutines.launch
  * knows a radio parameter.
  */
 @Composable
-fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () -> Unit, onOpenSettings: () -> Unit) {
+fun MeshTerminalScreen(
+    plan: MeshScreenPlan,
+    config: LdmuxConfig,
+    onOpenSettings: () -> Unit,
+    routes: List<RouteChoice> = emptyList(),
+    currentRoute: RouteChoice? = null,
+    onRoute: (RouteChoice) -> Unit = {},
+) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
     // itself), so the caller needs a way to make it. A refused bind, a rotated token or an
@@ -269,7 +277,9 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
                     status = meshTermLabel(view, plan.endpoint),
                     onRefresh = null,
                     onSettings = onOpenSettings,
-                    onLeave = onLeave,
+                    routes = routes,
+                    currentRoute = currentRoute,
+                    onRoute = onRoute,
                 )
             }
             Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {

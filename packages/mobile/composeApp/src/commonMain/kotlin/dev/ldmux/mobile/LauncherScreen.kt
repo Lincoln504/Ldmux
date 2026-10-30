@@ -74,6 +74,9 @@ fun LauncherScreen(
     liveResult: LiveResult?,
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
+    routes: List<RouteChoice> = emptyList(),
+    currentRoute: RouteChoice? = null,
+    onRoute: (RouteChoice) -> Unit = {},
 ) {
     // Which shells and pi sessions are chosen, **in the order they were chosen**.
     // Keys, not objects, so a list that refreshes under the user does not silently
@@ -104,6 +107,9 @@ fun LauncherScreen(
             onRefresh = onRefresh,
             refreshing = desktopLoading,
             onSettings = onSettings,
+            routes = routes,
+            currentRoute = currentRoute,
+            onRoute = onRoute,
         )
 
         // Where a new shell goes is asked for in the dialogue that creates it, and

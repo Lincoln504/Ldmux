@@ -78,7 +78,14 @@ private const val PANEL_FLIP_MS = 200L
 
 /** The app itself. A separate function only so the theme can wrap all of it. */
 @Composable
-internal fun AppContent(config: LdmuxConfig, store: ConfigStore, onOpenSettings: () -> Unit) {
+internal fun AppContent(
+    config: LdmuxConfig,
+    store: ConfigStore,
+    onOpenSettings: () -> Unit,
+    routes: List<RouteChoice> = emptyList(),
+    currentRoute: RouteChoice? = null,
+    onRoute: (RouteChoice) -> Unit = {},
+) {
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
 
@@ -760,6 +767,9 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore, onOpenSettings:
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
             onSettings = onOpenSettings,
+            routes = routes,
+            currentRoute = currentRoute,
+            onRoute = onRoute,
         )
         }
         // What the daemon said, whenever it said no — a bad path in "+ shell",

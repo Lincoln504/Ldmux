@@ -11,8 +11,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -36,8 +42,12 @@ import androidx.compose.ui.unit.sp
  * body differs.
  *
  * [onRefresh] is null where a refresh would mean nothing; the button is then absent rather
- * than present and inert. [onLeave] is the mesh route's way back to the tailnet launcher and
- * is absent everywhere else.
+ * than present and inert.
+ *
+ * [routes] is the way between the tailnet route and the mesh route, and it lives **here**, in
+ * the app's own header, as a dropdown: it is a choice about the link, not a setting about the
+ * terminal, and it must not be buried in Settings. The mesh route has no separate exit either
+ * (no `leave`): the same header switches, on the same screen, in the same app.
  */
 @Composable
 internal fun AppHeader(
@@ -47,21 +57,37 @@ internal fun AppHeader(
     /** A refresh in flight: the arrow dims rather than turning into text. */
     refreshing: Boolean = false,
     onSettings: () -> Unit,
-    onLeave: (() -> Unit)? = null,
+    /** Selectable routes, when this build has more than one. Empty hides the control. */
+    routes: List<RouteChoice> = emptyList(),
+    currentRoute: RouteChoice? = null,
+    onRoute: (RouteChoice) -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text(status, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
         }
-        if (onLeave != null) {
-            Text(
-                "leave",
-                color = Accent,
-                fontSize = 13.sp,
-                maxLines = 1,
-                modifier = Modifier.padding(4.dp).clickable(role = Role.Button, onClick = onLeave),
-            )
+        if (routes.size > 1 && currentRoute != null) {
+            Box {
+                var open by remember { mutableStateOf(false) }
+                Text(
+                    currentRoute.label,
+                    color = Accent,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .padding(4.dp)
+                        .clickable(role = Role.Button) { open = true },
+                )
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (route in routes) {
+                        DropdownMenuItem(
+                            text = { Text(if (route == currentRoute) "${route.label} ✓" else route.label, color = Fg, fontSize = 13.sp) },
+                            onClick = { open = false; onRoute(route) },
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.width(6.dp))
         }
         if (onRefresh != null) {
@@ -91,3 +117,6 @@ internal fun HeaderIcon(label: String, onClick: () -> Unit, content: @Composable
         content()
     }
 }
+
+/** A route this build offers, as the header shows it: the app's own name for the link. */
+data class RouteChoice(val label: String, val mesh: Boolean)

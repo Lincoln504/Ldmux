@@ -57,12 +57,14 @@ fun App() {
             // shows why and opens nothing. The tailnet path below is exactly what it was.
             // Leaving the mesh screen is a **view** change, not a configuration change. It used
             // to rewrite the saved route to tailnet, so a person who looked away once came back to
-            // "unreachable" and had to re-pair to find the mesh again — the route they chose was
-            // silently abandoned. The saved route stays; this flag only decides which surface is
-            // drawn now, and choosing the mesh route in Settings brings it back.
-            var showApp by remember { mutableStateOf(false) }
-            LaunchedEffect(config.route) {
-                if (config.route == MeshRoute.Mesh) showApp = false
+            // The route is chosen in the app's own header (a dropdown), so there is no
+            // separate exit from the mesh route and no separate screen to come back from.
+            val routes = availableRoutes(currentPlatform).map {
+                RouteChoice(if (it == MeshRoute.Mesh) "mesh" else "tailnet", it == MeshRoute.Mesh)
+            }
+            val current = RouteChoice(if (config.route == MeshRoute.Mesh) "mesh" else "tailnet", config.route == MeshRoute.Mesh)
+            val choose: (RouteChoice) -> Unit = { c ->
+                store.update(config.copy(route = if (c.mesh) MeshRoute.Mesh else MeshRoute.Tailnet))
             }
             val mesh = meshScreenFor(config)
             // Settings is drawn **once, here**, for every route. It used to belong to the
@@ -70,10 +72,10 @@ fun App() {
             // the mesh route to reach Settings, and leaving then reported the route as
             // unavailable. One app, one Settings.
             var showSettings by remember { mutableStateOf(false) }
-            if (mesh != null && !showApp) {
-                MeshTerminalScreen(mesh, config, onLeave = { showApp = true }, onOpenSettings = { showSettings = true })
+            if (mesh != null) {
+                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
             } else {
-                AppContent(config, store, onOpenSettings = { showSettings = true })
+                AppContent(config, store, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
             }
             if (showSettings) {
                 SettingsDialog(
