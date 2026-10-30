@@ -533,7 +533,10 @@ async fn session(
             s.files.persister(),
         )
     });
-    let started = Instant::now();
+    // Same clock as every other probe in the process. A bare `Instant::now()` here was a second
+    // origin, so `drained … ms` and `reply queued at …` differed by a constant that read as
+    // latency — 76 748 ms on one run. Anything two probes are compared against comes from here.
+    let started = runtime_start();
     let mut budget: Option<u8> = None;
     let mut awaiting: u8 = 0;
     let mut seq: u8 = 0;
@@ -874,6 +877,14 @@ mod tests {
 /// 11 550 ms "round trip" that was really 0 ms. Any probe that can be compared with another must
 /// come from here.
 pub(crate) fn runtime_stamp() -> u128 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_millis()
+    runtime_start().elapsed().as_millis()
+}
+
+/// The process's single timing origin.
+///
+/// Callers that need elapsed milliseconds keep this instant rather than taking their own, so no
+/// two probes can drift apart by a constant offset.
+pub(crate) fn runtime_start() -> Instant {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(Instant::now)
 }
