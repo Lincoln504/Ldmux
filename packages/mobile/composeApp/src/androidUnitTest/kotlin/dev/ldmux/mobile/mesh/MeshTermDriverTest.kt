@@ -25,8 +25,11 @@ class MeshTermDriverTest {
         override var uplinkRecordMax = 172
         val sent = ArrayList<ByteArray>()
         var outcome = MeshSendOutcome.SentDirect
+        /** A gateway that takes the record and never answers. */
+        var silent = false
         override suspend fun send(record: ByteArray): MeshSendResult {
             sent += record
+            if (silent) kotlinx.coroutines.awaitCancellation()
             return MeshSendResult(0, outcome)
         }
         override fun close() {}
@@ -75,8 +78,8 @@ class MeshTermDriverTest {
     private val sess = FakeSession()
     private var hs = FakeHandshake(sess)
     private var now = 1_000L
-    private fun driver(handshakeTimeoutMs: Long = 300_000) =
-        MeshTermDriver(gw, { hs }, selector = "", clock = { now }, handshakeTimeoutMs = handshakeTimeoutMs)
+    private fun driver(handshakeTimeoutMs: Long = 300_000, sendTimeoutMs: Long = 10_000) =
+        MeshTermDriver(gw, { hs }, selector = "", clock = { now }, handshakeTimeoutMs = handshakeTimeoutMs, sendTimeoutMs = sendTimeoutMs)
 
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
@@ -104,6 +107,16 @@ class MeshTermDriverTest {
         val d = driver(); d.start()
         assertEquals(MeshTermView.LinkDown(MeshLinkState.Unreachable), d.view.value)
         assertTrue(gw.sent.isEmpty())
+    }
+
+    @Test
+    fun `a gateway that never answers cannot hold the driver, so the tick can still run`() = runBlocking<Unit> {
+        gw.silent = true
+        val d = driver(sendTimeoutMs = 50)
+        d.start() // would never return if the send were awaited without a bound, with the lock held
+        assertEquals(MeshTermView.Handshaking, d.view.value)
+        d.tick() // and the lock is free again: this is the call that reports a dead link
+        assertEquals(MeshTermView.Handshaking, d.view.value)
     }
 
     @Test

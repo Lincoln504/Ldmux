@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 
 // ── The seams the driver needs, so it runs against fakes without a socket or a native library ──
 
@@ -146,6 +148,8 @@ class MeshTermDriver(
     private val clock: () -> Long,
     /** A handshake not answered in this long is reported as a dead link. Minutes are normal here. */
     private val handshakeTimeoutMs: Long = 5 * 60_000,
+    /** How long the gateway may take to say what the radio did with one record. */
+    private val sendTimeoutMs: Long = SEND_RESULT_TIMEOUT_MS,
 ) {
     private val lock = Mutex()
     private val _view = MutableStateFlow<MeshTermView>(MeshTermView.Idle)
@@ -587,9 +591,17 @@ class MeshTermDriver(
     /** Hand one record to the gateway. False when the link is gone and the rest should wait. */
     private suspend fun transmit(record: ByteArray): Boolean {
         val result = try {
-            gateway.send(record)
+            // **Bounded, because the lock is held across it.** Every entry point of this driver (a
+            // received record, a keystroke, the tick that notices a dead link) takes the same mutex,
+            // so a gateway that never answered froze the screen with nothing able to say so: the
+            // silence rule lives in `tick`, which could not run. A record with no answer in time is
+            // treated like a busy radio — the session's own retransmission covers it — and the rest
+            // wait for the next pump.
+            withTimeout(sendTimeoutMs) { gateway.send(record) }
         } catch (e: MeshGatewayException) {
             terminalView = MeshTermView.LinkDown(e.state); return false
+        } catch (e: TimeoutCancellationException) {
+            return false
         }
         lastSendOutcome = result.outcome
         when (result.outcome) {
@@ -656,3 +668,6 @@ class MeshTermDriver(
  * cannot see: a radio that is off the air, where nothing ever comes back at all.
  */
 private const val SILENCE_FAILURE_MS = 20_000L
+
+/** Longer than the gateway's own bound on the radio's answer, short enough that `tick` runs again. */
+private const val SEND_RESULT_TIMEOUT_MS = 10_000L
