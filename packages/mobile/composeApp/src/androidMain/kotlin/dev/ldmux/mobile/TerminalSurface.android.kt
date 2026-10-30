@@ -120,7 +120,27 @@ actual fun rememberTerminalSurface(
     // mid-compose) leaked a connected controller that held the shell with no owner.
     val holder = remember(config.connectionKey, sessionId) { ControllerHolder(config, sessionId, active) }
     val controller = holder.controller
+    TerminalSurfaceFor(controller, sessionId, config, typing, active, modifier, keyboardRequest)
+    return controller
+}
 
+/**
+ * The surface itself, over any [TerminalSource]. The daemon-attached route and the mesh route
+ * both draw through here, so gestures, selection, the cursor, scrolling and the IME path are
+ * the same code for both and cannot drift apart again.
+ */
+@Composable
+actual fun TerminalSurfaceFor(
+    source: TerminalSource,
+    key: String,
+    config: LdmuxConfig,
+    typing: Boolean,
+    active: Boolean,
+    modifier: Modifier,
+    keyboardRequest: Int,
+) {
+    val controller = source
+    val sessionId = key
     // Entering or leaving the foreground starts or drops the stream. The last
     // painted frame stays, so swiping back is instant rather than blank. Keyed on
     // the controller as well as the flag: a page that adopts a new controller while
@@ -887,7 +907,6 @@ actual fun rememberTerminalSurface(
         }
 
     }
-    return controller
 }
 
 /**

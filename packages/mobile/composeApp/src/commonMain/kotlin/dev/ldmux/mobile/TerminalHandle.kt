@@ -2,6 +2,7 @@ package dev.ldmux.mobile
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import dev.ldmux.mobile.term.TerminalFrame
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -236,6 +237,32 @@ interface TerminalHandle {
 }
 
 /**
+ * What the terminal *surface* needs from whatever feeds it, beyond what the chrome drives
+ * ([TerminalHandle]): a frame to paint, a grid to report, a clipboard to hand a program's copy to.
+ *
+ * The surface (gestures, painter, selection, IME, scrollbar) is one composable and must stay one:
+ * a second route that drew its own rows is how the mesh terminal became a different app. The
+ * daemon-attached [TerminalController] and the mesh route's source both implement this, so the
+ * only thing that differs between routes is where the bytes come from.
+ */
+interface TerminalSource : TerminalHandle {
+    /** The painted screen, or null before there is one. */
+    val frame: StateFlow<TerminalFrame.Frame?>
+
+    /** Whether the host understands `S-` on named keys (the hardware-key mapper asks). */
+    val shiftKeys: Boolean
+
+    /** Where a program's clipboard write goes, if anyone can take it. */
+    var onClipboardRequest: ((ClipboardRequest) -> Unit)?
+
+    /** Start or stop streaming; a source with no stream ignores it. */
+    fun setActive(value: Boolean)
+
+    /** The grid the surface can paint. A source whose grid is fixed by its host ignores it. */
+    fun setGrid(cols: Int, rows: Int)
+}
+
+/**
  * Whether a page should be connected: it is the one on screen, and the app is.
  *
  * The second half was missing and it was visible from the other end: backgrounding
@@ -283,3 +310,21 @@ expect fun rememberTerminalSurface(
     modifier: Modifier,
     keyboardRequest: Int = 0,
 ): TerminalHandle
+
+/**
+ * The terminal surface for an existing [source]: the one composable both routes draw.
+ *
+ * [rememberTerminalSurface] builds the daemon-attached source and calls this; the mesh route
+ * calls it with its own. [key] identifies the line being typed on, so a different shell starts a
+ * fresh input buffer.
+ */
+@Composable
+expect fun TerminalSurfaceFor(
+    source: TerminalSource,
+    key: String,
+    config: LdmuxConfig,
+    typing: Boolean,
+    active: Boolean,
+    modifier: Modifier,
+    keyboardRequest: Int = 0,
+)

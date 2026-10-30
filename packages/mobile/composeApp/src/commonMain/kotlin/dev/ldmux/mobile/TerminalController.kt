@@ -33,7 +33,7 @@ class TerminalController(
     private val config: LdmuxConfig,
     private val sessionId: String,
     active: Boolean = true,
-) : TerminalHandle {
+) : TerminalSource {
 
     /**
      * Whether the stream should be running.
@@ -51,7 +51,7 @@ class TerminalController(
     private var engine = TerminalEngine(DEFAULT_COLS, DEFAULT_ROWS)
 
     private val _frame = MutableStateFlow<TerminalFrame.Frame?>(null)
-    val frame: StateFlow<TerminalFrame.Frame?> = _frame
+    override val frame: StateFlow<TerminalFrame.Frame?> = _frame
 
     private var lastRenderAt: TimeMark? = null
     private var renderScheduled = false
@@ -74,7 +74,7 @@ class TerminalController(
      * owns the actual clipboard and sets this; nothing here knows what a clipboard
      * is, which is what keeps this file testable without a device.
      */
-    var onClipboardRequest: ((ClipboardRequest) -> Unit)? = null
+    override var onClipboardRequest: ((ClipboardRequest) -> Unit)? = null
 
     /**
      * Where something the agent wants said goes, from either producer: the daemon's typed
@@ -109,7 +109,7 @@ class TerminalController(
     private val attach = AttachClient(config, sessionId)
 
     /** Whether the daemon this page is attached to understands `S-` on named keys. */
-    val shiftKeys: Boolean get() = attach.shiftKeys
+    override val shiftKeys: Boolean get() = attach.shiftKeys
 
     /**
      * Whether typed text is shown before the shell echoes it (see
@@ -529,7 +529,7 @@ class TerminalController(
     }
 
     /** Start or stop the stream as this page enters or leaves the foreground. */
-    fun setActive(value: Boolean) {
+    override fun setActive(value: Boolean) {
         if (value == active) return
         active = value
         // Before [begin] the stream is not this controller's to open yet; `begin`
@@ -964,7 +964,7 @@ class TerminalController(
      * sizes the session's pty to it, so the shell is always the right size for the
      * screen showing it rather than fixed at creation.
      */
-    fun setGrid(cols: Int, rows: Int) {
+    override fun setGrid(cols: Int, rows: Int) {
         attach.setGrid(cols, rows)
     }
 
