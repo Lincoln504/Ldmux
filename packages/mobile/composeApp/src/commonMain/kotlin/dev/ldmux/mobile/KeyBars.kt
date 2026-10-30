@@ -31,7 +31,9 @@ import kotlinx.coroutines.CoroutineScope
 internal fun PortraitBar(
     handle: TerminalHandle?,
     pages: List<Session>,
-    pagerState: PagerState,
+    // Null on the mesh route, which has pages (the host's shells) but no pager to swipe: the
+    // header's arrows then only name the shell they move to.
+    pagerState: PagerState?,
     scope: CoroutineScope,
     keyboardUp: Boolean,
     onToggleKeyboard: () -> Unit,

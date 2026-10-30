@@ -68,7 +68,7 @@ private val PANEL_WIDTH = 190.dp
 @Composable
 internal fun ShellHeader(
     pages: List<Session>,
-    pagerState: PagerState,
+    pagerState: PagerState?,
     scope: CoroutineScope,
     onLauncher: () -> Unit,
     // The shell on screen, by id — not the pager's page index, which a
@@ -93,7 +93,7 @@ internal fun ShellHeader(
         val target = (current + delta).coerceIn(0, (total - 1).coerceAtLeast(0))
         if (target != current) {
             pages.getOrNull(target)?.let { onShow(it.id) }
-            scope.launch { pagerState.animateScrollToPage(target) }
+            if (pagerState != null) scope.launch { pagerState.animateScrollToPage(target) }
         }
     }
 
