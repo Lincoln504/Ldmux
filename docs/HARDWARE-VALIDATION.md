@@ -430,3 +430,42 @@ Two bridge tests pinned the old policy and now set `pending` to the window, whic
 means. The timing probes stay in the daemon behind `LDMUX_MESH_TIMING=1`: the phone's terminal is
 a native surface whose text is invisible to the accessibility tree, so host-side timestamps are
 the only honest measurement of a keystroke's turnaround.
+
+## The pairing that only worked from inside the app (2026-10-30)
+
+Reported by the user: pairing the radio from the phone's own Bluetooth menu did not work, pairing
+it from inside MeshMore did. Two states for one pairing.
+
+The phone's own bond table (`dumpsys bluetooth_manager`) says why. Both of these are ordinary
+`BOND_STATE_BONDED` entries, and they are not the same thing at all:
+
+```
+shim::record 003  xx:xx:xx:xx:c5:3d  name:"MeshCore-HELTEC-BASE"
+    le_linkkey_known:T  ble_enc_key_size:0   le_authenticated:F  le_encrypted:F
+shim::record 006  xx:xx:xx:xx:5a:9a  name:"MeshCore-WIOld"
+    le_linkkey_known:T  ble_enc_key_size:16  le_authenticated:T  le_encrypted:T
+```
+
+Record 003 is a bond record with **no key material**. The radio's characteristics are MITM-only
+(`bleuart.setPermission(SECMODE_ENC_WITH_MITM, …)`, `SerialBLEInterface.cpp:183`), so a keyless
+record discovers services and then fails the first encrypted operation. `bondState` is
+`bonded` either way, so the app trusted it.
+
+The second half of the divergence is that the two menus wrote different stores. The Bluetooth
+menu writes Android's bond. MeshMore's own pairing writes `mm.paired.id` in prefs. An OS bond
+with an empty prefs record left `autoConnectIfPaired()` returning early, so the app read "No
+device paired" for a radio the phone was already bonded to.
+
+Fixed in MeshMore `18705e5`: the OS bond is adopted as the app's pairing at startup (preferring
+the radio the app used last when the phone holds several), `autoConnect` tries a bonded radio
+before scanning, a bond the radio cannot use is removed and re-made in place, and "forget the
+radio" now removes the OS bond too so the next start cannot adopt it back. The repair only runs
+while the radio is still linked — a link that dropped mid-open is not a bond problem, and
+removing a good bond over it would cost the user a pairing.
+
+`flutter test`: 1038 passing, 5 of them the new adoption rule.
+
+Not yet verified on the device: the phone was off USB when the fix landed. The
+expected reading is that pairing from the Bluetooth menu and pairing from the app leave the app
+in the same state, and that a `ble_enc_key_size:0` bond repairs itself instead of reporting a
+stale pairing.
