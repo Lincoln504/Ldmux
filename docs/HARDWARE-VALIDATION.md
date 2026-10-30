@@ -396,7 +396,7 @@ audit and the fixes, in order of size:
 | session ack delay 3000 → 150 ms | `9624c73` | up to 3 s of silence per pure ack |
 | retransmit 20 s → 2 s (cap 30 s) | `9624c73` | a lost record no longer stalls a screen |
 | window 4 → 8 | `9624c73` | a repaint pipelines instead of stalling |
-| phone idle flush 700 → 60 ms (hold 600) | `d3b2797` | ~90 ms per non-Enter keystroke |
+| phone idle flush 700 → 100 ms (hold 200) | `d3b2797`, `ae2dc64` | ~90 ms per non-Enter keystroke, and a bounded cadence |
 | `Rows` + `Commit` in one record | `398755d` | one frame per echo instead of two |
 | radio SF7 → SF5 at 500 kHz | (config) | ~48 ms per frame instead of ~70 |
 
