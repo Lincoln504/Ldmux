@@ -391,7 +391,10 @@ async fn a_corrupted_record_is_rejected_by_the_session_and_nothing_is_applied() 
 #[tokio::test]
 async fn the_bridge_never_transmits_past_the_records_the_gateway_says_remain() {
     // Two records of airtime: the handshake reply takes one, the Attach reply is one more.
-    let (w, mut phone) = established("bridge-budget", 2).await;
+    // One record of budget, spent by the handshake reply, so the snapshot cannot leave at all.
+    // It used to be 2 because a screen needed two records (rows and commit); messages now share
+    // a record when they fit, so 2 was enough and the budget no longer stalled.
+    let (w, mut phone) = established("bridge-budget", 1).await;
     let host = FakeShell::default();
     host.0
         .lock()
@@ -431,7 +434,7 @@ async fn the_bridge_never_transmits_past_the_records_the_gateway_says_remain() {
     let on_air = w.seen.lock().unwrap().records.len();
     assert!(
         on_air <= 1,
-        "budget 2, one already spent on the handshake reply: {on_air}"
+        "budget 1, spent on the handshake reply: {on_air}"
     );
     assert!(w.runtime.snapshot().session.budget_stalls >= 1);
     let _ = std::fs::remove_dir_all(&w.dir);

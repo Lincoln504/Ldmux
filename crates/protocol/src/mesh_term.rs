@@ -58,13 +58,17 @@ use std::collections::VecDeque;
 /// Version 3 adds `Resize`, so the phone can ask the host to fit its pty to the phone's own
 /// grid, as every tailnet client does. A host answers a resize with a fresh `Profile` and a full
 /// screen. The `Profile` body is unchanged from version 2.
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
 pub const KEY_VERSION: u8 = 2;
 /// The first version that has `Resize`.
 pub const RESIZE_VERSION: u8 = 3;
+/// First version whose phone decodes **several messages in one record** (`TermDecoder` is a
+/// stream decoder). From here the host packs a `Rows` and the `Commit` that belongs to it into
+/// one record when they fit, which is one frame instead of two for an ordinary echo.
+pub const STREAM_VERSION: u8 = 4;
 /// Most key names in one `Key` message.
 pub const MAX_KEYS: usize = 16;
 

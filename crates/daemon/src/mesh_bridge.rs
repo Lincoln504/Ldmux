@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION, Screen, VERSION,
+    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION, Screen,
+    STREAM_VERSION, VERSION,
     closed,
     session_pages,
 };
@@ -87,6 +88,8 @@ impl Link for crate::mesh::MeshRuntime {
 pub struct BridgeStats {
     pub updates: u32,
     pub messages_sent: u32,
+    /// Records actually handed to the link (several messages may share one).
+    pub records_sent: u32,
     pub inputs: u32,
     pub keys: u32,
     pub resizes: u32,
@@ -130,19 +133,61 @@ impl<H: Host, L: Link> Bridge<H, L> {
     }
 
     fn reply(&mut self, shell: u8, messages: &[Message]) -> bool {
+        // **Messages share a record when they fit.** The phone's decoder is a stream decoder
+        // (`TermDecoder` in MeshTerm.kt), so a record may carry several messages, and the
+        // protocol's own `RECORD_PAYLOAD` is the only limit. Sending one record per message
+        // cost a whole 176-byte frame per message: a one-row echo paid two frames (`Rows` and
+        // its `Commit`) where the pair is 30-40 bytes. Packed, the same echo is one frame.
+        //
+        // A phone that attached below [STREAM_VERSION] is not assumed to decode a record with
+        // more than one message, so it keeps one record per message.
+        let streamed = self
+            .shells
+            .get(&shell)
+            .map(|s| s.version >= STREAM_VERSION)
+            .unwrap_or(false);
         let mut ok = true;
+        let mut record: Vec<u8> = Vec::with_capacity(ldmux_protocol::mesh_term::RECORD_PAYLOAD);
+        let mut flush = |record: &mut Vec<u8>, ok: &mut bool, link: &mut L, stats: &mut BridgeStats| {
+            if record.is_empty() {
+                return;
+            }
+            if link.send(shell, record).is_ok() {
+                stats.records_sent += 1;
+            } else {
+                stats.refused_sends += 1;
+                *ok = false;
+            }
+            record.clear();
+        };
         for m in messages {
             let Ok(bytes) = m.encode() else {
                 ok = false;
                 continue;
             };
-            if self.link.send(shell, &bytes).is_ok() {
-                self.stats.messages_sent += 1;
-            } else {
-                self.stats.refused_sends += 1;
-                ok = false;
-                break;
+            if !streamed {
+                if self.link.send(shell, &bytes).is_ok() {
+                    self.stats.messages_sent += 1;
+                } else {
+                    self.stats.refused_sends += 1;
+                    ok = false;
+                    break;
+                }
+                continue;
             }
+            if !record.is_empty()
+                && record.len() + bytes.len() > ldmux_protocol::mesh_term::RECORD_PAYLOAD
+            {
+                flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
+                if !ok {
+                    break;
+                }
+            }
+            record.extend_from_slice(&bytes);
+            self.stats.messages_sent += 1;
+        }
+        if ok {
+            flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
         }
         ok
     }
