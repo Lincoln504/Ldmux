@@ -11,7 +11,7 @@
 //! ```text
 //! LDMUX_MESH_ADDR   127.0.0.1:41731        gateway address
 //! LDMUX_MESH_TOKEN  1e96a66d...           pairing token, 32 hex chars
-//! LDMUX_MESH_PEER   615f431f...           the peer's public key, 64 hex chars
+//! LDMUX_MESH_PEER   aa11bb22...           the peer's public key, 64 hex chars
 //! ```
 //!
 //! A fourth, optional, `LDMUX_MESH_PSK` (64 hex characters, the pairing's pre-shared key)

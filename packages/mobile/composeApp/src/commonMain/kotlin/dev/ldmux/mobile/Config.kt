@@ -61,7 +61,7 @@ data class LdmuxConfig(
     val deviceLabel: String = "",
     /**
      * What the paired machine is called (the link's `name`), for "paired with
-     * debian". Empty for a pairing made before names existed: [pairedName] then
+     * a hostname". Empty for a pairing made before names existed: [pairedName] then
      * falls back to the host.
      */
     val pairName: String = "",
