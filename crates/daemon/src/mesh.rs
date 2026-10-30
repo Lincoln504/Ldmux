@@ -29,6 +29,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ldmux_mesh::client::MeshClient;
 use ldmux_mesh::constants::{CAP_STATUS_PUSH, CREDIT_WINDOW, FrameType, RadioState, SendOutcome};
+
+/// The longest this loop will sleep with a session attached. See the comment at the wait.
+const MAX_IDLE_WAIT: Duration = Duration::from_millis(50);
 use ldmux_mesh::frame::MeshError;
 use ldmux_mesh::messages;
 use ldmux_session::arq::Limits;
@@ -359,7 +362,14 @@ impl MeshRuntime {
         }
         let mut ex = self.exchange.lock().map_err(|_| "poisoned".to_owned())?;
         ex.outbound.push_back((shell, bytes.to_vec()));
+        let depth = ex.outbound.len();
         drop(ex);
+        if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") {
+            eprintln!(
+                "ldmuxd: mesh timing: pushed to outbound, depth {depth} at {:?}",
+                runtime_stamp()
+            );
+        }
         self.wake.notify_one();
         Ok(())
     }
@@ -543,12 +553,17 @@ async fn session(
             // Fall through to the body without sleeping.
         } else {
         let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // **Never sleep longer than a tick.** The wake notification is not the only way work
+        // arrives here — the bridge hands records over from its own task — and a missed
+        // notification used to park a queued screen update until whichever deadline the ARQ was
+        // waiting on: measured on the device as ten seconds between the bridge queueing an echo
+        // and the loop handing it to the radio. A 50 ms ceiling costs twenty wakeups a second and
+        // removes the whole class of "it waits for something it did not need to".
         let wait = host
             .as_ref()
             .and_then(SessionHost::next_deadline)
-            .map_or(Duration::from_secs(3600), |d| {
-                Duration::from_millis(d.saturating_sub(now_ms))
-            });
+            .map_or(MAX_IDLE_WAIT, |d| Duration::from_millis(d.saturating_sub(now_ms)))
+            .min(MAX_IDLE_WAIT);
         tokio::select! {
             frame = client.recv() => {
                 let frame = frame?;
@@ -614,6 +629,13 @@ async fn session(
             .map(|mut ex| ex.outbound.drain(..).collect())
             .unwrap_or_default();
         let queued_n = queued.len();
+        if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && !queued.is_empty() {
+            eprintln!(
+                "ldmuxd: mesh timing: drained {} at {} ms",
+                queued.len(),
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+            );
+        }
         for (shell, bytes) in queued {
             if let Err(e) = h.send(shell, &bytes) {
                 set(snapshot, |s| {
@@ -628,7 +650,13 @@ async fn session(
             records_left: budget.unwrap_or(0),
             l2_slots: CREDIT_WINDOW.saturating_sub(awaiting),
         };
+        let t_poll = std::time::Instant::now();
         let polled = h.poll(now_ms, limits);
+        if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1")
+            && t_poll.elapsed().as_millis() > 50
+        {
+            eprintln!("ldmuxd: mesh timing: poll took {} ms", t_poll.elapsed().as_millis());
+        }
         if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && queued_n > 0 {
             eprintln!(
                 "ldmuxd: mesh timing: queued {} -> polled {} at {now_ms} ms (awaiting {awaiting}, budget {budget:?}, l2_slots {})",
@@ -640,7 +668,12 @@ async fn session(
         let sent_now = polled.len();
         let pending_now = h.snapshot().pending;
         for record in polled {
+            let t_write = std::time::Instant::now();
             client.send_record(seq, &record).await?;
+            let took = t_write.elapsed().as_millis();
+            if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && took > 50 {
+                eprintln!("ldmuxd: mesh timing: socket write took {took} ms");
+            }
             seq = seq.wrapping_add(1);
             awaiting = awaiting.saturating_add(1);
             budget = budget.map(|b| b.saturating_sub(1));
@@ -831,4 +864,16 @@ mod tests {
         assert!(err.contains("unreadable"), "{err}");
     }
 
+}
+
+/// Milliseconds since the first call in this process, for cross-task timing lines.
+///
+/// **One clock for every probe.** This and `mesh_bridge::stamp` used to be two separate
+/// `OnceLock<Instant>`s, each started by its own first call, so a line from the bridge and a line
+/// from this loop differed by a constant offset. That offset was read as latency: a constant
+/// 11 550 ms "round trip" that was really 0 ms. Any probe that can be compared with another must
+/// come from here.
+pub(crate) fn runtime_stamp() -> u128 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis()
 }

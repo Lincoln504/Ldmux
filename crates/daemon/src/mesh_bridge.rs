@@ -1254,11 +1254,7 @@ fn timing() -> bool {
     std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1")
 }
 
-/// Milliseconds since the first call, so two lines can be subtracted.
+/// The daemon's one timing clock, so a line here can be subtracted from a line in `mesh.rs`.
 fn stamp() -> u128 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_millis()
+    crate::mesh::runtime_stamp()
 }
