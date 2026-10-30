@@ -71,7 +71,7 @@ fun App() {
             // unavailable. One app, one Settings.
             var showSettings by remember { mutableStateOf(false) }
             if (mesh != null && !showApp) {
-                MeshTerminalScreen(mesh, onLeave = { showApp = true }, onOpenSettings = { showSettings = true })
+                MeshTerminalScreen(mesh, config, onLeave = { showApp = true }, onOpenSettings = { showSettings = true })
             } else {
                 AppContent(config, store, onOpenSettings = { showSettings = true })
             }

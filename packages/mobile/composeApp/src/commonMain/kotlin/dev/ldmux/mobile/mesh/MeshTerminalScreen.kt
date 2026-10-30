@@ -13,35 +13,21 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,13 +36,13 @@ import dev.ldmux.mobile.AccentBtn
 import dev.ldmux.mobile.Bg
 import dev.ldmux.mobile.Dim
 import dev.ldmux.mobile.Fg
-import dev.ldmux.mobile.InputOp
+import dev.ldmux.mobile.LdmuxConfig
 import dev.ldmux.mobile.LocalTouch
+import dev.ldmux.mobile.TerminalSurfaceFor
 import dev.ldmux.mobile.AppHeader
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
-import dev.ldmux.mobile.inputOpsFor
 import kotlin.time.TimeSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -65,9 +51,11 @@ import kotlinx.coroutines.launch
  * The mesh route's terminal. It is the **same chrome as the tailnet terminal**: the shared
  * [PortraitBar] (shell header with its arrows, menu, Esc/Tab/Home/End/PgUp/PgDn, the sticky
  * Ctrl/Alt/Shift latch, C/c, paste, Enter, the arrow pad, the keyboard toggle) drives a
- * [MeshTerminalHandle] where the tailnet drives a surface. What differs is the link, and the
+ * [MeshTerminalHandle] where the tailnet drives a surface, and the terminal itself is the
+ * tailnet's own surface ([TerminalSurfaceFor]) over a [MeshTerminalSource]: same painter, cursor,
+ * tap-to-move, selection and IME field, fed from committed screens instead of an attach stream. What differs is the link, and the
  * differences are stated where they bite and nowhere else:
- *  - plain-text rows, no colour, scrollback, mouse, selection or clipboard (the host's own
+ *  - plain-text rows, no colour, scrollback, mouse or clipboard writes (the host's own
  *    `absent` list, one line);
  *  - what you type waits a moment and leaves in one record (the line above the keys shows
  *    what is waiting, and how many records the hour has left);
@@ -78,7 +66,7 @@ import kotlinx.coroutines.launch
  * knows a radio parameter.
  */
 @Composable
-fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings: () -> Unit) {
+fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () -> Unit, onOpenSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
     // itself), so the caller needs a way to make it. A refused bind, a rotated token or an
@@ -95,6 +83,8 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings
     val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
+    val source = remember(conn) { MeshTerminalSource(handle) }
+    DisposableEffect(source) { onDispose { source.close() } }
     val pump = remember(conn) { MeshInputPump(batcher, { out ->
         when (out) {
             is MeshOut.Text -> conn.driver.input(out.bytes)
@@ -131,8 +121,13 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings
     var showPicker by remember(conn) { mutableStateOf(false) }
     var menuOpen by remember(conn) { mutableStateOf(false) }
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    val keyboard = LocalSoftwareKeyboardController.current
-    val focus = remember { FocusRequester() }
+    // The keyboard is portrait-only and is the user's, as on the tailnet route (AppContent).
+    var keyboardWanted by remember { mutableStateOf(true) }
+    var keyboardRequest by remember { mutableStateOf(0) }
+    val windowSize = LocalWindowInfo.current.containerSize
+    val portrait = windowSize.height >= windowSize.width
+    LaunchedEffect(portrait) { if (portrait) keyboardWanted = true }
+    val typing = portrait && keyboardWanted
 
     // safeDrawingPadding first: the mesh screen is drawn instead of AppContent's own Box,
     // so without it the status line sits under the clock and the nav bar eats the last row.
@@ -159,18 +154,20 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings
             if (live?.screen?.alternate == true) {
                 Text("A full-screen program is running: updates are large and slow here.", color = Warn, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp))
             }
-            Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp).verticalScroll(rememberScrollState())) {
-                val screen = live?.screen
-                for ((y, line) in screen?.lines.orEmpty().withIndex()) {
-                    // The cursor is the host's, from the last `Commit`: it changes at most once per
-                    // update, and only its own row is rebuilt, so it costs nothing between updates.
-                    if (screen != null && y == screen.cursorY) {
-                        Text(meshCursorRow(line, screen.cursorX), color = Fg, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
-                    } else {
-                        Text(line.ifEmpty { " " }, color = Fg, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
-                    }
-                }
-            }
+            // The terminal itself is the tailnet route's own surface (TerminalSurfaceFor): its painter,
+            // its cursor, tap-to-move, selection, and the IME field that takes typing at the prompt.
+            // This route only decides what feeds it. Painting on `Commit` only is the driver's rule,
+            // so the screen shown here is never half a screen.
+            LaunchedEffect(source, live?.screen) { live?.screen?.let(source::show) }
+            TerminalSurfaceFor(
+                source = source,
+                key = shells.current ?: "mesh",
+                config = config,
+                typing = typing,
+                active = true,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                keyboardRequest = keyboardRequest,
+            )
             if (showPicker) {
                 Column(Modifier.fillMaxWidth().background(dev.ldmux.mobile.Surface).padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (shells.entries.isEmpty()) Text("no shells listed yet", color = Dim, fontSize = 12.sp)
@@ -197,38 +194,21 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings
                 )
                 Text(meshBudgetLine(live?.budgetLeft).removePrefix("send budget: "), color = Dim, fontSize = 11.sp, maxLines = 1)
             }
-            // The soft keyboard's target. It is an input method's buffer, read as a delta (the same
-            // rule the tailnet surface uses), so a swipe, a paste and a backspace all arrive as what
-            // they were. Backspace on an empty buffer is not a text change: it is caught as a key.
-            var field by remember(conn) { mutableStateOf("") }
-            BasicTextField(
-                value = field,
-                onValueChange = { next ->
-                    for (op in inputOpsFor(field, next)) when (op) {
-                        is InputOp.Keys -> op.names.forEach(handle::sendKey)
-                        is InputOp.Text -> handle.sendText(op.value)
-                    }
-                    // A buffer that only grows is a buffer the IME keeps re-reading: start it fresh
-                    // once it is long, between changes, when nothing is mid-edit.
-                    field = if (next.length > 200) "" else next
-                },
-                textStyle = TextStyle(color = Bg, fontSize = 1.sp),
-                cursorBrush = SolidColor(Bg),
-                modifier = Modifier
-                    .fillMaxWidth().padding(horizontal = 8.dp)
-                    .focusRequester(focus)
-                    .onPreviewKeyEvent { e ->
-                        if (e.type == KeyEventType.KeyDown && e.key == Key.Backspace && field.isEmpty()) { handle.sendKey("BSpace"); true } else false
-                    },
-            )
             PortraitBar(
                 handle = handle,
                 pages = meshPages(shells),
                 pagerState = null,
                 scope = scope,
                 keyboardUp = imeUp,
+                // Decided by what is on screen, not by the flag, exactly as the tailnet bar does it: the
+                // back gesture puts the keypad away without telling us.
                 onToggleKeyboard = {
-                    if (imeUp) keyboard?.hide() else { focus.requestFocus(); keyboard?.show() }
+                    if (imeUp) {
+                        keyboardWanted = false
+                    } else {
+                        keyboardWanted = true
+                        keyboardRequest++
+                    }
                 },
                 onMenu = { menuOpen = true },
                 menuExpanded = menuOpen,
@@ -295,22 +275,6 @@ internal fun meshPages(shells: MeshShells): List<Session> {
     )
     if (shells.entries.isEmpty()) return listOf(page("", "shell"))
     return shells.entries.map { page(it.id, it.label.ifEmpty { it.id.take(8) }) }
-}
-
-/**
- * The cursor's row with a block drawn at column [x]: the character there inverted, or a space
- * past the end of the text. Rows are plain text, so a column is a character (a character outside
- * the basic plane is kept whole).
- */
-internal fun meshCursorRow(line: String, x: Int): AnnotatedString {
-    val col = x.coerceAtLeast(0)
-    val padded = if (col >= line.length) line.padEnd(col + 1) else line
-    val width = if (padded[col].isHighSurrogate() && col + 1 < padded.length) 2 else 1
-    return buildAnnotatedString {
-        append(padded.substring(0, col))
-        withStyle(SpanStyle(background = Fg, color = Bg)) { append(padded.substring(col, col + width)) }
-        append(padded.substring(col + width))
-    }
 }
 
 /** A wait with the seconds it has taken: proof the link is working, not the app hanging. */

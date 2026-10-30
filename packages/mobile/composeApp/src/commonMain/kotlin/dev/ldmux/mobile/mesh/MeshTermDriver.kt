@@ -66,6 +66,8 @@ data class MeshScreen(
     /** The shell has exited. */
     val dead: Boolean,
     val epoch: Int,
+    /** The host's column count from its `Profile`; the rows are [lines]. 0 until a profile arrived. */
+    val cols: Int = 0,
 )
 
 /**
@@ -573,6 +575,7 @@ class MeshTermDriver(
                         alternate = mirror.flags and MeshTerm.CommitFlags.ALTERNATE != 0,
                         dead = mirror.flags and MeshTerm.CommitFlags.DEAD != 0,
                         epoch = mirror.epoch,
+                        cols = mirror.profile?.cols ?: 0,
                     ),
                     absent = absentFeatures(unsupported),
                     budgetLeft = left,

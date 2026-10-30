@@ -193,32 +193,3 @@ class MeshInputTest {
         assertTrue(b.isEmpty)
     }
 }
-
-/** The block cursor: drawn where the host's last `Commit` said, and only on that row. */
-class MeshCursorRowTest {
-    private fun inverted(a: androidx.compose.ui.text.AnnotatedString) =
-        a.spanStyles.map { a.text.substring(it.start, it.end) }
-
-    @Test
-    fun `the character under the cursor is the one inverted`() {
-        val a = meshCursorRow("$ ls", 1)
-        assertEquals("$ ls", a.text)
-        assertEquals(listOf(" "), inverted(a))
-        assertEquals(listOf("l"), inverted(meshCursorRow("$ ls", 2)))
-        assertEquals(listOf("s"), inverted(meshCursorRow("$ ls", 3)))
-    }
-
-    @Test
-    fun `past the end of the text the cursor is a block on a space`() {
-        val a = meshCursorRow("$", 4)
-        assertEquals("$    ", a.text)
-        assertEquals(listOf(" "), inverted(a))
-        assertEquals(listOf(" "), inverted(meshCursorRow("", 0)))
-    }
-
-    @Test
-    fun `a character outside the basic plane is kept whole and a negative column is column zero`() {
-        assertEquals(listOf("\uD83D\uDE00"), inverted(meshCursorRow("\uD83D\uDE00x", 0)))
-        assertEquals(listOf("a"), inverted(meshCursorRow("ab", -3)))
-    }
-}

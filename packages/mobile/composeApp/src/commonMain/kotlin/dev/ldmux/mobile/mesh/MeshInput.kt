@@ -283,6 +283,9 @@ class MeshTerminalHandle(
 
     private fun pushText(text: String): Boolean = settle(batcher.appendText(text.encodeToByteArray(), clock()))
 
+    /** One named key with no sticky modifier applied or spent (a tap's cursor walk is not a keystroke). */
+    fun sendPlainKey(name: String): Boolean = pushKey(name)
+
     private fun pushKey(name: String): Boolean = settle(batcher.appendKey(name, clock()))
 
     private fun settle(ok: Boolean): Boolean {
