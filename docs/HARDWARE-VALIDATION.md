@@ -293,3 +293,53 @@ Until a free contact slot exists and the peer is added as a device contact, a
 two-radio validation cannot get past BIND. Check `Radio contacts` first and
 confirm the count against `max contacts: 350` in Device configuration before
 blaming the mesh.
+
+## First over-the-air session, end to end (2026-10-29)
+
+Path: LDMUX on the phone → MeshMore's gateway on the phone (BLE to the Heltec V4)
+→ LoRa 910.525 / 62.5 / SF7 / CR5 → Seeed Wio Tracker L1 Pro (USB) → host
+`meshmore_gateway` → `ldmuxd` (test instance, own state dir and socket).
+
+Result, from `ldmux mesh status`:
+
+```
+state    ready
+capacity 172 B per record
+budget   56 records left this hour
+radio    connected
+airtime  1.6 s this hour (gateway's own estimate)
+session  established
+  phone key  0e4e32f0… (pinned)
+  handshakes 1 accepted, 0 refused
+  records    6 sent, 1 retransmitted, 0 dropped, 3 pending
+  received   18 bytes
+```
+
+Host configuration, with no public key copied by hand:
+
+```
+meshmore_gateway --port /dev/ttyACM3 --listen 41731 \
+                 --peer-name HELTEC-BASE --state /tmp/gw.json
+LDMUX_MESH_STATE=/tmp/gw.json \
+LDMUX_MESH_PSK=<64 hex> ldmuxd
+```
+
+`--peer-name` resolved `HELTEC-BASE → 615f431f…` from the radio's own contact
+table. The state file then held the loopback address, the token, the daemon's radio
+key and the peer key, and `ldmuxd` read all four from it. Two settings in total.
+
+What had to be fixed before it worked, each found on hardware:
+
+- **A stale stored gateway port.** The gateway falls back to an ephemeral port when
+  its preferred one is taken, so a stored pairing can point at nothing while
+  MeshMore is healthy. The failure line now names the address and says re-pair
+  instead of accusing MeshMore of not running.
+- **An old session key.** The phone still held `mk=9f8d6852…` after the daemon's
+  state dir was recreated; the host logged `handshakes 0 accepted, 1 refused`
+  because the responder's key had changed. Re-pairing from the live daemon fixed it,
+  and the refusal was visible in `mesh status` rather than silent.
+- **`leave` rewriting the saved route.** Leaving the mesh screen set the route back
+  to tailnet, so the next launch showed "unreachable" and the mesh route looked
+  lost. Leaving is a view change now.
+- **Settings clipped.** The dialog's column was unbounded and drew under the button
+  row; the scroll area is bounded now, and the two scan labels no longer wrap and clip.
