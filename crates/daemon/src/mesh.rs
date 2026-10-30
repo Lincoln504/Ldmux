@@ -599,6 +599,7 @@ async fn session(
             .lock()
             .map(|mut ex| ex.outbound.drain(..).collect())
             .unwrap_or_default();
+        let queued_n = queued.len();
         for (shell, bytes) in queued {
             if let Err(e) = h.send(shell, &bytes) {
                 set(snapshot, |s| {
@@ -613,7 +614,16 @@ async fn session(
             records_left: budget.unwrap_or(0),
             l2_slots: CREDIT_WINDOW.saturating_sub(awaiting),
         };
-        for record in h.poll(now_ms, limits) {
+        let polled = h.poll(now_ms, limits);
+        if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && queued_n > 0 {
+            eprintln!(
+                "ldmuxd: mesh timing: queued {} -> polled {} at {now_ms} ms (awaiting {awaiting}, budget {budget:?}, l2_slots {})",
+                queued_n,
+                polled.len(),
+                CREDIT_WINDOW.saturating_sub(awaiting),
+            );
+        }
+        for record in polled {
             client.send_record(seq, &record).await?;
             seq = seq.wrapping_add(1);
             awaiting = awaiting.saturating_add(1);

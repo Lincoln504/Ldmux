@@ -188,6 +188,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
         }
         if ok {
             flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
+            if timing() {
+                eprintln!("ldmuxd: mesh timing: reply queued at {:?}", stamp());
+            }
         }
         ok
     }
@@ -230,7 +233,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
 
         let ids: Vec<u8> = self.shells.keys().copied().collect();
         for shell in ids {
-            if self.link.pending() > 0 {
+            // **Keep the pipe full, do not build a backlog.** This used to stop looking at the
+            // screen while ANY record was unacked, which cost a whole round trip per update: the
+            // echo you were waiting for could not even be *built* until the previous record's ack
+            // came back, and on this link an ack only rides on the phone's next record or its pure
+            // ack timer. Measured on the device as a 16 s gap between a keystroke and its echo.
+            // The bound that belongs here is the window: past it the queue would only grow.
+            if self.link.pending() >= PENDING_LIMIT {
                 break;
             }
             let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
@@ -332,6 +341,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     return;
                 };
                 self.stats.inputs += 1;
+                // Timing probe, off unless asked for (`LDMUX_MESH_TIMING=1`): the phone's own
+                // screen is a native surface with no text to poll, so the only honest way to
+                // measure a keystroke's turnaround is from inside the host. This marks the
+                // moment input arrived; `reply` marks when its echo was queued.
+                if timing() {
+                    eprintln!("ldmuxd: mesh timing: input {} bytes at {:?}", bytes.len(), stamp());
+                }
                 let _ = self.host.input(&session, &bytes).await;
             }
             Message::Key(names) => {
@@ -484,6 +500,10 @@ impl Host for DaemonHost {
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
 /// bound does not care: an update waits for an empty queue regardless.
 pub const TICK_MS: u64 = 50;
+
+/// How many unacked records may be in flight before the bridge stops looking at the screen. It is
+/// the session's own window, so the queue can never grow past what the link can carry.
+pub const PENDING_LIMIT: usize = 8;
 
 /// Run the bridge for the life of the process.
 pub async fn run<H: Host, L: Link>(mut bridge: Bridge<H, L>) {
@@ -1224,4 +1244,19 @@ mod tests {
         b.tick().await;
         assert!(!b.attached(1));
     }
+}
+
+/// `LDMUX_MESH_TIMING=1` turns on the two timing lines in this file. Off by default: a log line
+/// per keystroke is noise on a link that carries a few dozen records an hour.
+fn timing() -> bool {
+    std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1")
+}
+
+/// Milliseconds since the first call, so two lines can be subtracted.
+fn stamp() -> u128 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
 }
