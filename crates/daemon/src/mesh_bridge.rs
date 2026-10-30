@@ -695,8 +695,8 @@ mod tests {
         let new = link.0.lock().unwrap().sent[sent_before..].to_vec();
         assert_eq!(
             new.len(),
-            2,
-            "one Rows and one Commit: no Profile, no full screen"
+            1,
+            "one record carrying the Rows and its Commit: no Profile, no full screen"
         );
     }
 
@@ -759,8 +759,8 @@ mod tests {
         b.tick().await;
         assert_eq!(
             link.0.lock().unwrap().sent.len() - n,
-            2,
-            "one Rows, one Commit"
+            1,
+            "one record: the Rows and its Commit share it"
         );
         assert_eq!(phone_view(&link, 1).lines, ["tick 29", "x"]);
     }

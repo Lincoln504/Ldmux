@@ -39,6 +39,13 @@ sealed interface MeshOut {
  *  - **after [IDLE_MS] of quiet**, so typing without pressing Enter is never silent;
  *  - **after [MAX_HOLD_MS]** from the first waiting byte, so continuous typing still goes out.
  *
+ * Both windows are close together on purpose. The old pair (700 / 2500) made the link feel
+ * inconsistent rather than slow: a pause of a moment sent one character in a frame of its own,
+ * while fast typing accumulated for seconds. A tight ceiling bounds how stale the pane can be,
+ * and a short idle joins the last few characters into the same frame. The floor is physical —
+ * one frame each way is about 48 ms at 500 kHz SF5 — so the point is to be *regular*, not to
+ * chase zero.
+ *
  * A backspace that meets an ordinary printable character still waiting here removes it instead
  * of being sent: a typo fixed before it left costs nothing on the air.
  *
@@ -178,9 +185,9 @@ class MeshInputBatcher(
 
     companion object {
         /** Quiet that means "done typing for now": about one round trip at the default preset. */
-        const val IDLE_MS = 60L
+        const val IDLE_MS = 100L
         /** The longest a byte waits, however steadily the user types. */
-        const val MAX_HOLD_MS = 600L
+        const val MAX_HOLD_MS = 200L
         /** More than this unsent is refused rather than queued for an hour. */
         const val CAPACITY = 1_024
         private const val CR: Byte = 0x0D

@@ -20,12 +20,15 @@ object MeshTerm {
      * version the phone attached with and accepts [MIN_VERSION]..[VERSION]. Version 3 adds
      * `Resize`: the phone's grid, so the host fits its pty to it as it does for a tailnet client.
      */
-    const val VERSION = 3
+    const val VERSION = 4
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
     /** The first version that has `Resize`. */
     const val RESIZE_VERSION = 3
+
+    /** First version whose records may carry several messages (the host packs them). */
+    const val STREAM_VERSION = 4
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
     const val MAX_BODY = 300

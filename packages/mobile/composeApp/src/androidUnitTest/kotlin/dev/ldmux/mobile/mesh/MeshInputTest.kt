@@ -17,12 +17,16 @@ class MeshInputTest {
     @Test
     fun `typing waits for quiet, then leaves as one piece`() {
         val b = MeshInputBatcher()
-        b.appendText(bytes("l"), 0); b.appendText(bytes("s"), 100); b.appendText(bytes(" -l"), 200)
-        // Relative to the idle window on purpose: the window is a tunable (it is 60 ms for typing
-        // on a private channel), so a test that hard-coded 300 ms was asserting the tuning rather
-        // than the rule.
-        assertNull(b.peek(200 + MeshInputBatcher.IDLE_MS - 1), "still typing")
-        assertEquals(text("ls -l"), b.peek(200 + MeshInputBatcher.IDLE_MS))
+        val idle = MeshInputBatcher.IDLE_MS
+        val hold = MeshInputBatcher.MAX_HOLD_MS
+        // Both windows are tunables, so the test is written against them and never against a
+        // literal millisecond count: the rule is "quiet for the idle window, or held for the hold
+        // window". The keys are spread so the hold window cannot fire before the idle one.
+        b.appendText(bytes("l"), 0)
+        b.appendText(bytes("s"), hold / 4)
+        b.appendText(bytes(" -l"), hold / 2)
+        assertNull(b.peek(hold / 2 + idle - 1), "still typing")
+        assertEquals(text("ls -l"), b.peek(hold / 2 + idle))
     }
 
     @Test
