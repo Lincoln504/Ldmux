@@ -260,7 +260,24 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings
                     }
                     MeshTermView.NoShells -> AccentBtn("ask again") { scope.launch { conn.driver.refresh() } }
                     is MeshTermView.LinkDown, is MeshTermView.HostClosed -> AccentBtn("reconnect") { attempt += 1 }
-                    else -> {}
+                    else -> {
+                        // A wait is not nothing. This branch used to draw an empty screen, which is
+                        // why the route looked broken while it was working: a handshake on this link
+                        // takes seconds to minutes and the phone said nothing at all. One line, with
+                        // the seconds it has been waiting, is the whole difference between "working"
+                        // and "dead", and a reconnect is offered the moment it is stuck.
+                        val waiting = when (view) {
+                            MeshTermView.Idle -> "starting"
+                            MeshTermView.Handshaking -> "handshaking"
+                            MeshTermView.ProfileMissing -> "the host has not described a terminal yet"
+                            MeshTermView.Listing -> "asking the host which shells are running"
+                            else -> null
+                        }
+                        if (waiting != null) {
+                            WaitingLine(waiting, view::class.simpleName)
+                            AccentBtn("reconnect") { attempt += 1 }
+                        }
+                    }
                 }
             }
         }
@@ -294,4 +311,21 @@ internal fun meshCursorRow(line: String, x: Int): AnnotatedString {
         withStyle(SpanStyle(background = Fg, color = Bg)) { append(padded.substring(col, col + width)) }
         append(padded.substring(col + width))
     }
+}
+
+/** A wait with the seconds it has taken: proof the link is working, not the app hanging. */
+@Composable
+private fun WaitingLine(text: String, key: String?) {
+    var secs by remember(key) { mutableStateOf(0L) }
+    LaunchedEffect(key) {
+        while (true) {
+            delay(1000)
+            secs += 1
+        }
+    }
+    // Past a minute with no answer, say so. The handshake's own bound is five minutes, and the
+    // difference between "still trying" and "nothing is out there" is the one thing the phone can
+    // tell the user before that bound expires.
+    val suffix = if (secs >= 60) " · nothing back yet" else ""
+    Text("$text · ${secs} s$suffix", color = Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
 }
