@@ -153,6 +153,14 @@ class MeshTermDriver(
 
     private var handshake: HandshakePort? = null
     private var handshakeSince = 0L
+
+    /**
+     * When the host last said anything. Silence is not failure on a shell that has nothing to
+     * report, so this is only consulted while something is unacked: a record the host never
+     * acknowledges is the only evidence this route has that the far end is gone, and without
+     * this a dead radio looked like a frozen screen.
+     */
+    private var lastInboundAt = 0L
     private var session: SessionPort? = null
     private val decoder = TermDecoder()
     private var mirror = RowMirror()
@@ -250,7 +258,10 @@ class MeshTermDriver(
             Received.Quiet -> {}
             is Received.Rejected -> rejectedRecords++
             Received.PeerClosed -> { terminalView = MeshTermView.HostClosed(null) }
-            is Received.Data -> for (c in r.chunks) if (c.shell == SHELL) feedStream(c.bytes)
+            is Received.Data -> {
+                lastInboundAt = clock()
+                for (c in r.chunks) if (c.shell == SHELL) feedStream(c.bytes)
+            }
         }
         pump()
         publish()
@@ -262,6 +273,14 @@ class MeshTermDriver(
         if (s != null) {
             val h = s.health(clock())
             if (h.failed && terminalView == null) terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+            // **A record the host never answers is a dead link, and the screen must say so.** With
+            // nothing outstanding an idle shell is silent by design, so silence alone proves
+            // nothing; with something outstanding, a minute of nothing back means the radio, the
+            // far end, or both are gone, and the terminal would otherwise sit frozen on the last
+            // screen with the user's typing going nowhere.
+            if (terminalView == null && h.pending > 0 && clock() - lastInboundAt > SILENCE_FAILURE_MS) {
+                terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+            }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
             pump()
         } else if (handshake != null && clock() - handshakeSince > handshakeTimeoutMs) {
@@ -630,3 +649,10 @@ class MeshTermDriver(
         const val IDLE_TICK_MS = 30_000L
     }
 }
+
+/**
+ * How long an unanswered record may wait before this route calls the link dead. The ARQ gives up
+ * on its own after its attempts; this is the shorter, user-visible bound for the case the ARQ
+ * cannot see: a radio that is off the air, where nothing ever comes back at all.
+ */
+private const val SILENCE_FAILURE_MS = 20_000L
