@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    DecodeError, Decoder, Differ, Message, Screen, VERSION, closed, session_pages,
+    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, Screen, VERSION, closed,
+    session_pages,
 };
 
 /// The session as the bridge sees it.
@@ -53,6 +54,10 @@ pub trait Host {
     }
     async fn screen(&mut self, id: &str) -> Result<Screen, String>;
     async fn input(&mut self, id: &str, bytes: &[u8]) -> Result<(), String>;
+    /// Named keys for the shell, encoded for **that pane's own mode** (cursor-key mode, Kitty
+    /// flags) by the daemon's one key table. The bridge never turns a name into bytes itself:
+    /// a second table is a second behaviour, and this one cannot see the pane.
+    async fn keys(&mut self, id: &str, names: &[String]) -> Result<(), String>;
 }
 
 impl Link for crate::mesh::MeshRuntime {
@@ -79,6 +84,7 @@ pub struct BridgeStats {
     pub updates: u32,
     pub messages_sent: u32,
     pub inputs: u32,
+    pub keys: u32,
     pub malformed: u32,
     pub refused_sends: u32,
 }
@@ -86,6 +92,9 @@ pub struct BridgeStats {
 struct Attached {
     session: String,
     differ: Differ,
+    /// The profile version the phone attached with. A phone on version 1 does not send `Key`,
+    /// and one that does is not obeyed: it did not ask for the message's meaning.
+    version: u8,
 }
 
 pub struct Bridge<H, L> {
@@ -219,7 +228,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
     async fn handle(&mut self, shell: u8, m: Message) {
         match m {
             Message::Attach { version, selector } => {
-                if version != VERSION {
+                if !(MIN_VERSION..=VERSION).contains(&version) {
                     self.reply(
                         shell,
                         &[Message::Closed {
@@ -247,7 +256,10 @@ impl<H: Host, L: Link> Bridge<H, L> {
                             shell,
                             Attached {
                                 session: (*one).clone(),
-                                differ: Differ::new(),
+                                // Answered in the version asked for, naming the shell the host
+                                // chose, so a phone that sent an empty selector learns which.
+                                differ: Differ::for_attach(version, one),
+                                version,
                             },
                         );
                     }
@@ -271,6 +283,18 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 };
                 self.stats.inputs += 1;
                 let _ = self.host.input(&session, &bytes).await;
+            }
+            Message::Key(names) => {
+                let Some(a) = self.shells.get(&shell) else {
+                    return;
+                };
+                if a.version < KEY_VERSION {
+                    return;
+                }
+                let session = a.session.clone();
+                self.stats.keys += 1;
+                // A name the table refuses is the daemon's refusal: nothing reaches the shell.
+                let _ = self.host.keys(&session, &names).await;
             }
             Message::Resync => {
                 if let Some(a) = self.shells.get_mut(&shell) {
@@ -363,6 +387,18 @@ impl Host for DaemonHost {
             .await
             .map(|_| ())
     }
+
+    /// The same `send` the CLI and the tailnet clients use: it reads the pane's cursor-key mode
+    /// and Kitty flags from the keeper and encodes each name with `key_name_to_bytes_in_mode`,
+    /// refusing a name it does not know instead of typing it into the shell.
+    async fn keys(&mut self, id: &str, names: &[String]) -> Result<(), String> {
+        self.0
+            .lock()
+            .await
+            .handle("send", serde_json::json!({ "id": id, "keys": names }))
+            .await
+            .map(|_| ())
+    }
 }
 
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
@@ -424,6 +460,7 @@ mod tests {
         running: Vec<String>,
         screens: HashMap<String, Screen>,
         typed: Vec<(String, Vec<u8>)>,
+        keyed: Vec<(String, Vec<String>)>,
         fail_screen: bool,
     }
     #[derive(Clone, Default)]
@@ -452,6 +489,14 @@ mod tests {
                 .unwrap()
                 .typed
                 .push((id.to_owned(), bytes.to_vec()));
+            Ok(())
+        }
+        async fn keys(&mut self, id: &str, names: &[String]) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .keyed
+                .push((id.to_owned(), names.to_vec()));
             Ok(())
         }
     }
@@ -776,6 +821,92 @@ mod tests {
         );
         b.tick().await;
         assert!(b.attached(4));
+    }
+
+    #[tokio::test]
+    async fn a_key_message_reaches_the_attached_shell_as_names_never_as_bytes() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Key(vec!["Up".into(), "S-Tab".into()]));
+        b.tick().await;
+        let h = host.0.lock().unwrap();
+        assert_eq!(
+            h.keyed,
+            vec![(
+                "abcd-1".to_owned(),
+                vec!["Up".to_owned(), "S-Tab".to_owned()]
+            )],
+            "the host's own key table does the encoding, per the pane's mode"
+        );
+        assert!(h.typed.is_empty(), "no bytes were typed by the bridge");
+        assert_eq!(b.stats.keys, 1);
+    }
+
+    #[tokio::test]
+    async fn a_key_before_attach_or_from_a_version_one_phone_is_ignored() {
+        let (mut b, host, link) = setup();
+        phone_says(&link, 1, &Message::Key(vec!["Enter".into()]));
+        b.tick().await;
+        assert!(host.0.lock().unwrap().keyed.is_empty(), "not attached");
+        phone_says(
+            &link,
+            2,
+            &Message::Attach {
+                version: 1,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 2, &Message::Key(vec!["Enter".into()]));
+        b.tick().await;
+        assert!(
+            host.0.lock().unwrap().keyed.is_empty(),
+            "a phone that attached as version 1 did not ask for Key"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_profile_names_the_attached_shell_in_the_version_asked_for() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().running = vec!["abcd-1".into()];
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        phone_says(
+            &link,
+            2,
+            &Message::Attach {
+                version: 1,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        let sent = link.0.lock().unwrap().sent.clone();
+        let first = |shell: u8| {
+            let (_, bytes) = sent.iter().find(|(s, _)| *s == shell).unwrap();
+            Decoder::new().push(bytes).unwrap().remove(0).unwrap()
+        };
+        // An empty selector: the host picked the shell, and says which.
+        assert!(
+            matches!(first(1), Message::Profile { version, shell, .. } if version == VERSION && shell == "abcd-1")
+        );
+        // A version-1 phone gets the five-byte Profile it can decode, with no shell.
+        assert!(matches!(first(2), Message::Profile { version: 1, shell, .. } if shell.is_empty()));
+        let (_, bytes) = sent.iter().find(|(s, _)| *s == 2).unwrap();
+        assert_eq!(bytes.len(), 7, "tag, len, and a five-byte body");
     }
 
     #[tokio::test]

@@ -28,7 +28,8 @@
 //! | 0x03 | phone→host | `Resync` | empty: "send me the whole screen again" |
 //! | 0x04 | phone→host | `Detach` | empty |
 //! | 0x05 | phone→host | `List` | empty: "which shells are running?" (ADR-0025, 2026-10-29 addition) |
-//! | 0x81 | host→phone | `Profile` | `version u8`, `cols u8`, `rows u8`, `unsupported u16 LE` |
+//! | 0x06 | phone→host | `Key` | 1..=[`MAX_KEYS`] key names (`Up`, `S-Tab`, `C-c`), single-space separated, at most [`MAX_INPUT`] bytes (version 2) |
+//! | 0x81 | host→phone | `Profile` | `version u8`, `cols u8`, `rows u8`, `unsupported u16 LE`, and from version 2 `shell_len u8 \| shell id` |
 //! | 0x82 | host→phone | `Rows` | `epoch u16 LE`, `flags u8` (bit 0 = full), then patches |
 //! | 0x83 | host→phone | `Commit` | `epoch u16 LE`, `cursor_x u8`, `cursor_y u8`, `flags u8` |
 //! | 0x84 | host→phone | `Closed` | `reason u8` |
@@ -46,7 +47,19 @@
 use std::collections::VecDeque;
 
 /// Profile version carried in `Attach` and `Profile`.
-pub const VERSION: u8 = 1;
+///
+/// Version 2 adds the `Key` message and names the attached shell in `Profile`. A host answers
+/// in the version the phone attached with (it accepts [`MIN_VERSION`]..=[`VERSION`]), so a
+/// version-1 phone still gets a version-1 `Profile` it can decode, and a phone that attaches
+/// with 2 against a version-1 host is told `closed::VERSION` rather than left sending a message
+/// that host would skip.
+pub const VERSION: u8 = 2;
+/// The oldest profile version a host still speaks.
+pub const MIN_VERSION: u8 = 1;
+/// The first version that has `Key` and the shell id in `Profile`.
+pub const KEY_VERSION: u8 = 2;
+/// Most key names in one `Key` message.
+pub const MAX_KEYS: usize = 16;
 
 /// A message body is at most this long.
 pub const MAX_BODY: usize = 300;
@@ -139,6 +152,9 @@ pub enum Message {
         cols: u8,
         rows: u8,
         unsupported: u16,
+        /// The id of the attached shell (version 2; empty in version 1). After an `Attach` with
+        /// an empty selector the host chose the shell, and this is how the phone learns which.
+        shell: String,
     },
     Rows {
         epoch: u16,
@@ -156,6 +172,10 @@ pub enum Message {
     },
     /// Phone asks which shells are running.
     List,
+    /// Named keys for the shell (version 2). The host encodes them for the pane's own cursor-key
+    /// and keyboard mode, exactly as it does for a tailnet client, so the phone carries no key
+    /// table and cannot send an arrow the program will not read.
+    Key(Vec<String>),
     /// One page of the answer. `last` is set on the final page; an empty list is one page with
     /// `last` set and no entries.
     Sessions {
@@ -165,6 +185,7 @@ pub enum Message {
 }
 
 const T_LIST: u8 = 0x05;
+const T_KEY: u8 = 0x06;
 const T_SESSIONS: u8 = 0x85;
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
@@ -191,6 +212,12 @@ pub enum DecodeError {
     Overflow,
     /// A known tag whose body does not parse. The message is dropped, the stream continues.
     Malformed(u8),
+}
+
+/// A key name is printable ASCII with no space: the space is the separator, and anything else
+/// is not a name the host's key table could know.
+fn valid_key_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
 fn put_len(out: &mut Vec<u8>, mut n: usize) {
@@ -235,9 +262,17 @@ impl Message {
                 cols,
                 rows,
                 unsupported,
+                shell,
             } => {
                 body.extend_from_slice(&[*version, *cols, *rows]);
                 body.extend_from_slice(&unsupported.to_le_bytes());
+                if *version >= KEY_VERSION {
+                    if shell.len() > MAX_SELECTOR {
+                        return Err(EncodeError::TooLong);
+                    }
+                    body.push(shell.len() as u8);
+                    body.extend_from_slice(shell.as_bytes());
+                }
                 T_PROFILE
             }
             Self::Rows {
@@ -276,6 +311,19 @@ impl Message {
                 T_CLOSED
             }
             Self::List => T_LIST,
+            Self::Key(names) => {
+                if names.is_empty() {
+                    return Err(EncodeError::Empty);
+                }
+                if names.len() > MAX_KEYS || names.iter().any(|n| !valid_key_name(n)) {
+                    return Err(EncodeError::TooLong);
+                }
+                body.extend_from_slice(names.join(" ").as_bytes());
+                if body.len() > MAX_INPUT {
+                    return Err(EncodeError::TooLong);
+                }
+                T_KEY
+            }
             Self::Sessions { last, entries } => {
                 body.push(u8::from(*last));
                 for e in entries {
@@ -321,12 +369,31 @@ impl Message {
             }
             T_RESYNC if body.is_empty() => Self::Resync,
             T_DETACH if body.is_empty() => Self::Detach,
+            // Version 1 is exactly five bytes. A longer body is a version-2 body and must carry its
+            // shell id: an old five-byte `Profile` is never an error.
             T_PROFILE if body.len() == 5 => Self::Profile {
                 version: body[0],
                 cols: body[1],
                 rows: body[2],
                 unsupported: u16::from_le_bytes([body[3], body[4]]),
+                shell: String::new(),
             },
+            T_PROFILE if body.len() > 5 && body[0] >= KEY_VERSION => {
+                let n = usize::from(body[5]);
+                if n > MAX_SELECTOR || body.len() != 6 + n {
+                    return Err(bad);
+                }
+                let shell = std::str::from_utf8(&body[6..])
+                    .map_err(|_| bad.clone())?
+                    .to_owned();
+                Self::Profile {
+                    version: body[0],
+                    cols: body[1],
+                    rows: body[2],
+                    unsupported: u16::from_le_bytes([body[3], body[4]]),
+                    shell,
+                }
+            }
             T_ROWS => {
                 if body.len() < 3 {
                     return Err(bad);
@@ -367,6 +434,17 @@ impl Message {
             },
             T_CLOSED if body.len() == 1 => Self::Closed { reason: body[0] },
             T_LIST if body.is_empty() => Self::List,
+            T_KEY => {
+                if body.is_empty() || body.len() > MAX_INPUT {
+                    return Err(bad);
+                }
+                let text = std::str::from_utf8(body).map_err(|_| bad.clone())?;
+                let names: Vec<String> = text.split(' ').map(str::to_owned).collect();
+                if names.len() > MAX_KEYS || names.iter().any(|n| !valid_key_name(n)) {
+                    return Err(bad);
+                }
+                Self::Key(names)
+            }
             T_SESSIONS => {
                 let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
                 let mut entries = Vec::new();
@@ -605,16 +683,42 @@ fn segments(text: &str) -> Vec<&str> {
 /// will hold. An update is the difference from that, computed only when the caller asks (the
 /// bridge asks only when nothing is queued), so a phone that was away converges by one diff
 /// against the present, never by replaying the changes in between.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Differ {
     sent: Option<Screen>,
     epoch: u16,
+    /// The profile version the phone attached with: its `Profile` is written in that version.
+    version: u8,
+    /// The attached shell, named in a version-2 `Profile`.
+    shell: String,
+}
+
+impl Default for Differ {
+    fn default() -> Self {
+        Self {
+            sent: None,
+            epoch: 0,
+            version: VERSION,
+            shell: String::new(),
+        }
+    }
 }
 
 impl Differ {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A differ for one attach: `version` is what the phone asked for and `shell` is the shell
+    /// it is attached to, so the first update tells it which.
+    #[must_use]
+    pub fn for_attach(version: u8, shell: &str) -> Self {
+        Self {
+            version,
+            shell: shell.to_owned(),
+            ..Self::default()
+        }
     }
 
     /// Forget what the phone holds, so the next update is a full screen (`Resync`, or a new
@@ -634,10 +738,11 @@ impl Differ {
         let full = geometry_changed;
         if geometry_changed {
             out.push(Message::Profile {
-                version: VERSION,
+                version: self.version,
                 cols: screen.cols,
                 rows: screen.rows,
                 unsupported: unsupported::ALL_V1,
+                shell: self.shell.clone(),
             });
         }
         let mut flat: Vec<Patch> = Vec::new();
@@ -713,6 +818,8 @@ impl Differ {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Mirror {
     pub profile: Option<(u8, u8, u16)>,
+    /// The shell the host named in its `Profile` (empty from a version-1 host).
+    pub shell: String,
     pub lines: Vec<String>,
     pub cursor: (u8, u8),
     pub flags: u8,
@@ -737,9 +844,11 @@ impl Mirror {
                 cols,
                 rows,
                 unsupported,
+                shell,
                 ..
             } => {
                 self.profile = Some((*cols, *rows, *unsupported));
+                self.shell = shell.clone();
                 self.lines = vec![String::new(); usize::from(*rows)];
                 false
             }
@@ -850,7 +959,21 @@ mod tests {
             cols: 80,
             rows: 24,
             unsupported: unsupported::ALL_V1,
+            shell: String::new(),
         });
+        roundtrip(&Message::Profile {
+            version: 2,
+            cols: 80,
+            rows: 24,
+            unsupported: unsupported::ALL_V1,
+            shell: "ab12-1".into(),
+        });
+        roundtrip(&Message::Key(vec!["Up".into()]));
+        roundtrip(&Message::Key(vec![
+            "C-c".into(),
+            "M-C-S-Left".into(),
+            "Enter".into(),
+        ]));
         roundtrip(&Message::Rows {
             epoch: 0xBEEF,
             full: true,
@@ -999,6 +1122,126 @@ mod tests {
         );
     }
 
+    // ---- version 2: `Key` and the shell id in `Profile` --------------------------------------
+
+    #[test]
+    fn key_names_are_one_space_separated_body() {
+        assert_eq!(
+            Message::Key(vec!["Up".into(), "C-c".into()])
+                .encode()
+                .unwrap(),
+            [&[0x06, 0x06][..], b"Up C-c"].concat()
+        );
+    }
+
+    #[test]
+    fn a_key_with_a_space_too_many_names_or_too_long_a_body_is_refused() {
+        // Encode refuses all three; a space inside a name would split into two names on the host.
+        assert_eq!(
+            Message::Key(vec!["C c".into()]).encode(),
+            Err(EncodeError::TooLong)
+        );
+        assert_eq!(Message::Key(Vec::new()).encode(), Err(EncodeError::Empty));
+        assert_eq!(
+            Message::Key(vec!["Up".into(); MAX_KEYS + 1]).encode(),
+            Err(EncodeError::TooLong)
+        );
+        assert_eq!(
+            Message::Key(vec!["M-C-S-Left".into(); 10]).encode(),
+            Err(EncodeError::TooLong),
+            "ten of eleven bytes plus separators is over the 96-byte cap"
+        );
+        // Decode refuses the same, dropping only that message.
+        let mut d = Decoder::new();
+        for body in [&b"C c "[..], b"", b"Up  Down", b"Up\x01"] {
+            let mut wire = vec![0x06, body.len() as u8];
+            wire.extend_from_slice(body);
+            let out = d.push(&wire).unwrap();
+            assert_eq!(out, vec![Err(DecodeError::Malformed(0x06))], "{body:?}");
+        }
+        let many = vec!["a"; MAX_KEYS + 1].join(" ");
+        let mut wire = vec![0x06, many.len() as u8];
+        wire.extend_from_slice(many.as_bytes());
+        assert_eq!(
+            d.push(&wire).unwrap(),
+            vec![Err(DecodeError::Malformed(0x06))]
+        );
+        let long = vec!["x"; 60].join(" ");
+        let mut wire = vec![0x06];
+        put_len(&mut wire, long.len());
+        wire.extend_from_slice(long.as_bytes());
+        assert_eq!(
+            d.push(&wire).unwrap(),
+            vec![Err(DecodeError::Malformed(0x06))]
+        );
+    }
+
+    #[test]
+    fn a_version_one_profile_decodes_with_no_shell_and_version_two_carries_it() {
+        let mut d = Decoder::new();
+        // The five-byte body a version-1 host writes: still decodes, never an error.
+        let v1 = d.push(&[0x81, 0x05, 0x01, 0x50, 0x18, 0x7F, 0x00]).unwrap();
+        assert_eq!(
+            v1,
+            vec![Ok(Message::Profile {
+                version: 1,
+                cols: 80,
+                rows: 24,
+                unsupported: 0x7F,
+                shell: String::new(),
+            })]
+        );
+        let v2 = Message::Profile {
+            version: 2,
+            cols: 80,
+            rows: 24,
+            unsupported: 0x7F,
+            shell: "ab12-1".into(),
+        };
+        let wire = v2.encode().unwrap();
+        assert_eq!(
+            &wire[..8],
+            &[0x81, 0x0C, 0x02, 0x50, 0x18, 0x7F, 0x00, 0x06]
+        );
+        assert_eq!(d.push(&wire).unwrap(), vec![Ok(v2)]);
+        // A version-1 Profile never carries a shell on the wire, whatever the struct holds.
+        let v1_with_shell = Message::Profile {
+            version: 1,
+            cols: 80,
+            rows: 24,
+            unsupported: 0x7F,
+            shell: "ignored".into(),
+        };
+        assert_eq!(v1_with_shell.encode().unwrap().len(), 7);
+        // A version-2 body whose shell length lies is malformed, not skipped silently.
+        assert_eq!(
+            d.push(&[0x81, 0x07, 0x02, 0x50, 0x18, 0x7F, 0x00, 0x09, b'a'])
+                .unwrap(),
+            vec![Err(DecodeError::Malformed(0x81))]
+        );
+    }
+
+    #[test]
+    fn a_differ_names_its_shell_in_the_attach_version() {
+        let screen = Screen {
+            cols: 80,
+            rows: 2,
+            lines: vec!["$".into(), String::new()],
+            ..Screen::default()
+        };
+        let v2 = Differ::for_attach(2, "ab12-1").update(&screen);
+        assert!(matches!(&v2[0], Message::Profile { version: 2, shell, .. } if shell == "ab12-1"));
+        let v1 = Differ::for_attach(1, "ab12-1").update(&screen);
+        assert!(matches!(&v1[0], Message::Profile { version: 1, .. }));
+        // What a version-1 phone receives is exactly the five-byte body it can decode.
+        assert_eq!(v1[0].encode().unwrap().len(), 7);
+        let mut m = Mirror::new();
+        for msg in &v2 {
+            m.apply(msg);
+        }
+        assert_eq!(m.shell, "ab12-1");
+    }
+
     #[test]
     fn exact_bytes_are_pinned() {
         // These are the vectors the Kotlin port must reproduce.
@@ -1008,7 +1251,8 @@ mod tests {
                 version: 1,
                 cols: 80,
                 rows: 24,
-                unsupported: 0x007F
+                unsupported: 0x007F,
+                shell: String::new(),
             }
             .encode()
             .unwrap(),
@@ -1053,6 +1297,7 @@ mod tests {
                 cols: 80,
                 rows: 2,
                 unsupported: 0x7f,
+                shell: String::new(),
             },
             Message::Rows {
                 epoch: 1,
@@ -1319,6 +1564,7 @@ mod tests {
             cols: 10,
             rows: 1,
             unsupported: 0,
+            shell: String::new(),
         });
         m.apply(&Message::Rows {
             epoch: 5,
@@ -1382,8 +1628,10 @@ mod tests {
                 cols,
                 rows,
                 unsupported,
+                shell,
             } => json!({
-                "kind":"profile","version":version,"cols":cols,"rows":rows,"unsupported":unsupported}),
+                "kind":"profile","version":version,"cols":cols,"rows":rows,"unsupported":unsupported,"shell":shell}),
+            Message::Key(names) => json!({"kind":"key","names":names}),
             Message::Rows {
                 epoch,
                 full,
@@ -1426,7 +1674,17 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 unsupported: unsupported::ALL_V1,
+                shell: String::new(),
             },
+            Message::Profile {
+                version: 2,
+                cols: 80,
+                rows: 24,
+                unsupported: unsupported::ALL_V1,
+                shell: "ab12-1".into(),
+            },
+            Message::Key(vec!["Up".into()]),
+            Message::Key(vec!["C-c".into(), "S-Tab".into()]),
             Message::Rows {
                 epoch: 1,
                 full: true,
@@ -1560,7 +1818,7 @@ mod tests {
             "//": "Generated by crates/protocol/src/mesh_term.rs (fixture_value). Do not edit by hand: LDMUX_REGEN_FIXTURES=1 cargo test -p ldmux-protocol mesh_term_fixture. Read by the app's MeshTermCodecTest.",
             "limits": {"maxBody":MAX_BODY,"maxInput":MAX_INPUT,"maxSegment":MAX_SEGMENT,"maxSelector":MAX_SELECTOR,
                        "maxRowsBody":MAX_ROWS_BODY,"maxLabel":MAX_LABEL,"maxSessions":MAX_SESSIONS,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
-                       "version":VERSION,"unsupportedAllV1":unsupported::ALL_V1},
+                       "version":VERSION,"minVersion":MIN_VERSION,"maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1},
             "messages": msg_cases,
             "sessionPages": {"input": many.iter().map(|(i,l)| json!({"id":i,"label":l})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,

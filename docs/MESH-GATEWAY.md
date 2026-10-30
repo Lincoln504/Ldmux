@@ -304,7 +304,7 @@ Small, and none of it is radio code.
 2. **Done 2026-10-28 (ADR-0025), host and phone; neither has run on a radio or a device.** A compact encoding for the L3
    control messages the mesh profile actually carries. It is `crates/protocol/src/mesh_term.rs`
    (plain-text row diffs) with the shell bridge in `crates/daemon/src/mesh_bridge.rs`; the phone's
-   port (`MeshTerm.kt`), attach driver (`MeshTermDriver`) and screen (`MeshTerminalScreen`) were built the same day. **2026-10-29:** the profile can list shells (`List`/`Sessions`, ADR-0025) and the route is reachable from Settings: a mesh pairing that does not depend on the tailnet pairing, a scanner for the gateway code, and a picker that cannot save a route that will not run. Original text: **The existing `crates/protocol` frames cannot cross this link**:
+   port (`MeshTerm.kt`), attach driver (`MeshTermDriver`) and screen (`MeshTerminalScreen`) were built the same day. **2026-10-29:** the profile can list shells (`List`/`Sessions`, ADR-0025) and the route is reachable from Settings: a mesh pairing that does not depend on the tailnet pairing, a scanner for the gateway code, and a picker that cannot save a route that will not run. **2026-10-30:** profile version 2 (ADR-0025): named keys (`Key`) encoded by the host for the pane's own mode, and the attached shell named in `Profile`. Original text: **The existing `crates/protocol` frames cannot cross this link**:
    they are JSON with a 16 MiB payload ceiling. The mesh profile needs its own
    binary encoding of the subset, defined end to end inside the Noise session
    and therefore opaque to the gateway.

@@ -193,6 +193,9 @@ impl Host for FakeShell {
         self.0.lock().unwrap().1.push(bytes.to_vec());
         Ok(())
     }
+    async fn keys(&mut self, _id: &str, _names: &[String]) -> Result<(), String> {
+        Err("this fake shell has no key table".into())
+    }
 }
 
 fn screen(lines: &[&str]) -> Screen {

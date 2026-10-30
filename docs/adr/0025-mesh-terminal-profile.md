@@ -78,6 +78,25 @@ The profile could not say which shells exist, so a host running more than one an
 - Pinned in `mesh-term-vectors.json` (`messages`, `limits`, and `sessionPages`, a 7-shell list spanning records); both codecs are held to it.
 - **Phone behaviour, and a deliberate deviation from "request the list when the selector is empty".** The driver still sends `Attach("")` first. The host takes the one shell when there is exactly one (the common case) and costs no extra record on a link that allows about 58 an hour; `Closed(NOT_FOUND)` becomes the `NoShells` state; `Closed(AMBIGUOUS)` is the cue to send `List`. One shell attaches, several show a picker (`Choose`), none is stated. `choose(id)` accepts only an id the host listed. A shell named explicitly that is ambiguous still ends visibly with no picker.
 
+## Update, 2026-10-30: profile version 2, `Key` and a named shell
+
+Two gaps were found on the phone, and one duplicated table.
+
+- **Keys carried no terminal mode.** `Input` is raw bytes, so the phone had to build the bytes of an arrow or an Escape itself, from a copy of the daemon's key table. It cannot see the pane's cursor-key mode (DECCKM) or Kitty flags, so an arrow was always `ESC [ A` (wrong in `vim`, `less`, `htop`, which expect `ESC O A`) and Shift+Enter was a plain CR. The tailnet path never had the problem: it sends key **names** and the daemon encodes them for the pane (`send` with `keys`, `key_name_to_bytes_in_mode`, `crates/daemon/src/stream.rs`).
+- **`Profile` did not name the shell.** After `Attach("")` the host chose the shell, so the phone's header could not mark which one it was on until the user picked one.
+
+| tag | direction | name | body |
+|---|---|---|---|
+| 0x06 | phone to host | `Key` | 1..=16 key names, one space between, at most 96 bytes in all |
+| 0x81 | host to phone | `Profile` | as before, then from version 2 `shell_len u8, shell id` |
+
+- **`Key`.** Names are printable ASCII with no space (`Up`, `S-Tab`, `C-c`, `M-C-S-Left`, `Enter`, `PgUp`). More than 16 names, a body over `MAX_INPUT`, an empty name or any other byte is malformed and costs that message only. The host sends them through the daemon's own `send` RPC, which reads the pane's `app_cursor` and Kitty flags from the keeper and encodes with `key_name_to_bytes_in_mode`. If the mode cannot be read the normal-mode encoding is used, as on the tailnet. A name the table does not know is refused there and nothing reaches the shell.
+- **The phone has no key table.** `MeshKeys.kt` is deleted. The shared key bar already emits the names. Typed text still goes as `Input` bytes. The phone's batcher keeps text and keys in the order typed and sends them as separate records.
+- **Version 2, no flag day.** `VERSION` is 2 and `MIN_VERSION` is 1. A host accepts `Attach` with either and answers in the version asked for: a version-1 phone gets the five-byte `Profile` it can decode and its `Key` messages are ignored. A version-2 phone against a version-1 host gets `Closed(VERSION)`, which says so, rather than sending a message that host would skip as an unknown tag. The decoder accepts a five-byte `Profile` as version 1 with no shell; a longer body must be version 2 and carry a consistent shell length.
+- **The shell id.** The host puts the attached shell's id in every version-2 `Profile`. The phone marks it current at once; the list is still how it learns the other shells.
+- **Cursor.** `Commit` already carried the cursor cell. The phone now draws a block there, rebuilding only the cursor's row, at most once per `Commit`.
+- Tests: protocol (`key_names_are_one_space_separated_body`, `a_key_with_a_space_too_many_names_or_too_long_a_body_is_refused`, `a_version_one_profile_decodes_with_no_shell_and_version_two_carries_it`, `a_differ_names_its_shell_in_the_attach_version`), bridge (`a_key_message_reaches_the_attached_shell_as_names_never_as_bytes`, `a_key_before_attach_or_from_a_version_one_phone_is_ignored`, `the_profile_names_the_attached_shell_in_the_version_asked_for`), and against a real keeper `crates/daemon/tests/mesh_keys.rs` (`up_is_ss3_when_the_pane_asked_for_application_cursor_keys`, `up_is_csi_in_a_pane_that_did_not`). Both codecs are held to `mesh-term-vectors.json`, regenerated with `LDMUX_REGEN_FIXTURES=1`.
+
 ## Not supported, and how the client knows
 
 `Profile.unsupported` is a bitmask the client must render as absent: scrollback, colour and text attributes, hyperlinks, mouse, images, resize (the phone renders the host's geometry; the pane is never resized from the mesh, because the keeper's geometry is canonical, ADR-0018), clipboard. A version-1 host sets all of them. The phone must show "reduced profile" and must not offer a control the mask says is missing.
@@ -85,7 +104,7 @@ The profile could not say which shells exist, so a host running more than one an
 ## Consequences
 
 - The Rust encoding and a Kotlin port are checked against the same pinned byte vectors (`exact_bytes_are_pinned`).
-- `Input` is raw bytes so control characters (Ctrl-C) work. The host writes them to the shell through the existing `send` RPC. Input is capped at 96 bytes per message; the phone's own governor paces it.
+- `Input` is raw bytes for typed text and so control characters (Ctrl-C) work; named keys use `Key` (version 2, above). The host writes them to the shell through the existing `send` RPC. Input is capped at 96 bytes per message; the phone's own governor paces it.
 - Nothing here touches MeshMore: `rg -i 'mesh_term|Rows|Commit' ` in `meshcore_gateway` and `meshcore_host` finds no hit.
 
 ## Not decided
