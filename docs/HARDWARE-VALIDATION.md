@@ -208,3 +208,48 @@ refusal rule on Android 16 with a real radio attached over BLE.
 What it does not prove: a bound session, the L3 handshake over the air, or the
 terminal profile, because a bound session needs a peer that is a real contact.
 That needs the second radio.
+
+## Result: the phone leg, 2026-10-29 (real device, one radio, no peer)
+
+Device: Motorola Edge 2024, Android 16 (API 36). Radio: Heltec V4 on the BLE
+companion image, linked at 910.525 MHz / 62.5 kHz / SF7 / CR5 / 22 dBm.
+
+### Four defects only the device showed
+
+1. **The gateway could not start at all.** `SocketException: Failed to create
+   server socket (OS Error: Operation not permitted, errno = 1)` on
+   `127.0.0.1:41731`. Not a permission: this device's
+   `/proc/sys/net/ipv4/ip_local_reserved_ports` contains **41731**, and binding
+   a reserved port as an app UID returns EPERM rather than EADDRINUSE. Fixed by
+   treating the preferred port as a preference and falling back to an ephemeral
+   one (`GatewayServer._bind`), with the real port shown and encoded in the QR.
+2. **Same-phone pairing could never happen by scanning.** MeshMore's QR is drawn
+   by the other app on the same screen, so LDMUX's camera has nothing to point
+   at. Added a type/paste field that routes by scheme (`ldmux://` versus
+   `meshmore://` or a bare 32-hex token).
+3. **The mesh screen drew under the status bar** and the "leave" control was
+   squeezed into a one-character column. `safeDrawingPadding()` plus a weighted,
+   wrapping label.
+4. **The app would not install over the existing build**: the earlier APKs were
+   signed with `~/.config/.android/debug.keystore`, not `~/.android`. Building
+   with `ANDROID_USER_HOME=/home/ldeen/.config/.android` preserves user data.
+
+### What the phone leg proved
+
+- The loopback gateway runs on Android 16 and reports its real port:
+  `Listening on 127.0.0.1:42989`.
+- The full L2 exchange succeeds over the real network stack on the device.
+  Verified from the host through `adb forward` with `GatewayClient`:
+  `connected` → `hello ok caps=2 state=0` → `pair ok` →
+  `bind refused: not_a_contact`.
+- The refusal is correct, not a defect: the test used a random host radio key,
+  which is not a contact of the attached radio. LDMUX showed
+  `mesh · refused (re-pair, or add the host as a contact)`.
+- Airtime used stayed at `0.0 s of 36 s`, so nothing was transmitted for a
+  session that never bound.
+
+### What it did not prove
+
+- No successful `BIND`, so no session, no terminal profile, no over-the-air leg.
+  Those need a second companion radio acting as the host, or a genuine contact
+  entry for the host radio's key.
