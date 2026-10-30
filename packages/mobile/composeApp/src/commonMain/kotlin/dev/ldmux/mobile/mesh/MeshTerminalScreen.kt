@@ -90,6 +90,8 @@ fun MeshTerminalScreen(
     routes: List<RouteChoice> = emptyList(),
     currentRoute: RouteChoice? = null,
     onRoute: (RouteChoice) -> Unit = {},
+    /** Asking MeshMore on this phone for a fresh gateway token; null where there is no such thing. */
+    handoff: MeshHandoffUi? = null,
 ) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
@@ -346,6 +348,8 @@ fun MeshTerminalScreen(
                     if (handle.pendingLabel.isNotEmpty()) Text("waiting to send: ${handle.pendingLabel}", color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
                 if (listed != null) {
+                    // A list with nothing in it is a sentence, not an empty rectangle above `open`.
+                    if (listed.isEmpty()) meshBodyFor(v, plan.endpoint)?.let { MeshBodyBlock(it, handoff, replaceStale = false) }
                     MeshShellList(
                         entries = listed,
                         current = if (terminalLive) shells.current else null,
@@ -364,7 +368,14 @@ fun MeshTerminalScreen(
                         MeshTermView.Listing -> "asking the host which shells are running"
                         else -> null
                     }
-                    if (waiting != null) WaitingLine(waiting, v::class.simpleName)
+                    if (waiting != null) {
+                        WaitingLine(waiting, v::class.simpleName)
+                    } else {
+                        // Every other state says what is wrong, and offers the one cure there is. A token the
+                        // link just refused, or a port with nothing on it, is the case a fresh handoff may
+                        // replace; a token that was never stored is not a replacement at all.
+                        meshBodyFor(v, plan.endpoint)?.let { MeshBodyBlock(it, handoff, replaceStale = true) }
+                    }
                     Spacer(Modifier.weight(1f))
                 }
             }

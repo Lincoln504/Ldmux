@@ -85,6 +85,7 @@ internal fun AppContent(
     routes: List<RouteChoice> = emptyList(),
     currentRoute: RouteChoice? = null,
     onRoute: (RouteChoice) -> Unit = {},
+    handoff: dev.ldmux.mobile.mesh.MeshHandoffUi? = null,
 ) {
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
@@ -704,6 +705,16 @@ internal fun AppContent(
                 } else null,
             ),
             link = link,
+            routeNotice = if (link == LinkState.RouteUnavailable && config.route == MeshRoute.Mesh) {
+                {
+                    // The header names the problem; this says what to do about it, and for a missing
+                    // token it is the one button that makes it go away.
+                    val problem = (currentMeshResolution(config.route) as? MeshRouteResolution.Unusable)?.problem
+                    dev.ldmux.mobile.mesh.meshRouteBodyFor(problem)?.let {
+                        dev.ldmux.mobile.mesh.MeshBodyBlock(it, handoff, replaceStale = false)
+                    }
+                }
+            } else null,
             sessions = sessions,
             desktop = desktop,
             desktopLoading = desktopLoading,

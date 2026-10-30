@@ -10,6 +10,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,7 +51,9 @@ internal fun MeshRouteSection(
     /** Persist a changed config now (route, gateway) without closing Settings. */
     onConfig: (LdmuxConfig) -> Unit,
     onUnpairMesh: () -> Unit,
+    onHandoff: suspend () -> String? = { null },
 ) {
+    val scope = rememberCoroutineScope()
     var credentials by remember { mutableStateOf(readCredentials()) }
     val view = meshSetupView(current, credentials)
     if (!view.meshExists) return // iOS: there is no mesh route to configure
@@ -97,6 +101,18 @@ internal fun MeshRouteSection(
                     }
                 }
             }) { Text("MeshMore", color = Accent, fontSize = 12.sp, maxLines = 1) }
+        }
+        // The same-phone path: MeshMore is asked over Binder and the token arrives without being
+        // typed. The scan and paste rows below remain for a gateway that is not on this phone.
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("this phone", color = Dim, fontSize = 12.sp)
+            MiniTextButton(onClick = {
+                note = null
+                scope.launch {
+                    note = onHandoff()
+                    credentials = readCredentials()
+                }
+            }) { Text("fetch token", color = Accent, fontSize = 12.sp, maxLines = 1) }
         }
         // Same-phone pairing cannot be scanned: MeshMore's code is displayed by the other app on
         // this very screen, so there is nothing for this camera to point at. Typing or pasting the
@@ -159,4 +175,10 @@ class MeshRouteActions(
     val onGatewayCode: (String) -> GatewayScan,
     val onConfig: (LdmuxConfig) -> Unit,
     val onUnpair: () -> Unit,
+    /**
+     * Ask MeshMore on this phone for its gateway token; the line to show when it did not link, null
+     * when it did. The button is a retry, so it may replace a stored token: pressing it is the
+     * person saying the one they have is not working.
+     */
+    val onHandoff: suspend () -> String? = { null },
 )

@@ -77,6 +77,11 @@ fun LauncherScreen(
     routes: List<RouteChoice> = emptyList(),
     currentRoute: RouteChoice? = null,
     onRoute: (RouteChoice) -> Unit = {},
+    /**
+     * Under the header when the saved route cannot run: what is missing, and the one action that
+     * helps. Drawn only by the caller that knows the route's problem; the tailnet draws nothing.
+     */
+    routeNotice: (@Composable () -> Unit)? = null,
 ) {
     // Which shells and pi sessions are chosen, **in the order they were chosen**.
     // Keys, not objects, so a list that refreshes under the user does not silently
@@ -123,6 +128,7 @@ fun LauncherScreen(
         }
 
         Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
+        routeNotice?.let { it(); Spacer(Modifier.height(LocalTouch.current.rowPad * 2)) }
 
         // ── one list ─────────────────────────────────────────────────────────
         // Unpaired, there is no list and nothing to open: the header says

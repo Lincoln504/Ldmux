@@ -1,7 +1,13 @@
 package dev.ldmux.mobile
 
 import androidx.compose.material3.MaterialTheme
+import dev.ldmux.mobile.mesh.MeshHandoffApplied
+import dev.ldmux.mobile.mesh.MeshHandoffUi
 import dev.ldmux.mobile.mesh.MeshRouteActions
+import dev.ldmux.mobile.mesh.applyMeshHandoff
+import dev.ldmux.mobile.mesh.meshHandoffLine
+import dev.ldmux.mobile.mesh.meshHandoffWanted
+import dev.ldmux.mobile.mesh.requestMeshHandoff
 import dev.ldmux.mobile.mesh.applyGatewayScan
 import dev.ldmux.mobile.mesh.applyMeshPairingScan
 import dev.ldmux.mobile.mesh.availableRoutes
@@ -66,16 +72,42 @@ fun App() {
             val choose: (RouteChoice) -> Unit = { c ->
                 store.update(config.copy(route = if (c.mesh) MeshRoute.Mesh else MeshRoute.Tailnet))
             }
-            val mesh = meshScreenFor(config)
+            // **Built once per configuration, not once per recomposition.** `MeshScreenPlan` has no
+            // equality, and the mesh screen keys its whole connection on it, so every recomposition of
+            // this scope (opening Settings is one) made a new plan and with it a new connection: a
+            // fresh handshake, which is minutes on the radio. The credentials version is the other
+            // way in: scanning or fetching a token changes secure storage and not the config.
+            var credentialsVersion by remember { mutableStateOf(0) }
+            val mesh = remember(config, credentialsVersion) { meshScreenFor(config) }
+            var handoffNote by remember { mutableStateOf<String?>(null) }
+            val runHandoff: suspend (Boolean) -> String? = { replaceStale ->
+                val applied = applyMeshHandoff(
+                    requestMeshHandoff(), store.config.value, meshSessionKeyStore(), meshTokenStore(), replaceStale,
+                )
+                if (applied is MeshHandoffApplied.Linked) {
+                    store.update(applied.config)
+                    credentialsVersion++
+                }
+                meshHandoffLine(applied).also { handoffNote = it }
+            }
+            val handoff = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) MeshHandoffUi(handoffNote, runHandoff) else null
+            // The automatic attempt: the ldmux code is in and the token is not, which is the moment the
+            // person would otherwise be told to type one. Keyed on the credentials, so it runs once per
+            // change and not on a loop, and it never replaces a token that is there.
+            LaunchedEffect(credentialsVersion) {
+                if (handoff != null && meshHandoffWanted(readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first)) {
+                    runHandoff(false)
+                }
+            }
             // Settings is drawn **once, here**, for every route. It used to belong to the
             // tailnet surface, so the mesh terminal had no way in at all: you had to leave
             // the mesh route to reach Settings, and leaving then reported the route as
             // unavailable. One app, one Settings.
             var showSettings by remember { mutableStateOf(false) }
             if (mesh != null) {
-                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
+                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose, handoff = handoff)
             } else {
-                AppContent(config, store, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
+                AppContent(config, store, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose, handoff = handoff)
             }
             if (showSettings) {
                 SettingsDialog(
@@ -93,10 +125,11 @@ fun App() {
                     mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
                         MeshRouteActions(
                             credentials = { readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first },
-                            onPairing = { text -> applyMeshPairingScan(text, store) },
-                            onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()) },
+                            onPairing = { text -> applyMeshPairingScan(text, store).also { credentialsVersion++ } },
+                            onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()).also { credentialsVersion++ } },
                             onConfig = { store.update(it) },
-                            onUnpair = { store.unpairMesh() },
+                            onUnpair = { store.unpairMesh(); credentialsVersion++ },
+                            onHandoff = { runHandoff(true) },
                         )
                     } else null,
                 )
