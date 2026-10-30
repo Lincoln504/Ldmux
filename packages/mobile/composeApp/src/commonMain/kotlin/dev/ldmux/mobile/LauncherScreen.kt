@@ -210,23 +210,7 @@ fun LauncherScreen(
         // chosen — a shell can die between two taps, and a page number that counts a
         // row nobody can see is a number that disagrees with the pager.
         val pickedNow = chosen.mapNotNull { key -> entries.firstOrNull { it.key == key } }
-        // Drawn like the rows above it (and like `+ shell`): the list's own
-        // background and shape, rather than a filled accent bar.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .clip(RadiusMedium)
-                .background(Surface)
-                .clickable(role = Role.Button) { if (pickedNow.isNotEmpty()) onOpen(pickedNow) }
-                .padding(vertical = LocalTouch.current.rowPad * 2),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                openButtonLabel(pickedNow),
-                color = if (pickedNow.isEmpty()) Dim else Fg,
-                fontSize = 14.sp,
-            )
-        }
+        OpenBar(openButtonLabel(pickedNow), empty = pickedNow.isEmpty()) { onOpen(pickedNow) }
     }
 
     if (newShellOpen) {
@@ -364,8 +348,30 @@ internal fun rowSubtitle(cwd: String, state: String): String =
 internal fun liveWorkspaceOf(workspace: String?): String? = workspace?.takeIf { it.isNotBlank() }
 
 /** What the launcher's left button says, given what is chosen. */
-internal fun openButtonLabel(picked: List<LauncherEntry>): String =
-    if (picked.isEmpty()) "open" else "open (${picked.size})"
+internal fun openButtonLabel(picked: List<LauncherEntry>): String = openLabel(picked.size)
+
+/** The same label for any list of chosen rows: the mesh route's shells are not [LauncherEntry]s. */
+internal fun openLabel(count: Int): String = if (count == 0) "open" else "open ($count)"
+
+/**
+ * The list's one action, drawn like the rows above it (and like `+ shell`): the list's own
+ * background and shape, rather than a filled accent bar. Inert and dimmed with nothing chosen.
+ * Both routes draw this one, so choosing and then opening is the same gesture on either.
+ */
+@Composable
+internal fun OpenBar(label: String, empty: Boolean, onOpen: () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RadiusMedium)
+            .background(Surface)
+            .clickable(role = Role.Button) { if (!empty) onOpen() }
+            .padding(vertical = LocalTouch.current.rowPad * 2),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = if (empty) Dim else Fg, fontSize = 14.sp)
+    }
+}
 
 /** One workspace, as a chip to aim a new shell at. */@Composable
 internal fun ChoiceRow(

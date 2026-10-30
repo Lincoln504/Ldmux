@@ -97,6 +97,21 @@ class MeshTerminalSource(
         _frame.value = engine?.render()
     }
 
+    /**
+     * Forget the screen: the engine and its frame go, so the surface draws nothing until the next
+     * [show]. Used when the host is attached to another shell, so that one shell's rows are never
+     * drawn under another's name.
+     */
+    fun clear() {
+        engine?.close()
+        engine = null
+        last = null
+        cols = 0
+        rows = 0
+        hasSelection = false
+        _frame.value = null
+    }
+
     /** Free the engine. Idempotent. */
     fun close() {
         engine?.close()

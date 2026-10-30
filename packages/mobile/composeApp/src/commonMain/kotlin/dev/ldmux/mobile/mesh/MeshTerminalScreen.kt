@@ -6,6 +6,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -41,7 +45,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
-import dev.ldmux.mobile.AccentBtn
 import dev.ldmux.mobile.Bg
 import dev.ldmux.mobile.Dim
 import dev.ldmux.mobile.Fg
@@ -50,6 +53,8 @@ import dev.ldmux.mobile.LocalTouch
 import dev.ldmux.mobile.TerminalSurfaceFor
 import dev.ldmux.mobile.AppHeader
 import dev.ldmux.mobile.ChoiceRow
+import dev.ldmux.mobile.OpenBar
+import dev.ldmux.mobile.openLabel
 import dev.ldmux.mobile.RouteChoice
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
@@ -110,8 +115,8 @@ fun MeshTerminalScreen(
         }
     }, clock) }
 
-    // Moves what the user typed to the driver. Polling at a quarter second is far finer than
-    // the batcher's own windows (700 ms idle), and a step never sends more than one record.
+    // Moves what the user typed to the driver. The poll is never coarser than the batcher's own
+    // windows (`IDLE_MS`, `MAX_HOLD_MS`), and a step never sends more than one record.
     LaunchedEffect(conn) {
         while (true) {
             val step = pump.step()
@@ -139,6 +144,13 @@ fun MeshTerminalScreen(
     // The list of the host's shells is this route's launcher: the tailnet's menu → shells leaves the
     // terminal for a screen with the header and the list, and so does this one.
     var showList by remember(conn) { mutableStateOf(false) }
+    // **Which shells are pages, and nothing else: the tailnet's rule.** A row is ticked, not opened,
+    // and the one `open` at the bottom makes exactly the ticked rows the pages the header's arrows
+    // walk, in the order they were ticked. Before there was a selection every shell the host listed
+    // was a page, so a header reading `1 / 2 shells` followed a tap on one row, and the tap itself
+    // attached at once with no way to choose a second.
+    var chosen by remember(conn) { mutableStateOf(listOf<String>()) }
+    var pageOrder by remember(conn) { mutableStateOf(listOf<String>()) }
     var menuOpen by remember(conn) { mutableStateOf(false) }
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     // The keyboard is portrait-only and is the user's, as on the tailnet route (AppContent).
@@ -164,7 +176,28 @@ fun MeshTerminalScreen(
     }
 
     val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
-    val openList = { showList = true; scope.launch { conn.driver.listShells() }; Unit }
+    val openList = { chosen = emptyList(); showList = true; scope.launch { conn.driver.listShells() }; Unit }
+    // The list's one action. The first ticked shell is page 1, as on the tailnet; the host takes one
+    // `Attach` for it (`choose` on the first list, `selectShell` from a list opened over a live shell,
+    // which spends nothing when it is the shell already attached).
+    val openChosen: (List<SessionEntry>) -> Unit = { picked ->
+        pageOrder = picked.map { it.id }
+        showList = false
+        val first = picked.first().id
+        val choosing = view is MeshTermView.Choose
+        scope.launch { if (choosing) conn.driver.choose(first) else conn.driver.selectShell(first) }
+    }
+    // The header's refresh square, as on the tailnet: it brings the screen up to date. Over a list that
+    // is asking the host again; anywhere else it is the reconnect that used to be a button in the body.
+    val onRefresh: () -> Unit = {
+        when {
+            terminalLive -> scope.launch { conn.driver.listShells() }
+            view is MeshTermView.Choose || view is MeshTermView.NoShells -> scope.launch { conn.driver.refresh() }
+            else -> attempt += 1
+        }
+    }
+    val refreshing = view is MeshTermView.Idle || view is MeshTermView.Handshaking ||
+        view is MeshTermView.ProfileMissing || view is MeshTermView.Listing
     // Back is the launcher button, as on the tailnet route: the same call, not a second way.
     BackToLauncher(enabled = terminalLive && !showList) { openList() }
 
@@ -174,7 +207,7 @@ fun MeshTerminalScreen(
         if (terminalLive && !showList) {
             // The terminal, and nothing above it: the tailnet's terminal has no header either. The
             // header belongs to the list screen, which is where Settings is, as on the tailnet.
-            val pages = meshPages(shells)
+            val pages = meshPagesFor(shells, pageOrder)
             val shownId = shells.current ?: pages.firstOrNull()?.id
             val panel: @Composable () -> Unit = {
                 SidePanel(
@@ -199,8 +232,17 @@ fun MeshTerminalScreen(
                     // The terminal is the tailnet route's own surface (TerminalSurfaceFor): its painter,
                     // its cursor, tap-to-move, selection and the IME field that takes typing at the
                     // prompt. Painting on `Commit` only is the driver's rule, so the screen shown here
-                    // is never half a screen.
-                    LaunchedEffect(source, live?.screen) { live?.screen?.let(source::show) }
+                    // is never half a screen — and never an empty one: a `Profile` blanks the driver's
+                    // mirror until the host's next full screen arrives (every `Resize` sends one), and
+                    // drawing that was the black terminal. Until a screen is committed the surface keeps
+                    // what it had; a switch to another shell drops it, so one shell's rows are never
+                    // under another's name.
+                    val toShow = meshScreenToShow(view)
+                    val switching = view is MeshTermView.ProfileMissing
+                    LaunchedEffect(source, toShow, switching) {
+                        if (toShow != null) source.show(toShow) else if (switching) source.clear()
+                    }
+                    val drawn by source.frame.collectAsState()
                     // The host fits its pty to what the surface measures (`Resize`, profile version
                     // 3), so the font is the user's own and a line is never wider than the screen.
                     DisposableEffect(source, conn) {
@@ -217,6 +259,13 @@ fun MeshTerminalScreen(
                             modifier = Modifier.fillMaxSize(),
                             keyboardRequest = keyboardRequest,
                         )
+                        // A wait is not a black screen: with nothing drawn yet this says what is awaited, with
+                        // the seconds it has taken. (A resize keeps the old screen up, so it needs no line.)
+                        if (toShow == null && drawn == null) {
+                            Box(Modifier.align(Alignment.TopStart).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                                WaitingLine("waiting for the shell's screen", shells.current ?: "mesh")
+                            }
+                        }
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
                         // What the link adds is said only while it is true, over the terminal like the voice
                         // banner, and never as a row: the tailnet's live screen is the terminal and the
@@ -267,76 +316,55 @@ fun MeshTerminalScreen(
                 )
             }
         } else {
-            // The launcher's shape: the app's own header (the one the tailnet launcher draws, with
-            // Settings), then the body. The status line is the route's own, the one thing that really
-            // differs; a refresh square is absent because a reconnect is what it would mean, and the
-            // body offers that where the state explains it.
-            Box(Modifier.fillMaxWidth().padding(start = LocalTouch.current.pad * 3, end = LocalTouch.current.pad * 3, top = LocalTouch.current.pad * 3)) {
+            // The launcher's shape, drawn the launcher's way: padding, the app's own header, then the
+            // list with the one `open` under it. The status line is the route's own, the one thing
+            // that really differs; the refresh square is the tailnet's reload (see [onRefresh]).
+            Column(Modifier.weight(1f).fillMaxWidth().padding(LocalTouch.current.rowPad * 3)) {
                 AppHeader(
                     title = "ldmux",
                     status = meshTermLabel(view, plan.endpoint),
-                    onRefresh = null,
+                    onRefresh = onRefresh,
+                    refreshing = refreshing,
                     onSettings = onOpenSettings,
                     routes = routes,
                     currentRoute = currentRoute,
                     onRoute = onRoute,
                 )
-            }
-            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
+                val v = view
+                // The host's own list, verbatim: only an id it listed can be opened, nothing is guessed.
+                val listed = when {
+                    terminalLive -> shells.entries
+                    v is MeshTermView.Choose -> v.entries
+                    else -> null
+                }
                 if (terminalLive) {
-                    // The host's own shells; choosing one attaches it and returns to the terminal.
                     val absent = meshAbsentLine(live?.absent ?: emptyList())
                     if (absent.isNotEmpty()) Text(absent, color = Dim, fontSize = 11.sp)
                     Text(meshBudgetLine(live?.budgetLeft), color = Dim, fontSize = 11.sp)
                     if (handle.pendingLabel.isNotEmpty()) Text("waiting to send: ${handle.pendingLabel}", color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                    if (shells.entries.isEmpty()) Text("no shells listed yet", color = Dim, fontSize = 12.sp)
-                    // The launcher's own row, not a list of monospaced strings: the same height, the same
-                    // tick-as-number marker for the shell you are on, the same tap target. A route that
-                    // drew its own rows was the biggest reason this screen read as another app.
-                    for (e in shells.entries) {
-                        ChoiceRow(
-                            title = e.label.ifEmpty { e.id },
-                            subtitle = e.id,
-                            chosen = false,
-                            inUse = e.id == shells.current,
-                            onClick = { showList = false; scope.launch { conn.driver.selectShell(e.id) } },
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        AccentBtn("terminal") { showList = false }
-                        AccentBtn("ask again") { scope.launch { conn.driver.listShells() } }
-                    }
+                }
+                if (listed != null) {
+                    MeshShellList(
+                        entries = listed,
+                        current = if (terminalLive) shells.current else null,
+                        chosen = chosen,
+                        onToggle = { id -> chosen = if (id in chosen) chosen - id else chosen + id },
+                        onOpen = openChosen,
+                        modifier = Modifier.weight(1f),
+                    )
                 } else {
-                    when (val v = view) {
-                        // The host's own list, verbatim: choosing sends that id and nothing is guessed.
-                        is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad)) {
-                            for (e in v.entries) {
-                                ChoiceRow(
-                                    title = e.label.ifEmpty { e.id },
-                                    subtitle = e.id,
-                                    chosen = false,
-                                    onClick = { scope.launch { conn.driver.choose(e.id) } },
-                                )
-                            }
-                        }
-                        MeshTermView.NoShells -> AccentBtn("ask again") { scope.launch { conn.driver.refresh() } }
-                        is MeshTermView.LinkDown, is MeshTermView.HostClosed -> AccentBtn("reconnect") { attempt += 1 }
-                        else -> {
-                            // A wait is not nothing: it says what it is waiting for, with the seconds it
-                            // has taken, and offers reconnect the moment the user wants to stop waiting.
-                            val waiting = when (view) {
-                                MeshTermView.Idle -> "starting"
-                                MeshTermView.Handshaking -> "handshaking"
-                                MeshTermView.ProfileMissing -> "the host has not described a terminal yet"
-                                MeshTermView.Listing -> "asking the host which shells are running"
-                                else -> null
-                            }
-                            if (waiting != null) {
-                                WaitingLine(waiting, view::class.simpleName)
-                                AccentBtn("reconnect") { attempt += 1 }
-                            }
-                        }
+                    // Nothing to choose from: a wait says what it is waiting for, with the seconds it has
+                    // taken. A dead link or a closed shell is the header's line and its refresh square.
+                    val waiting = when (v) {
+                        MeshTermView.Idle -> "starting"
+                        MeshTermView.Handshaking -> "handshaking"
+                        MeshTermView.ProfileMissing -> "the host has not described a terminal yet"
+                        MeshTermView.Listing -> "asking the host which shells are running"
+                        else -> null
                     }
+                    if (waiting != null) WaitingLine(waiting, v::class.simpleName)
+                    Spacer(Modifier.weight(1f))
                 }
             }
         }
@@ -344,16 +372,66 @@ fun MeshTerminalScreen(
 }
 
 /**
- * The host's shells as the shared header's pages. The header draws a folder name and a count, so a
- * shell's label stands where a directory would; before the host has listed anything the one shell
- * we are on is a page of its own, so the header is never empty.
+ * The host's shells, ticked and then opened: the launcher's own rows ([ChoiceRow], numbered in the
+ * order ticked) over the launcher's own `open` ([OpenBar]), so choosing is one gesture on both routes
+ * and a tap on a row never leaves the list by itself.
  */
-internal fun meshPages(shells: MeshShells): List<Session> {
+@Composable
+private fun MeshShellList(
+    entries: List<SessionEntry>,
+    current: String?,
+    chosen: List<String>,
+    onToggle: (String) -> Unit,
+    onOpen: (List<SessionEntry>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // In the order ticked, skipping anything that left the list meanwhile (a shell can end between two taps).
+    val picked = chosen.mapNotNull { id -> entries.firstOrNull { it.id == id } }
+    Column(modifier) {
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
+        ) {
+            items(entries, key = { it.id }) { e ->
+                ChoiceRow(
+                    title = e.label.ifEmpty { e.id },
+                    subtitle = e.id,
+                    chosen = e.id in chosen,
+                    ordinal = picked.indexOfFirst { it.id == e.id }.takeIf { it >= 0 }?.plus(1),
+                    inUse = e.id == current,
+                    onClick = { onToggle(e.id) },
+                )
+            }
+        }
+        Spacer(Modifier.height(LocalTouch.current.rowPad))
+        OpenBar(openLabel(picked.size), empty = picked.isEmpty()) { onOpen(picked) }
+    }
+}
+
+/**
+ * What the shared surface should draw for [view]: the host's screen once at least one `Commit` has
+ * been applied, and nothing before that. The driver's mirror is blank from a `Profile` until the next
+ * full screen, and a blank screen is not a fact about the shell.
+ */
+internal fun meshScreenToShow(view: MeshTermView): MeshScreen? =
+    (view as? MeshTermView.Live)?.takeIf { it.painted }?.screen
+
+/**
+ * The shared header's pages: the shells the user ticked, in that order, or — when nothing was ticked
+ * because the host had exactly one shell and the attach took it — the shell attached. A shell's label
+ * stands where a directory would; before the host has listed anything the one shell we are on is a
+ * page of its own, so the header is never empty. Never every shell the host lists: that made one
+ * ticked row read as `1 / 2 shells`.
+ */
+internal fun meshPagesFor(shells: MeshShells, order: List<String>): List<Session> {
     fun page(id: String, label: String) = Session(
         id = id, kind = "shell", title = label, cwd = label, status = "running", keeperName = id,
     )
-    if (shells.entries.isEmpty()) return listOf(page("", "shell"))
-    return shells.entries.map { page(it.id, it.label.ifEmpty { it.id.take(8) }) }
+    val byId = shells.entries.associateBy { it.id }
+    val ids = order.filter { it in byId }.distinct()
+        .ifEmpty { listOfNotNull(shells.current?.takeIf { it in byId }) }
+    if (ids.isEmpty()) return listOf(page("", "shell"))
+    return ids.map { id -> byId.getValue(id).let { page(it.id, it.label.ifEmpty { it.id.take(8) }) } }
 }
 
 /** A wait with the seconds it has taken: proof the link is working, not the app hanging. */
