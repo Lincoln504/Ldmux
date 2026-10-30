@@ -141,5 +141,5 @@ fun meshCredentialLine(c: MeshCredential, present: Boolean): String {
         MeshCredential.GatewayToken -> "MeshMore gateway token"
         MeshCredential.HostRadioKey -> "host radio key"
     }
-    return "$name: ${if (present) "present" else "missing"}"
+    return "${if (present) "✓" else "✗"} $name"
 }

@@ -29,13 +29,13 @@ import dev.ldmux.mobile.Warn
  * credentials exist, what a mesh route would do, and which routes may be chosen are all computed
  * there and tested there.
  *
- * Honest by construction:
+ * Honest by construction, and **terse by decision**: Settings is a list of controls and their
+ * state, not a manual. The rate limit and the "MeshMore must be running" fact are stated where
+ * they bite — on the mesh screen, next to the input — not here, where they were noise that pushed
+ * the controls off the page.
  *  - **Hidden where the route does not exist** (iOS), not shown and disabled.
- *  - A route that cannot run is **not offered**; what is missing is listed instead, in the order
- *    the ceremony goes (ldmux code, then MeshMore's code).
- *  - It says the one real constraint: the mesh route only works **while MeshMore is running on this
- *    phone** with its gateway on. Its Connected apps screen shows that; when it is not running this
- *    app shows "mesh · MeshMore not running" and nothing else happens.
+ *  - A route that cannot run is **not offered**; what is missing is a short mark on the
+ *    credential line, in the order the ceremony goes.
  */
 @Composable
 internal fun MeshRouteSection(
@@ -59,12 +59,6 @@ internal fun MeshRouteSection(
     var confirmForget by remember(current.connectionKey) { mutableStateOf(false) }
     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("mesh route", color = Fg, fontSize = 13.sp)
-        Text(MESH_RATE_NOTICE, color = Dim, fontSize = 11.sp)
-        Text(
-            "Works only while MeshMore is running on this phone with its gateway on (MeshMore → Connected apps). " +
-                "If it is not, this app says \"mesh · MeshMore not running\" and opens nothing else.",
-            color = Dim, fontSize = 11.sp,
-        )
         for (c in MeshCredential.entries) {
             val ok = c in view.present
             Text(meshCredentialLine(c, ok), color = if (ok) Fg else Warn, fontSize = 12.sp)
@@ -143,8 +137,6 @@ internal fun MeshRouteSection(
                     }
                 }
             }
-        } else {
-            Text("no route can run yet: pair the tailnet or finish the mesh pairing", color = Dim, fontSize = 11.sp)
         }
         if (view.present.isNotEmpty()) {
             MiniTextButton(onClick = { if (confirmForget) { onUnpairMesh(); credentials = readCredentials() } else confirmForget = true }) {
