@@ -741,12 +741,14 @@ mod tests {
             .unwrap()
             .screens
             .insert("abcd-1".into(), screen(&["changed", ""]));
-        link.0.lock().unwrap().pending = 2;
+        // Busy means the window is full, not "one record is in flight": waiting for the first
+        // ack cost a whole round trip per update (measured on the device as sixteen seconds).
+        link.0.lock().unwrap().pending = PENDING_LIMIT;
         b.tick().await;
         assert_eq!(
             link.0.lock().unwrap().sent.len(),
             n,
-            "a busy session gets no new update"
+            "a full window gets no new update"
         );
         link.0.lock().unwrap().pending = 0;
         b.tick().await;
@@ -765,7 +767,7 @@ mod tests {
             },
         );
         b.tick().await;
-        link.0.lock().unwrap().pending = 1; // unreachable for a while
+        link.0.lock().unwrap().pending = PENDING_LIMIT; // unreachable for a while
         for i in 0..30 {
             host.0
                 .lock()
