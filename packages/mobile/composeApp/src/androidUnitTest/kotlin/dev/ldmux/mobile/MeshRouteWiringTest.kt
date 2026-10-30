@@ -1,5 +1,6 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshGatewayEndpoint
 import dev.ldmux.mobile.mesh.MeshLinkState
 import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshRouteProblem
@@ -140,5 +141,20 @@ class MeshRouteWiringTest {
             assertFalse(label in tailnetLabels, label)
         }
         assertEquals("mesh · host not answering", meshLinkLabel(MeshLinkState.SessionFailed))
+    }
+
+    @Test
+    fun `an unreachable gateway is described by its address, not blamed on MeshMore`() {
+        // The gateway binds an ephemeral port when its preferred one is taken, so a stored pairing
+        // can be stale while MeshMore is healthy. The label must say where it looked.
+        val endpoint = MeshGatewayEndpoint("127.0.0.1", 42989)
+        val line = meshLinkLabel(MeshLinkState.Unreachable, endpoint)
+        assertTrue(line.contains("127.0.0.1:42989"), line)
+        assertTrue("re-pair" in line, line)
+        assertFalse("MeshMore not running" in line, line)
+        assertEquals(
+            "mesh · nothing listening on the paired address",
+            meshLinkLabel(MeshLinkState.Unreachable),
+        )
     }
 }

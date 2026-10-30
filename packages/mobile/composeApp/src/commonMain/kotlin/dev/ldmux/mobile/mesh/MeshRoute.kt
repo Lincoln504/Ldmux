@@ -120,8 +120,15 @@ fun resolveRoute(
     return MeshRouteResolution.Use(MeshRoute.Mesh)
 }
 
-/** One line for the link, in the same register as `linkLabel`. Never says "delivered". */
-fun meshLinkLabel(state: MeshLinkState): String = when (state) {
+/**
+ * One line for the link, in the same register as `linkLabel`. Never says "delivered".
+ *
+ * [endpoint] is the gateway address this device is paired with. It matters for one state: the
+ * gateway binds an ephemeral port when its preferred one is unavailable, so a stored pairing can
+ * point at a port that nothing listens on while MeshMore is running perfectly. Saying "not
+ * running" then accuses the wrong side of the failure; naming the address and the cure does not.
+ */
+fun meshLinkLabel(state: MeshLinkState, endpoint: MeshGatewayEndpoint? = null): String = when (state) {
     MeshLinkState.NeedsToken -> "mesh · needs pairing token"
     MeshLinkState.Idle -> "mesh · idle"
     MeshLinkState.Connecting -> "mesh · connecting"
@@ -129,7 +136,11 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
     MeshLinkState.RadioUnavailable -> "mesh · radio unavailable"
     MeshLinkState.GatewayBusy -> "mesh · another app holds the gateway"
     MeshLinkState.ProtocolMismatch -> "mesh · gateway version mismatch"
-    MeshLinkState.Unreachable -> "mesh · MeshMore not running"
+    MeshLinkState.Unreachable -> if (endpoint == null) {
+        "mesh · nothing listening on the paired address"
+    } else {
+        "mesh · nothing on $endpoint (MeshMore off, or it took another port: re-pair)"
+    }
     MeshLinkState.Refused -> "mesh · refused (re-pair, or add the host as a contact)"
     MeshLinkState.SessionFailed -> "mesh · host not answering"
     MeshLinkState.Closed -> "mesh · closed"

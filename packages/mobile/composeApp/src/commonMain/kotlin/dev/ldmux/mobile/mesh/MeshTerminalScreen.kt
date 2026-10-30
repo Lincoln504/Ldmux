@@ -48,7 +48,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val conn = remember(plan) { MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint) }
+    // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
+    // itself), so the caller needs a way to make it. A refused bind, a rotated token or an
+    // unreachable gateway each left the screen stuck with no action but leaving; the only cure
+    // was to force-stop the app. Rebuilding the connection is the whole retry.
+    var attempt by remember(plan) { mutableStateOf(0) }
+    val conn = remember(plan, attempt) { MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint) }
     LaunchedEffect(conn) { conn.run() }
     DisposableEffect(conn) { onDispose { conn.close() } }
     val view by conn.driver.view.collectAsState()
@@ -60,7 +65,7 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
             // The label must wrap to its own row rather than squeeze the button: a Row with
             // SpaceBetween gave "leave" one character of width and it drew vertically.
             Text(
-                meshTermLabel(view),
+                meshTermLabel(view, plan.endpoint),
                 color = if (view is MeshTermView.Live) Fg else Warn,
                 fontSize = 13.sp,
                 maxLines = 2,
@@ -107,7 +112,7 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
             note?.let { Text(it, color = Warn, fontSize = 11.sp) }
         } else {
             // Not live: say which of the not-working cases it is, and offer nothing to type into.
-            Text(meshTermLabel(view), color = Dim, fontSize = 12.sp)
+            Text(meshTermLabel(view, plan.endpoint), color = Dim, fontSize = 12.sp)
             when (val v = view) {
                 // The host's own list, verbatim: choosing sends that id and nothing is guessed.
                 is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -123,6 +128,7 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
                     }
                 }
                 MeshTermView.NoShells -> AccentBtn("ask again") { scope.launch { conn.driver.refresh() } }
+                is MeshTermView.LinkDown -> AccentBtn("reconnect") { attempt += 1 }
                 else -> {}
             }
         }

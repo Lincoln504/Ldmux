@@ -78,9 +78,9 @@ class MeshTermConnection(
  * One line for each thing the mesh terminal can be doing. The three "not working" cases read
  * differently on purpose: the cure for each is different.
  */
-fun meshTermLabel(view: MeshTermView): String = when (view) {
+fun meshTermLabel(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): String = when (view) {
     MeshTermView.Idle -> "mesh · not attached"
-    is MeshTermView.LinkDown -> meshLinkLabel(view.link)
+    is MeshTermView.LinkDown -> meshLinkLabel(view.link, endpoint)
     MeshTermView.Handshaking -> "mesh · securing the link (can take minutes)"
     MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
     MeshTermView.Listing -> "mesh · asking the host which shells are running"
