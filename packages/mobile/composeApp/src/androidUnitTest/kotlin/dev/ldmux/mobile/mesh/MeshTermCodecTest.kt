@@ -41,7 +41,8 @@ class MeshTermCodecTest {
             "input" -> TermMessage.Input(unhex(o["bytes"]!!.jsonPrimitive.content))
             "resync" -> TermMessage.Resync
             "detach" -> TermMessage.Detach
-            "profile" -> TermMessage.Profile(i("version"), i("cols"), i("rows"), i("unsupported"))
+            "profile" -> TermMessage.Profile(i("version"), i("cols"), i("rows"), i("unsupported"), o["shell"]!!.jsonPrimitive.content)
+            "key" -> TermMessage.Key(o["names"]!!.jsonArray.map { it.jsonPrimitive.content })
             "rows" -> TermMessage.Rows(
                 i("epoch"), o["full"]!!.jsonPrimitive.boolean,
                 o["patches"]!!.jsonArray.map {
@@ -79,6 +80,8 @@ class MeshTermCodecTest {
         assertEquals(n("recordPayload"), MeshTerm.RECORD_PAYLOAD)
         assertEquals(n("maxBuffer"), MeshTerm.MAX_BUFFER)
         assertEquals(n("version"), MeshTerm.VERSION)
+        assertEquals(n("minVersion"), MeshTerm.MIN_VERSION)
+        assertEquals(n("maxKeys"), MeshTerm.MAX_KEYS)
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }
         assertEquals(n("unsupportedAllV1"), all)
     }
@@ -134,6 +137,36 @@ class MeshTermCodecTest {
     }
 
     @Test
+    fun aKeyIsNamesWithOneSpaceBetweenAndNothingElse() {
+        assertContentEquals(
+            byteArrayOf(0x06, 0x06) + "Up C-c".encodeToByteArray(),
+            TermMessage.Key(listOf("Up", "C-c")).encode(),
+        )
+        assertFailsWith<TermEncodeException> { TermMessage.Key(listOf("C c")).encode() }
+        assertFailsWith<TermEncodeException> { TermMessage.Key(emptyList()).encode() }
+        assertFailsWith<TermEncodeException> { TermMessage.Key(List(MeshTerm.MAX_KEYS + 1) { "Up" }).encode() }
+        assertFailsWith<TermEncodeException> { TermMessage.Key(List(10) { "M-C-S-Left" }).encode() }
+        // The decoder refuses the same, losing only that message.
+        for (body in listOf("C c ", "", "Up  Down", "Up\u0001")) {
+            val wire = byteArrayOf(0x06, body.length.toByte()) + body.encodeToByteArray()
+            assertEquals(listOf<TermItem>(TermItem.Malformed(0x06)), decodeAll(wire), "[$body]")
+        }
+    }
+
+    @Test
+    fun aVersionOneProfileStillDecodesWithNoShellAndVersionTwoNamesIt() {
+        val v1 = decodeAll(byteArrayOf(0x81.toByte(), 5, 1, 80, 24, 0x7f, 0))
+        assertEquals(listOf<TermItem>(TermItem.Message(TermMessage.Profile(1, 80, 24, 0x7f, ""))), v1)
+        val v2 = TermMessage.Profile(2, 80, 24, 0x7f, "ab12-1")
+        assertEquals(listOf<TermItem>(TermItem.Message(v2)), decodeAll(v2.encode()))
+        // A version-2 body whose shell length lies is malformed, never silently accepted.
+        val lie = byteArrayOf(0x81.toByte(), 7, 2, 80, 24, 0x7f, 0, 9, 'a'.code.toByte())
+        assertEquals(listOf<TermItem>(TermItem.Malformed(0x81)), decodeAll(lie))
+        // A version-1 Profile carries no shell on the wire, whatever the object holds.
+        assertEquals(7, TermMessage.Profile(1, 80, 24, 0x7f, "ignored").encode().size)
+    }
+
+    @Test
     fun aStreamSplitAnywhereDecodesTheSame() {
         val all = fixture["messages"]!!.jsonArray.map { it.jsonObject["hex"]!!.jsonPrimitive.content }
             .joinToString("").let(::unhex)
@@ -180,14 +213,14 @@ class MeshTermCodecTest {
     fun theEncoderRefusesWhatTheWireCannotCarry() {
         assertFailsWith<TermEncodeException> { TermMessage.Input(ByteArray(0)).encode() }
         assertFailsWith<TermEncodeException> { TermMessage.Input(ByteArray(MeshTerm.MAX_INPUT + 1)).encode() }
-        assertFailsWith<TermEncodeException> { TermMessage.Attach(1, "x".repeat(MeshTerm.MAX_SELECTOR + 1)).encode() }
+        assertFailsWith<TermEncodeException> { TermMessage.Attach(MeshTerm.VERSION, "x".repeat(MeshTerm.MAX_SELECTOR + 1)).encode() }
         assertFailsWith<TermEncodeException> {
             TermMessage.Rows(1, false, listOf(TermPatch(0, false, "x".repeat(MeshTerm.MAX_SEGMENT + 1)))).encode()
         }
         assertFailsWith<TermEncodeException> { TermMessage.Commit(0x10000, 0, 0, 0).encode() }
         // The bounds themselves are accepted.
         TermMessage.Input(ByteArray(MeshTerm.MAX_INPUT)).encode()
-        TermMessage.Attach(1, "x".repeat(MeshTerm.MAX_SELECTOR)).encode()
+        TermMessage.Attach(MeshTerm.VERSION, "x".repeat(MeshTerm.MAX_SELECTOR)).encode()
     }
 
     @Test

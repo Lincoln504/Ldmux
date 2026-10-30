@@ -117,7 +117,7 @@ class MeshTermDriverTest {
     fun `message two establishes the session and queues Attach, and the view says no profile yet`() = runBlocking<Unit> {
         val d = driver(); d.start(); d.onRecord(byteArrayOf(2))
         assertEquals(MeshTermView.ProfileMissing, d.view.value)
-        assertEquals(listOf<TermMessage>(TermMessage.Attach(1, "")), sess.messages())
+        assertEquals(listOf<TermMessage>(TermMessage.Attach(MeshTerm.VERSION, "")), sess.messages())
     }
 
     // ── choosing a shell ───────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ class MeshTermDriverTest {
         val d = driver(); probed(d)
         deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS))
         assertEquals(MeshTermView.Listing, d.view.value)
-        assertEquals(listOf<TermMessage>(TermMessage.Attach(1, ""), TermMessage.ListRequest), sess.messages())
+        assertEquals(listOf<TermMessage>(TermMessage.Attach(MeshTerm.VERSION, ""), TermMessage.ListRequest), sess.messages())
         deliver(d, TermMessage.Sessions(true, listOf(ent("aa11", "RCNT"), ent("bb22", "pi"))))
         assertEquals(MeshTermView.Choose(listOf(ent("aa11", "RCNT"), ent("bb22", "pi"))), d.view.value)
         assertEquals(2, sess.messages().size, "choosing is the user's: no Attach was sent for them")
@@ -143,7 +143,7 @@ class MeshTermDriverTest {
         assertEquals(false, d.choose("zz99"))
         assertEquals(2, sess.messages().size)
         assertEquals(true, d.choose("bb22"))
-        assertEquals(TermMessage.Attach(1, "bb22"), sess.messages().last())
+        assertEquals(TermMessage.Attach(MeshTerm.VERSION, "bb22"), sess.messages().last())
         assertEquals(false, d.choose("aa11"), "a second choice after attaching is refused")
         deliver(d, profile, rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
         assertIs<MeshTermView.Live>(d.view.value)
@@ -168,7 +168,7 @@ class MeshTermDriverTest {
         assertEquals(TermMessage.ListRequest, sess.messages().last())
         assertEquals(MeshTermView.Listing, d.view.value)
         deliver(d, TermMessage.Sessions(true, listOf(ent("cc33"))))
-        assertEquals(TermMessage.Attach(1, "cc33"), sess.messages().last())
+        assertEquals(TermMessage.Attach(MeshTerm.VERSION, "cc33"), sess.messages().last())
     }
 
     @Test
@@ -191,7 +191,7 @@ class MeshTermDriverTest {
     fun `a named shell that is ambiguous or missing still ends visibly, with no picker`() = runBlocking<Unit> {
         val d = MeshTermDriver(gw, { hs }, selector = "ab", clock = { now })
         probed(d)
-        assertEquals(TermMessage.Attach(1, "ab"), sess.messages().single())
+        assertEquals(TermMessage.Attach(MeshTerm.VERSION, "ab"), sess.messages().single())
         deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS))
         assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.AMBIGUOUS), d.view.value)
     }
@@ -225,7 +225,7 @@ class MeshTermDriverTest {
         d.listShells()
         deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
         assertEquals(true, d.selectShell("bb22"))
-        assertEquals(TermMessage.Attach(1, "bb22"), sess.messages().last())
+        assertEquals(TermMessage.Attach(MeshTerm.VERSION, "bb22"), sess.messages().last())
         assertEquals("bb22", d.shells.value.current)
         assertEquals(MeshTermView.ProfileMissing, d.view.value, "no old rows under the new name")
         deliver(d, profile, rows(1, true, 0 to "new> "), TermMessage.Commit(1, 5, 0, 0))
@@ -317,6 +317,34 @@ class MeshTermDriverTest {
         assertEquals(InputOutcome.Empty, d.input(ByteArray(0)))
         sess.queueOutcome = QueueOutcome.Full
         assertEquals(InputOutcome.QueueFull, d.input(byteArrayOf(1)))
+    }
+
+    @Test
+    fun `keys go out as one Key message of names, never as bytes, and only while live`() = runBlocking<Unit> {
+        val d = driver()
+        assertEquals(InputOutcome.NotLive, d.keys(listOf("Up")))
+        d.start(); d.onRecord(byteArrayOf(2))
+        assertEquals(InputOutcome.NotLive, d.keys(listOf("Up")), "attached but no profile")
+        deliver(d, profile, rows(1, true), TermMessage.Commit(1, 0, 0, 0))
+        assertEquals(InputOutcome.Accepted, d.keys(listOf("Up", "S-Tab")))
+        assertEquals(TermMessage.Key(listOf("Up", "S-Tab")), sess.messages().last())
+        assertEquals(InputOutcome.Empty, d.keys(emptyList()))
+        assertEquals(InputOutcome.TooLong, d.keys(listOf("not a name")), "a space is the separator, so it is refused")
+        assertEquals(InputOutcome.TooLong, d.keys(List(MeshTerm.MAX_KEYS + 1) { "Up" }))
+        sess.queueOutcome = QueueOutcome.Full
+        assertEquals(InputOutcome.QueueFull, d.keys(listOf("Up")))
+    }
+
+    @Test
+    fun `the profile names the attached shell, so the header knows it before any list`() = runBlocking<Unit> {
+        val d = driver(); d.start(); d.onRecord(byteArrayOf(2))
+        assertEquals(null, d.shells.value.current)
+        deliver(d, TermMessage.Profile(2, 20, 3, 0, "bb22"), rows(1, true), TermMessage.Commit(1, 0, 0, 0))
+        assertEquals("bb22", d.shells.value.current)
+        // A version-1 host names nothing, and the marker stays unknown rather than guessed.
+        val old = driver(); old.start(); old.onRecord(byteArrayOf(2))
+        deliver(old, TermMessage.Profile(1, 20, 3, 0), rows(1, true), TermMessage.Commit(1, 0, 0, 0))
+        assertEquals(null, old.shells.value.current)
     }
 
     @Test

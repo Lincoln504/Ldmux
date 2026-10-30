@@ -71,7 +71,7 @@ class MeshTermIntegrationTest {
             return got
         }
         val attach = toHost().single()
-        assertEquals(listOf<TermItem>(TermItem.Message(TermMessage.Attach(1, ""))), TermDecoder().push(attach.bytes))
+        assertEquals(listOf<TermItem>(TermItem.Message(TermMessage.Attach(MeshTerm.VERSION, ""))), TermDecoder().push(attach.bytes))
 
         fun hostSays(vararg m: TermMessage): List<ByteArray> {
             assertEquals(QueueOutcome.Queued, host.send(0, stream(*m)))

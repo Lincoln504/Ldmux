@@ -36,6 +36,10 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -88,7 +92,12 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
     val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
-    val pump = remember(conn) { MeshInputPump(batcher, { conn.driver.input(it) }, clock) }
+    val pump = remember(conn) { MeshInputPump(batcher, { out ->
+        when (out) {
+            is MeshOut.Text -> conn.driver.input(out.bytes)
+            is MeshOut.Keys -> conn.driver.keys(out.names)
+        }
+    }, clock) }
 
     // Moves what the user typed to the driver. Polling at a quarter second is far finer than
     // the batcher's own windows (700 ms idle), and a step never sends more than one record.
@@ -144,8 +153,15 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
                 Text("A full-screen program is running: updates are large and slow here.", color = Warn, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp))
             }
             Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp).verticalScroll(rememberScrollState())) {
-                for (line in live?.screen?.lines.orEmpty()) {
-                    Text(line.ifEmpty { " " }, color = Fg, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                val screen = live?.screen
+                for ((y, line) in screen?.lines.orEmpty().withIndex()) {
+                    // The cursor is the host's, from the last `Commit`: it changes at most once per
+                    // update, and only its own row is rebuilt, so it costs nothing between updates.
+                    if (screen != null && y == screen.cursorY) {
+                        Text(meshCursorRow(line, screen.cursorX), color = Fg, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                    } else {
+                        Text(line.ifEmpty { " " }, color = Fg, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                    }
                 }
             }
             if (showPicker) {
@@ -255,4 +271,20 @@ internal fun meshPages(shells: MeshShells): List<Session> {
     )
     if (shells.entries.isEmpty()) return listOf(page("", "shell"))
     return shells.entries.map { page(it.id, it.label.ifEmpty { it.id.take(8) }) }
+}
+
+/**
+ * The cursor's row with a block drawn at column [x]: the character there inverted, or a space
+ * past the end of the text. Rows are plain text, so a column is a character (a character outside
+ * the basic plane is kept whole).
+ */
+internal fun meshCursorRow(line: String, x: Int): AnnotatedString {
+    val col = x.coerceAtLeast(0)
+    val padded = if (col >= line.length) line.padEnd(col + 1) else line
+    val width = if (padded[col].isHighSurrogate() && col + 1 < padded.length) 2 else 1
+    return buildAnnotatedString {
+        append(padded.substring(0, col))
+        withStyle(SpanStyle(background = Fg, color = Bg)) { append(padded.substring(col, col + width)) }
+        append(padded.substring(col + width))
+    }
 }

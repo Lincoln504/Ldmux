@@ -280,18 +280,35 @@ class MeshTermDriver(
      * the link carries about one record a minute).
      */
     suspend fun input(bytes: ByteArray): InputOutcome = lock.withLock {
-        val s = session
-        if (s == null || _view.value !is MeshTermView.Live || terminalView != null) return@withLock InputOutcome.NotLive
         if (bytes.isEmpty()) return@withLock InputOutcome.Empty
         if (bytes.size > MeshTerm.MAX_INPUT) return@withLock InputOutcome.TooLong
-        val out = when (s.send(SHELL, TermMessage.Input(bytes).encode())) {
+        sendToShell(TermMessage.Input(bytes))
+    }
+
+    /**
+     * Send named keys (`Up`, `S-Tab`, `C-c`). The host encodes them for the pane's own cursor-key
+     * and keyboard mode, which this side cannot see, so an arrow is the right bytes in `vim` and in
+     * a plain prompt. Same rules as [input]: only while live, and one record per call.
+     */
+    suspend fun keys(names: List<String>): InputOutcome = lock.withLock {
+        if (names.isEmpty()) return@withLock InputOutcome.Empty
+        val message = TermMessage.Key(names)
+        val wire = try { message.encode() } catch (_: TermEncodeException) { return@withLock InputOutcome.TooLong }
+        if (wire.size > 3 + MeshTerm.MAX_INPUT) return@withLock InputOutcome.TooLong
+        sendToShell(message)
+    }
+
+    private suspend fun sendToShell(message: TermMessage): InputOutcome {
+        val s = session
+        if (s == null || _view.value !is MeshTermView.Live || terminalView != null) return InputOutcome.NotLive
+        val out = when (s.send(SHELL, message.encode())) {
             QueueOutcome.Queued -> InputOutcome.Accepted
             QueueOutcome.Full -> InputOutcome.QueueFull
             QueueOutcome.NotOpen -> InputOutcome.NotLive
         }
         if (out == InputOutcome.Accepted) pump()
         publish()
-        out
+        return out
     }
 
     /**
@@ -417,6 +434,9 @@ class MeshTermDriver(
             is TermMessage.Profile -> {
                 if (pick == Pick.Probing) pick = Pick.Attached
                 unsupported = m.unsupported
+                // The host names the shell it attached (version 2), so the header's current marker
+                // is known at once, including after an empty-selector attach that chose for us.
+                if (m.shell.isNotEmpty() && m.shell != attachedId) { attachedId = m.shell; publishShells() }
                 mirror.apply(m)
                 held.clear(); lastEpoch = null; painted = false
                 // The host answered a resync with a fresh profile: the screen that follows is full.

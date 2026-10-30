@@ -15,7 +15,16 @@ package dev.ldmux.mobile.mesh
  * the attach.
  */
 object MeshTerm {
-    const val VERSION = 1
+    /**
+     * Version 2 adds `Key` and names the attached shell in `Profile`. A host answers in the
+     * version the phone attached with and accepts [MIN_VERSION]..[VERSION].
+     */
+    const val VERSION = 2
+    const val MIN_VERSION = 1
+    /** The first version that has `Key` and the shell id in `Profile`. */
+    const val KEY_VERSION = 2
+    /** Most key names in one `Key` message. */
+    const val MAX_KEYS = 16
     const val MAX_BODY = 300
     const val MAX_ROWS_BODY = 130
     const val MAX_MESSAGE = 1 + 2 + MAX_ROWS_BODY
@@ -61,6 +70,7 @@ object MeshTerm {
     internal const val T_RESYNC = 0x03
     internal const val T_DETACH = 0x04
     internal const val T_LIST = 0x05
+    internal const val T_KEY = 0x06
     internal const val T_SESSIONS = 0x85
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
@@ -82,7 +92,13 @@ sealed interface TermMessage {
     }
     data object Resync : TermMessage
     data object Detach : TermMessage
-    data class Profile(val version: Int, val cols: Int, val rows: Int, val unsupported: Int) : TermMessage
+    /** [shell] is the attached shell's id (version 2; empty from a version-1 host). */
+    data class Profile(val version: Int, val cols: Int, val rows: Int, val unsupported: Int, val shell: String = "") : TermMessage
+    /**
+     * Phone to host: named keys (`Up`, `S-Tab`, `C-c`). The host encodes them for the pane's own
+     * cursor-key and keyboard mode, so the phone has no key table. Printable ASCII, no space.
+     */
+    data class Key(val names: List<String>) : TermMessage
     data class Rows(val epoch: Int, val full: Boolean, val patches: List<TermPatch>) : TermMessage
     data class Commit(val epoch: Int, val cursorX: Int, val cursorY: Int, val flags: Int) : TermMessage
     data class Closed(val reason: Int) : TermMessage
@@ -107,6 +123,10 @@ private fun putLen(out: ArrayList<Byte>, n0: Int) {
         out.add((b or 0x80).toByte())
     }
 }
+
+/** Printable ASCII with no space: the space is the separator and nothing else is a key name. */
+internal fun validKeyName(name: String): Boolean =
+    name.isNotEmpty() && name.all { it.code in 0x21..0x7e }
 
 private fun u8(v: Int, what: String): Byte {
     if (v !in 0..255) throw TermEncodeException("$what does not fit one byte")
@@ -139,6 +159,11 @@ fun TermMessage.encode(): ByteArray {
         is TermMessage.Profile -> {
             body.add(u8(version, "version")); body.add(u8(cols, "cols")); body.add(u8(rows, "rows"))
             body.addAll(u16(unsupported, "unsupported"))
+            if (version >= MeshTerm.KEY_VERSION) {
+                val sh = shell.encodeToByteArray()
+                if (sh.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("shell id too long")
+                body.add(sh.size.toByte()); sh.forEach { body.add(it) }
+            }
             MeshTerm.T_PROFILE
         }
         is TermMessage.Rows -> {
@@ -162,6 +187,13 @@ fun TermMessage.encode(): ByteArray {
             MeshTerm.T_CLOSED
         }
         TermMessage.ListRequest -> MeshTerm.T_LIST
+        is TermMessage.Key -> {
+            if (names.isEmpty()) throw TermEncodeException("empty key")
+            if (names.size > MeshTerm.MAX_KEYS || names.any { !validKeyName(it) }) throw TermEncodeException("bad key names")
+            names.joinToString(" ").encodeToByteArray().forEach { body.add(it) }
+            if (body.size > MeshTerm.MAX_INPUT) throw TermEncodeException("keys too long")
+            MeshTerm.T_KEY
+        }
         is TermMessage.Sessions -> {
             body.add(if (last) 1 else 0)
             for (e in entries) {
@@ -268,8 +300,18 @@ class TermDecoder {
                 if (body.isEmpty() || body.size > MeshTerm.MAX_INPUT) Parsed.Bad else ok(TermMessage.Input(body))
             MeshTerm.T_RESYNC -> if (body.isEmpty()) ok(TermMessage.Resync) else Parsed.Bad
             MeshTerm.T_DETACH -> if (body.isEmpty()) ok(TermMessage.Detach) else Parsed.Bad
-            MeshTerm.T_PROFILE ->
-                if (body.size == 5) ok(TermMessage.Profile(b(body, 0), b(body, 1), b(body, 2), le16(body, 3))) else Parsed.Bad
+            // Version 1 is exactly five bytes and is never an error; a longer body is version 2 and
+            // must carry its shell id.
+            MeshTerm.T_PROFILE -> when {
+                body.size == 5 -> ok(TermMessage.Profile(b(body, 0), b(body, 1), b(body, 2), le16(body, 3)))
+                body.size > 5 && b(body, 0) >= MeshTerm.KEY_VERSION -> {
+                    val n = b(body, 5)
+                    if (n > MeshTerm.MAX_SELECTOR || body.size != 6 + n) return Parsed.Bad
+                    val shell = utf8(body.copyOfRange(6, body.size)) ?: return Parsed.Bad
+                    ok(TermMessage.Profile(b(body, 0), b(body, 1), b(body, 2), le16(body, 3), shell))
+                }
+                else -> Parsed.Bad
+            }
             MeshTerm.T_ROWS -> {
                 if (body.size < 3) return Parsed.Bad
                 val epoch = le16(body, 0)
@@ -290,6 +332,13 @@ class TermDecoder {
                 if (body.size == 5) ok(TermMessage.Commit(le16(body, 0), b(body, 2), b(body, 3), b(body, 4))) else Parsed.Bad
             MeshTerm.T_CLOSED -> if (body.size == 1) ok(TermMessage.Closed(b(body, 0))) else Parsed.Bad
             MeshTerm.T_LIST -> if (body.isEmpty()) ok(TermMessage.ListRequest) else Parsed.Bad
+            MeshTerm.T_KEY -> {
+                if (body.isEmpty() || body.size > MeshTerm.MAX_INPUT) return Parsed.Bad
+                val text = utf8(body) ?: return Parsed.Bad
+                val names = text.split(' ')
+                if (names.size > MeshTerm.MAX_KEYS || names.any { !validKeyName(it) }) Parsed.Bad
+                else ok(TermMessage.Key(names))
+            }
             MeshTerm.T_SESSIONS -> {
                 if (body.isEmpty()) return Parsed.Bad
                 val entries = ArrayList<SessionEntry>()
@@ -323,6 +372,9 @@ class RowMirror {
 
     var profile: ProfileInfo? = null
         private set
+    /** The shell the host named in its `Profile` (empty from a version-1 host). */
+    var shell: String = ""
+        private set
     var lines: List<String> = emptyList()
         private set
     var cursorX = 0
@@ -347,6 +399,7 @@ class RowMirror {
         when (m) {
             is TermMessage.Profile -> {
                 profile = ProfileInfo(m.cols, m.rows, m.unsupported)
+                shell = m.shell
                 lines = List(m.rows) { "" }
                 return false
             }
