@@ -123,3 +123,18 @@ The mesh terminal clipped on the right. The tailnet route asks the host to resiz
 - **Version 3.** `VERSION` is 3, `MIN_VERSION` stays 1, `RESIZE_VERSION` is 3. The `Profile` body is unchanged from version 2. A phone that attached below 3 is not obeyed on `Resize`, and a phone that attaches with 3 against an older host is told `Closed(VERSION)`.
 - **Shared pty.** As on the tailnet, a pane has one size: resizing it for the phone resizes it for any other client attached to it.
 - **Tests.** Protocol: `resize_is_two_bytes_of_cells_and_zero_is_refused_both_ways`, `a_version_three_profile_names_its_shell_like_version_two`, and the regenerated fixture. Bridge: `a_resize_fits_the_pane_and_starts_the_screen_over_with_the_new_grid`, `a_resize_before_attach_from_an_older_phone_or_a_refused_one_changes_nothing`. Real keeper: `a_resize_changes_the_real_pane_and_the_next_profile_says_so` (`crates/daemon/tests/mesh_keys.rs`).
+
+## Update, 2026-10-30 (profile version 4): messages share a record
+
+An echo of one typed line used to cost two 176-byte frames: the `Rows` that carried the
+changed line and the `Commit` that paints it, 5 bytes of body. The bridge sent every message
+as its own record, although `RECORD_PAYLOAD` is 144 and the phone's decoder (`TermDecoder`)
+reassembles messages from an arbitrarily chunked stream.
+
+From version 4 the bridge packs consecutive messages into one record while they fit, so an
+ordinary echo is one frame. A phone that attached below version 4 keeps one record per
+message, which is what it was built to decode. No message changed: this is record framing,
+not a new tag.
+
+Measured on the device: 910.525 MHz / 500 kHz / SF5 / CR5, private channel, one echo is one
+frame; the same exchange is two before version 4.

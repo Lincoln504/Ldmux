@@ -384,3 +384,27 @@ so a tap that "does nothing" is usually a stale connection, not a stale tap.
 For text input, `adb shell input text` is parsed by the *device's* shell: `%s` is a space
 and an unquoted `>` becomes a redirect. Wrap the argument in single quotes for the remote
 shell.
+
+## Third run: latency (2026-10-30)
+
+The device reported "long pause, blank, then the response" with the link at 62.5 kHz. The
+audit and the fixes, in order of size:
+
+| change | commit | effect |
+|---|---|---|
+| bridge tick 1000 → 50 ms | `9624c73` | up to 1 s per direction |
+| session ack delay 3000 → 150 ms | `9624c73` | up to 3 s of silence per pure ack |
+| retransmit 20 s → 2 s (cap 30 s) | `9624c73` | a lost record no longer stalls a screen |
+| window 4 → 8 | `9624c73` | a repaint pipelines instead of stalling |
+| phone idle flush 700 → 60 ms (hold 600) | `d3b2797` | ~90 ms per non-Enter keystroke |
+| `Rows` + `Commit` in one record | `398755d` | one frame per echo instead of two |
+| radio SF7 → SF5 at 500 kHz | (config) | ~48 ms per frame instead of ~70 |
+
+Aks turn out not to be on the critical path: every data record carries a cumulative ack, a
+pure ack is only emitted when nothing else is queued, and the sender never waits for an ack
+unless the window is full. Removing acks would buy nothing and cost the only delivery
+guarantee.
+
+Still open: a keystroke-level timing harness. The native terminal surface exposes no text to
+the accessibility tree, so `uiautomator dump` cannot time an echo; timing must come from
+host-side timestamps or screenshot deltas.
