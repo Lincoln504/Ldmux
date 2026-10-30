@@ -1825,6 +1825,33 @@ impl LdmuxDaemon {
                 .await?;
                 Ok(serde_json::json!({ "ok": true }))
             }
+            // Fit a pane to a client that has no stream of its own (the mesh bridge). It is the
+            // keeper's own `Resize`, the message `PaneStream::resize` sends for a tailnet client,
+            // clamped by the same `clamp_pane_size`; only the caller differs.
+            "resizePane" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let cols = params.get("cols").and_then(|v| v.as_u64());
+                let rows = params.get("rows").and_then(|v| v.as_u64());
+                let (Some(cols), Some(rows)) = (cols, rows) else {
+                    return Err("bad_size: invalid size".to_string());
+                };
+                let record = self
+                    .registry
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("no such session: {id}"))?;
+                if record.keeper_name.is_empty() {
+                    return Err("no terminal-backed session".to_string());
+                }
+                let (cols, rows) = ldmux_protocol::clamp_pane_size(cols, rows);
+                self.keeper_call(&km::KeeperMessage::Resize(km::Resize {
+                    session_id: record.keeper_name.clone(),
+                    cols,
+                    rows,
+                }))
+                .await?;
+                Ok(serde_json::json!({ "cols": cols, "rows": rows }))
+            }
             "capture" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let history = params

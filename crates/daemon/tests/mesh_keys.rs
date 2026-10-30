@@ -154,3 +154,52 @@ async fn the_profile_names_the_shell_the_host_chose() {
         m => panic!("the first message is a Profile, not {m:?}"),
     }
 }
+
+/// Version 3: a `Resize` reaches the REAL keeper, so the pane's own grid changes (the thing a
+/// tailnet client's resize does), and the next screen the phone gets carries a `Profile` with
+/// exactly that grid. A bridge that only reset its differ would answer with the old 80 columns.
+#[tokio::test]
+async fn a_resize_changes_the_real_pane_and_the_next_profile_says_so() {
+    let rig = Rig::start().await;
+    let link = FakeLink::default();
+    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
+    phone_says(
+        &link,
+        &Message::Attach {
+            version: VERSION,
+            selector: rig.session.clone(),
+        },
+    );
+    bridge.tick().await;
+    link.0.lock().unwrap().sent.clear();
+    phone_says(&link, &Message::Resize { cols: 41, rows: 17 });
+    bridge.tick().await;
+    assert_eq!(bridge.stats.resizes, 1);
+    let snap = rig
+        .arc
+        .lock()
+        .await
+        .handle("snapshot", serde_json::json!({ "id": rig.session }))
+        .await
+        .unwrap();
+    assert_eq!(
+        (snap["cols"].as_u64(), snap["rows"].as_u64()),
+        (Some(41), Some(17))
+    );
+    let mut d = Decoder::new();
+    let mut messages = Vec::new();
+    for (_, bytes) in link.0.lock().unwrap().sent.iter() {
+        messages.extend(d.push(bytes).unwrap().into_iter().map(Result::unwrap));
+    }
+    assert!(
+        matches!(
+            messages.first(),
+            Some(Message::Profile {
+                cols: 41,
+                rows: 17,
+                ..
+            })
+        ),
+        "the first message after a resize is a Profile with the new grid: {messages:?}"
+    );
+}

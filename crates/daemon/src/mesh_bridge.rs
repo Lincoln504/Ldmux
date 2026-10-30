@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, Screen, VERSION, closed,
+    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION, Screen, VERSION,
+    closed,
     session_pages,
 };
 
@@ -58,6 +59,9 @@ pub trait Host {
     /// flags) by the daemon's one key table. The bridge never turns a name into bytes itself:
     /// a second table is a second behaviour, and this one cannot see the pane.
     async fn keys(&mut self, id: &str, names: &[String]) -> Result<(), String>;
+    /// Fit the shell's pty to the phone's grid, through the keeper's own resize (the one a
+    /// tailnet client's `resize` ends in), so the screen is never wider than the phone.
+    async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String>;
 }
 
 impl Link for crate::mesh::MeshRuntime {
@@ -85,6 +89,7 @@ pub struct BridgeStats {
     pub messages_sent: u32,
     pub inputs: u32,
     pub keys: u32,
+    pub resizes: u32,
     pub malformed: u32,
     pub refused_sends: u32,
 }
@@ -296,6 +301,24 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // A name the table refuses is the daemon's refusal: nothing reaches the shell.
                 let _ = self.host.keys(&session, &names).await;
             }
+            Message::Resize { cols, rows } => {
+                let Some(a) = self.shells.get(&shell) else {
+                    return;
+                };
+                // A phone that attached below version 3 did not ask for this message's meaning.
+                if a.version < RESIZE_VERSION {
+                    return;
+                }
+                let session = a.session.clone();
+                self.stats.resizes += 1;
+                // Only a resize the pane accepted starts the screen over: a refused one leaves
+                // the grid as it was and the phone keeps what it has.
+                if self.host.resize(&session, cols, rows).await.is_ok() {
+                    if let Some(a) = self.shells.get_mut(&shell) {
+                        a.differ.reset();
+                    }
+                }
+            }
             Message::Resync => {
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.differ.reset();
@@ -399,6 +422,18 @@ impl Host for DaemonHost {
             .await
             .map(|_| ())
     }
+
+    async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String> {
+        self.0
+            .lock()
+            .await
+            .handle(
+                "resizePane",
+                serde_json::json!({ "id": id, "cols": cols, "rows": rows }),
+            )
+            .await
+            .map(|_| ())
+    }
 }
 
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
@@ -461,6 +496,8 @@ mod tests {
         screens: HashMap<String, Screen>,
         typed: Vec<(String, Vec<u8>)>,
         keyed: Vec<(String, Vec<String>)>,
+        resized: Vec<(String, u8, u8)>,
+        refuse_resize: bool,
         fail_screen: bool,
     }
     #[derive(Clone, Default)]
@@ -497,6 +534,20 @@ mod tests {
                 .unwrap()
                 .keyed
                 .push((id.to_owned(), names.to_vec()));
+            Ok(())
+        }
+        async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String> {
+            let mut s = self.0.lock().unwrap();
+            if s.refuse_resize {
+                return Err("no live session".into());
+            }
+            s.resized.push((id.to_owned(), cols, rows));
+            // The pane's grid really changes, as the keeper's does.
+            if let Some(sc) = s.screens.get_mut(id) {
+                sc.cols = cols;
+                sc.rows = rows;
+                sc.lines.resize(usize::from(rows), String::new());
+            }
             Ok(())
         }
     }
@@ -848,6 +899,94 @@ mod tests {
         );
         assert!(h.typed.is_empty(), "no bytes were typed by the bridge");
         assert_eq!(b.stats.keys, 1);
+    }
+
+    /// Every host→phone message sent on `shell`, decoded in order.
+    fn sent_messages(link: &FakeLink, shell: u8) -> Vec<Message> {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        for (s, bytes) in link.0.lock().unwrap().sent.iter() {
+            if *s == shell {
+                out.extend(d.push(bytes).unwrap().into_iter().map(Result::unwrap));
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_resize_fits_the_pane_and_starts_the_screen_over_with_the_new_grid() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        let before = sent_messages(&link, 1).len();
+        phone_says(&link, 1, &Message::Resize { cols: 45, rows: 30 });
+        b.tick().await;
+        assert_eq!(
+            host.0.lock().unwrap().resized,
+            vec![("abcd-1".to_owned(), 45, 30)]
+        );
+        assert_eq!(b.stats.resizes, 1);
+        let after = sent_messages(&link, 1);
+        assert!(
+            matches!(
+                &after[before],
+                Message::Profile { cols: 45, rows: 30, shell, .. } if shell == "abcd-1"
+            ),
+            "a fresh Profile with the new grid leads the answer: {:?}",
+            &after[before..]
+        );
+        assert!(
+            matches!(&after[before + 1], Message::Rows { full: true, .. }),
+            "and the screen follows in full"
+        );
+        let m = phone_view(&link, 1);
+        assert_eq!(m.profile.map(|p| (p.0, p.1)), Some((45, 30)));
+        assert_eq!(m.lines.len(), 30);
+    }
+
+    #[tokio::test]
+    async fn a_resize_before_attach_from_an_older_phone_or_a_refused_one_changes_nothing() {
+        let (mut b, host, link) = setup();
+        phone_says(&link, 1, &Message::Resize { cols: 45, rows: 30 });
+        b.tick().await;
+        assert!(host.0.lock().unwrap().resized.is_empty(), "not attached");
+        phone_says(
+            &link,
+            2,
+            &Message::Attach {
+                version: 2,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 2, &Message::Resize { cols: 45, rows: 30 });
+        b.tick().await;
+        assert!(
+            host.0.lock().unwrap().resized.is_empty(),
+            "a phone that attached as version 2 did not ask for Resize"
+        );
+        // A resize the pane refuses leaves the grid, and sends no second Profile.
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        let before = sent_messages(&link, 3).len();
+        host.0.lock().unwrap().refuse_resize = true;
+        phone_says(&link, 3, &Message::Resize { cols: 45, rows: 30 });
+        b.tick().await;
+        assert_eq!(sent_messages(&link, 3).len(), before);
     }
 
     #[tokio::test]

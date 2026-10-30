@@ -29,6 +29,7 @@
 //! | 0x04 | phone→host | `Detach` | empty |
 //! | 0x05 | phone→host | `List` | empty: "which shells are running?" (ADR-0025, 2026-10-29 addition) |
 //! | 0x06 | phone→host | `Key` | 1..=[`MAX_KEYS`] key names (`Up`, `S-Tab`, `C-c`), single-space separated, at most [`MAX_INPUT`] bytes (version 2) |
+//! | 0x07 | phone→host | `Resize` | `cols u8`, `rows u8`, both 1..=255: fit the pty to the phone, then a fresh `Profile` and a full screen (version 3) |
 //! | 0x81 | host→phone | `Profile` | `version u8`, `cols u8`, `rows u8`, `unsupported u16 LE`, and from version 2 `shell_len u8 \| shell id` |
 //! | 0x82 | host→phone | `Rows` | `epoch u16 LE`, `flags u8` (bit 0 = full), then patches |
 //! | 0x83 | host→phone | `Commit` | `epoch u16 LE`, `cursor_x u8`, `cursor_y u8`, `flags u8` |
@@ -53,11 +54,17 @@ use std::collections::VecDeque;
 /// version-1 phone still gets a version-1 `Profile` it can decode, and a phone that attaches
 /// with 2 against a version-1 host is told `closed::VERSION` rather than left sending a message
 /// that host would skip.
-pub const VERSION: u8 = 2;
+///
+/// Version 3 adds `Resize`, so the phone can ask the host to fit its pty to the phone's own
+/// grid, as every tailnet client does. A host answers a resize with a fresh `Profile` and a full
+/// screen. The `Profile` body is unchanged from version 2.
+pub const VERSION: u8 = 3;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
 pub const KEY_VERSION: u8 = 2;
+/// The first version that has `Resize`.
+pub const RESIZE_VERSION: u8 = 3;
 /// Most key names in one `Key` message.
 pub const MAX_KEYS: usize = 16;
 
@@ -176,6 +183,13 @@ pub enum Message {
     /// and keyboard mode, exactly as it does for a tailnet client, so the phone carries no key
     /// table and cannot send an arrow the program will not read.
     Key(Vec<String>),
+    /// The phone's grid, in cells (version 3). The host resizes the attached pty to it and starts
+    /// the screen over: a fresh `Profile` and a full screen. Both are 1..=255; the host clamps
+    /// them again to the range a pane may have.
+    Resize {
+        cols: u8,
+        rows: u8,
+    },
     /// One page of the answer. `last` is set on the final page; an empty list is one page with
     /// `last` set and no entries.
     Sessions {
@@ -186,6 +200,7 @@ pub enum Message {
 
 const T_LIST: u8 = 0x05;
 const T_KEY: u8 = 0x06;
+const T_RESIZE: u8 = 0x07;
 const T_SESSIONS: u8 = 0x85;
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
@@ -324,6 +339,13 @@ impl Message {
                 }
                 T_KEY
             }
+            Self::Resize { cols, rows } => {
+                if *cols == 0 || *rows == 0 {
+                    return Err(EncodeError::Empty);
+                }
+                body.extend_from_slice(&[*cols, *rows]);
+                T_RESIZE
+            }
             Self::Sessions { last, entries } => {
                 body.push(u8::from(*last));
                 for e in entries {
@@ -445,6 +467,10 @@ impl Message {
                 }
                 Self::Key(names)
             }
+            T_RESIZE if body.len() == 2 && body[0] != 0 && body[1] != 0 => Self::Resize {
+                cols: body[0],
+                rows: body[1],
+            },
             T_SESSIONS => {
                 let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
                 let mut entries = Vec::new();
@@ -470,7 +496,7 @@ impl Message {
                     entries,
                 }
             }
-            T_RESYNC | T_DETACH | T_PROFILE | T_COMMIT | T_CLOSED | T_LIST => {
+            T_RESYNC | T_DETACH | T_PROFILE | T_COMMIT | T_CLOSED | T_LIST | T_RESIZE => {
                 return Err(bad);
             }
             _ => return Ok(None), // unknown tag: skipped, not fatal
@@ -1122,6 +1148,44 @@ mod tests {
         );
     }
 
+    // ---- version 3: `Resize` -------------------------------------------------------------------
+
+    #[test]
+    fn resize_is_two_bytes_of_cells_and_zero_is_refused_both_ways() {
+        assert_eq!(
+            Message::Resize { cols: 45, rows: 30 }.encode().unwrap(),
+            [0x07, 0x02, 45, 30]
+        );
+        assert_eq!(
+            Message::Resize { cols: 0, rows: 30 }.encode(),
+            Err(EncodeError::Empty)
+        );
+        assert_eq!(
+            Message::Resize { cols: 45, rows: 0 }.encode(),
+            Err(EncodeError::Empty)
+        );
+        for bad in [&[0x07, 0x02, 0, 30][..], &[0x07, 0x02, 45, 0], &[0x07, 0x01, 45], &[0x07, 0x03, 45, 30, 1]] {
+            let mut d = Decoder::new();
+            assert_eq!(d.push(bad).unwrap(), vec![Err(DecodeError::Malformed(0x07))], "{bad:?}");
+        }
+        let mut d = Decoder::new();
+        assert_eq!(
+            d.push(&[0x07, 0x02, 45, 30]).unwrap(),
+            vec![Ok(Message::Resize { cols: 45, rows: 30 })]
+        );
+    }
+
+    #[test]
+    fn a_version_three_profile_names_its_shell_like_version_two() {
+        let screen = Screen::from_keeper(&"\n".repeat(29), 45, 30, (0, 0), false, false);
+        let first = Differ::for_attach(3, "ab12-1").update(&screen);
+        assert!(matches!(
+            &first[0],
+            Message::Profile { version: 3, cols: 45, rows: 30, shell, .. } if shell == "ab12-1"
+        ));
+        roundtrip(&first[0]);
+    }
+
     // ---- version 2: `Key` and the shell id in `Profile` --------------------------------------
 
     #[test]
@@ -1632,6 +1696,7 @@ mod tests {
             } => json!({
                 "kind":"profile","version":version,"cols":cols,"rows":rows,"unsupported":unsupported,"shell":shell}),
             Message::Key(names) => json!({"kind":"key","names":names}),
+            Message::Resize { cols, rows } => json!({"kind":"resize","cols":cols,"rows":rows}),
             Message::Rows {
                 epoch,
                 full,
@@ -1685,6 +1750,14 @@ mod tests {
             },
             Message::Key(vec!["Up".into()]),
             Message::Key(vec!["C-c".into(), "S-Tab".into()]),
+            Message::Resize { cols: 45, rows: 30 },
+            Message::Profile {
+                version: 3,
+                cols: 45,
+                rows: 30,
+                unsupported: unsupported::ALL_V1,
+                shell: "ab12-1".into(),
+            },
             Message::Rows {
                 epoch: 1,
                 full: true,

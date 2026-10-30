@@ -110,3 +110,16 @@ Two gaps were found on the phone, and one duplicated table.
 ## Not decided
 
 Styled rows, a smaller cell-delta form, a per-message checksum (the AEAD tag already covers every record). **Selecting a shell over the link: decided 2026-10-29, above** (this line used to list it, and the ceremony, as undecided).
+
+## Update, 2026-10-30 (later): profile version 3 and `Resize`
+
+The mesh terminal clipped on the right. The tailnet route asks the host to resize its pty to the phone (`resize` on the attach stream), so a line is never wider than the screen. This profile had no resize: the host's 80 columns were fixed, and shrinking the phone's font to fit is a workaround that makes the text unreadable on a narrow screen.
+
+| tag | direction | name | body |
+|---|---|---|---|
+| 0x07 | phone to host | `Resize` | `cols u8`, `rows u8`, each 1..=255 |
+
+- **`Resize`.** A zero in either byte or any other body length is malformed and costs that message only. The host resizes the attached pty through the keeper's own `Resize` message (daemon method `resizePane`, clamped by `clamp_pane_size` exactly as the tailnet's `PaneStream::resize` is), then resets its differ, so the next update is a fresh `Profile` with the new grid and a full screen. A refused resize changes nothing and sends nothing.
+- **Version 3.** `VERSION` is 3, `MIN_VERSION` stays 1, `RESIZE_VERSION` is 3. The `Profile` body is unchanged from version 2. A phone that attached below 3 is not obeyed on `Resize`, and a phone that attaches with 3 against an older host is told `Closed(VERSION)`.
+- **Shared pty.** As on the tailnet, a pane has one size: resizing it for the phone resizes it for any other client attached to it.
+- **Tests.** Protocol: `resize_is_two_bytes_of_cells_and_zero_is_refused_both_ways`, `a_version_three_profile_names_its_shell_like_version_two`, and the regenerated fixture. Bridge: `a_resize_fits_the_pane_and_starts_the_screen_over_with_the_new_grid`, `a_resize_before_attach_from_an_older_phone_or_a_refused_one_changes_nothing`. Real keeper: `a_resize_changes_the_real_pane_and_the_next_profile_says_so` (`crates/daemon/tests/mesh_keys.rs`).
