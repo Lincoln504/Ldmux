@@ -96,27 +96,15 @@ fun LauncherScreen(
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(Bg).padding(LocalTouch.current.rowPad * 3)) {
         // ── header ───────────────────────────────────────────────────────────
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("ldmux", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    status,
-                    color = Dim,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
-            // Refresh and settings are one pair: same square, same background as the
-            // list rows, icons rather than words. While a refresh is running the
-            // arrow dims rather than turning into text.
-            HeaderIcon(label = if (desktopLoading) "refreshing" else "refresh", onClick = onRefresh) {
-                // Dimmed as one layer: a translucent tint would draw darker where the
-                // head overlaps the arc.
-                Box(Modifier.alpha(if (desktopLoading) 0.4f else 1f)) { IconRefresh(Dim) }
-            }
-            Spacer(Modifier.width(6.dp))
-            HeaderIcon(label = "settings", onClick = onSettings) { IconCog(Dim) }
-        }
+        // The same header every route draws (AppHeader.kt): name, one status line, refresh
+        // and settings as one pair of squares.
+        AppHeader(
+            title = "ldmux",
+            status = status,
+            onRefresh = onRefresh,
+            refreshing = desktopLoading,
+            onSettings = onSettings,
+        )
 
         // Where a new shell goes is asked for in the dialogue that creates it, and
         // where a pushed window goes is asked for when it is pushed. There used to
@@ -507,21 +495,6 @@ private fun ChoiceRow(
     }
 }
 
-/** A square header button on the list rows' background; drawn icons need a spoken [label]. */
-@Composable
-private fun HeaderIcon(label: String, onClick: () -> Unit, content: @Composable () -> Unit) {
-    Box(
-        Modifier
-            .clip(RadiusMedium)
-            .background(Surface)
-            .size(LocalTouch.current.min)
-            .clickable(role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = label },
-        contentAlignment = Alignment.Center,
-    ) {
-        content()
-    }
-}
 
 /** Add or remove a key from a selection, without mutating the set. */
 private fun toggle(current: List<String>, key: String): List<String> =

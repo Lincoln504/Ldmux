@@ -78,8 +78,7 @@ private const val PANEL_FLIP_MS = 200L
 
 /** The app itself. A separate function only so the theme can wrap all of it. */
 @Composable
-internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
-    var showSettings by remember { mutableStateOf(false) }
+internal fun AppContent(config: LdmuxConfig, store: ConfigStore, onOpenSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
 
@@ -760,7 +759,7 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
             },
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
-            onSettings = { showSettings = true },
+            onSettings = onOpenSettings,
         )
         }
         // What the daemon said, whenever it said no — a bad path in "+ shell",
@@ -939,34 +938,9 @@ internal fun AppContent(config: LdmuxConfig, store: ConfigStore) {
                 onConfirm = {
                     store.pair(decision.pairing)
                     PairingInbox.clear()
-                    showSettings = false
                 },
             )
         }
     }
 
-    if (showSettings) {
-        SettingsDialog(
-            current = config,
-            onDismiss = { showSettings = false },
-            onSave = {
-                store.update(it)
-                showSettings = false
-            },
-            onPaired = { p ->
-                store.pair(p)
-                showSettings = false
-            },
-            onUnpair = { store.unpair() },
-            mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
-                MeshRouteActions(
-                    credentials = { readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first },
-                    onPairing = { text -> applyMeshPairingScan(text, store) },
-                    onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()) },
-                    onConfig = { store.update(it) },
-                    onUnpair = { store.unpairMesh() },
-                )
-            } else null,
-        )
-    }
 }

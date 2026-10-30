@@ -1,6 +1,12 @@
 package dev.ldmux.mobile
 
 import androidx.compose.material3.MaterialTheme
+import dev.ldmux.mobile.mesh.MeshRouteActions
+import dev.ldmux.mobile.mesh.applyGatewayScan
+import dev.ldmux.mobile.mesh.applyMeshPairingScan
+import dev.ldmux.mobile.mesh.availableRoutes
+import dev.ldmux.mobile.mesh.currentPlatform
+import dev.ldmux.mobile.mesh.readMeshCredentials
 import dev.ldmux.mobile.mesh.MeshEnrollment
 import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshTerminalScreen
@@ -59,10 +65,39 @@ fun App() {
                 if (config.route == MeshRoute.Mesh) showApp = false
             }
             val mesh = meshScreenFor(config)
+            // Settings is drawn **once, here**, for every route. It used to belong to the
+            // tailnet surface, so the mesh terminal had no way in at all: you had to leave
+            // the mesh route to reach Settings, and leaving then reported the route as
+            // unavailable. One app, one Settings.
+            var showSettings by remember { mutableStateOf(false) }
             if (mesh != null && !showApp) {
-                MeshTerminalScreen(mesh, onLeave = { showApp = true })
+                MeshTerminalScreen(mesh, onLeave = { showApp = true }, onOpenSettings = { showSettings = true })
             } else {
-                AppContent(config, store)
+                AppContent(config, store, onOpenSettings = { showSettings = true })
+            }
+            if (showSettings) {
+                SettingsDialog(
+                    current = config,
+                    onDismiss = { showSettings = false },
+                    onSave = {
+                        store.update(it)
+                        showSettings = false
+                    },
+                    onPaired = { p ->
+                        store.pair(p)
+                        showSettings = false
+                    },
+                    onUnpair = { store.unpair() },
+                    mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
+                        MeshRouteActions(
+                            credentials = { readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first },
+                            onPairing = { text -> applyMeshPairingScan(text, store) },
+                            onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()) },
+                            onConfig = { store.update(it) },
+                            onUnpair = { store.unpairMesh() },
+                        )
+                    } else null,
+                )
             }
         }
     }

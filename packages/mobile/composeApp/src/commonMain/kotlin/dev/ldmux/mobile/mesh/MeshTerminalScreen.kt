@@ -3,6 +3,7 @@ package dev.ldmux.mobile.mesh
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -50,6 +51,8 @@ import dev.ldmux.mobile.Bg
 import dev.ldmux.mobile.Dim
 import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.InputOp
+import dev.ldmux.mobile.LocalTouch
+import dev.ldmux.mobile.AppHeader
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
@@ -75,7 +78,7 @@ import kotlinx.coroutines.launch
  * knows a radio parameter.
  */
 @Composable
-fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
+fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit, onOpenSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
     // itself), so the caller needs a way to make it. A refused bind, a rotated token or an
@@ -134,17 +137,21 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
     // safeDrawingPadding first: the mesh screen is drawn instead of AppContent's own Box,
     // so without it the status line sits under the clock and the nav bar eats the last row.
     Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            // The label must wrap to its own row rather than squeeze the button: a Row with
-            // SpaceBetween gave "leave" one character of width and it drew vertically.
-            Text(
-                meshTermLabel(view, plan.endpoint),
-                color = if (live != null) Fg else Warn,
-                fontSize = 13.sp,
-                maxLines = 2,
-                modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
+        // The app's own header, byte for byte the one the tailnet route draws. It used to be a
+        // bare label and a `leave`, which is why this route read as a different app that had
+        // taken over the screen: no settings, no way back but leaving first.
+        //
+        // The status line is the route's own, because that is the one thing that really differs;
+        // the refresh square is absent here — a reconnect is what it would mean, and the body
+        // offers that where the state explains it.
+        Box(Modifier.fillMaxWidth().padding(start = LocalTouch.current.pad * 3, end = LocalTouch.current.pad * 3, top = LocalTouch.current.pad * 3)) {
+            AppHeader(
+                title = "ldmux",
+                status = meshTermLabel(view, plan.endpoint),
+                onRefresh = null,
+                onSettings = onOpenSettings,
+                onLeave = onLeave,
             )
-            Text("leave", color = Accent, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(4.dp).clickable(onClick = onLeave))
         }
         if (live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())) {
             val absent = meshAbsentLine(live?.absent ?: emptyList())
