@@ -112,6 +112,9 @@ sealed interface MeshTermView {
     data class HostClosed(val reason: Int?) : MeshTermView
 }
 
+/** The host's shells as the header shows them. [current] is the one attached, when known. */
+data class MeshShells(val entries: List<SessionEntry>, val current: String?)
+
 enum class InputOutcome { Accepted, NotLive, QueueFull, TooLong, Empty }
 
 /**
@@ -165,6 +168,20 @@ class MeshTermDriver(
     private var choices: List<SessionEntry> = emptyList()
     /** A recoverable gateway problem (radio out). Cleared when the link is bound again. */
     private var linkProblem: MeshLinkState? = null
+
+    /** The shell this attach is on, by the host's own id, when it is known (see [MeshShells]). */
+    private var attachedId: String? = null
+    /** A list was asked for while attached: its answer fills [shells] and attaches nothing. */
+    private var listingForHeader = false
+    private val _shells = MutableStateFlow(MeshShells(emptyList(), null))
+
+    /**
+     * The host's shells, for the header and the picker. Empty until the host has answered a
+     * [listShells]; [MeshShells.current] is null while the attached shell's id is not known (an
+     * empty-selector attach to the one shell does not say which it took, so it is learned from the
+     * list: exactly one entry is the one).
+     */
+    val shells: StateFlow<MeshShells> = _shells.asStateFlow()
 
     /** Records that failed a session check (tag, replay, decode). Evidence of noise or an attacker, not a failure. */
     var rejectedRecords = 0
@@ -285,6 +302,38 @@ class MeshTermDriver(
         if (session == null || terminalView != null || pick != Pick.Choosing) return@withLock false
         if (choices.none { it.id == id }) return@withLock false
         pick = Pick.Attached
+        attachedId = id
+        publishShells()
+        queue(TermMessage.Attach(MeshTerm.VERSION, id))
+        pump(); publish()
+        true
+    }
+
+    /**
+     * Ask the host which shells are running **while attached**, to fill [shells]. Attaches nothing:
+     * the answer is information for the header, and moving is [selectShell]. Costs one record up and
+     * one or more down, so callers use it once on arriving and when the user asks, not on a timer.
+     */
+    suspend fun listShells() = lock.withLock {
+        if (session == null || terminalView != null || pick != Pick.Attached) return@withLock
+        listingForHeader = true; pages = ArrayList()
+        queue(TermMessage.ListRequest); pump(); publish()
+    }
+
+    /**
+     * Move to another of the host's shells without leaving the session: one `Attach`, and the host
+     * answers with a fresh `Profile` and a full screen. Only an id from the host's own list is
+     * accepted, and the shell already attached is a no-op, so a stale header cannot attach a guess
+     * or spend a record to stay where it is. The old screen is dropped at once (the view says the
+     * host has not described the terminal yet) rather than painting one shell's rows under another's name.
+     */
+    suspend fun selectShell(id: String): Boolean = lock.withLock {
+        if (session == null || terminalView != null || pick != Pick.Attached) return@withLock false
+        if (_shells.value.entries.none { it.id == id } || id == attachedId) return@withLock false
+        mirror = RowMirror()
+        held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
+        attachedId = id
+        publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
         true
@@ -372,11 +421,9 @@ class MeshTermDriver(
                 held.clear(); lastEpoch = null; painted = false
                 // The host answered a resync with a fresh profile: the screen that follows is full.
             }
-            is TermMessage.Rows -> {
-                if (held.isNotEmpty() && held[0].epoch != m.epoch) held.clear()
-                held += m
-            }
-            is TermMessage.Commit -> commit(m)
+            // Before a profile there is no screen to paint into: these are the previous shell's
+            // last updates arriving after a switch, and must not be answered with a Resync.
+            is TermMessage.Rows, is TermMessage.Commit -> if (mirror.profile != null) handleScreen(m)
             is TermMessage.Closed -> when {
                 // The answer to an empty-selector attach: not an ending, a question for the user.
                 pick == Pick.Probing && m.reason == MeshTerm.Closed.AMBIGUOUS -> {
@@ -391,19 +438,44 @@ class MeshTermDriver(
         }
     }
 
-    /** A page of the shell list. Ignored unless a list was asked for, so a stray one cannot attach anything. */
+    private fun handleScreen(m: TermMessage) {
+        when (m) {
+            is TermMessage.Rows -> {
+                if (held.isNotEmpty() && held[0].epoch != m.epoch) held.clear()
+                held += m
+            }
+            is TermMessage.Commit -> commit(m)
+            else -> {}
+        }
+    }
+
+    /**
+     * A page of the shell list. Ignored unless a list was asked for, so a stray one cannot attach
+     * anything. A list asked for to choose a shell may attach (one entry) or ask the user; a list
+     * asked for by the header only fills [shells].
+     */
     private fun onSessions(m: TermMessage.Sessions) {
-        if (pick != Pick.Listing) return
+        if (pick != Pick.Listing && !listingForHeader) return
         pages.addAll(m.entries)
         if (!m.last) return
         val all = pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
         pages = ArrayList()
+        if (listingForHeader && pick != Pick.Listing) {
+            listingForHeader = false
+            // Exactly one shell and we did not know which we took: it is that one.
+            if (attachedId == null && all.size == 1) attachedId = all[0].id
+            _shells.value = MeshShells(all, attachedId)
+            return
+        }
         when (all.size) {
             0 -> pick = Pick.None
-            1 -> { pick = Pick.Attached; queue(TermMessage.Attach(MeshTerm.VERSION, all[0].id)) }
+            1 -> { pick = Pick.Attached; attachedId = all[0].id; queue(TermMessage.Attach(MeshTerm.VERSION, all[0].id)) }
             else -> { pick = Pick.Choosing; choices = all }
         }
+        _shells.value = MeshShells(all, attachedId)
     }
+
+    private fun publishShells() { _shells.value = MeshShells(_shells.value.entries, attachedId) }
 
     private fun commit(m: TermMessage.Commit) {
         val rows = held.filter { it.epoch == m.epoch }

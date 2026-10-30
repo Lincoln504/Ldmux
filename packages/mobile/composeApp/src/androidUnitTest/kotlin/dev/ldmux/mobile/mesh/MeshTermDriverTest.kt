@@ -196,6 +196,74 @@ class MeshTermDriverTest {
         assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.AMBIGUOUS), d.view.value)
     }
 
+    // ── the header's shell list, and moving between shells ─────────────────────────────
+
+    @Test
+    fun `listing while attached fills the header and attaches nothing`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        val before = sess.messages().size
+        d.listShells()
+        assertEquals(TermMessage.ListRequest, sess.messages().last())
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11", "RCNT"), ent("bb22", "pi"))))
+        assertEquals(before + 1, sess.messages().size, "only the ListRequest was sent")
+        assertEquals(listOf(ent("aa11", "RCNT"), ent("bb22", "pi")), d.shells.value.entries)
+        assertEquals(null, d.shells.value.current, "an empty-selector attach to one shell does not say which")
+        assertIs<MeshTermView.Live>(d.view.value)
+    }
+
+    @Test
+    fun `exactly one listed shell is the one that was attached`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        d.listShells()
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11", "RCNT"))))
+        assertEquals("aa11", d.shells.value.current)
+    }
+
+    @Test
+    fun `selecting a listed shell sends one Attach and drops the old screen at once`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        d.listShells()
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        assertEquals(true, d.selectShell("bb22"))
+        assertEquals(TermMessage.Attach(1, "bb22"), sess.messages().last())
+        assertEquals("bb22", d.shells.value.current)
+        assertEquals(MeshTermView.ProfileMissing, d.view.value, "no old rows under the new name")
+        deliver(d, profile, rows(1, true, 0 to "new> "), TermMessage.Commit(1, 5, 0, 0))
+        assertEquals("new> ", (d.view.value as MeshTermView.Live).screen.lines[0])
+    }
+
+    @Test
+    fun `updates of the old shell arriving after a switch are ignored, not answered with a Resync`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        d.listShells()
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        d.selectShell("bb22")
+        val sent = sess.messages().size
+        deliver(d, rows(2, false, 0 to "stale"), TermMessage.Commit(2, 0, 0, 0))
+        assertEquals(sent, sess.messages().size, "no Resync for a screen we no longer have")
+        assertEquals(MeshTermView.ProfileMissing, d.view.value)
+    }
+
+    @Test
+    fun `an id the host did not list, and the shell already attached, send nothing`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        d.listShells()
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        d.selectShell("bb22")
+        val sent = sess.messages().size
+        assertEquals(false, d.selectShell("zz99"))
+        assertEquals(false, d.selectShell("bb22"))
+        assertEquals(sent, sess.messages().size)
+    }
+
+    @Test
+    fun `nothing can be selected before the host has listed`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        val sent = sess.messages().size
+        assertEquals(false, d.selectShell("aa11"))
+        assertEquals(sent, sess.messages().size)
+    }
+
     @Test
     fun `the picker states are different values from every other not-working state`() {
         val states = listOf(
