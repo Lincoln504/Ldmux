@@ -42,6 +42,7 @@ class MeshTermCodecTest {
             "resync" -> TermMessage.Resync
             "detach" -> TermMessage.Detach
             "profile" -> TermMessage.Profile(i("version"), i("cols"), i("rows"), i("unsupported"), o["shell"]!!.jsonPrimitive.content)
+            "resize" -> TermMessage.Resize(i("cols"), i("rows"))
             "key" -> TermMessage.Key(o["names"]!!.jsonArray.map { it.jsonPrimitive.content })
             "rows" -> TermMessage.Rows(
                 i("epoch"), o["full"]!!.jsonPrimitive.boolean,

@@ -49,6 +49,7 @@ import dev.ldmux.mobile.LdmuxConfig
 import dev.ldmux.mobile.LocalTouch
 import dev.ldmux.mobile.TerminalSurfaceFor
 import dev.ldmux.mobile.AppHeader
+import dev.ldmux.mobile.ChoiceRow
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
@@ -192,37 +193,39 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
                     // prompt. Painting on `Commit` only is the driver's rule, so the screen shown here
                     // is never half a screen.
                     LaunchedEffect(source, live?.screen) { live?.screen?.let(source::show) }
-                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                        val fit = meshFitFontSp(maxWidth.value, live?.screen?.cols ?: 0, LocalDensity.current.fontScale, config.fontSp)
+                    // The host fits its pty to what the surface measures (`Resize`, profile version
+                    // 3), so the font is the user's own and a line is never wider than the screen.
+                    DisposableEffect(source, conn) {
+                        source.onGrid = { c, r -> scope.launch { conn.driver.setGrid(c, r) } }
+                        onDispose { source.onGrid = null }
+                    }
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
                         TerminalSurfaceFor(
                             source = source,
                             key = shells.current ?: "mesh",
-                            config = config.copy(fontSp = fit),
+                            config = config,
                             typing = typing,
                             active = true,
                             modifier = Modifier.fillMaxSize(),
                             keyboardRequest = keyboardRequest,
                         )
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
-                        if (live?.screen?.alternate == true) {
-                            // A warning only while it is true, over the terminal like the voice banner.
+                        // What the link adds is said only while it is true, over the terminal like the voice
+                        // banner, and never as a row: the tailnet's live screen is the terminal and the
+                        // bar. The hour's records and the typing that waits are on the shell list.
+                        val notice = when {
+                            handle.overflow -> "too much typed: wait for it to send"
+                            live?.stalled == true -> "waiting for send budget"
+                            live?.screen?.alternate == true -> "full-screen program: updates are large and slow"
+                            else -> null
+                        }
+                        if (notice != null) {
                             Text(
-                                "full-screen program: updates are large and slow",
+                                notice,
                                 color = Warn, fontSize = 11.sp,
                                 modifier = Modifier.align(Alignment.TopEnd).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp),
                             )
                         }
-                    }
-                    // The one line the link's limits live on: what is waiting to be sent, and the hour's
-                    // records. Next to the input, where the user is when it matters.
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(
-                            if (handle.overflow) "too much typed: wait for it to send" else handle.pendingLabel.ifEmpty { meshTermLabel(view, plan.endpoint) },
-                            color = if (handle.overflow) Warn else if (handle.pendingLabel.isEmpty()) Dim else Fg,
-                            fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        Text(meshBudgetLine(live?.budgetLeft).removePrefix("send budget: "), color = Dim, fontSize = 11.sp, maxLines = 1)
                     }
                 }
                 if (!portrait && !config.panelLeft) panel()
@@ -274,15 +277,19 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
                     // The host's own shells; choosing one attaches it and returns to the terminal.
                     val absent = meshAbsentLine(live?.absent ?: emptyList())
                     if (absent.isNotEmpty()) Text(absent, color = Dim, fontSize = 11.sp)
+                    Text(meshBudgetLine(live?.budgetLeft), color = Dim, fontSize = 11.sp)
+                    if (handle.pendingLabel.isNotEmpty()) Text("waiting to send: ${handle.pendingLabel}", color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                     if (shells.entries.isEmpty()) Text("no shells listed yet", color = Dim, fontSize = 12.sp)
+                    // The launcher's own row, not a list of monospaced strings: the same height, the same
+                    // tick-as-number marker for the shell you are on, the same tap target. A route that
+                    // drew its own rows was the biggest reason this screen read as another app.
                     for (e in shells.entries) {
-                        Text(
-                            meshShellLine(e),
-                            color = if (e.id == shells.current) Accent else Fg,
-                            fontSize = 13.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                                .clickable { showList = false; scope.launch { conn.driver.selectShell(e.id) } },
+                        ChoiceRow(
+                            title = e.label.ifEmpty { e.id },
+                            subtitle = e.id,
+                            chosen = false,
+                            inUse = e.id == shells.current,
+                            onClick = { showList = false; scope.launch { conn.driver.selectShell(e.id) } },
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -292,15 +299,13 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
                 } else {
                     when (val v = view) {
                         // The host's own list, verbatim: choosing sends that id and nothing is guessed.
-                        is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad)) {
                             for (e in v.entries) {
-                                Text(
-                                    meshShellLine(e),
-                                    color = Fg,
-                                    fontSize = 13.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                                        .clickable { scope.launch { conn.driver.choose(e.id) } },
+                                ChoiceRow(
+                                    title = e.label.ifEmpty { e.id },
+                                    subtitle = e.id,
+                                    chosen = false,
+                                    onClick = { scope.launch { conn.driver.choose(e.id) } },
                                 )
                             }
                         }

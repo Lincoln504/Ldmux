@@ -300,6 +300,33 @@ class MeshTermDriver(
         sendToShell(message)
     }
 
+    /**
+     * The phone's grid in cells, from the surface's own geometry. The host is asked to fit its pty
+     * to it once per attached shell and grid (version 3 and above), so a line is never wider than
+     * the screen, as on the tailnet. Called again on rotation or a font change; the same grid for
+     * the same shell is not asked twice, so a host that clamps it cannot start a loop.
+     */
+    suspend fun setGrid(cols: Int, rows: Int) = lock.withLock {
+        if (cols !in 1..255 || rows !in 1..255) return@withLock
+        wantedGrid = cols to rows
+        if (session != null && terminalView == null) { fitHost(); pump(); publish() }
+    }
+
+    private var wantedGrid: Pair<Int, Int>? = null
+    private var requestedFit: Triple<String, Int, Int>? = null
+    private var hostVersion = 0
+
+    private fun fitHost() {
+        val (cols, rows) = wantedGrid ?: return
+        val profile = mirror.profile ?: return
+        if (hostVersion < MeshTerm.RESIZE_VERSION) return
+        if (profile.cols == cols && profile.rows == rows) return
+        val key = Triple(attachedId ?: mirror.shell, cols, rows)
+        if (requestedFit == key) return
+        requestedFit = key
+        queue(TermMessage.Resize(cols, rows))
+    }
+
     private suspend fun sendToShell(message: TermMessage): InputOutcome {
         val s = session
         if (s == null || _view.value !is MeshTermView.Live || terminalView != null) return InputOutcome.NotLive
@@ -435,6 +462,7 @@ class MeshTermDriver(
         when (m) {
             is TermMessage.Profile -> {
                 if (pick == Pick.Probing) pick = Pick.Attached
+                hostVersion = m.version
                 unsupported = m.unsupported
                 // The host names the shell it attached (version 2), so the header's current marker
                 // is known at once, including after an empty-selector attach that chose for us.
@@ -442,6 +470,8 @@ class MeshTermDriver(
                 mirror.apply(m)
                 held.clear(); lastEpoch = null; painted = false
                 // The host answered a resync with a fresh profile: the screen that follows is full.
+                // If its grid is not the phone's, ask it to fit (the answer is another profile).
+                fitHost()
             }
             // Before a profile there is no screen to paint into: these are the previous shell's
             // last updates arriving after a switch, and must not be answered with a Resync.

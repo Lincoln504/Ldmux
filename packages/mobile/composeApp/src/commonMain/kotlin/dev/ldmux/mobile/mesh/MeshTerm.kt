@@ -17,12 +17,15 @@ package dev.ldmux.mobile.mesh
 object MeshTerm {
     /**
      * Version 2 adds `Key` and names the attached shell in `Profile`. A host answers in the
-     * version the phone attached with and accepts [MIN_VERSION]..[VERSION].
+     * version the phone attached with and accepts [MIN_VERSION]..[VERSION]. Version 3 adds
+     * `Resize`: the phone's grid, so the host fits its pty to it as it does for a tailnet client.
      */
-    const val VERSION = 2
+    const val VERSION = 3
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
+    /** The first version that has `Resize`. */
+    const val RESIZE_VERSION = 3
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
     const val MAX_BODY = 300
@@ -71,6 +74,7 @@ object MeshTerm {
     internal const val T_DETACH = 0x04
     internal const val T_LIST = 0x05
     internal const val T_KEY = 0x06
+    internal const val T_RESIZE = 0x07
     internal const val T_SESSIONS = 0x85
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
@@ -99,6 +103,8 @@ sealed interface TermMessage {
      * cursor-key and keyboard mode, so the phone has no key table. Printable ASCII, no space.
      */
     data class Key(val names: List<String>) : TermMessage
+    /** Phone to host (version 3): the phone's grid in cells, each 1..255. The host answers with a fresh `Profile`. */
+    data class Resize(val cols: Int, val rows: Int) : TermMessage
     data class Rows(val epoch: Int, val full: Boolean, val patches: List<TermPatch>) : TermMessage
     data class Commit(val epoch: Int, val cursorX: Int, val cursorY: Int, val flags: Int) : TermMessage
     data class Closed(val reason: Int) : TermMessage
@@ -193,6 +199,11 @@ fun TermMessage.encode(): ByteArray {
             names.joinToString(" ").encodeToByteArray().forEach { body.add(it) }
             if (body.size > MeshTerm.MAX_INPUT) throw TermEncodeException("keys too long")
             MeshTerm.T_KEY
+        }
+        is TermMessage.Resize -> {
+            if (cols !in 1..255 || rows !in 1..255) throw TermEncodeException("resize out of range")
+            body.add(cols.toByte()); body.add(rows.toByte())
+            MeshTerm.T_RESIZE
         }
         is TermMessage.Sessions -> {
             body.add(if (last) 1 else 0)
@@ -339,6 +350,8 @@ class TermDecoder {
                 if (names.size > MeshTerm.MAX_KEYS || names.any { !validKeyName(it) }) Parsed.Bad
                 else ok(TermMessage.Key(names))
             }
+            MeshTerm.T_RESIZE ->
+                if (body.size == 2 && b(body, 0) != 0 && b(body, 1) != 0) ok(TermMessage.Resize(b(body, 0), b(body, 1))) else Parsed.Bad
             MeshTerm.T_SESSIONS -> {
                 if (body.isEmpty()) return Parsed.Bad
                 val entries = ArrayList<SessionEntry>()

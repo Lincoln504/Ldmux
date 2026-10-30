@@ -362,7 +362,7 @@ internal fun openButtonLabel(picked: List<LauncherEntry>): String =
     if (picked.isEmpty()) "open" else "open (${picked.size})"
 
 /** One workspace, as a chip to aim a new shell at. */@Composable
-private fun ChoiceRow(
+internal fun ChoiceRow(
     title: String,
     subtitle: String,
     chosen: Boolean,

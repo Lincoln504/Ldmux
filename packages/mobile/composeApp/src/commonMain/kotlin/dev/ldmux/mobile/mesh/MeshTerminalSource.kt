@@ -27,8 +27,9 @@ import kotlinx.coroutines.flow.StateFlow
  * only what the surface asks of a terminal: a frame, a selection, a tap.
  *
  * Not carried, because the link does not carry it: scrollback (the engine has none to scroll, so
- * [scrollBy] reports 0), resize (the host's grid is fixed by its `Profile`, so [setGrid] is
- * ignored) and mouse tracking (a tap is always cursor keys).
+ * [scrollBy] reports 0) and mouse tracking (a tap is always cursor keys). Resize *is* carried
+ * (profile version 3): the grid the surface measures goes to [onGrid], and the driver asks the
+ * host to fit its pty to it, so the host's grid is the phone's and a line is never clipped.
  */
 class MeshTerminalSource(
     private val input: MeshTerminalHandle,
@@ -55,8 +56,16 @@ class MeshTerminalSource(
 
     override fun setActive(value: Boolean) {}
 
-    /** The host's grid is its own; the surface's measured one is not a request this link can make. */
-    override fun setGrid(cols: Int, rows: Int) {}
+    /** Where the surface's measured grid goes: the driver's request to the host to fit its pty. */
+    var onGrid: ((Int, Int) -> Unit)? = null
+
+    /**
+     * The grid the surface can paint at the user's own font size, measured by its painter. The
+     * tailnet sends the same number to the daemon as a resize; here it is the `Resize` message.
+     */
+    override fun setGrid(cols: Int, rows: Int) {
+        onGrid?.invoke(cols, rows)
+    }
 
     /**
      * Put [screen] on the engine. Called for every change of the committed screen, on the main
