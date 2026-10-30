@@ -32,7 +32,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /** The landscape panel's width. The terminal gets everything else. */
-private val PANEL_WIDTH = 190.dp
+internal val PANEL_WIDTH = 190.dp
 
 /**
  * Landscape app: a terminal filling the screen with a slim **side** panel — no
@@ -142,14 +142,19 @@ internal fun ShellHeader(
 @Composable
 internal fun SidePanel(
     pages: List<Session>,
-    pagerState: PagerState,
+    // Null on the mesh route, which has pages but no pager to move (see [ShellHeader]).
+    pagerState: PagerState?,
     scope: CoroutineScope,
-    client: LdmuxClient,
+    // Neither is read here; they stay for the tailnet call site. The mesh route has no
+    // daemon client and closes no shell from the panel.
+    client: LdmuxClient? = null,
     handles: Map<String, TerminalHandle>,
-    onKill: (Session) -> Unit,
+    onKill: (Session) -> Unit = {},
     onVoice: () -> Unit,
     voiceOn: Boolean = false,
-    onVoiceMode: () -> Unit = {},
+    // Null where there is no speech channel to run a voice mode over (the mesh link carries
+    // none): the button is then absent rather than present and inert.
+    onVoiceMode: (() -> Unit)? = {},
     onLauncher: () -> Unit,
     press: (String) -> Unit,
     shownId: String?,
@@ -212,7 +217,7 @@ internal fun SidePanel(
                 }
                 // Voice mode: hands-free, bound to this shell. Not the same control as the mic,
                 // which is one dictation: this one keeps listening and speaks the agent's reply.
-                KeyBtn("voice", Modifier.weight(1f), active = voiceOn) { onVoiceMode() }
+                if (onVoiceMode != null) KeyBtn("voice", Modifier.weight(1f), active = voiceOn) { onVoiceMode() }
                 IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
             }
             PanelDivider()

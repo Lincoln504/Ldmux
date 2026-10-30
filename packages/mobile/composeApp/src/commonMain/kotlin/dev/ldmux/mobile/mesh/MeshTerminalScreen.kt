@@ -14,6 +14,15 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Text
+import dev.ldmux.mobile.voice.VoiceState
+import dev.ldmux.mobile.voice.VoiceBanner
+import dev.ldmux.mobile.voice.Dictation
+import dev.ldmux.mobile.SidePanel
+import dev.ldmux.mobile.BackToLauncher
+import dev.ldmux.mobile.AppLifecycle
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -118,7 +127,9 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
         if (live != null && !listed) { listed = true; conn.driver.listShells() }
     }
 
-    var showPicker by remember(conn) { mutableStateOf(false) }
+    // The list of the host's shells is this route's launcher: the tailnet's menu → shells leaves the
+    // terminal for a screen with the header and the list, and so does this one.
+    var showList by remember(conn) { mutableStateOf(false) }
     var menuOpen by remember(conn) { mutableStateOf(false) }
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     // The keyboard is portrait-only and is the user's, as on the tailnet route (AppContent).
@@ -126,50 +137,143 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
     var keyboardRequest by remember { mutableStateOf(0) }
     val windowSize = LocalWindowInfo.current.containerSize
     val portrait = windowSize.height >= windowSize.width
-    LaunchedEffect(portrait) { if (portrait) keyboardWanted = true }
+    LaunchedEffect(portrait) { if (portrait) { keyboardWanted = true }; menuOpen = false }
     val typing = portrait && keyboardWanted
 
-    // safeDrawingPadding first: the mesh screen is drawn instead of AppContent's own Box,
-    // so without it the status line sits under the clock and the nav bar eats the last row.
-    Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        // The app's own header, byte for byte the one the tailnet route draws. It used to be a
-        // bare label and a `leave`, which is why this route read as a different app that had
-        // taken over the screen: no settings, no way back but leaving first.
-        //
-        // The status line is the route's own, because that is the one thing that really differs;
-        // the refresh square is absent here — a reconnect is what it would mean, and the body
-        // offers that where the state explains it.
-        Box(Modifier.fillMaxWidth().padding(start = LocalTouch.current.pad * 3, end = LocalTouch.current.pad * 3, top = LocalTouch.current.pad * 3)) {
-            AppHeader(
-                title = "ldmux",
-                status = meshTermLabel(view, plan.endpoint),
-                onRefresh = null,
-                onSettings = onOpenSettings,
-                onLeave = onLeave,
-            )
+    // Dictation is the tailnet's, with its own state and banner: it types into the shell, which on
+    // this route means the batcher. A microphone that outlives the screen is stopped at once.
+    var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
+    DisposableEffect(conn) {
+        val remove = AppLifecycle.onBackground { Dictation.stop() }
+        onDispose { remove(); Dictation.stop() }
+    }
+    LaunchedEffect(voice) {
+        if (voice is VoiceState.Failed || voice == VoiceState.Unavailable || voice == VoiceState.NoSpeech) {
+            delay(4000)
+            voice = VoiceState.Idle
         }
-        if (live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())) {
-            val absent = meshAbsentLine(live?.absent ?: emptyList())
-            if (absent.isNotEmpty()) Text(absent, color = Dim, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp))
-            if (live?.screen?.alternate == true) {
-                Text("A full-screen program is running: updates are large and slow here.", color = Warn, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp))
+    }
+
+    val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
+    val openList = { showList = true; scope.launch { conn.driver.listShells() }; Unit }
+    // Back is the launcher button, as on the tailnet route: the same call, not a second way.
+    BackToLauncher(enabled = terminalLive && !showList) { openList() }
+
+    // safeDrawingPadding first: this is drawn instead of AppContent's own Column, so without it the
+    // status line sits under the clock and the nav bar eats the last row.
+    Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
+        if (terminalLive && !showList) {
+            // The terminal, and nothing above it: the tailnet's terminal has no header either. The
+            // header belongs to the list screen, which is where Settings is, as on the tailnet.
+            val pages = meshPages(shells)
+            val shownId = shells.current ?: pages.firstOrNull()?.id
+            val panel: @Composable () -> Unit = {
+                SidePanel(
+                    pages = pages,
+                    pagerState = null,
+                    scope = scope,
+                    handles = pages.associate { it.id to (source as dev.ldmux.mobile.TerminalHandle) },
+                    onVoice = {
+                        Dictation.toggle(onText = { source.sendText(it) }, onState = { voice = it })
+                    },
+                    // No speech channel crosses this link, so there is no voice mode to run.
+                    onVoiceMode = null,
+                    onLauncher = { openList() },
+                    press = handle::sendKey,
+                    shownId = shownId,
+                    onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
+                )
             }
-            // The terminal itself is the tailnet route's own surface (TerminalSurfaceFor): its painter,
-            // its cursor, tap-to-move, selection, and the IME field that takes typing at the prompt.
-            // This route only decides what feeds it. Painting on `Commit` only is the driver's rule,
-            // so the screen shown here is never half a screen.
-            LaunchedEffect(source, live?.screen) { live?.screen?.let(source::show) }
-            TerminalSurfaceFor(
-                source = source,
-                key = shells.current ?: "mesh",
-                config = config,
-                typing = typing,
-                active = true,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                keyboardRequest = keyboardRequest,
-            )
-            if (showPicker) {
-                Column(Modifier.fillMaxWidth().background(dev.ldmux.mobile.Surface).padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                if (!portrait && config.panelLeft) panel()
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    // The terminal is the tailnet route's own surface (TerminalSurfaceFor): its painter,
+                    // its cursor, tap-to-move, selection and the IME field that takes typing at the
+                    // prompt. Painting on `Commit` only is the driver's rule, so the screen shown here
+                    // is never half a screen.
+                    LaunchedEffect(source, live?.screen) { live?.screen?.let(source::show) }
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                        val fit = meshFitFontSp(maxWidth.value, live?.screen?.cols ?: 0, LocalDensity.current.fontScale, config.fontSp)
+                        TerminalSurfaceFor(
+                            source = source,
+                            key = shells.current ?: "mesh",
+                            config = config.copy(fontSp = fit),
+                            typing = typing,
+                            active = true,
+                            modifier = Modifier.fillMaxSize(),
+                            keyboardRequest = keyboardRequest,
+                        )
+                        VoiceBanner(voice, Modifier.align(Alignment.TopStart))
+                        if (live?.screen?.alternate == true) {
+                            // A warning only while it is true, over the terminal like the voice banner.
+                            Text(
+                                "full-screen program: updates are large and slow",
+                                color = Warn, fontSize = 11.sp,
+                                modifier = Modifier.align(Alignment.TopEnd).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    // The one line the link's limits live on: what is waiting to be sent, and the hour's
+                    // records. Next to the input, where the user is when it matters.
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(
+                            if (handle.overflow) "too much typed: wait for it to send" else handle.pendingLabel.ifEmpty { meshTermLabel(view, plan.endpoint) },
+                            color = if (handle.overflow) Warn else if (handle.pendingLabel.isEmpty()) Dim else Fg,
+                            fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Text(meshBudgetLine(live?.budgetLeft).removePrefix("send budget: "), color = Dim, fontSize = 11.sp, maxLines = 1)
+                    }
+                }
+                if (!portrait && !config.panelLeft) panel()
+            }
+            if (portrait) {
+                PortraitBar(
+                    handle = handle,
+                    pages = pages,
+                    pagerState = null,
+                    scope = scope,
+                    keyboardUp = imeUp,
+                    // Decided by what is on screen, not by the flag, exactly as the tailnet bar does it: the
+                    // back gesture puts the keypad away without telling us.
+                    onToggleKeyboard = {
+                        if (imeUp) {
+                            keyboardWanted = false
+                        } else {
+                            keyboardWanted = true
+                            keyboardRequest++
+                        }
+                    },
+                    onMenu = { menuOpen = true },
+                    menuExpanded = menuOpen,
+                    onMenuDismiss = { menuOpen = false },
+                    onLauncher = { openList() },
+                    modifiers = handle.modifiers,
+                    onSticky = handle::toggleModifier,
+                    press = handle::sendKey,
+                    shownId = shownId,
+                    onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
+                )
+            }
+        } else {
+            // The launcher's shape: the app's own header (the one the tailnet launcher draws, with
+            // Settings), then the body. The status line is the route's own, the one thing that really
+            // differs; a refresh square is absent because a reconnect is what it would mean, and the
+            // body offers that where the state explains it.
+            Box(Modifier.fillMaxWidth().padding(start = LocalTouch.current.pad * 3, end = LocalTouch.current.pad * 3, top = LocalTouch.current.pad * 3)) {
+                AppHeader(
+                    title = "ldmux",
+                    status = meshTermLabel(view, plan.endpoint),
+                    onRefresh = null,
+                    onSettings = onOpenSettings,
+                    onLeave = onLeave,
+                )
+            }
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (terminalLive) {
+                    // The host's own shells; choosing one attaches it and returns to the terminal.
+                    val absent = meshAbsentLine(live?.absent ?: emptyList())
+                    if (absent.isNotEmpty()) Text(absent, color = Dim, fontSize = 11.sp)
                     if (shells.entries.isEmpty()) Text("no shells listed yet", color = Dim, fontSize = 12.sp)
                     for (e in shells.entries) {
                         Text(
@@ -178,84 +282,44 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
                             fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
                             modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                                .clickable { showPicker = false; scope.launch { conn.driver.selectShell(e.id) } },
+                                .clickable { showList = false; scope.launch { conn.driver.selectShell(e.id) } },
                         )
                     }
-                }
-            }
-            // The one line the link's limits live on: what is waiting to be sent, and the hour's
-            // records. Next to the input, where the user is when it matters.
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(
-                    if (handle.overflow) "too much typed: wait for it to send" else handle.pendingLabel.ifEmpty { "type, or use the keys" },
-                    color = if (handle.overflow) Warn else if (handle.pendingLabel.isEmpty()) Dim else Fg,
-                    fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                Text(meshBudgetLine(live?.budgetLeft).removePrefix("send budget: "), color = Dim, fontSize = 11.sp, maxLines = 1)
-            }
-            PortraitBar(
-                handle = handle,
-                pages = meshPages(shells),
-                pagerState = null,
-                scope = scope,
-                keyboardUp = imeUp,
-                // Decided by what is on screen, not by the flag, exactly as the tailnet bar does it: the
-                // back gesture puts the keypad away without telling us.
-                onToggleKeyboard = {
-                    if (imeUp) {
-                        keyboardWanted = false
-                    } else {
-                        keyboardWanted = true
-                        keyboardRequest++
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AccentBtn("terminal") { showList = false }
+                        AccentBtn("ask again") { scope.launch { conn.driver.listShells() } }
                     }
-                },
-                onMenu = { menuOpen = true },
-                menuExpanded = menuOpen,
-                onMenuDismiss = { menuOpen = false },
-                // The menu's one item is "shells": here it asks the host again and shows its list.
-                onLauncher = { showPicker = !showPicker; scope.launch { conn.driver.listShells() } },
-                modifiers = handle.modifiers,
-                onSticky = handle::toggleModifier,
-                press = handle::sendKey,
-                shownId = shells.current ?: meshPages(shells).firstOrNull()?.id,
-                onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
-            )
-        } else {
-            // Not live: say which of the not-working cases it is, and offer nothing to type into.
-            Column(Modifier.padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                when (val v = view) {
-                    // The host's own list, verbatim: choosing sends that id and nothing is guessed.
-                    is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        for (e in v.entries) {
-                            Text(
-                                meshShellLine(e),
-                                color = Fg,
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                                    .clickable { scope.launch { conn.driver.choose(e.id) } },
-                            )
+                } else {
+                    when (val v = view) {
+                        // The host's own list, verbatim: choosing sends that id and nothing is guessed.
+                        is MeshTermView.Choose -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            for (e in v.entries) {
+                                Text(
+                                    meshShellLine(e),
+                                    color = Fg,
+                                    fontSize = 13.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                                        .clickable { scope.launch { conn.driver.choose(e.id) } },
+                                )
+                            }
                         }
-                    }
-                    MeshTermView.NoShells -> AccentBtn("ask again") { scope.launch { conn.driver.refresh() } }
-                    is MeshTermView.LinkDown, is MeshTermView.HostClosed -> AccentBtn("reconnect") { attempt += 1 }
-                    else -> {
-                        // A wait is not nothing. This branch used to draw an empty screen, which is
-                        // why the route looked broken while it was working: a handshake on this link
-                        // takes seconds to minutes and the phone said nothing at all. One line, with
-                        // the seconds it has been waiting, is the whole difference between "working"
-                        // and "dead", and a reconnect is offered the moment it is stuck.
-                        val waiting = when (view) {
-                            MeshTermView.Idle -> "starting"
-                            MeshTermView.Handshaking -> "handshaking"
-                            MeshTermView.ProfileMissing -> "the host has not described a terminal yet"
-                            MeshTermView.Listing -> "asking the host which shells are running"
-                            else -> null
-                        }
-                        if (waiting != null) {
-                            WaitingLine(waiting, view::class.simpleName)
-                            AccentBtn("reconnect") { attempt += 1 }
+                        MeshTermView.NoShells -> AccentBtn("ask again") { scope.launch { conn.driver.refresh() } }
+                        is MeshTermView.LinkDown, is MeshTermView.HostClosed -> AccentBtn("reconnect") { attempt += 1 }
+                        else -> {
+                            // A wait is not nothing: it says what it is waiting for, with the seconds it
+                            // has taken, and offers reconnect the moment the user wants to stop waiting.
+                            val waiting = when (view) {
+                                MeshTermView.Idle -> "starting"
+                                MeshTermView.Handshaking -> "handshaking"
+                                MeshTermView.ProfileMissing -> "the host has not described a terminal yet"
+                                MeshTermView.Listing -> "asking the host which shells are running"
+                                else -> null
+                            }
+                            if (waiting != null) {
+                                WaitingLine(waiting, view::class.simpleName)
+                                AccentBtn("reconnect") { attempt += 1 }
+                            }
                         }
                     }
                 }
