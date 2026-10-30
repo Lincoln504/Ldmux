@@ -73,12 +73,13 @@ import kotlinx.coroutines.launch
  * differences are stated where they bite and nowhere else:
  *  - plain-text rows, no colour, scrollback, mouse or clipboard writes (the host's own
  *    `absent` list, one line);
- *  - what you type waits a moment and leaves in one record (the line above the keys shows
- *    what is waiting, and how many records the hour has left);
+ *  - what you type waits a moment and leaves in one record (the list screen shows what is
+ *    waiting, and how many records the hour has left);
  *  - a full-screen program makes updates large and slow (one warning line, only then).
  *
- * The header lists the host's own shells and moves between them with one `Attach`; a shell
- * opened at the desk appears after the list is asked for again (menu → shells). Nothing here
+ * The shell list is the tailnet launcher's: rows are ticked, then the one `open` makes exactly the
+ * ticked shells the header's pages, and moving between them is one `Attach`. A shell opened at the
+ * desk appears after the list is asked for again (the header's refresh square). Nothing here
  * knows a radio parameter.
  */
 @Composable
