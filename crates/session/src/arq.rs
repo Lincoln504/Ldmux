@@ -94,12 +94,23 @@ impl Config {
     /// measurements. `max_payload` must come from the record limit the gateway advertised.
     #[must_use]
     pub fn for_payload(max_payload: usize) -> Self {
+        // Tuned for **interactive typing on a link we own**, measured 2026-10-30. The old
+        // numbers (3 s ack delay, 20 s first retry, 300 s cap, window 4) were chosen when a
+        // reply taking tens of seconds was normal; on a private 500 kHz channel that is a
+        // 70 ms frame, and they were the whole of the delay a keystroke saw. Air is not the
+        // constraint here: one echo is two records, about 140 ms.
+        //
+        //  - `ack_delay_ms` still lets an owed ack ride on outgoing data first; it only bounds
+        //    how long a *pure* ack waits, and at 150 ms that frame is not worth avoiding.
+        //  - `rto_initial_ms` is ~10x the measured round trip at 62.5 kHz, so a retry fires long
+        //    before a user would notice, and a duplicate is dropped and only marks an ack owed.
+        //  - `window` 8 is the L2 credit, so a repaint pipelines instead of stalling at 4.
         Self {
-            window: 4,
-            rto_initial_ms: 20_000,
-            rto_max_ms: 300_000,
+            window: 8,
+            rto_initial_ms: 2_000,
+            rto_max_ms: 30_000,
             max_attempts: 5,
-            ack_delay_ms: 3_000,
+            ack_delay_ms: 150,
             queue_max: 64,
             max_payload,
         }

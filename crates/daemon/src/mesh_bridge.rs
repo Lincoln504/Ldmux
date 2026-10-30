@@ -438,7 +438,7 @@ impl Host for DaemonHost {
 
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
 /// bound does not care: an update waits for an empty queue regardless.
-pub const TICK_MS: u64 = 1000;
+pub const TICK_MS: u64 = 50;
 
 /// Run the bridge for the life of the process.
 pub async fn run<H: Host, L: Link>(mut bridge: Bridge<H, L>) {

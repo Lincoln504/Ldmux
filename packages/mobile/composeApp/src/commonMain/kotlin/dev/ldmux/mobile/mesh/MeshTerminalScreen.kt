@@ -110,11 +110,11 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, config: LdmuxConfig, onLeave: () ->
             handle.refreshPending()
             when (step) {
                 PumpStep.Sent -> {}
-                PumpStep.Waiting -> delay(600)
-                PumpStep.Blocked -> delay(500)
+                PumpStep.Waiting -> delay(150)
+                PumpStep.Blocked -> delay(150)
                 PumpStep.Idle -> {
                     val due = batcher.nextDueMs()
-                    delay(if (due == null) 250L else (due - clock()).coerceIn(30L, 250L))
+                    delay(if (due == null) 50L else (due - clock()).coerceIn(10L, 50L))
                 }
             }
         }
