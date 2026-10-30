@@ -408,3 +408,25 @@ guarantee.
 Still open: a keystroke-level timing harness. The native terminal surface exposes no text to
 the accessibility tree, so `uiautomator dump` cannot time an echo; timing must come from
 host-side timestamps or screenshot deltas.
+
+## The stall that felt like "my keys only appear when I press another key" (2026-10-30)
+
+`Bridge::tick` refused to look at the screen while **any** record was unacked:
+
+```rust
+if self.link.pending() > 0 { break; }
+```
+
+so an echo could not even be *built* until the previous record's ack came back, and an ack on
+this link only rides on the phone's next record or its pure-ack timer. Measured with the
+`LDMUX_MESH_TIMING=1` probes: input arrived at 38529 ms, the echo was queued at 55080 ms, a
+**sixteen-second** gap with the radio idle.
+
+The gate is the session window now (`PENDING_LIMIT = 8`): the pipe stays full, the queue cannot
+grow past what the link carries. Same measurement after the change: input at 31048 ms, echo
+queued at 31050 ms.
+
+Two bridge tests pinned the old policy and now set `pending` to the window, which is what "busy"
+means. The timing probes stay in the daemon behind `LDMUX_MESH_TIMING=1`: the phone's terminal is
+a native surface whose text is invisible to the accessibility tree, so host-side timestamps are
+the only honest measurement of a keystroke's turnaround.
