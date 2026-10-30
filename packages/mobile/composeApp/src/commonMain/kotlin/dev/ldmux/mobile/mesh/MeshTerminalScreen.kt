@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -52,10 +53,20 @@ fun MeshTerminalScreen(plan: MeshScreenPlan, onLeave: () -> Unit) {
     DisposableEffect(conn) { onDispose { conn.close() } }
     val view by conn.driver.view.collectAsState()
 
-    Column(Modifier.fillMaxSize().background(Bg).padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    // safeDrawingPadding first: the mesh screen is drawn instead of AppContent's own Box,
+    // so without it the status line sits under the clock and the nav bar eats the last row.
+    Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(meshTermLabel(view), color = if (view is MeshTermView.Live) Fg else Warn, fontSize = 13.sp)
-            Text("leave", color = Accent, fontSize = 13.sp, modifier = Modifier.padding(4.dp).clickable(onClick = onLeave))
+            // The label must wrap to its own row rather than squeeze the button: a Row with
+            // SpaceBetween gave "leave" one character of width and it drew vertically.
+            Text(
+                meshTermLabel(view),
+                color = if (view is MeshTermView.Live) Fg else Warn,
+                fontSize = 13.sp,
+                maxLines = 2,
+                modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp),
+            )
+            Text("leave", color = Accent, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(4.dp).clickable(onClick = onLeave))
         }
         Text(MESH_RATE_NOTICE, color = Dim, fontSize = 11.sp)
         val live = view as? MeshTermView.Live

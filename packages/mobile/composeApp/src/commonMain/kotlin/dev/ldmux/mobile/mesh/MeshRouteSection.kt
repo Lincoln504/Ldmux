@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -54,6 +55,7 @@ internal fun MeshRouteSection(
     if (!view.meshExists) return // iOS: there is no mesh route to configure
 
     var note by remember { mutableStateOf<String?>(null) }
+    var pasted by remember { mutableStateOf("") }
     var confirmForget by remember(current.connectionKey) { mutableStateOf(false) }
     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("mesh route", color = Fg, fontSize = 13.sp)
@@ -97,6 +99,39 @@ internal fun MeshRouteSection(
                     }
                 }
             }) { Text("scan MeshMore code", color = Accent, fontSize = 12.sp) }
+        }
+        // Same-phone pairing cannot be scanned: MeshMore's code is displayed by the other app on
+        // this very screen, so there is nothing for this camera to point at. Typing or pasting the
+        // code is the only path for the daily case, and it is routed by its own scheme so a user
+        // never has to know which box it belongs in.
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            BasicTextField(
+                value = pasted,
+                onValueChange = { pasted = it },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = Fg, fontSize = 12.sp),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 4.dp),
+                decorationBox = { inner ->
+                    if (pasted.isEmpty()) Text("paste a code", color = Dim, fontSize = 12.sp) else inner()
+                },
+            )
+            MiniTextButton(onClick = {
+                note = null
+                val code = pasted.trim()
+                if (code.startsWith("meshmore://") || code.matches(Regex("[0-9a-fA-F]{32}"))) {
+                    when (val g = onGatewayCode(code)) {
+                        is GatewayScan.Saved -> { onConfig(g.config); credentials = readCredentials(); pasted = "" }
+                        is GatewayScan.Refused -> note = gatewayScanLine(g.problem)
+                    }
+                } else {
+                    when (val o = onMeshPairing(code).also { credentials = readCredentials() }) {
+                        is MeshPairingScan.Enrolled -> pasted = ""
+                        is MeshPairingScan.Refused -> note = meshPairingLine(o.problem)
+                    }
+                }
+            }) { Text("use code", color = Accent, fontSize = 12.sp) }
         }
         // The picker: only routes that can run are offered, so it cannot save one that will not.
         if (view.choosable.isNotEmpty()) {

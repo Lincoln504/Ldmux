@@ -170,3 +170,41 @@ Stop the host processes first: `pkill -f meshmore_gateway.dart` and `pkill -x ld
 - MeshMore APK build (blocked, above). No device attached to ADB (`adb devices` empty).
 - MeshMore's activity name was read from the stale APK; re-check on the rebuilt one.
 - Nothing on a phone, nothing on the radio's USB image since 2026-10-28.
+
+## Phone-only run, 2026-10-29 (Pixel-era Android 16, Moto Edge 2024)
+
+What was done: MeshMore and LDMUX built and installed over the existing installs
+(the previous builds were signed with `ANDROID_USER_HOME=~/.config/.android`, so
+that variable must be set or `adb install -r` fails with a signature mismatch),
+the radio stayed on the BLE image, MeshMore's gateway was turned on, and LDMUX
+was paired for a mesh-only route and switched to it.
+
+Results, in order:
+
+- **The gateway could not start at all.** `ServerSocket.bind(127.0.0.1:41731)`
+  returned `EPERM`. 41731 is listed in the device's
+  `/proc/sys/net/ipv4/ip_local_reserved_ports`, and binding a reserved port as
+  an app UID is refused with `Operation not permitted`. Fixed: the preferred port
+  is now a preference, with an ephemeral fallback on EPERM/EADDRINUSE, and the
+  real port is what the Connected apps payload carries. The gateway then reported
+  `Listening on 127.0.0.1:42989`.
+- **Scanning cannot pair two apps on the same phone.** MeshMore displays its code
+  on the device LDMUX is running on, so there is nothing for LDMUX's camera to
+  point at. Fixed: a "paste a code" field that routes by scheme (`ldmux://` versus
+  `meshmore://` or a bare 32-hex token), so a user never has to know which box a
+  code belongs in.
+- **The L2 path works on the device.** With `adb forward` to the phone's gateway,
+  the desktop client completed `connect -> HELLO -> PAIR` and was refused at
+  `BIND` with `not_a_contact`, which is correct: the `mr=` key in the test pairing
+  was random, not the host radio's key. The LDMUX screen showed the same refusal
+  and named both cures.
+- **Two UI defects the device showed.** The mesh screen drew its status line under
+  the system clock (no `safeDrawingPadding`), and the `leave` button was squeezed
+  to one character wide by a `SpaceBetween` row. Both fixed.
+
+What this proves: the loopback gateway, the L2 handshake, token auth and the bind
+refusal rule on Android 16 with a real radio attached over BLE.
+
+What it does not prove: a bound session, the L3 handshake over the air, or the
+terminal profile, because a bound session needs a peer that is a real contact.
+That needs the second radio.
