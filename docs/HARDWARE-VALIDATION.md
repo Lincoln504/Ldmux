@@ -253,3 +253,43 @@ companion image, linked at 910.525 MHz / 62.5 kHz / SF7 / CR5 / 22 dBm.
 - No successful `BIND`, so no session, no terminal profile, no over-the-air leg.
   Those need a second companion radio acting as the host, or a genuine contact
   entry for the host radio's key.
+
+## Result: the two-radio leg, 2026-10-29
+
+Second radio: Seeed Wio Tracker L1 Pro, flashed from this tree to
+`WioTrackerL1_companion_radio_usb` (PlatformIO upload, nrfutil, 48 s), then
+configured over serial to 910.525 MHz / 62.5 kHz / SF7 / CR5 / 22 dBm — it had
+been 917.0 / 125.0 / SF11. Its key is `26f6071f…`, the phone's radio is
+`615f431f…` (`HELTEC-BASE`).
+
+**Order that worked, given two USB-C ports and three devices:** the Heltec has no
+battery so it must stay tethered, the Seeed and the phone must be swapped. Pair
+and bind while the phone is attached; the actual over-the-air exchange needs the
+Seeed attached and does not need the phone attached at all.
+
+### What bound
+
+- Desktop side, `meshcore_gateway` on `/dev/ttyACM1` + `ldmuxd` with
+  `LDMUX_MESH_PEER` = phone radio key: `state ready`, capacity 172 B per record,
+  58 records left this hour, radio connected.
+- Phone side: HELLO ok, PAIR ok, then `BIND_ERR` / `not_a_contact`.
+- The radios themselves were fine: the Seeed listed `HELTEC-BASE pathLen 0`, and
+  the Heltec listed `WIOld` at SNR 11.0 / RSSI −12 after five forced flood
+  adverts (`tool/advertise.dart`).
+
+### Why it stops
+
+`BIND` requires the peer to be a **contact** on the phone's radio, not merely a
+node it has heard. MeshMore offers `Add to device contacts`, and on this radio the
+add did not take — probably a full table (350/350 measured earlier), but the app
+never surfaced the radio's reply, so that stays a hypothesis. The screen that
+could free slots (`Radio contacts`) does not respond to taps, so the recovery
+path is unreachable from the UI. See `meshmore-sns-architecture-audit.md`
+(D1, D2) for the evidence.
+
+### Consequence for this runbook
+
+Until a free contact slot exists and the peer is added as a device contact, a
+two-radio validation cannot get past BIND. Check `Radio contacts` first and
+confirm the count against `max contacts: 350` in Device configuration before
+blaming the mesh.
