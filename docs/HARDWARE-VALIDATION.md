@@ -343,3 +343,44 @@ What had to be fixed before it worked, each found on hardware:
   lost. Leaving is a view change now.
 - **Settings clipped.** The dialog's column was unbounded and drew under the button
   row; the scroll area is bounded now, and the two scan labels no longer wrap and clip.
+
+## Second run: one UI for both routes, and keys by name (2026-10-30)
+
+Path unchanged: LDMUX on the phone → MeshMore (BLE, Heltec V4) → 910.525 / 62.5 / SF7
+→ Seeed L1 (USB) → host gateway → `ldmuxd`.
+
+What the screen is now. The mesh route draws the tailnet route's own chrome: `AppHeader`
+(name, one status line, settings square), the shared `PortraitBar` (shell header with
+`n / m shells` and its arrows, Esc/Tab/Home/End/PgUp/PgDn, sticky Ctrl/Alt/Shift, C/c,
+paste, Enter, arrow pad, keyboard toggle), and a block cursor from the host's `Commit`.
+`SettingsDialog` is drawn once by `App` for every route, so pairing no longer requires
+leaving the mesh screen. The differences are one subtitle word — `live (reduced)` — the
+host's own `Not on this link:` line, the pending-typing line and the hour's record count.
+
+Measured, by driving the phone over wireless adb (`/tmp/ui.py`, accessibility tree only):
+
+| check | result |
+|---|---|
+| typed command reaches the host | `echo MESHTEXT_TWO > /tmp/meshtest.txt` → file on the host, contents `MESHTEXT_TWO` |
+| DECCKM on | `tput smkx; cat -v` then ↑ → `^[OA` |
+| DECCKM off | `tput rmkx; cat -v` then ↑ → `^[[A` |
+| interrupt | `C/c` → `^C` at the pane |
+| switch shells | `▶` → header `2 / 2 shells`, new screen |
+| list shells | menu → shells → both host shells listed by id |
+| settings | gear on the mesh screen opens the same dialog, mesh section included |
+| budget | `43` of 58 records left after the run |
+
+The DECCKM pair is the point: the phone sends the name `Up`, never a byte sequence, and
+the host encodes it in the pane's own mode through the daemon's single encoder. A phone
+that kept its own key table could only ever have produced one of those two rows.
+
+### Driving the phone without a USB cable
+
+Wireless debugging drops its advertised port when the phone sleeps and comes back on a new
+one. Read it from `adb mdns services` (`adb-<serial>-XXXX._adb-tls-connect._tcp  ip:port`)
+and `adb connect` to that address. A stale `adb connect` survives a screen that has moved,
+so a tap that "does nothing" is usually a stale connection, not a stale tap.
+
+For text input, `adb shell input text` is parsed by the *device's* shell: `%s` is a space
+and an unquoted `>` becomes a redirect. Wrap the argument in single quotes for the remote
+shell.
