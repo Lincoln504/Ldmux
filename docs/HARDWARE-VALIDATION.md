@@ -746,3 +746,28 @@ missing automatic refetch are in `2e446d0`.
 **Retransmission is worth a look**: 2 of 4 records were retransmitted. The ARQ is working, but a
 50% rate on a 172-byte record over SF7 points at the ack delay or the record cadence rather than
 at loss, and it is the next thing to measure.
+
+### The first application records stall after a good handshake (2026-10-31)
+
+Measured on the live pair: the Noise handshake completes (1 accepted, keys pinned), then both
+ends sit with one record pending and neither acknowledges. The daemon reports
+`records 4 sent, 2 retransmitted, 1 pending` while the phone shows its new
+"host stopped answering … Trying again" line, so the exchange needs tens of seconds and often a
+second handshake to move a single attach. Retransmission has been 1–2 of every 4 records in each
+of the three sessions measured today.
+
+Both radios transmit during the stall (the host gateway's own airtime advances, the phone has
+4.9 s of airtime this hour), so this is not a dead key or a dead antenna. That leaves the ACK
+path or the MeshCore path between the two nodes as the cause: a direct route learned before one
+of the radios restarted is stale, and a stale direct path fails silently - the frame leaves, no
+one delivers it, and only the ARQ notices. Re-advertising both nodes is the obvious next test,
+and the gateway should not depend on the user thinking of it.
+
+### Two processes on one serial port look exactly like dead air (2026-10-31)
+
+`kill` on the wrapper of `dart run bin/meshmore_gateway.dart` leaves the `dart` process alive and
+holding `/dev/ttyACM1`. A second gateway then fails to open the port, prints its reason, and the
+"restarted" gateway is the old one. Every status on both sides still reads healthy - the daemon
+says `radio connected`, the phone says `Radio LINKED`, MeshMore says `Talking to HELTEC-BASE` -
+while no frame moves. Check `lsof /dev/ttyACM1` before believing any radio fault; the port has
+exactly one owner.
