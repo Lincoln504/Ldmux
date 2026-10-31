@@ -707,3 +707,42 @@ Two things the fix deliberately does **not** do:
   and on every connection instead, and the honest remedy for a dirty store remains clearing it.
 - **It does not prune a record with no IRK.** Without an IRK there is nothing that identifies the
   peer rather than the address it happened to use, so two records cannot be told apart safely.
+
+### First L3 session on real hardware (2026-10-31)
+
+The mesh route is established end to end: MeshMore's gateway on the phone, the phone's radio over
+BLE, the air, the host radio on USB, the host gateway, and the daemon's Noise session. The daemon
+reported:
+
+```
+session  established
+  phone key    dd04de81… (pinned)
+  handshakes   1 accepted, 1 refused
+  records      4 sent, 2 retransmitted, 0 dropped, 0 pending
+  received     5 bytes
+```
+
+and the phone's mesh screen rendered the host's own shell list (`mesh · choose a shell`, entries
+listed). Every earlier run read `session waiting`, so this is the first time the two ends have
+spoken over a radio.
+
+**Two defects were found on the way, both fixed by hand here and neither fixed in code yet.**
+
+1. **Issuing a pairing code does not clear the pinned phone key.** A phone that re-enrols gets a
+   new static key, and the daemon then refuses it as `PinMismatch` for ever, because the pin from
+   the previous enrolment is still in `mesh-pairing.json`. The pin was cleared by hand to proceed.
+   The rule should be that issuing a code (a new grant) clears the pin: with `pinned = None` the
+   current phone still re-pins itself, so clearing costs nothing and a re-enrolled phone is
+   admitted.
+2. **The mesh pairing secret is only in the daemon's environment**, so a daemon restart that loses
+   its process loses the secret: it cannot be recovered from disk, and every enrolled phone must be
+   re-enrolled. A fresh secret was generated, and both apps re-enrolled, to proceed.
+
+Also fixed on the way, and shipped: the automatic handoff was rebuilt on every recomposition and
+the screen's effect keyed on it, so the app asked MeshMore at frame rate — the flashing the user
+saw. The dead-end button (a refusal could not replace the token it had just rejected) and the
+missing automatic refetch are in `2e446d0`.
+
+**Retransmission is worth a look**: 2 of 4 records were retransmitted. The ARQ is working, but a
+50% rate on a 172-byte record over SF7 points at the ack delay or the record cadence rather than
+at loss, and it is the next thing to measure.
