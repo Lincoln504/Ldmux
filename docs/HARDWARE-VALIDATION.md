@@ -501,3 +501,64 @@ with `smp_cb.state: 0`, ~5 s later `GATT_CONN_TIMEOUT` — and the radio keeps a
 bond is not yet known, so this section does not claim one. The repair rule above covers the
 recovery (forget and pair again), but if this recurs on every connection the pairing ceremony
 is not the fix and the firmware's bond handling has to be looked at directly.
+
+### Where a bond actually lives, and how its loss can be silent (2026-10-31)
+
+Read from the vendor sources rather than guessed, because the failure is invisible from the
+phone: the peripheral's bond store is not SoftDevice flash, it is plain files in the Adafruit
+InternalFS LittleFS volume — `bond_save_keys_dfr` in
+`libraries/Bluefruit52Lib/src/utility/bonding.cpp` writes one file per peer under
+`/adafruit/bond_prph/<MAC>`. Three properties of that code decide whether this class of symptom
+can happen at all:
+
+- **The save is deferred and its result is discarded.** `bond_save_keys()` queues an
+  `ada_callback` and returns the *queueing* result, so it can report success while the write
+  that follows fails. `BLEConnection::saveBondKey()` then sets `_bonded = true` unconditionally.
+- **The write failure is silent.** The deferred worker deletes the old file first, then opens
+  the new one guarded by `VERIFY(file, )` — an empty branch that returns with no log line.
+- **The read has no size check on the common path.** `bond_load_keys()` for
+  `BLE_GAP_ADDR_TYPE_PUBLIC` / `RANDOM_STATIC` opens the file by name and reads the stored
+  length prefix straight into `bond_keys_t` with no comparison against `sizeof(bond_keys_t)`,
+  unlike the resolvable-private-address path, which does check it.
+
+The consequence is exactly the shape measured here: pairing succeeds because the keys are still
+valid in RAM for that session, and every later connection fails because the stored copy is
+absent or short. Loading is lazy — it happens only on `BLE_GAP_EVT_SEC_INFO_REQUEST`, never at
+`begin()` — so `BLEConnection::bonded()` reads false right after a connect even when the bond
+is fine, which makes "is this device bonded" a poor health check.
+
+Two local hypotheses were tested and **ruled out**, rather than left as suspicions:
+
+- the app image overlapping the filesystem: app flash ends at `0xD4000`
+  (`boards/nrf52840_s140_v7_extrafs.ld`) and `InternalFS` starts at `0xED000`
+  (`LFS_FLASH_ADDR` in `libraries/InternalFileSytem/src/InternalFileSystem.cpp`), so they do not
+  overlap and the FS region is intact;
+- the firmware mounting `InternalFS` twice (`examples/companion_radio/main.cpp` calls
+  `InternalFS.begin()` and `Bluefruit.begin()` calls `bond_init()` → `InternalFS.begin()`
+  again): `Adafruit_LittleFS::begin()` short-circuits on `_mounted`, so the second call is a
+  no-op.
+
+**Still unverified:** which side drops the bond. Confirming it needs the radio's own serial log
+(the WIO image is built with `BLE_DEBUG_LOGGING=1`, so it prints pairing and bond events), which
+needs the radio on the host's USB while the phone attempts the reconnect. Until then the app-side
+behaviour below is the correct response either way.
+
+### What the reference implementations do about it
+
+Meshtastic runs the same Adafruit Bluefruit stack on nRF52 and has the same user-visible
+failure open against it: pair once, then no reconnect until the pairing is removed and re-made
+(`meshtastic/Meshtastic-Android` issue 6685). Their fix for the analogue is **not** to retry
+harder — the Android client's connections guide says the app stops retrying after three failed
+handshakes and tells the user to power-cycle the radio, "a radio that keeps failing here is
+usually crashing on reconnect". Their own regression in the same issue is the opposite mistake:
+`BleReconnectPolicy` with `maxFailures = Int.MAX_VALUE`, which presents as a hung screen because
+it is endlessly failing rather than stuck.
+
+MeshMore applies that lesson directly (`1d7f7d8` for the repair, `9b25ebf` for the bound): a
+failed open on a radio that is demonstrably still in range spends **one** bond repair per app
+run, and a second failure raises
+"The radio is not keeping its pairing: it paired, then could not encrypt on the next connection.
+Power-cycle the radio and pair again."
+
+That is deliberate. A second repair would be another PIN prompt for the user and no new
+information, because the failure that follows it is identical.
