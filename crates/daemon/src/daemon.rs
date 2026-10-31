@@ -2037,6 +2037,13 @@ impl LdmuxDaemon {
                     "detail": detail,
                 }))
             }
+            // Hand a shell back, so a viewer that was displaced (or a device that has
+            // stopped looking) does not hold it for ever.
+            "release" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let device = params.get("device").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(serde_json::json!({ "ok": self.release_claim(id, device) }))
+            }
             "reclaim" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let device: ldmux_protocol::rpc::DeviceInfo = params

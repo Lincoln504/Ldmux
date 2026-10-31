@@ -61,6 +61,17 @@ pub trait Host {
     /// Fit the shell's pty to the phone's grid, through the keeper's own resize (the one a
     /// tailnet client's `resize` ends in), so the screen is never wider than the phone.
     async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String>;
+    /// Take the shell for this link, displacing any other viewer.
+    ///
+    /// A desk window that believes it holds the shell re-asserts its own grid every time a
+    /// snapshot disagrees with its tty, so without a claim the phone and the window spend the
+    /// link repainting the pane at two sizes in turn: the phone sees an unchanged screen, a
+    /// cursor in the wrong place and a resize that does not take. Claiming is what ADR-0010
+    /// says a second viewer does, and it is also what makes the window stop: a displaced
+    /// window is sent `owned`, not a snapshot, so it stops resizing.
+    async fn claim(&mut self, id: &str) -> Result<bool, String>;
+    /// Give the shell back, so a desk window can take it again.
+    async fn release(&mut self, id: &str);
 }
 
 impl Link for crate::mesh::MeshRuntime {
@@ -204,15 +215,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
     /// One pass: take what the phone sent, then push what changed on screen.
     pub async fn tick(&mut self) {
         if !self.link.established() {
-            self.shells.clear();
-            self.decoders.clear();
+            self.drop_all().await;
             return;
         }
         let generation = self.link.generation();
         if generation != self.generation {
             self.generation = generation;
-            self.shells.clear();
-            self.decoders.clear();
+            self.drop_all().await;
         }
 
         for (shell, bytes) in self.link.take_inbound() {
@@ -224,7 +233,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 ) => {
                     // The stream is unusable: drop the attach, the phone starts again.
                     self.stats.malformed += 1;
-                    self.shells.remove(&shell);
+                    if let Some(a) = self.shells.remove(&shell) {
+                        self.host.release(&a.session).await;
+                    }
                     self.decoders.remove(&shell);
                     continue;
                 }
@@ -296,6 +307,20 @@ impl<H: Host, L: Link> Bridge<H, L> {
         }
     }
 
+    /// Forget every attach, handing each shell back to whoever held it before.
+    ///
+    /// A link that re-handshakes, or a stream that cannot be decoded, ends the attach as
+    /// surely as `Detach` does, and a claim left behind would lock a desk window out of a
+    /// shell nobody is watching.
+    async fn drop_all(&mut self) {
+        let ids: Vec<String> = self.shells.values().map(|a| a.session.clone()).collect();
+        self.shells.clear();
+        self.decoders.clear();
+        for id in ids {
+            self.host.release(&id).await;
+        }
+    }
+
     async fn handle(&mut self, shell: u8, m: Message) {
         match m {
             Message::Attach { version, selector } => {
@@ -323,6 +348,15 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         );
                     }
                     [one] => {
+                        if self.host.claim(one).await.is_err() {
+                            self.reply(
+                                shell,
+                                &[Message::Closed {
+                                    reason: closed::UNAVAILABLE,
+                                }],
+                            );
+                            return;
+                        }
                         self.shells.insert(
                             shell,
                             Attached {
@@ -412,13 +446,19 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
             }
             Message::Detach => {
-                self.shells.remove(&shell);
+                if let Some(a) = self.shells.remove(&shell) {
+                    self.host.release(&a.session).await;
+                }
             }
             // Host-to-phone messages arriving from the phone are ignored.
             _ => {}
         }
     }
 }
+
+/// The identity the mesh link claims shells under. One mesh link is one viewer: the session
+/// carries one phone key, and a second phone means a new pairing.
+const MESH_DEVICE: &str = "mesh-link";
 
 /// The daemon as a [`Host`]: every call is an RPC the control socket already serves.
 pub struct DaemonHost(pub Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>);
@@ -521,6 +561,34 @@ impl Host for DaemonHost {
             .await
             .map(|_| ())
     }
+
+    async fn claim(&mut self, id: &str) -> Result<bool, String> {
+        let v = self
+            .0
+            .lock()
+            .await
+            .handle(
+                "reclaim",
+                serde_json::json!({
+                    "id": id,
+                    "device": { "id": MESH_DEVICE, "name": "the mesh link", "kind": "mesh" },
+                }),
+            )
+            .await?;
+        Ok(v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false))
+    }
+
+    async fn release(&mut self, id: &str) {
+        let _ = self
+            .0
+            .lock()
+            .await
+            .handle(
+                "release",
+                serde_json::json!({ "id": id, "device": MESH_DEVICE }),
+            )
+            .await;
+    }
 }
 
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
@@ -588,6 +656,8 @@ mod tests {
         typed: Vec<(String, Vec<u8>)>,
         keyed: Vec<(String, Vec<String>)>,
         resized: Vec<(String, u8, u8)>,
+        /// Every claim, in order: `("claim" | "release", session)`.
+        claimed: Vec<(&'static str, String)>,
         refuse_resize: bool,
         fail_screen: bool,
     }
@@ -626,6 +696,21 @@ mod tests {
                 .keyed
                 .push((id.to_owned(), names.to_vec()));
             Ok(())
+        }
+        async fn claim(&mut self, id: &str) -> Result<bool, String> {
+            self.0
+                .lock()
+                .unwrap()
+                .claimed
+                .push(("claim", id.to_owned()));
+            Ok(true)
+        }
+        async fn release(&mut self, id: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .claimed
+                .push(("release", id.to_owned()));
         }
         async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String> {
             let mut s = self.0.lock().unwrap();
@@ -692,6 +777,40 @@ mod tests {
             }
         }
         m
+    }
+
+    /// A desk window that believes it holds a shell re-asserts its own grid whenever a
+    /// snapshot disagrees, so an attaching phone that does not take the shell fights it for
+    /// ever: every resize is undone and every undo repaints the pane. The claim is what ends
+    /// that, and a detach must hand the shell back or a window is locked out of a shell
+    /// nobody is watching.
+    #[tokio::test]
+    async fn an_attach_takes_the_shell_and_a_detach_gives_it_back() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        assert_eq!(
+            *host.0.lock().unwrap().claimed,
+            [("claim", "abcd-1".to_string())],
+            "the phone took the shell before it was given a screen"
+        );
+        phone_says(&link, 3, &Message::Detach);
+        b.tick().await;
+        assert_eq!(
+            *host.0.lock().unwrap().claimed,
+            [
+                ("claim", "abcd-1".to_string()),
+                ("release", "abcd-1".to_string())
+            ],
+            "the detached shell went back to whoever held it"
+        );
     }
 
     #[tokio::test]

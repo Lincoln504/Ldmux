@@ -575,6 +575,21 @@ class MeshTermDriverTest {
     }
 
     @Test
+    fun `a session out of nonce budget rekeys without taking the screen away`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        val before = d.view.value
+        val sent = gw.sent.size
+        sess.health = SessionHealth(false, false, needsRekey = true, pending = 0, dropped = 0)
+        d.tick()
+        // Not a failure: the link is up and the host is answering, so the screen must not say
+        // the host stopped answering, and the wait must not back off.
+        assertIs<MeshTermView.Handshaking>(d.view.value)
+        assertTrue(before is MeshTermView.Live, "the test starts from a live screen")
+        assertTrue(sess.freed, "the old session is closed, not kept")
+        assertEquals(sent + 1, gw.sent.size, "a new handshake follows at once")
+    }
+
+    @Test
     fun `detach tells the host, asks the session to close and frees it`() = runBlocking<Unit> {
         val d = driver(); live(d)
         d.detach()

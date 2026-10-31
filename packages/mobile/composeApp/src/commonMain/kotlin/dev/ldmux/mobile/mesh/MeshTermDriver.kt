@@ -236,6 +236,24 @@ class MeshTermDriver(
     }
 
     /**
+     * Replace a session that has spent its nonce budget, without taking the screen away.
+     *
+     * Nothing failed: the link is up, the host is answering, and the only thing that must
+     * change is the keys. Reusing [failed] here would say the host stopped answering at 2^16
+     * records or 12 hours, which is the one moment the user has done nothing wrong, and it
+     * would back off as if the host were gone. The handshake is immediate, and the new session
+     * brings a full screen, so the pane repaints at once.
+     */
+    private fun rekey() {
+        handshake?.abandon()
+        handshake = null
+        session?.close()
+        session = null
+        recoverAt = clock()
+        recoverDelayMs = FIRST_RECOVERY_MS
+    }
+
+    /**
      * The session or the handshake ended badly. A dead session is retried on a schedule; a refused
      * pairing is not, because waiting cannot cure a token or a key and the screen already offers
      * the cure that can.
@@ -310,14 +328,9 @@ class MeshTermDriver(
         val s = session
         if (s != null) {
             val h = s.health(clock())
-            // A session that has spent its nonce budget starts a new one. It is not a failure:
-            // the link is fine and the screen stays, but a Noise session must not be driven past
-            // its counter, so the handshake is immediate rather than backed off.
-            if (h.needsRekey && terminalView == null) {
-                failed(MeshLinkState.SessionFailed)
-                recoverAt = clock()
-                recoverDelayMs = FIRST_RECOVERY_MS
-            }
+            // A session that has spent its nonce budget starts a new one. Nothing is wrong with
+            // the link, so this is not [failed]: the screen stays up and only the keys change.
+            if (h.needsRekey && terminalView == null) rekey()
             if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed)
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves

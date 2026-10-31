@@ -147,7 +147,7 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
 fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
     MeshRouteProblem.NotOnThisPlatform -> "meshmore route is not available on this device"
     MeshRouteProblem.SessionNotBuilt -> "meshmore · session library unavailable on this device"
-    MeshRouteProblem.TerminalNotBuilt -> "meshmore · shells over mesh are not built yet"
+    MeshRouteProblem.TerminalNotBuilt -> "meshmore · the terminal is unavailable on this device"
     MeshRouteProblem.NeedsSessionKeys -> "meshmore · scan a pairing code made with ldmux code --mesh"
     MeshRouteProblem.NeedsToken -> "meshmore · needs pairing token"
     MeshRouteProblem.NeedsPeer -> "meshmore · needs the host radio's public key"

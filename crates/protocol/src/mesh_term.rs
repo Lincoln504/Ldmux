@@ -124,6 +124,8 @@ pub mod closed {
     pub const UNAVAILABLE: u8 = 4;
     /// `Attach.version` is not one the host speaks.
     pub const VERSION: u8 = 5;
+    /// Another viewer holds the shell and could not be displaced.
+    pub const HELD: u8 = 6;
 }
 
 /// `Commit.flags`.
