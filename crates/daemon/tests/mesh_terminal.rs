@@ -302,9 +302,11 @@ async fn attach_snapshot_keystroke_and_changed_rows_over_the_real_session() {
     phone.pump(&w, &mut bridge).await;
     assert!(bridge.attached(3));
     assert_eq!(phone.mirror.lines, ["$", "", ""]);
+    // Everything the profile cannot carry, except resize: this phone attached at the current
+    // version, which sends `Resize`, so claiming it is unsupported would contradict it.
     assert_eq!(
         phone.mirror.profile.map(|p| p.2),
-        Some(ldmux_protocol::mesh_term::unsupported::ALL_V1)
+        Some(ldmux_protocol::mesh_term::unsupported::ALL_V1 & !ldmux_protocol::mesh_term::unsupported::RESIZE)
     );
 
     phone

@@ -153,7 +153,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             .unwrap_or(false);
         let mut ok = true;
         let mut record: Vec<u8> = Vec::with_capacity(ldmux_protocol::mesh_term::RECORD_PAYLOAD);
-        let mut flush =
+        let flush =
             |record: &mut Vec<u8>, ok: &mut bool, link: &mut L, stats: &mut BridgeStats| {
                 if record.is_empty() {
                     return;
