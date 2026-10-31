@@ -449,22 +449,20 @@ the only honest measurement of a keystroke's turnaround.
 Reported by the user: pairing the radio from the phone's own Bluetooth menu did not work, pairing
 it from inside MeshMore did. Two states for one pairing.
 
-The phone's own bond table (`dumpsys bluetooth_manager`) says why. Both of these are ordinary
-`BOND_STATE_BONDED` entries, and they are not the same thing at all:
+The divergence is that the two menus wrote different stores, and that is what the phone's own
+`dumpsys bluetooth_manager` shows plainly.
 
-```
-shim::record 003  xx:xx:xx:xx:c5:3d  name:"MeshCore-HELTEC-BASE"
-    le_linkkey_known:T  ble_enc_key_size:0   le_authenticated:F  le_encrypted:F
-shim::record 006  xx:xx:xx:xx:5a:9a  name:"MeshCore-WIOld"
-    le_linkkey_known:T  ble_enc_key_size:16  le_authenticated:T  le_encrypted:T
-```
+**Correction (2026-10-31) to the reading recorded here first.** This section originally said the
+bond table proved record 003 held "no key material", because it showed `ble_enc_key_size:0`
+next to record 006's `ble_enc_key_size:16`. That reading was wrong. `ble_enc_key_size`,
+`le_encrypted` and `le_authenticated` describe the **live link**, not the stored bond: with
+nothing connected at all, a record that had just been created by a successful pairing reports
+`ble_enc_key_size:0, le_encrypted:F` again. The two records differed because the WIO was
+connected and encrypted at that instant and the HELTEC was not connected at all (it runs the USB
+image now, so it has no BLE link). Nothing in that table showed a missing key. Android's public
+API does not expose bond health, so "is this bond usable" still cannot be read, only tested.
 
-Record 003 is a bond record with **no key material**. The radio's characteristics are MITM-only
-(`bleuart.setPermission(SECMODE_ENC_WITH_MITM, …)`, `SerialBLEInterface.cpp:183`), so a keyless
-record discovers services and then fails the first encrypted operation. `bondState` is
-`bonded` either way, so the app trusted it.
-
-The second half of the divergence is that the two menus wrote different stores. The Bluetooth
+The divergence that *is* proven is that the two menus wrote different stores. The Bluetooth
 menu writes Android's bond. MeshMore's own pairing writes `mm.paired.id` in prefs. An OS bond
 with an empty prefs record left `autoConnectIfPaired()` returning early, so the app read "No
 device paired" for a radio the phone was already bonded to.
@@ -472,13 +470,34 @@ device paired" for a radio the phone was already bonded to.
 Fixed in MeshMore `18705e5`: the OS bond is adopted as the app's pairing at startup (preferring
 the radio the app used last when the phone holds several), `autoConnect` tries a bonded radio
 before scanning, a bond the radio cannot use is removed and re-made in place, and "forget the
-radio" now removes the OS bond too so the next start cannot adopt it back. The repair only runs
-while the radio is still linked — a link that dropped mid-open is not a bond problem, and
-removing a good bond over it would cost the user a pairing.
+radio" now removes the OS bond too so the next start cannot adopt it back.
 
-`flutter test`: 1038 passing, 5 of them the new adoption rule.
+**Correction (2026-10-31): the repair that `18705e5` added could never run.** It required
+`device.isConnected` at the moment the failure was handled. When a bond is not usable, Android
+starts encryption itself on connect, SMP never leaves idle, the encryption request is cancelled
+about five seconds later, and the link dies on the supervision timeout — so the link is already
+gone, the guard refused the repair, and the error was rethrown. The bond was also read *after*
+`_locate`, so a failure inside service discovery arrived with `hadBond` still false and was
+refused a second way.
 
-Not yet verified on the device: the phone was off USB when the fix landed. The
-expected reading is that pairing from the Bluetooth menu and pairing from the app leave the app
-in the same state, and that a `ble_enc_key_size:0` bond repairs itself instead of reporting a
-stale pairing.
+Both conditions are now measured rather than assumed: the bond is read before `_locate` (a read
+makes no bond and asks the user nothing), and the decision uses whether the **radio is still
+reachable**, because that is what separates a bad bond from a radio that walked away. Removing a
+good bond over a radio that is merely out of range still costs the user a pairing, which is why
+absence leaves the bond alone.
+
+`flutter test`: 1041 passing, 5 of them the adoption rule and 3 the repair rule.
+
+Verified on the device (2026-10-31): "forget the radio" removes the OS bond as well as the pref,
+and the next pairing dialog appears with a working link at the end of it — the app read `LINKED`
+and the radio reported `910.525MHz SF7 CR5 22dBm`. So the two stores are now one pairing from
+the app's side.
+
+**Still open, and separate from the pairing bug:** a link that fails to encrypt on a *later*
+connection. After one successful pairing, the next connection completes at the link layer and
+encryption then fails — Android logs `BTM_SetEncryption: busy`, `smp_cancel_start_encryption_attempt`
+with `smp_cb.state: 0`, ~5 s later `GATT_CONN_TIMEOUT` — and the radio keeps advertising
+(`MeshCore-WIOld`, −55 dBm), so it is present and awake. Which side no longer holds the agreed
+bond is not yet known, so this section does not claim one. The repair rule above covers the
+recovery (forget and pair again), but if this recurs on every connection the pairing ceremony
+is not the fix and the firmware's bond handling has to be looked at directly.
