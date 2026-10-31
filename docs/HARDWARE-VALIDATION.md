@@ -405,6 +405,19 @@ pure ack is only emitted when nothing else is queued, and the sender never waits
 unless the window is full. Removing acks would buy nothing and cost the only delivery
 guarantee.
 
+### The send queue was never the delay (2026-10-30)
+
+`SerialMeshSender._serialise` puts every radio operation on one queue, because the firmware's
+`OK`/`ERR` on a raw-data send carries no correlation tag and two in-flight sends could not be
+told apart. The open question was whether pipelining it would buy back the cost of a screen's
+worth of records.
+
+Measured on the real pair with `MESHMORE_GATEWAY_DEBUG=1`: **`wait=0 ms ran=2–4 ms`**. An
+action reaches the front of the queue immediately and holds it for a single firmware round
+trip. There is nothing to win, so pipelining is **dropped, not deferred**. Doing it would put
+a working send path at risk to remove a wait that is already zero, and it cannot be done
+safely at all without a correlation tag the firmware does not send.
+
 Still open: a keystroke-level timing harness. The native terminal surface exposes no text to
 the accessibility tree, so `uiautomator dump` cannot time an echo; timing must come from
 host-side timestamps or screenshot deltas.
