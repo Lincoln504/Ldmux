@@ -1,7 +1,11 @@
 # Mesh gateway: the carriage contract for LDMUX over MeshCore
 
-**Status: the LDMUX mobile client is built (section 11); the daemon side is not implemented.** Written 2026-10-24 on branch
-`feat/meshmore-gateway`. This supersedes the carriage assumptions in
+**Status: both sides are built and tested; neither has run on a device together.** The daemon
+holds the link, answers the L3 session and bridges the terminal profile; the phone carries the
+same session through the Rust ABI and draws the tailnet's own terminal surface. What remains is
+one hardware run: `mesh status` still reads `session waiting` because the mesh screen has never
+been opened against a live radio. Written 2026-10-24 on branch `feat/meshmore-gateway`; status
+corrected 2026-10-31. This supersedes the carriage assumptions in
 [`MESH-TRANSPORT.md`](MESH-TRANSPORT.md) where the two differ, and it is bound by
 [ADR-0020](adr/0020-mesh-link-security.md) wherever it touches security. Nothing
 here is a plan of record until the open decisions at the bottom are taken.
