@@ -28,7 +28,12 @@ import kotlinx.coroutines.launch
  * here, so a dead link or a closed shell is a sentence and not a black rectangle. The refresh
  * square in the header is the retry for all of them, so it is not repeated as a button.
  */
-class MeshBody(val line: String, val handoff: Boolean)
+class MeshBody(
+    val line: String,
+    val handoff: Boolean,
+    /** Whether asking MeshMore must replace the stored token, because that token is known to be dead. */
+    val replaceStale: Boolean = false,
+)
 
 /** Null for the states that draw something else: the waits (with their seconds) and the lists. */
 fun meshBodyFor(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): MeshBody? = when (view) {
@@ -61,7 +66,11 @@ fun meshBodyFor(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): Mesh
                 "Connected apps, or pair again if it took another port",
             handoff = true,
         )
-        MeshLinkState.Refused -> MeshBody("MeshMore or the host refused the link: get a new token, or pair again", handoff = true)
+        MeshLinkState.Refused -> MeshBody(
+            "MeshMore or the host refused the link: get a new token, or pair again",
+            handoff = true,
+            replaceStale = true,
+        )
         MeshLinkState.SessionFailed -> MeshBody("the host stopped answering: it may be off or out of range", false)
         MeshLinkState.Closed -> MeshBody("the link closed: refresh to connect again", false)
     }
@@ -83,7 +92,33 @@ fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
  * success or before any attempt), and the one way to try again. [run]'s argument says the stored
  * token has just failed, which is the only time it may be replaced.
  */
-class MeshHandoffUi(val note: String?, val run: suspend (replaceStale: Boolean) -> String?)
+class MeshHandoffUi(
+    private val noteOf: () -> String?,
+    val run: suspend (replaceStale: Boolean) -> String?,
+) {
+    /**
+     * The last result, read at draw time.
+     *
+     * A property rather than a constructor field so this object's identity can be stable: it used
+     * to be rebuilt on every recomposition, and the screen's automatic attempt keyed on it, so every
+     * result restarted the effect and asked again — a loop at frame rate.
+     */
+    val note: String? get() = noteOf()
+
+    /**
+     * The automatic attempt, **once per app run**.
+     *
+     * Held here, on an object that outlives the connection, because the connection is rebuilt when
+     * a handoff lands (the config changes), which would reset any guard remembered beside it and
+     * start the cycle again.
+     */
+    private var autoDone = false
+    fun claimAuto(): Boolean {
+        if (autoDone) return false
+        autoDone = true
+        return true
+    }
+}
 
 /** One sentence, the last handoff result when there is one, and the one action that helps. */
 @Composable
@@ -100,7 +135,7 @@ internal fun MeshBodyBlock(body: MeshBody, handoff: MeshHandoffUi?, replaceStale
                 onClick = {
                     busy = true
                     scope.launch {
-                        result = handoff.run(replaceStale)
+                        result = handoff.run(replaceStale || body.replaceStale)
                         busy = false
                     }
                 },

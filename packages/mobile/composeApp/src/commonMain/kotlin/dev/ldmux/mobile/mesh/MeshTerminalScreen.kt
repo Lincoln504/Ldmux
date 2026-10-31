@@ -35,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.key
@@ -137,6 +138,21 @@ fun MeshTerminalScreen(
     }
 
     val live = view as? MeshTermView.Live
+    // **A refused token is not a decision the user should have to make.** It is unambiguous: the
+    // stored token is dead, and the only cure is the fresh one MeshMore already has. So it is
+    // fetched invisibly, once per refusal, and the button in the body stays as the manual fallback
+    // for the cases that are not unambiguous (MeshMore off, nothing on the saved port).
+    val handoffNow by rememberUpdatedState(handoff)
+    LaunchedEffect(view) {
+        val v = view
+        val h = handoffNow ?: return@LaunchedEffect
+        // `claimAuto` lives on the handoff object, which outlives this connection, so a refusal that
+        // survives a re-connect cannot restart the cycle.
+        if (v is MeshTermView.LinkDown && v.link == MeshLinkState.Refused && h.claimAuto()) {
+            h.run(true)
+        }
+    }
+
     // Asked once per connection, on first arriving: one record up, one or more down. After that
     // it is the user's (menu → shells), never a timer, because the link has about 58 records an hour.
     var listed by remember(conn) { mutableStateOf(false) }

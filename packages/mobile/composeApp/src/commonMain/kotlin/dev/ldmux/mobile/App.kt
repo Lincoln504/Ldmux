@@ -90,7 +90,11 @@ fun App() {
                 }
                 meshHandoffLine(applied).also { handoffNote = it }
             }
-            val handoff = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) MeshHandoffUi(handoffNote, runHandoff) else null
+            // Identity-stable: the screen's automatic attempt runs inside an effect, and an object
+            // that changes every recomposition restarts that effect every recomposition.
+            val handoff = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
+                remember { MeshHandoffUi({ handoffNote }) { replaceStale -> runHandoff(replaceStale) } }
+            } else null
             // The automatic attempt: the ldmux code is in and the token is not, which is the moment the
             // person would otherwise be told to type one. Keyed on the credentials, so it runs once per
             // change and not on a loop, and it never replaces a token that is there.
