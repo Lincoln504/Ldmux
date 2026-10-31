@@ -664,3 +664,46 @@ to see the problem, and `bond_clear_prph()` the only way out of it.
 3. **Until (1) ships, the recovery is a clean store**: clear the radio's peripheral bonds on both
    sides and pair once. Verified today: one bond, no pairing on reconnect, across an app restart
    and a radio reboot.
+
+### The fix, and how it was proven (2026-10-31)
+
+One record per peer, enforced where the fresh record is known: after a successful pairing the
+radio deletes any other stored bond that carries the same IRK. That makes `bond_load_keys`
+correct by construction instead of relying on directory order, and it needs no change to the
+library, which is a pinned download rather than source this project owns.
+
+Shipped in the firmware repo, not the framework: `2955792` adds the prune (`SerialBLEInterface`
+`prune_duplicate_bonds_for`), `2fc1361` splits the decision from the I/O and prints the store.
+
+**The guard was exercised, not assumed.** A test-only build in `/tmp` (the shipping image plus a
+`BOND_PRUNE_TEST` hook) duplicated the stored record under a name no peer owns, then ran the
+prune against it:
+
+```
+PRUNETEST before=2
+SerialBLEInterface: pruning duplicate bond /adafruit/bond_prph/DEADBEEF0000
+PRUNETEST after=1
+SerialBLEInterface: connected handle=0x0000 bond_records=1
+SerialBLEInterface: onSecured handle=0x0000
+```
+
+**The shipping image then passed the sequence that used to brick the link**: forget the radio from
+the app (which removes the OS bond too), pair again, restart the app —
+
+```
+connected handle=0x0000 bond_records=1
+onSecured handle=0x0000
+```
+
+— no pairing dialog, no MIC failure, `Radio LINKED`. Before the fix the same sequence left two
+records and every later connection died at `reason=61`.
+
+Two things the fix deliberately does **not** do:
+
+- **It does not repair a store that is already dirty.** The prune needs a fresh record as its
+  reference, so it runs at pairing only. Choosing a winner at boot is not safe: in the measured
+  case the *newer* record was the one filed under a throwaway address, so a "prefer the real
+  identity address" heuristic would have kept the stale key. The store size is printed at boot
+  and on every connection instead, and the honest remedy for a dirty store remains clearing it.
+- **It does not prune a record with no IRK.** Without an IRK there is nothing that identifies the
+  peer rather than the address it happened to use, so two records cannot be told apart safely.
