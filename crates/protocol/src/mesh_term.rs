@@ -104,7 +104,8 @@ pub mod unsupported {
     pub const HYPERLINKS: u16 = 1 << 2;
     pub const MOUSE: u16 = 1 << 3;
     pub const IMAGES: u16 = 1 << 4;
-    /// The phone does not resize the pane; it renders the host's geometry.
+    /// A version-1 or version-2 phone does not resize the pane; it renders the host's geometry.
+    /// A version-3 phone sends `Resize` and this bit is cleared in its `Profile`.
     pub const RESIZE: u16 = 1 << 5;
     pub const CLIPBOARD: u16 = 1 << 6;
     /// Everything a version-1 host leaves out.
@@ -713,7 +714,7 @@ fn segments(text: &str) -> Vec<&str> {
 /// will hold. An update is the difference from that, computed only when the caller asks (the
 /// bridge asks only when nothing is queued), so a phone that was away converges by one diff
 /// against the present, never by replaying the changes in between.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Differ {
     sent: Option<Screen>,
     epoch: u16,
@@ -760,18 +761,49 @@ impl Differ {
     /// The messages that bring the phone from what it holds to `screen`; empty when nothing
     /// differs. The first call after `new` or `reset` is a full screen, preceded by a `Profile`.
     pub fn update(&mut self, screen: &Screen) -> Vec<Message> {
-        let mut out = Vec::new();
+        self.update_within(screen, usize::MAX)
+    }
+
+    /// As [`Self::update`], sending at most `room` messages and recording only what it sent.
+    ///
+    /// A frame bigger than the window used to be enqueued whole, because the queue was only
+    /// checked between ticks. One full repaint could then put eight records in front of a
+    /// keystroke, and the phone waited seconds for each of them: on the device that reads as a
+    /// freeze, keys that go missing, and a session that eventually gives up. Bounding at the
+    /// source only works if the record of what the phone holds stays honest - a row that was not
+    /// sent must not be marked as sent, or the next diff skips it and the phone keeps a hole. So
+    /// the snapshot advances per row, over exactly the patches that went out, and the cursor
+    /// moves only when its `Commit` does.
+    ///
+    /// A change of geometry is the one thing sent whole or not at all: a `Profile` without the
+    /// `Rows` that clear the pane, or with the cursor left elsewhere, describes a screen the
+    /// phone does not have. Geometry changes are rare; the pane can wait a tick for one.
+    pub fn update_within(&mut self, screen: &Screen, room: usize) -> Vec<Message> {
+        if room == 0 {
+            return Vec::new();
+        }
         let geometry_changed = self
             .sent
             .as_ref()
             .is_none_or(|s| s.cols != screen.cols || s.rows != screen.rows);
         let full = geometry_changed;
+        // Profile + one `Rows` + `Commit`, the least a geometry change can be said in.
+        if full && room < 3 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
         if geometry_changed {
             out.push(Message::Profile {
                 version: self.version,
                 cols: screen.cols,
                 rows: screen.rows,
-                unsupported: unsupported::ALL_V1,
+                // A version-3 phone sends `Resize`, so telling it that resize is unsupported
+                // would contradict the message it is already sending.
+                unsupported: if self.version >= RESIZE_VERSION {
+                    unsupported::ALL_V1 & !unsupported::RESIZE
+                } else {
+                    unsupported::ALL_V1
+                },
                 shell: self.shell.clone(),
             });
         }
@@ -808,37 +840,101 @@ impl Differ {
         let epoch = self.epoch;
         // Pack patches into `Rows` messages of at most MAX_ROWS_BODY bytes. A full screen with
         // no text still sends one empty `Rows(full)`, so the phone clears.
-        let mut cur: Vec<Patch> = Vec::new();
-        let mut size = 3usize;
-        let mut first = true;
-        let flush = |cur: &mut Vec<Patch>, first: &mut bool, out: &mut Vec<Message>| {
-            if cur.is_empty() && !(*first && full) {
-                return;
+        let mut packed: Vec<Message> = Vec::new();
+        {
+            let mut cur: Vec<Patch> = Vec::new();
+            let mut size = 3usize;
+            let mut first = true;
+            let flush = |cur: &mut Vec<Patch>, first: &mut bool, out: &mut Vec<Message>| {
+                if cur.is_empty() && !(*first && full) {
+                    return;
+                }
+                out.push(Message::Rows {
+                    epoch,
+                    full: full && *first,
+                    patches: std::mem::take(cur),
+                });
+                *first = false;
+            };
+            for p in flat {
+                let need = 3 + p.text.len();
+                if size + need > MAX_ROWS_BODY {
+                    flush(&mut cur, &mut first, &mut packed);
+                    size = 3;
+                }
+                size += need;
+                cur.push(p);
             }
-            out.push(Message::Rows {
-                epoch,
-                full: full && *first,
-                patches: std::mem::take(cur),
-            });
-            *first = false;
-        };
-        for p in flat {
-            let need = 3 + p.text.len();
-            if size + need > MAX_ROWS_BODY {
-                flush(&mut cur, &mut first, &mut out);
-                size = 3;
-            }
-            size += need;
-            cur.push(p);
+            flush(&mut cur, &mut first, &mut packed);
         }
-        flush(&mut cur, &mut first, &mut out);
-        out.push(Message::Commit {
-            epoch,
-            cursor_x: screen.cursor_x,
-            cursor_y: screen.cursor_y,
-            flags,
-        });
-        self.sent = Some(screen.clone());
+        // One message is held back for the `Commit`: it carries the cursor and the flags, and a
+        // frame that cannot include it must leave the old cursor in the record so the next tick
+        // sends the change rather than forgetting it.
+        let room_for_rows = room.saturating_sub(out.len() + 1);
+        let take = room_for_rows.min(packed.len());
+        // The `Commit` goes with the rows, not after all of them: the phone applies a `Rows`
+        // only when its `Commit` arrives, so rows sent without one are discarded when the next
+        // epoch's rows arrive - which is how a long frame used to disappear row by row.
+        let commit = out.len() + take + 1 <= room && (take > 0 || packed.is_empty());
+        // What the phone will now hold, row by row, from the patches that actually went out.
+        let mut carried: Vec<Option<String>> = vec![None; screen.lines.len()];
+        for m in packed.iter().take(take) {
+            if let Message::Rows { patches, .. } = m {
+                for p in patches {
+                    let slot = carried
+                        .get_mut(usize::from(p.y))
+                        .expect("a patch names a row of this screen");
+                    slot.get_or_insert_with(String::new).push_str(&p.text);
+                }
+            }
+        }
+        let mut snapshot = if full {
+            screen.clone()
+        } else {
+            self.sent.clone().unwrap_or_else(|| screen.clone())
+        };
+        snapshot.cols = screen.cols;
+        snapshot.rows = screen.rows;
+        // A taller pane than the record has: the rows past the old end are blank on the phone
+        // until their text is carried, and the record has to have them to say so.
+        snapshot.lines.resize(screen.lines.len(), String::new());
+        for y in 0..screen.lines.len() {
+            match carried.get(y) {
+                Some(Some(prefix)) => {
+                    if let Some(slot) = snapshot.lines.get_mut(y) {
+                        *slot = prefix.clone();
+                    }
+                }
+                // A full screen clears the pane first, so a row that was not carried is blank on
+                // the phone even where the host has text.
+                _ if full => {
+                    if let Some(slot) = snapshot.lines.get_mut(y) {
+                        slot.clear();
+                    }
+                }
+                _ => {}
+            }
+        }
+        if commit {
+            snapshot.cursor_x = screen.cursor_x;
+            snapshot.cursor_y = screen.cursor_y;
+            snapshot.alternate = screen.alternate;
+            snapshot.dead = screen.dead;
+        }
+        out.extend(packed.into_iter().take(take));
+        if commit {
+            out.push(Message::Commit {
+                epoch,
+                cursor_x: screen.cursor_x,
+                cursor_y: screen.cursor_y,
+                flags,
+            });
+        }
+        // Nothing went out: the record must not move, or the change would be forgotten.
+        if out.is_empty() {
+            return Vec::new();
+        }
+        self.sent = Some(snapshot);
         out
     }
 }
@@ -962,6 +1058,90 @@ mod tests {
             dead: false,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    /// A frame bigger than the window is spread over calls and loses nothing: the record of
+    /// what the phone holds advances per row, so the rows that did not fit come back.
+    #[test]
+    fn a_bounded_update_spreads_a_big_frame_and_loses_no_row() {
+        fn pump(d: &mut Differ, target: &Screen, m: &mut Mirror) -> usize {
+            let mut dec = Decoder::new();
+            let mut turns = 0;
+            loop {
+                let msgs = d.update_within(target, 3);
+                if msgs.is_empty() {
+                    break;
+                }
+                turns += 1;
+                assert!(msgs.len() <= 3, "never more than the window allows");
+                assert!(turns < 60, "it must converge");
+                for msg in msgs {
+                    for item in dec.push(&msg.encode().unwrap()).unwrap() {
+                        m.apply(&item.unwrap());
+                    }
+                }
+            }
+            turns
+        }
+
+        let mut d = Differ::for_attach(VERSION, "abcd");
+        let mut m = Mirror::new();
+        let blank: Vec<String> = (0..20).map(|_| String::new()).collect();
+        let refs: Vec<&str> = blank.iter().map(String::as_str).collect();
+        let empty = screen(&refs, 80);
+        assert!(pump(&mut d, &empty, &mut m) >= 1);
+        assert_eq!(m.lines, empty.lines, "a blank screen arrives whole");
+
+        let lines: Vec<String> = (0..60)
+            .map(|i| format!("row {i} with some text on it"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let target = screen(&refs, 80);
+        let turns = pump(&mut d, &target, &mut m);
+        assert!(turns > 1, "sixty rows do not fit three messages");
+        assert_eq!(
+            m.lines, target.lines,
+            "every row arrives, none lost or stale"
+        );
+        assert_eq!(m.cursor, (target.cursor_x, target.cursor_y));
+    }
+
+    /// The cursor is only claimed when its `Commit` was sent; otherwise the change stays owed
+    /// rather than being forgotten.
+    #[test]
+    fn a_frame_without_its_commit_leaves_the_cursor_pending() {
+        let mut d = Differ::for_attach(VERSION, "abcd");
+        let one = screen(&["$"], 80);
+        let mut dec = Decoder::new();
+        let mut m = Mirror::new();
+        for _ in 0..10 {
+            let msgs = d.update_within(&one, 8);
+            if msgs.is_empty() {
+                break;
+            }
+            for msg in msgs {
+                for item in dec.push(&msg.encode().unwrap()).unwrap() {
+                    m.apply(&item.unwrap());
+                }
+            }
+        }
+        let mut moved = one.clone();
+        moved.cursor_x = 7;
+        moved.lines[0] = "$ typed".to_owned();
+        let tight = d.update_within(&moved, 1);
+        assert!(
+            !tight
+                .iter()
+                .any(|msg| matches!(msg, Message::Commit { .. })),
+            "one message cannot be both the rows and the commit"
+        );
+        let again = d.update_within(&moved, 2);
+        assert!(
+            again
+                .iter()
+                .any(|msg| matches!(msg, Message::Commit { .. })),
+            "the owed cursor is sent once there is room"
+        );
     }
 
     fn roundtrip(m: &Message) {
@@ -1168,9 +1348,18 @@ mod tests {
             Message::Resize { cols: 45, rows: 0 }.encode(),
             Err(EncodeError::Empty)
         );
-        for bad in [&[0x07, 0x02, 0, 30][..], &[0x07, 0x02, 45, 0], &[0x07, 0x01, 45], &[0x07, 0x03, 45, 30, 1]] {
+        for bad in [
+            &[0x07, 0x02, 0, 30][..],
+            &[0x07, 0x02, 45, 0],
+            &[0x07, 0x01, 45],
+            &[0x07, 0x03, 45, 30, 1],
+        ] {
             let mut d = Decoder::new();
-            assert_eq!(d.push(bad).unwrap(), vec![Err(DecodeError::Malformed(0x07))], "{bad:?}");
+            assert_eq!(
+                d.push(bad).unwrap(),
+                vec![Err(DecodeError::Malformed(0x07))],
+                "{bad:?}"
+            );
         }
         let mut d = Decoder::new();
         assert_eq!(

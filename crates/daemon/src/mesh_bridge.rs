@@ -23,10 +23,8 @@ use std::sync::Arc;
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION, Screen,
-    STREAM_VERSION, VERSION,
-    closed,
-    session_pages,
+    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION,
+    STREAM_VERSION, Screen, VERSION, closed, session_pages,
 };
 
 /// The session as the bridge sees it.
@@ -93,6 +91,8 @@ pub struct BridgeStats {
     pub inputs: u32,
     pub keys: u32,
     pub resizes: u32,
+    /// Resizes that named the geometry already in force: no change, no repaint.
+    pub resizes_unchanged: u32,
     pub malformed: u32,
     pub refused_sends: u32,
 }
@@ -103,6 +103,11 @@ struct Attached {
     /// The profile version the phone attached with. A phone on version 1 does not send `Key`,
     /// and one that does is not obeyed: it did not ask for the message's meaning.
     version: u8,
+    /// The grid last accepted from this phone. A `Resize` to the size already set is not a
+    /// change, and starting the screen over for it repaints the whole pane for nothing - which
+    /// on this link is a burst of records the phone waits through, seen as a freeze while a
+    /// full-screen app is open.
+    geometry: Option<(u8, u8)>,
 }
 
 pub struct Bridge<H, L> {
@@ -148,18 +153,19 @@ impl<H: Host, L: Link> Bridge<H, L> {
             .unwrap_or(false);
         let mut ok = true;
         let mut record: Vec<u8> = Vec::with_capacity(ldmux_protocol::mesh_term::RECORD_PAYLOAD);
-        let mut flush = |record: &mut Vec<u8>, ok: &mut bool, link: &mut L, stats: &mut BridgeStats| {
-            if record.is_empty() {
-                return;
-            }
-            if link.send(shell, record).is_ok() {
-                stats.records_sent += 1;
-            } else {
-                stats.refused_sends += 1;
-                *ok = false;
-            }
-            record.clear();
-        };
+        let mut flush =
+            |record: &mut Vec<u8>, ok: &mut bool, link: &mut L, stats: &mut BridgeStats| {
+                if record.is_empty() {
+                    return;
+                }
+                if link.send(shell, record).is_ok() {
+                    stats.records_sent += 1;
+                } else {
+                    stats.refused_sends += 1;
+                    *ok = false;
+                }
+                record.clear();
+            };
         for m in messages {
             let Ok(bytes) = m.encode() else {
                 ok = false;
@@ -239,7 +245,8 @@ impl<H: Host, L: Link> Bridge<H, L> {
             // came back, and on this link an ack only rides on the phone's next record or its pure
             // ack timer. Measured on the device as a 16 s gap between a keystroke and its echo.
             // The bound that belongs here is the window: past it the queue would only grow.
-            if self.link.pending() >= PENDING_LIMIT {
+            let room = PENDING_LIMIT.saturating_sub(self.link.pending());
+            if room == 0 {
                 break;
             }
             let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
@@ -258,8 +265,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     continue;
                 }
             };
+            // **Send only what the window can take, and mean it.** The differ bounds itself to
+            // `room` messages and advances its record of the phone's screen only over the rows
+            // that actually went out, so a frame too big for the window is spread over ticks
+            // instead of being queued whole: one full repaint used to sit in front of a
+            // keystroke as eight records, which the device showed as a freeze.
             let messages = match self.shells.get_mut(&shell) {
-                Some(a) => a.differ.update(&screen),
+                Some(a) => a.differ.update_within(&screen, room),
                 None => continue,
             };
             if messages.is_empty() {
@@ -319,6 +331,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 // chose, so a phone that sent an empty selector learns which.
                                 differ: Differ::for_attach(version, one),
                                 version,
+                                geometry: None,
                             },
                         );
                     }
@@ -346,7 +359,11 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // measure a keystroke's turnaround is from inside the host. This marks the
                 // moment input arrived; `reply` marks when its echo was queued.
                 if timing() {
-                    eprintln!("ldmuxd: mesh timing: input {} bytes at {:?}", bytes.len(), stamp());
+                    eprintln!(
+                        "ldmuxd: mesh timing: input {} bytes at {:?}",
+                        bytes.len(),
+                        stamp()
+                    );
                 }
                 let _ = self.host.input(&session, &bytes).await;
             }
@@ -372,10 +389,19 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
                 let session = a.session.clone();
                 self.stats.resizes += 1;
+                // A phone repeats its geometry on every relayout, and the keeper answers the
+                // same size happily, so without this an unchanged size would throw away the
+                // differ's record and send the whole pane again - twice over for a keyboard
+                // that opens and closes.
+                if a.geometry == Some((cols, rows)) {
+                    self.stats.resizes_unchanged += 1;
+                    return;
+                }
                 // Only a resize the pane accepted starts the screen over: a refused one leaves
                 // the grid as it was and the phone keeps what it has.
                 if self.host.resize(&session, cols, rows).await.is_ok() {
                     if let Some(a) = self.shells.get_mut(&shell) {
+                        a.geometry = Some((cols, rows));
                         a.differ.reset();
                     }
                 }
