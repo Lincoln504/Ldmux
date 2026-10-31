@@ -166,6 +166,9 @@ class MeshTermDriver(
      */
     private var lastInboundAt = 0L
     private var session: SessionPort? = null
+    /** When a dead session is tried again, and how long to wait after the next failure. */
+    private var recoverAt = 0L
+    private var recoverDelayMs = FIRST_RECOVERY_MS
     private val decoder = TermDecoder()
     private var mirror = RowMirror()
     private var held = ArrayList<TermMessage.Rows>()
@@ -210,18 +213,45 @@ class MeshTermDriver(
     /** Begin: needs a bound gateway. Sends handshake message 1 as the first record. */
     suspend fun start() = lock.withLock {
         check(handshake == null && session == null) { "already started" }
+        connect()
+    }
+
+    /**
+     * Start a session, or say why not. The lock is already held: [start] and the retry in [tick]
+     * both end here, and neither may take it again.
+     */
+    private suspend fun connect() {
         val g = gateway.state.value
         if (g != MeshLinkState.Bound && g != MeshLinkState.RadioUnavailable) {
-            terminalView = MeshTermView.LinkDown(g); publish(); return@withLock
+            failed(g); publish(); return
         }
         val h = try { begin() } catch (e: MeshSessionException) {
-            terminalView = MeshTermView.LinkDown(e.state); publish(); return@withLock
+            failed(e.state); publish(); return
         }
         handshake = h
         handshakeSince = clock()
         _view.value = MeshTermView.Handshaking
         transmit(h.message1)
         publish()
+    }
+
+    /**
+     * The session or the handshake ended badly. A dead session is retried on a schedule; a refused
+     * pairing is not, because waiting cannot cure a token or a key and the screen already offers
+     * the cure that can.
+     */
+    private fun failed(state: MeshLinkState) {
+        // Drop what failed. A retry that kept the dead session would never run, and the native
+        // session holds keys and a queue that only a fresh handshake should replace.
+        handshake?.abandon()
+        handshake = null
+        session?.close()
+        session = null
+        terminalView = MeshTermView.LinkDown(state)
+        if (state == MeshLinkState.SessionFailed) {
+            recoverAt = clock() + recoverDelayMs
+            recoverDelayMs = (recoverDelayMs * 2).coerceAtMost(MAX_RECOVERY_MS)
+        }
     }
 
     /** The gateway link changed. Anything but bound is a visible [MeshTermView.LinkDown]. */
@@ -247,6 +277,9 @@ class MeshTermDriver(
                 terminalView = MeshTermView.LinkDown(e.state); publish(); return@withLock
             }
             session = s
+            // A session that worked earns the fast retry back for the next failure.
+            recoverDelayMs = FIRST_RECOVERY_MS
+            recoverAt = 0
             _view.value = MeshTermView.ProfileMissing
             // Nothing named: attach with an empty selector first. The host takes the one shell if
             // there is exactly one (the common case, and no extra record on a link that allows
@@ -264,6 +297,7 @@ class MeshTermDriver(
             Received.PeerClosed -> { terminalView = MeshTermView.HostClosed(null) }
             is Received.Data -> {
                 lastInboundAt = clock()
+                recoverDelayMs = FIRST_RECOVERY_MS
                 for (c in r.chunks) if (c.shell == SHELL) feedStream(c.bytes)
             }
         }
@@ -276,26 +310,41 @@ class MeshTermDriver(
         val s = session
         if (s != null) {
             val h = s.health(clock())
-            if (h.failed && terminalView == null) terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+            if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed)
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves
             // nothing; with something outstanding, a minute of nothing back means the radio, the
             // far end, or both are gone, and the terminal would otherwise sit frozen on the last
             // screen with the user's typing going nowhere.
             if (terminalView == null && h.pending > 0 && clock() - lastInboundAt > SILENCE_FAILURE_MS) {
-                terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+                failed(MeshLinkState.SessionFailed)
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
             pump()
         } else if (handshake != null && clock() - handshakeSince > handshakeTimeoutMs) {
             handshake?.abandon(); handshake = null
-            terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+            failed(MeshLinkState.SessionFailed)
+        }
+        // The retry itself. Nothing else can bring a dead session back, and the user asking
+        // again should not be the mechanism.
+        if (recoverAt > 0 && clock() >= recoverAt && session == null && handshake == null) {
+            recoverAt = 0
+            terminalView = null
+            connect()
         }
         publish()
     }
 
     /** When the driver next wants [tick], in [clock]'s time, or null. */
-    suspend fun nextWakeMs(): Long? = lock.withLock { session?.nextDeadlineMs() }
+    suspend fun nextWakeMs(): Long? = lock.withLock {
+        val deadline = session?.nextDeadlineMs()
+        val retry = recoverAt.takeIf { it > 0 }
+        when {
+            deadline == null -> retry
+            retry == null -> deadline
+            else -> minOf(deadline, retry)
+        }
+    }
 
     // ── what the user does ─────────────────────────────────────────────────────────────
 
@@ -477,7 +526,7 @@ class MeshTermDriver(
             decoder.push(bytes)
         } catch (e: TermStreamException) {
             // The stream is unusable: say so and stop rather than painting from garbage.
-            terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+            failed(MeshLinkState.SessionFailed)
             return
         }
         for (item in items) when (item) {
@@ -628,7 +677,7 @@ class MeshTermDriver(
             // The host is not a contact, or the record is over what the radio takes: retrying
             // changes nothing, so it is a visible failure rather than a silent loop.
             MeshSendOutcome.ErrNotFound -> terminalView = MeshTermView.LinkDown(MeshLinkState.Refused)
-            MeshSendOutcome.ErrTooLong -> terminalView = MeshTermView.LinkDown(MeshLinkState.SessionFailed)
+            MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.SessionFailed)
             // Busy, a local timeout or an unknown answer: the record was not acknowledged by the
             // host, so the session's own bounded retransmission covers it.
             else -> {}
@@ -688,6 +737,18 @@ class MeshTermDriver(
  * cannot see: a radio that is off the air, where nothing ever comes back at all.
  */
 private const val SILENCE_FAILURE_MS = 20_000L
+
+/**
+ * A failed session is retried, not mourned.
+ *
+ * The host restarts, the radio reattaches, the gateway reconnects: each of those leaves the phone
+ * holding a session the daemon no longer has, and nothing the user can see explains why the
+ * terminal is stuck. Every failed session therefore starts again, doubling the pause so a host
+ * that is truly off is not hammered on airtime, and capped so a host that comes back is picked up
+ * within half a minute rather than the next time the user reopens the screen.
+ */
+private const val FIRST_RECOVERY_MS = 2_000L
+private const val MAX_RECOVERY_MS = 30_000L
 
 /** Longer than the gateway's own bound on the radio's answer, short enough that `tick` runs again. */
 private const val SEND_RESULT_TIMEOUT_MS = 10_000L

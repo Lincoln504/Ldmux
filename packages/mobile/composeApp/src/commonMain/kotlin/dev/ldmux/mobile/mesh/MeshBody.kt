@@ -71,7 +71,7 @@ fun meshBodyFor(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): Mesh
             handoff = true,
             replaceStale = true,
         )
-        MeshLinkState.SessionFailed -> MeshBody("the host stopped answering: it may be off or out of range", false)
+        MeshLinkState.SessionFailed -> MeshBody("the host stopped answering: it may be off or out of range. Trying again.", false)
         MeshLinkState.Closed -> MeshBody("the link closed: refresh to connect again", false)
     }
 }

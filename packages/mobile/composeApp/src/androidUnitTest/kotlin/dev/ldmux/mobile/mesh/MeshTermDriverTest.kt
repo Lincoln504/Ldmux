@@ -14,6 +14,8 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlin.test.assertTrue
 
 /** The driver against fakes: no socket, no native library. Every rule it owns has a case. */
@@ -95,6 +97,61 @@ class MeshTermDriverTest {
 
     private fun rows(epoch: Int, full: Boolean, vararg p: Pair<Int, String>) =
         TermMessage.Rows(epoch, full, p.map { TermPatch(it.first, false, it.second) })
+
+    /** A session the host stopped answering is retried on a schedule, not left dead. */
+    @Test
+    fun a_dead_session_is_retried_with_a_new_handshake(): Unit = runBlocking {
+        val d = driver()
+        live(d)
+        val before = gw.sent.size
+        sess.health = SessionHealth(failed = true, peerClosed = false, needsRekey = false, pending = 3, dropped = 0)
+        d.tick()
+        assertIs<MeshTermView.LinkDown>(d.view.value, "the screen says the host stopped answering")
+        assertTrue(sess.freed, "the dead session is dropped, not kept")
+        val wake = d.nextWakeMs()
+        assertEquals(now + 2_000, wake, "the first retry is two seconds later")
+        now = wake!!
+        d.tick()
+        assertEquals(before + 1, gw.sent.size, "the retry is a new handshake message 1")
+        assertIs<MeshTermView.Handshaking>(d.view.value)
+    }
+
+    /** The wait doubles, so a host that is off is not hammered with airtime. */
+    @Test
+    fun the_retry_backs_off_and_stops_growing(): Unit = runBlocking {
+        var dead = false
+        val d = MeshTermDriver(
+            gw,
+            { if (dead) throw MeshSessionException(MeshLinkState.SessionFailed, 1, "gone") else hs },
+            selector = "",
+            clock = { now },
+        )
+        live(d)
+        sess.health = SessionHealth(failed = true, peerClosed = false, needsRekey = false, pending = 1, dropped = 0)
+        dead = true
+        val waits = ArrayList<Long>()
+        repeat(6) {
+            d.tick()
+            val wake = d.nextWakeMs() ?: error("a retry must be scheduled")
+            waits += wake - now
+            now = wake
+        }
+        assertEquals(listOf(2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L), waits)
+    }
+
+    /** A refused pairing is not retried: waiting cannot cure a token or a key. */
+    @Test
+    fun a_refused_pairing_is_not_retried(): Unit = runBlocking {
+        val d = MeshTermDriver(
+            gw,
+            { throw MeshSessionException(MeshLinkState.Refused, 1, "bad token") },
+            selector = "",
+            clock = { now },
+        )
+        d.start()
+        assertIs<MeshTermView.LinkDown>(d.view.value)
+        assertNull(d.nextWakeMs(), "nothing is scheduled: the screen offers the cure instead")
+    }
 
     private suspend fun live(d: MeshTermDriver) {
         d.start(); d.onRecord(byteArrayOf(2))
