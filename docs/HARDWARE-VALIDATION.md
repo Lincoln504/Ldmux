@@ -562,3 +562,105 @@ Power-cycle the radio and pair again."
 
 That is deliberate. A second repair would be another PIN prompt for the user and no new
 information, because the failure that follows it is identical.
+
+### Root cause: the radio keeps a stale duplicate bond, and the lookup returns the first match (2026-10-31)
+
+This is settled, not inferred. The board was flashed with a **diagnostic build only** — the
+stock firmware with extra serial logging, built in `/tmp` from the read-only tree — and the
+stock image was restored and re-verified afterwards. The question was whether the radio's bond
+survives, and the answer is that it does survive and is then **mis-resolved**.
+
+**What the radio reported.** At every connect, a permanently failing link printed:
+
+```
+file=B2466FEB659C size=110 idaddr=9C:65:EB:6F:46:B2 irk_zero=0 resolves=1 lesc=0 auth=1 ltlen=16
+file=51A0E0C084C4 size=122 idaddr=C4:84:C0:E0:A0:51 irk_zero=0 resolves=1 lesc=0 auth=1 ltlen=16
+peer type=2 49:B2:AB:75:2A:37 load=1 chosen_id=9C:65:EB:6F:46:B2
+disconnected handle=0x0000 reason=61
+```
+
+Three facts in that block decide everything. The store held **two** bonds. **Both resolved the
+phone's rotating address** (`resolves=1`), because both carry the same IRK — the IRK is the
+phone's stable identity secret, shared with every bond. And `bond_load_keys` returned the
+**first** file it met, which was the older one. `reason=61` is `0x3D`,
+`CONN_TERMINATED_DUE_TO_MIC_FAILURE`: the radio answered the phone's encryption request with a
+key from a bond the phone no longer holds.
+
+**What a fresh pairing proved.** After clearing the store so that exactly one bond existed:
+
+```
+pairing complete status=0
+file=51A0E0C084C4 size=101 ... files=1
+pairing successful
+```
+
+One file, saved successfully. The size change (122 → 101) is the save landing, so the write path
+works. Then, with no pairing at all, an app restart and a radio reboot both produced
+`connected` → `onSecured` → a live companion session and `Radio LINKED`. Same firmware, same
+phone, same app. **Two files fail. One file works.** That is the whole bug.
+
+**Where the second file came from.** `BLESecurity::_eventHandler` stores the peer's
+`id_addr_info` from the identity exchange, and when the peer does not supply an identity key it
+substitutes `conn->getPeerAddr()`. For Android — which connects from a rotating resolvable
+private address — that substitute is an address that will never be seen again. A second pairing
+therefore writes a second file, and nothing ever removes the first. The old record's IRK still
+resolves the phone, so it stays reachable forever and can win the scan.
+
+**Nothing we wrote causes the divergence, and our repair makes it worse.** Every `removeBond` /
+`createBond` cycle is one more chance to leave a second file. The app-side repair introduced in
+`1d7f7d8` removes the phone's bond and re-pairs, which on this stack manufactures exactly the
+duplicate that breaks the next connection. That is why the self-service remedy ("forget it and
+pair again") never held: it was feeding the bug.
+
+#### What is already fixed upstream, and what is not
+
+The pin is `framework-arduinoadafruitnrf52` `1.10701.0` from
+`https://github.com/meshcore-dev/Adafruit_nRF52_Arduino#d541301` — MeshCore's own fork of the
+Adafruit core, core version 1.7.1. It **contains** Adafruit PR #671 (merged 2021-07-06, first
+released in 1.0.0), whose entire contribution is the `if (!status->kdist_peer.id)` guard. That
+guard is the reason bonds are no longer filed as `000000000000`, which was Adafruit issue #670.
+
+So the guard is the fix, not the fault — but it is only correct for a peer whose connection
+address *is* its identity, that is, a public or random-static address. For a privacy-enabled
+central it stores a throwaway address. Adafruit's own issue #752 (opened 2022-11-21, still open)
+shows the same end state from the other branch: `Loaded keys from file …` immediately followed by
+`CONN_TERMINATED_DUE_TO_MIC_FAILURE`. There is no duplicate detection anywhere in the library,
+and `bond_load_keys` has no recency, identity or count check — `bond_print_list` is the only way
+to see the problem, and `bond_clear_prph()` the only way out of it.
+
+#### What correct looks like, from stacks that do this properly
+
+- **Key the record by the resolved identity address, never by the over-the-air address.** Nordic's
+  `id_manager.c` matches public/static peers on the address and resolvable peers by scanning
+  stored IRKs, and never matches a non-resolvable random address at all because it is "not longterm
+  form of identification".
+- **One record per peer, with explicit duplicate detection.** Nordic's reference predicate is
+  `(duplicate_addr && id_addrs) || (duplicate_irk && !id_addrs)`: dedupe on the address when both
+  records hold genuine identity addresses, otherwise on the IRK, treating an all-zero IRK as
+  invalid so two IRK-less records are never merged. Adafruit has no equivalent, so the prune has to
+  be done by whoever owns the fork.
+- **Recovery is a ladder, not a reflex.** Do not touch the bond for `0x3E`, `0x22` or `0x08`.
+  Escalate to deleting bonds and re-pairing only on a persistent `0x3D` or `0x06` across at least
+  two clean reconnects. Zephyr's own record of an unpair-on-failure workaround notes it "is not a
+  recovery strategy; it is an admission that the key ring is being managed incorrectly."
+- **A new pairing needs a new physical link.** The Security Manager timer kills the SMP channel
+  for the life of a connection after 30 s, which is exactly the `PASSKEY_ENTRY_FAILED` we measured
+  when a PIN was typed into a dialog whose attempt had already expired.
+- **Android keeps its own bond when the peripheral has lost one**, and on API 36+ raises
+  `ACTION_KEY_MISSING` and prompts to pair again; `isPaired()` still returns true throughout. An
+  app cannot treat "the OS says bonded" as "this link can encrypt", which is the same conclusion
+  the app reached the hard way.
+
+#### The fix, in order of correctness
+
+1. **Prune duplicates in the fork.** In `bond_save_keys_dfr`, before writing, remove any existing
+   bond file whose `peer_id.id_info.irk` matches the new record's valid IRK. That is Nordic's
+   predicate in the one place it can be enforced, and it makes "first match wins" harmless because
+   there is only ever one match. It belongs in `meshcore-dev/Adafruit_nRF52_Arduino`, which this
+   project already pins — a one-file change, no protocol impact.
+2. **Stop manufacturing duplicates from the app.** The bound added in `9b25ebf` limits a run to one
+   repair; the remaining risk is that the one repair is itself the harmful act, so it should only
+   follow a repeated failure rather than a single one.
+3. **Until (1) ships, the recovery is a clean store**: clear the radio's peripheral bonds on both
+   sides and pair once. Verified today: one bond, no pairing on reconnect, across an app restart
+   and a radio reboot.
