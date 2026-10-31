@@ -123,12 +123,11 @@ fun resolveRoute(
 /**
  * One line for the link, in the same register as `linkLabel`. Never says "delivered".
  *
- * [endpoint] is the gateway address this device is paired with. It matters for one state: the
- * gateway binds an ephemeral port when its preferred one is unavailable, so a stored pairing can
- * point at a port that nothing listens on while MeshMore is running perfectly. Saying "not
- * running" then accuses the wrong side of the failure; naming the address and the cure does not.
+ * Short on purpose. An earlier version named the endpoint and the cure here, and on a phone that
+ * wrapped to five lines inside a status bar. The address and the remedy are in [meshBodyFor],
+ * which has the room.
  */
-fun meshLinkLabel(state: MeshLinkState, endpoint: MeshGatewayEndpoint? = null): String = when (state) {
+fun meshLinkLabel(state: MeshLinkState): String = when (state) {
     MeshLinkState.NeedsToken -> "mesh · needs pairing token"
     MeshLinkState.Idle -> "mesh · idle"
     MeshLinkState.Connecting -> "mesh · connecting"
@@ -136,12 +135,11 @@ fun meshLinkLabel(state: MeshLinkState, endpoint: MeshGatewayEndpoint? = null): 
     MeshLinkState.RadioUnavailable -> "mesh · radio unavailable"
     MeshLinkState.GatewayBusy -> "mesh · another app holds the gateway"
     MeshLinkState.ProtocolMismatch -> "mesh · gateway version mismatch"
-    MeshLinkState.Unreachable -> if (endpoint == null) {
-        "mesh · nothing listening on the paired address"
-    } else {
-        "mesh · nothing on $endpoint (MeshMore off, or it took another port: re-pair)"
-    }
-    MeshLinkState.Refused -> "mesh · refused (re-pair, or add the host as a contact)"
+    // The header is a status bar, not a diagnosis. Naming the address and the cure here made one
+    // line wrap to five on a phone, at the moment the user most needs to see the screen. The
+    // address and what to do about it live in the body, which has room and already says both.
+    MeshLinkState.Unreachable -> "mesh · unreachable"
+    MeshLinkState.Refused -> "mesh · refused"
     MeshLinkState.SessionFailed -> "mesh · host not answering"
     MeshLinkState.Closed -> "mesh · closed"
 }

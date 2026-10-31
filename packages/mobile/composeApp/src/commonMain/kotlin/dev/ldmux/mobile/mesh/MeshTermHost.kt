@@ -80,7 +80,7 @@ class MeshTermConnection(
  */
 fun meshTermLabel(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): String = when (view) {
     MeshTermView.Idle -> "mesh · not attached"
-    is MeshTermView.LinkDown -> meshLinkLabel(view.link, endpoint)
+    is MeshTermView.LinkDown -> meshLinkLabel(view.link)
     MeshTermView.Handshaking -> "mesh · securing the link (can take minutes)"
     MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
     MeshTermView.Listing -> "mesh · asking the host which shells are running"

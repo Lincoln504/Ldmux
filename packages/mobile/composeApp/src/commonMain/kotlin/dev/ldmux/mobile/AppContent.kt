@@ -705,7 +705,11 @@ internal fun AppContent(
                 } else null,
             ),
             link = link,
-            routeNotice = if (link == LinkState.RouteUnavailable && config.route == MeshRoute.Mesh) {
+            // A screen with only a header is not a state. Unpaired is the one case with no list and
+            // no notice of its own, so it gets the same one line every other dead end gets.
+            routeNotice = if (link == LinkState.Unpaired) {
+                { Text("no host paired: scan a pairing code in Settings", color = Dim, fontSize = 12.sp) }
+            } else if (link == LinkState.RouteUnavailable && config.route == MeshRoute.Mesh) {
                 {
                     // The header names the problem; this says what to do about it, and for a missing
                     // token it is the one button that makes it go away.

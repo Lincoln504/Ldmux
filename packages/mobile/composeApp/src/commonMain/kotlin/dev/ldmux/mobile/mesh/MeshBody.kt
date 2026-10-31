@@ -57,7 +57,8 @@ fun meshBodyFor(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): Mesh
         MeshLinkState.GatewayBusy -> MeshBody("another app is using the MeshMore gateway: close it, then refresh", false)
         MeshLinkState.ProtocolMismatch -> MeshBody("MeshMore speaks another gateway version: update one of the apps", false)
         MeshLinkState.Unreachable -> MeshBody(
-            "nothing on ${endpoint ?: MeshGatewayEndpoint.DEFAULT}: open MeshMore and turn on Connected apps",
+            "nothing on ${endpoint ?: MeshGatewayEndpoint.DEFAULT}: open MeshMore and turn on " +
+                "Connected apps, or pair again if it took another port",
             handoff = true,
         )
         MeshLinkState.Refused -> MeshBody("MeshMore or the host refused the link: get a new token, or pair again", handoff = true)

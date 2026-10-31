@@ -5,8 +5,10 @@ import dev.ldmux.mobile.mesh.MeshLinkState
 import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshRouteProblem
 import dev.ldmux.mobile.mesh.MeshRouteResolution
+import dev.ldmux.mobile.mesh.MeshTermView
 import dev.ldmux.mobile.mesh.MobilePlatform
 import dev.ldmux.mobile.mesh.availableRoutes
+import dev.ldmux.mobile.mesh.meshBodyFor
 import dev.ldmux.mobile.mesh.meshLinkLabel
 import dev.ldmux.mobile.mesh.meshRouteFromStored
 import dev.ldmux.mobile.mesh.resolveRoute
@@ -14,6 +16,7 @@ import dev.ldmux.mobile.mesh.selectableRoutes
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -148,13 +151,13 @@ class MeshRouteWiringTest {
         // The gateway binds an ephemeral port when its preferred one is taken, so a stored pairing
         // can be stale while MeshMore is healthy. The label must say where it looked.
         val endpoint = MeshGatewayEndpoint("127.0.0.1", 42989)
-        val line = meshLinkLabel(MeshLinkState.Unreachable, endpoint)
-        assertTrue(line.contains("127.0.0.1:42989"), line)
-        assertTrue("re-pair" in line, line)
-        assertFalse("MeshMore not running" in line, line)
-        assertEquals(
-            "mesh · nothing listening on the paired address",
-            meshLinkLabel(MeshLinkState.Unreachable),
-        )
+        // The header says what is wrong in one short line; the address and the cure are the body's
+        // job, because naming both here wrapped to five lines on a phone and pushed the screen away.
+        assertEquals("mesh · unreachable", meshLinkLabel(MeshLinkState.Unreachable))
+        val body = meshBodyFor(MeshTermView.LinkDown(MeshLinkState.Unreachable), endpoint)
+        assertNotNull(body)
+        assertTrue(body!!.line.contains("127.0.0.1:42989"), body.line)
+        assertTrue("pair again" in body.line, body.line)
+        assertFalse("MeshMore not running" in body.line, body.line)
     }
 }
