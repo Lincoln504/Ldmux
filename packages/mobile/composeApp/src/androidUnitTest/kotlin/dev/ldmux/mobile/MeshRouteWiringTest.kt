@@ -140,10 +140,10 @@ class MeshRouteWiringTest {
         val tailnetLabels = LinkState.entries.map { linkLabel(it, tailnet).substringAfter("${tailnet.pairedName} · ") }.toSet()
         for (s in MeshLinkState.entries) {
             val label = meshLinkLabel(s)
-            assertTrue(label.startsWith("mesh · "), label)
+            assertTrue(label.startsWith("meshmore · "), label)
             assertFalse(label in tailnetLabels, label)
         }
-        assertEquals("mesh · host not answering", meshLinkLabel(MeshLinkState.SessionFailed))
+        assertEquals("meshmore · host not answering", meshLinkLabel(MeshLinkState.SessionFailed))
     }
 
     @Test
@@ -153,7 +153,7 @@ class MeshRouteWiringTest {
         val endpoint = MeshGatewayEndpoint("127.0.0.1", 42989)
         // The header says what is wrong in one short line; the address and the cure are the body's
         // job, because naming both here wrapped to five lines on a phone and pushed the screen away.
-        assertEquals("mesh · unreachable", meshLinkLabel(MeshLinkState.Unreachable))
+        assertEquals("meshmore · unreachable", meshLinkLabel(MeshLinkState.Unreachable))
         val body = meshBodyFor(MeshTermView.LinkDown(MeshLinkState.Unreachable), endpoint)
         assertNotNull(body)
         assertTrue(body!!.line.contains("127.0.0.1:42989"), body.line)

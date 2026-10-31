@@ -128,29 +128,29 @@ fun resolveRoute(
  * which has the room.
  */
 fun meshLinkLabel(state: MeshLinkState): String = when (state) {
-    MeshLinkState.NeedsToken -> "mesh · needs pairing token"
-    MeshLinkState.Idle -> "mesh · idle"
-    MeshLinkState.Connecting -> "mesh · connecting"
-    MeshLinkState.Bound -> "mesh · bound"
-    MeshLinkState.RadioUnavailable -> "mesh · radio unavailable"
-    MeshLinkState.GatewayBusy -> "mesh · another app holds the gateway"
-    MeshLinkState.ProtocolMismatch -> "mesh · gateway version mismatch"
+    MeshLinkState.NeedsToken -> "meshmore · needs pairing token"
+    MeshLinkState.Idle -> "meshmore · idle"
+    MeshLinkState.Connecting -> "meshmore · connecting"
+    MeshLinkState.Bound -> "meshmore · bound"
+    MeshLinkState.RadioUnavailable -> "meshmore · radio unavailable"
+    MeshLinkState.GatewayBusy -> "meshmore · another app holds the gateway"
+    MeshLinkState.ProtocolMismatch -> "meshmore · gateway version mismatch"
     // The header is a status bar, not a diagnosis. Naming the address and the cure here made one
     // line wrap to five on a phone, at the moment the user most needs to see the screen. The
     // address and what to do about it live in the body, which has room and already says both.
-    MeshLinkState.Unreachable -> "mesh · unreachable"
-    MeshLinkState.Refused -> "mesh · refused"
-    MeshLinkState.SessionFailed -> "mesh · host not answering"
-    MeshLinkState.Closed -> "mesh · closed"
+    MeshLinkState.Unreachable -> "meshmore · unreachable"
+    MeshLinkState.Refused -> "meshmore · refused"
+    MeshLinkState.SessionFailed -> "meshmore · host not answering"
+    MeshLinkState.Closed -> "meshmore · closed"
 }
 
 fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
-    MeshRouteProblem.NotOnThisPlatform -> "mesh route is not available on this device"
-    MeshRouteProblem.SessionNotBuilt -> "mesh · session library unavailable on this device"
-    MeshRouteProblem.TerminalNotBuilt -> "mesh · shells over mesh are not built yet"
-    MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a pairing code made with ldmux code --mesh"
-    MeshRouteProblem.NeedsToken -> "mesh · needs pairing token"
-    MeshRouteProblem.NeedsPeer -> "mesh · needs the host radio's public key"
+    MeshRouteProblem.NotOnThisPlatform -> "meshmore route is not available on this device"
+    MeshRouteProblem.SessionNotBuilt -> "meshmore · session library unavailable on this device"
+    MeshRouteProblem.TerminalNotBuilt -> "meshmore · shells over mesh are not built yet"
+    MeshRouteProblem.NeedsSessionKeys -> "meshmore · scan a pairing code made with ldmux code --mesh"
+    MeshRouteProblem.NeedsToken -> "meshmore · needs pairing token"
+    MeshRouteProblem.NeedsPeer -> "meshmore · needs the host radio's public key"
 }
 
 /**

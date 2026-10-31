@@ -310,6 +310,14 @@ class MeshTermDriver(
         val s = session
         if (s != null) {
             val h = s.health(clock())
+            // A session that has spent its nonce budget starts a new one. It is not a failure:
+            // the link is fine and the screen stays, but a Noise session must not be driven past
+            // its counter, so the handshake is immediate rather than backed off.
+            if (h.needsRekey && terminalView == null) {
+                failed(MeshLinkState.SessionFailed)
+                recoverAt = clock()
+                recoverDelayMs = FIRST_RECOVERY_MS
+            }
             if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed)
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves

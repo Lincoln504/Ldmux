@@ -66,9 +66,9 @@ fun App() {
             // The route is chosen in the app's own header (a dropdown), so there is no
             // separate exit from the mesh route and no separate screen to come back from.
             val routes = availableRoutes(currentPlatform).map {
-                RouteChoice(if (it == MeshRoute.Mesh) "mesh" else "tailnet", it == MeshRoute.Mesh)
+                RouteChoice(if (it == MeshRoute.Mesh) "meshmore" else "tailnet", it == MeshRoute.Mesh)
             }
-            val current = RouteChoice(if (config.route == MeshRoute.Mesh) "mesh" else "tailnet", config.route == MeshRoute.Mesh)
+            val current = RouteChoice(if (config.route == MeshRoute.Mesh) "meshmore" else "tailnet", config.route == MeshRoute.Mesh)
             val choose: (RouteChoice) -> Unit = { c ->
                 store.update(config.copy(route = if (c.mesh) MeshRoute.Mesh else MeshRoute.Tailnet))
             }

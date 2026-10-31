@@ -12,6 +12,8 @@ import dev.ldmux.mobile.mesh.meshTokenStore
 import dev.ldmux.mobile.mesh.readMeshCredentials
 import dev.ldmux.mobile.mesh.currentMeshResolution
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -654,15 +656,10 @@ internal fun AppContent(
     // content moving through it, where a cut reads as a glitch.
     AnimatedContent(
         targetState = showLauncher,
-        transitionSpec = {
-            if (targetState) {
-                (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
-                    (slideOutHorizontally { it / 3 } + fadeOut())
-            } else {
-                (slideInHorizontally { it / 3 } + fadeIn()) togetherWith
-                    (slideOutHorizontally { -it / 3 } + fadeOut())
-            }
-        },
+        // A cut, deliberately, while the ghosting is investigated: a slide that does not finish
+        // leaves the outgoing screen composed under the incoming one, which reads as two copies
+        // of the app at once (and puts the terminal's cursor wherever the stale copy left it).
+        transitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
         label = "menu or terminal",
     ) { showingLauncher ->
     if (showingLauncher) {

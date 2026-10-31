@@ -79,27 +79,27 @@ class MeshTermConnection(
  * differently on purpose: the cure for each is different.
  */
 fun meshTermLabel(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): String = when (view) {
-    MeshTermView.Idle -> "mesh · not attached"
+    MeshTermView.Idle -> "meshmore · not attached"
     is MeshTermView.LinkDown -> meshLinkLabel(view.link)
-    MeshTermView.Handshaking -> "mesh · securing the link (can take minutes)"
-    MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
-    MeshTermView.Listing -> "mesh · asking the host which shells are running"
-    is MeshTermView.Choose -> "mesh · choose a shell"
-    MeshTermView.NoShells -> "mesh · the host is running no shell"
+    MeshTermView.Handshaking -> "meshmore · securing the link (can take minutes)"
+    MeshTermView.ProfileMissing -> "meshmore · linked, waiting for the host to describe the terminal"
+    MeshTermView.Listing -> "meshmore · asking the host which shells are running"
+    is MeshTermView.Choose -> "meshmore · choose a shell"
+    MeshTermView.NoShells -> "meshmore · the host is running no shell"
     is MeshTermView.Live -> when {
-        view.resyncing -> "mesh · resyncing the screen"
-        !view.painted -> "mesh · attached, no screen yet"
-        view.stalled -> "mesh · waiting for send budget"
-        else -> "mesh · live (reduced)"
+        view.resyncing -> "meshmore · resyncing the screen"
+        !view.painted -> "meshmore · attached, no screen yet"
+        view.stalled -> "meshmore · waiting for send budget"
+        else -> "meshmore · live (reduced)"
     }
     is MeshTermView.HostClosed -> when (view.reason) {
-        null -> "mesh · the host ended the session"
-        MeshTerm.Closed.NOT_FOUND -> "mesh · no such shell on the host"
-        MeshTerm.Closed.AMBIGUOUS -> "mesh · more than one shell on the host"
-        MeshTerm.Closed.EXITED -> "mesh · the shell exited"
-        MeshTerm.Closed.UNAVAILABLE -> "mesh · the host could not read the screen"
-        MeshTerm.Closed.VERSION -> "mesh · the host speaks another terminal version"
-        else -> "mesh · the host closed the terminal (${view.reason})"
+        null -> "meshmore · the host ended the session"
+        MeshTerm.Closed.NOT_FOUND -> "meshmore · no such shell on the host"
+        MeshTerm.Closed.AMBIGUOUS -> "meshmore · more than one shell on the host"
+        MeshTerm.Closed.EXITED -> "meshmore · the shell exited"
+        MeshTerm.Closed.UNAVAILABLE -> "meshmore · the host could not read the screen"
+        MeshTerm.Closed.VERSION -> "meshmore · the host speaks another terminal version"
+        else -> "meshmore · the host closed the terminal (${view.reason})"
     }
 }
 

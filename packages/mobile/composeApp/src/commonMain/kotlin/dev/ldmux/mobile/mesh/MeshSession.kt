@@ -226,7 +226,7 @@ data class SessionHealth(
     /** Retries were exhausted: the far end stopped answering. Maps to [MeshLinkState.SessionFailed]. */
     val failed: Boolean,
     val peerClosed: Boolean,
-    /** 2^16 records or 12 hours: a new handshake is due. Acting on it is not built yet. */
+    /** 2^16 records or 12 hours: a new handshake is due, and the driver starts one. */
     val needsRekey: Boolean,
     val pending: Int,
     val dropped: Int,

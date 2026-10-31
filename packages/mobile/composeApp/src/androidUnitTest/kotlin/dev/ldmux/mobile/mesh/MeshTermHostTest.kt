@@ -21,7 +21,7 @@ class MeshTermHostTest {
             meshTermLabel(MeshTermView.Handshaking),
         )
         assertEquals(labels.size, labels.toSet().size, labels.toString())
-        assertTrue(labels.all { it.startsWith("mesh · ") })
+        assertTrue(labels.all { it.startsWith("meshmore · ") })
         val closes = listOf(null, 1, 2, 3, 4, 5).map { meshTermLabel(MeshTermView.HostClosed(it)) }
         assertEquals(closes.size, closes.toSet().size)
     }
