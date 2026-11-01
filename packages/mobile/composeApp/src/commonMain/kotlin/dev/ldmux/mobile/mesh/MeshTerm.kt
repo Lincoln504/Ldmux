@@ -109,7 +109,19 @@ sealed interface TermMessage {
     /** Phone to host (version 3): the phone's grid in cells, each 1..255. The host answers with a fresh `Profile`. */
     data class Resize(val cols: Int, val rows: Int) : TermMessage
     data class Rows(val epoch: Int, val full: Boolean, val patches: List<TermPatch>) : TermMessage
-    data class Commit(val epoch: Int, val cursorX: Int, val cursorY: Int, val flags: Int) : TermMessage
+    /**
+     * The screen is settled. [firstLine] is the host's absolute line number for row 0 (version 5),
+     * which is the only way a phone can tell that rows leaving the top went into history rather
+     * than being rewritten: without it a local scrollback has to guess by matching content, and a
+     * guess is wrong exactly when the content repeats.
+     */
+    data class Commit(
+        val epoch: Int,
+        val cursorX: Int,
+        val cursorY: Int,
+        val flags: Int,
+        val firstLine: Int = 0,
+    ) : TermMessage
     data class Closed(val reason: Int) : TermMessage
     /** Phone to host: which shells are running? */
     data object ListRequest : TermMessage
@@ -141,6 +153,14 @@ private fun u8(v: Int, what: String): Byte {
     if (v !in 0..255) throw TermEncodeException("$what does not fit one byte")
     return v.toByte()
 }
+
+private fun u32(v: Int, what: String): List<Byte> =
+    listOf(
+        (v and 0xff).toByte(),
+        ((v ushr 8) and 0xff).toByte(),
+        ((v ushr 16) and 0xff).toByte(),
+        ((v ushr 24) and 0xff).toByte(),
+    )
 
 private fun u16(v: Int, what: String): List<Byte> {
     if (v !in 0..0xffff) throw TermEncodeException("$what does not fit two bytes")
@@ -189,6 +209,9 @@ fun TermMessage.encode(): ByteArray {
         is TermMessage.Commit -> {
             body.addAll(u16(epoch, "epoch"))
             body.add(u8(cursorX, "cursorX")); body.add(u8(cursorY, "cursorY")); body.add(u8(flags, "flags"))
+            // Only when the host has line identity: an older peer reads five bytes and would
+            // mistake four more for the start of the next record.
+            if (firstLine > 0) body.addAll(u32(firstLine, "firstLine"))
             MeshTerm.T_COMMIT
         }
         is TermMessage.Closed -> {
@@ -300,6 +323,13 @@ class TermDecoder {
         try { b.decodeToString(throwOnInvalidSequence = true) } catch (_: Exception) { null }
 
     private fun le16(b: ByteArray, i: Int) = (b[i].toInt() and 0xff) or ((b[i + 1].toInt() and 0xff) shl 8)
+
+    /** A line number. Four bytes, little endian, and the phone keeps it as an `Int`. */
+    private fun le32(b: ByteArray, i: Int): Int =
+        (b[i].toInt() and 0xff) or
+            ((b[i + 1].toInt() and 0xff) shl 8) or
+            ((b[i + 2].toInt() and 0xff) shl 16) or
+            ((b[i + 3].toInt() and 0xff) shl 24)
     private fun b(b: ByteArray, i: Int) = b[i].toInt() and 0xff
 
     private fun parse(tag: Int, body: ByteArray): Parsed {
@@ -342,8 +372,18 @@ class TermDecoder {
                 }
                 ok(TermMessage.Rows(epoch, full, patches))
             }
-            MeshTerm.T_COMMIT ->
-                if (body.size == 5) ok(TermMessage.Commit(le16(body, 0), b(body, 2), b(body, 3), b(body, 4))) else Parsed.Bad
+            MeshTerm.T_COMMIT -> when (body.size) {
+                // Version 4 and older: no line number, and a phone on it is told `Scrollback` is
+                // absent, so nothing is lost.
+                5 -> ok(TermMessage.Commit(le16(body, 0), b(body, 2), b(body, 3), b(body, 4)))
+                9 -> ok(
+                    TermMessage.Commit(
+                        le16(body, 0), b(body, 2), b(body, 3), b(body, 4),
+                        le32(body, 5),
+                    ),
+                )
+                else -> Parsed.Bad
+            }
             MeshTerm.T_CLOSED -> if (body.size == 1) ok(TermMessage.Closed(b(body, 0))) else Parsed.Bad
             MeshTerm.T_LIST -> if (body.isEmpty()) ok(TermMessage.ListRequest) else Parsed.Bad
             MeshTerm.T_KEY -> {
@@ -401,6 +441,13 @@ class RowMirror {
         private set
     var epoch = 0
         private set
+    /**
+     * The host's absolute line number for row 0, from the last `Commit` (0 when the host has no
+     * line identity). A screen that scrolls by N advances this by N: rows that leave the top are
+     * history the phone already holds, and rows it never received are a gap it can name.
+     */
+    var firstLine = 0
+        private set
     /** The `Closed` reason, once the host ended the attach. */
     var closed: Int? = null
         private set
@@ -442,6 +489,7 @@ class RowMirror {
                 }
                 lines = next
                 cursorX = m.cursorX; cursorY = m.cursorY; flags = m.flags; epoch = m.epoch
+                firstLine = m.firstLine
                 return true
             }
             is TermMessage.Closed -> { closed = m.reason; return false }

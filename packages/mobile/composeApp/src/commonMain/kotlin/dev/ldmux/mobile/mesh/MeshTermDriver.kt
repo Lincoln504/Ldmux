@@ -70,6 +70,12 @@ data class MeshScreen(
     val epoch: Int,
     /** The host's column count from its `Profile`; the rows are [lines]. 0 until a profile arrived. */
     val cols: Int = 0,
+    /**
+     * The host's absolute line number for the first of [lines] (0 when it has none). Two screens
+     * whose `firstLine` differ by N say that N rows left the top into history, which is the fact a
+     * local scrollback needs and a mirror of screen positions cannot invent.
+     */
+    val firstLine: Int = 0,
 )
 
 /**
@@ -732,6 +738,7 @@ class MeshTermDriver(
                         dead = mirror.flags and MeshTerm.CommitFlags.DEAD != 0,
                         epoch = mirror.epoch,
                         cols = mirror.profile?.cols ?: 0,
+                        firstLine = mirror.firstLine,
                     ),
                     absent = absentFeatures(unsupported),
                     budgetLeft = left,

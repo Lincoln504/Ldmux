@@ -962,6 +962,7 @@ impl Keeper {
                     cols: o.cols as u64,
                     rows: o.rows as u64,
                     history_lines: o.history_lines,
+                    total_rows: o.total_rows,
                     text: o.text,
                     cursor_x: o.cursor_x as u64,
                     cursor_y: o.cursor_y as u64,

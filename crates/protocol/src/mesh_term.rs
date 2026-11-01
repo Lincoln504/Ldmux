@@ -58,7 +58,7 @@ use std::collections::VecDeque;
 /// Version 3 adds `Resize`, so the phone can ask the host to fit its pty to the phone's own
 /// grid, as every tailnet client does. A host answers a resize with a fresh `Profile` and a full
 /// screen. The `Profile` body is unchanged from version 2.
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
@@ -69,6 +69,14 @@ pub const RESIZE_VERSION: u8 = 3;
 /// stream decoder). From here the host packs a `Rows` and the `Commit` that belongs to it into
 /// one record when they fit, which is one frame instead of two for an ordinary echo.
 pub const STREAM_VERSION: u8 = 4;
+
+/// The version whose `Commit` names the absolute line at the top of the screen (version 5).
+///
+/// The field is what makes a phone-side scrollback possible at all: a mirror of screen positions
+/// cannot tell "these rows scrolled up into history" from "these rows were rewritten in place",
+/// and guessing by matching content is what makes mosh's history unreliable. Four bytes once per
+/// commit answer it exactly.
+pub const STREAM_LINE_VERSION: u8 = 5;
 /// Most key names in one `Key` message.
 pub const MAX_KEYS: usize = 16;
 
@@ -180,6 +188,11 @@ pub enum Message {
         cursor_x: u8,
         cursor_y: u8,
         flags: u8,
+        /// The absolute line number of row 0 (version 5). A screen that scrolls by N advances
+        /// this by N, which is how the phone learns that the N rows leaving the top are history
+        /// it already holds rather than rows overwritten in place - the one fact a mirror of
+        /// screen positions cannot express.
+        first_line: u32,
     },
     Closed {
         reason: u8,
@@ -323,9 +336,13 @@ impl Message {
                 cursor_x,
                 cursor_y,
                 flags,
+                first_line,
             } => {
                 body.extend_from_slice(&epoch.to_le_bytes());
                 body.extend_from_slice(&[*cursor_x, *cursor_y, *flags]);
+                if *first_line > 0 {
+                    body.extend_from_slice(&first_line.to_le_bytes());
+                }
                 T_COMMIT
             }
             Self::Closed { reason } => {
@@ -460,6 +477,16 @@ impl Message {
                 cursor_x: body[2],
                 cursor_y: body[3],
                 flags: body[4],
+                // Version 4 and older: the message carries no line number, and a phone on it is
+                // told `Scrollback` is absent anyway.
+                first_line: 0,
+            },
+            T_COMMIT if body.len() == 9 => Self::Commit {
+                epoch: u16::from_le_bytes([body[0], body[1]]),
+                cursor_x: body[2],
+                cursor_y: body[3],
+                flags: body[4],
+                first_line: u32::from_le_bytes([body[5], body[6], body[7], body[8]]),
             },
             T_CLOSED if body.len() == 1 => Self::Closed { reason: body[0] },
             T_LIST if body.is_empty() => Self::List,
@@ -616,6 +643,10 @@ pub struct Screen {
     pub cursor_y: u8,
     pub alternate: bool,
     pub dead: bool,
+    /// The absolute line number of row 0, from the keeper's own line numbering. Zero when the
+    /// source cannot say, which a phone treats as "no line identity": it accumulates nothing
+    /// rather than guessing at a scroll.
+    pub first_line: u32,
     /// Exactly `rows` entries, trailing spaces removed.
     pub lines: Vec<String>,
 }
@@ -631,6 +662,7 @@ impl Screen {
         cursor: (u64, u64),
         alternate: bool,
         dead: bool,
+        first_line: u32,
     ) -> Self {
         let rows_u8 = rows.min(255) as u8;
         let mut lines: Vec<String> = text.split('\n').map(plain_row).collect();
@@ -646,6 +678,7 @@ impl Screen {
             cursor_y: cursor.1.min(255) as u8,
             alternate,
             dead,
+            first_line,
             lines,
         }
     }
@@ -829,13 +862,20 @@ impl Differ {
         }
         let flags = (u8::from(screen.alternate) * commit::ALTERNATE)
             | (u8::from(screen.dead) * commit::DEAD);
+        // A scroll with identical content still has to reach the phone: the rows leaving the top
+        // are history the phone already holds, and a commit that does not say so loses them.
+        let line_changed = self
+            .sent
+            .as_ref()
+            .is_some_and(|s| s.first_line != screen.first_line);
         let cursor_or_flags_changed = self.sent.as_ref().is_none_or(|s| {
             s.cursor_x != screen.cursor_x
                 || s.cursor_y != screen.cursor_y
                 || s.alternate != screen.alternate
                 || s.dead != screen.dead
+                || s.first_line != screen.first_line
         });
-        if flat.is_empty() && !full && !cursor_or_flags_changed {
+        if flat.is_empty() && !full && !cursor_or_flags_changed && !line_changed {
             return Vec::new();
         }
         self.epoch = self.epoch.wrapping_add(1);
@@ -930,6 +970,13 @@ impl Differ {
                 cursor_x: screen.cursor_x,
                 cursor_y: screen.cursor_y,
                 flags,
+                // Only a version 5 phone asked for line identity; an older one would read four
+                // bytes it does not expect as the start of the next record.
+                first_line: if self.version >= STREAM_LINE_VERSION {
+                    screen.first_line
+                } else {
+                    0
+                },
             });
         }
         // Nothing went out: the record must not move, or the change would be forgotten.
@@ -952,6 +999,9 @@ pub struct Mirror {
     pub cursor: (u8, u8),
     pub flags: u8,
     pub epoch: u16,
+    /// The absolute line number of row 0, from the last `Commit` (version 5; 0 when the host has
+    /// no line identity, which is every host older than 5).
+    pub first_line: u32,
     /// `Rows` held until their `Commit`.
     pending: Option<(u16, bool, Vec<Patch>)>,
     /// A `Closed` reason, once the host ended the attach.
@@ -1000,6 +1050,7 @@ impl Mirror {
                 cursor_x,
                 cursor_y,
                 flags,
+                first_line,
             } => {
                 let (full, patches) = match self.pending.take() {
                     Some((e, f, p)) if e == *epoch => (f, p),
@@ -1023,6 +1074,7 @@ impl Mirror {
                 self.cursor = (*cursor_x, *cursor_y);
                 self.flags = *flags;
                 self.epoch = *epoch;
+                self.first_line = *first_line;
                 true
             }
             Message::Closed { reason } => {
@@ -1058,8 +1110,51 @@ mod tests {
             cursor_y: 0,
             alternate: false,
             dead: false,
+            first_line: 0,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    /// A phone on version 5 is told the absolute line at the top of the screen, which is the one
+    /// fact it needs to move rows into a local history. Guessing by matching content is what makes
+    /// mosh's history unreliable: an in-place rewrite of identical text is indistinguishable from
+    /// a scroll.
+    #[test]
+    fn a_current_phone_is_told_which_line_is_at_the_top() {
+        fn deliver(d: &mut Differ, m: &mut Mirror, target: &Screen) {
+            let mut dec = Decoder::new();
+            for msg in d.update(target) {
+                for item in dec.push(&msg.encode().unwrap()).unwrap() {
+                    m.apply(&item.unwrap());
+                }
+            }
+        }
+
+        // Real rows, so the first update actually carries something and commits.
+        let rows = ["$ one", "two", "", ""];
+        let refs: Vec<&str> = rows.iter().copied().collect();
+        let mut at_attach = screen(&refs, 20);
+        at_attach.first_line = 7;
+
+        let mut d = Differ::for_attach(VERSION, "ab12-1");
+        let mut m = Mirror::new();
+        deliver(&mut d, &mut m, &at_attach);
+        assert_eq!(m.first_line, 7, "the phone knows where the screen starts");
+
+        // The shell prints three lines: the screen scrolls by exactly three.
+        let mut scrolled = screen(&refs, 20);
+        scrolled.first_line = 10;
+        deliver(&mut d, &mut m, &scrolled);
+        assert_eq!(m.first_line, 10, "three rows left the top into history");
+
+        // A version 4 phone is told nothing at all, and is offered no scrollback: reading four
+        // bytes it does not expect would break the stream.
+        let mut old = Differ::for_attach(4, "ab12-1");
+        let first = old.update(&scrolled);
+        assert!(
+            first.iter().all(|msg| !matches!(msg, Message::Commit { first_line, .. } if *first_line != 0)),
+            "a version 4 commit carries no line number"
+        );
     }
 
     /// A frame bigger than the window is spread over calls and loses nothing: the record of
@@ -1203,6 +1298,7 @@ mod tests {
             ],
         });
         roundtrip(&Message::Commit {
+            first_line: 0,
             epoch: 7,
             cursor_x: 3,
             cursor_y: 4,
@@ -1372,7 +1468,7 @@ mod tests {
 
     #[test]
     fn a_version_three_profile_names_its_shell_like_version_two() {
-        let screen = Screen::from_keeper(&"\n".repeat(29), 45, 30, (0, 0), false, false);
+        let screen = Screen::from_keeper(&"\n".repeat(29), 45, 30, (0, 0), false, false, 0);
         let first = Differ::for_attach(3, "ab12-1").update(&screen);
         assert!(matches!(
             &first[0],
@@ -1520,6 +1616,7 @@ mod tests {
         assert_eq!(
             Message::Commit {
                 epoch: 0x0102,
+                first_line: 0,
                 cursor_x: 5,
                 cursor_y: 6,
                 flags: 1
@@ -1569,6 +1666,7 @@ mod tests {
             },
             Message::Commit {
                 epoch: 1,
+                first_line: 0,
                 cursor_x: 4,
                 cursor_y: 0,
                 flags: 0,
@@ -1656,9 +1754,9 @@ mod tests {
     #[test]
     fn from_keeper_takes_the_live_rows_when_history_is_above() {
         let text = "old1\nold2\n$ ls\nfile";
-        let s = Screen::from_keeper(text, 80, 2, (0, 1), false, false);
+        let s = Screen::from_keeper(text, 80, 2, (0, 1), false, false, 0);
         assert_eq!(s.lines, ["$ ls", "file"]);
-        let s = Screen::from_keeper("only", 80, 3, (0, 0), false, false);
+        let s = Screen::from_keeper("only", 80, 3, (0, 0), false, false, 0);
         assert_eq!(s.lines, ["only", "", ""]);
     }
 
@@ -1837,6 +1935,7 @@ mod tests {
         // The Commit is for another epoch: the held rows do not belong to it.
         m.apply(&Message::Commit {
             epoch: 6,
+            first_line: 0,
             cursor_x: 0,
             cursor_y: 0,
             flags: 0,
@@ -1904,6 +2003,7 @@ mod tests {
                 cursor_x,
                 cursor_y,
                 flags,
+                ..
             } => json!({
                 "kind":"commit","epoch":epoch,"cursorX":cursor_x,"cursorY":cursor_y,"flags":flags}),
             Message::Closed { reason } => json!({"kind":"closed","reason":reason}),
@@ -1980,6 +2080,7 @@ mod tests {
             },
             Message::Commit {
                 epoch: 0x0102,
+                first_line: 0,
                 cursor_x: 5,
                 cursor_y: 6,
                 flags: 1,

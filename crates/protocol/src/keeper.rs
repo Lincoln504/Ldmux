@@ -221,6 +221,11 @@ pub struct SnapshotResult {
     pub rows: u64,
     /// The number of history lines actually captured (0 = live screen only).
     pub history_lines: u64,
+    /// Every line the pane has, history and live: `first_line = total_rows - rows`. The keeper's
+    /// own numbering, so a client can name a line rather than count rows it happens to hold.
+    /// Absent from an older keeper's answer, which a client must treat as "no line identity".
+    #[serde(default)]
+    pub total_rows: u64,
     pub text: String,
     // The pane's state (plan §3.4: the `display-message` fields, read direct
     // from ghostty-vt — not a parsed format string). See each field's source.
@@ -410,6 +415,7 @@ mod tests {
     fn snapshot_result_shape() {
         let v: serde_json::Value =
             serde_json::to_value(KeeperMessage::SnapshotResult(SnapshotResult {
+                total_rows: 0,
                 session_id: "s1".into(),
                 cols: 80,
                 rows: 24,

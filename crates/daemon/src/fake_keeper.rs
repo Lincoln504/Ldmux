@@ -200,6 +200,9 @@ impl FakeKeeper {
                     // retains; echoing it here is what makes a caller's request
                     // observable to a test.
                     history_lines: req.history_lines.unwrap_or(0).min(sess.history_size as u64),
+                    // The fake's history is the rows it holds above the screen; the numbering is
+                    // the same as the real keeper's.
+                    total_rows: sess.history_size as u64 + sess.rows as u64,
                     text: sess.snapshot_text.clone(),
                     cursor_x: sess.cursor_x as u64,
                     cursor_y: sess.cursor_y as u64,

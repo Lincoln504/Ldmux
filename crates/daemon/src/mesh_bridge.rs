@@ -525,6 +525,9 @@ impl Host for DaemonHost {
             (s.cursor_x, s.cursor_y),
             s.alternate_on,
             s.dead,
+            // The keeper numbers its lines: history first, then the live screen. A keeper too
+            // old to say reports nothing, and a phone treats that as "no line identity".
+            s.total_rows.saturating_sub(s.rows).min(u64::from(u32::MAX)) as u32,
         ))
     }
 
@@ -736,6 +739,7 @@ mod tests {
             cursor_y: 0,
             alternate: false,
             dead: false,
+            first_line: 0,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
         }
     }

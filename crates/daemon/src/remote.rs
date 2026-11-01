@@ -2797,6 +2797,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
         let conn = Arc::new(ConnShared::with_inner(tx, ConnInner::new()));
         let snap = ldmux_protocol::keeper::SnapshotResult {
+            total_rows: 0,
             session_id: "s".into(),
             cols: 80,
             rows: 24,

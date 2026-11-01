@@ -196,6 +196,10 @@ impl Host for FakeShell {
     async fn keys(&mut self, _id: &str, _names: &[String]) -> Result<(), String> {
         Err("this fake shell has no key table".into())
     }
+    async fn claim(&mut self, _id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn release(&mut self, _id: &str) {}
     async fn resize(&mut self, _id: &str, _cols: u8, _rows: u8) -> Result<(), String> {
         Err("this fake shell cannot be resized".into())
     }

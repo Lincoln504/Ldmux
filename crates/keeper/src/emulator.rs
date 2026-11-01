@@ -251,6 +251,9 @@ pub struct Outcome {
     pub rows: u16,
     /// The number of history lines actually captured (0 = live only).
     pub history_lines: u64,
+    /// Every line the pane holds, history and live: `total_rows - rows` is the absolute line
+    /// number of the row at the top of the screen.
+    pub total_rows: u64,
     pub text: String,
     // The pane's state, read from the `Terminal` the thread owns (plan §3.4
     // — the `display-message` fields, direct from ghostty-vt). The `/proc`
@@ -568,6 +571,9 @@ fn service(msg: EmuMsg, term: &mut Terminal, rs: &mut RenderState, out: &Mutex<c
                 cols: rs.cols(),
                 rows: rs.rows(),
                 history_lines: n as u64,
+                // Live rows plus retained history: the keeper's own line numbering, which is what
+                // lets a client name a line instead of counting the rows it happens to hold.
+                total_rows: term.total_rows() as u64,
                 text,
                 cursor_x: term.cursor_x(),
                 cursor_y: term.cursor_y(),

@@ -1134,6 +1134,7 @@ mod tests {
             match req {
                 KeeperMessage::Snapshot(s) => Ok(KeeperMessage::SnapshotResult(
                     ldmux_protocol::keeper::SnapshotResult {
+                        total_rows: 0,
                         session_id: s.session_id.clone(),
                         cols: 80,
                         rows: 24,
