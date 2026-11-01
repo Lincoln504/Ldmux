@@ -160,8 +160,18 @@ class MeshTermDriver(
      * a short timeout safe: the wait is retried every [handshakeRetryMs], not once.
      */
     private val handshakeTimeoutMs: Long = 60_000,
-    /** How often an unanswered handshake is asked again, with fresh keys each time. */
-    private val handshakeRetryMs: Long = 6_000,
+    /**
+     * The first interval before an unanswered handshake is asked again, with fresh keys each time.
+     *
+     * **It must exceed the round trip, or the retry destroys the answer it is waiting for.** A
+     * handshake is three records each way through the ARQ on a half-duplex radio; several seconds is
+     * ordinary. At six seconds the driver abandoned a handshake just as `msg2` was arriving, and the
+     * late record was handed to the *new* handshake and failed to decode - measured on the device,
+     * 2026-11-01: `handshakes 5 accepted` on the host while the phone still said `handshaking`, and
+     * the counter resetting every six seconds. Doubling from here (CoAP's ladder, RFC 6298's
+     * backoff) gives 8 s, 16 s, 32 s.
+     */
+    private val handshakeRetryMs: Long = 8_000,
     /** How many re-asks before the transport itself is judged dead and the connection rebuilt. */
     private val handshakeRetries: Int = 3,
     /** How long the gateway may take to say what the radio did with one record. */
@@ -396,12 +406,12 @@ class MeshTermDriver(
             if (waited > handshakeTimeoutMs) {
                 handshake?.abandon(); handshake = null
                 failed(MeshLinkState.SessionFailed)
-            } else if (waited >= handshakeRetryMs && handshakeTries >= handshakeRetries) {
-                // Three unanswered handshakes over eighteen seconds is not a lost record. The
-                // transport is the suspect now, and only a new connection can test that.
+            } else if (handshakeTries >= handshakeRetries) {
+                // Three unanswered handshakes, each given twice as long as the last, is not a lost
+                // record. The transport is the suspect now, and only a new connection can test that.
                 handshake?.abandon(); handshake = null
                 failed(MeshLinkState.SessionFailed)
-            } else if (waited >= handshakeRetryMs) {
+            } else if (waited >= handshakeRetryMs shl handshakeTries) {
                 handshakeTries++
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
                 // one record; on a radio that drops one in ten it can simply go missing, and until

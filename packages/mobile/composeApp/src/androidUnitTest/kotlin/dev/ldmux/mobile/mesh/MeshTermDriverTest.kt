@@ -94,9 +94,19 @@ class MeshTermDriverTest {
         now += 5_000
         d.tick()
         assertEquals(first, gw.sent.size, "five seconds is not yet a retry")
-        now += 1_500
+        now += 3_500
         d.tick()
-        assertEquals(first + 1, gw.sent.size, "over six seconds it asks again")
+        assertEquals(first + 1, gw.sent.size, "over eight seconds it asks again")
+        // **The second ask waits twice as long.** A fixed short interval re-keys before the answer
+        // can arrive, and then hands the late `msg2` to a handshake it no longer belongs to
+        // (measured 2026-11-01: five accepted handshakes on the host, the phone still saying
+        // `handshaking`). Doubling from 8 s is CoAP's ladder.
+        now += 9_000
+        d.tick()
+        assertEquals(first + 1, gw.sent.size, "the second wait is the doubled one")
+        now += 7_500
+        d.tick()
+        assertEquals(first + 2, gw.sent.size, "and the next ask comes at sixteen")
         assertIs<MeshTermView.Handshaking>(d.view.value, "and the screen still says so")
     }
 
@@ -558,17 +568,18 @@ class MeshTermDriverTest {
 
     @Test
     fun `a handshake nobody answers is re-asked, then ends as a dead transport`() = runBlocking<Unit> {
-        // Six seconds per ask, three asks: a lost msg1 costs seconds, not the whole timeout, and a
-        // host that is really gone ends the connection so the screen can build a new one.
-        val d = driver(handshakeTimeoutMs = 60_000); d.start()
+        // 8 s then 16 s then 32 s, three asks: a lost msg1 costs seconds, not the whole timeout, and
+        // a host that is really gone ends the connection so the screen can build a new one. The
+        // doubling matters - a fixed 6 s re-key raced its own answer on the real link.
+        val d = driver(handshakeTimeoutMs = 120_000); d.start()
         val first = gw.sent.size
-        now += 6_500; d.tick()
-        assertEquals(first + 1, gw.sent.size, "the second ask")
-        now += 6_500; d.tick()
-        assertEquals(first + 2, gw.sent.size, "the third")
-        now += 6_500; d.tick()
-        assertEquals(first + 3, gw.sent.size, "the fourth")
-        now += 6_500; d.tick()
+        now += 8_500; d.tick()
+        assertEquals(first + 1, gw.sent.size, "the second ask at eight seconds")
+        now += 16_500; d.tick()
+        assertEquals(first + 2, gw.sent.size, "the third at sixteen after that")
+        now += 32_500; d.tick()
+        assertEquals(first + 3, gw.sent.size, "the fourth at thirty-two after that")
+        d.tick()
         assertEquals(MeshTermView.LinkDown(MeshLinkState.SessionFailed), d.view.value)
         assertTrue(hs.abandoned)
     }

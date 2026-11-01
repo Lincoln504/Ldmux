@@ -33,6 +33,10 @@ pub const INBOUND_MAX: usize = 1024;
 /// Chunks the application may have queued toward the phone.
 pub const OUTBOUND_MAX_BYTES: usize = 8 * 1024;
 
+/// How many control records may ride one tick, whatever the budget says. The handshake reply is one
+/// record; the spare two are for a reply that was re-queued after a fresh `msg1` in the same tick.
+const CONTROL_RECORDS: u8 = 3;
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct SessionSnapshot {
     /// `off` (no PSK configured), `waiting` (no handshake on this link yet), `established`.
@@ -209,20 +213,29 @@ impl SessionHost {
         Ok(())
     }
 
-    /// Records to hand to the tunnel now: at most `min(records_left, l2_slots)`, handshake
-    /// replies first.
+    /// Records to hand to the tunnel now: handshake replies first, then data bounded by
+    /// `min(records_left, l2_slots)`.
+    ///
+    /// **A handshake reply is control traffic and is never gated by the budget.** It used to share the
+    /// same gate as data, and `records_left` is `budget.unwrap_or(0)` on the calling side - so a
+    /// gateway that had not yet reported a budget blocked the very exchange that carries the
+    /// information needed to report one. Acks and retransmissions are already exempt on the phone
+    /// (`AirtimePolicy::ownedChannel`); this is the host's half of the same rule: replies, acks and
+    /// heartbeats are sent, full stop.
     pub fn poll(&mut self, now_ms: u64, limits: Limits) -> Vec<Vec<u8>> {
-        let mut budget = limits.records_left.min(limits.l2_slots);
         let mut out = Vec::new();
-        while budget > 0 {
+        let mut control = CONTROL_RECORDS;
+        while control > 0 && usize::from(limits.l2_slots) > out.len() {
             match self.outbox.pop_front() {
                 Some(r) => {
                     out.push(r);
-                    budget -= 1;
+                    control -= 1;
                 }
                 None => break,
             }
         }
+        let data_slots = limits.l2_slots.saturating_sub(out.len() as u8);
+        let mut budget = limits.records_left.min(data_slots);
         if let Some(session) = self.session.as_mut() {
             // A handshake reply still waiting for budget must not be overtaken by data.
             if self.outbox.is_empty() {
@@ -470,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn a_handshake_is_answered_only_within_budget_and_recorded_first() {
+    fn a_handshake_is_answered_whatever_the_budget_and_data_is_still_gated() {
         let (mut h, gw_pub, saved) = host(true);
         let phone = Keypair::generate().unwrap();
         let (_i, m1) = Initiator::start(&phone, &gw_pub, &PSK, WALL).unwrap();
@@ -481,10 +494,27 @@ mod tests {
             1,
             "the timestamp is persisted before the reply"
         );
-        // No airtime: the reply is held, not dropped.
+        // **No airtime does not hold the reply.** A handshake answer is control traffic: gating it on
+        // a budget meant that a gateway which had not yet reported one blocked the exchange that
+        // carries the information needed to report one (measured 2026-11-01: five accepted
+        // handshakes, zero records sent, the phone re-keying for ever).
+        let out = h.poll(
+            0,
+            Limits {
+                records_left: 0,
+                l2_slots: 8,
+            },
+        );
+        assert_eq!(out.len(), 1, "the reply goes out with no budget at all");
+        assert_eq!(out[0].len(), 50);
+        assert!(!h.wants_poll(), "and nothing is left waiting");
+
+        // Data, by contrast, is still gated: with the reply gone and no budget, the session record
+        // must not be sealed.
+        h.send(0, &[7u8; 4]).unwrap();
         assert!(
             h.poll(
-                0,
+                1,
                 Limits {
                     records_left: 0,
                     l2_slots: 8
@@ -492,16 +522,6 @@ mod tests {
             )
             .is_empty()
         );
-        assert!(h.wants_poll());
-        let out = h.poll(
-            1,
-            Limits {
-                records_left: 1,
-                l2_slots: 8,
-            },
-        );
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].len(), 50);
     }
 
     #[test]
