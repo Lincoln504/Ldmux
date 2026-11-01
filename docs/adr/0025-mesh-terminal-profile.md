@@ -138,3 +138,36 @@ not a new tag.
 
 Measured on the device: 910.525 MHz / 500 kHz / SF5 / CR5, private channel, one echo is one
 frame; the same exchange is two before version 4.
+
+## Update, 2026-11-01 (profile version 6): a shell's folder in `Sessions`
+
+The mesh picker drew every row as a name over a hex id (`ldeen` / `16db506fe9`), while the
+tailnet launcher drew the directory the shell is in. The id is the `Attach` selector, not
+something a person reads, and the folder is what tells two shells of the same kind apart.
+
+| tag | direction | name | body |
+|---|---|---|---|
+| 0x85 | host to phone | `Sessions` | `flags u8` (bit 0 = last page, bit 1 = entries carry a `cwd`), then entries `id_len u8, id, label_len u8, label` and, when bit 1 is set, `cwd_len u8, cwd` |
+
+- **`cwd`.** The daemon already describes the pane's live directory in `list` (`cwd` follows
+  the keeper's `/proc` fact while a shell runs), so the bridge copies it into the entry instead
+  of inventing a second source. A `cwd` is at most 60 bytes, cut at a character boundary, so
+  one entry's worst case is `1 + 40 + 1 + 24 + 1 + 60 = 127` bytes: under `MAX_ROWS_BODY`'s
+  130 and always inside one record.
+- **Why a flag rather than a profile version.** A `List` is answered before most attaches
+  succeed - the phone learns which shell to attach to from it - so the host cannot gate the
+  page on `Profile.version`. The page carries its own format bit. The bridge remembers the
+  last `Attach` version seen on that shell, refused or not, and sets bit 1 only for a phone
+  that attached with `CWD_VERSION` (6) or later, so a version-5 phone still decodes the
+  version-5 form.
+- **Version 6.** `VERSION` is 6, `MIN_VERSION` stays 1, `CWD_VERSION` is 6. A version-5 phone
+  is still accepted and answered in its own form; a phone that searches a list decodes whatever
+  the flag says.
+- **Phone rendering.** A row's second line is `tildify(cwd)` - the same function the tailnet
+  launcher uses - and falls back to the id only when a version-5 host sends no path. The
+  side panel's page title is the folder, from the same value.
+- **Tests.** Protocol: `list_and_sessions_have_exact_bytes` (the version-5 and version-6
+  forms side by side), `sessions_pages_fit_one_record_and_say_which_is_last` (both forms),
+  `sessions_survive_any_chunking_and_cut_at_char_boundaries` (a 120-byte path), and the
+  regenerated `mesh-term-vectors.json`, which the app's `MeshTermCodecTest` reads.
+  Bridge: `a_list_carries_the_folder_only_to_a_phone_that_speaks_version_six`.

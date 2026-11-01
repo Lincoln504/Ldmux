@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION,
+    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION,
     STREAM_VERSION, Screen, VERSION, closed, session_pages,
 };
 
@@ -44,12 +44,14 @@ pub trait Link {
 pub trait Host {
     /// Ids of the running shells.
     async fn running(&mut self) -> Vec<String>;
-    /// `(id, label)` of the running shells, for the phone's picker. The default has no labels.
-    async fn listing(&mut self) -> Vec<(String, String)> {
+    /// `(id, label, cwd)` of the running shells, for the phone's picker. The default has no labels
+    /// and no paths; a host that knows where a shell runs gives the phone the folder, as the
+    /// tailnet launcher does.
+    async fn listing(&mut self) -> Vec<(String, String, String)> {
         self.running()
             .await
             .into_iter()
-            .map(|id| (id, String::new()))
+            .map(|id| (id, String::new(), String::new()))
             .collect()
     }
     async fn screen(&mut self, id: &str) -> Result<Screen, String>;
@@ -126,6 +128,11 @@ pub struct Bridge<H, L> {
     link: L,
     shells: HashMap<u8, Attached>,
     decoders: HashMap<u8, Decoder>,
+    /// The profile version of the last attach seen on a shell, refused or accepted. A `List` is
+    /// answered before most attaches succeed, and its page format depends on the version the
+    /// phone speaks (`CWD_VERSION`), so the version is remembered from the `Attach` that always
+    /// precedes it rather than guessed.
+    versions: HashMap<u8, u8>,
     generation: u32,
     pub stats: BridgeStats,
 }
@@ -137,6 +144,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             link,
             shells: HashMap::new(),
             decoders: HashMap::new(),
+            versions: HashMap::new(),
             generation: 0,
             stats: BridgeStats::default(),
         }
@@ -316,6 +324,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
         let ids: Vec<String> = self.shells.values().map(|a| a.session.clone()).collect();
         self.shells.clear();
         self.decoders.clear();
+        self.versions.clear();
         for id in ids {
             self.host.release(&id).await;
         }
@@ -333,6 +342,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     );
                     return;
                 }
+                // Remembered even when the attach itself is refused: the phone answers a refusal
+                // with a `List`, and that answer must be in the version this phone speaks.
+                self.versions.insert(shell, version);
                 let running = self.host.running().await;
                 let matches: Vec<&String> = running
                     .iter()
@@ -381,7 +393,14 @@ impl<H: Host, L: Link> Bridge<H, L> {
             }
             Message::List => {
                 let listing = self.host.listing().await;
-                self.reply(shell, &session_pages(&listing));
+                // A version-5 phone decodes the version-5 form; only a version-6 phone is given
+                // the folder as well. No attach means no version, and no version means the old
+                // form: a page the phone cannot read is worse than one without a path.
+                let with_cwd = self
+                    .versions
+                    .get(&shell)
+                    .is_some_and(|v| *v >= CWD_VERSION);
+                self.reply(shell, &session_pages(&listing, with_cwd));
             }
             Message::Input(bytes) => {
                 let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
@@ -485,7 +504,7 @@ impl Host for DaemonHost {
             .unwrap_or_default()
     }
 
-    async fn listing(&mut self) -> Vec<(String, String)> {
+    async fn listing(&mut self) -> Vec<(String, String, String)> {
         let Ok(v) = self
             .0
             .lock()
@@ -503,7 +522,10 @@ impl Host for DaemonHost {
                     .filter_map(|s| {
                         let id = s.get("id").and_then(|x| x.as_str())?;
                         let label = s.get("title").and_then(|x| x.as_str()).unwrap_or("");
-                        Some((id.to_owned(), label.to_owned()))
+                        // The daemon's `list` already describes the pane's live directory (the
+                        // keeper's fact, not the directory the session was created in).
+                        let cwd = s.get("cwd").and_then(|x| x.as_str()).unwrap_or("");
+                        Some((id.to_owned(), label.to_owned(), cwd.to_owned()))
                     })
                     .collect()
             })
@@ -670,11 +692,11 @@ mod tests {
         async fn running(&mut self) -> Vec<String> {
             self.0.lock().unwrap().running.clone()
         }
-        async fn listing(&mut self) -> Vec<(String, String)> {
+        async fn listing(&mut self) -> Vec<(String, String, String)> {
             let s = self.0.lock().unwrap();
             s.running
                 .iter()
-                .map(|id| (id.clone(), format!("label of {id}")))
+                .map(|id| (id.clone(), format!("label of {id}"), format!("/work/{id}")))
                 .collect()
         }
         async fn screen(&mut self, id: &str) -> Result<Screen, String> {
@@ -1051,10 +1073,18 @@ mod tests {
             );
             let mut ids = Vec::new();
             for (i, m) in pages.iter().enumerate() {
-                let Message::Sessions { last, entries } = m else {
+                let Message::Sessions {
+                    last,
+                    cwd,
+                    entries,
+                } = m
+                else {
                     unreachable!()
                 };
                 assert_eq!(*last, i + 1 == pages.len());
+                // No attach was seen on this shell, so the host has no version to trust and
+                // answers in the oldest form it speaks.
+                assert!(!*cwd, "n={n}: an unattached shell gets no path");
                 ids.extend(entries.iter().map(|e| e.id.clone()));
             }
             assert_eq!(ids.len(), n, "n={n}");
@@ -1088,6 +1118,45 @@ mod tests {
         );
         b.tick().await;
         assert!(b.attached(4));
+    }
+
+    /// A list is answered before an attach can succeed, so its page carries its own format flag.
+    /// A version-5 phone keeps the version-5 form (no path on the wire) and a version-6 phone is
+    /// given the folder the shell runs in, which is what its picker shows instead of the id.
+    #[tokio::test]
+    async fn a_list_carries_the_folder_only_to_a_phone_that_speaks_version_six() {
+        for (version, expect_cwd) in [(5u8, false), (CWD_VERSION, true)] {
+            let (mut b, _host, link) = setup();
+            // Any attach records the version, refused or not: a list whose shell was not known
+            // is exactly the ambiguous case that made the phone ask.
+            phone_says(
+                &link,
+                4,
+                &Message::Attach {
+                    version,
+                    selector: "nope".into(),
+                },
+            );
+            b.tick().await;
+            phone_says(&link, 4, &Message::List);
+            b.tick().await;
+            let Message::Sessions {
+                last,
+                cwd,
+                entries,
+            } = &sessions_seen(&link, 4)[0]
+            else {
+                panic!("a list must answer with a page")
+            };
+            assert!(*last);
+            assert_eq!(*cwd, expect_cwd, "version {version}");
+            assert_eq!(entries[0].id, "abcd-1");
+            assert_eq!(
+                entries[0].cwd,
+                if expect_cwd { "/work/abcd-1" } else { "" },
+                "version {version}: the path is on the wire only for a version-6 phone"
+            );
+        }
     }
 
     #[tokio::test]

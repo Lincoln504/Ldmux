@@ -354,6 +354,9 @@ Platforms (see `docs/PLATFORMS.md`):
   - *Entry points.* Settings has a mesh section (hidden on iOS): three credentials as present/missing in ceremony order, a scanner for `ldmux code --mesh` / `--mesh-only`, a scanner for MeshMore's gateway code (refused until the session keys exist), a route picker that offers only routes that can run, and "forget mesh pairing". `ldmux code --mesh-only` hands a radio-only phone the keys and no daemon token.
   - *MeshMore's code.* `meshmore://gateway?v=1&host=127.0.0.1:<port>&token=<32 hex>`; a bare token still reads as the default endpoint; a non-loopback host is refused. L2 grant only: no key material.
   - *Choosing a shell.* ADR-0025 gains `List`/`Sessions`; the driver shows one shell attached, a picker for several, a stated "none".
+    **2026-11-01:** the picker shows the shell's folder, as the tailnet launcher does, not the id it would attach with:
+    `Sessions` entries carry `cwd` from profile version 6, gated on the page's own flag because a list is answered
+    before an attach can succeed (ADR-0025, "Update, 2026-11-01 (profile version 6)").
   - *Defects found on the way.* Unpairing left the MeshMore gateway token in the Keystore (now cleared with the keys); `MeshRouteWiringTest` pinned the contradiction that a mesh-route device with no daemon reads as "unpaired".
   - *Still not done:* any run on a phone or a radio; the Keystore, scanner and Compose screen were never exercised on a device. The route works only while MeshMore is running on the same phone with its gateway on (its foreground service). Not done either: PSK rotation, padding, ML-KEM, rekey, an iOS build.
 - **Mesh work** (ADR-0020, ADR-0023, `docs/MESH-TRANSPORT.md`): the link, the RPC, the CLI

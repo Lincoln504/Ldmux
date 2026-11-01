@@ -34,7 +34,7 @@
 //! | 0x82 | host→phone | `Rows` | `epoch u16 LE`, `flags u8` (bit 0 = full), then patches |
 //! | 0x83 | host→phone | `Commit` | `epoch u16 LE`, `cursor_x u8`, `cursor_y u8`, `flags u8` |
 //! | 0x84 | host→phone | `Closed` | `reason u8` |
-//! | 0x85 | host→phone | `Sessions` | `flags u8` (bit 0 = last page), then entries `id_len u8 \| id \| label_len u8 \| label` |
+//! | 0x85 | host→phone | `Sessions` | `flags u8` (bit 0 = last page, bit 1 = entries carry a `cwd`), then entries `id_len u8 \| id \| label_len u8 \| label` and, when bit 1 is set, `cwd_len u8 \| cwd` |
 //!
 //! A patch is `y u8 | flags u8 (bit 0 = append) | n u8 | n bytes of UTF-8`. A row longer than
 //! [`MAX_SEGMENT`] bytes is sent as a first segment (replace) and further segments (append).
@@ -58,7 +58,12 @@ use std::collections::VecDeque;
 /// Version 3 adds `Resize`, so the phone can ask the host to fit its pty to the phone's own
 /// grid, as every tailnet client does. A host answers a resize with a fresh `Profile` and a full
 /// screen. The `Profile` body is unchanged from version 2.
-pub const VERSION: u8 = 5;
+///
+/// Version 6 adds a shell's working directory to each `Sessions` entry (see [`CWD_VERSION`]). A
+/// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
+/// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
+/// its own and the host sets it only for a phone that has attached with version 6 or later.
+pub const VERSION: u8 = 6;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
@@ -77,6 +82,14 @@ pub const STREAM_VERSION: u8 = 4;
 /// and guessing by matching content is what makes mosh's history unreliable. Four bytes once per
 /// commit answer it exactly.
 pub const STREAM_LINE_VERSION: u8 = 5;
+
+/// The version whose `Sessions` entries carry the shell's working directory (version 6).
+///
+/// The phone's picker shows where a shell is, as the tailnet launcher does, instead of the id it
+/// would send. The field is gated on the flag bit in each page rather than on the profile version
+/// because a list is answered before the first successful attach; a version-5 phone keeps
+/// decoding the version-5 form.
+pub const CWD_VERSION: u8 = 6;
 /// Most key names in one `Key` message.
 pub const MAX_KEYS: usize = 16;
 
@@ -93,6 +106,10 @@ pub const RECORD_PAYLOAD: usize = 143;
 pub const MAX_INPUT: usize = 96;
 /// Most bytes of a shell label in a `Sessions` entry (cut at a character boundary by the host).
 pub const MAX_LABEL: usize = 24;
+/// Most bytes of a shell's working directory in a `Sessions` entry (cut at a character boundary
+/// by the host). One entry's worst case is `1 + 40 + 1 + 24 + 1 + 60 = 127` bytes, under
+/// [`MAX_ROWS_BODY`]'s 130, so an entry always fits one record however long its path is.
+pub const MAX_CWD: usize = 60;
 /// Most shells a host lists. A host with more lists the first this many and says nothing else:
 /// a picker of more than this is not usable at one record a minute anyway.
 pub const MAX_SESSIONS: usize = 16;
@@ -153,11 +170,15 @@ pub struct Patch {
     pub text: String,
 }
 
-/// One running shell in a `Sessions` reply: its id (usable as an `Attach` selector) and a label.
+/// One running shell in a `Sessions` reply: its id (usable as an `Attach` selector), a label, and
+/// the directory it is in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
     pub id: String,
     pub label: String,
+    /// Where the shell is (version 6). Empty in a page built for a version-5 phone, where the
+    /// field is not on the wire at all.
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,9 +232,12 @@ pub enum Message {
         rows: u8,
     },
     /// One page of the answer. `last` is set on the final page; an empty list is one page with
-    /// `last` set and no entries.
+    /// `last` set and no entries. `cwd` says the entries carry their working directory (version
+    /// 6): the host sets it only for a phone that attached with [`CWD_VERSION`] or later, and the
+    /// flag is what lets one decoder read both forms.
     Sessions {
         last: bool,
+        cwd: bool,
         entries: Vec<SessionEntry>,
     },
 }
@@ -370,16 +394,27 @@ impl Message {
                 body.extend_from_slice(&[*cols, *rows]);
                 T_RESIZE
             }
-            Self::Sessions { last, entries } => {
-                body.push(u8::from(*last));
+            Self::Sessions {
+                last,
+                cwd,
+                entries,
+            } => {
+                body.push(u8::from(*last) | if *cwd { 2 } else { 0 });
                 for e in entries {
                     if e.id.len() > MAX_SELECTOR || e.label.len() > MAX_LABEL {
+                        return Err(EncodeError::TooLong);
+                    }
+                    if *cwd && e.cwd.len() > MAX_CWD {
                         return Err(EncodeError::TooLong);
                     }
                     body.push(e.id.len() as u8);
                     body.extend_from_slice(e.id.as_bytes());
                     body.push(e.label.len() as u8);
                     body.extend_from_slice(e.label.as_bytes());
+                    if *cwd {
+                        body.push(e.cwd.len() as u8);
+                        body.extend_from_slice(e.cwd.as_bytes());
+                    }
                 }
                 if body.len() > MAX_ROWS_BODY {
                     return Err(EncodeError::TooLong);
@@ -507,6 +542,7 @@ impl Message {
             },
             T_SESSIONS => {
                 let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
+                let with_cwd = flags & 2 != 0;
                 let mut entries = Vec::new();
                 while !rest.is_empty() {
                     let mut field = |max: usize| -> Result<String, DecodeError> {
@@ -523,10 +559,16 @@ impl Message {
                     };
                     let id = field(MAX_SELECTOR)?;
                     let label = field(MAX_LABEL)?;
-                    entries.push(SessionEntry { id, label });
+                    let cwd = if with_cwd {
+                        field(MAX_CWD)?
+                    } else {
+                        String::new()
+                    };
+                    entries.push(SessionEntry { id, label, cwd });
                 }
                 Self::Sessions {
                     last: flags & 1 == 1,
+                    cwd: with_cwd,
                     entries,
                 }
             }
@@ -601,19 +643,22 @@ fn cut(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-/// The `Sessions` pages for a list of `(id, label)`: at most [`MAX_SESSIONS`] entries, ids and
-/// labels cut to their limits, each page packed up to [`MAX_ROWS_BODY`] so it fits one record,
-/// the final page flagged `last`. Always at least one page, so "no shells" is an answer.
+/// The `Sessions` pages for a list of `(id, label, cwd)`: at most [`MAX_SESSIONS`] entries, ids,
+/// labels and paths cut to their limits, each page packed up to [`MAX_ROWS_BODY`] so it fits one
+/// record, the final page flagged `last`. `cwd` says the entries carry the working directory
+/// (version 6); a page built for an older phone leaves it off the wire and its entries carry an
+/// empty `cwd`. Always at least one page, so "no shells" is an answer.
 #[must_use]
-pub fn session_pages(sessions: &[(String, String)]) -> Vec<Message> {
+pub fn session_pages(sessions: &[(String, String, String)], cwd: bool) -> Vec<Message> {
     let mut pages: Vec<Vec<SessionEntry>> = vec![Vec::new()];
     let mut size = 1; // the flags byte
-    for (id, label) in sessions.iter().take(MAX_SESSIONS) {
+    for (id, label, path) in sessions.iter().take(MAX_SESSIONS) {
         let e = SessionEntry {
             id: cut(id, MAX_SELECTOR),
             label: cut(label, MAX_LABEL),
+            cwd: if cwd { cut(path, MAX_CWD) } else { String::new() },
         };
-        let cost = 2 + e.id.len() + e.label.len();
+        let cost = 2 + e.id.len() + e.label.len() + if cwd { 1 + e.cwd.len() } else { 0 };
         if size + cost > MAX_ROWS_BODY {
             pages.push(Vec::new());
             size = 1;
@@ -627,6 +672,7 @@ pub fn session_pages(sessions: &[(String, String)]) -> Vec<Message> {
         .enumerate()
         .map(|(i, entries)| Message::Sessions {
             last: i + 1 == n,
+            cwd,
             entries,
         })
         .collect()
@@ -1379,12 +1425,13 @@ mod tests {
         });
     }
 
-    fn sh(n: usize) -> Vec<(String, String)> {
+    fn sh(n: usize) -> Vec<(String, String, String)> {
         (0..n)
             .map(|i| {
                 (
                     format!("{i:02x}{}", "f".repeat(30)),
                     format!("shell number {i} long label"),
+                    format!("~/projects/shell-{i}"),
                 )
             })
             .collect()
@@ -1395,67 +1442,97 @@ mod tests {
         assert_eq!(Message::List.encode().unwrap(), [0x05, 0x00]);
         // no shells: one page, `last`, no entries
         assert_eq!(
-            session_pages(&[]),
+            session_pages(&[], false),
             vec![Message::Sessions {
                 last: true,
+                cwd: false,
                 entries: vec![]
             }]
         );
         assert_eq!(
-            session_pages(&[]).remove(0).encode().unwrap(),
+            session_pages(&[], false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x01]
+        );
+        // The same page for a version-6 phone: the cwd flag is set, and there are still no entries.
+        assert_eq!(
+            session_pages(&[], true).remove(0).encode().unwrap(),
+            [0x85, 0x01, 0x03]
         );
         let one = Message::Sessions {
             last: true,
+            cwd: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
+                cwd: String::new(),
             }],
         };
-        // flags 1, id_len 2 "ab", label_len 1 "x"
+        // flags 1, id_len 2 "ab", label_len 1 "x" (no cwd: version 5 form)
         assert_eq!(
             one.encode().unwrap(),
             [0x85, 0x06, 0x01, 0x02, b'a', b'b', 0x01, b'x']
         );
+        let one_with_cwd = Message::Sessions {
+            last: true,
+            cwd: true,
+            entries: vec![SessionEntry {
+                id: "ab".into(),
+                label: "x".into(),
+                cwd: "~/".into(),
+            }],
+        };
+        // flags 3, id 2 "ab", label 1 "x", cwd 2 "~/"
+        assert_eq!(
+            one_with_cwd.encode().unwrap(),
+            [0x85, 0x09, 0x03, 0x02, b'a', b'b', 0x01, b'x', 0x02, b'~', b'/']
+        );
         roundtrip(&Message::List);
         roundtrip(&one);
+        roundtrip(&one_with_cwd);
     }
 
     #[test]
     fn sessions_pages_fit_one_record_and_say_which_is_last() {
-        for n in [0usize, 1, 2, 3, 7, MAX_SESSIONS, MAX_SESSIONS + 5] {
-            let pages = session_pages(&sh(n));
-            let mut total = 0;
-            for (i, m) in pages.iter().enumerate() {
-                let bytes = m.encode().unwrap();
-                assert!(
-                    bytes.len() <= MAX_MESSAGE,
-                    "n={n} page {i} is {} bytes",
-                    bytes.len()
+        for with_cwd in [false, true] {
+            for n in [0usize, 1, 2, 3, 7, MAX_SESSIONS, MAX_SESSIONS + 5] {
+                let pages = session_pages(&sh(n), with_cwd);
+                let mut total = 0;
+                for (i, m) in pages.iter().enumerate() {
+                    let bytes = m.encode().unwrap();
+                    assert!(
+                        bytes.len() <= MAX_MESSAGE,
+                        "cwd={with_cwd} n={n} page {i} is {} bytes",
+                        bytes.len()
+                    );
+                    assert!(bytes.len() <= RECORD_PAYLOAD);
+                    let Message::Sessions { last, cwd, entries } = m else {
+                        panic!()
+                    };
+                    assert_eq!(*last, i + 1 == pages.len(), "only the final page is last");
+                    assert_eq!(*cwd, with_cwd, "the cwd flag is the page's own");
+                    total += entries.len();
+                }
+                assert_eq!(
+                    total,
+                    n.min(MAX_SESSIONS),
+                    "cwd={with_cwd} n={n}: nothing lost, nothing past the cap"
                 );
-                assert!(bytes.len() <= RECORD_PAYLOAD);
-                let Message::Sessions { last, entries } = m else {
-                    panic!()
-                };
-                assert_eq!(*last, i + 1 == pages.len(), "only the final page is last");
-                total += entries.len();
             }
-            assert_eq!(
-                total,
-                n.min(MAX_SESSIONS),
-                "n={n}: nothing lost, nothing past the cap"
+            assert!(
+                session_pages(&sh(7), with_cwd).len() > 1,
+                "a long list really does span records"
             );
         }
-        assert!(
-            session_pages(&sh(7)).len() > 1,
-            "a long list really does span records"
-        );
     }
 
     #[test]
     fn sessions_survive_any_chunking_and_cut_at_char_boundaries() {
-        let list = vec![("é".repeat(30), "漢".repeat(20))]; // 60-byte id, 60-byte label
-        let pages = session_pages(&list);
+        let list = vec![(
+            "é".repeat(30),
+            "漢".repeat(20),
+            "~/漢".repeat(20),
+        )]; // 60-byte id, 60-byte label, 120-byte path
+        let pages = session_pages(&list, true);
         let mut stream = Vec::new();
         for m in &pages {
             stream.extend(m.encode().unwrap());
@@ -1472,9 +1549,14 @@ mod tests {
             panic!()
         };
         assert!(entries[0].id.len() <= MAX_SELECTOR && entries[0].label.len() <= MAX_LABEL);
+        assert!(entries[0].cwd.len() <= MAX_CWD);
         assert!(
             entries[0].id.chars().all(|c| c == 'é'),
             "never half a character"
+        );
+        assert!(
+            entries[0].cwd.chars().all(|c| c == '~' || c == '/' || c == '漢'),
+            "a path is cut at a character boundary too"
         );
     }
 
@@ -1482,12 +1564,24 @@ mod tests {
     fn oversize_or_broken_sessions_are_refused() {
         let bad = Message::Sessions {
             last: true,
+            cwd: false,
             entries: vec![SessionEntry {
                 id: "x".repeat(MAX_SELECTOR + 1),
                 label: String::new(),
+                cwd: String::new(),
             }],
         };
         assert_eq!(bad.encode(), Err(EncodeError::TooLong));
+        let bad_cwd = Message::Sessions {
+            last: true,
+            cwd: true,
+            entries: vec![SessionEntry {
+                id: "a".into(),
+                label: String::new(),
+                cwd: "p".repeat(MAX_CWD + 1),
+            }],
+        };
+        assert_eq!(bad_cwd.encode(), Err(EncodeError::TooLong));
         // entry claims 5 bytes of id but only 1 follows
         let mut d = Decoder::new();
         let out = d.push(&[0x85, 0x03, 0x01, 0x05, b'a']).unwrap();
@@ -2078,9 +2172,9 @@ mod tests {
                 "kind":"commit","epoch":epoch,"cursorX":cursor_x,"cursorY":cursor_y,"flags":flags}),
             Message::Closed { reason } => json!({"kind":"closed","reason":reason}),
             Message::List => json!({"kind":"list"}),
-            Message::Sessions { last, entries } => json!({
-                "kind":"sessions","last":last,
-                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label})).collect::<Vec<_>>()}),
+            Message::Sessions { last, cwd, entries } => json!({
+                "kind":"sessions","last":last,"cwd":cwd,
+                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd})).collect::<Vec<_>>()}),
         }
     }
 
@@ -2161,31 +2255,45 @@ mod tests {
             Message::List,
             Message::Sessions {
                 last: true,
+                cwd: false,
                 entries: vec![],
             },
             Message::Sessions {
                 last: false,
+                cwd: false,
                 entries: vec![
                     SessionEntry {
                         id: "ab12cd34".into(),
                         label: "RCNT".into(),
+                        cwd: String::new(),
                     },
                     SessionEntry {
                         id: "ef56".into(),
                         label: "héllo 漢".into(),
+                        cwd: String::new(),
                     },
                 ],
             },
+            Message::Sessions {
+                last: true,
+                cwd: true,
+                entries: vec![SessionEntry {
+                    id: "ab12cd34".into(),
+                    label: "RCNT".into(),
+                    cwd: "~/Documents/RCNT".into(),
+                }],
+            },
         ];
-        let many: Vec<(String, String)> = (0..7)
+        let many: Vec<(String, String, String)> = (0..7)
             .map(|i| {
                 (
                     format!("{i:02x}{}", "f".repeat(30)),
                     format!("shell number {i} long label"),
+                    format!("~/projects/shell-{i}"),
                 )
             })
             .collect();
-        let page_cases: Vec<_> = session_pages(&many)
+        let page_cases: Vec<_> = session_pages(&many, true)
             .iter()
             .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
             .collect();
@@ -2256,10 +2364,10 @@ mod tests {
         json!({
             "//": "Generated by crates/protocol/src/mesh_term.rs (fixture_value). Do not edit by hand: LDMUX_REGEN_FIXTURES=1 cargo test -p ldmux-protocol mesh_term_fixture. Read by the app's MeshTermCodecTest.",
             "limits": {"maxBody":MAX_BODY,"maxInput":MAX_INPUT,"maxSegment":MAX_SEGMENT,"maxSelector":MAX_SELECTOR,
-                       "maxRowsBody":MAX_ROWS_BODY,"maxLabel":MAX_LABEL,"maxSessions":MAX_SESSIONS,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
-                       "version":VERSION,"minVersion":MIN_VERSION,"maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1},
+                       "maxRowsBody":MAX_ROWS_BODY,"maxLabel":MAX_LABEL,"maxCwd":MAX_CWD,"maxSessions":MAX_SESSIONS,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
+                       "version":VERSION,"minVersion":MIN_VERSION,"cwdVersion":CWD_VERSION,"maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1},
             "messages": msg_cases,
-            "sessionPages": {"input": many.iter().map(|(i,l)| json!({"id":i,"label":l})).collect::<Vec<_>>(), "pages": page_cases},
+            "sessionPages": {"input": many.iter().map(|(i,l,p)| json!({"id":i,"label":l,"cwd":p})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,
             "streams": streams,
         })

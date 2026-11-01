@@ -48,6 +48,18 @@ class MeshShellChoiceTest {
         assertEquals("open (2)", openLabel(2))
     }
 
+    @Test
+    fun `a row's second line is the folder, and the id only when a version-5 host sends none`() {
+        assertEquals("~/Documents/RCNT", meshRowSubtitle(SessionEntry("ab12", "RCNT", "/home/u/Documents/RCNT")))
+        assertEquals("ab12", meshRowSubtitle(SessionEntry("ab12", "RCNT")))
+    }
+
+    @Test
+    fun `a page carries the folder too, so the side panel names the shell's directory`() {
+        val shells = MeshShells(listOf(SessionEntry("ab12", "RCNT", "/home/u/Documents/RCNT")), current = "ab12")
+        assertEquals("/home/u/Documents/RCNT", meshPagesFor(shells, listOf("ab12")).single().cwd)
+    }
+
     private fun live(painted: Boolean) = MeshTermView.Live(
         screen = MeshScreen(listOf("x"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 80),
         absent = emptyList(), budgetLeft = null, stalled = false, resyncing = false, painted = painted,

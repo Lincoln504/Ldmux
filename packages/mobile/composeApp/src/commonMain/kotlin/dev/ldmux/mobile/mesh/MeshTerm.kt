@@ -21,8 +21,10 @@ object MeshTerm {
      * `Resize`: the phone's grid, so the host fits its pty to it as it does for a tailnet client.
      * Version 5 adds the absolute line number to `Commit`: the rows leaving the top of the screen
      * are history the phone already holds, which is the fact a local scrollback is built on.
+     * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
+     * folder instead of the id it would send.
      */
-    const val VERSION = 5
+    const val VERSION = 6
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -33,6 +35,8 @@ object MeshTerm {
     const val STREAM_VERSION = 4
     /** The first version whose `Commit` names the absolute line at the top of the screen. */
     const val LINE_VERSION = 5
+    /** The first version whose `Sessions` entries carry the shell's working directory. */
+    const val CWD_VERSION = 6
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
     const val MAX_BODY = 300
@@ -45,6 +49,8 @@ object MeshTerm {
     const val MAX_SELECTOR = 40
     /** Longest shell label in a `Sessions` entry. */
     const val MAX_LABEL = 24
+    /** Longest shell working directory in a `Sessions` entry: worst case 3 + 40 + 24 + 60 < 130. */
+    const val MAX_CWD = 60
     /** Most shells a host lists. */
     const val MAX_SESSIONS = 16
     const val MAX_BUFFER = 4096
@@ -89,8 +95,11 @@ object MeshTerm {
     internal const val T_CLOSED = 0x84
 }
 
-/** One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector. */
-data class SessionEntry(val id: String, val label: String)
+/**
+ * One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector, [cwd] is where
+ * the shell is (version 6; empty from a version-5 host, which does not send the field at all).
+ */
+data class SessionEntry(val id: String, val label: String, val cwd: String = "")
 
 data class TermPatch(val y: Int, val append: Boolean, val text: String)
 
@@ -129,8 +138,12 @@ sealed interface TermMessage {
     data class Closed(val reason: Int) : TermMessage
     /** Phone to host: which shells are running? */
     data object ListRequest : TermMessage
-    /** Host to phone: one page of the answer; [last] marks the final page (an empty list is one empty last page). */
-    data class Sessions(val last: Boolean, val entries: List<SessionEntry>) : TermMessage
+    /**
+     * Host to phone: one page of the answer; [last] marks the final page (an empty list is one
+     * empty last page). [cwd] says the entries carry their working directory (version 6); the host
+     * sets it only for a phone that attached with [MeshTerm.CWD_VERSION] or later.
+     */
+    data class Sessions(val last: Boolean, val entries: List<SessionEntry>, val cwd: Boolean = false) : TermMessage
 }
 
 /** A field is over its limit, or an `Input` is empty. Nothing is truncated: the caller decides. */
@@ -236,15 +249,18 @@ fun TermMessage.encode(): ByteArray {
             MeshTerm.T_RESIZE
         }
         is TermMessage.Sessions -> {
-            body.add(if (last) 1 else 0)
+            body.add(((if (last) 1 else 0) or (if (cwd) 2 else 0)).toByte())
             for (e in entries) {
                 val id = e.id.encodeToByteArray()
                 val label = e.label.encodeToByteArray()
+                val path = e.cwd.encodeToByteArray()
                 if (id.size > MeshTerm.MAX_SELECTOR || label.size > MeshTerm.MAX_LABEL) {
                     throw TermEncodeException("session entry too long")
                 }
+                if (cwd && path.size > MeshTerm.MAX_CWD) throw TermEncodeException("session path too long")
                 body.add(id.size.toByte()); id.forEach { body.add(it) }
                 body.add(label.size.toByte()); label.forEach { body.add(it) }
+                if (cwd) { body.add(path.size.toByte()); path.forEach { body.add(it) } }
             }
             if (body.size > MeshTerm.MAX_ROWS_BODY) throw TermEncodeException("sessions body too long")
             MeshTerm.T_SESSIONS
@@ -401,6 +417,7 @@ class TermDecoder {
                 if (body.size == 2 && b(body, 0) != 0 && b(body, 1) != 0) ok(TermMessage.Resize(b(body, 0), b(body, 1))) else Parsed.Bad
             MeshTerm.T_SESSIONS -> {
                 if (body.isEmpty()) return Parsed.Bad
+                val withCwd = body[0].toInt() and 2 != 0
                 val entries = ArrayList<SessionEntry>()
                 var p = 1
                 fun field(max: Int): String? {
@@ -414,9 +431,10 @@ class TermDecoder {
                 while (p < body.size) {
                     val id = field(MeshTerm.MAX_SELECTOR) ?: return Parsed.Bad
                     val label = field(MeshTerm.MAX_LABEL) ?: return Parsed.Bad
-                    entries += SessionEntry(id, label)
+                    val cwd = if (withCwd) field(MeshTerm.MAX_CWD) ?: return Parsed.Bad else ""
+                    entries += SessionEntry(id, label, cwd)
                 }
-                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries))
+                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries, withCwd))
             }
             else -> Parsed.Unknown
         }

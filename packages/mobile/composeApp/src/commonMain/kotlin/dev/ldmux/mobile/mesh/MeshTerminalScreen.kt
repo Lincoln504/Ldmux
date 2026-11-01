@@ -60,6 +60,7 @@ import dev.ldmux.mobile.RouteChoice
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
+import dev.ldmux.mobile.tildify
 import kotlin.random.Random
 import kotlin.time.TimeSource
 import kotlinx.coroutines.delay
@@ -509,8 +510,11 @@ private fun MeshShellList(
         ) {
             items(entries, key = { it.id }) { e ->
                 ChoiceRow(
+                    // The folder is the row's second line, as on the tailnet launcher: it is what
+                    // tells two shells of the same kind apart. The id is still the attach
+                    // selector, it is just no longer the thing a person reads.
                     title = e.label.ifEmpty { e.id },
-                    subtitle = e.id,
+                    subtitle = meshRowSubtitle(e),
                     chosen = e.id in chosen,
                     ordinal = picked.indexOfFirst { it.id == e.id }.takeIf { it >= 0 }?.plus(1),
                     inUse = e.id == current,
@@ -539,15 +543,26 @@ internal fun meshScreenToShow(view: MeshTermView): MeshScreen? =
  * ticked row read as `1 / 2 shells`.
  */
 internal fun meshPagesFor(shells: MeshShells, order: List<String>): List<Session> {
-    fun page(id: String, label: String) = Session(
-        id = id, kind = "shell", title = label, cwd = label, status = "running", keeperName = id,
+    fun page(id: String, label: String, cwd: String) = Session(
+        id = id, kind = "shell", title = label, cwd = cwd.ifEmpty { label }, status = "running", keeperName = id,
     )
     val byId = shells.entries.associateBy { it.id }
     val ids = order.filter { it in byId }.distinct()
         .ifEmpty { listOfNotNull(shells.current?.takeIf { it in byId }) }
-    if (ids.isEmpty()) return listOf(page("", "shell"))
-    return ids.map { id -> byId.getValue(id).let { page(it.id, it.label.ifEmpty { it.id.take(8) }) } }
+    if (ids.isEmpty()) return listOf(page("", "shell", ""))
+    return ids.map { id ->
+        byId.getValue(id).let { page(it.id, it.label.ifEmpty { it.id.take(8) }, it.cwd) }
+    }
 }
+
+/**
+ * The second line of a shell row: where the shell is, as the tailnet launcher shows it.
+ *
+ * A version-5 host does not send a working directory - the field is not on its wire - so the row
+ * falls back to the id it would attach with rather than showing an empty line.
+ */
+internal fun meshRowSubtitle(e: SessionEntry): String =
+    if (e.cwd.isEmpty()) e.id else tildify(e.cwd)
 
 /**
  * A wait, in words.

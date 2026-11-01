@@ -57,8 +57,13 @@ class MeshTermCodecTest {
             "sessions" -> TermMessage.Sessions(
                 o["last"]!!.jsonPrimitive.boolean,
                 o["entries"]!!.jsonArray.map {
-                    SessionEntry(it.jsonObject["id"]!!.jsonPrimitive.content, it.jsonObject["label"]!!.jsonPrimitive.content)
+                    SessionEntry(
+                        it.jsonObject["id"]!!.jsonPrimitive.content,
+                        it.jsonObject["label"]!!.jsonPrimitive.content,
+                        it.jsonObject["cwd"]!!.jsonPrimitive.content,
+                    )
                 },
+                o["cwd"]!!.jsonPrimitive.boolean,
             )
             else -> error("unknown fixture kind $kind")
         }
@@ -75,6 +80,7 @@ class MeshTermCodecTest {
         assertEquals(n("maxSegment"), MeshTerm.MAX_SEGMENT)
         assertEquals(n("maxSelector"), MeshTerm.MAX_SELECTOR)
         assertEquals(n("maxLabel"), MeshTerm.MAX_LABEL)
+        assertEquals(n("maxCwd"), MeshTerm.MAX_CWD)
         assertEquals(n("maxSessions"), MeshTerm.MAX_SESSIONS)
         assertEquals(n("maxRowsBody"), MeshTerm.MAX_ROWS_BODY)
         assertEquals(n("maxMessage"), MeshTerm.MAX_MESSAGE)
@@ -82,6 +88,7 @@ class MeshTermCodecTest {
         assertEquals(n("maxBuffer"), MeshTerm.MAX_BUFFER)
         assertEquals(n("version"), MeshTerm.VERSION)
         assertEquals(n("minVersion"), MeshTerm.MIN_VERSION)
+        assertEquals(n("cwdVersion"), MeshTerm.CWD_VERSION)
         assertEquals(n("maxKeys"), MeshTerm.MAX_KEYS)
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }
         assertEquals(n("unsupportedAllV1"), all)
@@ -120,8 +127,24 @@ class MeshTermCodecTest {
         }
         assertEquals(pages.size, got.size)
         assertEquals(List(got.size) { it == got.size - 1 }, got.map { it.last })
-        val input = fixture["sessionPages"]!!.jsonObject["input"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
-        assertEquals(input, got.flatMap { g -> g.entries.map { it.id } })
+        val input = fixture["sessionPages"]!!.jsonObject["input"]!!.jsonArray
+        assertEquals(input.map { it.jsonObject["id"]!!.jsonPrimitive.content }, got.flatMap { g -> g.entries.map { it.id } })
+        // The folder rides the same entries: a path cut by the host decodes to the same cut.
+        assertEquals(input.map { it.jsonObject["cwd"]!!.jsonPrimitive.content }, got.flatMap { g -> g.entries.map { it.cwd } })
+    }
+
+    @Test
+    fun aVersionFivePageHasNoPathOnTheWireAndAVersionSixOneCarriesIt() {
+        val entry = SessionEntry("aa11", "RCNT", "~/src/rcnt")
+        // `cwd = false`: the field is not written at all, whatever the entry object holds, and a
+        // version-5 phone decodes the old form.
+        val v5 = TermMessage.Sessions(true, listOf(entry))
+        assertEquals(
+            listOf<TermItem>(TermItem.Message(TermMessage.Sessions(true, listOf(SessionEntry("aa11", "RCNT", ""))))),
+            decodeAll(v5.encode()),
+        )
+        val v6 = TermMessage.Sessions(true, listOf(entry), cwd = true)
+        assertEquals(listOf<TermItem>(TermItem.Message(v6)), decodeAll(v6.encode()))
     }
 
     @Test
@@ -131,6 +154,9 @@ class MeshTermCodecTest {
         }
         assertFailsWith<TermEncodeException> {
             TermMessage.Sessions(true, listOf(SessionEntry("a", "y".repeat(MeshTerm.MAX_LABEL + 1)))).encode()
+        }
+        assertFailsWith<TermEncodeException> {
+            TermMessage.Sessions(true, listOf(SessionEntry("a", "", "p".repeat(MeshTerm.MAX_CWD + 1))), cwd = true).encode()
         }
         // an entry that claims 5 bytes of id with 1 following, and a List with a body
         val got = decodeAll(byteArrayOf(0x85.toByte(), 3, 1, 5, 'a'.code.toByte(), 0x05, 1, 0))
