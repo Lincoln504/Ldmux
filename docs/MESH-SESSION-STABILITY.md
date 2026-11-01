@@ -116,7 +116,15 @@ to one session and one sequence space, so it dies with that session. A picture h
 Leaving the terminal cancels the resume: a rebuild after the user goes back to the list lands on the
 list.
 
-### 3.4 A session has an identity that outlives a record
+### 3.4 A session has an identity that outlives a record (deferred, on purpose)
+
+**Decision, 2026-11-01: not doing this yet.** After 3.3 the reconnect costs the user nothing visible -
+the screen stays, the shell re-attaches, and the only price is one 3-record handshake on a channel with
+no voluntary budget - so a wire-format change bought no user-visible behaviour. The case that would
+justify it is a link that drops often enough for the handshake itself to matter, and that is not what
+the measurements show. Recorded here so the reasoning is not lost, not because it is wrong.
+
+The sketch that follows is what it would look like.
 
 The durable fix, and the one that makes the rest small: the L3 session gets an epoch (random 8 bytes at
 establish), carried in every record header. A reconnect presents `(epoch, last-line-seen)`; the host
