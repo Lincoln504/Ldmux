@@ -74,9 +74,9 @@ import kotlinx.coroutines.launch
  * tap-to-move, selection and IME field, fed from committed screens instead of an attach stream. What differs is the link, and the
  * differences are stated where they bite and nowhere else:
  *  - plain-text rows, no colour, scrollback, mouse or clipboard writes (the host's own
- *    `absent` list, one line);
+ *    `absent` list, stated once where the link is described, not above every shell list);
  *  - what you type waits a moment and leaves in one record (the list screen shows what is
- *    waiting, and how many records the hour has left);
+ *    waiting);
  *  - a full-screen program makes updates large and slow (one warning line, only then).
  *
  * The shell list is the tailnet launcher's: rows are ticked, then the one `open` makes exactly the
@@ -440,9 +440,14 @@ fun MeshTerminalScreen(
                     else -> null
                 }
                 if (terminalLive) {
-                    val absent = meshAbsentLine(live?.absent ?: emptyList())
-                    if (absent.isNotEmpty()) Text(absent, color = Dim, fontSize = 11.sp)
-                    Text(meshBudgetLine(live?.budgetLeft), color = Dim, fontSize = 11.sp)
+                    // **Nothing here narrates the link.** "Not on this link: scrollback, style,
+                    // hyperlinks, ..." and "send budget: 255 or more records left this hour" were
+                    // two grey lines above the shell list, repeating every visit, describing a limit
+                    // the user cannot act on from this screen (asked to be removed, 2026-11-01:
+                    // "when did this come from? I didn't see it earlier"). What the link cannot do
+                    // is true of every shell in the list, so it belongs beside the route, not above
+                    // each list; what the hour has left is the gateway's own measurement and the
+                    // daemon reports it (`ldmux mesh status`).
                     if (handle.pendingLabel.isNotEmpty()) Text("waiting to send: ${handle.pendingLabel}", color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
                 if (listed != null) {

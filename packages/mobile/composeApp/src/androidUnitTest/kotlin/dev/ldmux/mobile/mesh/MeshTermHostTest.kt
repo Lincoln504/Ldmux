@@ -2,7 +2,6 @@ package dev.ldmux.mobile.mesh
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -24,23 +23,6 @@ class MeshTermHostTest {
         assertTrue(labels.all { it.startsWith("meshmore · ") })
         val closes = listOf(null, 1, 2, 3, 4, 5).map { meshTermLabel(MeshTermView.HostClosed(it)) }
         assertEquals(closes.size, closes.toSet().size)
-    }
-
-    @Test
-    fun `the absent features are named, and a full list is named whole`() {
-        assertEquals("", meshAbsentLine(emptyList()))
-        val line = meshAbsentLine(MeshTermFeature.entries)
-        for (f in MeshTermFeature.entries) assertTrue(f.name.lowercase() in line, line)
-    }
-
-    @Test
-    fun `the budget line is in records and says when it is not reported`() {
-        assertEquals("send budget: not reported", meshBudgetLine(null))
-        assertEquals("send budget: none left this hour", meshBudgetLine(0))
-        assertTrue("58 records" in meshBudgetLine(58))
-        assertTrue("255 or more" in meshBudgetLine(255))
-        // No seconds, no preset: the app must not do radio arithmetic.
-        assertFalse(listOf(null, 0, 58, 255).any { "second" in meshBudgetLine(it) || "ms" in meshBudgetLine(it) })
     }
 
     @Test

@@ -227,8 +227,10 @@ class MeshInputPump(
  * [spendLatchOnFirst]).
  *
  * Everything the tailnet handle does for a surface (selection, scrollback, mouse, clipboard,
- * ownership) is absent on this link and is left at the interface's no-op defaults: the host's
- * `absent` list says so on screen.
+ * ownership) is absent on this link and is left at the interface's no-op defaults. The host still
+ * says which of them it lacks - [absentFeatures] decodes it and the driver keeps it on the view -
+ * but the launcher no longer prints the list above the shells, because a limit that applies to
+ * every shell is not news about the one being opened.
  */
 class MeshTerminalHandle(
     private val batcher: MeshInputBatcher,

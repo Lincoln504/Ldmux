@@ -124,18 +124,6 @@ fun meshTermLabel(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): St
     }
 }
 
-/** What this link cannot do, in words. Empty when the host reports nothing absent. */
-fun meshAbsentLine(absent: List<MeshTermFeature>): String =
-    if (absent.isEmpty()) "" else "Not on this link: " + absent.joinToString(", ") { it.name.lowercase() }
-
-/** The budget line, never in seconds (the architecture forbids radio arithmetic here). */
-fun meshBudgetLine(left: Int?): String = when (left) {
-    null -> "send budget: not reported"
-    0 -> "send budget: none left this hour"
-    255 -> "send budget: 255 or more records left this hour"
-    else -> "send budget: $left records left this hour"
-}
-
 /**
  * What is wrong with a saved mesh route right now, read from secure storage; null when it can
  * run. Never throws. The launcher uses it so the line under the title names the real next step
