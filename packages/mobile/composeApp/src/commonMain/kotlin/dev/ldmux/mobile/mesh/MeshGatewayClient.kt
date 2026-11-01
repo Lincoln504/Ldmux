@@ -5,12 +5,12 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.flow.getAndUpdate
@@ -108,13 +108,24 @@ class MeshGatewayClient(
     /** The last pushed `STATUS`, or null before the first. */
     override val status: StateFlow<MeshStatus?> = _status.asStateFlow()
 
-    private val _received = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
-
     /**
-     * Downlink records. **Lossy by firmware design**: the radio drops raw data when no app is
-     * connected and never queues it (`MyMesh.cpp:811-816`), so absence is not evidence.
+     * Downlink records, in the order the gateway sent them, and **none may be dropped here**.
+     *
+     * This used to be a `SharedFlow` with a 64-record buffer and `tryEmit`, which returns false
+     * and loses the record when the collector is busy. The collector is the driver, and the driver
+     * holds its lock across a send that may take up to ten seconds, so a screen update's burst of
+     * eight records plus a slow radio was enough to overflow it. Losing a row only costs a
+     * retransmission, but losing `msg2` is fatal and silent: the phone retries `msg1` for ever and
+     * the host accepts every one of them. Measured on the device: eight accepted handshakes, zero
+     * bytes received, `lastError` null on both sides, and the terminal saying "the host stopped
+     * answering" while the host was answering every message it got.
+     *
+     * The radio's own lossiness is a separate fact (a raw packet is dropped when no app is
+     * connected, `MyMesh.cpp:811-816`), so absence still is not evidence - but a record the
+     * gateway handed over must reach the session.
      */
-    override val received: SharedFlow<ByteArray> = _received.asSharedFlow()
+    private val inbox = Channel<ByteArray>(Channel.UNLIMITED)
+    override val received: Flow<ByteArray> = inbox.receiveAsFlow()
 
     private val uplink = MutableStateFlow(0)
 
@@ -349,7 +360,9 @@ class MeshGatewayClient(
     private suspend fun onBoundFrame(f: MeshFrame): Boolean {
         when (f.type) {
             MeshFrameType.RECV -> {
-                _received.tryEmit(MeshMessages.readRecv(f) ?: return false)
+                // Never closed: the client outlives a session, and a closed inbox would silence
+                // every record after one reconnect.
+                inbox.trySend(MeshMessages.readRecv(f) ?: return false)
             }
             MeshFrameType.SEND_RESULT -> {
                 val (seq, outcome) = MeshMessages.readSendResult(f) ?: return false

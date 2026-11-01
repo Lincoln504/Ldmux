@@ -15,6 +15,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -259,6 +260,25 @@ class MeshGatewayClientTest {
         delay(50)
         sock.feed(MeshFrame(MeshFrameType.RECV, ByteArray(148) { it.toByte() }))
         assertContentEquals(ByteArray(148) { it.toByte() }, got.await())
+    }
+
+    @Test
+    fun `a burst of records survives a collector that is inside a send`() = rig {
+        bind()
+        // The collector here is slow on purpose: the driver holds its lock across a send, and a
+        // screen update arrives as a burst. With a fixed buffer and `tryEmit` the tail of the
+        // burst was dropped without a trace, which is how a handshake answer could vanish.
+        val got = async {
+            val seen = ArrayList<Int>()
+            client.received.take(100).collect {
+                seen += it[0].toInt()
+                delay(3)
+            }
+            seen
+        }
+        delay(50)
+        for (i in 0 until 100) sock.feed(MeshFrame(MeshFrameType.RECV, byteArrayOf(i.toByte())))
+        assertEquals((0 until 100).toList(), withTimeout(10_000) { got.await() })
     }
 
     @Test
