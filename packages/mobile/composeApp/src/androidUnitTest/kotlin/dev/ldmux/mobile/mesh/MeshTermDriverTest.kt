@@ -513,10 +513,12 @@ class MeshTermDriverTest {
     }
 
     @Test
-    fun `an unreported budget is zero, not a guess`() = runBlocking<Unit> {
+    fun `an unreported budget does not mute the session`() = runBlocking<Unit> {
+        // Silence is not "none". Treating it as zero stops the acks, the peer retransmits for
+        // ever, and the screen reads "host stopped answering" while both radios are fine.
         gw.status.value = null
         val d = driver(); d.start(); d.onRecord(byteArrayOf(2))
-        assertEquals(0, sess.pollCalls.last().first)
+        assertEquals(255, sess.pollCalls.last().first, "unlimited is the safe assumption")
     }
 
     @Test

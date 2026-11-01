@@ -95,12 +95,13 @@ class MeshSessionAbiTest {
     }
 
     @Test
-    fun a_full_144_byte_payload_fills_the_172_byte_record_exactly() {
+    fun a_full_payload_fills_the_172_byte_record_exactly() {
         val p = handshake(lib())
-        p.phone.send(0, ByteArray(144) { 7 })
+        p.phone.send(0, ByteArray(143) { 7 })
         val recs = p.phone.poll(now, 5, 5)
         assertEquals(1, recs.size)
-        assertEquals(172, recs[0].size, "6 clear + 2 inner + 4 ARQ + 144 + 16 tag")
+        // 6 clear + 2 inner + 5 ARQ (seq, ack, mark) + 143 + 16 tag = 172
+        assertEquals(172, recs[0].size, "one record at the ceiling")
         p.phone.close(); p.host.close()
     }
 
@@ -173,7 +174,7 @@ class MeshSessionAbiTest {
     fun a_full_queue_slows_the_caller_down_rather_than_growing() {
         val p = handshake(lib())
         var queued = 0
-        while (p.phone.send(0, ByteArray(144)) == QueueOutcome.Queued) {
+        while (p.phone.send(0, ByteArray(143)) == QueueOutcome.Queued) {
             queued++
             assertTrue(queued < 1000, "queue must be bounded")
         }

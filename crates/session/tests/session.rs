@@ -68,21 +68,21 @@ fn bytes_cross_in_both_directions_encrypted_and_in_order() {
 }
 
 #[test]
-fn each_record_carries_up_to_144_bytes_of_payload_at_the_ceiling() {
+fn each_record_carries_up_to_143_bytes_of_payload_at_the_ceiling() {
     let (mut phone, _host) = pair(172);
-    phone.send(0, &[7u8; 144]).unwrap();
+    phone.send(0, &[7u8; 143]).unwrap();
     let out = phone.poll(0, PLENTY).unwrap();
     assert_eq!(
         out.len(),
         1,
-        "144 = 148 application bytes - the 4-byte ARQ header"
+        "143 = 148 application bytes - the 5-byte ARQ header"
     );
     assert_eq!(out[0].len(), 172);
-    phone.send(0, &[7u8; 145]).unwrap();
+    phone.send(0, &[7u8; 144]).unwrap();
     assert_eq!(
         phone.poll(1, PLENTY).unwrap().len(),
         2,
-        "145 bytes need two records"
+        "144 bytes need two records"
     );
 }
 

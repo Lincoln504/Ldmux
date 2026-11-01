@@ -12,7 +12,7 @@
     "maxSelector": 40,
     "maxSessions": 16,
     "minVersion": 1,
-    "recordPayload": 144,
+    "recordPayload": 143,
     "unsupportedAllV1": 127,
     "version": 5
   },

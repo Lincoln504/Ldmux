@@ -7,9 +7,22 @@
 //! # Inner layout (inside the AEAD plaintext)
 //!
 //! ```text
-//! flags (1)  shell (1)  | seq u16 LE | ack u16 LE | payload (0..=max_payload)
-//!  ADR inner header     |   4-byte ARQ header, taken out of the application bytes
+//! flags (1)  shell (1)  | seq u16 LE | ack u16 LE | mark u8 | payload (0..=max_payload)
+//!  ADR inner header     |   5-byte ARQ header, taken out of the application bytes
 //! ```
+//!
+//! # Why `mark` exists
+//!
+//! MeshCore suppresses duplicates by **packet hash**, first copy wins, at every receiver and
+//! repeater (`Mesh::onRecvPacket` -> `wasSeen`/`markSeen`). A record retransmitted with the same
+//! bytes is therefore dropped on arrival: the sender waits for an ack the peer never had a chance
+//! to send, retries until `max_attempts`, and the session dies. That is exactly "host stopped
+//! answering" with both radios healthy.
+//!
+//! `mark` makes every transmission a distinct packet. It counts up for each record emitted, so a
+//! retransmission, a repeated ack and two heartbeats carrying the same ack are all new to the
+//! mesh. The receiver ignores it - duplicates are recognised by `seq` - so it costs one byte and
+//! buys the whole retry mechanism.
 //!
 //! `flags` bits 0-1 are the [`Kind`]; every other bit is reserved and must be zero (a record
 //! with one set is dropped, so a future flag is not half-understood by an old peer).
@@ -33,7 +46,7 @@ use std::collections::VecDeque;
 use ldmux_mesh::constants::CREDIT_WINDOW;
 
 /// ARQ header inside the application bytes.
-pub const HEADER: usize = 4;
+pub const HEADER: usize = 5;
 /// The most records ever in flight: the L2 credit window.
 pub const MAX_WINDOW: u8 = CREDIT_WINDOW;
 
@@ -83,6 +96,13 @@ pub struct Config {
     pub max_attempts: u8,
     /// How long an owed acknowledgement may wait for outgoing data to ride on.
     pub ack_delay_ms: u64,
+    /// How long an idle link may stay silent before it says something.
+    ///
+    /// Silence is how both ends decide the other is gone, so an idle session that sends nothing
+    /// is indistinguishable from a dead one. mosh sends a heartbeat every 3 s for the same
+    /// reason. A heartbeat is a pure ack: about 22 bytes, and it carries real information (what
+    /// has been received).
+    pub heartbeat_ms: u64,
     /// Chunks waiting to be sent. A full queue refuses, it never grows.
     pub queue_max: usize,
     /// Largest payload in one record: `application_bytes - HEADER`.
@@ -111,6 +131,7 @@ impl Config {
             rto_max_ms: 30_000,
             max_attempts: 5,
             ack_delay_ms: 150,
+            heartbeat_ms: 3_000,
             queue_max: 64,
             max_payload,
         }
@@ -143,6 +164,8 @@ pub struct Outgoing {
     pub seq: u16,
     pub ack: u16,
     pub shell: u8,
+    /// A per-record mark, so no two transmissions are byte-identical (see the module docs).
+    pub mark: u8,
     pub payload: Vec<u8>,
     pub retransmit: bool,
 }
@@ -154,6 +177,7 @@ impl Outgoing {
         let mut out = Vec::with_capacity(HEADER + self.payload.len());
         out.extend_from_slice(&self.seq.to_le_bytes());
         out.extend_from_slice(&self.ack.to_le_bytes());
+        out.push(self.mark);
         out.extend_from_slice(&self.payload);
         out
     }
@@ -166,6 +190,8 @@ pub struct Incoming {
     pub seq: u16,
     pub ack: u16,
     pub shell: u8,
+    /// The sender's per-record mark. Unused here: duplicates are recognised by `seq`.
+    pub mark: u8,
     pub payload: Vec<u8>,
 }
 
@@ -180,6 +206,7 @@ impl Incoming {
             seq: u16::from_le_bytes([app[0], app[1]]),
             ack: u16::from_le_bytes([app[2], app[3]]),
             shell,
+            mark: app[4],
             payload: app[HEADER..].to_vec(),
         })
     }
@@ -230,6 +257,10 @@ pub struct Arq {
     /// Out-of-order data held until the gap fills, keyed by distance from `next_expected`.
     held: Vec<Option<(u8, Vec<u8>)>>,
     ack_owed_since: Option<u64>,
+    /// When something was last sent, for the heartbeat. `None` before the first record.
+    last_sent_at: Option<u64>,
+    /// The next per-record mark. Bumped for every record emitted, so no two are identical.
+    next_mark: u8,
     close_wanted: bool,
     close_sent: bool,
     peer_closed: bool,
@@ -250,6 +281,8 @@ impl Arq {
             next_expected: 0,
             held: vec![None; usize::from(MAX_WINDOW)],
             ack_owed_since: None,
+            last_sent_at: None,
+            next_mark: 0,
             close_wanted: false,
             close_sent: false,
             peer_closed: false,
@@ -386,6 +419,17 @@ impl Arq {
             .front()
             .map(|s| s.sent_at + self.rto(s.attempts));
         let ack = self.ack_owed_since.map(|t| t + self.cfg.ack_delay_ms);
+        let beat = self
+            .last_sent_at
+            .map(|t| t.saturating_add(self.cfg.heartbeat_ms));
+        let (retx, ack) = match (retx, ack) {
+            (Some(a), Some(b)) => (Some(a.min(b)), None),
+            (a, b) => (a, b),
+        };
+        let retx = match (retx, beat) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         match (retx, ack) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -410,8 +454,10 @@ impl Arq {
                 return out;
             }
             wanted = true;
-            if budget > 0 {
-                budget -= 1;
+            // A retransmission is not new traffic: it is the record already paid for. Gating it
+            // on the voluntary cap turns a busy minute into a dead session, and the cap exists to
+            // bound what the operator chooses to send, not to throw away what was sent.
+            if usize::from(limits.l2_slots) > out.len() {
                 let ack = self.next_expected;
                 let front = self.inflight.front_mut().expect("checked above");
                 front.attempts += 1;
@@ -421,6 +467,7 @@ impl Arq {
                     seq: front.seq,
                     ack,
                     shell: front.shell,
+                    mark: 0,
                     payload: front.payload.clone(),
                     retransmit: true,
                 });
@@ -450,6 +497,7 @@ impl Arq {
                 seq,
                 ack: self.next_expected,
                 shell,
+                mark: 0,
                 payload,
                 retransmit: false,
             });
@@ -462,8 +510,20 @@ impl Arq {
                 .is_some_and(|t| now_ms >= t + self.cfg.ack_delay_ms)
         {
             wanted = true;
-            if budget > 0 {
-                budget -= 1;
+            if limits.l2_slots > 0 {
+                out.push(self.control(Kind::Ack));
+            }
+        }
+
+        // 3b. A heartbeat when the link has gone quiet. Silence is how each end decides the other
+        //     is gone, so an idle session that says nothing is indistinguishable from a dead one;
+        //     a pure ack costs about 22 bytes and carries the receive state.
+        if out.is_empty()
+            && self
+                .last_sent_at
+                .is_some_and(|t| now_ms >= t.saturating_add(self.cfg.heartbeat_ms))
+        {
+            if limits.l2_slots > 0 {
                 out.push(self.control(Kind::Ack));
             }
         }
@@ -484,7 +544,12 @@ impl Arq {
         }
 
         if !out.is_empty() {
+            for o in &mut out {
+                o.mark = self.next_mark;
+                self.next_mark = self.next_mark.wrapping_add(1);
+            }
             self.ack_owed_since = None;
+            self.last_sent_at = Some(now_ms);
             self.stats.sent += out.len() as u32;
         }
         if wanted && out.is_empty() {
@@ -499,6 +564,7 @@ impl Arq {
             seq: self.next_seq,
             ack: self.next_expected,
             shell: 0,
+            mark: 0,
             payload: Vec::new(),
             retransmit: false,
         }

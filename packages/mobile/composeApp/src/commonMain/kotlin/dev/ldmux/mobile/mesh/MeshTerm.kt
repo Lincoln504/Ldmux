@@ -19,8 +19,10 @@ object MeshTerm {
      * Version 2 adds `Key` and names the attached shell in `Profile`. A host answers in the
      * version the phone attached with and accepts [MIN_VERSION]..[VERSION]. Version 3 adds
      * `Resize`: the phone's grid, so the host fits its pty to it as it does for a tailnet client.
+     * Version 5 adds the absolute line number to `Commit`: the rows leaving the top of the screen
+     * are history the phone already holds, which is the fact a local scrollback is built on.
      */
-    const val VERSION = 4
+    const val VERSION = 5
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -29,13 +31,15 @@ object MeshTerm {
 
     /** First version whose records may carry several messages (the host packs them). */
     const val STREAM_VERSION = 4
+    /** The first version whose `Commit` names the absolute line at the top of the screen. */
+    const val LINE_VERSION = 5
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
     const val MAX_BODY = 300
     const val MAX_ROWS_BODY = 130
     const val MAX_MESSAGE = 1 + 2 + MAX_ROWS_BODY
-    /** 172 - 24 (ADR-0020) - 4 (ARQ header): what one record carries of this stream. */
-    const val RECORD_PAYLOAD = 144
+    /** 172 - 24 (ADR-0020) - 5 (ARQ header incl. the per-record mark): one record's capacity. */
+    const val RECORD_PAYLOAD = 143
     const val MAX_INPUT = 96
     const val MAX_SEGMENT = 120
     const val MAX_SELECTOR = 40

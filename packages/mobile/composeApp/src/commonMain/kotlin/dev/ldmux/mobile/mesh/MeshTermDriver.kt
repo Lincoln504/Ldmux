@@ -672,8 +672,11 @@ class MeshTermDriver(
     }
 
     private suspend fun pump() {
+        // See `left`: the session is only muted by a gateway that says so.
         val s = session ?: return
-        val left = gateway.status.value?.opsLeftThisHour ?: 0
+        // A gateway that has not spoken yet has not said "none": treating silence as zero mutes
+        // the session, including the acks that keep it alive.
+        val left = gateway.status.value?.opsLeftThisHour ?: UNKNOWN_BUDGET
         val records = try {
             s.poll(clock(), left, L2_WINDOW)
         } catch (e: MeshSessionException) {
@@ -755,6 +758,15 @@ class MeshTermDriver(
         const val SHELL = 0
         /** The gateway's L2 credit window: records it will take unanswered. */
         const val L2_WINDOW = 8
+
+        /**
+         * What to assume before the gateway has reported a budget.
+         *
+         * Unlimited is the safe assumption: the cost of being wrong is a little extra airtime on
+         * a link whose policy nobody has stated, and the cost of assuming zero is a session that
+         * cannot even acknowledge what it receives, which reads as "host stopped answering".
+         */
+        const val UNKNOWN_BUDGET = 255
         const val IDLE_TICK_MS = 30_000L
     }
 }

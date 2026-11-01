@@ -9,6 +9,7 @@ const PLENTY: Limits = Limits {
 
 fn cfg() -> Config {
     Config {
+        heartbeat_ms: 3_000,
         window: 4,
         rto_initial_ms: 1_000,
         rto_max_ms: 8_000,
@@ -21,6 +22,7 @@ fn cfg() -> Config {
 
 fn inc(o: &Outgoing) -> Incoming {
     Incoming {
+        mark: 0,
         kind: o.kind,
         seq: o.seq,
         ack: o.ack,
@@ -131,6 +133,7 @@ fn the_window_bounds_what_is_in_flight() {
     a.on_incoming(
         2,
         &Incoming {
+            mark: 0,
             kind: Kind::Ack,
             seq: 0,
             ack: 1,
@@ -172,20 +175,23 @@ fn the_hourly_budget_is_never_exceeded_and_a_stall_is_visible() {
             l2_slots: 8,
         },
     );
-    assert!(none.is_empty());
-    assert_eq!(a.stats().budget_stalls, 1);
-    // The retransmission also needs budget: a due timer with no budget sends nothing.
     assert!(
-        a.poll(
-            5_000,
-            Limits {
-                records_left: 0,
-                l2_slots: 8
-            }
-        )
-        .is_empty()
+        none.iter().all(|o| o.kind != Kind::Data),
+        "the voluntary cap stops new data"
     );
-    assert_eq!(a.stats().retransmits, 0);
+    assert_eq!(a.stats().budget_stalls, 1);
+    // A retransmission is not new traffic: it is the record already paid for. Refusing it throws
+    // away airtime already spent and turns a busy minute into a dead session.
+    let retx = a.poll(
+        5_000,
+        Limits {
+            records_left: 0,
+            l2_slots: 8,
+        },
+    );
+    assert_eq!(retx.len(), 1, "the due retransmission still goes out");
+    assert!(retx[0].retransmit);
+    assert_eq!(a.stats().retransmits, 1);
 }
 
 #[test]
@@ -209,7 +215,11 @@ fn l2_slots_cap_the_burst_too() {
 
 #[test]
 fn retries_back_off_and_then_fail_instead_of_storming() {
-    let mut a = Arq::new(cfg()); // rto 1000, 2000, 4000, then fail (max_attempts 4)
+    // A heartbeat would be indistinguishable from a retransmission in this test's timing.
+    let mut a = Arq::new(Config {
+        heartbeat_ms: 60_000,
+        ..cfg()
+    }); // rto 1000, 2000, 4000, then fail (max_attempts 4)
     a.send(0, b"x").unwrap();
     assert_eq!(a.poll(0, PLENTY).len(), 1);
     assert!(a.poll(999, PLENTY).is_empty());
@@ -258,6 +268,7 @@ fn nonsense_acks_are_ignored_and_counted() {
     a.on_incoming(
         1,
         &Incoming {
+            mark: 0,
             kind: Kind::Ack,
             seq: 0,
             ack: 5,
@@ -268,6 +279,7 @@ fn nonsense_acks_are_ignored_and_counted() {
     a.on_incoming(
         1,
         &Incoming {
+            mark: 0,
             kind: Kind::Ack,
             seq: 0,
             ack: 0xFFF0,
@@ -389,4 +401,86 @@ fn close_is_sent_once_after_the_queue_drains() {
     );
     b.on_incoming(301, &inc(&out2[0]));
     assert!(b.peer_closed());
+}
+
+/// An acknowledgement is control traffic, and refusing it is how a link dies: the peer
+/// retransmits a full record for ever, then gives up and the session fails. The voluntary cap
+/// bounds what the operator chooses to send, not what it takes to stay in step.
+#[test]
+fn an_ack_is_sent_even_with_no_budget_left() {
+    let mut a = Arq::new(cfg());
+    let mut b = Arq::new(cfg());
+    b.send(0, b"x").unwrap();
+    let record = b.poll(0, PLENTY).pop().unwrap();
+    let incoming = Incoming::decode(record.kind.flags(), record.shell, &record.app_bytes()).unwrap();
+    a.on_incoming(0, &incoming);
+    let out = a.poll(
+        1_000,
+        Limits {
+            records_left: 0,
+            l2_slots: 8,
+        },
+    );
+    assert_eq!(out.len(), 1, "the ack is not optional");
+    assert_eq!(out[0].kind, Kind::Ack);
+}
+
+/// An idle link that says nothing is indistinguishable from a dead one, and both ends decide
+/// the other is gone by silence. A heartbeat is a pure ack: about 22 bytes, and it carries the
+/// receive state, so it is never wasted.
+#[test]
+fn an_idle_link_heartbeats() {
+    // A long retry timer, so the only thing that could fire is the heartbeat.
+    let mut a = Arq::new(Config {
+        rto_initial_ms: 60_000,
+        ..cfg()
+    });
+    a.send(0, b"x").unwrap();
+    assert_eq!(a.poll(0, PLENTY).len(), 1);
+    assert!(a.poll(2_999, PLENTY).is_empty(), "not yet");
+    let beat = a.poll(3_000, PLENTY);
+    assert_eq!(beat.len(), 1, "the idle link says something");
+    assert_eq!(beat[0].kind, Kind::Ack);
+    // And it is a wake reason, so a caller that only sleeps until `next_deadline` will send it.
+    assert!(a.next_deadline().is_some());
+}
+
+/// MeshCore suppresses duplicates by packet hash, first copy wins, at every receiver and
+/// repeater. A retransmission carrying the same bytes as the original is therefore dropped on
+/// arrival: the sender waits for an ack the peer never had a chance to send, retries until the
+/// attempts run out, and the session dies with both radios healthy - "host stopped answering".
+/// The per-record mark makes each transmission a different packet.
+#[test]
+fn a_retransmission_is_a_different_packet() {
+    let mut a = Arq::new(Config {
+        heartbeat_ms: 60_000,
+        ..cfg()
+    });
+    a.send(0, b"hello").unwrap();
+    let first = a.poll(0, PLENTY).pop().unwrap();
+    let again = a.poll(1_000, PLENTY).pop().unwrap();
+    assert!(again.retransmit);
+    assert_ne!(
+        first.app_bytes(),
+        again.app_bytes(),
+        "the same bytes would be suppressed by the mesh's own duplicate check"
+    );
+}
+
+/// Two heartbeats carry the same ack and the same sequence: without the mark they would be the
+/// same packet, and the second would never arrive.
+#[test]
+fn two_heartbeats_are_different_packets() {
+    let mut a = Arq::new(Config {
+        rto_initial_ms: 60_000,
+        ..cfg()
+    });
+    a.send(0, b"x").unwrap();
+    let _ = a.poll(0, PLENTY);
+    let one = a.poll(3_000, PLENTY).pop().unwrap();
+    let two = a.poll(6_000, PLENTY).pop().unwrap();
+    assert_eq!(one.kind, Kind::Ack);
+    assert_eq!(two.kind, Kind::Ack);
+    assert_eq!(one.ack, two.ack, "the same receive state");
+    assert_ne!(one.app_bytes(), two.app_bytes(), "but not the same packet");
 }

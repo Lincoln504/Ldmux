@@ -341,7 +341,7 @@ fun MeshTerminalScreen(
             Column(Modifier.weight(1f).fillMaxWidth().padding(LocalTouch.current.rowPad * 3)) {
                 AppHeader(
                     title = "ldmux",
-                    status = meshTermLabel(view, plan.endpoint),
+                    status = meshHeaderStatus(view, plan.endpoint),
                     onRefresh = onRefresh,
                     refreshing = refreshing,
                     onSettings = onOpenSettings,

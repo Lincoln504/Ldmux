@@ -78,6 +78,24 @@ class MeshTermConnection(
  * One line for each thing the mesh terminal can be doing. The three "not working" cases read
  * differently on purpose: the cure for each is different.
  */
+/**
+ * The header's status line, or empty when the view has nothing to report.
+ *
+ * A header that says "choose a shell" above a list of shells is noise: the screen already says
+ * it, and the one line costs a row that the terminal will want. Only a state the user would not
+ * otherwise know - securing, waiting, failed, closed - earns the line.
+ */
+fun meshHeaderStatus(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): String = when (view) {
+    // Routine: the body already says what to do.
+    is MeshTermView.Choose, MeshTermView.Idle, MeshTermView.Listing -> ""
+    is MeshTermView.Live -> if (view.resyncing || !view.painted || view.stalled) {
+        meshTermLabel(view, endpoint)
+    } else {
+        ""
+    }
+    else -> meshTermLabel(view, endpoint)
+}
+
 fun meshTermLabel(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): String = when (view) {
     MeshTermView.Idle -> "meshmore · not attached"
     is MeshTermView.LinkDown -> meshLinkLabel(view.link)

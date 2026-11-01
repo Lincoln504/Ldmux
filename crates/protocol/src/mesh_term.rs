@@ -88,7 +88,7 @@ pub const MAX_ROWS_BODY: usize = 130;
 /// The largest encoded host→phone message.
 pub const MAX_MESSAGE: usize = 1 + 2 + MAX_ROWS_BODY;
 /// The payload of one record after the L3 headers: 172 − 24 (ADR-0020) − 4 (ARQ).
-pub const RECORD_PAYLOAD: usize = 144;
+pub const RECORD_PAYLOAD: usize = 143;
 /// Most bytes in one `Input` message.
 pub const MAX_INPUT: usize = 96;
 /// Most bytes of a shell label in a `Sessions` entry (cut at a character boundary by the host).
@@ -757,6 +757,13 @@ pub struct Differ {
     version: u8,
     /// The attached shell, named in a version-2 `Profile`.
     shell: String,
+    /// A frame whose rows did not all fit in the window the last time it was offered.
+    ///
+    /// The phone drops rows from an older epoch when the next epoch's rows arrive, so a frame
+    /// split across ticks must keep one epoch: otherwise the second batch looks like a new frame
+    /// and the first batch is thrown away, which is how a long screen arrived as its last rows
+    /// only.
+    frame_open: bool,
 }
 
 impl Default for Differ {
@@ -764,6 +771,7 @@ impl Default for Differ {
         Self {
             sent: None,
             epoch: 0,
+            frame_open: false,
             version: VERSION,
             shell: String::new(),
         }
@@ -860,6 +868,18 @@ impl Differ {
                 });
             }
         }
+        // The row the cursor is on goes first.
+        //
+        // A frame that does not fit one window is carried over several ticks, and the last batch
+        // is seconds behind the first on this link. In a shell the cursor sits on the line being
+        // typed, so sending rows in screen order put the echo last: the cursor moved (its
+        // `Commit` is cheap) and the letters arrived a batch later. The row the user is writing
+        // on is the one worth the airtime first; every other row is equally urgent and equally
+        // delayed.
+        if flat.len() > 1 {
+            let cursor_row = screen.cursor_y;
+            flat.sort_by_key(|p| u8::from(p.y != cursor_row));
+        }
         let flags = (u8::from(screen.alternate) * commit::ALTERNATE)
             | (u8::from(screen.dead) * commit::DEAD);
         // A scroll with identical content still has to reach the phone: the rows leaving the top
@@ -875,10 +895,13 @@ impl Differ {
                 || s.dead != screen.dead
                 || s.first_line != screen.first_line
         });
-        if flat.is_empty() && !full && !cursor_or_flags_changed && !line_changed {
+        if !self.frame_open && flat.is_empty() && !full && !cursor_or_flags_changed && !line_changed
+        {
             return Vec::new();
         }
-        self.epoch = self.epoch.wrapping_add(1);
+        if !self.frame_open {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
         let epoch = self.epoch;
         // Pack patches into `Rows` messages of at most MAX_ROWS_BODY bytes. A full screen with
         // no text still sends one empty `Rows(full)`, so the phone clears.
@@ -913,11 +936,18 @@ impl Differ {
         // frame that cannot include it must leave the old cursor in the record so the next tick
         // sends the change rather than forgetting it.
         let room_for_rows = room.saturating_sub(out.len() + 1);
-        let take = room_for_rows.min(packed.len());
+        let packed_len = packed.len();
+        let take = room_for_rows.min(packed_len);
         // The `Commit` goes with the rows, not after all of them: the phone applies a `Rows`
         // only when its `Commit` arrives, so rows sent without one are discarded when the next
         // epoch's rows arrive - which is how a long frame used to disappear row by row.
-        let commit = out.len() + take + 1 <= room && (take > 0 || packed.is_empty());
+        //
+        // It goes only when the frame is **whole**. A commit after a partial frame moves the
+        // cursor over text the phone has not been given yet, which the user sees as the cursor
+        // running ahead of their typing: the letters arrive a second later, in the next batch.
+        // Rows without a commit wait on the phone, so holding the cursor back loses nothing.
+        let commit = out.len() + take + 1 <= room && take == packed_len;
+        self.frame_open = !commit;
         // What the phone will now hold, row by row, from the patches that actually went out.
         let mut carried: Vec<Option<String>> = vec![None; screen.lines.len()];
         for m in packed.iter().take(take) {
@@ -981,6 +1011,7 @@ impl Differ {
         }
         // Nothing went out: the record must not move, or the change would be forgotten.
         if out.is_empty() {
+            self.frame_open = packed_len > 0;
             return Vec::new();
         }
         self.sent = Some(snapshot);
@@ -1155,6 +1186,45 @@ mod tests {
             first.iter().all(|msg| !matches!(msg, Message::Commit { first_line, .. } if *first_line != 0)),
             "a version 4 commit carries no line number"
         );
+    }
+
+    /// A frame spread over several calls is **one** frame: every batch carries the same epoch,
+    /// and only the batch that completes it carries the `Commit`.
+    ///
+    /// A commit after a partial frame moves the cursor over text the phone has not been given,
+    /// which reads as the cursor running ahead of the typing. A new epoch per batch is worse
+    /// still: the phone drops rows from an older epoch when the next epoch's rows arrive, so the
+    /// screen arrives as its last rows only.
+    #[test]
+    fn a_split_frame_keeps_one_epoch_and_commits_only_when_whole() {
+        let lines: Vec<String> = (0..30).map(|i| format!("row {i} with some words")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let target = screen(&refs, 40);
+        let mut d = Differ::for_attach(VERSION, "ab12-1");
+
+        let mut epochs = std::collections::BTreeSet::new();
+        let mut commits = 0;
+        let mut rows_seen = 0;
+        for turn in 0..40 {
+            let out = d.update_within(&target, 3);
+            if out.is_empty() {
+                break;
+            }
+            for m in &out {
+                match m {
+                    Message::Rows { epoch, patches, .. } => {
+                        epochs.insert(*epoch);
+                        rows_seen += patches.len();
+                    }
+                    Message::Commit { .. } => commits += 1,
+                    _ => {}
+                }
+            }
+            assert!(turn < 39, "it must finish");
+        }
+        assert_eq!(commits, 1, "one frame, one commit");
+        assert_eq!(epochs.len(), 1, "every batch belongs to the same frame");
+        assert_eq!(rows_seen, 30, "every row is carried once");
     }
 
     /// A frame bigger than the window is spread over calls and loses nothing: the record of
