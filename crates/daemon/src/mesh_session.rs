@@ -235,7 +235,7 @@ impl SessionHost {
             }
         }
         let data_slots = limits.l2_slots.saturating_sub(out.len() as u8);
-        let mut budget = limits.records_left.min(data_slots);
+        let budget = limits.records_left.min(data_slots);
         if let Some(session) = self.session.as_mut() {
             // A handshake reply still waiting for budget must not be overtaken by data.
             if self.outbox.is_empty() {
