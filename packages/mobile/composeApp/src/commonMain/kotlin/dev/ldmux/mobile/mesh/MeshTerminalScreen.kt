@@ -117,6 +117,7 @@ fun MeshTerminalScreen(
     }
     DisposableEffect(conn) { onDispose { conn.close() } }
     val view by conn.driver.view.collectAsState()
+    val attemptNo by conn.driver.attempt.collectAsState()
     LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
     val shells by conn.driver.shells.collectAsState()
 
@@ -229,8 +230,11 @@ fun MeshTerminalScreen(
             else -> attempt += 1
         }
     }
-    val refreshing = view is MeshTermView.Idle || view is MeshTermView.Handshaking ||
-        view is MeshTermView.ProfileMissing || view is MeshTermView.Listing
+    // **The refresh square is never dimmed by a wait.** It used to dim in exactly the states that
+    // are waits - securing, listing, waiting for a profile - which is when the user most wants to
+    // try again: on a stuck link it sat greyed out for minutes (measured on the device,
+    // 2026-10-31) and the one escape hatch from a dead link looked disabled. A retry is cheap and
+    // idempotent, so the button stays live.
     // Back is the launcher button, as on the tailnet route: the same call, not a second way.
     BackToLauncher(enabled = terminalLive && !showList) { openList() }
 
@@ -296,7 +300,7 @@ fun MeshTerminalScreen(
                         // the seconds it has taken. (A resize keeps the old screen up, so it needs no line.)
                         if (toShow == null && drawn == null) {
                             Box(Modifier.align(Alignment.TopStart).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp)) {
-                                WaitingLine("waiting for the shell's screen", shells.current ?: "mesh")
+                                WaitingLine("waiting for the shell's screen", attemptNo)
                             }
                         }
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
@@ -355,9 +359,8 @@ fun MeshTerminalScreen(
             Column(Modifier.weight(1f).fillMaxWidth().padding(LocalTouch.current.rowPad * 3)) {
                 AppHeader(
                     title = "ldmux",
-                    status = meshHeaderStatus(view, plan.endpoint),
                     onRefresh = onRefresh,
-                    refreshing = refreshing,
+                    refreshing = false,
                     onSettings = onOpenSettings,
                     routes = routes,
                     currentRoute = currentRoute,
@@ -399,7 +402,7 @@ fun MeshTerminalScreen(
                         else -> null
                     }
                     if (waiting != null) {
-                        WaitingLine(waiting, v::class.simpleName)
+                        WaitingLine(waiting, attemptNo)
                     } else {
                         // Every other state says what is wrong, and offers the one cure there is. A token the
                         // link just refused, or a port with nothing on it, is the case a fresh handoff may
@@ -476,9 +479,22 @@ internal fun meshPagesFor(shells: MeshShells, order: List<String>): List<Session
     return ids.map { id -> byId.getValue(id).let { page(it.id, it.label.ifEmpty { it.id.take(8) }) } }
 }
 
-/** A wait with the seconds it has taken: proof the link is working, not the app hanging. */
+/**
+ * A wait, in words.
+ *
+ * It used to count seconds and, past a minute, add "nothing back yet". That number was never the
+ * age of the attempt: it was the age of the *screen*, so it climbed through retries that were
+ * working exactly as intended and reached four figures on a link that was being re-asked every six
+ * seconds (measured on the device, 2026-10-31: "107 s", "290 s" while the driver retried). A
+ * number that measures the wrong thing is worse than no number - the state is what the user needs,
+ * and the retry itself is the proof that something is happening.
+ */
 @Composable
-private fun WaitingLine(text: String, key: String?) {
+private fun WaitingLine(text: String, key: Any?) {
+    // The seconds are the age of **this attempt**, so the key changes whenever the driver starts a
+    // new one. The first version keyed on the view's class name, which never changed while the
+    // driver retried underneath it: it counted to 290 on a link that was being re-asked every six
+    // seconds, which reads as a hang. Reset per attempt, it says what it looks like it says.
     var secs by remember(key) { mutableStateOf(0L) }
     LaunchedEffect(key) {
         while (true) {
@@ -486,9 +502,5 @@ private fun WaitingLine(text: String, key: String?) {
             secs += 1
         }
     }
-    // Past a minute with no answer, say so. The handshake's own bound is five minutes, and the
-    // difference between "still trying" and "nothing is out there" is the one thing the phone can
-    // tell the user before that bound expires.
-    val suffix = if (secs >= 60) " · nothing back yet" else ""
-    Text("$text · ${secs} s$suffix", color = Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+    Text("$text · ${secs} s", color = Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
 }

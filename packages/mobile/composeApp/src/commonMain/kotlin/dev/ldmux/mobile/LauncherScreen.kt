@@ -59,7 +59,6 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun LauncherScreen(
     /** The line under the title: what this is paired with and how the link is ([linkLabel]). */
-    status: String,
     link: LinkState,
     sessions: List<Session>,
     desktop: DesktopInventory?,
@@ -104,11 +103,10 @@ fun LauncherScreen(
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(Bg).padding(LocalTouch.current.rowPad * 3)) {
         // ── header ───────────────────────────────────────────────────────────
-        // The same header every route draws (AppHeader.kt): name, one status line, refresh
-        // and settings as one pair of squares.
+        // The same header every route draws (AppHeader.kt): the name, then refresh and settings
+        // as one pair of squares.
         AppHeader(
             title = "ldmux",
-            status = status,
             onRefresh = onRefresh,
             refreshing = desktopLoading,
             onSettings = onSettings,

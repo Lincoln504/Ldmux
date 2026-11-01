@@ -171,6 +171,17 @@ class MeshTermDriver(
     private val _view = MutableStateFlow<MeshTermView>(MeshTermView.Idle)
     val view: StateFlow<MeshTermView> = _view.asStateFlow()
 
+    /**
+     * Which attempt at a connection this is.
+     *
+     * A wait screen wants to count the seconds of *this* try. Counting the screen's own age was
+     * wrong the moment the driver started retrying underneath it: the number climbed through
+     * attempts that were working (measured: 290 s on a link being re-asked every six seconds),
+     * which reads as a hang rather than as progress.
+     */
+    private val _attempt = MutableStateFlow(0)
+    val attempt: StateFlow<Int> = _attempt.asStateFlow()
+
     private var handshake: HandshakePort? = null
     private var handshakeSince = 0L
 
@@ -256,6 +267,7 @@ class MeshTermDriver(
      * both end here, and neither may take it again.
      */
     private suspend fun connect() {
+        _attempt.value += 1
         val g = gateway.state.value
         if (g != MeshLinkState.Bound && g != MeshLinkState.RadioUnavailable) {
             failed(g); publish(); return

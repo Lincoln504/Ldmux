@@ -24,7 +24,7 @@ class LauncherTest {
         // A pi outside ldmux cannot be opened, and a row for it used to start a new
         // phone shell instead (2026-09-20). A pi inside a desk window is that
         // window's shell row, named by its process.
-        val rows = launcherEntries(listOf(shell("abc", "/home/ldeen/proj").copy(process = "pi")))
+        val rows = launcherEntries(listOf(shell("abc", "/home/u/proj").copy(process = "pi")))
         assertEquals(listOf("abc"), rows.map { it.sessionId })
         assertEquals("pi", rows[0].label)
     }
@@ -33,10 +33,10 @@ class LauncherTest {
     fun `an open shell is named by its process and located by its folder`() {
         // The row has to answer "which of these is my editor", and a directory
         // alone cannot: two shells in one folder would otherwise be the same row.
-        val rows = launcherEntries(listOf(shell("abc", "/home/ldeen/proj").copy(process = "vim")),
+        val rows = launcherEntries(listOf(shell("abc", "/home/u/proj").copy(process = "vim")),
         )
         assertEquals("vim", rows[0].label)
-        assertEquals("/home/ldeen/proj", rows[0].cwd)
+        assertEquals("/home/u/proj", rows[0].cwd)
         assertEquals("abc", rows[0].sessionId)
     }
 
@@ -65,8 +65,8 @@ class LauncherTest {
 
     @Test
     fun `the row's second line is the folder and then the state`() {
-        assertEquals("~/proj", rowSubtitle("/home/ldeen/proj", ""))
-        assertEquals("~/proj  \u00b7  on desktop 2", rowSubtitle("/home/ldeen/proj", "on desktop 2"))
+        assertEquals("~/proj", rowSubtitle("/home/u/proj", ""))
+        assertEquals("~/proj  \u00b7  on desktop 2", rowSubtitle("/home/u/proj", "on desktop 2"))
     }
 
     @Test
@@ -94,7 +94,7 @@ class LauncherTest {
             {"wm":"i3",
              "workspaces":[{"name":"1","index":1,"focused":false,"visible":false,"windowCount":2}],
              "windows":[{"id":"0x4600005","appClass":"Alacritty","title":"π","workspace":"1","pid":9707}],
-             "piSessions":[{"pid":100,"cwd":"/home/ldeen","sessionId":"01a0","startedAt":"2026-09-15T00:00:00Z",
+             "piSessions":[{"pid":100,"cwd":"/home/u","sessionId":"01a0","startedAt":"2026-09-15T00:00:00Z",
                             "transcript":"/t.jsonl","windowId":"0x4600005","workspace":"1","label":"ldeen"}]}
             """.trimIndent(),
         )!!
@@ -161,13 +161,13 @@ class LauncherTest {
         // A title is not a location. The whole route from the root is worth the
         // room when you are choosing a directory and worth none of it when you are
         // already in one, and the shell view is the already-in-one case.
-        assertEquals("ldmux", folderName("/home/ldeen/Documents/ldmux"))
+        assertEquals("ldmux", folderName("/home/u/src/ldmux"))
         assertEquals("shelltest", folderName("/tmp/shelltest"))
-        assertEquals("src", folderName("/home/ldeen/proj/src/"))
+        assertEquals("src", folderName("/home/u/proj/src/"))
         // The home directory has no last segment worth showing, and the root has
         // none at all.
-        assertEquals("~", folderName("/home/ldeen"))
-        assertEquals("~", folderName("/home/ldeen/"))
+        assertEquals("~", folderName("/home/u"))
+        assertEquals("~", folderName("/home/u/"))
         assertEquals("/", folderName("/"))
         // Someone else's home is not "~" in principle, but the client has no way
         // to know the local user, so any `/home/<name>` reads as one. That is the

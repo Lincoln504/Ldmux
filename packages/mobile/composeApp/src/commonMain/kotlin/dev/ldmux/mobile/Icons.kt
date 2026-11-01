@@ -449,7 +449,7 @@ private fun DrawScope.drawMic(tint: Color) {
 /**
  * The title of the shell view: the folder the shell is in, not the way to it.
  *
- * `/home/ldeen/Documents/ldmux` is a *path*: it says where a thing is by spelling
+ * `/home/user/src/ldmux` is a *path*: it says where a thing is by spelling
  * the whole route from the root, which is worth the room when you are choosing a
  * directory and worth none of it when you are already in one. The shell view is
  * the already-in-one case, so it shows `ldmux`.

@@ -694,13 +694,6 @@ internal fun AppContent(
         HoldOrientation(OrientationPolicy.Portrait)
         Box(Modifier.fillMaxSize().background(Bg).safeDrawingPadding()) {
         LauncherScreen(
-            status = linkLabel(
-                link, config,
-                // Read the real credentials only when the label is about the mesh route.
-                problem = if (link == LinkState.RouteUnavailable) {
-                    (currentMeshResolution(config.route) as? MeshRouteResolution.Unusable)?.problem
-                } else null,
-            ),
             link = link,
             // A screen with only a header is not a state. Unpaired is the one case with no list and
             // no notice of its own, so it gets the same one line every other dead end gets.

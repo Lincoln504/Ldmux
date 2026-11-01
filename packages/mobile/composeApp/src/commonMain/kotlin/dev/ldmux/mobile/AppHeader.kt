@@ -52,7 +52,6 @@ import androidx.compose.ui.unit.sp
 @Composable
 internal fun AppHeader(
     title: String,
-    status: String,
     onRefresh: (() -> Unit)?,
     /** A refresh in flight: the arrow dims rather than turning into text. */
     refreshing: Boolean = false,
@@ -64,8 +63,12 @@ internal fun AppHeader(
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
+            // One line, and nothing under it. A second line under the name held the route's
+            // status - "meshmore · securing the link", the old "tailnet" - and it duplicated what
+            // the body already says: a wait has its own screen, and a failure has its sentence.
+            // It also held the height of a line even when empty, which is the sort of thing that
+            // looks like a layout bug.
             Text(title, color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-            Text(status, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
         }
         if (routes.size > 1 && currentRoute != null) {
             Box {

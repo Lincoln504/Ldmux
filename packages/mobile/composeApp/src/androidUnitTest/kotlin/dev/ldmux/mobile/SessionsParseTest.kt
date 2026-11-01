@@ -29,10 +29,12 @@ class SessionsParseTest {
         parseSessions(Json.parseToJsonElement(json).jsonObject["sessions"], deviceId)
 
     /**
-     * The daemon's own output, captured 2026-09-20 (the session-layer name field
-     * was renamed `keeperName` on 2026-10-05 and the capture edited to match).
+     * Shaped exactly like the daemon's output (captured 2026-09-20, and the session-layer name
+     * field renamed `keeperName` on 2026-10-05), with **synthetic paths and names**: a fixture
+     * that carries one machine's home directory and one user's project names is a fixture that
+     * cannot be read on any other machine, and it says nothing the test needs.
      */
-    private val real = """{"type":"sessions","sessions":[{"id":"e1b2f6f8f9","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"dead","keeperName":"ldmux-e1b2f6f8f9","createdBy":"local","lastActivityAt":1789919010983},{"id":"9bbe2eaf62","kind":"shell","title":"RCNT","cwd":"/home/ldeen/Documents/RCNT","status":"running","keeperName":"ldmux-9bbe2eaf62","createdBy":"phone","process":"bash","lastActivityAt":1789857207000},{"id":"0c4d7be073","kind":"shell","title":"nocira","cwd":"/home/ldeen/Documents/nocira","status":"running","keeperName":"ldmux-0c4d7be073","createdBy":"phone","process":"bash","lastActivityAt":1789857210000},{"id":"09207486a3","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"running","keeperName":"ldmux-09207486a3","createdBy":"local","process":"bash","lastActivityAt":1789831137000},{"id":"5dff7004ec","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"running","keeperName":"ldmux-5dff7004ec","createdBy":"local","process":"pi","lastActivityAt":1789832638000},{"id":"f1ffeb84cd","kind":"shell","title":"ldeen","cwd":"/home/ldeen","status":"running","keeperName":"ldmux-f1ffeb84cd","createdBy":"local","process":"bash","lastActivityAt":1789826242000}]}"""
+    private val real = """{"type":"sessions","sessions":[{"id":"e1b2f6f8f9","kind":"shell","title":"home","cwd":"/home/u","status":"dead","keeperName":"ldmux-e1b2f6f8f9","createdBy":"local","lastActivityAt":1789919010983},{"id":"9bbe2eaf62","kind":"shell","title":"alpha","cwd":"/home/u/src/alpha","status":"running","keeperName":"ldmux-9bbe2eaf62","createdBy":"phone","process":"bash","lastActivityAt":1789857207000},{"id":"0c4d7be073","kind":"shell","title":"beta","cwd":"/home/u/src/beta","status":"running","keeperName":"ldmux-0c4d7be073","createdBy":"phone","process":"bash","lastActivityAt":1789857210000},{"id":"09207486a3","kind":"shell","title":"home","cwd":"/home/u","status":"running","keeperName":"ldmux-09207486a3","createdBy":"local","process":"bash","lastActivityAt":1789831137000},{"id":"5dff7004ec","kind":"shell","title":"home","cwd":"/home/u","status":"running","keeperName":"ldmux-5dff7004ec","createdBy":"local","process":"pi","lastActivityAt":1789832638000},{"id":"f1ffeb84cd","kind":"shell","title":"home","cwd":"/home/u","status":"running","keeperName":"ldmux-f1ffeb84cd","createdBy":"local","process":"bash","lastActivityAt":1789826242000}]}"""
 
     @Test
     fun `the real payload parses every session`() {
@@ -41,8 +43,8 @@ class SessionsParseTest {
         assertTrue(sessions.all { it.id.isNotEmpty() }, "every row has an id")
         // The names the daemon chose, and the reason `list` now returns the
         // described view: these are folders, not the word "pi".
-        assertEquals("RCNT", sessions.first { it.cwd.endsWith("/RCNT") }.title)
-        assertEquals("nocira", sessions.first { it.cwd.endsWith("/nocira") }.title)
+        assertEquals("alpha", sessions.first { it.cwd.endsWith("/alpha") }.title)
+        assertEquals("beta", sessions.first { it.cwd.endsWith("/beta") }.title)
         // A shell whose pane is gone has no `process` key at all.
         assertTrue(sessions.count { it.process.isEmpty() } >= 1)
     }
