@@ -102,3 +102,18 @@ tasks.withType<Test>().configureEach {
     dependsOn(buildSessionHost)
     systemProperty("java.library.path", sessionHostDir.absolutePath)
 }
+
+// The APK packages the Rust session per ABI from `composeApp/src/androidMain/jniLibs`, and until
+// now nothing rebuilt those files: `build-session.sh android` was a step someone had to remember.
+// A stale `.so` is invisible - the app installs, connects, and every session fix is simply absent,
+// which is how a four-hour-old library was blamed on the radio. Always run it before packaging;
+// cargo is incremental, so the common case is a one-second no-op.
+val buildSessionAndroid = tasks.register<Exec>("buildSessionAndroid") {
+    workingDir = rootProject.layout.projectDirectory.dir("native").asFile
+    environment("JAVA_HOME", System.getProperty("java.home"))
+    commandLine("./build-session.sh", "android")
+    outputs.upToDateWhen { false }
+}
+tasks.matching { it.name.startsWith("merge") && it.name.contains("JniLib") }.configureEach {
+    dependsOn(buildSessionAndroid)
+}
