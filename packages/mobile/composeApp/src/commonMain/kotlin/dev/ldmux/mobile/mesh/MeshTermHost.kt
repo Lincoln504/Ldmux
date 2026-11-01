@@ -99,7 +99,10 @@ fun meshHeaderStatus(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null):
 fun meshTermLabel(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): String = when (view) {
     MeshTermView.Idle -> "meshmore · not attached"
     is MeshTermView.LinkDown -> meshLinkLabel(view.link)
-    MeshTermView.Handshaking -> "meshmore · securing the link (can take minutes)"
+    // "Can take minutes" was the old truth (a single msg1 and a five-minute timeout). A handshake
+    // is three small records and is now retried every six seconds, so the honest label is the
+    // state, not a warning about how long it might take.
+    MeshTermView.Handshaking -> "meshmore · securing the link"
     MeshTermView.ProfileMissing -> "meshmore · linked, waiting for the host to describe the terminal"
     MeshTermView.Listing -> "meshmore · asking the host which shells are running"
     is MeshTermView.Choose -> "meshmore · choose a shell"

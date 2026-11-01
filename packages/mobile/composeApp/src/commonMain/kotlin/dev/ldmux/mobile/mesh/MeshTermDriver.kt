@@ -152,8 +152,18 @@ class MeshTermDriver(
     private val begin: () -> HandshakePort,
     private val selector: String = "",
     private val clock: () -> Long,
-    /** A handshake not answered in this long is reported as a dead link. Minutes are normal here. */
-    private val handshakeTimeoutMs: Long = 5 * 60_000,
+    /**
+     * A handshake not answered in this long is reported as a dead link.
+     *
+     * A handshake is three small records, so a minute is already generous - the old five made a
+     * lost `msg1` look like a dead host for most of a coffee break. The retry below is what makes
+     * a short timeout safe: the wait is retried every [handshakeRetryMs], not once.
+     */
+    private val handshakeTimeoutMs: Long = 60_000,
+    /** How often an unanswered handshake is asked again, with fresh keys each time. */
+    private val handshakeRetryMs: Long = 6_000,
+    /** How many re-asks before the transport itself is judged dead and the connection rebuilt. */
+    private val handshakeRetries: Int = 3,
     /** How long the gateway may take to say what the radio did with one record. */
     private val sendTimeoutMs: Long = SEND_RESULT_TIMEOUT_MS,
 ) {
@@ -163,6 +173,22 @@ class MeshTermDriver(
 
     private var handshake: HandshakePort? = null
     private var handshakeSince = 0L
+
+    /**
+     * Set when this connection cannot be revived from the inside.
+     *
+     * **A transport that has stopped carrying records cannot be fixed by re-handshaking over it.**
+     * The retry sends `msg1` into the same socket the host stopped answering on, waits out the
+     * handshake timeout, and tries again for ever - which is what "the host stopped answering"
+     * looked like while the host was up and answering everything it was given (measured
+     * 2026-10-31: an accepted handshake count that kept climbing with zero bytes delivered). The
+     * only cure is a new socket, and that is the caller's to build: `run` returns here so the
+     * screen can rebuild the connection, which is what pressing refresh did by hand.
+     */
+    private var transportDead = false
+
+    /** How many times this connection has re-asked an unanswered handshake. */
+    private var handshakeTries = 0
 
     /**
      * When the host last said anything. Silence is not failure on a shell that has nothing to
@@ -219,6 +245,9 @@ class MeshTermDriver(
     /** Begin: needs a bound gateway. Sends handshake message 1 as the first record. */
     suspend fun start() = lock.withLock {
         check(handshake == null && session == null) { "already started" }
+        // A new connection gets a full set of handshake re-asks. `connect` itself is also the
+        // retry path inside one connection, which is why it does not reset this.
+        handshakeTries = 0
         connect()
     }
 
@@ -272,10 +301,11 @@ class MeshTermDriver(
         session?.close()
         session = null
         terminalView = MeshTermView.LinkDown(state)
-        if (state == MeshLinkState.SessionFailed) {
-            recoverAt = clock() + recoverDelayMs
-            recoverDelayMs = (recoverDelayMs * 2).coerceAtMost(MAX_RECOVERY_MS)
-        }
+        // Every one of these is the transport's word, not the user's: a refused link, a handshake
+        // that got no answer, or a session the host stopped acknowledging. Re-handshaking over the
+        // same socket cannot fix any of them, so this connection is over and the caller builds the
+        // next one.
+        transportDead = true
     }
 
     /** The gateway link changed. Anything but bound is a visible [MeshTermView.LinkDown]. */
@@ -301,6 +331,7 @@ class MeshTermDriver(
                 terminalView = MeshTermView.LinkDown(e.state); publish(); return@withLock
             }
             session = s
+            handshakeTries = 0
             // A session that worked earns the fast retry back for the next failure.
             recoverDelayMs = FIRST_RECOVERY_MS
             recoverAt = 0
@@ -348,9 +379,29 @@ class MeshTermDriver(
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
             pump()
-        } else if (handshake != null && clock() - handshakeSince > handshakeTimeoutMs) {
-            handshake?.abandon(); handshake = null
-            failed(MeshLinkState.SessionFailed)
+        } else if (handshake != null) {
+            val waited = clock() - handshakeSince
+            if (waited > handshakeTimeoutMs) {
+                handshake?.abandon(); handshake = null
+                failed(MeshLinkState.SessionFailed)
+            } else if (waited >= handshakeRetryMs && handshakeTries >= handshakeRetries) {
+                // Three unanswered handshakes over eighteen seconds is not a lost record. The
+                // transport is the suspect now, and only a new connection can test that.
+                handshake?.abandon(); handshake = null
+                failed(MeshLinkState.SessionFailed)
+            } else if (waited >= handshakeRetryMs) {
+                handshakeTries++
+                // **A handshake that was not answered is asked again, not waited out.** `msg1` is
+                // one record; on a radio that drops one in ten it can simply go missing, and until
+                // this nothing retried it - the driver sat on "securing the link" for the whole
+                // five-minute timeout first (measured on the device: 77 seconds on the counter with
+                // nothing on the air). A fresh handshake is a *different* packet (a new ephemeral
+                // key), which matters because the mesh drops byte-identical repeats.
+                handshake?.abandon()
+                handshake = null
+                terminalView = null
+                connect()
+            }
         }
         // The retry itself. Nothing else can bring a dead session back, and the user asking
         // again should not be the mechanism.
@@ -518,20 +569,26 @@ class MeshTermDriver(
 
     /** Drive the whole thing from the gateway's flows until cancelled. */
     suspend fun run() = coroutineScope {
-        launch { gateway.received.collect { onRecord(it) } }
-        launch { gateway.state.collect { onGatewayState(it) } }
-        launch { gateway.status.collect { tick() } }
-        start()
+        val watchers = listOf(
+            launch { gateway.received.collect { onRecord(it) } },
+            launch { gateway.state.collect { onGatewayState(it) } },
+            launch { gateway.status.collect { tick() } },
+        )
         try {
-            while (true) {
+            start()
+            while (!transportDead) {
                 val wake = nextWakeMs()
                 val wait = if (wake == null) IDLE_TICK_MS else (wake - clock()).coerceIn(50L, IDLE_TICK_MS)
                 delay(wait)
                 tick()
             }
-        } catch (e: CancellationException) {
+        } finally {
+            // `coroutineScope` joins its children, so the collectors have to be stopped or this
+            // never returns - and returning is the point: the transport is dead and the caller
+            // builds the next connection. Detach first: this phone is letting the shell go, and
+            // the host should be free to give it back to a desk window.
             detach()
-            throw e
+            watchers.forEach { it.cancel() }
         }
     }
 

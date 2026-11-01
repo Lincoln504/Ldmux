@@ -101,9 +101,23 @@ fun MeshTerminalScreen(
     // was to force-stop the app. Rebuilding the connection is the whole retry.
     var attempt by remember(plan) { mutableStateOf(0) }
     val conn = remember(plan, attempt) { MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint) }
-    LaunchedEffect(conn) { conn.run() }
+    // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport
+    // stopped carrying records - a radio that went quiet, a socket the host stopped answering on.
+    // Nothing inside the driver can revive that, which is why the refresh button was the only cure
+    // (measured 2026-10-31: "securing the link" until reload, then instantly working). The rebuild
+    // is that reload, on the same backoff: two seconds doubling to thirty, and back to two as soon
+    // as the link is live.
+    var rebuilds by remember(plan) { mutableStateOf(0) }
+    LaunchedEffect(conn) {
+        conn.run()
+        val wait = (2_000L shl rebuilds.coerceAtMost(4)).coerceAtMost(30_000L)
+        rebuilds += 1
+        delay(wait)
+        attempt += 1
+    }
     DisposableEffect(conn) { onDispose { conn.close() } }
     val view by conn.driver.view.collectAsState()
+    LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
     val shells by conn.driver.shells.collectAsState()
 
     val origin = remember { TimeSource.Monotonic.markNow() }

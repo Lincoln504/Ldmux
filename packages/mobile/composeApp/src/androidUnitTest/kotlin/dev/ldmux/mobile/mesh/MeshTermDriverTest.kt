@@ -3,6 +3,7 @@ package dev.ldmux.mobile.mesh
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -83,6 +84,22 @@ class MeshTermDriverTest {
     private fun driver(handshakeTimeoutMs: Long = 300_000, sendTimeoutMs: Long = 10_000) =
         MeshTermDriver(gw, { hs }, selector = "", clock = { now }, handshakeTimeoutMs = handshakeTimeoutMs, sendTimeoutMs = sendTimeoutMs)
 
+    /** An unanswered handshake is asked again in seconds, not waited out. */
+    @Test
+    fun an_unanswered_handshake_is_asked_again_with_new_keys(): Unit = runBlocking {
+        val d = driver()
+        d.start()
+        assertIs<MeshTermView.Handshaking>(d.view.value)
+        val first = gw.sent.size
+        now += 5_000
+        d.tick()
+        assertEquals(first, gw.sent.size, "five seconds is not yet a retry")
+        now += 1_500
+        d.tick()
+        assertEquals(first + 1, gw.sent.size, "over six seconds it asks again")
+        assertIs<MeshTermView.Handshaking>(d.view.value, "and the screen still says so")
+    }
+
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
 
@@ -100,44 +117,24 @@ class MeshTermDriverTest {
 
     /** A session the host stopped answering is retried on a schedule, not left dead. */
     @Test
-    fun a_dead_session_is_retried_with_a_new_handshake(): Unit = runBlocking {
+    fun a_dead_session_ends_the_connection_so_it_can_be_rebuilt(): Unit = runBlocking {
         val d = driver()
         live(d)
-        val before = gw.sent.size
         sess.health = SessionHealth(failed = true, peerClosed = false, needsRekey = false, pending = 3, dropped = 0)
         d.tick()
         assertIs<MeshTermView.LinkDown>(d.view.value, "the screen says the host stopped answering")
         assertTrue(sess.freed, "the dead session is dropped, not kept")
-        val wake = d.nextWakeMs()
-        assertEquals(now + 2_000, wake, "the first retry is two seconds later")
-        now = wake!!
-        d.tick()
-        assertEquals(before + 1, gw.sent.size, "the retry is a new handshake message 1")
-        assertIs<MeshTermView.Handshaking>(d.view.value)
+        assertNull(d.nextWakeMs(), "no retry is scheduled: this socket cannot be revived from here")
+        // The run ends so the caller can build a new connection - a new socket, a new handshake.
+        // Re-handshaking over a transport that stopped carrying records is what made the phone
+        // sit on "securing the link" until the refresh button rebuilt everything by hand.
+        val done = withTimeout(5_000) { d.run(); true }
+        assertTrue(done, "run returns instead of retrying into a dead transport")
     }
 
-    /** The wait doubles, so a host that is off is not hammered with airtime. */
-    @Test
-    fun the_retry_backs_off_and_stops_growing(): Unit = runBlocking {
-        var dead = false
-        val d = MeshTermDriver(
-            gw,
-            { if (dead) throw MeshSessionException(MeshLinkState.SessionFailed, 1, "gone") else hs },
-            selector = "",
-            clock = { now },
-        )
-        live(d)
-        sess.health = SessionHealth(failed = true, peerClosed = false, needsRekey = false, pending = 1, dropped = 0)
-        dead = true
-        val waits = ArrayList<Long>()
-        repeat(6) {
-            d.tick()
-            val wake = d.nextWakeMs() ?: error("a retry must be scheduled")
-            waits += wake - now
-            now = wake
-        }
-        assertEquals(listOf(2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L), waits)
-    }
+    // The retry backoff (two seconds doubling to thirty) is the screen's, not the driver's: the
+    // retry is now "build a new connection", so it lives where the connection is built
+    // (`MeshTerminalScreen`, `rebuilds`).
 
     /** A refused pairing is not retried: waiting cannot cure a token or a key. */
     @Test
@@ -151,6 +148,7 @@ class MeshTermDriverTest {
         d.start()
         assertIs<MeshTermView.LinkDown>(d.view.value)
         assertNull(d.nextWakeMs(), "nothing is scheduled: the screen offers the cure instead")
+        assertTrue(withTimeout(5_000) { d.run(); true }, "and the connection ends")
     }
 
     private suspend fun live(d: MeshTermDriver) {
@@ -559,11 +557,18 @@ class MeshTermDriverTest {
     }
 
     @Test
-    fun `a handshake nobody answers ends as a dead session after the timeout`() = runBlocking<Unit> {
+    fun `a handshake nobody answers is re-asked, then ends as a dead transport`() = runBlocking<Unit> {
+        // Six seconds per ask, three asks: a lost msg1 costs seconds, not the whole timeout, and a
+        // host that is really gone ends the connection so the screen can build a new one.
         val d = driver(handshakeTimeoutMs = 60_000); d.start()
-        now += 59_000; d.tick()
-        assertEquals(MeshTermView.Handshaking, d.view.value)
-        now += 2_000; d.tick()
+        val first = gw.sent.size
+        now += 6_500; d.tick()
+        assertEquals(first + 1, gw.sent.size, "the second ask")
+        now += 6_500; d.tick()
+        assertEquals(first + 2, gw.sent.size, "the third")
+        now += 6_500; d.tick()
+        assertEquals(first + 3, gw.sent.size, "the fourth")
+        now += 6_500; d.tick()
         assertEquals(MeshTermView.LinkDown(MeshLinkState.SessionFailed), d.view.value)
         assertTrue(hs.abandoned)
     }
