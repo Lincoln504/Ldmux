@@ -1350,6 +1350,7 @@ impl LdmuxDaemon {
     }
 
     /// Create a new session (the TS `handleNew`).
+    /// Create a session in the default grid (80x24), for callers that have no window of their own.
     pub async fn create_session(
         &mut self,
         kind: &str,
@@ -1357,6 +1358,28 @@ impl LdmuxDaemon {
         title: Option<&str>,
         created_by: &str,
     ) -> Result<SessionRecord, String> {
+        self.create_session_at(kind, cwd, title, created_by, 80, 24)
+            .await
+    }
+
+    /// Create a session in a known grid.
+    ///
+    /// **A shell born 80x24 in a 200-column window is wrong before it is right.** The pty starts at
+    /// the default size, everything the shell prints is laid out for it, and the resize that
+    /// arrives with the first attach then reflows all of it: the prompt is drawn twice and a
+    /// full-screen program paints at the wrong width first. Every caller that has a screen - a
+    /// window, a phone - knows its own grid, so it says so.
+    pub async fn create_session_at(
+        &mut self,
+        kind: &str,
+        cwd: &str,
+        title: Option<&str>,
+        created_by: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SessionRecord, String> {
+        let cols = cols.clamp(1, 1000);
+        let rows = rows.clamp(1, 1000);
         let kind = if kind == "shell" || kind == "pi" {
             kind.to_string()
         } else {
@@ -1412,8 +1435,8 @@ impl LdmuxDaemon {
         let spawn_resp = self
             .keeper_call(&km::KeeperMessage::Spawn(km::Spawn {
                 session_id: keeper_name.clone(),
-                cols: 80,
-                rows: 24,
+                cols: u64::from(cols),
+                rows: u64::from(rows),
                 cwd: Some(cwd.clone()),
                 command: if command.is_empty() {
                     None
@@ -1790,7 +1813,19 @@ impl LdmuxDaemon {
                     .get("createdBy")
                     .and_then(|v| v.as_str())
                     .unwrap_or("local");
-                let record = self.create_session(kind, cwd, title, created_by).await?;
+                // Optional, and additive: a caller that knows its grid says it, and one that does
+                // not keeps the old default.
+                let cols = params
+                    .get("cols")
+                    .and_then(|v| v.as_u64())
+                    .map_or(80, |v| v.clamp(1, 1000) as u16);
+                let rows = params
+                    .get("rows")
+                    .and_then(|v| v.as_u64())
+                    .map_or(24, |v| v.clamp(1, 1000) as u16);
+                let record = self
+                    .create_session_at(kind, cwd, title, created_by, cols, rows)
+                    .await?;
                 Ok(serde_json::json!({ "session": record }))
             }
             "kill" => {
@@ -3031,6 +3066,53 @@ mod tests {
         assert!(killed.exited_at.is_some());
         // The registry has the dead record.
         assert_eq!(d.registry().get(&id).unwrap().status, "dead");
+        drop(fk);
+    }
+
+    /// A new shell is born at the size its creator asked for.
+    ///
+    /// Every shell used to spawn 80x24 whatever made it, so a window twice that wide got a prompt
+    /// laid out for 80 columns and then a resize that reflowed it, and a full-screen program
+    /// painted at the wrong width before repainting.
+    #[tokio::test]
+    async fn a_new_shell_is_spawned_at_the_grid_it_was_asked_for() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path()).await.unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let r = d
+            .handle(
+                "new",
+                serde_json::json!({ "kind": "shell", "cwd": cwd, "cols": 132, "rows": 43 }),
+            )
+            .await
+            .unwrap();
+        let id = r["session"]["id"].as_str().unwrap().to_string();
+
+        // The fake keeper stores what it was told to spawn.
+        let listed = d.keeper_call(&ldmux_protocol::keeper::KeeperMessage::List(
+            ldmux_protocol::keeper::List {},
+        ));
+        let states = match listed.await.unwrap() {
+            ldmux_protocol::keeper::KeeperMessage::ListResult(lr) => lr.sessions,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let state = states
+            .iter()
+            .find(|s| s.session_id == format!("ldmux-{id}"))
+            .expect("the shell the daemon just made");
+        assert_eq!((state.cols, state.rows), (132, 43));
         drop(fk);
     }
 
