@@ -825,6 +825,13 @@ impl LdmuxDaemon {
     }
 
     /// End the shells of windows that are gone (see [`Self::live_prepass`]).
+    ///
+    /// **A window closing ends a viewer, not necessarily the shell.** There is one holder per
+    /// session, so a phone that took the shell displaced the desk window's claim and that window
+    /// is now only watching (see `mesh_bridge.rs`, `MESH_DEVICE`). `close_session` refuses to kill
+    /// a session somebody holds for exactly this reason, and this path bypassed that check:
+    /// closing a desk window killed a shell the phone was typing into. Only a shell held by
+    /// nobody but the desktop leaves with its window.
     async fn end_absent_windows(&mut self, absent: Vec<(String, u64)>) -> bool {
         let mut changed = false;
         for (id, since) in absent {
@@ -835,6 +842,18 @@ impl LdmuxDaemon {
             self.live_windows.remove(&id);
             changed = true;
             self.set_live_window(&id, None, None);
+            if let Some(claim) = self.ownership.owner(&id).cloned() {
+                if claim.device.kind != "desktop" {
+                    // Somebody else has it in their hands. Losing the window is news (the list
+                    // stops showing one), but the shell stays and so does the claim.
+                    println!(
+                        "ldmuxd: session {id} outlives its desk window ({} holds it)",
+                        claim.device.name
+                    );
+                    self.sessions_dirty = true;
+                    continue;
+                }
+            }
             let _ = self.kill_session(&id, "its desk window closed").await;
         }
         changed
@@ -3042,6 +3061,83 @@ mod tests {
         let (ended2, _) = d.close_session(&id2, "closed").await.unwrap();
         assert!(!ended2);
         assert_eq!(d.registry().get(&id2).unwrap().status, "running");
+        drop(fk);
+    }
+
+    /// A desk window closing must not kill a shell the phone holds.
+    ///
+    /// One holder per session, so a phone that takes a shell displaces the desk window's claim
+    /// and that window is then only watching. `close_session` refuses to kill what somebody
+    /// holds, and `end_absent_windows` used to bypass that: the window's process disappeared, the
+    /// daemon called `kill_session`, and the phone lost the shell it was typing into.
+    #[tokio::test]
+    async fn a_desk_window_closing_leaves_a_phone_held_shell_alone() {
+        let dir = scratch();
+        let keeper_sock = dir.join("keeper.sock");
+        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
+        let fk_serve = fk.clone();
+        let fk_sock = keeper_sock.clone();
+        tokio::spawn(async move {
+            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
+                .await
+                .unwrap();
+        });
+        wait_socket(&keeper_sock).await;
+
+        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let record = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
+        let id = record.id.clone();
+        d.live_windows.insert(
+            id.clone(),
+            LiveWindow {
+                workspace: "1".into(),
+                since: 0,
+                pid: None,
+            },
+        );
+        d.set_live_window(&id, Some("1".into()), None);
+        // The phone takes it, as `mesh_bridge` does on attach.
+        let phone = ldmux_protocol::rpc::DeviceInfo {
+            id: "mesh-link".into(),
+            name: "the mesh link".into(),
+            kind: "mesh".into(),
+        };
+        d.claim(&id, &phone, true);
+
+        let ended = d.end_absent_windows(vec![(id.clone(), 0)]).await;
+        assert!(ended, "the window record is gone, so the list has news");
+        assert_eq!(
+            d.registry().get(&id).unwrap().status,
+            "running",
+            "the phone is typing into it"
+        );
+        assert!(d.ownership.owner(&id).is_some(), "the phone still holds it");
+        assert!(d.live_windows.get(&id).is_none(), "but the window is gone");
+
+        // A shell nobody holds still ends with its window.
+        let record2 = d
+            .create_session("shell", &cwd, None, "local")
+            .await
+            .unwrap();
+        let id2 = record2.id.clone();
+        d.live_windows.insert(
+            id2.clone(),
+            LiveWindow {
+                workspace: "1".into(),
+                since: 0,
+                pid: None,
+            },
+        );
+        d.set_live_window(&id2, Some("1".into()), None);
+        d.end_absent_windows(vec![(id2.clone(), 0)]).await;
+        assert_eq!(d.registry().get(&id2).unwrap().status, "dead");
         drop(fk);
     }
 
