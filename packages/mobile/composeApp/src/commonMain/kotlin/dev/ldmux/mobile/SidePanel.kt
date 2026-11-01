@@ -248,12 +248,12 @@ internal fun SidePanel(
             // and landscape had the same four-in-a-row shape portrait did.
             ArrowPad(Modifier.fillMaxWidth(), press, gap = 6.dp)
             PanelDivider()
+            // `PgUp`/`PgDn` live in the arrow block above, exactly as portrait has
+            // them: one pad, one definition, and no key drawn twice in one panel.
             KeyRow(
                 listOf(
                     "Home" to { press("Home") },
                     "End" to { press("End") },
-                    "PgUp" to { press("PageUp") },
-                    "PgDn" to { press("PageDown") },
                 ),
             )
             PanelDivider()

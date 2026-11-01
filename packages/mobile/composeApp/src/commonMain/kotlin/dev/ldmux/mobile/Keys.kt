@@ -61,25 +61,45 @@ fun panelControlKeys(press: (String) -> Unit): List<Pair<String, () -> Unit>> = 
 )
 
 /**
- * The four arrows as a **position**, not a list.
+ * The six navigation keys as a **position**, not a list: two rows of three equal keys.
  *
- * Row 1 is `Up` alone; row 2 is `Left, Down, Right`. `Up` takes the whole width of
- * the pad, which puts it directly over `Down` and `Left`/`Right` either side of it,
- * so the block reads as a direction instead of four words in a row.
+ *     PgUp   Up   PgDn
+ *     Left  Down  Right
  *
- * The first version of this was `null, Up, null` over `Left, Down, Right`: an
- * *empty cell* above each of `Left` and `Right`. It drew the same picture and left
- * two holes in the bar — a cell that is not a key, in the one place a thumb goes
- * without looking (reported on the phone, 2026-10-25: "blank button spaces above
- * the left and right arrows"). The list has no `null` in it any more, so the
- * layout cannot grow a blank back: every item is a key.
+ * `Up` sits directly over `Down` and `Left`/`Right` either side of it, so the block
+ * reads as a direction rather than four words in a row. Every cell holds one key of
+ * one width, which is the part that took three attempts:
+ *
+ * The first version was `null, Up, null` over `Left, Down, Right`: an *empty cell*
+ * above each of `Left` and `Right`. It drew the same picture and left two holes in
+ * the bar, in the one place a thumb goes without looking (reported on the phone,
+ * 2026-10-25: "blank button spaces above the left and right arrows"). The list has
+ * no `null` in it any more, so the layout cannot grow a blank back.
+ *
+ * The second filled those holes with `Up` itself, one key spanning the whole row.
+ * Drawn at three times the width of `Down`, `Left` and `Right`, the most-used key in
+ * a terminal looked like a banner and not a direction, and the block read as two
+ * rows of different kinds (reported on the phone, 2026-11-01: "the up arrow is extra
+ * long; it should be the same width").
+ *
+ * So the two cells beside `Up` are the page keys, and they are the right two: a phone
+ * terminal scrolls history far more often than it moves a cursor, both were already
+ * in the bar's top row at a sixth of its width each, and page-up over page-down beside
+ * the arrows is the cluster every keyboard puts together. The top row keeps `Esc`,
+ * `Tab`, `Home` and `End`, which is the rest of that family, and it is now four keys
+ * wide instead of six.
  *
  * It lives here, as data, so a layout change and the test that guards it read the
- * same thing. The bar rendered `← ↑ ↓ →` inline for a long time and nothing
- * noticed, because there was nothing to notice: the shape was a call site, not a
- * value.
+ * same thing. The bar rendered `← ↑ ↓ →` inline for a long time and nothing noticed,
+ * because there was nothing to notice: the shape was a call site, not a value.
+ */
+/*
+ * The names are the *protocol's*, not the labels: `press` sends what it is given, and the bar
+ * used to spell the label at the call site (`"PgUp" to { press("PageUp") }`). A pad that
+ * carried the label would send a key called `PgUp`, which the host has never heard of - so the
+ * label is drawn by `glyphFor` and the name is what travels.
  */
 val ARROW_PAD_ROWS: List<List<String>> = listOf(
-    listOf("Up"),
+    listOf("PageUp", "Up", "PageDown"),
     listOf("Left", "Down", "Right"),
 )

@@ -114,9 +114,9 @@ internal fun PortraitBar(
                 "Tab" to { press("Tab") },
                 "Home" to { press("Home") },
                 "End" to { press("End") },
-                "PgUp" to { press("PageUp") },
-                "PgDn" to { press("PageDown") },
             ),
+            // `PgUp`/`PgDn` are in the pad below, where every cell is one key wide:
+            // keeping them here as well drew the same key twice in one bar.
             leading = menuHere,
         )
         // The typing half of the bar and the arrow block share the width, two rows
@@ -324,5 +324,9 @@ private fun glyphFor(name: String): String = when (name) {
     "Down" -> "\u2193"
     "Left" -> "\u2190"
     "Right" -> "\u2192"
+    // Four letters in a seventh of the bar is not a word, it is a smudge; the two page keys
+    // keep the label the rest of the app uses for them.
+    "PageUp" -> "PgUp"
+    "PageDown" -> "PgDn"
     else -> name
 }

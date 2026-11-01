@@ -216,22 +216,40 @@ class ModifiersTest {
     }
 
     /**
-     * The arrows are a block, not a row: `Up` over `Down`, `Left` and `Right` either
-     * side of it. Both bars render this value, so this test guards both.
+     * The navigation keys are a block, not a row: `Up` over `Down`, `Left` and
+     * `Right` either side of it, the page keys beside `Up`. Both bars render this
+     * value, so this test guards both.
      */
     @Test
-    fun `the arrow pad is a cross with no empty cells`() {
+    fun `the arrow pad is a cross of six equal keys`() {
         assertEquals(2, ARROW_PAD_ROWS.size)
-        assertEquals(listOf("Up"), ARROW_PAD_ROWS[0])
+        assertEquals(listOf("PageUp", "Up", "PageDown"), ARROW_PAD_ROWS[0])
         assertEquals(listOf("Left", "Down", "Right"), ARROW_PAD_ROWS[1])
-        // Every cell is a key. The first version had `null, Up, null` over the row
-        // of three, which drew the same cross and left two blank cells above `Left`
-        // and `Right` — reported on the phone 2026-10-25. `Up` is one wide key now,
-        // so it is centred over `Down` by taking the space.
+        // Every cell is a key: the original had `null, Up, null` over the row of
+        // three and left two blank cells above `Left` and `Right` (reported
+        // 2026-10-25).
         assertEquals(
-            listOf("Up", "Left", "Down", "Right"),
+            listOf("PageUp", "Up", "PageDown", "Left", "Down", "Right"),
             ARROW_PAD_ROWS.flatten(),
             "no blank cells: every item in the pad is a key",
+        )
+        // **Every row is three keys, so no key is drawn wider than another.** The
+        // version in between put `Up` alone on its row, which `weight(1f)` stretched
+        // to three times `Down`'s width (reported 2026-11-01: "the up arrow is extra
+        // long; it should be the same width"). A row of a different length is the
+        // only way that can come back.
+        assertEquals(
+            listOf(3, 3),
+            ARROW_PAD_ROWS.map { it.size },
+            "rows of equal length keep every key one width",
+        )
+        // **Names are the protocol's, not the labels.** `press` sends what it is handed, so a
+        // pad carrying `PgUp` would ask the host for a key that does not exist; the bar draws
+        // `PgUp` through `glyphFor` and sends `PageUp`.
+        assertEquals(
+            listOf("Down", "Left", "PageDown", "PageUp", "Right", "Up"),
+            ARROW_PAD_ROWS.flatten().sorted(),
+            "every key in the pad is a name the protocol has",
         )
     }
 }
