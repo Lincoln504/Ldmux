@@ -1007,9 +1007,28 @@ impl LdmuxDaemon {
     /// whether anything a client can see changed, which is the signal to push a
     /// fresh session list.
     pub async fn maintain(&mut self) -> Result<bool, String> {
-        let states = match self.keeper_call(&KeeperMessage::List(km::List {})).await? {
-            KeeperMessage::ListResult(lr) => lr.sessions,
-            _ => Vec::new(),
+        let states = match self.keeper_call(&KeeperMessage::List(km::List {})).await {
+            Ok(KeeperMessage::ListResult(lr)) => {
+                self.keeper.note_answer();
+                lr.sessions
+            }
+            Ok(_) => {
+                self.keeper.note_answer();
+                Vec::new()
+            }
+            Err(e) => {
+                // **A wedged keeper is worse than a dead one.** It binds and accepts, so every
+                // cheap liveness probe says alive, while nothing is answered: the session list
+                // stops changing, every shell is unreachable, and only a service restart cures
+                // it. A dead keeper needs nothing here - `keeper_call` already respawned it.
+                // Only this periodic tick is allowed to replace one, never an interactive call:
+                // replacing it kills every shell the keeper holds.
+                if self.keeper.note_mute() {
+                    eprintln!("ldmuxd: keeper stopped answering; replacing it ({e})");
+                    self.keeper.replace_wedged().await?;
+                }
+                return Err(e);
+            }
         };
         self.kill_dead_keeper_sessions(&states).await;
         let plan = self.maintain_plan(&states);

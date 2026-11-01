@@ -40,7 +40,18 @@ pub struct KeeperSupervisor {
     /// The systemd user unit that runs the keeper and the absolute `systemctl`,
     /// when the keeper is started through systemd (see the module docs).
     unit: Option<KeeperUnit>,
+    /// Consecutive keeper calls that reached a listening keeper and got no answer.
+    ///
+    /// `is_alive` is a socket connect, and **a wedged keeper still accepts**: it binds, accepts,
+    /// and never answers. Liveness therefore said "alive" for ever while every shell was
+    /// unreachable, and only restarting the service brought the daemon back - the shell list just
+    /// stopped updating with nothing to say. One silent call is a slow reply under load; several
+    /// in a row from the periodic tick is a wedged process, and the only cure is a new one.
+    mute_streak: AtomicU32,
 }
+
+/// How many consecutive unanswered keeper calls mean a wedged process rather than a slow one.
+pub const MUTE_LIMIT: u32 = 3;
 
 /// How to start the keeper through systemd.
 #[derive(Debug, Clone)]
@@ -96,6 +107,7 @@ impl KeeperSupervisor {
             keeper_bin,
             last_pid: AtomicU32::new(0),
             unit: KeeperUnit::from_env(),
+            mute_streak: AtomicU32::new(0),
         }
     }
 
@@ -156,6 +168,42 @@ impl KeeperSupervisor {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         false
+    }
+
+    /// Count a call that timed out, and say whether the keeper has to be replaced.
+    pub fn note_mute(&self) -> bool {
+        self.mute_streak.fetch_add(1, Ordering::SeqCst) + 1 >= MUTE_LIMIT
+    }
+
+    /// A keeper answered: whatever it was doing, it is doing its job.
+    pub fn note_answer(&self) {
+        self.mute_streak.store(0, Ordering::SeqCst);
+    }
+
+    /// Replace a keeper that accepts connections and never answers.
+    ///
+    /// This is destructive by design and is only ever reached from the periodic tick: the
+    /// keeper's children die with it, so every shell ends. That is the lesser harm - a wedged
+    /// keeper has already made every shell unreachable, and leaving it in place means the daemon
+    /// reports a list that never changes and nothing ever recovers. A dead keeper needs none of
+    /// this: `keeper_call` respawns it already.
+    pub async fn replace_wedged(&self) -> Result<(), String> {
+        let pid = self.last_pid();
+        if pid != 0 {
+            let p = nix::unistd::Pid::from_raw(pid as i32);
+            let _ = nix::sys::signal::kill(p, nix::sys::signal::Signal::SIGTERM);
+            for _ in 0..20 {
+                if !self.is_alive().await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            // A process that never answered may never read its default signal either.
+            let _ = nix::sys::signal::kill(p, nix::sys::signal::Signal::SIGKILL);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        self.note_answer();
+        self.ensure().await
     }
 
     /// Ensure the keeper is running (auto-spawn if absent).
@@ -295,8 +343,22 @@ impl KeeperSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ldmux_protocol::keeper::{KeeperMessage, List};
     use nix::sys::signal;
     use nix::unistd::Pid;
+
+    /// Three mutes in a row is a wedged keeper; one is a slow reply.
+    #[test]
+    fn a_mute_streak_only_reaches_the_limit_on_the_third_silence() {
+        let dir = std::env::temp_dir().join(format!("ldmux-mute-{}", std::process::id()));
+        let sup = KeeperSupervisor::new(dir, PathBuf::from("/nonexistent"));
+        assert!(!sup.note_mute(), "one slow call is not a wedge");
+        assert!(!sup.note_mute());
+        assert!(sup.note_mute(), "the third is");
+        // Any answer clears it: a keeper that came back is not replaced.
+        sup.note_answer();
+        assert!(!sup.note_mute(), "the streak starts again");
+    }
 
     /// The `ldmux-keeper` binary, in the target dir next to this test binary.
     fn keeper_bin() -> PathBuf {
@@ -330,6 +392,41 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// A keeper that accepts and never answers is replaced, because nothing else notices it.
+    ///
+    /// `SIGSTOP` is the honest reproduction: the process is alive, its socket is bound and the
+    /// kernel queues connections to it, so `is_alive` says yes for ever, and every request waits
+    /// out the full timeout. That is what "the keeper wedged" means, and before this nothing in
+    /// the daemon could tell it from a healthy keeper.
+    #[tokio::test]
+    async fn a_stopped_keeper_is_replaced_and_the_new_one_answers() {
+        let state_dir = scratch_dir();
+        let sup = KeeperSupervisor::new(state_dir, keeper_bin());
+        sup.ensure().await.unwrap();
+        let pid = sup.last_pid();
+        assert_ne!(pid, 0);
+        signal::kill(Pid::from_raw(pid as i32), signal::Signal::SIGSTOP).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(sup.is_alive().await, "a stopped keeper still accepts connections");
+
+        sup.replace_wedged().await.unwrap();
+
+        assert!(sup.is_alive().await, "a new keeper is listening");
+        assert_ne!(sup.last_pid(), pid, "and it is not the stopped one");
+        let sock = sup.socket_path().to_str().unwrap().to_string();
+        let answered = ldmux_protocol::keeper_call::keeper_call(
+            &sock,
+            &KeeperMessage::List(List {}),
+            ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+        )
+        .await;
+        assert!(
+            matches!(answered, Ok(KeeperMessage::ListResult(_))),
+            "the new keeper answers: {answered:?}"
+        );
+        kill_keeper(&sup).await;
     }
 
     /// The ssh-agent pattern (plan §3.2): `ensure` auto-spawns a dead keeper,
