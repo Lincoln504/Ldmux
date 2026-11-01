@@ -2486,7 +2486,17 @@ impl LdmuxDaemon {
                 .mode(0o600)
                 .open(&tmp)?;
             f.write_all(Value::Array(rows).to_string().as_bytes())?;
-            std::fs::rename(&tmp, &path)
+            // **The bytes reach the disk before the name does.** The rename is atomic against a
+            // reader, not against a power cut: without the fsync the directory entry can land while
+            // the data is still in the page cache, and ext4's documented outcome for that pair is a
+            // zero-length file - every claim silently lost, which is the one thing this file exists
+            // to prevent. The directory sync is what makes the rename itself durable.
+            f.sync_all()?;
+            std::fs::rename(&tmp, &path)?;
+            if let Some(dir) = path.parent() {
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+            Ok(())
         };
         if let Err(e) = write() {
             eprintln!("ldmuxd: claims save: {e}");

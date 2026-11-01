@@ -60,6 +60,7 @@ import dev.ldmux.mobile.RouteChoice
 import dev.ldmux.mobile.PortraitBar
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
+import kotlin.random.Random
 import kotlin.time.TimeSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -100,7 +101,14 @@ fun MeshTerminalScreen(
     // unreachable gateway each left the screen stuck with no action but leaving; the only cure
     // was to force-stop the app. Rebuilding the connection is the whole retry.
     var attempt by remember(plan) { mutableStateOf(0) }
-    val conn = remember(plan, attempt) { MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint) }
+    // **A rebuilt connection comes back to the same shell.** The attach carries an id, so a resume is
+    // one record instead of a fresh list and a tap: a drop costs the user a pause, not their place.
+    // Keyed on the plan rather than the connection, because the connection is thrown away on every
+    // rebuild, and that is exactly the value that must survive it.
+    var resumeShell by remember(plan) { mutableStateOf("") }
+    val conn = remember(plan, attempt) {
+        MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint, selector = resumeShell)
+    }
     // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport
     // stopped carrying records - a radio that went quiet, a socket the host stopped answering on.
     // Nothing inside the driver can revive that, which is why the refresh button was the only cure
@@ -110,9 +118,13 @@ fun MeshTerminalScreen(
     var rebuilds by remember(plan) { mutableStateOf(0) }
     LaunchedEffect(conn) {
         conn.run()
-        val wait = (2_000L shl rebuilds.coerceAtMost(4)).coerceAtMost(30_000L)
+        // **Full jitter, because two ends that double in lockstep keep colliding.** The cap is the same
+        // two-to-thirty seconds as before, but the wait is drawn uniformly below it: a phone and a host
+        // that both back off on 2, 4, 8, 16 meet again on 2, 4, 8, 16, which is the shape every account
+        // of a reconnect storm prescribes against.
+        val cap = (2_000L shl rebuilds.coerceAtMost(4)).coerceAtMost(30_000L)
         rebuilds += 1
-        delay(wait)
+        delay(Random.nextLong(1, cap + 1))
         attempt += 1
     }
     DisposableEffect(conn) { onDispose { conn.close() } }
@@ -120,9 +132,18 @@ fun MeshTerminalScreen(
     val attemptNo by conn.driver.attempt.collectAsState()
     LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
     val shells by conn.driver.shells.collectAsState()
+    // Learned from the driver, not from the tap: a shell the host chose for us (the one-shell attach)
+    // resumes exactly as reliably as one the user picked.
+    LaunchedEffect(shells.current) { shells.current?.let { resumeShell = it } }
 
     val origin = remember { TimeSource.Monotonic.markNow() }
     val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
+    // **The input queue belongs to the connection, the picture does not.** Carrying a batcher across a
+    // rebuild re-delivers text that the old session had already accepted: measured 2026-11-01, a
+    // single `input text` came out as `yhgecho dsh9 > /tmpmecho dsh9 > /tmp/meshin9` in the shell -
+    // the tail of the old queue prepended to the new one. Typed text is addressed to one session and
+    // one sequence space, so it dies with it; only the frame below survives, because a picture has no
+    // addressee.
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
     val source = remember(conn) { MeshTerminalSource(handle) }
@@ -193,6 +214,12 @@ fun MeshTerminalScreen(
     val windowSize = LocalWindowInfo.current.containerSize
     val portrait = windowSize.height >= windowSize.width
     LaunchedEffect(portrait) { if (portrait) { keyboardWanted = true }; menuOpen = false }
+    // **A rebuilt connection asks for the keyboard again.** The surface - and the hidden field that
+    // carries the IME - is recreated with the connection, so a keyboard the user had open stays
+    // drawn by the system while the new field has never been focused: typing went nowhere after a
+    // resume (measured 2026-11-01, a command typed 12 s after a gateway restart never reached the
+    // pty). Nothing about wanting to type changed, so nothing about the request should either.
+    LaunchedEffect(conn) { if (keyboardWanted) keyboardRequest++ }
     val typing = portrait && keyboardWanted
 
     // Dictation is the tailnet's, with its own state and banner: it types into the shell, which on
@@ -210,7 +237,13 @@ fun MeshTerminalScreen(
     }
 
     val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
-    val openList = { chosen = emptyList(); showList = true; scope.launch { conn.driver.listShells() }; Unit }
+    // Leaving the terminal is the user's decision, so it is also the one that cancels the resume: a
+    // rebuild after this must land on the list, not drag them back into a shell they left.
+    val openList = {
+        chosen = emptyList(); showList = true; resumeShell = ""
+        scope.launch { conn.driver.listShells() }
+        Unit
+    }
     // The list's one action. The first ticked shell is page 1, as on the tailnet; the host takes one
     // `Attach` for it (`choose` on the first list, `selectShell` from a list opened over a live shell,
     // which spends nothing when it is the shell already attached).
@@ -240,8 +273,40 @@ fun MeshTerminalScreen(
 
     // safeDrawingPadding first: this is drawn instead of AppContent's own Column, so without it the
     // status line sits under the clock and the nav bar eats the last row.
+    // **A drop does not take the screen away.** While the link is being rebuilt, the last painted
+    // screen stays with the link's own line over it. Throwing the user back to the shell list for a
+    // two-second radio hiccup is what made a working session read as a dead app (measured 2026-11-01:
+    // every typing test ended on the launcher mid-sentence); the resume above brings the same shell
+    // back underneath, so this is a pause drawn as a pause.
+    // The last whole screen, kept across connections by the screen rather than by the source, so a
+    // rebuild can re-show it into a fresh source without carrying anything addressed to a session.
+    var heldScreen by remember(plan) { mutableStateOf<MeshScreen?>(null) }
+    LaunchedEffect(source, view) { meshScreenToShow(view)?.let { heldScreen = it } }
+    val holding = !terminalLive && !showList && resumeShell.isNotEmpty() && heldScreen != null &&
+        (view is MeshTermView.LinkDown || view is MeshTermView.Handshaking || view is MeshTermView.Idle)
+
     Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
-        if (terminalLive && !showList) {
+        if (holding) {
+            Column(Modifier.weight(1f).fillMaxWidth()) {
+                // The one line that explains the pause, in the terminal's own type so it reads as the
+                // link talking rather than as chrome.
+                Text(
+                    meshTermLabel(view).removePrefix("meshmore · "),
+                    color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+                val keep = heldScreen
+                LaunchedEffect(source, keep) { if (keep != null) source.show(keep) }
+                TerminalSurfaceFor(
+                    source = source,
+                    key = resumeShell,
+                    config = config,
+                    typing = false,
+                    active = false,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
+            }
+        } else if (terminalLive && !showList) {
             // The terminal, and nothing above it: the tailnet's terminal has no header either. The
             // header belongs to the list screen, which is where Settings is, as on the tailnet.
             val pages = meshPagesFor(shells, pageOrder)

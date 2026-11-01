@@ -100,12 +100,21 @@ first interval is chosen to exceed the observed handshake round trip rather than
 give-up is unchanged in spirit (the transport is not abandoned quickly) but is now ~56 s of real
 waiting instead of 18 s of self-defeating churn.
 
-### 3.3 A rebuilt connection keeps the terminal, and resumes the shell
+### 3.3 A rebuilt connection keeps the terminal, and resumes the shell (done)
 
-Dropping to the launcher on every blip is why the app "keeps handshaking". The screen keeps the last
-frame, shows the link state as a ribbon over it, rebuilds underneath, and **re-attaches the same shell
-id** rather than asking the host to list again. The claim already survives (`7a8ef08`), so the shell is
+Dropping to the launcher on every blip is why the app "keeps handshaking". Now the last painted screen
+stays where it is, the link's own line sits over it, and the rebuild **re-attaches the same shell id**
+rather than asking the host to list again. The claim already survives (`7a8ef08`), so the shell is
 there to come back to.
+
+The split is the important part: **the picture belongs to the screen, the input queue belongs to the
+connection.** Carrying a batcher across a rebuild re-delivers text the old session had already
+accepted - measured 2026-11-01, one `input text` came out as `yhgecho dsh9 > /tmpmecho dsh9 >
+/tmp/meshin9` because the tail of the old queue was prepended to the new one. Typed text is addressed
+to one session and one sequence space, so it dies with that session. A picture has no addressee.
+
+Leaving the terminal cancels the resume: a rebuild after the user goes back to the list lands on the
+list.
 
 ### 3.4 A session has an identity that outlives a record
 
@@ -119,11 +128,11 @@ This is QUIC's connection ID and mosh's state number, applied to our own framing
 format, so both ends move together: `STREAM_VERSION` 4 → 5 was the last such move, and this is the same
 kind of change.
 
-### 3.5 Backoff gets jitter
+### 3.5 Backoff gets jitter (done)
 
-The screen's 2 s → 30 s doubling (`MeshTerminalScreen.kt:102-117`) gains full jitter:
-`delay = random(0, min(cap, base × 2^attempt))`. With two ends rebuilding, uncorrelated retries are the
-difference between a collision loop and a recovery.
+The screen's 2 s → 30 s ladder draws each wait uniformly below its cap. Two ends that both double on
+2, 4, 8, 16 meet again on 2, 4, 8, 16; that is the shape every account of a reconnect storm prescribes
+against.
 
 ### 3.6 Keep the two failure detectors separate
 
@@ -133,6 +142,12 @@ Already true, and worth writing down so it stays true:
 "wait longer", never "the peer is gone"; only the silence detectors may rebuild anything.
 
 ---
+
+### 3.7 A rebuilt surface has to be able to type again (done)
+
+The surface and the hidden field that carries the IME are recreated with the connection. The system
+keyboard stays drawn because the window still wants one, but the new field has never been focused, so
+typing goes nowhere. The screen now asks for the keyboard again on every new connection.
 
 ## 4. What not to do
 
@@ -159,3 +174,34 @@ Already true, and worth writing down so it stays true:
 - Measurement 2026-11-01 00:1x: 42 s of samples, `state=ready`, `hs` constant at 3, `rx` flat at 20
   bytes with `tx` advancing one record per 3 s — the heartbeat being acked. Idle links are stable; the
   churn appears only when a drop forces a rebuild.
+
+---
+
+## 6. Testing typing on a real phone
+
+Two ways in, and only one of them is robust.
+
+- **`adb shell input text`** injects through the input method, so it needs the hidden
+  `BasicTextField` to be focused. It works when it is (verified: `echo dshten > /tmp/meshin9` arrived
+  byte for byte) and silently does nothing when it is not, which is exactly the state a rebuild leaves
+  behind. It also splits long strings into several commits, so a partial send is indistinguishable
+  from a lost one.
+- **`adb shell input keyevent <code>`** goes in as hardware keys, which the surface already maps to
+  terminal keys through `onPreviewKeyEvent`. It needs no focus and no IME, and each key is one
+  observable event. `touch /tmp/m18` (15 key codes plus Enter) created the file on the host, and
+  `echo hi` printed `hi`. **Use this one.**
+
+A shell to type into must be chosen by evidence, not by name: several keeper children are plain
+`/bin/bash` with a pi session running inside them, and typing into one is a message to pi. The test
+for it is whether the bash process has children of its own, matched to the registry's session id by
+start time (`/proc/<pid>/stat` field 22 against `createdAt`, to the second). Measured 2026-11-01:
+`16db506fe9` runs pi, `9d1bac2059` is bare.
+
+## 7. Evidence from the device, 2026-11-01
+
+- Typing before a drop: `echo dshten > /tmp/meshin9` arrived exactly, file content `dshten`.
+- A gateway restart while attached: the terminal stayed on screen at 8, 20, 30, 45 and 60 s - never
+  the shell list - and `echo hi` was answered afterwards, so the link resumed underneath.
+- Keystrokes are not duplicated by a rebuild any more once the batcher is per-connection.
+- `claims.json` is now fsynced before its rename and the directory after it: the rename is atomic
+  against a reader, not against a power cut.
