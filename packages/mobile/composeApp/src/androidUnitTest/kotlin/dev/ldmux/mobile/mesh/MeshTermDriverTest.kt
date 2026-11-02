@@ -169,9 +169,9 @@ class MeshTermDriverTest {
 
     @Test
     fun `an unbound gateway is a visible link-down and nothing is sent`() = runBlocking<Unit> {
-        gw.state.value = MeshLinkState.Unreachable
+        gw.state.value = MeshLinkState.RadioUnavailable
         val d = driver(); d.start()
-        assertEquals(MeshTermView.LinkDown(MeshLinkState.Unreachable), d.view.value)
+        assertEquals(MeshTermView.LinkDown(MeshLinkState.RadioUnavailable), d.view.value)
         assertTrue(gw.sent.isEmpty())
     }
 
@@ -354,7 +354,7 @@ class MeshTermDriverTest {
 
     @Test
     fun `the three failure cases are three different values`() = runBlocking<Unit> {
-        val down = MeshTermView.LinkDown(MeshLinkState.Unreachable)
+        val down = MeshTermView.LinkDown(MeshLinkState.RadioUnavailable)
         val missing = MeshTermView.ProfileMissing
         val closed = MeshTermView.HostClosed(MeshTerm.Closed.EXITED)
         assertEquals(3, setOf(down, missing, closed).size)

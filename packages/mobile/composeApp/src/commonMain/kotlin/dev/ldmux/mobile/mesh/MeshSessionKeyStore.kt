@@ -3,7 +3,7 @@ package dev.ldmux.mobile.mesh
 /**
  * What the L3 session needs that the phone must keep: the phone's own static keypair, the host's
  * public key, and the 32-byte pre-shared secret (ADR-0020). All three are credentials, so they go
- * in platform secure storage with the pairing token, never in `AppPrefs`.
+ * in platform secure storage with the session keys, never in `AppPrefs`.
  *
  * This only stores and loads them. They arrive by the pairing link (`ldmux code --mesh`):
  * `MeshEnrollment` generates the phone's keypair, takes the host key and the secret from the
@@ -16,7 +16,7 @@ class MeshSessionKeys(
     val hostPublic: ByteArray,
     val psk: ByteArray,
     /**
-     * The host's MeshCore radio public key, which the gateway binds (`BIND`). Optional because the
+     * The host's MeshCore radio public key. Optional because the
      * daemon only knows it when told (`LDMUX_MESH_SELF`); without it the route reports
      * `NeedsPeer`, and nothing guesses one.
      */

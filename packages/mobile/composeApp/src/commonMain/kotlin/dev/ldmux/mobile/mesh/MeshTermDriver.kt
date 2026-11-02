@@ -15,7 +15,7 @@ import kotlinx.coroutines.withTimeout
 
 // ── The seams the driver needs, so it runs against fakes without a socket or a native library ──
 
-/** What the driver uses of the MeshMore gateway client ([MeshGatewayClient] implements it). */
+/** What the driver uses of the carrier ([MeshRadioGateway] implements it). */
 interface GatewayPort {
     val state: StateFlow<MeshLinkState>
     val status: StateFlow<MeshStatus?>
@@ -128,7 +128,7 @@ data class MeshShells(val entries: List<SessionEntry>, val current: String?)
 enum class InputOutcome { Accepted, NotLive, QueueFull, TooLong, Empty }
 
 /**
- * The phone's attach driver for the mesh terminal profile (ADR-0025): the gateway link, the
+ * The phone's attach driver for the mesh terminal profile (ADR-0025): the radio link, the
  * end-to-end session and the row codec, joined.
  *
  * It owns **policy**, and nothing platform or radio:
@@ -279,7 +279,7 @@ class MeshTermDriver(
     private suspend fun connect() {
         _attempt.value += 1
         val g = gateway.state.value
-        if (g != MeshLinkState.Bound && g != MeshLinkState.RadioUnavailable) {
+        if (g != MeshLinkState.Bound) {
             failed(g); publish(); return
         }
         val h = try { begin() } catch (e: MeshSessionException) {
@@ -786,7 +786,7 @@ class MeshTermDriver(
             // treated like a busy radio — the session's own retransmission covers it — and the rest
             // wait for the next pump.
             withTimeout(sendTimeoutMs) { gateway.send(record) }
-        } catch (e: MeshGatewayException) {
+        } catch (e: RadioLinkException) {
             terminalView = MeshTermView.LinkDown(e.state); return false
         } catch (e: TimeoutCancellationException) {
             return false
@@ -795,8 +795,11 @@ class MeshTermDriver(
         when (result.outcome) {
             // The host is not a contact, or the record is over what the radio takes: retrying
             // changes nothing, so it is a visible failure rather than a silent loop.
-            MeshSendOutcome.ErrNotFound -> terminalView = MeshTermView.LinkDown(MeshLinkState.Refused)
-            MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.SessionFailed)
+            MeshSendOutcome.ErrNotFound -> terminalView = MeshTermView.LinkDown(
+                if (gateway.state.value == MeshLinkState.NoPath) MeshLinkState.NoPath
+                else MeshLinkState.Refused,
+            )
+            MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.NoPath)
             // Busy, a local timeout or an unknown answer: the record was not acknowledged by the
             // host, so the session's own bounded retransmission covers it.
             else -> {}
@@ -834,7 +837,11 @@ class MeshTermDriver(
                     ),
                     absent = absentFeatures(unsupported),
                     budgetLeft = left,
-                    stalled = pending > 0 && (left == null || left == 0),
+                    // Unknown is not zero. The gateway route always reports a
+                    // budget; a direct radio does not, and treating null as
+                    // "stalled" painted "waiting for send budget" over a link
+                    // that was sending normally.
+                    stalled = pending > 0 && left != null && left == 0,
                     resyncing = resyncing,
                     painted = painted,
                 )

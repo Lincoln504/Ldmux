@@ -1,26 +1,17 @@
 package dev.ldmux.mobile
 
 import androidx.compose.material3.MaterialTheme
-import dev.ldmux.mobile.mesh.MeshHandoffApplied
-import dev.ldmux.mobile.mesh.MeshHandoffUi
 import dev.ldmux.mobile.mesh.MeshRouteActions
-import dev.ldmux.mobile.mesh.applyMeshHandoff
-import dev.ldmux.mobile.mesh.meshHandoffLine
-import dev.ldmux.mobile.mesh.meshHandoffWanted
-import dev.ldmux.mobile.mesh.openMeshMore
-import dev.ldmux.mobile.mesh.requestMeshHandoff
-import dev.ldmux.mobile.mesh.applyGatewayScan
 import dev.ldmux.mobile.mesh.applyMeshPairingScan
 import dev.ldmux.mobile.mesh.availableRoutes
 import dev.ldmux.mobile.mesh.currentPlatform
-import dev.ldmux.mobile.mesh.readMeshCredentials
 import dev.ldmux.mobile.mesh.MeshEnrollment
 import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshTerminalScreen
 import dev.ldmux.mobile.mesh.meshScreenFor
+import dev.ldmux.mobile.mesh.readMeshCredentials
 import dev.ldmux.mobile.mesh.libraryKeypair
 import dev.ldmux.mobile.mesh.meshSessionKeyStore
-import dev.ldmux.mobile.mesh.meshTokenStore
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -52,7 +43,7 @@ fun App() {
     // both. A setting that reached only some of the controls would be worse than no
     // setting: the whole reason this one exists is that the app disagreed with
     // itself about the same control in two places.
-    val store = remember { ConfigStore(AppPrefs.load(), MeshEnrollment(meshSessionKeyStore(), meshTokenStore(), ::libraryKeypair), AppPrefs::save) }
+    val store = remember { ConfigStore(AppPrefs.load(), MeshEnrollment(meshSessionKeyStore(), ::libraryKeypair), AppPrefs::save) }
     val config by store.config.collectAsState()
     MaterialTheme(colorScheme = LdmuxColors) {
         CompositionLocalProvider(
@@ -67,9 +58,9 @@ fun App() {
             // The route is chosen in the app's own header (a dropdown), so there is no
             // separate exit from the mesh route and no separate screen to come back from.
             val routes = availableRoutes(currentPlatform).map {
-                RouteChoice(if (it == MeshRoute.Mesh) "meshmore" else "tailnet", it == MeshRoute.Mesh)
+                RouteChoice(if (it == MeshRoute.Mesh) "mesh" else "tailnet", it == MeshRoute.Mesh)
             }
-            val current = RouteChoice(if (config.route == MeshRoute.Mesh) "meshmore" else "tailnet", config.route == MeshRoute.Mesh)
+            val current = RouteChoice(if (config.route == MeshRoute.Mesh) "mesh" else "tailnet", config.route == MeshRoute.Mesh)
             val choose: (RouteChoice) -> Unit = { c ->
                 store.update(config.copy(route = if (c.mesh) MeshRoute.Mesh else MeshRoute.Tailnet))
             }
@@ -77,52 +68,19 @@ fun App() {
             // equality, and the mesh screen keys its whole connection on it, so every recomposition of
             // this scope (opening Settings is one) made a new plan and with it a new connection: a
             // fresh handshake, which is minutes on the radio. The credentials version is the other
-            // way in: scanning or fetching a token changes secure storage and not the config.
+            // way in: scanning or fetching a pairing changes secure storage and not the config.
+            // `connectionKey` is the radio/tailnet identity without font, theme or other view state.
             var credentialsVersion by remember { mutableStateOf(0) }
-            val mesh = remember(config, credentialsVersion) { meshScreenFor(config) }
-            var handoffNote by remember { mutableStateOf<String?>(null) }
-            val runHandoff: suspend (Boolean, Boolean) -> String? = { replaceStale, openMeshMoreWhenClosed ->
-                val applied = applyMeshHandoff(
-                    requestMeshHandoff(), store.config.value, meshSessionKeyStore(), meshTokenStore(), replaceStale,
-                )
-                if (applied is MeshHandoffApplied.Linked) {
-                    store.update(applied.config)
-                    credentialsVersion++
-                }
-                // **"Not serving" is a thing the user can cure by opening MeshMore.** Its gateway is
-                // created with the app (the service is eager), so the press that asked for a token
-                // brings MeshMore up instead of stopping at a sentence about a switch that was
-                // already on (measured on the device, 2026-11-01). The automatic attempts never do
-                // this: the app must not jump to another app unless the user asked it to.
-                val opened = applied is MeshHandoffApplied.NotServing && openMeshMoreWhenClosed && openMeshMore()
-                if (opened) {
-                    "MeshMore is opening: its gateway starts with the app".also { handoffNote = it }
-                } else {
-                    meshHandoffLine(applied).also { handoffNote = it }
-                }
-            }
-            // Identity-stable: the screen's automatic attempt runs inside an effect, and an object
-            // that changes every recomposition restarts that effect every recomposition.
-            val handoff = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
-                remember { MeshHandoffUi({ handoffNote }) { replaceStale, ask -> runHandoff(replaceStale, ask) } }
-            } else null
-            // The automatic attempt: the ldmux code is in and the token is not, which is the moment the
-            // person would otherwise be told to type one. Keyed on the credentials, so it runs once per
-            // change and not on a loop, and it never replaces a token that is there.
-            LaunchedEffect(credentialsVersion) {
-                if (handoff != null && meshHandoffWanted(readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first)) {
-                    runHandoff(false, false)
-                }
-            }
+            val mesh = remember(config.connectionKey, credentialsVersion) { meshScreenFor(config) }
             // Settings is drawn **once, here**, for every route. It used to belong to the
             // tailnet surface, so the mesh terminal had no way in at all: you had to leave
             // the mesh route to reach Settings, and leaving then reported the route as
             // unavailable. One app, one Settings.
             var showSettings by remember { mutableStateOf(false) }
             if (mesh != null) {
-                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose, handoff = handoff)
+                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
             } else {
-                AppContent(config, store, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose, handoff = handoff)
+                AppContent(config, store, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
             }
             if (showSettings) {
                 SettingsDialog(
@@ -139,12 +97,10 @@ fun App() {
                     onUnpair = { store.unpair() },
                     mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
                         MeshRouteActions(
-                            credentials = { readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first },
+                            credentials = { readMeshCredentials(meshSessionKeyStore()).first },
                             onPairing = { text -> applyMeshPairingScan(text, store).also { credentialsVersion++ } },
-                            onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()).also { credentialsVersion++ } },
                             onConfig = { store.update(it) },
                             onUnpair = { store.unpairMesh(); credentialsVersion++ },
-                            onHandoff = { runHandoff(true, true) },
                         )
                     } else null,
                 )

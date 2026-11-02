@@ -4,8 +4,8 @@ import dev.ldmux.mobile.ConfigStore
 import dev.ldmux.mobile.LdmuxConfig
 import dev.ldmux.mobile.parseScannedPairing
 
-/** The three things a mesh attach needs, each of which can be missing on its own. */
-enum class MeshCredential { SessionKeys, GatewayToken, HostRadioKey }
+/** The two things a mesh attach needs, each of which can be missing on its own. */
+enum class MeshCredential { SessionKeys, HostRadioKey }
 
 /**
  * What the route setup screen shows, as one pure value: which credentials are present, what the
@@ -34,16 +34,15 @@ fun meshSetupView(
 ): MeshSetupView {
     val present = buildSet {
         if (state.hasSessionKeys) add(MeshCredential.SessionKeys)
-        if (state.hasToken) add(MeshCredential.GatewayToken)
         if (state.hasPeer) add(MeshCredential.HostRadioKey)
     }
-    // The order is the order of the ceremony: the ldmux code first (the gateway token is refused
-    // without it), then MeshMore's code. The radio key rides on the ldmux code too.
-    val missing = listOf(MeshCredential.SessionKeys, MeshCredential.HostRadioKey, MeshCredential.GatewayToken)
+    // The order is the order of the ceremony: the ldmux code carries both the
+    // session keys and the host radio key.
+    val missing = listOf(MeshCredential.SessionKeys, MeshCredential.HostRadioKey)
         .filter { it !in present }
     val resolution = resolveRoute(
         MeshRoute.Mesh, platform,
-        hasToken = state.hasToken, hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
+        hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
         sessionBuilt = sessionBuilt, terminalBuilt = terminalBuilt,
     )
     val exists = MeshRoute.Mesh in availableRoutes(platform)
@@ -61,41 +60,6 @@ fun meshSetupView(
  */
 fun chooseRoute(config: LdmuxConfig, route: MeshRoute, view: MeshSetupView): LdmuxConfig? =
     if (route in view.choosable) config.copy(route = route) else null
-
-/** Why a scanned gateway code was not taken. */
-enum class GatewayScanProblem {
-    /** Not a MeshMore gateway code (neither the structured payload nor a bare token). */
-    NotAGatewayCode,
-
-    /** No session keys yet: scanning the ldmux code comes first, and a token alone would be a half-pairing. */
-    NeedsSessionPairing,
-
-    /** Secure storage refused the write. */
-    StoreFailed,
-}
-
-sealed interface GatewayScan {
-    data class Saved(val config: LdmuxConfig) : GatewayScan
-    data class Refused(val problem: GatewayScanProblem) : GatewayScan
-}
-
-/**
- * Take a scanned MeshMore gateway code: refused without a session pairing, otherwise the token goes
- * to secure storage and the endpoint (when it is not the default) into [config]. It writes the
- * token **last**, so a failure leaves no half-state.
- */
-fun applyGatewayScan(text: String, config: LdmuxConfig, keys: MeshSessionKeyStore, tokens: MeshTokenStore): GatewayScan {
-    val code = parseGatewayCode(text) ?: return GatewayScan.Refused(GatewayScanProblem.NotAGatewayCode)
-    val haveKeys = runCatching { keys.load() }.getOrNull() != null
-    if (!haveKeys) return GatewayScan.Refused(GatewayScanProblem.NeedsSessionPairing)
-    try {
-        tokens.save(code.token)
-    } catch (_: Exception) {
-        return GatewayScan.Refused(GatewayScanProblem.StoreFailed)
-    }
-    val stored = if (code.endpoint == MeshGatewayEndpoint.DEFAULT) "" else code.endpoint.toString()
-    return GatewayScan.Saved(config.copy(meshGateway = stored))
-}
 
 /** Why a scanned ldmux code did not give the mesh route its keys. */
 enum class MeshPairingProblem { NotAnLdmuxCode, NoMeshKeys, LibraryUnavailable, StoreFailed }
@@ -121,12 +85,6 @@ fun applyMeshPairingScan(text: String, store: ConfigStore): MeshPairingScan {
     }
 }
 
-fun gatewayScanLine(p: GatewayScanProblem): String = when (p) {
-    GatewayScanProblem.NotAGatewayCode -> "not a MeshMore gateway code"
-    GatewayScanProblem.NeedsSessionPairing -> "scan the ldmux pairing code first (ldmux code --mesh-only)"
-    GatewayScanProblem.StoreFailed -> "could not store the token"
-}
-
 fun meshPairingLine(p: MeshPairingProblem): String = when (p) {
     MeshPairingProblem.NotAnLdmuxCode -> "not an ldmux code"
     MeshPairingProblem.NoMeshKeys -> "that code has no mesh keys (use ldmux code --mesh-only)"
@@ -138,7 +96,6 @@ fun meshPairingLine(p: MeshPairingProblem): String = when (p) {
 fun meshCredentialLine(c: MeshCredential, present: Boolean): String {
     val name = when (c) {
         MeshCredential.SessionKeys -> "session keys"
-        MeshCredential.GatewayToken -> "MeshMore gateway token"
         MeshCredential.HostRadioKey -> "host radio key"
     }
     return "${if (present) "✓" else "✗"} $name"

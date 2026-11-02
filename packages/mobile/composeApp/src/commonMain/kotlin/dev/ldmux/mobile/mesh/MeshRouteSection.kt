@@ -4,22 +4,19 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.ldmux.mobile.Accent
 import dev.ldmux.mobile.CodeScanner
 import dev.ldmux.mobile.Dim
-import dev.ldmux.mobile.Accent
 import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.LdmuxConfig
 import dev.ldmux.mobile.MiniTextButton
@@ -31,13 +28,9 @@ import dev.ldmux.mobile.Warn
  * credentials exist, what a mesh route would do, and which routes may be chosen are all computed
  * there and tested there.
  *
- * Honest by construction, and **terse by decision**: Settings is a list of controls and their
- * state, not a manual. The rate limit and the "MeshMore must be running" fact are stated where
- * they bite — on the mesh screen, next to the input — not here, where they were noise that pushed
- * the controls off the page.
- *  - **Hidden where the route does not exist** (iOS), not shown and disabled.
- *  - A route that cannot run is **not offered**; what is missing is a short mark on the
- *    credential line, in the order the ceremony goes.
+ * The phone owns the radio. There is no MeshMore token, no Binder handoff and no inter-app gateway
+ * endpoint here: one scan selects the radio, one preset action writes the operating point, and
+ * the ordinary ldmux pairing code supplies the L3 keys and the host radio key.
  */
 @Composable
 internal fun MeshRouteSection(
@@ -46,21 +39,19 @@ internal fun MeshRouteSection(
     readCredentials: () -> MeshCredentialState,
     /** Apply a scanned ldmux code to the mesh route ([applyMeshPairingScan]). */
     onMeshPairing: (String) -> MeshPairingScan,
-    /** Take a scanned MeshMore gateway code; returns the result (the caller stores the token). */
-    onGatewayCode: (String) -> GatewayScan,
-    /** Persist a changed config now (route, gateway) without closing Settings. */
+    /** Persist a changed config now (route, radio) without closing Settings. */
     onConfig: (LdmuxConfig) -> Unit,
     onUnpairMesh: () -> Unit,
-    onHandoff: suspend () -> String? = { null },
 ) {
-    val scope = rememberCoroutineScope()
     var credentials by remember { mutableStateOf(readCredentials()) }
     val view = meshSetupView(current, credentials)
     if (!view.meshExists) return // iOS: there is no mesh route to configure
 
     var note by remember { mutableStateOf<String?>(null) }
-    var pasted by remember { mutableStateOf("") }
     var confirmForget by remember(current.connectionKey) { mutableStateOf(false) }
+    var showPicker by remember { mutableStateOf(false) }
+    var showPreset by remember { mutableStateOf(false) }
+
     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("mesh route", color = Fg, fontSize = 13.sp)
         for (c in MeshCredential.entries) {
@@ -70,9 +61,34 @@ internal fun MeshRouteSection(
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
             Text(meshProblemLabel(it.problem), color = Dim, fontSize = 11.sp)
         }
-        // One verb, two targets: "scan ldmux code" and "scan MeshMore code" as whole labels did
-        // not fit one row at any text size, and the second wrapped to a line that was clipped. The
-        // verb is stated once; the buttons name only what is being scanned.
+
+        // The radio is the one new physical fact. Its name is shown because a MAC address is
+        // not something a person recognises, and the address is kept because that is what BLE
+        // needs after a reboot.
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("radio", color = Dim, fontSize = 12.sp, maxLines = 1)
+            Text(
+                current.meshRadioName.ifEmpty { current.meshRadio.ifEmpty { "none" } },
+                color = if (current.meshRadio.isEmpty()) Warn else Fg,
+                fontSize = 12.sp,
+                maxLines = 1,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            MiniTextButton(onClick = { showPicker = true }) {
+                Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1)
+            }
+            MiniTextButton(
+                enabled = current.meshRadio.isNotEmpty(),
+                onClick = { showPreset = true },
+            ) {
+                Text("preset", color = if (current.meshRadio.isEmpty()) Dim else Accent, fontSize = 12.sp, maxLines = 1)
+            }
+        }
+        if (current.meshRadio.isNotEmpty()) {
+            Text(current.meshRadio, color = Dim, fontSize = 10.sp, maxLines = 1)
+        }
+
+        // One verb, one target: the ldmux code carries the session keys and the host radio key.
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("scan", color = Dim, fontSize = 12.sp)
             MiniTextButton(onClick = {
@@ -87,66 +103,9 @@ internal fun MeshRouteSection(
                         ScanResult.Unavailable -> "scanner unavailable"
                     }
                 }
-            }) { Text("ldmux", color = Accent, fontSize = 12.sp, maxLines = 1) }
-            MiniTextButton(onClick = {
-                note = null
-                CodeScanner.scan { r ->
-                    note = when (r) {
-                        is ScanResult.Code -> when (val g = onGatewayCode(r.text)) {
-                            is GatewayScan.Saved -> { onConfig(g.config); credentials = readCredentials(); null }
-                            is GatewayScan.Refused -> gatewayScanLine(g.problem)
-                        }
-                        ScanResult.Cancelled -> null
-                        ScanResult.Unavailable -> "scanner unavailable"
-                    }
-                }
-            }) { Text("MeshMore", color = Accent, fontSize = 12.sp, maxLines = 1) }
+            }) { Text("ldmux code", color = Accent, fontSize = 12.sp, maxLines = 1) }
         }
-        // The same-phone path: MeshMore is asked over Binder and the token arrives without being
-        // typed. The scan and paste rows below remain for a gateway that is not on this phone.
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("this phone", color = Dim, fontSize = 12.sp)
-            MiniTextButton(onClick = {
-                note = null
-                scope.launch {
-                    note = onHandoff()
-                    credentials = readCredentials()
-                }
-            }) { Text("fetch token", color = Accent, fontSize = 12.sp, maxLines = 1) }
-        }
-        // Same-phone pairing cannot be scanned: MeshMore's code is displayed by the other app on
-        // this very screen, so there is nothing for this camera to point at. Typing or pasting the
-        // code is the only path for the daily case, and it is routed by its own scheme so a user
-        // never has to know which box it belongs in.
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            BasicTextField(
-                value = pasted,
-                onValueChange = { pasted = it },
-                singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Fg, fontSize = 12.sp),
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(vertical = 4.dp),
-                decorationBox = { inner ->
-                    if (pasted.isEmpty()) Text("paste a code", color = Dim, fontSize = 12.sp) else inner()
-                },
-            )
-            MiniTextButton(onClick = {
-                note = null
-                val code = pasted.trim()
-                if (code.startsWith("meshmore://") || code.matches(Regex("[0-9a-fA-F]{32}"))) {
-                    when (val g = onGatewayCode(code)) {
-                        is GatewayScan.Saved -> { onConfig(g.config); credentials = readCredentials(); pasted = "" }
-                        is GatewayScan.Refused -> note = gatewayScanLine(g.problem)
-                    }
-                } else {
-                    when (val o = onMeshPairing(code).also { credentials = readCredentials() }) {
-                        is MeshPairingScan.Enrolled -> pasted = ""
-                        is MeshPairingScan.Refused -> note = meshPairingLine(o.problem)
-                    }
-                }
-            }) { Text("use code", color = Accent, fontSize = 12.sp) }
-        }
+
         // The picker: only routes that can run are offered, so it cannot save one that will not.
         if (view.choosable.isNotEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -159,11 +118,31 @@ internal fun MeshRouteSection(
             }
         }
         if (view.present.isNotEmpty()) {
-            MiniTextButton(onClick = { if (confirmForget) { onUnpairMesh(); credentials = readCredentials() } else confirmForget = true }) {
+            MiniTextButton(onClick = {
+                if (confirmForget) {
+                    onUnpairMesh()
+                    credentials = readCredentials()
+                } else {
+                    confirmForget = true
+                }
+            }) {
                 Text(if (confirmForget) "forget mesh pairing?" else "forget mesh pairing", color = if (confirmForget) Accent else Dim, fontSize = 12.sp)
             }
         }
         note?.let { Text(it, color = Warn, fontSize = 11.sp) }
+    }
+
+    if (showPicker) {
+        RadioPickerDialog(
+            onDismiss = { showPicker = false },
+            onPick = { d ->
+                onConfig(current.copy(meshRadio = d.address, meshRadioName = d.name))
+                credentials = readCredentials()
+            },
+        )
+    }
+    if (showPreset) {
+        RadioPresetDialog(address = current.meshRadio, onDismiss = { showPreset = false })
     }
 }
 
@@ -172,13 +151,6 @@ class MeshRouteActions(
     /** Read secure storage, never throwing (a broken Keystore reads as "nothing stored"). */
     val credentials: () -> MeshCredentialState,
     val onPairing: (String) -> MeshPairingScan,
-    val onGatewayCode: (String) -> GatewayScan,
     val onConfig: (LdmuxConfig) -> Unit,
     val onUnpair: () -> Unit,
-    /**
-     * Ask MeshMore on this phone for its gateway token; the line to show when it did not link, null
-     * when it did. The button is a retry, so it may replace a stored token: pressing it is the
-     * person saying the one they have is not working.
-     */
-    val onHandoff: suspend () -> String? = { null },
 )

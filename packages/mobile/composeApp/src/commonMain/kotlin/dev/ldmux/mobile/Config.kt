@@ -1,6 +1,5 @@
 package dev.ldmux.mobile
 
-import dev.ldmux.mobile.mesh.MeshGatewayEndpoint
 import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshRouteProblem
 import dev.ldmux.mobile.mesh.MeshRouteResolution
@@ -13,10 +12,10 @@ import dev.ldmux.mobile.mesh.resolveRoute
  * **Two pairings live here, and they are different things.** A device may have either, or both.
  *  - The **tailnet pairing** is [host] and [token]: the daemon's address and its bearer token.
  *    [isPaired], [endpoint] and [pairName] are about it, and about nothing else.
- *  - The **mesh pairing** is a [meshGateway] endpoint (MeshMore's loopback gateway, empty for the
- *    default), plus a gateway token and the L3 session keys, which are secrets and therefore live
- *    in the Keystore (`MeshTokenStore`, `MeshSessionKeyStore`), not here. Whether it is complete is
- *    a question about secure storage (`meshSetupView`), never about [host] or [token].
+ *  - The **mesh pairing** is the host radio's public key plus the L3 session keys, which are
+ *    secrets and therefore live in the Keystore (`MeshSessionKeyStore`), not here. The selected
+ *    radio's BLE address and label are not secrets. Whether the pairing is complete is a question
+ *    about secure storage (`meshSetupView`), never about [host] or [token].
  * [route] says which one a launch uses.
  *
  * Its own file because it is the one value every part of the app reads, and it was
@@ -72,17 +71,11 @@ data class LdmuxConfig(
      * install, so a device that never chose mesh behaves exactly as before.
      */
     val route: MeshRoute = MeshRoute.Tailnet,
-    /**
-     * MeshMore's gateway on this phone, as a loopback `host:port`. **Mesh pairing only**: nothing
-     * about the tailnet reads it. Empty means the default (`127.0.0.1:41731`). Not a secret.
-     */
-    val meshGateway: String = "",
     /** The BLE address of the phone's MeshCore radio. Not a secret; empty until chosen. */
     val meshRadio: String = "",
+    /** The advertised name of that radio, for the Settings row. Not a secret. */
+    val meshRadioName: String = "",
 ) {
-    /** Where the mesh route connects: the saved gateway, or the default when none (or an invalid one) is saved. */
-    val meshGatewayEndpoint: MeshGatewayEndpoint
-        get() = if (meshGateway.isEmpty()) MeshGatewayEndpoint.DEFAULT else MeshGatewayEndpoint.parse(meshGateway) ?: MeshGatewayEndpoint.DEFAULT
 
     /**
      * Paired means there is somewhere to connect and something to connect with — and
@@ -111,13 +104,12 @@ data class LdmuxConfig(
      * **nothing** (it never falls back to the tailnet), and the launcher says why.
      */
     fun routeProblem(
-        hasToken: Boolean = false,
         hasPeer: Boolean = false,
         hasSessionKeys: Boolean = false,
     ): MeshRouteProblem? {
         // Not gated on [isPaired]: that is the tailnet pairing, and a mesh-only device has none.
         if (route == MeshRoute.Tailnet) return null
-        return (resolveRoute(route, currentPlatform, hasToken, hasPeer, hasSessionKeys = hasSessionKeys) as? MeshRouteResolution.Unusable)?.problem
+        return (resolveRoute(route, currentPlatform, hasPeer, hasSessionKeys = hasSessionKeys) as? MeshRouteResolution.Unusable)?.problem
     }
 
     val panelLeft: Boolean get() = side != "right"
@@ -138,7 +130,7 @@ data class LdmuxConfig(
         get() = "$host|$token|$deviceId|$deviceLabel" +
             // Appended only off the tailnet, so a tailnet device's key is byte-for-byte what it
             // was and nothing rebuilds on upgrade; choosing a route does rebuild the page.
-            if (route == MeshRoute.Tailnet) "" else "|route=${route.name}|gw=$meshGateway|radio=$meshRadio"
+            if (route == MeshRoute.Tailnet) "" else "|route=${route.name}|radio=$meshRadio|name=$meshRadioName"
 
     companion object {
         const val DEFAULT_FONT_SP = 12f

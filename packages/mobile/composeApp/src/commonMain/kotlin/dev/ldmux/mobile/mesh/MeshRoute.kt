@@ -3,9 +3,9 @@ package dev.ldmux.mobile.mesh
 /**
  * How an endpoint is reached. A per-endpoint choice, never a global fallback chain.
  *
- * `Tailnet` is the existing WebSocket to the daemon. `Mesh` is the MeshMore loopback gateway
- * and, through it, a LoRa radio. They are different links with different rates, and a route
- * that silently turned into the other would hide why the app got slow or went quiet.
+ * `Tailnet` is the existing WebSocket to the daemon. `Mesh` is the phone-owned BLE radio
+ * and, through it, a LoRa link to the host. They are different links with different rates,
+ * and a route that silently turned into the other would hide why the app got slow or went quiet.
  */
 enum class MeshRoute { Tailnet, Mesh }
 
@@ -34,8 +34,9 @@ const val MESH_SESSION_BUILT: Boolean = true
  * (`ldmux code --mesh`, `MeshEnrollment`) exist and are tested. **True does not mean usable**:
  * [resolveRoute] still reports every missing credential, the library not loading, and iOS, and
  * nothing is opened for a route that resolves to a problem. Since 2026-10-29 Settings has a route
- * picker and a scanner for MeshMore's gateway code (`MeshRouteSection`, `meshSetupView`), so the
- * route is reachable; what has still not happened is any run on a device. `docs/STATE.md` has the list.
+ * picker and a BLE radio selector (`MeshRouteSection`, `meshSetupView`), so the route is
+ * reachable. The standalone path still has no hardware run. `docs/MESH-STANDALONE.md` is the
+ * current record.
  */
 const val MESH_TERMINAL_BUILT: Boolean = true
 
@@ -67,7 +68,7 @@ fun meshRouteFromStored(text: String?): MeshRoute =
 
 /** Why a chosen route cannot be used. Each is shown; none is papered over with another route. */
 enum class MeshRouteProblem {
-    /** `Mesh` is saved, but this platform has no gateway (iOS). Fails visibly, never falls back. */
+    /** `Mesh` is saved, but this platform has no BLE radio owner (iOS). Fails visibly, never falls back. */
     NotOnThisPlatform,
 
     /** The session library is not in this build, or did not load on this device. */
@@ -78,9 +79,6 @@ enum class MeshRouteProblem {
 
     /** No session keys: the pairing code was not scanned with `ldmux code --mesh`, or the keys could not be stored. */
     NeedsSessionKeys,
-
-    /** No pairing token for the MeshMore gateway yet. */
-    NeedsToken,
 
     /** No host radio public key to bind. */
     NeedsPeer,
@@ -99,7 +97,6 @@ sealed interface MeshRouteResolution {
 fun resolveRoute(
     saved: MeshRoute,
     platform: MobilePlatform,
-    hasToken: Boolean,
     hasPeer: Boolean,
     sessionBuilt: Boolean = MESH_SESSION_BUILT && sessionLibAvailable(),
     terminalBuilt: Boolean = MESH_TERMINAL_BUILT,
@@ -110,12 +107,11 @@ fun resolveRoute(
     if (MeshRoute.Mesh !in availableRoutes(platform)) {
         return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NotOnThisPlatform)
     }
-    // Checked before the token: asking the user to pair a route that cannot work yet is a
+    // Checked before the peer: asking the user to pair a route that cannot work yet is a
     // trap, so the first thing they are told is the real reason.
     if (!sessionBuilt) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.SessionNotBuilt)
     if (!terminalBuilt) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.TerminalNotBuilt)
     if (!hasSessionKeys) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsSessionKeys)
-    if (!hasToken) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsToken)
     if (!hasPeer) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NeedsPeer)
     return MeshRouteResolution.Use(MeshRoute.Mesh)
 }
@@ -130,30 +126,22 @@ fun resolveRoute(
 fun meshLinkLabel(state: MeshLinkState): String = when (state) {
     MeshLinkState.NeedsRadio -> "mesh · choose a radio"
     MeshLinkState.NeedsPermission -> "mesh · Bluetooth permission is off"
-    MeshLinkState.NoPath -> "mesh · the host radio has no direct path"
-    MeshLinkState.NeedsToken -> "mesh · needs pairing token"
-    MeshLinkState.Idle -> "meshmore · idle"
-    MeshLinkState.Connecting -> "meshmore · connecting"
-    MeshLinkState.Bound -> "meshmore · bound"
-    MeshLinkState.RadioUnavailable -> "meshmore · radio unavailable"
-    MeshLinkState.GatewayBusy -> "meshmore · another app holds the gateway"
-    MeshLinkState.ProtocolMismatch -> "meshmore · gateway version mismatch"
-    // The header is a status bar, not a diagnosis. Naming the address and the cure here made one
-    // line wrap to five on a phone, at the moment the user most needs to see the screen. The
-    // address and what to do about it live in the body, which has room and already says both.
-    MeshLinkState.Unreachable -> "meshmore · unreachable"
-    MeshLinkState.Refused -> "meshmore · refused"
-    MeshLinkState.SessionFailed -> "meshmore · host not answering"
-    MeshLinkState.Closed -> "meshmore · closed"
+    MeshLinkState.NoPath -> "mesh · the host radio has no usable direct path"
+    MeshLinkState.Idle -> "mesh · idle"
+    MeshLinkState.Connecting -> "mesh · connecting"
+    MeshLinkState.Bound -> "mesh · bound"
+    MeshLinkState.RadioUnavailable -> "mesh · radio unavailable"
+    MeshLinkState.Refused -> "mesh · refused"
+    MeshLinkState.SessionFailed -> "mesh · host not answering"
+    MeshLinkState.Closed -> "mesh · closed"
 }
 
 fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
-    MeshRouteProblem.NotOnThisPlatform -> "meshmore route is not available on this device"
-    MeshRouteProblem.SessionNotBuilt -> "meshmore · session library unavailable on this device"
-    MeshRouteProblem.TerminalNotBuilt -> "meshmore · the terminal is unavailable on this device"
-    MeshRouteProblem.NeedsSessionKeys -> "meshmore · scan a pairing code made with ldmux code --mesh"
-    MeshRouteProblem.NeedsToken -> "meshmore · needs pairing token"
-    MeshRouteProblem.NeedsPeer -> "meshmore · needs the host radio's public key"
+    MeshRouteProblem.NotOnThisPlatform -> "mesh route is not available on this device"
+    MeshRouteProblem.SessionNotBuilt -> "mesh · session library unavailable on this device"
+    MeshRouteProblem.TerminalNotBuilt -> "mesh · the terminal is unavailable on this device"
+    MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a pairing code made with ldmux code --mesh"
+    MeshRouteProblem.NeedsPeer -> "mesh · needs the host radio's public key"
 }
 
 /**
@@ -182,7 +170,6 @@ const val MESH_RATE_NOTICE: String =
 
 /*
  * Operations left this hour is NOT computed here. It arrives in `STATUS` as
- * [MeshStatus.opsLeftThisHour], derived by the gateway from the radio's real preset. A function
- * that took airtime-per-record would make this app carry radio knowledge, which the architecture
- * forbids (meshmore-sns-architecture.md, responsibility matrix).
+ * [MeshStatus.opsLeftThisHour], derived by the radio adapter from the live preset. A function
+ * that took airtime-per-record would make the UI carry radio knowledge.
  */

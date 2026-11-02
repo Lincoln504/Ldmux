@@ -1,14 +1,11 @@
 package dev.ldmux.mobile
 
 import dev.ldmux.mobile.mesh.MeshRoute
-import dev.ldmux.mobile.mesh.MeshRouteActions
 import dev.ldmux.mobile.mesh.MeshRouteResolution
-import dev.ldmux.mobile.mesh.applyGatewayScan
 import dev.ldmux.mobile.mesh.applyMeshPairingScan
 import dev.ldmux.mobile.mesh.availableRoutes
 import dev.ldmux.mobile.mesh.currentPlatform
 import dev.ldmux.mobile.mesh.meshSessionKeyStore
-import dev.ldmux.mobile.mesh.meshTokenStore
 import dev.ldmux.mobile.mesh.readMeshCredentials
 import dev.ldmux.mobile.mesh.currentMeshResolution
 import androidx.compose.animation.AnimatedContent
@@ -87,7 +84,6 @@ internal fun AppContent(
     routes: List<RouteChoice> = emptyList(),
     currentRoute: RouteChoice? = null,
     onRoute: (RouteChoice) -> Unit = {},
-    handoff: dev.ldmux.mobile.mesh.MeshHandoffUi? = null,
 ) {
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
@@ -705,7 +701,7 @@ internal fun AppContent(
                     // token it is the one button that makes it go away.
                     val problem = (currentMeshResolution(config.route) as? MeshRouteResolution.Unusable)?.problem
                     dev.ldmux.mobile.mesh.meshRouteBodyFor(problem)?.let {
-                        dev.ldmux.mobile.mesh.MeshBodyBlock(it, handoff, replaceStale = false)
+                        dev.ldmux.mobile.mesh.MeshBodyBlock(it)
                     }
                 }
             } else null,

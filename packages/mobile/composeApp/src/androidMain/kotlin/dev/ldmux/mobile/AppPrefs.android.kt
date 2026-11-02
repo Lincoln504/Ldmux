@@ -41,8 +41,8 @@ actual object AppPrefs {
     private const val KEY_DEVICE_ID = "device_id"
     private const val KEY_DEVICE_LABEL = "device_label"
     private const val KEY_ROUTE = "route"
-    private const val KEY_MESH_GATEWAY = "mesh_gateway"
     private const val KEY_MESH_RADIO = "mesh_radio"
+    private const val KEY_MESH_RADIO_NAME = "mesh_radio_name"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -66,8 +66,8 @@ actual object AppPrefs {
             deviceId = deviceId,
             deviceLabel = label,
             route = meshRouteFromStored(sp.getString(KEY_ROUTE, null)),
-            meshGateway = sp.getString(KEY_MESH_GATEWAY, null) ?: "",
             meshRadio = sp.getString(KEY_MESH_RADIO, null) ?: "",
+            meshRadioName = sp.getString(KEY_MESH_RADIO_NAME, null) ?: "",
         )
     }
 
@@ -83,8 +83,8 @@ actual object AppPrefs {
             .putString(KEY_DEVICE_ID, config.deviceId)
             .putString(KEY_DEVICE_LABEL, config.deviceLabel)
             .putString(KEY_ROUTE, config.route.name)
-            .putString(KEY_MESH_GATEWAY, config.meshGateway)
             .putString(KEY_MESH_RADIO, config.meshRadio)
+            .putString(KEY_MESH_RADIO_NAME, config.meshRadioName)
             .apply()
     }
 }

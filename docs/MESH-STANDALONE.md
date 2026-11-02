@@ -1,38 +1,34 @@
 # LDMUX standalone: the phone owns the radio
 
 Status: design of record for `feat/standalone-radio`, 2026-11-02.
-
-This document records the measured facts, the protocol boundary, the migration, and the
-open issues that are deliberately **not** this branch. It replaces the "keep MeshMore as
-the radio owner" recommendation in `docs/MESH-RADIO-OWNERSHIP.md` for the phone; it does
-**not** replace the host's radio gateway.
+Supersedes the phone-side recommendation in `docs/MESH-RADIO-OWNERSHIP.md`.
+The host side is unchanged.
 
 ## 1. Decision
 
-- **The Android app owns its BLE radio.** It talks to the MeshCore companion over GATT,
-  using the Java MeshCore library as the base.
-- **The phone MeshMore gateway, token, Binder handoff and loopback socket are removed
-  from LDMUX's mesh path.** MeshMore may keep its own gateway for other clients; LDMUX
-  no longer calls it.
-- **The host side is unchanged.** `ldmuxd` still talks to the host radio through
-  MeshMore's `meshcore_host` gateway (`bin/meshmore_gateway.dart`). A phone-only
-  standalone does not remove that process; a "no MeshMore anywhere" product needs a
-  separate host bridge.
-- **The L3 session is unchanged.** The existing Noise session, ARQ, terminal profile,
-  row codec and driver stay. The only transport replaced is the L2 carrier.
-- **The only pairing is the host's `ldmux code --mesh`.** It carries the host session key,
-  the PSK, and the host radio public key. The gateway token is gone from the phone.
-- **Encryption stays inside the raw record.** MeshCore's raw-custom payload does not
-  encrypt; LDMUX's Noise/AEAD is the confidentiality and integrity boundary. A MeshCore
-  channel PSK is neither needed nor used for the terminal.
+- **The Android app owns its BLE radio.** It talks to the MeshCore companion over
+  GATT, using the vendored Java MeshCore library as the base.
+- **The phone MeshMore gateway, token, Binder handoff and loopback socket are
+  gone from LDMUX's mesh path.** MeshMore may keep its own opt-in gateway for
+  another client. LDMUX no longer calls it.
+- **The host side is unchanged.** `ldmuxd` still reaches the host radio through
+  MeshMore's `meshcore_host` gateway (`meshmore_gateway.dart`). A phone-only
+  standalone does not remove that process.
+- **The L3 session is unchanged.** Noise `IKpsk2_25519_ChaChaPoly_SHA256`, ARQ,
+  terminal profile, row codec and driver stay. The L2 carrier is replaced.
+- **The only pairing is the host's `ldmux code --mesh`.** It carries the host
+  session key, the PSK and the host radio public key. The gateway token is gone.
+- **Encryption stays inside the raw record.** MeshCore's raw-custom payload has
+  no firmware cipher. LDMUX's Noise session is the confidentiality and integrity
+  boundary. A channel PSK is neither needed nor used.
 
-## 2. What the host and the phone each own
+## 2. Ownership
 
 ```
 Phone:  LDMUX
-          ├─ BLE scanner / permissions / radio selection
+          ├─ BLE scanner / permissions / bond
           ├─ MeshCore companion session (APP_START, SELF_INFO, contacts, config)
-          ├─ raw carrier (CMD_SEND_RAW_DATA / PUSH_CODE_RAW_DATA)
+          ├─ raw carrier (CMD_SEND_RAW_DATA / CMD_SEND_RAW_PACKET / 0x84)
           ├─ L3 Noise session + ARQ + terminal profile
           └─ terminal screen, keys, launcher
 
@@ -40,248 +36,354 @@ Host:   Heltec radio ─ USB ─ meshmore_gateway (serial companion + L2 gateway
           └─ ldmuxd / keeper ─ PTY, terminal state, shells
 ```
 
-- The phone's radio and the host's radio must be on the same preset. The phone sets its
-  own; the host has its own provisioning command (`meshcore_host/tool/configure_radio.dart`
-  today, or a future LDMUX host bridge). One radio cannot be on two presets at once.
-- The host radio gateway still binds the phone as its peer. `PUSH_CODE_RAW_DATA` carries
-  no sender identity, so the host's single-peer bind remains the addressing fact.
+The phone radio and the host radio must be on the same preset. The phone sets
+its own. The host has its own provisioning command
+(`meshcore_host/tool/configure_radio.dart` today, or a future LDMUX host bridge).
+One BLE central means LDMUX and MeshMore cannot both hold the same companion
+session at once.
 
-## 3. The MeshCore wire facts
+## 3. Wire facts
 
 ### 3.1 OTA packet
 
-`[header 1][transport codes 4?][path_len 1][path 0..64][payload 1..184]`
+```
+[header 1][transport_codes 4?][path_len 1][path 0..64][payload 1..184]
+```
 
-- Header bits: route in bits 0..1, payload type in bits 2..5, version in bits 6..7.
-- Transport codes exist only for `TRANSPORT_FLOOD` / `TRANSPORT_DIRECT`.
-- `path_len` low 6 bits are hop count; high 2 bits are `hash_size - 1`.
-- `MAX_PACKET_PAYLOAD = 184`; `MAX_PATH_SIZE = 64`; `MAX_TRANS_UNIT = 255`.
-- Payload type `0x0F` is `PAYLOAD_TYPE_RAW_CUSTOM`: **opaque bytes, no firmware format,
-  no MeshCore encryption**.
+- Header bits: route 0..1, payload type 2..5, version 6..7.
+- `path_len` is **encoded**, not a byte count: low 6 bits are hop count, high
+  2 bits are `hash_size - 1`. `0xFF` means path unknown.
+- Effective path bytes are `hop_count * hash_size`, not `path_len`.
+- `MAX_PACKET_PAYLOAD = 184`, `MAX_PATH_SIZE = 64`, `MAX_TRANS_UNIT = 255`.
+- Raw-custom is payload type `0x0F`: opaque bytes, no firmware format, no
+  firmware encryption.
 
-Evidence: `docs/packet_format.md` and `docs/payloads.md` in MeshCore; the local firmware
-`examples/companion_radio/MyMesh.cpp` and `src/Mesh.cpp`; the Java library's
-`OtaPacket.java` documents the same layout.
+Evidence: MeshCore `docs/packet_format.md` and `docs/payloads.md`;
+`src/Packet.h` / `src/Packet.cpp`; local firmware `MyMesh.cpp`;
+`vendor/libmeshcore/.../model/OtaPacket.java`.
 
-### 3.2 Companion raw commands
+### 3.2 Send: `CMD_SEND_RAW_DATA` 0x19
 
-- **Send:** `CMD_SEND_RAW_DATA` = `0x19`, body `[path_len int8][path bytes][payload]`.
-  - `path_len >= 0`: firmware calls `createRawData` and `sendDirect(pkt, path, path_len)`.
-  - `path_len < 0`: firmware returns `ERR_CODE_UNSUPPORTED_CMD` with
-    `// flood, not supported (yet)`.
-  - There is no flood fallback for raw custom.
-- **Receive:** `PUSH_CODE_RAW_DATA` = `0x84`, body
-  `[snr int8, quarter-dB][rssi int8][0xFF][payload]`.
-  - It carries no sender identity; the L3 Noise session authenticates the sender.
-- **Firmware receive filter:** raw custom is accepted only on a direct route
-  (`pkt->isRouteDirect()`).
+```
+19 [path_len int8] [path bytes] [payload]
+```
 
-Evidence: `MyMesh.cpp:1519-1534` (send), `MyMesh.cpp:807-813` (receive),
-`Mesh.cpp:292-299` (direct-only receive), `Mesh.cpp:589-604` (raw copy, no cipher).
+- `path_len` is the encoded value above. It is not the path byte count.
+- Firmware requires `path_len >= 0`, at least four payload bytes, and checks
+  `i + path_len + 4 <= frame length`.
+- That firmware check treats `path_len` as a byte count while `sendDirect()`
+  interprets it as encoded. For one-byte hash paths the two agree. For two- and
+  three-byte hash paths they do not.
+- **LDMUX therefore uses 0x19 only when `path_len <= 0x3F`.** That covers
+  zero-hop and all one-byte-hash paths.
+- Raw custom is direct-only. A negative path length is rejected with
+  `ERR_CODE_UNSUPPORTED_CMD` ("flood, not supported (yet)"). There is no flood
+  fallback.
+- Payload ceiling is `174 - pathBytes` (`176 - opcode - path_len field - path`).
 
-### 3.3 Size budget
+### 3.3 Send: `CMD_SEND_RAW_PACKET` 0x41
+
+```
+41 [priority] [complete MeshCore packet]
+```
+
+- The complete packet is `[header][path_len][path][payload]`.
+- LDMUX uses a direct raw-custom header `0x3E` and the encoded path length.
+- This is the carrier for two- and three-byte hash paths, and for any path whose
+  encoded value is above `0x3F`.
+- Payload ceiling is `172 - pathBytes` (`176 - opcode - priority - packet header
+  - path_len field - path`).
+- The firmware parses the whole packet and returns `ERR_CODE_ILLEGAL_ARG` on a
+  malformed packet.
+
+### 3.4 Receive: `PUSH_CODE_RAW_DATA` 0x84
+
+```
+84 [SNR int8 quarter-dB] [RSSI int8] [0xFF] [payload]
+```
+
+- It carries no sender identity and no packet header or path.
+- The `0xFF` marker is mandatory. LDMUX rejects a frame without it as
+  `MALFORMED`.
+- The L3 Noise session authenticates the sender.
+
+### 3.5 Size budget
 
 | Fact | Value | Source |
 |---|---:|---|
 | OTA payload | 184 B | `MeshCore.h:20` |
 | OTA path | 64 B | `MeshCore.h:22` |
-| Companion frame | 176 B | Dart `mesh_carry.dart:33` |
-| Raw payload | `174 - pathLen` | Dart `mesh_carry.dart:60` |
-| LDMUX record ceiling | 172 B | `MeshGatewayFrame.kt:32` |
-| LDMUX terminal payload | 143 B | `MeshTerm.kt` / protocol |
-| Existing record floor | 160 B | `MeshCarryLimits` |
+| Companion frame | 176 B | firmware `MAX_FRAME_SIZE` |
+| 0x19 raw payload | `174 - pathBytes` | firmware + codec |
+| 0x41 raw payload | `172 - pathBytes` | firmware + codec |
+| LDMUX record | 172 B | `MeshTerm` / protocol |
+| LDMUX terminal payload | 143 B | `MeshTerm.kt` |
+| LDMUX record floor | 160 B | `MeshCarryLimits` / gateway |
 
-The terminal's 143-byte payload fits every path up to 31 bytes at the 174-byte raw
-ceiling. The carrier must refuse a record rather than truncate it.
+The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
+160-byte record fits a 14-byte path on 0x19. A path that leaves less than the
+160-byte floor is `NoPath`, not a truncated record.
 
-### 3.4 Encryption placement
+### 3.6 Encryption
 
-- MeshCore encrypts its **defined** payloads (channel text, direct text, requests,
-  responses) with AES-128 and a 2-byte truncated HMAC.
-- Raw custom is explicitly "for applications with custom encryption"; firmware copies
-  the bytes and does not add a cipher.
-- **LDMUX's Noise `IKpsk2_25519_ChaChaPoly_SHA256` stays inside the record.**
-  - It gives end-to-end confidentiality and integrity across every hop.
-  - It authenticates the host and phone independently of the radio's channel state.
-  - It costs a 16-byte tag and the record header; that is already in the 143-byte budget.
-- **Do not wrap raw in a MeshCore channel PSK.** It would double-encrypt, shrink the
-  payload, require a channel slot, and add no authentication the L3 session lacks.
-- Metadata is visible: OTA header, path, and the fact that a raw packet is flowing. If
-  metadata privacy is required, raw custom is the wrong carrier; a MeshCore direct
-  encrypted packet has its own limits and cannot carry the arbitrary terminal stream.
+- MeshCore encrypts its **defined** payloads (channel text, direct text,
+  requests, responses) with AES-128 and a 2-byte truncated HMAC.
+- Raw custom is explicitly for applications with custom encryption. Firmware
+  copies the bytes and adds no cipher.
+- **LDMUX Noise stays inside the record.** It gives end-to-end confidentiality
+  and integrity across every hop, independent of the radio's channel state. It
+  costs the Noise header/tag and the ARQ header already in the 172-byte budget.
+- **Do not wrap raw in a channel PSK.** It would double-encrypt, shrink the
+  payload, require a channel slot, and add no authentication the L3 session
+  lacks.
+- Metadata is visible: OTA header, path, and the fact that a raw packet is
+  flowing. That is inherent to raw custom.
 
-## 4. The Java library: usable base, not a tunnel
+## 4. Path policy
 
-The library is `libmeshcore` + `libmeshcore-android` (MIT, `io.iotone.meshcore`).
+- A contact's `out_path_len` is decoded by `Contact.hasValidPathEncoding()`,
+  `pathHashSize()`, `pathHopCount()` and `activePath()`. `activePath()` returns
+  exactly `hops * hashSize` bytes, or empty for invalid/unknown.
+- A known contact path is used as-is.
+- The phone looks the host up by full public key with
+  `CMD_GET_CONTACT_BY_KEY` 0x1E, not with a full contact dump. The reply is one
+  contact frame or `ERR_CODE_NOT_FOUND`. This keeps the one answer window free
+  and does not depend on the size of the radio's contact table.
+- If the host radio is not in the phone's contact list, LDMUX sends a zero-hop
+  direct packet. This is the bootstrap route for two radios in the same room
+  and the first hop of contact discovery. It is not a multi-hop path and is
+  never presented as one.
+- If a known host contact has `0xFF`, an invalid hash-size code, a byte count
+  that disagrees with the encoding, or leaves less than the 160-byte record
+  floor, the link is `NoPath`.
+- Multi-hop path reset/discovery (`CMD_RESET_PATH`, `CMD_SEND_PATH_DISCOVERY_REQ`,
+  `PUSH_CODE_PATH_DISCOVERY_RESPONSE`, `PUSH_CODE_PATH_UPDATED`) is **not
+  implemented in this branch**. A learned multi-hop path is therefore not used
+  without a recovery rule. The bench is direct.
+- `PUSH_CODE_RAW_DATA` carries no sender identity. The host's single-peer bind
+  remains the addressing fact.
 
-It provides:
+## 5. Transport discipline
 
-- BLE transport (`AndroidBleTransport`, Nordic BLE 2.10.1, MTU 256, one frame per write).
-- Companion session (`MeshcoreSession`: `APP_START`, `SELF_INFO`, queue drain).
-- Codec (`MeshcoreFrameCodec`), contacts, channels, text, adverts, telemetry.
-- Radio configuration (`setRadioParams`, `setTxPower`, `setChannel`).
-- Crypto for defined payloads (channel/DM), not raw.
+### 5.1 BLE
 
-It does not provide, and this branch adds:
+- Scan for the MeshCore service UUID, with the `MeshCore-` name as a fallback.
+- Scan results are serialized on the main thread and bounded by a generation
+  token. A cancelled scan cannot deliver a stale callback.
+- Bond after service discovery, before notifications. The characteristics are
+  encrypted, so the bond must be usable before APP_START.
+- Request MTU 256 and require at least 179 (176-byte frame + 3-byte ATT
+  overhead). No fragmentation is assumed.
+- Write with response when the RX characteristic advertises `PROPERTY_WRITE`;
+  use write-without-response only when that is the only property. A write
+  failure ends the link and fails a pending raw callback.
+- APP_START is sent only after the bond, MTU and notification setup complete.
+- The mesh route uses the same foreground service as the tailnet route, so the
+  BLE link survives a short app switch.
 
-1. `CMD_SEND_RAW_DATA` (0x19) and a public send.
-2. `PUSH_CODE_RAW_DATA` (0x84) typing and a callback.
-3. A send-result contract (`OK`/`ERR`), because `MeshcoreSession.send` is private and
-   swallows transport errors.
-4. Contact/path lookup, `CMD_RESET_PATH` (13), `CMD_SEND_PATH_DISCOVERY_REQ` (52),
-   `PUSH_CODE_PATH_DISCOVERY_RESPONSE` (0x8D), and path updates (0x81).
-   The current bench can use a zero-hop direct path; multi-hop needs these.
-5. BLE scanning and runtime permissions; the library explicitly leaves scanning to the
-   caller.
-6. A handshake timeout and reconnect policy; `MeshcoreSession` waits indefinitely for
-   `SELF_INFO` and has no reconnect.
+### 5.2 Commands and airtime
 
-Library constraints:
+- Companion OK/ERR has no sequence number. `MeshcoreSession` now serializes
+  tracked commands: one is written, its OK/ERR/EndOfContacts/DeviceInfo is
+  awaited, then the next is written. A raw send is refused while any tracked
+  command is queued or in flight, and a tracked command waits while a raw send
+  is in flight.
+- A raw timeout is a dead link, not permission to send again. One raw send in
+  flight. A late OK must not resolve a later send.
+- LDMUX disables the MeshCore message drain. It has no chat consumer, and every
+  drain command shares the same answer window.
+- Radio `OK` means the frame was handed to the transmitter. It never means
+  delivery. The L3 ARQ owns delivery.
+- Airtime has two modes: **metered**, the default, and **open**. Metered spends
+  a 36 s/hour budget on data records (control and handshake records are not
+  gated). Open is for a private tuple where the operator has chosen to use the
+  band freely, and it must still respect the regional duty cycle. The status
+  line shows records left when metered; `null` is not "unlimited".
+- The old gateway's 36 s/hour governor was removed with the gateway. The
+  standalone path must own this counter explicitly.
 
-- Java 17 records/sealed types; LDMUX currently compiles JVM 11. This branch moves the
-  Android module to Java/Kotlin 17 (AGP desugaring) or vendors the library as a 17
-  module.
-- Pinned to firmware `companion-v1.15.0`; deployed firmware is 1.17.1. Raw and path
-  commands exist in both; verify on hardware.
-- The library's test suite has one stale advert failure, not a raw/runtime regression.
+### 5.3 Error mapping
 
-## 5. The transport adapter
-
-`MeshRadioGateway` implements the existing `GatewayPort`:
-
-| Member | Standalone implementation |
-|---|---|
-| `state` | `Idle`, `Connecting`, `Bound`, `RadioUnavailable`, `NeedsRadio`, `NeedsPermission`, `NoPath`, `Closed` |
-| `status` | `MeshStatus(radioState = 0, rssi from 0x84, battery null, airtime 0, opsLeftThisHour = null)` |
-| `received` | `0x84` payloads, in order, in an unbounded channel |
-| `send(record)` | `0x19` with the host's path; OK → `SentDirect`, ERR → the matching failure; timeout → `LocalTimeout` |
-| `uplinkRecordMax` | 172 (conservative), or `174 - pathLen` when smaller |
-| `close()` | close the session and transport, idempotent |
-
-- Never map `SentDirect` to delivery. The session's ARQ owns delivery.
-- Never report `opsLeftThisHour = 0`; unknown is null, which the driver treats as
-  `UNKNOWN_BUDGET` (255), not as a stall.
-- A missing path is `NoPath`, not `Refused`; it must not tell the user to re-pair.
-- The host contact and path are learned from `requestContacts`; the current bench may
-  use a zero-hop direct path. Path reset after repeated unanswered sends is a follow-up
-  unless the hardware proves it necessary now.
+| Firmware code | Meaning | LDMUX |
+|---:|---|---|
+| 1 | unsupported command / bad raw shape | visible unsupported, not "too long" |
+| 2 | not found | `Refused` / `NoPath` |
+| 3, 4 | busy / table full | `Busy`, retry by ARQ |
+| 6 | illegal argument | `NoPath` for a path/capacity failure |
+| timeout | no answer | dead link, rebuild |
 
 ## 6. Radio preset
 
 - The phone can change only the radio it is attached to:
-  `CMD_SET_RADIO_PARAMS` (0x0B: frequency, bandwidth, SF, CR) and
-  `CMD_SET_RADIO_TX_POWER` (0x0C).
-- The host radio is configured separately. The host tool today is
-  `meshcore_host/tool/configure_radio.dart`; the host gateway must be restarted if the
-  preset changes while it is running.
-- The LDMUX private preset used on this bench is **910.525 MHz / 500 kHz / SF7 / CR5 /
-  22 dBm**. The public USA/Canada preset is **910.525 / 62.5 / SF7 / CR5 / 22 dBm**.
-  They are different presets and cannot be active at once.
-- `CMD_SET_CHANNEL` is a channel slot (name + 16-byte PSK), not a radio preset. The raw
-  terminal does not use a channel slot.
-- **Quick preset:** a radio setup screen in LDMUX reads `SELF_INFO`, shows the current
-  frequency/bandwidth/SF/CR/TX, and writes the LDMUX preset with one action. It then
-  reconnects and re-reads `SELF_INFO` because the write itself only returns OK.
-- The pairing code / setup screen must state the host's preset. A mismatch is the first
-  thing to check when the terminal finds no path.
+  `CMD_SET_RADIO_PARAMS` (0x0B), `CMD_SET_RADIO_TX_POWER` (0x0C), and
+  `CMD_SET_PATH_HASH_MODE` (0x3D, `3D 00 [mode]`, mode 0..2 = 1..3 bytes).
+- **Preset is one tuple**: frequency, bandwidth, SF, CR, TX power and path-hash
+  width. The three writes are serialized through the session queue and the
+  read-back after a reconnect is the only proof.
+- **No LDMUX-specific public preset.** A private tuple is generated inside a
+  region's legal envelope and applied to both radios by whatever path reaches
+  them. The phone can always set its own radio. The host radio is configured
+  separately unless it is also reachable over BLE.
+- Public presets remain available for joining an existing mesh: USA/Canada,
+  EU/UK narrow, Australia, New Zealand and the other entries the region pack
+  carries. The host must use the same frequency, bandwidth and SF. CR may
+  differ because every packet carries it.
+- **Legal envelope for a private tuple** (from the regulatory research, 2026-11):
+  - USA/Canada 902-928 MHz: a fixed-channel DTS emission needs at least
+    500 kHz 6 dB bandwidth. 62.5 kHz public MeshCore presets do not satisfy
+    that. A 500 kHz private tuple does. Keep the centre between 902.250 and
+    927.750 MHz so the occupied bandwidth stays inside the band, and keep
+    conducted power at or below 30 dBm / 8 dBm per 3 kHz.
+  - EU/UK 863-870 MHz: 500 kHz is illegal in the 869.4-869.65 MHz sub-band
+    because the band is 250 kHz wide. Use 62.5, 125 or 250 kHz and stay
+    entirely inside a permitted sub-band. 869.525 MHz with 125 kHz is safer
+    than 869.618 with 62.5 kHz, whose upper edge has under 1 kHz of margin.
+  - Australia 915-928 MHz: 1 W EIRP, radiated PSD at most 25 mW per 3 kHz,
+    no duty cycle. 62.5/125/250 kHz fit the density limit at normal power.
+  - New Zealand 915-928 MHz: 1 W EIRP, digital modulation or frequency
+    hopping, no duty cycle in the band.
+  - No firmware or app check makes a tuple legal. The preset is a suggestion;
+    the operator remains responsible.
+- TX power is clamped to `SELF_INFO.maxTxPowerDbm`.
+- The write is not trusted. LDMUX waits for the tracked commands to finish,
+  reconnects, reads `SELF_INFO` and `DEVICE_INFO`, and verifies frequency,
+  bandwidth, SF, CR, TX and path-hash mode.
+- On failure it restores the previous tuple, including path-hash mode, and says
+  the result is unverified if it cannot prove the restore.
+- `CMD_SET_CHANNEL` is a channel slot (name + 16-byte PSK), not a radio preset.
+  The terminal does not use a channel slot.
 
 ## 7. Migration
 
-### Remove from LDMUX's mesh path
+### Removed from LDMUX
 
 - `MeshGatewayClient`, `MeshGatewayFrame`, `MeshGatewayCode`, `MeshSocket`,
   `JavaMeshSocket`, `SocketFactory.android.kt`.
-- `MeshTokenStore`, `KeystoreMeshTokenStore`, `meshTokenStore()`, the token argument to
-  `MeshEnrollment`.
-- `MeshHandoff.kt`, `MeshHandoff.android.kt`, `MeshHandoffUi`, the Binder service
-  permission, `openMeshMore`, and the automatic/foreground handoff effects.
-- `MeshCredential.GatewayToken`, `MeshRouteProblem.NeedsToken`,
-  `MeshLinkState.NeedsToken`.
-- `LdmuxConfig.meshGateway` / `meshGatewayEndpoint` and the endpoint in
-  `MeshScreenPlan`.
-- Gateway-specific strings and tests.
+- `MeshTokenStore`, `KeystoreMeshTokenStore`, `meshTokenStore()`, the token
+  argument to `MeshEnrollment`, `GatewayToken`.
+- `MeshHandoff.kt`, `MeshHandoff.android.kt`, `MeshHandoffUi`, the Binder
+  service permission, `openMeshMore`, the automatic/foreground handoff effects.
+- `MeshRouteProblem.NeedsToken`, `MeshLinkState.NeedsToken`,
+  `MeshGatewayEndpoint`, `LdmuxConfig.meshGateway`.
+- Gateway-specific strings, scan UI and tests.
 
-### Add
+### Added
 
-- Vendored `libmeshcore` and `libmeshcore-android` modules, with raw support and the
-  local modifications documented.
-- `MeshRadioGateway`, `MeshRadioScanner`, `MeshRadioPreset`, Android permissions.
-- A radio selection/preset screen, and a stable `MeshScreenPlan` identity based on the
-  radio address rather than the whole display config.
-- `LdmuxConfig.meshRadio` (address, not a secret) and a mesh connection key.
+- Vendored `libmeshcore` and `libmeshcore-android`.
+- `RadioLink`, `RadioPreset`, `RadioSelfInfo`, `RadioDeviceInfo`,
+  `MeshRadioGateway`, `MeshRadioConnection`.
+- `AndroidRadioLink`: BLE scan/permission/bond through the transport, path
+  model, raw 0x19/0x41, preset read/write/verify.
+- `RadioScanner`, `RadioPickerDialog`, `RadioPresetDialog`, `meshRadio` and
+  `meshRadioName` config/prefs.
+- `MeshCarrier.kt`: `MeshLinkState`, `MeshStatus`, `MeshSendOutcome`,
+  `MeshSendResult`.
 
-### Keep
+### Kept
 
-- `MeshTermDriver`, `MeshSession`, `MeshTerm`, `MeshTerminalSource`, the terminal screen,
-  the key bar, the launcher, `MeshSessionKeyStore`, the host pairing ceremony.
-- The host gateway and daemon. A phone-only standalone does not change them.
+- `MeshTermDriver`, `MeshSession`, `MeshTerm`, `MeshTerminalSource`, terminal
+  screen, key bar, launcher, `MeshSessionKeyStore`, host pairing ceremony.
+- The host gateway and daemon.
 
-## 8. Tests and timing
+## 8. Java library changes
 
-The rule is **one fail-fast loop**: fake transport for logic; the emulator/device only
-for the facts a fake cannot prove (permissions, GATT, RSSI, path).
+The vendored library is `libmeshcore` + `libmeshcore-android` (MIT,
+`io.iotone.meshcore`) at source `7386999`.
 
-| Layer | Test | Timing target |
+LDMUX changes:
+
+1. `CMD_SEND_RAW_DATA` 0x19 and `CMD_SEND_RAW_PACKET` 0x41 encoders.
+2. `PUSH_CODE_RAW_DATA` 0x84 typing and marker validation.
+3. `RawDataFrame`, `RawSendCallback`, `onRawData`.
+4. `Contact` path decoding: encoded length, hash width, exact byte count,
+   invalid/unknown handling.
+5. `CMD_SET_PATH_HASH_MODE` 0x3D.
+6. Tracked-command gate and raw-send correlation safety.
+7. BLE write-type selection, MTU gate, bond-after-discovery, manager close.
+8. RF-log capture keeps bytes, not per-frame hex strings.
+9. Auto-drain can be disabled for LDMUX.
+
+Remaining gaps for this branch:
+
+- No path reset/discovery/path-update handling.
+- No automatic reconnect inside the library; the screen rebuilds.
+- No BLE scan; the app owns it.
+- No bond repair/remove beyond the one `ensureBond` request.
+
+## 9. Tests and verification
+
+Run affected classes during development; run the full suite once before a
+commit and record wall time.
+
+| Layer | Test | Timing |
 |---|---|---|
-| Codec | `0x19` body, `0x84` parse, size bounds | < 1 s |
-| Session | OK/ERR correlation, timeout, no-op before READY | < 2 s |
-| Adapter | state mapping, unknown budget, no path, `ErrTooLong` | < 2 s |
-| Driver | existing `MeshTermDriverTest` with a fake radio | existing suite |
-| Route | no token, radio missing, permission denied | < 2 s |
-| Hardware | connect, preset, zero-hop raw round trip, attach | measured once, not repeated |
+| Codec | 0x19 encoded path, 0x41 packet, 0x84 marker/empty, 4-byte minimum | < 1 s |
+| Contact | 0x00, 0x03, 0x41, 0x7F, 0x80, 0xC0, 0xFF | < 1 s |
+| Session | fake transport: tracked command rejects raw; ERR does not resolve raw; timeout | < 2 s |
+| Adapter | fake radio: path capacity, NoPath, error mapping, one send | < 2 s |
+| Driver | unknown budget not stalled; ErrTooLong -> NoPath; no reconnect loop | existing suite |
+| Route | no token, missing keys/peer, radio name, connectionKey | < 2 s |
+| Scanner | generation, cancel, permission-pending | < 2 s |
+| Session | tracked commands serialize; raw refused while tracked; raw answer pumps tracked | added |
+| Hardware | scan, bond, MTU, SELF_INFO, 0x19/0x41 round trip, preset, shell | once |
 
-Do not rerun the 665-test Android suite after every edit. Run the affected test class
-during development; run the full suite once before the commit; record wall time.
+Hardware is the only proof of permissions, GATT, bond, MTU, RSSI and a real
+path. Do not repeat the full suite after every edit.
 
-## 9. Open issues outside this branch
+## 10. Desktop issues (separate branch)
 
-### Desktop shell fit and history
+Measured and code-read on 2026-11-02:
 
-Measured live on 2026-11-02:
+- `ldmux-terminal` runs `ldmux window`, which creates a new shell and a new
+  attach window. That is normal separate-shell behavior.
+- **History defect:** the attach client never requests a history page. It sends
+  only `attach` with size/features. The daemon supports `scrollback` and
+  `SnapKind::History`. `render_snapshot` clears the visible screen and paints
+  the current screen only. The terminal emulator's scrollback is therefore not
+  the shell's scrollback.
+- **Fit defect for mirrors:** a read-only mirror cannot resize the PTY
+  (`should_reassert` returns false for read-only). It paints the holder's grid in
+  its own window. `mirror_argv` carries no geometry.
+- `render_snapshot` writes full-width rows with autowrap still enabled and does
+  not reset scroll/origin/insert modes. That is a real paint hazard.
+- Fix plan: request a bounded history page once per attach, buffer live output
+  until it is painted; paint with autowrap off and modes reset; give a mirror the
+  holder's geometry or a per-client viewport. Separate branch.
 
-- The current `ldmux-live-*` windows map to tty sizes of 158x40, 158x19, 158x82 and
-  318x40; the corresponding window geometries are 2552x1404, 2552x698, 2552x2816 and
-  5112x1404. Those widths agree with the tty columns. The supplied screenshot is
-  1782x1696, smaller than any of those windows: it is a **crop**, not proof of a live
-  grid/window mismatch.
-- `ldmux-terminal` calls `ldmux window`, which creates a **new shell** and a new attach
-  window. That is normal separate-shell behavior; it is not shell history reuse.
-- The desk attach client is a screen mirror. `render_snapshot` clears the visible screen
-  (`\x1b[2J\x1b[H`) and repaints full rows on every snapshot. It never requests a
-  history page. The terminal emulator's scrollback therefore contains repeated
-  snapshots, not the shell's scrollback; the keeper's history is not shown. That is the
-  concrete "history is not working" defect.
-- The remaining multi-client pane issue is real: the holder wins and a read-only mirror
-  cannot resize; a mirror can paint the holder's phone-sized grid. The existing
-  re-assert (`crates/attach/src/lib.rs:242-268`) fixes the holder, not the mirror.
-- A "plain bash window with no layer" is not the current architecture: the keeper owns
-  the PTY and the window is an attach client. A true plain terminal requires a sidecar
-  or a local-shell mode and would lose remote attach. This needs a separate decision.
+## 11. Branch comparison
 
-The desktop fix belongs in a separate branch:
-1. Request a bounded history page once per attach and write it into scrollback before the
-   live screen.
-2. Do not clear the visible screen on every snapshot; use the snapshot diff or a
-   dedicated renderer so scrollback is not duplicated.
-3. Decide the multi-client viewport rule (holder, last writer, or per-client viewport).
-4. Persist/bless window geometry; the daemon currently passes no `--geometry`.
+- `main` is the merge-base `c9c7643`; `feat/meshmore-gateway` is 218 files /
+  34,522 insertions ahead.
+- `docs/STATE.md` has stale "not implemented" statements. Do not use it as a
+  baseline.
+- No regression from `main` was found in the inspected code. This is a recorded
+  conclusion, not a fresh full-tree reproduction.
+- The last working branch's session-stability fixes, folder list, handshake
+  ladder, background release and control-traffic rules remain in the L3 path.
 
-### Branch comparison
+## 12. Open items
 
-- `main` is the merge-base `c9c7643`; `feat/meshmore-gateway` is 218 files / 34,522
-  insertions ahead. `port/rust` has no commits ahead of the current branch.
-- The current branch is the last working branch. `main` is not a newer development
-  branch; it simply lacks the mesh work. There is no evidence of a regression from
-  `main` to this branch, but `docs/STATE.md` contains stale "not implemented" statements
-  that must not be used as the comparison baseline. Use the latest dated sections of
-  `docs/HARDWARE-VALIDATION.md` and `docs/MESH-GATEWAY.md`.
+- Hardware pass: scan, bond/PIN, MTU, SELF_INFO, DEVICE_INFO, 0x19 and 0x41
+  round trips, preset apply/rollback, end-to-end shell, background release.
+- First-run is one combined flow: permission, scan, bond, connect, read the
+  current tuple, choose a public or private preset, apply, verify, show the
+  host-key/path status.
+- The host radio must be set to the same tuple. The phone can set a second BLE
+  radio; a USB-only host radio needs the host provisioning path. This is not
+  implemented in this branch.
+- Airtime counter and the metered/open switch are designed but not yet wired
+  into `AndroidRadioLink` and the status line.
+- Multi-hop path reset/discovery is a follow-up; do not silently use a
+  multi-hop path without it.
+- Desktop history/fit fixes on a separate branch.
+- MeshMore phone gateway remains opt-in and off by default. It must not run
+  while LDMUX owns the radio.
 
-## 10. Non-goals
+## 13. Non-goals
 
-- Replacing the host `meshcore_host` gateway in this branch.
-- Simultaneous MeshMore chat and LDMUX terminal on one BLE radio (one central, one
-  connection).
-- Multi-hop path discovery/reset unless the bench proves it necessary; zero-hop direct
-  first, with the missing path work tracked.
-- MeshCore channel PSK or a second encryption layer.
-- A full desktop-terminal rewrite; the desktop history/fit fix is separate.
+- No host gateway rewrite.
+- No channel PSK on the terminal.
+- No raw-custom flood.
+- No delivery claim from a radio OK.
+- No local-shell mode in this branch.
+- No UI redesign beyond the radio picker and preset dialog.

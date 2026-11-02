@@ -24,6 +24,7 @@ import dev.ldmux.mobile.voice.Dictation
 import dev.ldmux.mobile.SidePanel
 import dev.ldmux.mobile.BackToLauncher
 import dev.ldmux.mobile.AppLifecycle
+import dev.ldmux.mobile.BackgroundSession
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -95,14 +96,12 @@ fun MeshTerminalScreen(
     routes: List<RouteChoice> = emptyList(),
     currentRoute: RouteChoice? = null,
     onRoute: (RouteChoice) -> Unit = {},
-    /** Asking MeshMore on this phone for a fresh gateway token; null where there is no such thing. */
-    handoff: MeshHandoffUi? = null,
 ) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
-    // itself), so the caller needs a way to make it. A refused bind, a rotated token or an
-    // unreachable gateway each left the screen stuck with no action but leaving; the only cure
-    // was to force-stop the app. Rebuilding the connection is the whole retry.
+    // itself), so the caller needs a way to make it. A refused link or an unreachable radio
+    // each left the screen stuck with no action but leaving; the only cure was to force-stop the
+    // app. Rebuilding the connection is the whole retry.
     var attempt by remember(plan) { mutableStateOf(0) }
     // **A rebuilt connection comes back to the same shell.** The attach carries an id, so a resume is
     // one record instead of a fresh list and a tap: a drop costs the user a pause, not their place.
@@ -130,6 +129,9 @@ fun MeshTerminalScreen(
     var released by remember(conn) { mutableStateOf(false) }
     LaunchedEffect(conn) {
         conn.run()
+        // The link is down: do not hold a foreground service for it while the user reads the
+        // reason or leaves the app.
+        BackgroundSession.setActive(false, "")
         // **A link that died while the app was off screen is rebuilt the moment the app is back**,
         // not after a two-to-thirty-second wait meant for a failure the user watched happen. The
         // wait itself is the platform's: this coroutine is suspended here while the process may be
@@ -137,6 +139,18 @@ fun MeshTerminalScreen(
         if (released || !AppLifecycle.foreground) {
             if (!AppLifecycle.foreground) snapshotFlow { AppLifecycle.foreground }.first { it }
             attempt += 1
+            return@LaunchedEffect
+        }
+        // A state that a retry cannot cure must not spin the rebuild loop. The plan or settings
+        // change is the user's cure, and that rebuilds this screen anyway.
+        val terminal = conn.driver.view.value
+        if (terminal is MeshTermView.LinkDown && terminal.link in setOf(
+                MeshLinkState.NeedsRadio,
+                MeshLinkState.NeedsPermission,
+                MeshLinkState.NoPath,
+                MeshLinkState.Refused,
+            )
+        ) {
             return@LaunchedEffect
         }
         // **Full jitter, because two ends that double in lockstep keep colliding.** The cap is the same
@@ -158,6 +172,7 @@ fun MeshTerminalScreen(
         // re-attaching `resumeShell`, so the user gets their place back rather than a stale screen.
         val remove = AppLifecycle.setReleaseHandler {
             released = true
+            BackgroundSession.setActive(false, "")
             conn.close()
         }
         onDispose { remove() }
@@ -172,6 +187,19 @@ fun MeshTerminalScreen(
         }
     }
     val view by conn.driver.view.collectAsState()
+    // The mesh link is a foreground service while it is up, exactly like the tailnet
+    // link. Without this Android freezes the process before the release grace and the
+    // BLE link is not actually kept alive while the user looks at another app.
+    LaunchedEffect(view) {
+        val up = when (view) {
+            MeshTermView.Idle, is MeshTermView.LinkDown, is MeshTermView.HostClosed -> false
+            else -> true
+        }
+        BackgroundSession.setActive(up, "Mesh session open")
+    }
+    DisposableEffect(conn) {
+        onDispose { BackgroundSession.setActive(false, "") }
+    }
     val attemptNo by conn.driver.attempt.collectAsState()
     LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
     val shells by conn.driver.shells.collectAsState()
@@ -217,36 +245,6 @@ fun MeshTerminalScreen(
     }
 
     val live = view as? MeshTermView.Live
-    // **A refused token is not a decision the user should have to make.** It is unambiguous: the
-    // stored token is dead, and the only cure is the fresh one MeshMore already has. So it is
-    // fetched invisibly, once per refusal, and the button in the body stays as the manual fallback
-    // for the cases that are not unambiguous (MeshMore off, nothing on the saved port).
-    val handoffNow by rememberUpdatedState(handoff)
-    LaunchedEffect(view) {
-        val v = view
-        val h = handoffNow ?: return@LaunchedEffect
-        // `claimAuto` lives on the handoff object, which outlives this connection, so a refusal that
-        // survives a re-connect cannot restart the cycle.
-        if (v is MeshTermView.LinkDown && meshLinkWantsHandoff(v.link) && h.claimAuto()) {
-            h.run(true, false)
-        }
-    }
-    // **Returning to the screen is a reason to ask again.** The one thing that changes while the app
-    // is away is what MeshMore is serving: the user may have opened it (which starts its gateway) or
-    // it may have picked another port. The automatic attempt above runs once per connection, so it
-    // cannot see that; this one is keyed on the platform's foreground instead, and only when the link
-    // is down for a reason a fresh grant cures.
-    val viewNow by rememberUpdatedState(view)
-    var hasBeenAway by remember { mutableStateOf(false) }
-    LaunchedEffect(AppLifecycle.foreground) {
-        if (!AppLifecycle.foreground) { hasBeenAway = true; return@LaunchedEffect }
-        if (!hasBeenAway) return@LaunchedEffect
-        val v = viewNow
-        if (v is MeshTermView.LinkDown && meshLinkWantsHandoff(v.link)) {
-            handoffNow?.run(true, false)
-        }
-    }
-
     // Asked once per connection, on first arriving: one record up, one or more down. After that
     // it is the user's (menu → shells), never a timer, because the link has about 58 records an hour.
     var listed by remember(conn) { mutableStateOf(false) }
@@ -275,7 +273,7 @@ fun MeshTerminalScreen(
     // **A rebuilt connection asks for the keyboard again.** The surface - and the hidden field that
     // carries the IME - is recreated with the connection, so a keyboard the user had open stays
     // drawn by the system while the new field has never been focused: typing went nowhere after a
-    // resume (measured 2026-11-01, a command typed 12 s after a gateway restart never reached the
+    // resume (measured 2026-11-01, a command typed 12 s after a radio reconnect never reached the
     // pty). Nothing about wanting to type changed, so nothing about the request should either.
     LaunchedEffect(conn) { if (keyboardWanted) keyboardRequest++ }
     val typing = portrait && keyboardWanted
@@ -349,7 +347,7 @@ fun MeshTerminalScreen(
                 // The one line that explains the pause, in the terminal's own type so it reads as the
                 // link talking rather than as chrome.
                 Text(
-                    meshTermLabel(view).removePrefix("meshmore · "),
+                    meshTermLabel(view),
                     color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
@@ -504,13 +502,13 @@ fun MeshTerminalScreen(
                     // the user cannot act on from this screen (asked to be removed, 2026-11-01:
                     // "when did this come from? I didn't see it earlier"). What the link cannot do
                     // is true of every shell in the list, so it belongs beside the route, not above
-                    // each list; what the hour has left is the gateway's own measurement and the
+                    // each list; what the hour has left is the radio's own measurement and the
                     // daemon reports it (`ldmux mesh status`).
                     if (handle.pendingLabel.isNotEmpty()) Text("waiting to send: ${handle.pendingLabel}", color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
                 if (listed != null) {
                     // A list with nothing in it is a sentence, not an empty rectangle above `open`.
-                    if (listed.isEmpty()) meshBodyFor(v, plan.endpoint)?.let { MeshBodyBlock(it, handoff, replaceStale = false) }
+                    if (listed.isEmpty()) meshBodyFor(v)?.let { MeshBodyBlock(it) }
                     MeshShellList(
                         entries = listed,
                         current = if (terminalLive) shells.current else null,
@@ -532,10 +530,10 @@ fun MeshTerminalScreen(
                     if (waiting != null) {
                         WaitingLine(waiting, attemptNo)
                     } else {
-                        // Every other state says what is wrong, and offers the one cure there is. A token the
-                        // link just refused, or a port with nothing on it, is the case a fresh handoff may
-                        // replace; a token that was never stored is not a replacement at all.
-                        meshBodyFor(v, plan.endpoint)?.let { MeshBodyBlock(it, handoff, replaceStale = true) }
+                        // Every other state says what is wrong. A radio that just refused the record,
+                        // or a host that stopped answering, is a fresh-connection case; a missing
+                        // radio or key is a settings case, not a retry.
+                        meshBodyFor(v)?.let { MeshBodyBlock(it) }
                     }
                     Spacer(Modifier.weight(1f))
                 }

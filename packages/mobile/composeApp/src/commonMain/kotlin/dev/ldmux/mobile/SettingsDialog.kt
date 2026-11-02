@@ -67,10 +67,8 @@ internal fun SettingsDialog(
                         current = current,
                         readCredentials = mesh.credentials,
                         onMeshPairing = mesh.onPairing,
-                        onGatewayCode = mesh.onGatewayCode,
                         onConfig = mesh.onConfig,
                         onUnpairMesh = mesh.onUnpair,
-                        onHandoff = mesh.onHandoff,
                     )
                 }
                 Box(Modifier.height(LocalTouch.current.rowPad * 2))

@@ -8,6 +8,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import dev.ldmux.mobile.mesh.RadioScanner
 import dev.ldmux.mobile.voice.Dictation
 
 class MainActivity : ComponentActivity() {
@@ -19,6 +20,7 @@ class MainActivity : ComponentActivity() {
         // shared seam, so this is where it is told which activity that is.
         Dictation.attachHost(this)
         CodeScanner.attachHost(this)
+        RadioScanner.attachHost(this)
         ScreenOrientation.attachHost(this)
         enableEdgeToEdge()
         // A cold start from a pairing link: held in the inbox until the UI reads it.
@@ -61,6 +63,7 @@ class MainActivity : ComponentActivity() {
         // Cleared rather than leaked: the service asks this for the notification
         // permission, and asking a destroyed activity is a crash, not a no-op.
         if (LdmuxService.activity === this) LdmuxService.activity = null
+        RadioScanner.detachHost()
         super.onDestroy()
     }
 
@@ -93,6 +96,7 @@ class MainActivity : ComponentActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        RadioScanner.onRequestPermissionsResult(requestCode, grantResults)
         if (requestCode == REQ_NOTIFICATIONS) return
         Dictation.onRequestPermissionsResult(
             requestCode,

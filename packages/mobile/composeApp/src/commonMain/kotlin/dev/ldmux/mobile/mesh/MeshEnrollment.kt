@@ -30,8 +30,6 @@ enum class MeshEnrollOutcome {
  */
 class MeshEnrollment(
     private val store: MeshSessionKeyStore,
-    /** The MeshMore gateway token, forgotten together with the keys (it was left behind before). */
-    private val tokens: MeshTokenStore? = null,
     private val newKeypair: () -> Pair<ByteArray, ByteArray>?,
 ) {
     /**
@@ -54,18 +52,14 @@ class MeshEnrollment(
         }
     }
 
-    /** Unpairing forgets the mesh keys, and the gateway token that only makes sense with them. */
+    /** Unpairing forgets the mesh keys. */
     fun onUnpaired() {
         runCatching { store.clear() }
-        runCatching { tokens?.clear() }
     }
 }
 
 /** The platform's secure store for the session keys (Android Keystore). */
 expect fun meshSessionKeyStore(): MeshSessionKeyStore
-
-/** The platform's secure store for the MeshMore gateway token. */
-expect fun meshTokenStore(): MeshTokenStore
 
 /** A device keypair from the real library, or null when it did not load. */
 fun libraryKeypair(): Pair<ByteArray, ByteArray>? =

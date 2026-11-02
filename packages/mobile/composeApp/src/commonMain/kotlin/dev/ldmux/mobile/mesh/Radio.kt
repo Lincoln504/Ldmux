@@ -19,6 +19,7 @@ interface RadioLink {
     val state: StateFlow<MeshLinkState>
     val status: StateFlow<MeshStatus?>
     val selfInfo: StateFlow<RadioSelfInfo?>
+    val deviceInfo: StateFlow<RadioDeviceInfo?>
     val received: Flow<ByteArray>
     val uplinkRecordMax: Int
 
@@ -27,6 +28,9 @@ interface RadioLink {
 
     /** Send one raw-custom record. The path belongs to the link; the caller sends only the record. */
     suspend fun send(record: ByteArray): RadioSendResult
+
+    /** Read the radio's firmware description (path-hash mode, limits). */
+    suspend fun readDeviceInfo(): RadioDeviceInfo?
 
     /** Apply the LDMUX preset to the attached radio. False when the write could not be verified. */
     suspend fun applyPreset(preset: RadioPreset): Boolean
@@ -40,25 +44,35 @@ data class RadioPreset(
     val spreadingFactor: Int,
     val codingRate: Int,
     val txPowerDbm: Int,
+    /** Path-hash width in bytes: 1, 2 or 3. The firmware mode is this minus one. */
+    val pathHashSize: Int = 1,
 ) {
     companion object {
-        /** The bench preset: 910.525 MHz, 500 kHz, SF7, CR5, 22 dBm. */
+        /** The bench preset: 910.525 MHz, 500 kHz, SF7, CR5, 22 dBm, 1-byte paths. */
         val LDMUX_PRIVATE = RadioPreset(
             frequencyMhz = 910.525,
             bandwidthKhz = 500.0,
             spreadingFactor = 7,
             codingRate = 5,
             txPowerDbm = 22,
+            pathHashSize = 1,
         )
 
-        /** The public USA/Canada preset: same frequency, 62.5 kHz. */
-        val USA_CANADA = RadioPreset(
+        /** The public USA preset: same frequency, 62.5 kHz, 1-byte paths. */
+        val USA = RadioPreset(
             frequencyMhz = 910.525,
             bandwidthKhz = 62.5,
             spreadingFactor = 7,
             codingRate = 5,
             txPowerDbm = 22,
+            pathHashSize = 1,
         )
+
+        /** The Canadian variant defaults to 3-byte path hashes. */
+        val CANADA = USA.copy(pathHashSize = 3)
+
+        /** The older name, kept because the design doc and tests use it. */
+        val USA_CANADA = USA
     }
 }
 
@@ -76,12 +90,26 @@ data class RadioSelfInfo(
     val maxTxPowerDbm: Int,
 )
 
+/** The radio's firmware description, read from DEVICE_INFO after the handshake. */
+data class RadioDeviceInfo(
+    val firmwareVersion: String,
+    val firmwareBuildDate: String,
+    val manufacturer: String,
+    val maxContacts: Int,
+    val maxGroupChannels: Int,
+    /** 0 = 1-byte, 1 = 2-byte, 2 = 3-byte path hashes. */
+    val pathHashMode: Int,
+) {
+    val pathHashSize: Int get() = (pathHashMode and 0x03) + 1
+}
+
 /** What the radio did with one raw record. Never delivery. */
 enum class RadioSendResult(val outcome: MeshSendOutcome) {
     Accepted(MeshSendOutcome.SentDirect),
     Busy(MeshSendOutcome.ErrBusy),
     TooLong(MeshSendOutcome.ErrTooLong),
     NotFound(MeshSendOutcome.ErrNotFound),
+    NoPath(MeshSendOutcome.ErrNotFound),
     Failed(MeshSendOutcome.Unknown),
 }
 
@@ -140,12 +168,9 @@ class MeshRadioConnection(
     suspend fun run() {
         try {
             link.connect()
+            driver.run()
         } catch (e: RadioLinkException) {
             driver.onGatewayState(e.state)
-            return
-        }
-        try {
-            driver.run()
         } finally {
             link.close()
         }
@@ -170,10 +195,13 @@ internal class UnsupportedRadioLink : RadioLink {
     override val status: StateFlow<MeshStatus?> = _status.asStateFlow()
     private val _selfInfo = MutableStateFlow<RadioSelfInfo?>(null)
     override val selfInfo: StateFlow<RadioSelfInfo?> = _selfInfo.asStateFlow()
+    private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
+    override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
     override val received: Flow<ByteArray> = emptyFlow()
     override val uplinkRecordMax: Int = 172
     override suspend fun connect() = throw RadioLinkException(MeshLinkState.NeedsRadio, "no radio platform")
     override suspend fun send(record: ByteArray): RadioSendResult = RadioSendResult.Failed
+    override suspend fun readDeviceInfo(): RadioDeviceInfo? = null
     override suspend fun applyPreset(preset: RadioPreset): Boolean = false
     override fun close() {}
 }
