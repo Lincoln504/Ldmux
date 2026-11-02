@@ -55,6 +55,9 @@ fun meshBodyFor(view: MeshTermView, endpoint: MeshGatewayEndpoint? = null): Mesh
         handoff = false,
     )
     is MeshTermView.LinkDown -> when (view.link) {
+        MeshLinkState.NeedsRadio -> MeshBody("choose the radio in Settings", false)
+        MeshLinkState.NeedsPermission -> MeshBody("Bluetooth permission is off for LDMUX", false)
+        MeshLinkState.NoPath -> MeshBody("the host radio has no direct path: move closer or re-pair", false)
         MeshLinkState.NeedsToken -> MeshBody("no MeshMore token yet", handoff = true)
         MeshLinkState.Idle, MeshLinkState.Connecting, MeshLinkState.Bound ->
             MeshBody("connecting to MeshMore", false)

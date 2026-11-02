@@ -4,11 +4,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!--
-      Signature permission declared by MeshMore for its same-phone gateway handoff. Granted
-      without a prompt when both apps are signed with one certificate, and to nobody else; an
-      app signed differently simply gets no handoff and the pairing code still works.
+      The phone owns its MeshCore radio. Android 12+ uses the runtime SCAN/CONNECT
+      permissions; older releases use BLUETOOTH/ADMIN plus location for scanning.
     -->
-    <uses-permission android:name="com.iotone.meshmore_sns_app.permission.GATEWAY_HANDOFF" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <!--
       Dictation is headless (SpeechRecognizer, not the keyboard's mic), so this
       is requested at the moment the mic button is first pressed, never at
@@ -33,8 +38,6 @@
 
     <!-- Needed so the speech recognizer is discoverable on the device. -->
     <queries>
-        <!-- Package visibility (Android 11+): without this MeshMore is invisible, and reads as not installed. -->
-        <package android:name="com.iotone.meshmore_sns_app" />
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>

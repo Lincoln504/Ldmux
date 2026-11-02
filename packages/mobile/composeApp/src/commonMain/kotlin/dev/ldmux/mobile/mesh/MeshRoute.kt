@@ -128,7 +128,10 @@ fun resolveRoute(
  * which has the room.
  */
 fun meshLinkLabel(state: MeshLinkState): String = when (state) {
-    MeshLinkState.NeedsToken -> "meshmore · needs pairing token"
+    MeshLinkState.NeedsRadio -> "mesh · choose a radio"
+    MeshLinkState.NeedsPermission -> "mesh · Bluetooth permission is off"
+    MeshLinkState.NoPath -> "mesh · the host radio has no direct path"
+    MeshLinkState.NeedsToken -> "mesh · needs pairing token"
     MeshLinkState.Idle -> "meshmore · idle"
     MeshLinkState.Connecting -> "meshmore · connecting"
     MeshLinkState.Bound -> "meshmore · bound"

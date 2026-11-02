@@ -22,7 +22,16 @@ import kotlinx.coroutines.withTimeout
  * several booleans. Every failure is its own state and none falls back to another route.
  */
 enum class MeshLinkState {
-    /** No pairing token yet. Nothing to connect with. */
+    /** No radio selected yet. Nothing to connect with. */
+    NeedsRadio,
+
+    /** Android refused the BLE permission needed to reach the radio. */
+    NeedsPermission,
+
+    /** The host radio is not a contact, or its direct path is missing. */
+    NoPath,
+
+    /** Legacy MeshMore gateway token. The radio route does not use it. */
     NeedsToken,
     Idle,
     Connecting,

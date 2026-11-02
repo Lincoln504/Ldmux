@@ -77,6 +77,8 @@ data class LdmuxConfig(
      * about the tailnet reads it. Empty means the default (`127.0.0.1:41731`). Not a secret.
      */
     val meshGateway: String = "",
+    /** The BLE address of the phone's MeshCore radio. Not a secret; empty until chosen. */
+    val meshRadio: String = "",
 ) {
     /** Where the mesh route connects: the saved gateway, or the default when none (or an invalid one) is saved. */
     val meshGatewayEndpoint: MeshGatewayEndpoint
@@ -136,7 +138,7 @@ data class LdmuxConfig(
         get() = "$host|$token|$deviceId|$deviceLabel" +
             // Appended only off the tailnet, so a tailnet device's key is byte-for-byte what it
             // was and nothing rebuilds on upgrade; choosing a route does rebuild the page.
-            if (route == MeshRoute.Tailnet) "" else "|route=${route.name}|gw=$meshGateway"
+            if (route == MeshRoute.Tailnet) "" else "|route=${route.name}|gw=$meshGateway|radio=$meshRadio"
 
     companion object {
         const val DEFAULT_FONT_SP = 12f

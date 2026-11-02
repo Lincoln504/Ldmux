@@ -110,7 +110,8 @@ fun MeshTerminalScreen(
     // rebuild, and that is exactly the value that must survive it.
     var resumeShell by remember(plan) { mutableStateOf("") }
     val conn = remember(plan, attempt) {
-        MeshTermConnection(meshSocketFactory(), scope, plan.creds, plan.lib, plan.endpoint, selector = resumeShell)
+        val link = meshRadioLink(plan.radioAddress, plan.creds.hostRadio) ?: UnsupportedRadioLink()
+        MeshRadioConnection(link, plan.creds, plan.lib, resumeShell)
     }
     // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport
     // stopped carrying records - a radio that went quiet, a socket the host stopped answering on.

@@ -20,7 +20,9 @@ fun readMeshCredentials(keys: MeshSessionKeyStore, tokens: MeshTokenStore): Pair
     val k = runCatching { keys.load() }.getOrNull()
     val t = runCatching { tokens.load() }.getOrNull()?.takeIf { it.size == MeshGateway.PAIRING_TOKEN_BYTES }
     val state = MeshCredentialState(hasSessionKeys = k != null, hasToken = t != null, hasPeer = k?.hostRadio != null)
-    val creds = if (k != null && t != null && k.hostRadio != null) MeshCredentials(k, t, k.hostRadio) else null
+    // The radio route needs the L3 keys and the host radio key. The MeshMore token is
+    // a legacy gateway credential; an empty value is deliberate, not a half-pairing.
+    val creds = if (k != null && k.hostRadio != null) MeshCredentials(k, t ?: ByteArray(0), k.hostRadio) else null
     return state to creds
 }
 
@@ -138,7 +140,13 @@ fun currentMeshResolution(route: MeshRoute): MeshRouteResolution {
 }
 
 /** Everything the mesh screen needs: the credentials, the library, and where the gateway is. */
-class MeshScreenPlan(val creds: MeshCredentials, val lib: SessionLib, val endpoint: MeshGatewayEndpoint)
+class MeshScreenPlan(
+    val creds: MeshCredentials,
+    val lib: SessionLib,
+    val endpoint: MeshGatewayEndpoint,
+    /** The BLE address selected for this install; empty means no radio has been chosen. */
+    val radioAddress: String = "",
+)
 
 /**
  * What to show the mesh terminal with, or null when the saved route is not mesh or cannot run (in
@@ -165,10 +173,14 @@ fun meshScreenPlan(
     if (lib == null) return null
     val resolution = resolveRoute(
         config.route, platform,
-        hasToken = state.hasToken, hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
+        // The radio route does not use the MeshMore token. Passing true keeps the
+        // legacy route resolver out of the way until its token branch is deleted.
+        hasToken = true, hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
         sessionBuilt = MESH_SESSION_BUILT, terminalBuilt = terminalBuilt,
     )
-    return if (resolution is MeshRouteResolution.Use && creds != null) MeshScreenPlan(creds, lib, config.meshGatewayEndpoint) else null
+    return if (resolution is MeshRouteResolution.Use && creds != null) {
+        MeshScreenPlan(creds, lib, config.meshGatewayEndpoint, config.meshRadio)
+    } else null
 }
 
 /** One picker line: the label when the host gave one, then the id the choice will send. */

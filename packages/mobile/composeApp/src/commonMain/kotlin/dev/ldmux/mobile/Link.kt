@@ -140,7 +140,7 @@ class ConfigStore(
     }
 
     private fun LdmuxConfig.withoutMesh(): LdmuxConfig =
-        copy(meshGateway = "", route = MeshRoute.Tailnet)
+        copy(meshGateway = "", meshRadio = "", route = MeshRoute.Tailnet)
 }
 
 /** How long the "why did that fail" request may take before the answer is "unreachable". */
