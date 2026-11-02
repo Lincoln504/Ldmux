@@ -45,6 +45,17 @@ sealed interface MeshHandoffResult {
 /** Ask MeshMore on this phone for its gateway's endpoint and token. Never throws; no UI of its own. */
 expect suspend fun requestMeshHandoff(): MeshHandoffResult
 
+/**
+ * Bring MeshMore to the foreground, if this phone has it.
+ *
+ * The handoff can only read what MeshMore's running process published, and a process that was
+ * killed cannot start its Flutter side from a Binder bind alone: the bind creates the service, not
+ * the engine that runs the gateway. Opening the app does start it (the gateway service is eager),
+ * so "not serving" has one cure the user can recognise. Fire-and-forget: the screen retries the
+ * handoff when it comes back, and there is nothing here to await.
+ */
+expect fun openMeshMore(): Boolean
+
 /** What applying an offer did. The caller stores nothing itself. */
 sealed interface MeshHandoffApplied {
     /** The token (and endpoint) are now what MeshMore offered. [config] carries the endpoint. */
@@ -112,7 +123,10 @@ fun meshHandoffLine(applied: MeshHandoffApplied): String? = when (applied) {
     is MeshHandoffApplied.NotServing -> when (applied.state) {
         "waitingForRadio" -> "MeshMore is waiting for its radio"
         "failed" -> "MeshMore's gateway could not start"
-        else -> "MeshMore is not serving: turn on Connected apps in MeshMore"
+        // The switch can be on and the app still not listening: the gateway is created with
+        // MeshMore's Flutter side, so a process started only to answer this bind has none. Opening
+        // the app is the cure, and the screen's button does that.
+        else -> "MeshMore is not serving: open it, or turn on Connected apps there"
     }
     is MeshHandoffApplied.Unavailable -> when (applied.why) {
         MeshHandoffFailure.NotInstalled -> "MeshMore is not installed"

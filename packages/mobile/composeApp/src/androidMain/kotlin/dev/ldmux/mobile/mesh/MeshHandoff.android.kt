@@ -25,6 +25,21 @@ private const val BIND_TIMEOUT_MS = 4_000L
 
 actual suspend fun requestMeshHandoff(): MeshHandoffResult = readMeshMoreHandoff(AndroidApp.context)
 
+actual fun openMeshMore(): Boolean = openMeshMoreApp(AndroidApp.context)
+
+/** The launcher intent the package manager knows, so an app renamed on the device still opens. */
+internal fun openMeshMoreApp(context: Context): Boolean {
+    val launch = runCatching { context.packageManager.getLaunchIntentForPackage(MESHMORE_PACKAGE) }.getOrNull()
+        ?: return false
+    return try {
+        context.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (_: Exception) {
+        // A background-activity start the platform refused, or no activity to start: not fatal.
+        false
+    }
+}
+
 /**
  * Bind to MeshMore's handoff service by an **explicit** component, read one offer, and unbind.
  *

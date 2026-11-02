@@ -226,8 +226,23 @@ fun MeshTerminalScreen(
         val h = handoffNow ?: return@LaunchedEffect
         // `claimAuto` lives on the handoff object, which outlives this connection, so a refusal that
         // survives a re-connect cannot restart the cycle.
-        if (v is MeshTermView.LinkDown && v.link == MeshLinkState.Refused && h.claimAuto()) {
-            h.run(true)
+        if (v is MeshTermView.LinkDown && meshLinkWantsHandoff(v.link) && h.claimAuto()) {
+            h.run(true, false)
+        }
+    }
+    // **Returning to the screen is a reason to ask again.** The one thing that changes while the app
+    // is away is what MeshMore is serving: the user may have opened it (which starts its gateway) or
+    // it may have picked another port. The automatic attempt above runs once per connection, so it
+    // cannot see that; this one is keyed on the platform's foreground instead, and only when the link
+    // is down for a reason a fresh grant cures.
+    val viewNow by rememberUpdatedState(view)
+    var hasBeenAway by remember { mutableStateOf(false) }
+    LaunchedEffect(AppLifecycle.foreground) {
+        if (!AppLifecycle.foreground) { hasBeenAway = true; return@LaunchedEffect }
+        if (!hasBeenAway) return@LaunchedEffect
+        val v = viewNow
+        if (v is MeshTermView.LinkDown && meshLinkWantsHandoff(v.link)) {
+            handoffNow?.run(true, false)
         }
     }
 

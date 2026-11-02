@@ -7,6 +7,7 @@ import dev.ldmux.mobile.mesh.MeshRouteActions
 import dev.ldmux.mobile.mesh.applyMeshHandoff
 import dev.ldmux.mobile.mesh.meshHandoffLine
 import dev.ldmux.mobile.mesh.meshHandoffWanted
+import dev.ldmux.mobile.mesh.openMeshMore
 import dev.ldmux.mobile.mesh.requestMeshHandoff
 import dev.ldmux.mobile.mesh.applyGatewayScan
 import dev.ldmux.mobile.mesh.applyMeshPairingScan
@@ -80,7 +81,7 @@ fun App() {
             var credentialsVersion by remember { mutableStateOf(0) }
             val mesh = remember(config, credentialsVersion) { meshScreenFor(config) }
             var handoffNote by remember { mutableStateOf<String?>(null) }
-            val runHandoff: suspend (Boolean) -> String? = { replaceStale ->
+            val runHandoff: suspend (Boolean, Boolean) -> String? = { replaceStale, openMeshMoreWhenClosed ->
                 val applied = applyMeshHandoff(
                     requestMeshHandoff(), store.config.value, meshSessionKeyStore(), meshTokenStore(), replaceStale,
                 )
@@ -88,19 +89,29 @@ fun App() {
                     store.update(applied.config)
                     credentialsVersion++
                 }
-                meshHandoffLine(applied).also { handoffNote = it }
+                // **"Not serving" is a thing the user can cure by opening MeshMore.** Its gateway is
+                // created with the app (the service is eager), so the press that asked for a token
+                // brings MeshMore up instead of stopping at a sentence about a switch that was
+                // already on (measured on the device, 2026-11-01). The automatic attempts never do
+                // this: the app must not jump to another app unless the user asked it to.
+                val opened = applied is MeshHandoffApplied.NotServing && openMeshMoreWhenClosed && openMeshMore()
+                if (opened) {
+                    "MeshMore is opening: its gateway starts with the app".also { handoffNote = it }
+                } else {
+                    meshHandoffLine(applied).also { handoffNote = it }
+                }
             }
             // Identity-stable: the screen's automatic attempt runs inside an effect, and an object
             // that changes every recomposition restarts that effect every recomposition.
             val handoff = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
-                remember { MeshHandoffUi({ handoffNote }) { replaceStale -> runHandoff(replaceStale) } }
+                remember { MeshHandoffUi({ handoffNote }) { replaceStale, ask -> runHandoff(replaceStale, ask) } }
             } else null
             // The automatic attempt: the ldmux code is in and the token is not, which is the moment the
             // person would otherwise be told to type one. Keyed on the credentials, so it runs once per
             // change and not on a loop, and it never replaces a token that is there.
             LaunchedEffect(credentialsVersion) {
                 if (handoff != null && meshHandoffWanted(readMeshCredentials(meshSessionKeyStore(), meshTokenStore()).first)) {
-                    runHandoff(false)
+                    runHandoff(false, false)
                 }
             }
             // Settings is drawn **once, here**, for every route. It used to belong to the
@@ -133,7 +144,7 @@ fun App() {
                             onGatewayCode = { text -> applyGatewayScan(text, store.config.value, meshSessionKeyStore(), meshTokenStore()).also { credentialsVersion++ } },
                             onConfig = { store.update(it) },
                             onUnpair = { store.unpairMesh(); credentialsVersion++ },
-                            onHandoff = { runHandoff(true) },
+                            onHandoff = { runHandoff(true, true) },
                         )
                     } else null,
                 )

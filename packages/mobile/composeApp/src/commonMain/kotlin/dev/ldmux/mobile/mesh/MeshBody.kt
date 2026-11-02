@@ -94,7 +94,13 @@ fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
  */
 class MeshHandoffUi(
     private val noteOf: () -> String?,
-    val run: suspend (replaceStale: Boolean) -> String?,
+    /**
+     * Try the handoff. [replaceStale] says the stored token has just failed, so a different one may
+     * replace it. [openMeshMoreWhenClosed] says this was the user pressing the button, so a MeshMore
+     * that is installed but not serving may be brought to the foreground: the gateway starts with
+     * the app (its service is eager), and this screen retries the handoff when the app returns.
+     */
+    val run: suspend (replaceStale: Boolean, openMeshMoreWhenClosed: Boolean) -> String?,
 ) {
     /**
      * The last result, read at draw time.
@@ -135,7 +141,7 @@ internal fun MeshBodyBlock(body: MeshBody, handoff: MeshHandoffUi?, replaceStale
                 onClick = {
                     busy = true
                     scope.launch {
-                        result = handoff.run(replaceStale || body.replaceStale)
+                        result = handoff.run(replaceStale || body.replaceStale, true)
                         busy = false
                     }
                 },
