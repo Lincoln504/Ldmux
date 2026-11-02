@@ -25,6 +25,9 @@ public enum MeshcoreCommand {
     /** {@code CMD_GET_CONTACTS} — source-only (not in the markdown doc). */
     GET_CONTACTS(0x04),
 
+    /** {@code CMD_GET_CONTACT_BY_KEY} — one contact by 32-byte public key. */
+    GET_CONTACT_BY_KEY(0x1E),
+
     /** {@code CMD_GET_DEVICE_TIME} — source-only. */
     GET_DEVICE_TIME(0x05),
 
@@ -48,6 +51,9 @@ public enum MeshcoreCommand {
 
     /** {@code CMD_SET_RADIO_TX_POWER} — TX power (int8 dBm). */
     SET_RADIO_TX_POWER(0x0C),
+
+    /** {@code CMD_SET_PATH_HASH_MODE} — 0 = 1-byte, 1 = 2-byte, 2 = 3-byte. */
+    SET_PATH_HASH_MODE(0x3D),
 
     /** {@code CMD_SET_ADVERT_LATLON} — advertised location. */
     SET_ADVERT_LATLON(0x0E),

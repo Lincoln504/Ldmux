@@ -20,10 +20,10 @@ package io.iotone.meshcore.codec;
  *       failure path, with a kind from this enum.</li>
  * </ul>
  *
- * <p>Hence the only failure kinds are structural: {@link #EMPTY} and
- * {@link #TRUNCATED}. An unknown opcode is <em>not</em> an error (it
- * becomes an {@code UnsupportedFrame}), so there is deliberately no
- * {@code UNSUPPORTED_OPCODE} kind.</p>
+ * <p>The failure kinds are structural ({@link #EMPTY}, {@link #TRUNCATED})
+ * or value-level ({@link #MALFORMED}). An unknown opcode is <em>not</em> an
+ * error (it becomes an {@code UnsupportedFrame}), so there is deliberately
+ * no {@code UNSUPPORTED_OPCODE} kind.</p>
  */
 public enum DecodeErrorKind {
 
@@ -31,5 +31,8 @@ public enum DecodeErrorKind {
     EMPTY,
 
     /** Frame ended before a required field could be read. */
-    TRUNCATED
+    TRUNCATED,
+
+    /** A field was present but its value violates the wire format. */
+    MALFORMED
 }

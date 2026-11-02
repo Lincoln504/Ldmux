@@ -314,41 +314,134 @@ public final class MeshcoreFrameCodec {
     // ---------------------------------------------------------------------
 
     /**
-     * {@code CMD_SEND_RAW_DATA} (0x19): one raw-custom OTA packet on a
-     * direct path. Body: {@code 19 [path_len u8][path][payload]}.
+     * {@code CMD_GET_CONTACT_BY_KEY} (0x1E): one contact by full public key.
      *
-     * <p>The firmware treats the path length as a signed byte and rejects a
-     * negative value: raw custom has no flood fallback. The companion frame
-     * ceiling is 176 bytes, so the payload ceiling is
-     * {@code 174 - path.length}.</p>
+     * <p>The firmware replies with a single {@code RESP_CODE_CONTACT} frame or
+     * {@code ERR_CODE_NOT_FOUND}. This is the terminal's connect path: a full
+     * contact dump can exceed the command answer window and spends it on every
+     * connect.</p>
      *
-     * @param path    direct path bytes; empty means a zero-hop direct send
-     * @param payload raw-custom bytes (opaque to MeshCore)
+     * @param publicKey full 32-byte public key
      * @return the encoded frame
-     * @throws IllegalArgumentException when the path or payload exceeds the
-     *                                  frame ceiling
+     * @throws IllegalArgumentException when the key is not 32 bytes
      */
-    public static byte[] sendRawData(byte[] path, byte[] payload) {
-        int pathLen = path.length;
-        if (pathLen > MeshcoreConstants.MAX_PATH_SIZE) {
+    public static byte[] getContactByKey(byte[] publicKey) {
+        if (publicKey.length != MeshcoreConstants.PUB_KEY_SIZE) {
+            throw new IllegalArgumentException("public key must be exactly "
+                    + MeshcoreConstants.PUB_KEY_SIZE + " bytes");
+        }
+        return new FrameBuilder()
+                .u8(MeshcoreCommand.GET_CONTACT_BY_KEY.code())
+                .fixed(publicKey, MeshcoreConstants.PUB_KEY_SIZE)
+                .build();
+    }
+
+    /**
+     * {@code CMD_SEND_RAW_DATA} (0x19) with an explicit encoded path length.
+     *
+     * <p>The firmware's {@code path_len} is the encoded byte used by
+     * {@code Packet::writePath}: low six bits are the hop count and high two
+     * bits are {@code hash_size - 1}. It is not the number of path bytes. For
+     * a one-hop two-byte path the encoded value is {@code 0x41} and only two
+     * path bytes follow. The frame budget is still
+     * {@code 176 - 2 - path.length}.</p>
+     *
+     * <p>Firmware 1.17.1/1.18 checks {@code path_len} as a byte count in
+     * {@code CMD_SEND_RAW_DATA}, so a two- or three-byte hash path is rejected
+     * there. Use {@link #sendRawPacket(int, byte[])} above {@code 0x3F}.</p>
+     *
+     * @param pathLen encoded path length (0..0x7F)
+     * @param path    actual path bytes ({@code hops * hash_size})
+     * @param payload raw-custom bytes (opaque to MeshCore, at least 4)
+     * @return the encoded frame
+     * @throws IllegalArgumentException when the encoding, path or payload is
+     *                                  outside the companion frame
+     */
+    public static byte[] sendRawData(int pathLen, byte[] path, byte[] payload) {
+        if (pathLen < 0 || pathLen > 0x7F) {
             throw new IllegalArgumentException(
-                    "raw path is " + pathLen + " bytes, maximum "
+                    "raw path length encoding must be 0..127, got " + pathLen);
+        }
+        int hashSize = (pathLen >>> 6) + 1;
+        int hops = pathLen & 0x3F;
+        int expected = hops * hashSize;
+        if (expected > MeshcoreConstants.MAX_PATH_SIZE) {
+            throw new IllegalArgumentException(
+                    "raw path needs " + expected + " bytes, maximum "
                             + MeshcoreConstants.MAX_PATH_SIZE);
         }
-        if (payload.length == 0) {
-            throw new IllegalArgumentException("raw payload must not be empty");
+        if (path.length != expected) {
+            throw new IllegalArgumentException(
+                    "raw path encoding " + pathLen + " means " + expected
+                            + " path bytes, got " + path.length);
         }
-        int maxPayload = MeshcoreConstants.MAX_RAW_PAYLOAD - pathLen;
+        if (payload.length < MeshcoreConstants.MIN_RAW_PAYLOAD) {
+            throw new IllegalArgumentException(
+                    "raw payload must be at least "
+                            + MeshcoreConstants.MIN_RAW_PAYLOAD + " bytes");
+        }
+        int maxPayload = MeshcoreConstants.MAX_RAW_PAYLOAD - path.length;
         if (payload.length > maxPayload) {
             throw new IllegalArgumentException(
                     "raw payload is " + payload.length + " bytes with a "
-                            + pathLen + "-byte path, maximum " + maxPayload);
+                            + path.length + "-byte path, maximum " + maxPayload);
         }
         return new FrameBuilder()
                 .u8(MeshcoreCommand.SEND_RAW_DATA.code())
                 .u8(pathLen)
                 .raw(path)
                 .raw(payload)
+                .build();
+    }
+
+    /**
+     * {@code CMD_SEND_RAW_PACKET} (0x41): {@code 41 [priority][packet]}.
+     *
+     * <p>Use this when the path encoding cannot be expressed by
+     * {@code CMD_SEND_RAW_DATA}'s byte-count bounds check, or when the caller
+     * needs a route other than direct. The packet is serialised in full,
+     * including its header and encoded path.</p>
+     *
+     * @param priority transmit priority
+     * @param packet   complete serialised packet
+     * @return the encoded companion frame
+     * @throws IllegalArgumentException when the packet is empty or exceeds
+     *                                  the companion frame
+     */
+    public static byte[] sendRawPacket(int priority, byte[] packet) {
+        if (priority < 0 || priority > 0xFF) {
+            throw new IllegalArgumentException("priority must fit one byte");
+        }
+        if (packet.length == 0) {
+            throw new IllegalArgumentException("raw packet must not be empty");
+        }
+        if (packet.length > MeshcoreConstants.MAX_RAW_PACKET) {
+            throw new IllegalArgumentException(
+                    "raw packet is " + packet.length + " bytes, maximum "
+                            + MeshcoreConstants.MAX_RAW_PACKET);
+        }
+        return new FrameBuilder()
+                .u8(MeshcoreCommand.SEND_RAW_PACKET.code())
+                .u8(priority)
+                .raw(packet)
+                .build();
+    }
+
+    /**
+     * {@code CMD_SET_PATH_HASH_MODE} (0x3D): {@code 3D 00 [mode]}.
+     *
+     * @param mode path-hash mode (0..2)
+     * @return the encoded frame
+     */
+    public static byte[] setPathHashMode(int mode) {
+        if (mode < 0 || mode > 2) {
+            throw new IllegalArgumentException(
+                    "path hash mode must be 0..2, got " + mode);
+        }
+        return new FrameBuilder()
+                .u8(MeshcoreCommand.SET_PATH_HASH_MODE.code())
+                .u8(0)
+                .u8(mode)
                 .build();
     }
 
@@ -758,12 +851,18 @@ public final class MeshcoreFrameCodec {
                 case 0x84: { // PUSH_CODE_RAW_DATA
                     double snr = c.i8("rawData.snr") / 4.0;
                     int rssi = c.i8("rawData.rssi");
-                    if (!c.atEnd()) {
-                        c.u8("rawData.marker");
+                    if (c.atEnd() || c.u8("rawData.marker")
+                            != MeshcoreConstants.RAW_DATA_MARKER) {
+                        return new DecodeFailure(MeshcoreDecodeError.of(
+                                DecodeErrorKind.MALFORMED,
+                                "rawData marker is not 0xFF", 0x84));
                     }
-                    byte[] payload = c.atEnd()
-                            ? new byte[0]
-                            : c.bytes(c.remaining(), "rawData.payload");
+                    if (c.atEnd()) {
+                        return new DecodeFailure(MeshcoreDecodeError.of(
+                                DecodeErrorKind.MALFORMED,
+                                "rawData payload is empty", 0x84));
+                    }
+                    byte[] payload = c.bytes(c.remaining(), "rawData.payload");
                     return new RawDataFrame(snr, rssi, payload);
                 }
                 case 0x88: { // PUSH_CODE_LOG_RX_DATA

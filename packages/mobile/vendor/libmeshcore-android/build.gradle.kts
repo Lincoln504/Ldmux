@@ -33,4 +33,6 @@ dependencies {
 
     // Nordic BLE: connection management, MTU negotiation, serialized writes.
     api("no.nordicsemi.android:ble:2.10.1")
+
+    testImplementation("junit:junit:4.13.2")
 }

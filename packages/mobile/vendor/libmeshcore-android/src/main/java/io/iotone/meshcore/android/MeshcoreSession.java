@@ -8,6 +8,7 @@ import androidx.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import io.iotone.meshcore.codec.MeshcoreFrameCodec;
@@ -78,14 +79,26 @@ public final class MeshcoreSession {
     private volatile SelfInfo selfInfo;
 
     /**
-     * Ring buffer of the last {@link #RF_LOG_BUFFER_CAP} RF-log frames
-     * (0x88), as hex strings. Used by {@link #exportInteropFixture}.
+     * Ring buffer of the last {@link #RF_LOG_BUFFER_CAP} raw inbound frames.
+     * Bytes are kept, not hex strings: hex is only needed when a fixture is
+     * exported, and formatting every raw terminal record on the BLE callback
+     * thread was measurable CPU and allocation cost.
      */
-    private final Deque<String> rfLogCapture =
+    private final Deque<byte[]> rfLogCapture =
             new ArrayDeque<>(RF_LOG_BUFFER_CAP);
 
     /** True while the sync-drain loop is in progress. */
-    private boolean draining = false;
+    private volatile boolean draining = false;
+
+    /**
+     * Whether the session drains the firmware's message queue.
+     *
+     * <p>LDMUX carries only raw custom records and has no consumer for
+     * MeshCore channel/DM messages. Leaving the pump on adds a
+     * {@code SYNC_NEXT_MESSAGE} command for every queued item, which competes
+     * with the one uncorrelated raw OK/ERR window. It is off for LDMUX.</p>
+     */
+    private volatile boolean autoDrain = true;
 
     /**
      * The one raw send awaiting a command answer, or null.
@@ -95,8 +108,26 @@ public final class MeshcoreSession {
      * most one raw send in flight, and a timeout is a dead link rather than a
      * reason to start another command that a late answer could resolve.</p>
      */
-    @Nullable
-    private RawSendCallback pendingRaw;
+    private final AtomicReference<RawSendCallback> pendingRaw =
+            new AtomicReference<>();
+
+    /**
+     * Number of tracked commands queued or in flight.
+     *
+     * <p>Tracked commands are the ones LDMUX coexists with: radio config,
+     * contacts and device query. Raw sends are refused while one is
+     * outstanding. The companion protocol has no sequence number, so this is
+     * the only way to keep a config OK from resolving a raw callback.</p>
+     *
+     * <p>Only one tracked command is written at a time. The queue is the
+     * firmware's single answer slot made explicit: three preset writes must
+     * not race three OK/ERR frames that carry no command id.</p>
+     */
+    private final Object trackedLock = new Object();
+    private final java.util.ArrayDeque<byte[]> trackedQueue =
+            new java.util.ArrayDeque<>();
+    private int pendingTracked;
+    private boolean trackedInFlight;
 
     /**
      * Creates a session.
@@ -230,7 +261,30 @@ public final class MeshcoreSession {
      */
     public void requestContacts() {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.getContacts());
+        sendTracked(MeshcoreFrameCodec.getContacts());
+    }
+
+    /**
+     * Requests one contact by its full public key
+     * ({@code CMD_GET_CONTACT_BY_KEY}, 0x1E).
+     *
+     * <p>The reply is a single {@link io.iotone.meshcore.frames.ContactFrame}
+     * on {@link SessionListener#onContact}, or an {@code ErrorFrame} with
+     * {@code ERR_CODE_NOT_FOUND}. This is the terminal's connect lookup: it
+     * avoids dumping a large contact table into the one answer window.</p>
+     *
+     * <p>No-op when not {@link SessionState#READY}.</p>
+     *
+     * @param publicKey full 32-byte public key
+     */
+    public void getContact(@NonNull byte[] publicKey) {
+        if (state.get() != SessionState.READY) return;
+        try {
+            sendTracked(MeshcoreFrameCodec.getContactByKey(publicKey));
+        } catch (IllegalArgumentException ignored) {
+            // A caller with a malformed key gets no command, not a broken
+            // answer window. The adapter only passes a full host key.
+        }
     }
 
     /**
@@ -348,7 +402,7 @@ public final class MeshcoreSession {
      */
     public void setRadioParams(RadioParams params) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.setRadioParams(params));
+        sendTracked(MeshcoreFrameCodec.setRadioParams(params));
     }
 
     /**
@@ -364,7 +418,7 @@ public final class MeshcoreSession {
      */
     public void setTxPower(int dbm) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.setRadioTxPower(dbm));
+        sendTracked(MeshcoreFrameCodec.setRadioTxPower(dbm));
     }
 
     /**
@@ -432,7 +486,7 @@ public final class MeshcoreSession {
      */
     public void deviceQuery(int appTargetVer) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.deviceQuery(appTargetVer));
+        sendTracked(MeshcoreFrameCodec.deviceQuery(appTargetVer));
     }
 
     /**
@@ -460,6 +514,72 @@ public final class MeshcoreSession {
     }
 
     /**
+     * Enables or disables the firmware message-queue drain.
+     *
+     * <p>On by default for clients that read MeshCore messages. LDMUX turns it
+     * off: it has no message consumer, and every drain command shares the
+     * companion protocol's single uncorrelated command-answer window.</p>
+     *
+     * @param enabled true to drain queued messages
+     */
+    public void setAutoDrain(boolean enabled) {
+        autoDrain = enabled;
+        if (!enabled) draining = false;
+    }
+
+    /** True when no message drain is running and no raw send is pending. */
+    public boolean isIdle() {
+        synchronized (trackedLock) {
+            return !draining && pendingRaw.get() == null && pendingTracked == 0;
+        }
+    }
+
+    /**
+     * Sets the path-hash mode ({@code CMD_SET_PATH_HASH_MODE}, 0x3D).
+     *
+     * <p>The firmware mode is 0, 1 or 2 for one, two or three bytes per path
+     * hash. Preset APIs that call these sizes 1, 2, 3 must subtract one.</p>
+     *
+     * @param mode path-hash mode (0..2)
+     */
+    public void setPathHashMode(int mode) {
+        if (state.get() != SessionState.READY) return;
+        sendTracked(MeshcoreFrameCodec.setPathHashMode(mode));
+    }
+
+    /**
+     * Sends one complete MeshCore packet ({@code CMD_SEND_RAW_PACKET},
+     * 0x41).
+     *
+     * <p>Use this when the path encoding cannot be expressed by
+     * {@code CMD_SEND_RAW_DATA}'s byte-count bounds check, or when the caller
+     * needs a route other than direct. The packet is serialised in full,
+     * including its header and encoded path.</p>
+     *
+     * @param priority transmit priority
+     * @param packet   complete serialised packet
+     * @param callback the one answer for this command
+     * @return true when the frame was handed to the transport
+     */
+    public boolean sendRawPacket(
+            int priority,
+            @NonNull byte[] packet,
+            @NonNull RawSendCallback callback) {
+        if (state.get() != SessionState.READY) {
+            callback.onResult(false, -1);
+            return false;
+        }
+        final byte[] frame;
+        try {
+            frame = MeshcoreFrameCodec.sendRawPacket(priority, packet);
+        } catch (IllegalArgumentException e) {
+            callback.onResult(false, -1);
+            return false;
+        }
+        return sendRawFrame(frame, callback);
+    }
+
+    /**
      * Sends one raw-custom packet on a direct path ({@code CMD_SEND_RAW_DATA},
      * 0x19).
      *
@@ -474,28 +594,58 @@ public final class MeshcoreSession {
      * @param callback the one answer for this send
      * @return true when the frame was handed to the transport
      */
+    /**
+     * Sends one raw-custom packet with an explicit encoded path length.
+     *
+     * @param pathLen encoded path length (low six bits hops, high two bits
+     *                {@code hash_size - 1})
+     * @param path    actual path bytes
+     * @param payload raw-custom bytes
+     * @param callback the one answer for this send
+     * @return true when the frame was handed to the transport
+     */
     public boolean sendRawData(
+            int pathLen,
             @NonNull byte[] path,
             @NonNull byte[] payload,
             @NonNull RawSendCallback callback) {
-        if (state.get() != SessionState.READY || pendingRaw != null) {
+        if (state.get() != SessionState.READY) {
             callback.onResult(false, -1);
             return false;
         }
         final byte[] frame;
         try {
-            frame = MeshcoreFrameCodec.sendRawData(path, payload);
+            frame = MeshcoreFrameCodec.sendRawData(pathLen, path, payload);
         } catch (IllegalArgumentException e) {
             callback.onResult(false, -1);
             return false;
         }
-        pendingRaw = callback;
+        return sendRawFrame(frame, callback);
+    }
+
+    private boolean sendRawFrame(
+            @NonNull byte[] frame,
+            @NonNull RawSendCallback callback) {
+        synchronized (trackedLock) {
+            if (pendingTracked != 0) {
+                // A config/contact/device answer could still be in flight.
+                // Without a sequence number it would be indistinguishable from
+                // the raw command's answer, so the raw send waits for quiet.
+                callback.onResult(false, -1);
+                return false;
+            }
+            if (!pendingRaw.compareAndSet(null, callback)) {
+                callback.onResult(false, -1);
+                return false;
+            }
+        }
         try {
             transport.send(frame);
             return true;
         } catch (IOException | IllegalStateException e) {
-            pendingRaw = null;
+            pendingRaw.compareAndSet(callback, null);
             callback.onResult(false, -1);
+            pumpTracked();
             return false;
         }
     }
@@ -504,10 +654,14 @@ public final class MeshcoreSession {
      * Closes the session and disconnects the transport.
      */
     public void close() {
-        RawSendCallback pending = pendingRaw;
-        pendingRaw = null;
+        RawSendCallback pending = pendingRaw.getAndSet(null);
         if (pending != null) {
             pending.onResult(false, -1);
+        }
+        synchronized (trackedLock) {
+            trackedQueue.clear();
+            pendingTracked = 0;
+            trackedInFlight = false;
         }
         setState(SessionState.DISCONNECTED);
         try {
@@ -544,15 +698,11 @@ public final class MeshcoreSession {
             @NonNull String knownPlaintextUtf8,
             @NonNull String firmwareVersion) {
         // Walk the RF-log ring newest-first for the last 0x88 frame.
-        String lastRfLog = null;
-        for (String hex : rfLogCapture) {
-            if (hex.startsWith("88") || hex.startsWith("8b")) {
-                // Both 0x88 (RF log) and 0x8b (telemetry) start with 8x.
-                // We want only 0x88.
-                if (hex.startsWith("88")) {
-                    lastRfLog = hex;
-                    break;
-                }
+        byte[] lastRfLog = null;
+        for (byte[] raw : rfLogCapture) {
+            if (raw.length > 0 && raw[0] == (byte) 0x88) {
+                lastRfLog = raw;
+                break;
             }
         }
         if (lastRfLog == null) return null;
@@ -566,7 +716,7 @@ public final class MeshcoreSession {
                 + "  \"channel_name\": \"Public\",\n"
                 + "  \"psk_hex\": \"" + pskHex + "\",\n"
                 + "  \"known_plaintext_utf8\": \"" + knownPlaintextUtf8 + "\",\n"
-                + "  \"rf_log_frame_hex\": \"" + lastRfLog + "\"\n"
+                + "  \"rf_log_frame_hex\": \"" + bytesToHex(lastRfLog) + "\"\n"
                 + "}\n";
     }
 
@@ -578,12 +728,12 @@ public final class MeshcoreSession {
 
         @Override
         public void onFrame(@NonNull byte[] frame) {
-            // Buffer every raw frame as hex for the RF-log capture.
-            String hex = bytesToHex(frame);
+            // Keep bytes, not formatted hex. Hex is only needed for an
+            // explicit fixture export, not for every raw terminal record.
             if (rfLogCapture.size() >= RF_LOG_BUFFER_CAP) {
                 rfLogCapture.pollLast();
             }
-            rfLogCapture.addFirst(hex);
+            rfLogCapture.addFirst(frame.clone());
 
             MeshcoreInbound decoded = MeshcoreFrameCodec.decode(frame);
             dispatch(decoded);
@@ -596,10 +746,14 @@ public final class MeshcoreSession {
                 // Kick off the handshake immediately.
                 send(MeshcoreFrameCodec.appStart(appName));
             } else {
-                RawSendCallback pending = pendingRaw;
-                pendingRaw = null;
+                RawSendCallback pending = pendingRaw.getAndSet(null);
                 if (pending != null) {
                     pending.onResult(false, -1);
+                }
+                synchronized (trackedLock) {
+                    trackedQueue.clear();
+                    pendingTracked = 0;
+                    trackedInFlight = false;
                 }
                 setState(SessionState.DISCONNECTED);
                 draining = false;
@@ -610,6 +764,11 @@ public final class MeshcoreSession {
     private void dispatch(@NonNull MeshcoreInbound frame) {
         if (frame instanceof SelfInfoFrame f) {
             selfInfo = f.selfInfo();
+            synchronized (trackedLock) {
+                trackedQueue.clear();
+                pendingTracked = 0;
+                trackedInFlight = false;
+            }
             setState(SessionState.READY);
             // Drain any messages that accumulated while we were offline.
             triggerDrain();
@@ -645,12 +804,13 @@ public final class MeshcoreSession {
         }
         if (frame instanceof RawDataFrame f) {
             listener.onRawData(f);
-            continueDrain();
+            // LDMUX disables auto-drain; clients that keep it on still need
+            // the message queue to advance after a raw push.
+            if (autoDrain) continueDrain();
             return;
         }
         if (frame instanceof OkFrame || frame instanceof ErrorFrame) {
-            RawSendCallback pending = pendingRaw;
-            pendingRaw = null;
+            RawSendCallback pending = pendingRaw.getAndSet(null);
             if (pending != null) {
                 if (frame instanceof OkFrame) {
                     pending.onResult(true, -1);
@@ -658,7 +818,16 @@ public final class MeshcoreSession {
                     ErrorFrame e = (ErrorFrame) frame;
                     pending.onResult(false, e.code().isPresent() ? e.code().getAsInt() : -1);
                 }
+                pumpTracked();
+            } else {
+                trackedAnswered();
             }
+        }
+        if (frame instanceof io.iotone.meshcore.frames.EndOfContactsFrame) {
+            trackedAnswered();
+        }
+        if (frame instanceof io.iotone.meshcore.frames.DeviceInfoFrame) {
+            trackedAnswered();
         }
         if (frame instanceof DecodeFailure f) {
             listener.onDecodeFailure(f);
@@ -674,9 +843,9 @@ public final class MeshcoreSession {
      * is ready.
      */
     private void triggerDrain() {
-        if (!draining && state.get() == SessionState.READY) {
+        if (autoDrain && !draining && state.get() == SessionState.READY) {
             draining = true;
-            send(MeshcoreFrameCodec.syncNextMessage());
+            if (!send(MeshcoreFrameCodec.syncNextMessage())) draining = false;
         }
     }
 
@@ -684,8 +853,8 @@ public final class MeshcoreSession {
      * Issue the next {@code SYNC_NEXT_MESSAGE} if a drain is in progress.
      */
     private void continueDrain() {
-        if (draining) {
-            send(MeshcoreFrameCodec.syncNextMessage());
+        if (autoDrain && draining) {
+            if (!send(MeshcoreFrameCodec.syncNextMessage())) draining = false;
         }
     }
 
@@ -696,21 +865,66 @@ public final class MeshcoreSession {
         }
     }
 
-    private void send(@NonNull byte[] frame) {
+    private void sendTracked(@NonNull byte[] frame) {
+        synchronized (trackedLock) {
+            if (pendingTracked >= MAX_TRACKED_QUEUE) {
+                // A caller that queues without waiting is misusing the API.
+                // Dropping here is safer than writing an answer nobody can
+                // correlate. The preset path sends three and waits for idle.
+                return;
+            }
+            pendingTracked++;
+            trackedQueue.addLast(frame);
+        }
+        pumpTracked();
+    }
+
+    private void trackedAnswered() {
+        synchronized (trackedLock) {
+            if (pendingTracked == 0) return;
+            pendingTracked--;
+            trackedInFlight = false;
+        }
+        pumpTracked();
+    }
+
+    /**
+     * Writes the next tracked command only when the one answer slot is free:
+     * no raw send waiting and no tracked command in flight.
+     */
+    private void pumpTracked() {
+        final byte[] next;
+        synchronized (trackedLock) {
+            if (trackedInFlight || pendingRaw.get() != null) return;
+            next = trackedQueue.pollFirst();
+            if (next == null) return;
+            trackedInFlight = true;
+        }
+        if (!send(next)) trackedAnswered();
+    }
+
+    private static final int MAX_TRACKED_QUEUE = 16;
+
+    private boolean send(@NonNull byte[] frame) {
         try {
             transport.send(frame);
+            return true;
         } catch (IOException | IllegalStateException e) {
             // Link dropped mid-session; the connection-observer will fire
             // onConnectionChanged(false) and reset the state.
+            return false;
         }
     }
 
 
     private static String bytesToHex(@NonNull byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
+        final char[] digits = "0123456789abcdef".toCharArray();
+        char[] out = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int v = bytes[i] & 0xFF;
+            out[i * 2] = digits[v >>> 4];
+            out[i * 2 + 1] = digits[v & 0x0F];
         }
-        return sb.toString();
+        return new String(out);
     }
 }

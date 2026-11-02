@@ -33,8 +33,10 @@ import java.util.Arrays;
  * @param type                contact node type
  * @param flags               contact flags (see the {@code FLAG_*}
  *                            constants)
- * @param outPathLen          number of valid hops in {@code outPath}
- *                            (the buffer is always 64 bytes)
+ * @param outPathLen          encoded path length: low 6 bits are the hop
+ *                            count, high 2 bits are {@code hash_size - 1};
+ *                            {@code 0xFF} means the path is unknown. This is
+ *                            not a byte count (the buffer is always 64 bytes).
  * @param outPath             64-byte outbound path buffer
  * @param name                contact display name (NUL-trimmed)
  * @param lastAdvertTimestamp unix seconds of the contact's last advert
@@ -92,14 +94,56 @@ public record Contact(
         return longitudeMicros / 1e6;
     }
 
+    /** The sentinel the firmware uses when it has no path for this contact. */
+    public static final int OUT_PATH_UNKNOWN = 0xFF;
+
+    /** True when the firmware knows a path. Zero hops is a known path. */
+    public boolean hasPath() {
+        return outPathLen != OUT_PATH_UNKNOWN;
+    }
+
+    /** Hash width in bytes: 1, 2 or 3. Zero when the path is unknown or invalid. */
+    public int pathHashSize() {
+        if (!hasPath()) return 0;
+        int encoded = (outPathLen >>> 6) & 0x03;
+        return encoded == 3 ? 0 : encoded + 1;
+    }
+
+    /** Number of hops in the path, or zero when it is unknown or invalid. */
+    public int pathHopCount() {
+        if (!hasPath()) return 0;
+        return outPathLen & 0x3F;
+    }
+
+    /** Number of path bytes actually present ({@code hops * hash_size}). */
+    public int pathByteCount() {
+        int size = pathHashSize();
+        return size == 0 ? 0 : pathHopCount() * size;
+    }
+
+    /** True when the encoding uses the reserved hash-size code 3 or the reserved 0xFF. */
+    public boolean hasValidPathEncoding() {
+        return hasPath() && pathHashSize() != 0;
+    }
+
     /**
-     * Returns the hops actually in use
-     * ({@code outPath[0..outPathLen)}), as a fresh copy.
+     * Returns the path bytes in use, as a fresh copy.
+     *
+     * <p>{@code outPathLen} is an encoded byte, not a count of bytes. A
+     * two-byte hash path of one hop is encoded as {@code 0x41}, so slicing
+     * {@code outPath[0..outPathLen)} would return the whole 64-byte buffer.
+     * This method decodes the hop count and hash width first.</p>
+     *
+     * <p>A zero-hop path and an unknown path both return an empty array.
+     * Callers that need to distinguish them must check {@link #hasPath()}.
+     * An invalid encoding also returns empty.</p>
      *
      * @return active path bytes
      */
     public byte[] activePath() {
-        int n = Math.max(0, Math.min(outPathLen, outPath.length));
+        if (!hasValidPathEncoding()) return new byte[0];
+        int n = pathByteCount();
+        if (n > outPath.length) return new byte[0];
         return Arrays.copyOfRange(outPath, 0, n);
     }
 

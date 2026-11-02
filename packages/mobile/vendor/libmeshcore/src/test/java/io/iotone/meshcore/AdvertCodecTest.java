@@ -86,13 +86,15 @@ class AdvertCodecTest {
     }
 
     @Test
-    void truncatedAdvertFailsControlled() {
-        // Signature should be 64 bytes; give 10.
+    void shortAdvertBecomesBareInsteadOfBeingDropped() {
+        // Firmware in the field pushes only the 32-byte public key. A short
+        // record is a "heard this node" notification, not a decode failure.
         byte[] frame = new FrameBuilder()
                 .u8(0x80).zeros(32).u32(0).zeros(10).build();
-        DecodeFailure df = assertInstanceOf(DecodeFailure.class,
-                MeshcoreFrameCodec.decode(frame));
-        assertEquals(DecodeErrorKind.TRUNCATED, df.error().kind());
+        Advert a = assertInstanceOf(AdvertFrame.class,
+                MeshcoreFrameCodec.decode(frame)).advert();
+        assertTrue(a.isBare());
+        assertEquals(0, a.signature().length);
     }
 
     @Test

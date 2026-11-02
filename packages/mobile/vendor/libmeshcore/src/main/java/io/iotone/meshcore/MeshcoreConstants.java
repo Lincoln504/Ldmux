@@ -62,6 +62,15 @@ public final class MeshcoreConstants {
      */
     public static final int MAX_RAW_PAYLOAD = MAX_RAW_FRAME - 2;
 
+    /**
+     * Largest serialised packet in a {@code CMD_SEND_RAW_PACKET} frame:
+     * {@code 176 - 1 (opcode) - 1 (priority)}.
+     */
+    public static final int MAX_RAW_PACKET = MAX_RAW_FRAME - 2;
+
+    /** The firmware rejects a raw payload shorter than four bytes. */
+    public static final int MIN_RAW_PAYLOAD = 4;
+
     /** The byte the firmware puts between RSSI and the raw payload. */
     public static final int RAW_DATA_MARKER = 0xFF;
 

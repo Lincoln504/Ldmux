@@ -59,9 +59,11 @@ class FuzzTest {
             MeshcoreInbound out = MeshcoreFrameCodec.decode(frame);
             assertNotNull(out);
             if (out instanceof DecodeFailure df) {
-                // The only failure kinds are structural.
+                // Structural failures plus value-level malformed frames
+                // (for example a 0x84 push whose marker is not 0xFF).
                 assertTrue(df.error().kind() == DecodeErrorKind.EMPTY
-                        || df.error().kind() == DecodeErrorKind.TRUNCATED);
+                        || df.error().kind() == DecodeErrorKind.TRUNCATED
+                        || df.error().kind() == DecodeErrorKind.MALFORMED);
             }
         }
     }

@@ -31,6 +31,20 @@ public final class TestUtil {
     }
 
     /**
+     * Builds a byte array from integer values, truncating each to one byte.
+     *
+     * @param values byte values
+     * @return the bytes
+     */
+    public static byte[] bytes(int... values) {
+        byte[] out = new byte[values.length];
+        for (int i = 0; i < values.length; i++) {
+            out[i] = (byte) values[i];
+        }
+        return out;
+    }
+
+    /**
      * Encodes bytes as lowercase hex.
      *
      * @param b bytes

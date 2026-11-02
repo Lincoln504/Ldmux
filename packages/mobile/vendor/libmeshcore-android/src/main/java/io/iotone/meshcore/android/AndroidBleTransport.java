@@ -49,6 +49,9 @@ public final class AndroidBleTransport implements MeshcoreTransport {
     /** Requested MTU — fits any MeshCore frame with room to spare. */
     private static final int PREFERRED_MTU = 256;
 
+    /** ATT overhead plus the largest companion frame. */
+    private static final int MIN_MTU = 176 + 3;
+
     private static final UUID SERVICE_UUID =
             UUID.fromString(MeshcoreBle.SERVICE_UUID);
     private static final UUID RX_UUID =
@@ -87,7 +90,8 @@ public final class AndroidBleTransport implements MeshcoreTransport {
      */
     @Override
     public boolean isConnected() {
-        return manager.isConnected() && manager.isReady();
+        return manager.isConnected() && manager.isReady()
+                && manager.mtu() >= MIN_MTU;
     }
 
     /**
@@ -166,10 +170,14 @@ public final class AndroidBleTransport implements MeshcoreTransport {
                     notifyConnectionChanged(false);
                 }
 
-                /** Fires after {@code initialize()} completes — transport is usable. */
+                /**
+                 * Fires after {@code initialize()} returns, which is before the
+                 * queued MTU and notification requests complete. Readiness is
+                 * reported from the notification-enable request instead, so
+                 * APP_START cannot be written to an unsubscribed link.
+                 */
                 @Override
                 public void onDeviceReady(@NonNull BluetoothDevice d) {
-                    notifyConnectionChanged(true);
                 }
 
                 @Override
@@ -184,14 +192,39 @@ public final class AndroidBleTransport implements MeshcoreTransport {
             });
         }
 
+        int mtu() {
+            return getMtu();
+        }
+
         void sendFrame(@NonNull byte[] frame) {
-            writeCharacteristic(rxCharacteristic, frame,
-                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+            if (rxCharacteristic == null) {
+                notifyConnectionChanged(false);
+                return;
+            }
+            int properties = rxCharacteristic.getProperties();
+            int writeType;
+            if ((properties & BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) {
+                // Write with response is the portable choice. The ESP32
+                // companion advertises PROPERTY_WRITE only, and Android rejects
+                // a write-no-response against such a characteristic.
+                writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT;
+            } else if ((properties
+                    & BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE;
+            } else {
+                notifyConnectionChanged(false);
+                return;
+            }
+            writeCharacteristic(rxCharacteristic, frame, writeType)
+                    .fail((device, status) -> notifyConnectionChanged(false))
                     .enqueue();
         }
 
         void shutdown() {
-            disconnect().enqueue();
+            // close() disconnects and releases the GATT/notification state.
+            // disconnect().enqueue() alone left the old manager alive across
+            // reconnects.
+            close();
         }
 
         // --- BleManager overrides ---
@@ -208,10 +241,38 @@ public final class AndroidBleTransport implements MeshcoreTransport {
 
         @Override
         protected void initialize() {
-            // Negotiate a larger MTU first so frames up to 255 B fit in
-            // one write/notification (default is 23 B minus 3 B overhead).
-            requestMtu(PREFERRED_MTU).enqueue();
+            // Bond after service discovery, not before connecting. Android
+            // needs the live GATT link for createBond, and the radio's
+            // characteristics are encrypted, so notifications must wait for
+            // the bond to be usable.
+            ensureBond()
+                    .done((device) -> negotiateMtuAndSubscribe())
+                    .fail((device, status) -> notifyConnectionChanged(false))
+                    .enqueue();
+        }
 
+        private void negotiateMtuAndSubscribe() {
+            requestMtu(PREFERRED_MTU)
+                    .done((device) -> {
+                        if (getMtu() < MIN_MTU) {
+                            notifyConnectionChanged(false);
+                        } else {
+                            subscribe();
+                        }
+                    })
+                    .fail((device, status) -> {
+                        // Some stacks refuse the request but already carry a
+                        // large ATT MTU. Use it only when the ceiling is real.
+                        if (getMtu() >= MIN_MTU) {
+                            subscribe();
+                        } else {
+                            notifyConnectionChanged(false);
+                        }
+                    })
+                    .enqueue();
+        }
+
+        private void subscribe() {
             setNotificationCallback(txCharacteristic)
                     .with((device, data) -> {
                         byte[] raw = data.getValue();
@@ -219,7 +280,13 @@ public final class AndroidBleTransport implements MeshcoreTransport {
                         Listener l = frameListener;
                         if (l != null) l.onFrame(raw.clone());
                     });
-            enableNotifications(txCharacteristic).enqueue();
+            // This is the readiness point. onDeviceReady() runs when
+            // initialize() returns, before bonding, MTU and notifications have
+            // completed, and MeshcoreSession sends APP_START on that signal.
+            enableNotifications(txCharacteristic)
+                    .done((device) -> notifyConnectionChanged(true))
+                    .fail((device, status) -> notifyConnectionChanged(false))
+                    .enqueue();
         }
 
         @Override
