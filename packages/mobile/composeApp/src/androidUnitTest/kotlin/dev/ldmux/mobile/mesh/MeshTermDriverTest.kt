@@ -2,6 +2,7 @@ package dev.ldmux.mobile.mesh
 
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -564,6 +565,17 @@ class MeshTermDriverTest {
         hs = FakeHandshake(sess, MeshSessionException(MeshLinkState.Refused, SessionLib.ERR_STALE, "stale"))
         val d = driver(); d.start(); d.onRecord(byteArrayOf(2))
         assertEquals(MeshTermView.LinkDown(MeshLinkState.Refused), d.view.value)
+    }
+
+    @Test
+    fun `a gateway that closed ends the run so the caller can rebuild`() = runBlocking<Unit> {
+        // The caller's only retry is a new connection handed to `run`; if a peer close leaves the
+        // loop turning, the screen says "closed" for ever and no rebuild is ever reached.
+        val d = driver()
+        val job = launch { d.run() }
+        gw.state.value = MeshLinkState.Closed
+        withTimeout(5_000) { job.join() }
+        assertEquals(MeshTermView.LinkDown(MeshLinkState.Closed), d.view.value)
     }
 
     @Test

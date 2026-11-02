@@ -37,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
@@ -64,6 +65,7 @@ import dev.ldmux.mobile.tildify
 import kotlin.random.Random
 import kotlin.time.TimeSource
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -117,8 +119,25 @@ fun MeshTerminalScreen(
     // is that reload, on the same backoff: two seconds doubling to thirty, and back to two as soon
     // as the link is live.
     var rebuilds by remember(plan) { mutableStateOf(0) }
+    // The connection ended while the app was already off screen, after the jitter below had begun.
+    // The return decides then, so a backoff meant for a failure someone was watching never spends
+    // the radio on a screen nobody is looking at.
+    var ended by remember(conn) { mutableStateOf(false) }
+    // The platform's release closed this connection. Not a failure, so it must not pay the failure
+    // backoff - and the timer can fire late: Android freezes the process, so the 45-second grace
+    // often expires only when the app is unfrozen on return, by which time it is foreground again.
+    var released by remember(conn) { mutableStateOf(false) }
     LaunchedEffect(conn) {
         conn.run()
+        // **A link that died while the app was off screen is rebuilt the moment the app is back**,
+        // not after a two-to-thirty-second wait meant for a failure the user watched happen. The
+        // wait itself is the platform's: this coroutine is suspended here while the process may be
+        // frozen, which is exactly the state a dead radio would otherwise be hidden in.
+        if (released || !AppLifecycle.foreground) {
+            if (!AppLifecycle.foreground) snapshotFlow { AppLifecycle.foreground }.first { it }
+            attempt += 1
+            return@LaunchedEffect
+        }
         // **Full jitter, because two ends that double in lockstep keep colliding.** The cap is the same
         // two-to-thirty seconds as before, but the wait is drawn uniformly below it: a phone and a host
         // that both back off on 2, 4, 8, 16 meet again on 2, 4, 8, 16, which is the shape every account
@@ -126,9 +145,31 @@ fun MeshTerminalScreen(
         val cap = (2_000L shl rebuilds.coerceAtMost(4)).coerceAtMost(30_000L)
         rebuilds += 1
         delay(Random.nextLong(1, cap + 1))
-        attempt += 1
+        if (AppLifecycle.foreground) attempt += 1 else ended = true
     }
-    DisposableEffect(conn) { onDispose { conn.close() } }
+    DisposableEffect(conn) {
+        // **A long stay off screen is not a pause the link survives.** The tailnet route lets go of
+        // its shells after the platform's grace and reconnects on return; this route now does the
+        // same. Without it the socket is left half-open across a frozen process, the screen keeps the
+        // last committed frame as if it were live, and typing goes into a session nobody is driving
+        // (measured on the device, 2026-11-01: backgrounded for a long time, came back to a frozen
+        // picture and no link). Closing here wakes `run`, and the effect above rebuilds on return,
+        // re-attaching `resumeShell`, so the user gets their place back rather than a stale screen.
+        val remove = AppLifecycle.setReleaseHandler {
+            released = true
+            conn.close()
+        }
+        onDispose { remove() }
+    }
+    // The other half of that decision: a connection that ended while the app was off screen gets a
+    // fresh one as soon as it is back. `released` needs no flag of its own: the release closes the
+    // connection, and this is the same path.
+    LaunchedEffect(AppLifecycle.foreground) {
+        if (AppLifecycle.foreground && ended) {
+            ended = false
+            attempt += 1
+        }
+    }
     val view by conn.driver.view.collectAsState()
     val attemptNo by conn.driver.attempt.collectAsState()
     LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }

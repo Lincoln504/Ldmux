@@ -336,7 +336,17 @@ class MeshTermDriver(
             MeshLinkState.Bound -> linkProblem = null
             // Not decisions: the link is still coming up or is idle.
             MeshLinkState.Idle, MeshLinkState.Connecting -> {}
-            else -> linkProblem = state
+            else -> {
+                linkProblem = state
+                // **A gateway that closed is the end of this connection.** `run`'s loops only end
+                // on [transportDead], and a peer close used to leave them ticking over a socket
+                // that no longer existed: the screen sat on "closed" for as long as the user
+                // watched, with the caller's rebuild never reached because `run` never returned
+                // (measured on the device, 2026-11-01: no socket open, no reconnect for minutes).
+                // Every other state here is the transport's word that the link is gone; a retry is
+                // the caller's, and it is exactly what returning enables.
+                transportDead = true
+            }
         }
         publish()
     }
