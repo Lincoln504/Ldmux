@@ -11,7 +11,8 @@ they are the whole argument.
 ## 1. What actually fails
 
 Three distinct faults were measured on the real pair (phone radio + host radio, 910.525 MHz / 500 kHz
-/ SF7 / CR5, both ends a metre apart at −27 to −37 dBm):
+/ SF7 / CR5, both ends a metre apart at −27 to −37 dBm). Three more were measured the same evening,
+after the app was left in the background; they are in §8.
 
 **A. The host refused every bind when it had no route to the phone.** `serial_mesh_sender.dart`
 returned `BindError.noPath` whenever `contact.directPath` was null. A route is learned *only* from a
@@ -213,3 +214,48 @@ start time (`/proc/<pid>/stat` field 22 against `createdAt`, to the second). Mea
 - Keystrokes are not duplicated by a rebuild any more once the batcher is per-connection.
 - `claims.json` is now fsynced before its rename and the directory after it: the rename is atomic
   against a reader, not against a power cut.
+
+---
+
+## 8. The stale screen and the missing gateway, 2026-11-01 evening
+
+Three more faults, measured on the same pair after the app had been left in the background for a long
+time. The first two are session faults. The third is the pairing path, and it is why "get token from
+MeshMore" changed nothing.
+
+**D. A gateway that closed did not end the connection, so the screen froze on "closed".** The driver's
+`run` loop ends only on `transportDead` (`MeshTermDriver.kt:611`, `while (!transportDead)`).
+`onGatewayState` (`MeshTermDriver.kt:334`) recorded every non-bound state as `linkProblem` and left
+the loop turning, so a peer close - the gateway closing the socket - painted `MeshLinkState.Closed`
+and then nothing ever happened again: the socket was gone (`/proc/<pid>/fd` had no socket for the
+app), the caller's rebuild was never reached because `run` never returned, and only the refresh
+button (which bumps `attempt` directly) could recover. **Fix:** any terminal gateway state now sets `transportDead` (`MeshTermDriver.kt:348`),
+which returns `run` and hands the retry to the caller. Test: `a gateway that closed ends the run so the
+caller can rebuild`.
+
+**E. The mesh route never let go when the app left the screen.** The tailnet route registers
+`AppLifecycle.setReleaseHandler` and releases its shells after the platform's grace; the mesh route did
+not, so a 60-second background left the socket open in a frozen process, the last committed frame on
+screen as if it were live, and typing addressed to a session nobody was driving. **Fix:** the mesh
+screen now registers the same handler (`MeshTerminalScreen.kt:158`): at the grace it
+marks `released` and closes the connection; the connection effect waits for the foreground and rebuilds
+at once (not on the failure jitter, because nothing failed), and the new connection re-attaches
+`resumeShell`. A connection that ends while off screen, or whose jitter finishes while backgrounded,
+takes the same return path. Measured after the fix: Home, 60 s, return - the same plain shell was live
+again in 3 s, one new handshake accepted, `records 30 sent, 0 pending`.
+
+**F. MeshMore's gateway was not running even with the switch on, and a Binder bind cannot start it.**
+`GatewayService` was a lazy provider, so its `load()` (and therefore the listener) ran only when
+Settings -> Connected apps was opened; the screen's "Listening on 127.0.0.1:41731" is a default, not the
+bound port. A handoff bind starts MeshMore's **process** (`BIND_AUTO_CREATE`) but not its Flutter engine,
+so the handoff store - in memory, published by Dart - answered `off` and LDMUX said "MeshMore is not
+serving" while MeshMore was running. Worse, Back on MeshMore's Dashboard finished the Activity and
+destroyed the engine, which stopped the radio link and the gateway; the foreground service kept the
+process alive around neither. **Fix, MeshMore:** the gateway provider is `lazy: false` so it is created
+with the app (`responsive_starter_app/lib/main.dart:114`); Back on the Dashboard calls
+`moveTaskToBack(true)` through `meshmore/app_lifecycle` (`MainActivity.kt:36`, `home_shell.dart:175`)
+instead of finishing the Activity. **Fix, LDMUX:** the handoff is attempted automatically for
+`Unreachable` and `Refused` as well as `NeedsToken`, and the button opens MeshMore when the offer is
+"not serving" (the press is the user's permission to switch apps), then retries on return. Measured:
+MeshMore force-stopped, LDMUX started, button pressed - MeshMore opened, its gateway listened on 41731
+with no visit to Connected apps, Back kept the listener, and LDMUX linked and listed the shells.
