@@ -19,6 +19,10 @@ companion-radio API has now been read rather than assumed.
 | Piece | Owner | Language |
 |---|---|---|
 | The radio, the companion-protocol BLE link, the local gateway | MeshMore (the phone app) | Dart |
+
+The 2026-11-01 review of whether LDMUX should own the radio instead (the Java
+MeshCore libraries, the single-BLE-session constraint, and the options) is in
+[`MESH-RADIO-OWNERSHIP.md`](MESH-RADIO-OWNERSHIP.md).
 | The end-to-end Noise session, the record layer | LDMUX app ↔ ldmux host | Kotlin (app) and Rust (host) |
 | The terminal, PTYs, the keeper, libghostty-vt | ldmux as it already is | Rust |
 
