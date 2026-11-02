@@ -28,6 +28,7 @@ import dev.ldmux.mobile.Surface
 import dev.ldmux.mobile.Warn
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 /** A bounded scan, shown as a small list. The scan stops itself; closing cancels it. */
 @Composable
@@ -97,12 +98,18 @@ internal fun RadioPickerDialog(
 @Composable
 internal fun RadioPresetDialog(
     address: String,
+    budgetMode: RadioBudgetMode,
+    onBudget: (RadioBudgetMode) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var link by remember(address) { mutableStateOf<RadioLink?>(null) }
     var note by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var region by remember { mutableStateOf(RadioRegion.UsCanada) }
+    var selected by remember { mutableStateOf(publicPresets(RadioRegion.UsCanada).first().preset) }
+    var seed by remember { mutableStateOf(1) }
+    var budget by remember { mutableStateOf(budgetMode) }
     val fallbackState = remember { MutableStateFlow(MeshLinkState.NeedsRadio) }
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
     val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
@@ -121,6 +128,7 @@ internal fun RadioPresetDialog(
             return@LaunchedEffect
         }
         link = l
+        l.setBudgetMode(budget)
         try {
             l.connect()
             l.readDeviceInfo()
@@ -158,17 +166,67 @@ internal fun RadioPresetDialog(
                         fontSize = 11.sp,
                     )
                 }
-                Text("LDMUX preset", color = Accent, fontSize = 12.sp)
+                Text("region", color = Accent, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    for (r in RadioRegion.entries) {
+                        MiniTextButton(onClick = {
+                            region = r
+                            selected = publicPresets(r).first().preset
+                        }) {
+                            Text(r.label, color = if (region == r) Accent else Dim, fontSize = 10.sp, maxLines = 1)
+                        }
+                    }
+                }
+                Text("public preset", color = Dim, fontSize = 11.sp)
+                for (choice in publicPresets(region)) {
+                    MiniTextButton(onClick = { selected = choice.preset }) {
+                        Text(
+                            choice.label,
+                            color = if (selected == choice.preset) Accent else Fg,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                MiniTextButton(onClick = {
+                    selected = privatePreset(region, Random(seed))
+                    seed += 1
+                }) {
+                    Text("generate private tuple", color = Accent, fontSize = 11.sp)
+                }
                 Text(
-                    "${RadioPreset.LDMUX_PRIVATE.frequencyMhz} MHz  ${RadioPreset.LDMUX_PRIVATE.bandwidthKhz} kHz  " +
-                        "SF${RadioPreset.LDMUX_PRIVATE.spreadingFactor}  CR${RadioPreset.LDMUX_PRIVATE.codingRate}  " +
-                        "${RadioPreset.LDMUX_PRIVATE.txPowerDbm} dBm  ${RadioPreset.LDMUX_PRIVATE.pathHashSize}-byte paths",
+                    presetLine(selected),
                     color = Fg,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                 )
                 Text(
-                    "the host radio must use the same tuple. It is configured separately; a preset change here does not change the host.",
+                    "the host radio must use the same frequency, bandwidth and SF. It is configured separately unless it is also reachable over BLE.",
+                    color = Dim,
+                    fontSize = 11.sp,
+                )
+                Text("data budget", color = Dim, fontSize = 11.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    for (mode in RadioBudgetMode.entries) {
+                        MiniTextButton(onClick = {
+                            budget = mode
+                            link?.setBudgetMode(mode)
+                            onBudget(mode)
+                        }) {
+                            Text(
+                                mode.name.lowercase(),
+                                color = if (budget == mode) Accent else Dim,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    if (budget == RadioBudgetMode.Metered) {
+                        "metered: 36 s of data airtime per hour (control and handshake are not gated)"
+                    } else {
+                        "open: no app airtime budget. Use only on a private tuple that your region allows; the radio's own duty cycle still applies."
+                    },
                     color = Dim,
                     fontSize = 11.sp,
                 )
@@ -183,7 +241,7 @@ internal fun RadioPresetDialog(
                     busy = true
                     scope.launch {
                         note = try {
-                            if (l.applyPreset(RadioPreset.LDMUX_PRIVATE)) {
+                            if (l.applyPreset(selected)) {
                                 "applied and verified"
                             } else {
                                 "the radio did not confirm the new tuple; it may have been put back"
@@ -198,12 +256,16 @@ internal fun RadioPresetDialog(
                     }
                 },
             ) {
-                Text(if (busy) "applying…" else "apply LDMUX preset", color = Accent, fontSize = 12.sp)
+                Text(if (busy) "applying…" else "apply tuple", color = Accent, fontSize = 12.sp)
             }
         },
         dismissButton = { MiniTextButton(onClick = onDismiss) { Text("close", color = Dim) } },
     )
 }
+
+private fun presetLine(p: RadioPreset): String =
+    "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  " +
+        "${p.txPowerDbm} dBm  ${p.pathHashSize}-byte paths  ·  ${RadioAirtime.opsPerHour(p)} records/hour at 36 s"
 
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {
     RadioScanProblem.PermissionDenied -> "Bluetooth permission is off. Grant it, then scan again."

@@ -43,6 +43,7 @@ actual object AppPrefs {
     private const val KEY_ROUTE = "route"
     private const val KEY_MESH_RADIO = "mesh_radio"
     private const val KEY_MESH_RADIO_NAME = "mesh_radio_name"
+    private const val KEY_MESH_OPEN_AIRTIME = "mesh_open_airtime"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -68,6 +69,7 @@ actual object AppPrefs {
             route = meshRouteFromStored(sp.getString(KEY_ROUTE, null)),
             meshRadio = sp.getString(KEY_MESH_RADIO, null) ?: "",
             meshRadioName = sp.getString(KEY_MESH_RADIO_NAME, null) ?: "",
+            meshOpenAirtime = sp.getBoolean(KEY_MESH_OPEN_AIRTIME, false),
         )
     }
 
@@ -85,6 +87,7 @@ actual object AppPrefs {
             .putString(KEY_ROUTE, config.route.name)
             .putString(KEY_MESH_RADIO, config.meshRadio)
             .putString(KEY_MESH_RADIO_NAME, config.meshRadioName)
+            .putBoolean(KEY_MESH_OPEN_AIRTIME, config.meshOpenAirtime)
             .apply()
     }
 }

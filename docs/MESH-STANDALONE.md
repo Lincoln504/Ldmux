@@ -199,8 +199,14 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   gated). Open is for a private tuple where the operator has chosen to use the
   band freely, and it must still respect the regional duty cycle. The status
   line shows records left when metered; `null` is not "unlimited".
-- The old gateway's 36 s/hour governor was removed with the gateway. The
-  standalone path must own this counter explicitly.
+- The meter is per adapter session: it adds the LoRa time-on-air of each
+  accepted data record, rolls the window after one hour, and refuses a send
+  with `RadioSendResult.Budget` when the budget is spent. It is an estimate for
+  our own transmit time, not a round-trip prediction; the radio's own duty
+  cycle remains the hard outer bound.
+- The old gateway's 36 s/hour governor was removed with the gateway, and the
+  standalone path now owns this counter explicitly. The mode is persisted in
+  config (`meshOpenAirtime`) and applied when a connection is built.
 
 ### 5.3 Error mapping
 
@@ -228,6 +234,13 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   EU/UK narrow, Australia, New Zealand and the other entries the region pack
   carries. The host must use the same frequency, bandwidth and SF. CR may
   differ because every packet carries it.
+- The preset dialog offers a region, the region's public presets, and a
+  generated private tuple. Choosing a radio from the scan opens the preset
+  dialog immediately, so first run is permission → scan → bond → current tuple
+  → choose/apply → verify → host-key/path status.
+- `RadioAirtime` is a pure Kotlin implementation of the LoRa time-on-air
+  formula. It is used for the budget display and the per-record estimate; it
+  is not used to claim delivery.
 - **Legal envelope for a private tuple** (from the regulatory research, 2026-11):
   - USA/Canada 902-928 MHz: a fixed-channel DTS emission needs at least
     500 kHz 6 dB bandwidth. 62.5 kHz public MeshCore presets do not satisfy
@@ -371,8 +384,8 @@ Measured and code-read on 2026-11-02:
 - The host radio must be set to the same tuple. The phone can set a second BLE
   radio; a USB-only host radio needs the host provisioning path. This is not
   implemented in this branch.
-- Airtime counter and the metered/open switch are designed but not yet wired
-  into `AndroidRadioLink` and the status line.
+- Airtime counter and the metered/open switch are wired for the phone's own
+  radio. The host radio's budget is not metered by this app.
 - Multi-hop path reset/discovery is a follow-up; do not silently use a
   multi-hop path without it.
 - Desktop history/fit fixes on a separate branch.

@@ -148,6 +148,48 @@ class MeshStandaloneTest {
         assertEquals(1, RadioPreset.USA.pathHashSize)
     }
 
+    @Test
+    fun `a private tuple stays inside its region envelope`() {
+        repeat(40) {
+            val us = privatePreset(RadioRegion.UsCanada)
+            assertEquals(500.0, us.bandwidthKhz)
+            assertTrue(us.frequencyMhz - 0.25 >= 902.0)
+            assertTrue(us.frequencyMhz + 0.25 <= 928.0)
+
+            val eu = privatePreset(RadioRegion.EuUk)
+            assertEquals(125.0, eu.bandwidthKhz)
+            assertTrue(eu.frequencyMhz - 0.0625 >= 869.4)
+            assertTrue(eu.frequencyMhz + 0.0625 <= 869.65)
+
+            val au = privatePreset(RadioRegion.Australia)
+            assertTrue(au.frequencyMhz - 0.0625 >= 915.0)
+            assertTrue(au.frequencyMhz + 0.0625 <= 928.0)
+        }
+    }
+
+    @Test
+    fun `public presets exist for every region and carry a path width`() {
+        for (r in RadioRegion.entries) {
+            val choices = publicPresets(r)
+            assertTrue(choices.isNotEmpty(), r.name)
+            for (c in choices) {
+                assertTrue(c.preset.pathHashSize in 1..3, c.label)
+                assertTrue(c.preset.frequencyMhz > 400.0, c.label)
+            }
+        }
+    }
+
+    @Test
+    fun `airtime is positive and a wider channel costs less`() {
+        val wide = RadioPreset.LDMUX_PRIVATE
+        val narrow = RadioPreset.USA
+        val wideMs = RadioAirtime.timeOnAirMs(wide, 172)
+        val narrowMs = RadioAirtime.timeOnAirMs(narrow, 172)
+        assertTrue(wideMs > 0.0)
+        assertTrue(narrowMs > wideMs, "62.5 kHz should cost more airtime")
+        assertTrue(RadioAirtime.opsPerHour(wide, 172) > RadioAirtime.opsPerHour(narrow, 172))
+    }
+
     private class FakeRadio : RadioLink {
         private val _state = MutableStateFlow(MeshLinkState.Bound)
         override val state: StateFlow<MeshLinkState> = _state.asStateFlow()

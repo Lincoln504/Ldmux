@@ -47,6 +47,7 @@ enum class MeshSendOutcome {
     ErrNotFound,
     ErrBusy,
     ErrTooLong,
+    ErrBudget,
     LocalTimeout,
     Unknown,
 }

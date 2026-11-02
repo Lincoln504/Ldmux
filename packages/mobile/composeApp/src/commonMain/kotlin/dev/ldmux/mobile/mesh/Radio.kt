@@ -1,5 +1,9 @@
 package dev.ldmux.mobile.mesh
 
+import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.pow
+import kotlin.random.Random
 import kotlin.time.Clock
 import kotlin.time.TimeSource
 import kotlinx.coroutines.flow.Flow
@@ -32,8 +36,11 @@ interface RadioLink {
     /** Read the radio's firmware description (path-hash mode, limits). */
     suspend fun readDeviceInfo(): RadioDeviceInfo?
 
-    /** Apply the LDMUX preset to the attached radio. False when the write could not be verified. */
+    /** Apply a radio preset to the attached radio. False when the write could not be verified. */
     suspend fun applyPreset(preset: RadioPreset): Boolean
+
+    /** Meter data airtime, or leave the operator's private channel unmetered. */
+    fun setBudgetMode(mode: RadioBudgetMode) {}
 
     fun close()
 }
@@ -76,6 +83,116 @@ data class RadioPreset(
     }
 }
 
+/** A regional legal envelope used to choose a private tuple. */
+enum class RadioRegion(val label: String) {
+    UsCanada("USA / Canada"),
+    EuUk("EU / UK"),
+    Australia("Australia"),
+    NewZealand("New Zealand"),
+}
+
+/** A named public preset, plus the region it belongs to. */
+data class RadioPresetChoice(val label: String, val preset: RadioPreset)
+
+/**
+ * The public presets a region actually uses. Values mirror the MeshCore app
+ * feed on 2026-11-02; the feed is a suggestion, not a legal filter.
+ */
+fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) {
+    RadioRegion.UsCanada -> listOf(
+        RadioPresetChoice("USA", RadioPreset.USA),
+        RadioPresetChoice("Canada (3-byte paths)", RadioPreset.CANADA),
+    )
+    RadioRegion.EuUk -> listOf(
+        RadioPresetChoice("EU/UK narrow", RadioPreset(
+            869.618, 62.5, 8, 8, 22, 1,
+        )),
+        RadioPresetChoice("EU/UK wide (deprecated)", RadioPreset(
+            869.525, 250.0, 11, 5, 22, 1,
+        )),
+    )
+    RadioRegion.Australia -> listOf(
+        RadioPresetChoice("Australia narrow", RadioPreset(
+            916.575, 62.5, 7, 8, 22, 1,
+        )),
+        RadioPresetChoice("Australia mid", RadioPreset(
+            915.075, 125.0, 9, 5, 22, 1,
+        )),
+        RadioPresetChoice("Australia SA/WA", RadioPreset(
+            923.125, 62.5, 8, 8, 22, 1,
+        )),
+    )
+    RadioRegion.NewZealand -> listOf(
+        RadioPresetChoice("New Zealand narrow", RadioPreset(
+            917.375, 62.5, 7, 5, 22, 1,
+        )),
+    )
+}
+
+/**
+ * A private tuple inside the region's legal envelope. It is deliberately not
+ * a public MeshCore preset: the point is a channel the operator's two radios
+ * share without joining (or interfering with) the public mesh.
+ *
+ * - USA/Canada: 500 kHz DTS, centre kept 250 kHz from both band edges.
+ * - EU/UK: 125 kHz inside the 869.4-869.65 MHz sub-band, away from the
+ *   869.525 and 869.618 public centres.
+ * - Australia/New Zealand: 125 kHz inside 915-928 MHz.
+ */
+fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPreset = when (region) {
+    RadioRegion.UsCanada -> RadioPreset(
+        frequencyMhz = 902.25 + 0.5 * random.nextInt(0, 51),
+        bandwidthKhz = 500.0,
+        spreadingFactor = if (random.nextBoolean()) 7 else 8,
+        codingRate = 5,
+        txPowerDbm = 22,
+        pathHashSize = 1,
+    )
+    RadioRegion.EuUk -> RadioPreset(
+        frequencyMhz = listOf(869.475, 869.4875, 869.5625, 869.575).random(random),
+        bandwidthKhz = 125.0,
+        spreadingFactor = if (random.nextBoolean()) 8 else 9,
+        codingRate = 5,
+        txPowerDbm = 22,
+        pathHashSize = 1,
+    )
+    RadioRegion.Australia, RadioRegion.NewZealand -> RadioPreset(
+        frequencyMhz = 915.5 + 0.25 * random.nextInt(0, 49),
+        bandwidthKhz = 125.0,
+        spreadingFactor = if (random.nextBoolean()) 9 else 10,
+        codingRate = 5,
+        txPowerDbm = 22,
+        pathHashSize = 1,
+    )
+}
+
+/** Whether data records are metered against the 36 s/hour courtesy budget. */
+enum class RadioBudgetMode { Metered, Open }
+
+/**
+ * LoRa time-on-air, used only to meter our own data records. It is an
+ * estimate (preamble, explicit header, CRC on); a round trip is still never
+ * inferred from it.
+ */
+object RadioAirtime {
+    const val BUDGET_MS_PER_HOUR = 36_000.0
+
+    fun timeOnAirMs(preset: RadioPreset, payloadBytes: Int): Double {
+        val bwHz = preset.bandwidthKhz * 1000.0
+        val tsymMs = (1 shl preset.spreadingFactor) / bwHz * 1000.0
+        val de = if (tsymMs > 16.0) 1 else 0
+        val preamble = if (preset.spreadingFactor <= 8) 32 else 16
+        val cr = preset.codingRate.coerceIn(5, 8)
+        val numerator = 8.0 * payloadBytes - 4.0 * preset.spreadingFactor + 28.0 + 16.0
+        val denominator = 4.0 * (preset.spreadingFactor - 2 * de)
+        val payloadSymbols = 8.0 + max(0.0, ceil(numerator / denominator) * cr)
+        return (preamble + 4.25 + payloadSymbols) * tsymMs
+    }
+
+    fun opsPerHour(preset: RadioPreset, payloadBytes: Int = 172, budgetMs: Double = BUDGET_MS_PER_HOUR): Int =
+        max(0, (budgetMs / timeOnAirMs(preset, payloadBytes)).toInt())
+}
+
 /** A scanned MeshCore companion. The address is a BLE MAC on Android. */
 data class RadioDevice(val address: String, val name: String, val rssi: Int?)
 
@@ -110,6 +227,7 @@ enum class RadioSendResult(val outcome: MeshSendOutcome) {
     TooLong(MeshSendOutcome.ErrTooLong),
     NotFound(MeshSendOutcome.ErrNotFound),
     NoPath(MeshSendOutcome.ErrNotFound),
+    Budget(MeshSendOutcome.ErrBudget),
     Failed(MeshSendOutcome.Unknown),
 }
 

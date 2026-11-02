@@ -81,7 +81,7 @@ internal fun MeshRouteSection(
                 enabled = current.meshRadio.isNotEmpty(),
                 onClick = { showPreset = true },
             ) {
-                Text("preset", color = if (current.meshRadio.isEmpty()) Dim else Accent, fontSize = 12.sp, maxLines = 1)
+                Text("set up", color = if (current.meshRadio.isEmpty()) Dim else Accent, fontSize = 12.sp, maxLines = 1)
             }
         }
         if (current.meshRadio.isNotEmpty()) {
@@ -138,11 +138,20 @@ internal fun MeshRouteSection(
             onPick = { d ->
                 onConfig(current.copy(meshRadio = d.address, meshRadioName = d.name))
                 credentials = readCredentials()
+                // One flow: choosing a radio moves straight to its operating point,
+                // so a first run does not stop at an address and leave the radio deaf.
+                showPicker = false
+                showPreset = true
             },
         )
     }
     if (showPreset) {
-        RadioPresetDialog(address = current.meshRadio, onDismiss = { showPreset = false })
+        RadioPresetDialog(
+            address = current.meshRadio,
+            budgetMode = if (current.meshOpenAirtime) RadioBudgetMode.Open else RadioBudgetMode.Metered,
+            onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
+            onDismiss = { showPreset = false },
+        )
     }
 }
 

@@ -110,6 +110,7 @@ fun MeshTerminalScreen(
     var resumeShell by remember(plan) { mutableStateOf("") }
     val conn = remember(plan, attempt) {
         val link = meshRadioLink(plan.radioAddress, plan.creds.hostRadio) ?: UnsupportedRadioLink()
+        link.setBudgetMode(if (config.meshOpenAirtime) RadioBudgetMode.Open else RadioBudgetMode.Metered)
         MeshRadioConnection(link, plan.creds, plan.lib, resumeShell)
     }
     // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport

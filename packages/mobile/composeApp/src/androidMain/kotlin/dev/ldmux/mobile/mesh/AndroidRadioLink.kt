@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import dev.ldmux.mobile.AndroidApp
 import dev.ldmux.mobile.appLog
 import io.iotone.meshcore.android.AndroidBleTransport
@@ -95,6 +96,11 @@ class AndroidRadioLink(
     @Volatile
     private var closing = false
 
+    @Volatile
+    private var budgetMode: RadioBudgetMode = RadioBudgetMode.Metered
+    private var airtimeWindowStartMs: Long = SystemClock.elapsedRealtime()
+    private var airtimeUsedMs: Double = 0.0
+
     /**
      * A two- or three-byte path hash cannot use `CMD_SEND_RAW_DATA`:
      * firmware 1.17.1/1.18 treats the encoded path byte as a byte count in
@@ -130,6 +136,7 @@ class AndroidRadioLink(
         override fun onReady(selfInfo: SelfInfo) {
             if (closing) return
             _selfInfo.value = selfInfo.toRadioSelfInfo()
+            refreshStatus()
             _status.value = _status.value.copy(radioState = 0)
             _state.value = MeshLinkState.Bound
             ready?.complete(Unit)
@@ -271,6 +278,10 @@ class AndroidRadioLink(
         }
         val s = session ?: return RadioSendResult.Failed
         if (_state.value != MeshLinkState.Bound) return RadioSendResult.Failed
+        if (budgetMode == RadioBudgetMode.Metered && remainingAirtimeMs() <= 0.0) {
+            refreshStatus()
+            return RadioSendResult.Budget
+        }
         // The companion has one uncorrelated answer window. A tracked command
         // still outstanding means a raw send would race it.
         if (!s.isIdle()) return RadioSendResult.Failed
@@ -292,7 +303,11 @@ class AndroidRadioLink(
         }
         if (!queued) return RadioSendResult.Failed
         return try {
-            withTimeout(SEND_TIMEOUT_MS) { answer.await() }
+            val result = withTimeout(SEND_TIMEOUT_MS) { answer.await() }
+            if (result == RadioSendResult.Accepted) {
+                recordAirtime(record.size + 2 + path.bytes.size + 1)
+            }
+            result
         } catch (e: TimeoutCancellationException) {
             // The companion protocol has no sequence number: a late OK could
             // resolve the next command. A timeout therefore ends the transport;
@@ -301,6 +316,11 @@ class AndroidRadioLink(
             closeTransport()
             RadioSendResult.Failed
         }
+    }
+
+    override fun setBudgetMode(mode: RadioBudgetMode) {
+        budgetMode = mode
+        refreshStatus()
     }
 
     override suspend fun applyPreset(preset: RadioPreset): Boolean {
@@ -366,6 +386,48 @@ class AndroidRadioLink(
         deviceInfoDone = gate
         s.deviceQuery(1)
         return withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { gate.await() } ?: _deviceInfo.value
+    }
+
+    private fun currentPreset(): RadioPreset {
+        val s = selfInfo.value ?: return RadioPreset.LDMUX_PRIVATE
+        return RadioPreset(
+            frequencyMhz = s.frequencyMhz,
+            bandwidthKhz = s.bandwidthKhz,
+            spreadingFactor = s.spreadingFactor,
+            codingRate = s.codingRate,
+            txPowerDbm = s.txPowerDbm,
+            pathHashSize = (deviceInfo.value?.pathHashMode ?: 0) + 1,
+        )
+    }
+
+    private fun remainingAirtimeMs(): Double {
+        val now = SystemClock.elapsedRealtime()
+        if (now - airtimeWindowStartMs >= 3_600_000L) {
+            airtimeWindowStartMs = now
+            airtimeUsedMs = 0.0
+        }
+        return (RadioAirtime.BUDGET_MS_PER_HOUR - airtimeUsedMs).coerceAtLeast(0.0)
+    }
+
+    private fun recordAirtime(otaBytes: Int) {
+        if (budgetMode != RadioBudgetMode.Metered) return
+        remainingAirtimeMs()
+        airtimeUsedMs += RadioAirtime.timeOnAirMs(currentPreset(), otaBytes)
+        refreshStatus()
+    }
+
+    private fun refreshStatus() {
+        val used = (airtimeUsedMs / 100.0).toInt()
+        val ops = if (budgetMode == RadioBudgetMode.Open) {
+            null
+        } else {
+            val perRecord = RadioAirtime.timeOnAirMs(currentPreset(), 172)
+            (remainingAirtimeMs() / perRecord).toInt().coerceIn(0, 255)
+        }
+        _status.value = _status.value.copy(
+            txAirtimeTenthsThisHour = used,
+            opsLeftThisHour = ops,
+        )
     }
 
     private fun rawPacketFor(path: RadioPath, record: ByteArray): ByteArray {
