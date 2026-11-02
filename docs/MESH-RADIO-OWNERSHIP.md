@@ -18,8 +18,8 @@ David Kordsmeier's Java MeshCore libraries that are already in this repository?
 `libmeshcore` and `libmeshcore-android` are real and are David's work:
 
 - `a8fe3b9` (2026-06-12) "Implement a meshcore client library, android friendly,
-  CI friendly", and `b8e994e` (2026-06-13) the Android module. Further work
-  through `7386999` (2026-08-17), which added capacity/contacts/channels calls to
+  CI friendly", and `b8e994e` (2026-06-13) the Android module. Further work in August
+  (`3621d32`, `36df66b`, `7386999`) added channel, contact and capacity calls to
   `MeshcoreSession`.
 - 5,626 lines of main Java (core + Android), 1,871 lines of tests, MIT.
 - It is a **companion-protocol client**: frame codec, CayenneLPP telemetry,
@@ -94,7 +94,7 @@ not possible").
   permissions** (`packages/mobile/composeApp/src/androidMain/AndroidManifest.xml`
   has INTERNET, network state, the MeshMore handoff permission, audio,
   foreground-service and wake-lock entries — no `BLUETOOTH_SCAN`/`CONNECT`).
-- The gateway is a **blind carrier**: `PAIR`, `BIND`, `SEND`, `RECV`, `STATUS`;
+- The gateway is a **blind carrier**: `PAIR`, `BIND`, `SEND_RESULT`, `RECV`, `STATUS`;
   the records are opaque. It never exposes `SYNC_NEXT_MESSAGE`, channel writes or
   radio configuration to the client (`meshcore_gateway/lib/src/messages.dart`,
   `mesh_sender.dart`).
