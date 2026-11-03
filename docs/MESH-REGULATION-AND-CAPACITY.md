@@ -186,3 +186,41 @@ than estimated.
 5. **Do not add LBT to the fast path.** A CCA before every record costs 160 µs plus a retry window
    and buys nothing on a band with no duty cycle and two endpoints a metre apart; it belongs to the
    European sub-1 % configuration, if that is ever used.
+
+## 7. The largest remaining waste is on the host, not the air
+
+Measured while reading the bridge on 2026-11-03: `Bridge::tick` runs every `TICK_MS` (50 ms,
+`mesh_bridge.rs:739`), and for every attached shell it asks the host for a full snapshot
+**before** it knows whether anything changed. That is twenty keeper calls a second per attached
+phone, each of which renders the pane to text with its escapes, reads `/proc` for the foreground
+process and the working directory, and serialises the result. On an idle shell over a link that
+sends nothing, the radio is silent and the host is busy.
+
+Two designs would fix it, and the first is the only one worth doing:
+
+1. **A change counter from the keeper.** `SnapshotResult` gains a monotonically increasing
+   generation that the keeper bumps whenever the pane's contents change; the bridge asks for the
+   cheap number each tick and only takes the snapshot when it differs. One field, no polling
+   policy, and the burst-pacing rule (which needs to observe a quiet tick to end a burst) keeps
+   working unchanged.
+2. **Poll less when nothing is pending.** Rejected: the pacing rule deliberately sends the first
+   change after a quiet tick immediately, and it detects "quiet" by looking. Slowing the look
+   slows that rule, and a test pins it (`a_quiet_tick_ends_the_burst`).
+
+Neither is an airtime question, so neither is urgent for the link; both matter on the machine the
+shells run on. The counter is a keeper change, so it lands with the next keeper release rather
+than as a phone-side patch.
+
+## 8. What a channel survey would look like as a feature
+
+The three signals in §4 are all available from the radio the gateway already drives, and none of
+them needs new hardware:
+
+- `getStats` deltas (`NbPktReceived`, `NbPktCrcError`, `NbPktHeaderErr`) over the dwell;
+- CAD hit count at the current SF/BW, sampled continuously rather than once before a transmit;
+- the noise floor the driver already calibrates every two seconds.
+
+The survey is a "listen for N seconds and report" operation on the gateway, invoked from the phone
+before a preset is chosen, and it answers with the three-way reading in §4 and nothing stronger.
+It is the only honest alternative to guessing which of the 40+ MeshCore presets is quiet where the
+user actually is, and it costs receive time only — which no duty cycle constrains.
