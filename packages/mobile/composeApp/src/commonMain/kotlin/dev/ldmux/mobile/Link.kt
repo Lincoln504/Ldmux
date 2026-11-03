@@ -123,15 +123,15 @@ class ConfigStore(
         return outcome
     }
 
-    /** Forget the machine: the tailnet pairing and, with it, the mesh keys and the gateway token. */
+    /** Forget the machine: the tailnet pairing and, with it, the mesh keys and the selected radio. */
     fun unpair() {
         mesh?.onUnpaired()
         update(_config.value.unpaired().withoutMesh())
     }
 
     /**
-     * Forget **only** the mesh pairing: the session keys, the gateway token and the gateway
-     * endpoint. The tailnet pairing is untouched. If the mesh route was the saved route it goes
+     * Forget **only** the mesh pairing: the session keys and the selected radio. The tailnet
+     * pairing is untouched. If the mesh route was the saved route it goes
      * back to the tailnet, so the saved route is never one whose credentials were just deleted.
      */
     fun unpairMesh() {

@@ -218,8 +218,8 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
 - The old gateway's 36 s/hour governor was removed with the gateway, and the
   standalone path now owns this counter explicitly. The mode is persisted in
   config (`meshOpenAirtime`, default `true`) and applied when a connection is
-  built. The preset dialog always selects Open because it only writes private
-  tuples.
+  built. The preset dialog shows the current mode and toggles it; it does not
+  write a mode merely by being opened.
 
 ### 5.3 Error mapping
 
@@ -243,17 +243,20 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   region's legal envelope and applied to both radios by whatever path reaches
   them. The phone can always set its own radio. The host radio is configured
   separately unless it is also reachable over BLE.
-- Public presets remain in the model for joining an existing mesh: USA/Canada,
-  EU/UK narrow, Australia, New Zealand and the other entries the region pack
-  carries. The host must use the same frequency, bandwidth and SF. CR may
-  differ because every packet carries it. They are not in the Settings dialog:
-  the dialog is a private-tuple form only, and a public preset is a deliberate
-  code-level choice, not a default the UI invites.
-- The preset dialog is compact: the radio and link state, the region, the
-  generated private tuple and one `new tuple` action. Choosing a radio from the
-  scan opens it immediately, so first run is permission → scan → bond → current
-  tuple → apply → verify → host-key/path status. The app-side airtime meter is
-  open by default; there is no metered/open switch to operate.
+- Public presets are available behind a `public` action: USA/Canada, EU/UK
+  narrow and wide, Australia and New Zealand. They are for joining an existing
+  mesh or returning a radio to a stock state. The host must use the same
+  frequency, bandwidth and SF. CR may differ because every packet carries it.
+- The preset dialog opens on the tuple the radio is actually using, not on a
+  fresh proposal. It shows the radio and link state, the selected tuple (which
+  is the applied tuple on open), the region, `new private`, `restore`, `public`,
+  the airtime mode, `apply` and `unset`. `restore` applies the tuple read at open, so a
+  public experiment is reversible. `unset` clears the selected radio but keeps
+  the session keys and the route. Choosing a radio from the scan opens the dialog
+  immediately, so first run is permission → scan → bond → current tuple →
+  apply → verify → host-key/path status.
+- The app-side airtime meter is open by default. The one-line `airtime` action
+  toggles metered/open for operators who join a public mesh.
 - `RadioAirtime` is a pure Kotlin implementation of the LoRa time-on-air
   formula. It is used for the budget display and the per-record estimate; it
   is not used to claim delivery.
@@ -334,10 +337,13 @@ LDMUX changes:
 
 Remaining gaps for this branch:
 
-- No path reset/discovery/path-update handling.
+- No path discovery or path-update handling. A radio `NotFound` send drops the
+  stored path and retries zero-hop once; a path that dies silently still needs
+  the ARQ or a rebuild.
 - No automatic reconnect inside the library; the screen rebuilds.
 - No BLE scan; the app owns it.
-- No bond repair/remove beyond the one `ensureBond` request.
+- No bond repair/remove. The connect path creates a bond if needed and never
+  removes one; a stale duplicate record is pre-existing and not repaired here.
 
 ## 9. Tests and verification
 
@@ -397,18 +403,17 @@ Measured and code-read on 2026-11-02:
   tuple written and read back (914.25 MHz / 500 kHz / SF8 / CR5 / 22 dBm), a
   session established over the air, the host's shell listed, and typed input
   reaching the host terminal. Not yet measured: preset rollback after a
-  rejected write, and the background-release path.
+  rejected write, and the background-release path. The current/public/restore/
+  airtime controls were added after that pass and are tested at the model level
+  only.
 - First-run is one combined flow: permission, scan, bond, connect, read the
   current tuple, generate and apply a private tuple, verify, show the
   host-key/path status. It is implemented and measured.
 - The host radio must use the same tuple. It was configured out of band with
-  `meshcore_host/tool/configure_radio.dart`; LDMUX still has no host-side
-  provisioning UI.
-- The host radio must be set to the same tuple. The phone can set a second BLE
-  radio; a USB-only host radio needs the host provisioning path. This is not
-  implemented in this branch.
+  `meshcore_host/tool/configure_radio.dart`; a USB-only host radio needs a host
+  provisioning path, which this branch does not have.
 - Airtime counter and the metered/open mode are wired for the phone's own
-  radio. The host radio's budget is not metered by this app; Open is the
+  radio. The host radio's budget is not metered by this app. Open is the
   default because the default preset is private.
 - Multi-hop path reset/discovery is a follow-up; do not silently use a
   multi-hop path without it.

@@ -136,6 +136,19 @@ fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) 
     )
 }
 
+/** The region a tuple most likely belongs to, used to open the preset dialog on the applied tuple. */
+fun regionOfPreset(preset: RadioPreset): RadioRegion {
+    for (r in RadioRegion.entries) {
+        if (publicPresets(r).any { it.preset == preset }) return r
+    }
+    return when {
+        preset.frequencyMhz < 880.0 -> RadioRegion.EuUk
+        preset.frequencyMhz < 915.0 -> RadioRegion.UsCanada
+        preset.bandwidthKhz >= 500.0 -> RadioRegion.UsCanada
+        else -> RadioRegion.Australia
+    }
+}
+
 /**
  * A private tuple inside the region's legal envelope. It is deliberately not
  * a public MeshCore preset: the point is a channel the operator's two radios
@@ -257,7 +270,6 @@ class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override suspend fun send(record: ByteArray): MeshSendResult =
         MeshSendResult(0, link.send(record).outcome)
 
-    override fun close() = link.close()
 }
 
 /**

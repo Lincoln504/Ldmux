@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -77,29 +78,23 @@ class MeshStandaloneTest {
     @Test
     fun `the setup view offers the mesh route only when it can run`() {
         val view = meshSetupView(
-            LdmuxConfig.DEFAULT.copy(route = MeshRoute.Mesh),
             MeshCredentialState(hasSessionKeys = true, hasPeer = true),
             platform = MobilePlatform.Android,
             sessionBuilt = true,
             terminalBuilt = true,
         )
         assertEquals(setOf(MeshCredential.SessionKeys, MeshCredential.HostRadioKey), view.present)
-        assertTrue(view.missing.isEmpty())
-        assertTrue(MeshRoute.Mesh in view.choosable)
         assertEquals(MeshRouteResolution.Use(MeshRoute.Mesh), view.meshResolution)
     }
 
     @Test
     fun `the setup view says which credential is missing`() {
         val view = meshSetupView(
-            LdmuxConfig.DEFAULT.copy(route = MeshRoute.Mesh),
             MeshCredentialState(hasSessionKeys = true, hasPeer = false),
             platform = MobilePlatform.Android,
             sessionBuilt = true,
             terminalBuilt = true,
         )
-        assertEquals(listOf(MeshCredential.HostRadioKey), view.missing)
-        assertFalse(MeshRoute.Mesh in view.choosable)
         assertEquals(
             MeshRouteProblem.NeedsPeer,
             (view.meshResolution as MeshRouteResolution.Unusable).problem,
@@ -132,8 +127,6 @@ class MeshStandaloneTest {
         assertEquals(172, gateway.uplinkRecordMax)
         assertEquals(MeshSendOutcome.SentDirect, gateway.send(ByteArray(4)).outcome)
         assertEquals(1, radio.sends)
-        gateway.close()
-        assertTrue(radio.closed)
     }
 
     @Test
@@ -174,6 +167,15 @@ class MeshStandaloneTest {
     }
 
     @Test
+    fun `the preset dialog infers the region from the applied tuple`() {
+        assertEquals(RadioRegion.UsCanada, regionOfPreset(RadioPreset.LDMUX_PRIVATE))
+        assertEquals(RadioRegion.UsCanada, regionOfPreset(RadioPreset.USA))
+        assertEquals(RadioRegion.EuUk, regionOfPreset(publicPresets(RadioRegion.EuUk)[0].preset))
+        assertEquals(RadioRegion.Australia, regionOfPreset(privatePreset(RadioRegion.Australia, Random(0))))
+        assertEquals(RadioRegion.NewZealand, regionOfPreset(publicPresets(RadioRegion.NewZealand)[0].preset))
+    }
+
+    @Test
     fun `public presets exist for every region and carry a path width`() {
         for (r in RadioRegion.entries) {
             val choices = publicPresets(r)
@@ -205,7 +207,6 @@ class MeshStandaloneTest {
         override val received: Flow<ByteArray> = emptyFlow()
         override val uplinkRecordMax: Int = 172
         var sends = 0
-        var closed = false
         override suspend fun connect() = Unit
         override suspend fun send(record: ByteArray): RadioSendResult {
             sends++
@@ -213,6 +214,6 @@ class MeshStandaloneTest {
         }
         override suspend fun readDeviceInfo(): RadioDeviceInfo? = null
         override suspend fun applyPreset(preset: RadioPreset): Boolean = true
-        override fun close() { closed = true }
+        override fun close() {}
     }
 }

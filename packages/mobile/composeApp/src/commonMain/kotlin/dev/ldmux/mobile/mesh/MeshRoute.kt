@@ -33,10 +33,10 @@ const val MESH_SESSION_BUILT: Boolean = true
  * (`MeshTermDriver`), the reduced-terminal screen (`MeshTerminalScreen`) and the key delivery
  * (`ldmux code --mesh`, `MeshEnrollment`) exist and are tested. **True does not mean usable**:
  * [resolveRoute] still reports every missing credential, the library not loading, and iOS, and
- * nothing is opened for a route that resolves to a problem. Since 2026-10-29 Settings has a route
- * picker and a BLE radio selector (`MeshRouteSection`, `meshSetupView`), so the route is
- * reachable. The standalone path still has no hardware run. `docs/MESH-STANDALONE.md` is the
- * current record.
+ * nothing is opened for a route that resolves to a problem. The route is chosen in the app header
+ * (`availableRoutes`), and Settings carries the BLE radio selector (`MeshRouteSection`,
+ * `meshSetupView`). The standalone path has a two-radio hardware run as of 2026-11-02;
+ * `docs/MESH-STANDALONE.md` is the current record.
  */
 const val MESH_TERMINAL_BUILT: Boolean = true
 
@@ -47,19 +47,6 @@ fun sessionLibAvailable(): Boolean = loadSessionLib() != null
 fun availableRoutes(platform: MobilePlatform): List<MeshRoute> = when (platform) {
     MobilePlatform.Android -> listOf(MeshRoute.Tailnet, MeshRoute.Mesh)
     MobilePlatform.Ios -> listOf(MeshRoute.Tailnet)
-}
-
-/**
- * Routes the user may *pick*: those that exist here and can get past "not built". A route that
- * can only ever resolve to a not-built problem is not offered, so it cannot be selected where it
- * cannot work; a saved one still resolves visibly (never to another route).
- */
-fun selectableRoutes(
-    platform: MobilePlatform,
-    sessionBuilt: Boolean = MESH_SESSION_BUILT && sessionLibAvailable(),
-    terminalBuilt: Boolean = MESH_TERMINAL_BUILT,
-): List<MeshRoute> = availableRoutes(platform).filter {
-    it == MeshRoute.Tailnet || (sessionBuilt && terminalBuilt)
 }
 
 /** Parse a persisted route. Unknown text is the tailnet, which is what an old install is. */
@@ -143,30 +130,6 @@ fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
     MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a pairing code made with ldmux code --mesh"
     MeshRouteProblem.NeedsPeer -> "mesh · needs the host radio's public key"
 }
-
-/**
- * What the route can honestly offer. The mesh link is a low-rate command channel, not a
- * terminal (`docs/MESH-GATEWAY.md` section 6.3): no live cursor, no per-keystroke echo, no
- * streaming. The UI reads these flags instead of assuming the tailnet's capabilities.
- */
-data class RouteCapabilities(
-    val liveCursor: Boolean,
-    val keystrokeEcho: Boolean,
-    val streamingOutput: Boolean,
-    /** Every reply carries a timestamp, because "minutes later" is normal. */
-    val timestampReplies: Boolean,
-    /** Show the budget as operations left this hour, not as seconds. */
-    val budgetInOperations: Boolean,
-)
-
-fun capabilitiesOf(route: MeshRoute): RouteCapabilities = when (route) {
-    MeshRoute.Tailnet -> RouteCapabilities(true, true, true, false, false)
-    MeshRoute.Mesh -> RouteCapabilities(false, false, false, true, true)
-}
-
-/** The honest one-liner shown wherever the mesh route is offered or active. */
-const val MESH_RATE_NOTICE: String =
-    "Low-rate command channel over LoRa. Replies take minutes, not milliseconds, and a sent command is not a delivered one."
 
 /*
  * Operations left this hour is NOT computed here. It arrives in `STATUS` as

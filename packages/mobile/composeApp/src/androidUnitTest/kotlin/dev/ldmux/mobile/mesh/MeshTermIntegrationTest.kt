@@ -31,7 +31,6 @@ class MeshTermIntegrationTest {
             sent += record
             return MeshSendResult(0, MeshSendOutcome.SentDirect)
         }
-        override fun close() {}
     }
 
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()

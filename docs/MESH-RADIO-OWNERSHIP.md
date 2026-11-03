@@ -1,8 +1,10 @@
 # Should LDMUX own the radio? A review of the Java MeshCore libraries
 
-**Status:** investigation, 2026-11-01. No code changed. The decision is to keep
-MeshMore as the radio owner for now; the conditions that would change that are
-at the end.
+**Status:** investigation, 2026-11-01. **Superseded 2026-11-02.** The decision
+recorded here was to keep MeshMore as the phone's radio owner; the standalone
+path now owns the phone's BLE radio directly. `docs/MESH-STANDALONE.md` is the
+plan of record. The analysis below remains as the reason the ownership question
+was raised, not as current direction.
 
 ## 1. The question
 

@@ -22,7 +22,6 @@ interface GatewayPort {
     val received: Flow<ByteArray>
     val uplinkRecordMax: Int
     suspend fun send(record: ByteArray): MeshSendResult
-    fun close()
 }
 
 /** What the driver uses of an established session ([MeshSession] implements it). */

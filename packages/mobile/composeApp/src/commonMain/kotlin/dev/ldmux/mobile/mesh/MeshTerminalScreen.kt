@@ -98,7 +98,7 @@ fun MeshTerminalScreen(
     onRoute: (RouteChoice) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
-    // Reconnection is the caller's decision by contract (`MeshGatewayClient` never retries by
+    // Reconnection is the caller's decision by contract (the mesh connection never retries by
     // itself), so the caller needs a way to make it. A refused link or an unreachable radio
     // each left the screen stuck with no action but leaving; the only cure was to force-stop the
     // app. Rebuilding the connection is the whole retry.

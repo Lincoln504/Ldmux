@@ -252,6 +252,7 @@ public final class AndroidBleTransport implements MeshcoreTransport {
         private final Handler main = new Handler(Looper.getMainLooper());
         private static final int BOND_POLL_MS = 100;
         private static final int BOND_POLLS = 300;
+        private static final int BOND_RETRY_POLL = 20;
 
         @Override
         protected void initialize() {
@@ -286,10 +287,10 @@ public final class AndroidBleTransport implements MeshcoreTransport {
                 main.postDelayed(() -> awaitBond(device, tries + 1), BOND_POLL_MS);
                 return;
             }
-            if (tries == 0) {
+            if (tries == 0 || tries == BOND_RETRY_POLL) {
                 createBond()
-                        .done((d) -> awaitBond(device, 1))
-                        .fail((d, status) -> awaitBond(device, 1))
+                        .done((d) -> awaitBond(device, tries + 1))
+                        .fail((d, status) -> awaitBond(device, tries + 1))
                         .enqueue();
             } else if (tries >= BOND_POLLS) {
                 notifyConnectionChanged(false);

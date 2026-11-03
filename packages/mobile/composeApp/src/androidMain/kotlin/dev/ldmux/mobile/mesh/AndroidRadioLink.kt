@@ -60,7 +60,14 @@ class AndroidRadioLink(
 
     /** The terminal may learn the host key after Settings opened the link first. */
     fun updateHostKey(key: ByteArray) {
-        if (key.isNotEmpty()) hostKey = key.copyOf()
+        if (key.isEmpty() || key.contentEquals(hostKey)) return
+        hostKey = key.copyOf()
+        hostPath = null
+        if (_state.value == MeshLinkState.Bound) {
+            // The path belongs to the previous host key; ask for this host's
+            // contact instead of keeping a route that now points at nobody.
+            session?.getContact(hostKey)
+        }
     }
 
     override fun release() {
@@ -135,7 +142,6 @@ class AndroidRadioLink(
 
     private val listener = object : SessionListener {
         override fun onStateChanged(state: SessionState) {
-            Log.d("ldmux", "radio state $state closing=$closing")
             if (closing) return
             when (state) {
                 SessionState.DISCONNECTED -> {
@@ -148,7 +154,6 @@ class AndroidRadioLink(
         }
 
         override fun onReady(selfInfo: SelfInfo) {
-            Log.d("ldmux", "radio onReady key=" + selfInfo.publicKey().size)
             if (closing) return
             _selfInfo.value = selfInfo.toRadioSelfInfo()
             refreshStatus()
@@ -232,7 +237,6 @@ class AndroidRadioLink(
             throw RadioLinkException(MeshLinkState.NeedsPermission, "Bluetooth permission is not granted")
         }
 
-        Log.d("ldmux", "radio connect start $address")
         closing = false
         hostPath = null
         _selfInfo.value = null
@@ -252,9 +256,7 @@ class AndroidRadioLink(
         contactDone = contact
         try {
             t.connectToDevice(device)
-            Log.d("ldmux", "radio connectToDevice called")
             withTimeout(CONNECT_TIMEOUT_MS) { gate.await() }
-            Log.d("ldmux", "radio gate open")
             // Wait for the contact dump so the first raw send does not race
             // the only other command the link sends. A radio with no contacts
             // still answers END_OF_CONTACTS; a dead command times out and the
@@ -324,6 +326,14 @@ class AndroidRadioLink(
         if (!queued) return RadioSendResult.Failed
         return try {
             val result = withTimeout(SEND_TIMEOUT_MS) { answer.await() }
+            if (result == RadioSendResult.NotFound && path.encoded > 0) {
+                // A stored direct path can outlive the peer. The radio has just
+                // told us it cannot route there; drop it and try the neighbour
+                // once, rather than blackholing the session until a reboot.
+                hostPath = null
+                appLog("mesh path not found; retrying zero-hop")
+                return send(record)
+            }
             if (result == RadioSendResult.Accepted) {
                 recordAirtime(record.size + 2 + path.bytes.size + 1)
             }
@@ -361,7 +371,7 @@ class AndroidRadioLink(
         // the only proof that the radio took the operating point.
         withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (!s.isIdle()) delay(25) }
         delay(PRESET_SETTLE_MS)
-        close()
+        resetLink()
         connect()
         val got = selfInfo.value ?: return false
         val info = readDeviceInfo()
@@ -383,7 +393,7 @@ class AndroidRadioLink(
             if (oldHashMode != null) restore?.setPathHashMode(oldHashMode)
             withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (restore?.isIdle() == false) delay(25) }
             delay(PRESET_SETTLE_MS)
-            close()
+            resetLink()
             runCatching { connect() }
             appLog("mesh preset rollback was best effort; reconnect ${if (_state.value == MeshLinkState.Bound) "ok" else "failed"}")
         }
@@ -391,6 +401,11 @@ class AndroidRadioLink(
     }
 
     override fun close() {
+        RadioLinks.close(this)
+    }
+
+    /** Tear down this transport without leaving the shared-link registry. */
+    private fun resetLink() {
         closing = true
         ready?.completeExceptionally(RadioLinkException(MeshLinkState.Closed, "closed"))
         ready = null
@@ -398,6 +413,11 @@ class AndroidRadioLink(
         deviceInfoDone = null
         closeTransport()
         _state.value = MeshLinkState.Closed
+    }
+
+    /** The registry's final close. */
+    internal fun closeNow() {
+        resetLink()
     }
 
     override suspend fun readDeviceInfo(): RadioDeviceInfo? {
@@ -563,7 +583,15 @@ private object RadioLinks {
         entry.refs--
         if (entry.refs <= 0) {
             entries.remove(address)
-            link.close()
+            link.closeNow()
         }
+    }
+
+    /** A direct close also ends the shared entry, so a later acquire starts a fresh link. */
+    @Synchronized
+    fun close(link: AndroidRadioLink) {
+        val address = entries.entries.firstOrNull { it.value.link === link }?.key
+        if (address != null) entries.remove(address)
+        link.closeNow()
     }
 }

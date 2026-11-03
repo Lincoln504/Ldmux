@@ -1,7 +1,7 @@
-# First hardware validation: runbook (prepared 2026-10-29, not yet run)
+# Hardware validation: runbook and results (prepared 2026-10-29, run through 2026-11-02)
 
-Nothing here has been executed on a phone or on the radio's USB image. Every command below was
-checked for existence and syntax only. Sequence is **phone first, radio last**: the same Heltec
+The runbook below was executed on the phone and both radios. Results are recorded at the end;
+the earlier "not yet run" text is kept only as the original preparation note. Sequence is **phone first, radio last**: the same Heltec
 board serves the phone over BLE today, and the host chain needs it reflashed to the USB image.
 
 ## 0. Artifacts (built 2026-10-29)

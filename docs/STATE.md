@@ -29,7 +29,9 @@ scripts, not for the Rust gate.
 
 The carriage is built, the daemon holds the link, and both sides of the L3 session exist and are
 tested: Rust on the host, the same Rust through a C ABI on the phone, with no crypto in Kotlin.
-What has not happened is a single run of those two together over a real radio.
+The phone now owns its own MeshCore radio over BLE, with no MeshMore app in the path. The two
+ends ran together over the air on 2026-10-29 and again on 2026-11-02 from the standalone path:
+session established, host shell listed, typed input reached the host terminal.
 `docs/MESH-TRANSPORT.md` asks whether a terminal over MeshCore is plausible.
 `docs/MESH-GATEWAY.md` answers the carriage: a two-phase record (flooded binary
 request to discover, raw custom for steady state), `BIND_OK` advertising the
@@ -47,11 +49,9 @@ What exists, 2026-10-28:
 | Session host in the daemon | `crates/daemon/src/mesh_session.rs`, `mesh.rs` | Implemented. Enabled by `LDMUX_MESH_PSK`. 5 unit + 4 integration tests against a fake gateway speaking the real L2 frames. `mesh.status` gained a `session` object. |
 | L3 session as a C ABI | `crates/session-ffi` (`ldmux-session-ffi`), `packages/mobile/native/ldmux_session.h`, `ldmux_session_jni.c`, `build-session.sh` | Implemented, 13 tests that call the ABI the way C does (whole handshake, a sealed record each way, budget bound, tamper, double free, nulls). ADR-0023 update. |
 | L3 session (Kotlin) | `packages/mobile/.../mesh/MeshSession.kt`, `SessionLib.kt`, `NativeMeshSession.kt` | Implemented. `MeshSessionAbiTest`: 11 tests that load the real library in a JVM and run the phone against the daemon's side. No crypto in Kotlin. Not exercised on a device. |
-| L2 client (Kotlin) | `packages/mobile/.../mesh` | Implemented, JVM-tested. The route is wired into `LdmuxConfig`, the transport choke point (`endpoint`) and `LinkState`; it carries no shell yet. |
-| Radio owner | MeshMore repo, `packages/meshcore_host` | Implemented and run against a real HELTEC-BASE on 2026-10-28 (USB serial). |
-
-Nothing here speaks MeshCore except the MeshMore gateway, and nothing in this
-repo needs to know a frequency, a spreading factor or a preset.
+| BLE radio link (Kotlin) | `packages/mobile/.../mesh/AndroidRadioLink.kt` | Implemented and hardware-run 2026-11-02 against the WIO and a HELTEC-BASE host. It owns the bond, the MeshCore session, the radio preset and the shared-link reference count. |
+| Radio owner (phone) | LDMUX, directly over BLE | The phone no longer goes through MeshMore's loopback gateway. `docs/MESH-STANDALONE.md` is the record. |
+| Radio owner (host) | MeshMore `packages/meshcore_host` | Implemented and run against a real HELTEC-BASE on 2026-10-28 (USB serial). The daemon still speaks to the host radio through this gateway. |
 
 ### What the L3 session has, and what it still lacks
 
@@ -75,10 +75,10 @@ repo needs to know a frequency, a spreading factor or a preset.
 
 - **A device run of the phone's end.** The Kotlin client calls the Rust session through
   `libldmux_session.so` (ADR-0023, update 2026-10-28) and is tested against the real library in a
-  JVM, but the Android build of the library has only been packaged (`assembleDebug` includes it
-  for arm64-v8a and x86_64), never run on a phone. `MESH_SESSION_BUILT` is `true`; a device where
-  the library does not load reports `SessionNotBuilt`.
-- **`MESH_TERMINAL_BUILT` is `true` (2026-10-28, ADR-0025) and the phone side exists; the route is still not reachable on a real device.** The three items this flag waited for were built: (a) `MeshTerm.kt`, a Kotlin port checked against `crates/protocol/test/fixtures/mesh-term-vectors.json`, which the Rust encoder writes (11 tests); (b) `MeshTermDriver` plus `MeshTerminalScreen`, the attach driver and the reduced terminal (26 fake-port tests, and one over the real Rust session through the JNI shim); (c) key delivery, below. `resolveRoute` reports the truth for every combination (`MeshRouteTruthTest`, 8). **Superseded 2026-10-29: the route is now reachable from Settings** (see the next bullet). The original text follows: still missing for a device to actually use it: a route picker (nothing can save `route = Mesh`), a way to enter the MeshMore gateway token (no scanner for MeshMore's token QR, so a saved mesh route stops at `NeedsToken`), and any device run.
+  JVM, and the Android build (`assembleDebug`, arm64-v8a and x86_64) ran on a phone on 2026-11-02.
+  `MESH_SESSION_BUILT` is `true`; a device where the library does not load reports
+  `SessionNotBuilt`.
+- **`MESH_TERMINAL_BUILT` is `true` (2026-10-28, ADR-0025) and the route ran standalone on a real device (2026-11-02).** The flag's prerequisites are built and tested: `MeshTerm.kt` (the Kotlin port checked against the Rust encoder's vectors), `MeshTermDriver` plus `MeshTerminalScreen`, and key delivery by `ldmux code --mesh` / `--mesh-only`. `resolveRoute` reports the truth for every combination (`MeshRouteTruthTest`). The standalone path established a session, listed the host's shell and carried typed input; `docs/MESH-STANDALONE.md` is the current record.
 - **(Superseded) `MESH_TERMINAL_BUILT` was `false`, and the host half of what it waited for existed**
   (2026-10-28, ADR-0025). A saved mesh route resolves to `TerminalNotBuilt`, opens nothing and does
   not fall back to the tailnet (`LdmuxConfig.endpoint` is null for it). What is **missing for the
@@ -222,9 +222,11 @@ Product and mobile:
   device check before it is claimed.
 - **iOS**: not started; needs a macOS host (`docs/IOS-DEVELOPMENT.md`).
 - **Mesh/LoRa**: the L2 clients and the host gateway exist
-  (`crates/mesh`, `packages/mobile/.../mesh`, `packages/meshcore_host`), but the
-  daemon has no listener and no RPC/CLI surface, and the mobile route is not
-  wired. No radio measurements of the link itself.
+  (`crates/mesh`, `packages/mobile/.../mesh`, `packages/meshcore_host`). The phone
+  owns its BLE radio standalone and the mesh route is wired. The daemon still has
+  no listener or RPC surface for MeshCore; the host gateway is its only ingress.
+  The standalone path has a two-radio hardware pass (2026-11-02). No multi-hop
+  path recovery yet.
 
 Daemon and protocol:
 - **Shells do not carry the desktop session's display environment.** The keeper
@@ -349,20 +351,24 @@ Platforms (see `docs/PLATFORMS.md`):
   history may push content into scrollback; checked in tests, not on a phone.
 - **Keeper replacement is needed to get bounded peeks** on a machine whose keeper predates
   them; it ends every shell, so it waits for a convenient moment.
-- **The mesh route is reachable from Settings (2026-10-29), and still has not run on a device.**
+- **The mesh route is reachable from Settings and ran standalone on a device (2026-11-02).**
   - *Two pairings.* `LdmuxConfig.host/token` are the daemon's. The mesh pairing is a loopback `meshGateway` endpoint (default `127.0.0.1:41731`, a setting, not a constant) plus the gateway token and the L3 keys, which stay in the Keystore. A device may have either or both; a mesh-only config has no endpoint, so it cannot open a tailnet connection, and a tailnet config's `connectionKey` is byte-identical to before. Tests: `MeshReachabilityTest`.
-  - *Entry points.* Settings has a mesh section (hidden on iOS): three credentials as present/missing in ceremony order, a scanner for `ldmux code --mesh` / `--mesh-only`, a scanner for MeshMore's gateway code (refused until the session keys exist), a route picker that offers only routes that can run, and "forget mesh pairing". `ldmux code --mesh-only` hands a radio-only phone the keys and no daemon token.
-  - *MeshMore's code.* `meshmore://gateway?v=1&host=127.0.0.1:<port>&token=<32 hex>`; a bare token still reads as the default endpoint; a non-loopback host is refused. L2 grant only: no key material.
+  - *Entry points.* The route is chosen in the app header. Settings has a compact mesh section (hidden on iOS): missing credentials only, a scanner for `ldmux code --mesh` / `--mesh-only`, a radio scanner, the preset dialog, and "forget mesh pairing". `ldmux code --mesh-only` hands a radio-only phone the keys and no daemon token.
+  - *MeshMore's code (historical).* `meshmore://gateway?v=1&host=127.0.0.1:<port>&token=<32 hex>` was the old phone-side gateway handoff. The standalone path removed it; the host gateway still uses its own token on the daemon side.
   - *Choosing a shell.* ADR-0025 gains `List`/`Sessions`; the driver shows one shell attached, a picker for several, a stated "none".
     **2026-11-01:** the picker shows the shell's folder, as the tailnet launcher does, not the id it would attach with:
     `Sessions` entries carry `cwd` from profile version 6, gated on the page's own flag because a list is answered
     before an attach can succeed (ADR-0025, "Update, 2026-11-01 (profile version 6)").
   - *Defects found on the way.* Unpairing left the MeshMore gateway token in the Keystore (now cleared with the keys); `MeshRouteWiringTest` pinned the contradiction that a mesh-route device with no daemon reads as "unpaired".
-  - *Still not done:* any run on a phone or a radio; the Keystore, scanner and Compose screen were never exercised on a device. The route works only while MeshMore is running on the same phone with its gateway on (its foreground service). Not done either: PSK rotation, padding, ML-KEM, rekey, an iOS build.
+  - *Still not done:* preset rollback, background release, multi-hop path recovery, a host-side
+    USB provisioning UI, an iOS build, and the daemon-side pin/PSK lifecycle fixes recorded in
+    `docs/HARDWARE-VALIDATION.md`. The phone no longer depends on MeshMore; the host still uses
+    its gateway for the USB radio.
 - **Mesh work** (ADR-0020, ADR-0023, `docs/MESH-TRANSPORT.md`): the link, the RPC, the CLI
   and the gateway side of the L3 session exist. Missing: the phone's Noise client (a
   decision), the compact encoding and the shell bridge, the pairing ceremony, and the mobile
-  route wiring. **Superseded 2026-10-28:** all four now exist. What remained then: a route picker, MeshMore token entry, a device run, and a real-radio run. **Superseded 2026-10-29:** the picker and the token entry exist; the device run and the real-radio run remain.
+  route wiring. **Superseded 2026-10-28:** all four now exist. **Superseded 2026-11-02:** the
+  standalone phone-radio path ran on a real device, with the host's shell and typed input.
 - **A tailnet IP appears in test fixtures** (`crates/daemon/src/pairing.rs` and others).
 - **The git `user.name` is misconfigured** as `user.email`; commits carry that name.
 

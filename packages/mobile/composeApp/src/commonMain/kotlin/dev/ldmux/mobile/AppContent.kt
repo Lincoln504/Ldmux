@@ -698,7 +698,7 @@ internal fun AppContent(
             } else if (link == LinkState.RouteUnavailable && config.route == MeshRoute.Mesh) {
                 {
                     // The header names the problem; this says what to do about it, and for a missing
-                    // token it is the one button that makes it go away.
+                    // credential it is the one action that makes it go away.
                     val problem = (currentMeshResolution(config.route) as? MeshRouteResolution.Unusable)?.problem
                     dev.ldmux.mobile.mesh.meshRouteBodyFor(problem)?.let {
                         dev.ldmux.mobile.mesh.MeshBodyBlock(it)

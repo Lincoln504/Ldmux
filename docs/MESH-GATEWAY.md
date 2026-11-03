@@ -1,11 +1,11 @@
 # Mesh gateway: the carriage contract for LDMUX over MeshCore
 
-**Status: both sides are built and tested; neither has run on a device together.** The daemon
-holds the link, answers the L3 session and bridges the terminal profile; the phone carries the
-same session through the Rust ABI and draws the tailnet's own terminal surface. What remains is
-one hardware run: `mesh status` still reads `session waiting` because the mesh screen has never
-been opened against a live radio. Written 2026-10-24 on branch `feat/meshmore-gateway`; status
-corrected 2026-10-31. This supersedes the carriage assumptions in
+**Status: both sides are built and tested, and they have run on devices together.** The daemon
+holds the host link, answers the L3 session and bridges the terminal profile; the phone carries
+the same session through the Rust ABI and draws the tailnet's own terminal surface. The first
+over-the-air session was 2026-10-29 and the standalone phone-radio path followed on 2026-11-02
+(`docs/MESH-STANDALONE.md`). Written 2026-10-24 on branch `feat/meshmore-gateway`; status
+corrected 2026-11-02. This supersedes the carriage assumptions in
 [`MESH-TRANSPORT.md`](MESH-TRANSPORT.md) where the two differ, and it is bound by
 [ADR-0020](adr/0020-mesh-link-security.md) wherever it touches security. Nothing
 here is a plan of record until the open decisions at the bottom are taken.
@@ -383,6 +383,10 @@ path; nothing here changes the direct path.
 Also: the gateway's airtime estimate is only correct for the radio preset it is configured for. The flat 4 ms/byte default fits 62.5 kHz SF7 (613 ms per 176 B). EU/UK Narrow is 1656 ms, 2.4x higher. The app must build the estimator from the radio's real parameters (`AirtimeEstimator.lora`).
 
 ## 11. Implementation status, 2026-10-28
+
+> **Superseded 2026-11-02.** The phone no longer uses MeshMore's loopback gateway. This list
+> records the earlier Kotlin implementation; the phone now owns BLE directly. Current record:
+> [`MESH-STANDALONE.md`](MESH-STANDALONE.md).
 
 **Built (LDMUX mobile, Kotlin, `packages/mobile/composeApp`, package `dev.ldmux.mobile.mesh`):**
 

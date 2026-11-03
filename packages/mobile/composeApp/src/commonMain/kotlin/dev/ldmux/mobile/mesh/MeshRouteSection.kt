@@ -45,7 +45,7 @@ internal fun MeshRouteSection(
     onUnpairMesh: () -> Unit,
 ) {
     var credentials by remember { mutableStateOf(readCredentials()) }
-    val view = meshSetupView(current, credentials)
+    val view = meshSetupView(credentials)
     if (!view.meshExists) return // iOS: there is no mesh route to configure
 
     var note by remember { mutableStateOf<String?>(null) }
@@ -58,7 +58,7 @@ internal fun MeshRouteSection(
         // Healthy credentials are automatic. Only a missing one is worth a line.
         for (c in MeshCredential.entries) {
             if (c !in view.present) {
-                Text(meshCredentialLine(c, false), color = Warn, fontSize = 12.sp)
+                Text(meshCredentialLine(c), color = Warn, fontSize = 12.sp)
             }
         }
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
@@ -72,8 +72,10 @@ internal fun MeshRouteSection(
             Text(
                 if (current.meshRadio.isEmpty()) {
                     "no radio"
+                } else if (current.meshRadioName.isEmpty()) {
+                    current.meshRadio
                 } else {
-                    current.meshRadioName.ifEmpty { current.meshRadio } + "  " + current.meshRadio
+                    current.meshRadioName + "  " + current.meshRadio
                 },
                 color = if (current.meshRadio.isEmpty()) Warn else Fg,
                 fontSize = 12.sp,
@@ -138,7 +140,12 @@ internal fun MeshRouteSection(
     if (showPreset) {
         RadioPresetDialog(
             address = current.meshRadio,
+            openAirtime = current.meshOpenAirtime,
             onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
+            onUnset = {
+                onConfig(current.copy(meshRadio = "", meshRadioName = ""))
+                showPreset = false
+            },
             onDismiss = { showPreset = false },
         )
     }

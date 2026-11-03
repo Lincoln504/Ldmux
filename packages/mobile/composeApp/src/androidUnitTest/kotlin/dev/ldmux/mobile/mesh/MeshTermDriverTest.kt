@@ -36,7 +36,6 @@ class MeshTermDriverTest {
             if (silent) kotlinx.coroutines.awaitCancellation()
             return MeshSendResult(0, outcome)
         }
-        override fun close() {}
     }
 
     /** What the driver queued, and what it was told to deliver. */

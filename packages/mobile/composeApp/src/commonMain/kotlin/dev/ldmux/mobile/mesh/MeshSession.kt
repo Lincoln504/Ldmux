@@ -9,11 +9,10 @@ package dev.ldmux.mobile.mesh
  * codes onto the one error vocabulary the mesh package already has, [MeshLinkState].
  *
  * Knows nothing about a radio, a preset, a path or an airtime figure. The only numbers it takes
- * are the record size the gateway advertised (`BIND_OK`) and the count of records the gateway
- * says may still be sent (`STATUS.opsLeftThisHour`), and it never sends more than either.
+ * are the record size the L2 carrier reports and the count of records it says may still be sent
+ * (`STATUS.opsLeftThisHour`), and it never sends more than either.
  *
- * Threading: one coroutine owns an instance, like [MeshGatewayClient]'s read loop. Calls on one
- * instance must not overlap.
+ * Threading: one coroutine owns an instance. Calls on one instance must not overlap.
  */
 class MeshSession internal constructor(
     private val lib: SessionLib,
@@ -81,10 +80,10 @@ class MeshSession internal constructor(
     }
 
     /**
-     * Ask what to transmit now. **Never more than [recordsLeft]** (the gateway's
-     * `recordsLeftThisHour`) nor [l2Slots] (the L2 credit window minus records still awaiting
-     * `SEND_RESULT`). An unknown budget is the caller's to pass as 0: this class does not guess.
-     * Each returned array is one sealed record, ready for `MeshGatewayClient.send`.
+     * Ask what to transmit now. **Never more than [recordsLeft]** (the carrier's
+     * `opsLeftThisHour`) nor [l2Slots] (the L2 credit window minus records still awaiting
+     * a send result). An unknown budget is the caller's to pass as 0: this class does not guess.
+     * Each returned array is one sealed record, ready for the radio gateway's `send`.
      */
     override fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray> {
         val n = lib.poll(live(), nowMs, recordsLeft.coerceIn(0, 255), l2Slots.coerceIn(0, 255))
@@ -180,7 +179,7 @@ class PendingHandshake internal constructor(
     override val message1: ByteArray,
 ) : HandshakePort {
     /**
-     * Consume message 2. [recordLimit] is `BIND_OK`'s advertised record size, so the layout is
+     * Consume message 2. [recordLimit] is the carrier's advertised record size, so the layout is
      * sized to what the radio will accept. The native handshake is consumed whatever the outcome.
      */
     override fun finish(message2: ByteArray, recordLimit: Int, nowMs: Long): MeshSession {

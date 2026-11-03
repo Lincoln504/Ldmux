@@ -65,9 +65,9 @@ data class LdmuxConfig(
      */
     val pairName: String = "",
     /**
-     * How this pairing is reached (`docs/MESH-GATEWAY.md`). A choice persisted beside the pairing,
-     * **not a second credential**: the mesh token lives in the Keystore and the session secret
-     * arrives with the pairing ceremony. The default is the tailnet, which is every existing
+     * How this pairing is reached (`docs/MESH-STANDALONE.md`). A choice persisted beside the
+     * pairing, **not a second credential**: the session keys live in the Keystore and arrive with
+     * the pairing ceremony. There is no gateway token. The default is the tailnet, which is every existing
      * install, so a device that never chose mesh behaves exactly as before.
      */
     val route: MeshRoute = MeshRoute.Tailnet,
