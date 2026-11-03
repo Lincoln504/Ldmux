@@ -42,3 +42,15 @@ attaching client and the phone, so a change there needs three edits.
 payload, a row already inside the window) and the settle path. The device check on 2026-11-03
 covered the phone's side of the same path: resize on rotation, the panel arriving in landscape,
 and `bad_size` no longer sticking.
+
+## The ceiling was below a real window (fixed 2026-11-03)
+
+The columns ceiling was 500, documented as "well above any real display". It is not: a wide window
+at a small font asks for more, and the clamp then pinned the pane at 500 while the window kept
+growing, so the right of the window stayed blank and the terminal looked like a smaller view inside
+the window rather than more text. 2000 now (`ldmux_protocol::MAX_PANE_COLS`), which is 510k cells at
+the row ceiling. Verified end to end against a local daemon: a 620-column window left `stty size`
+reporting `40 620` inside the shell, where the same probe reported `40 500` before the change.
+
+The keeper is a long-lived process and clamps on its own, so a host that has not restarted the
+keeper and the daemon still has the old ceiling.

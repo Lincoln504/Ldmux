@@ -111,7 +111,7 @@ Client → server (JSON):
 | `{type:"hello",device,features?}` | identify the device (id, name, kind); identity, not authentication (ADR-0010). Writing and shell-changing messages need it (see below). `features` is an optional list of strings the client understands: `inplaceResync`, `sessionEnded` |
 | `{type:"attach",sessionId,cols?,rows?,takeover?,features?}` | subscribe this connection to a session; a shell held by another device is refused with `owned` unless `takeover`. `features` here has the same meaning as in `hello` |
 | `{type:"release",sessionId?}` | this device is leaving the shell on purpose (a page was closed, the app went away); the claim is freed at once instead of after `RECONNECT_GRACE_MS`, and the session list is pushed so a displaced window can take the shell back. Omitted `sessionId` releases every claim this device holds. A release from a device that does not hold the shell is a no-op |
-| `{type:"resize",cols,rows}` | the client's grid changed; the session's pty is resized and a fresh snapshot follows. The daemon clamps to 20..500 columns and answers `bad_size` outside it; `docs/DESKTOP-RESIZE.md` records the desk-window side of this path |
+| `{type:"resize",cols,rows}` | the client's grid changed; the session's pty is resized and a fresh snapshot follows. The daemon clamps to 20..2000 columns and answers `bad_size` outside it; `docs/DESKTOP-RESIZE.md` records the desk-window side of this path |
 | `{type:"mouseclick",col,row}` | a tap in a pane whose program enabled SGR mouse reporting |
 | `{type:"input",data}` | type literal text into the pane |
 | `{type:"key",keys:["Enter"]}` | send named keys |

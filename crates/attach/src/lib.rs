@@ -1063,10 +1063,13 @@ mod render_tests {
     /// report a grid this window will agree with, so the clamp is what makes it settle.
     #[test]
     fn an_out_of_range_window_does_not_loop_on_its_own_size() {
-        // 600 columns and 300 rows are clamped by the daemon to 500 x 255.
-        assert!(!should_reassert(600, 300, 500, 255, false, None));
+        // 3000 columns and 300 rows are clamped by the daemon to 2000 x 255.
+        assert!(!should_reassert(3000, 300, 2000, 255, false, None));
         // A window inside the range is still taken back.
         assert!(should_reassert(300, 100, 48, 17, false, None));
+        // And a wide window at a small font is inside the range, so it is taken back too:
+        // this is the size that used to be clamped to 500 and stop filling the window.
+        assert!(should_reassert(600, 60, 480, 60, false, None));
     }
 
     #[test]

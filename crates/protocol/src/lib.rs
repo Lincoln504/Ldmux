@@ -12,11 +12,19 @@
 //! (phase state).
 
 /// Bounds for a client-requested pane size. The floor keeps a pane usable (a
-/// client that bugs out at 1x1 leaves a shell nobody can read); the ceiling is
-/// well above any real display and stops a bad client from asking for a grid
-/// whose capture would blow the stream's byte budget.
+/// client that bugs out at 1x1 leaves a shell nobody can read); the ceiling stops a
+/// bad client from asking for a grid whose capture would blow the stream's byte budget.
+///
+/// **2000 columns, because 500 was not "well above any real display"** — it was below
+/// one. A wide monitor at a small font asks for more: a 4K window at a 7 px cell is about
+/// 620 columns, and the clamp then pinned the pane at 500 while the window kept growing,
+/// so the terminal stopped filling the window and the columns right of 500 stayed blank.
+/// That reads as "the font got smaller and then the view shrank instead", measured
+/// 2026-11-03. Two thousand is 510k cells at the row ceiling (half a megabyte, one grid),
+/// and the frame's column field is 16 bits, so this is a deliberate bound rather than a
+/// format limit — but a bound that a real display can reach has to be above it.
 pub const MIN_PANE_COLS: u64 = 20;
-pub const MAX_PANE_COLS: u64 = 500;
+pub const MAX_PANE_COLS: u64 = 2000;
 pub const MIN_PANE_ROWS: u64 = 5;
 /// 255, not 300, because the client's wire format is the binding constraint.
 ///
@@ -71,6 +79,10 @@ mod size_tests {
         assert_eq!(clamp_pane_size(80, 300).1, MAX_PANE_ROWS);
         assert_eq!(clamp_pane_size(80, u64::MAX).1, MAX_PANE_ROWS);
         assert_eq!(clamp_pane_size(9999, 24).0, MAX_PANE_COLS);
+        // A wide window at a small font is inside the bounds, and must stay there: this is the
+        // size that used to be clamped to 500 and left the right of the window unpainted.
+        assert_eq!(clamp_pane_size(600, 60), (600, 60));
+        assert_eq!(clamp_pane_size(1600, 40), (1600, 40));
         // Compile-time, not run-time: raising the constant past the frame's
         // one-byte row field is a build error, not a failing test.
         const { assert!(MAX_PANE_ROWS <= 255) };

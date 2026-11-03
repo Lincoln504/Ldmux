@@ -781,8 +781,8 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
 /** The size bounds the daemon's stream applies (`MIN_PANE_COLS` / `MAX_PANE_COLS` in Rust). */
 private const val MIN_COLS = 20
-private const val MAX_COLS = 500
-private const val MAX_ROWS = 500
+private const val MAX_COLS = 2000
+private const val MAX_ROWS = 255
 
 /**
  * How long a leaving page waits to say goodbye before it drops the socket anyway.
