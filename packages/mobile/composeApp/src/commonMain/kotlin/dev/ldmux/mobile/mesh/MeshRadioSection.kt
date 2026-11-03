@@ -98,7 +98,6 @@ internal fun RadioPickerDialog(
 @Composable
 internal fun RadioPresetDialog(
     address: String,
-    budgetMode: RadioBudgetMode,
     onBudget: (RadioBudgetMode) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -107,17 +106,18 @@ internal fun RadioPresetDialog(
     var note by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var region by remember { mutableStateOf(RadioRegion.UsCanada) }
-    var selected by remember { mutableStateOf(publicPresets(RadioRegion.UsCanada).first().preset) }
-    var seed by remember { mutableStateOf(1) }
-    var budget by remember { mutableStateOf(budgetMode) }
+    var seed by remember { mutableStateOf(0) }
+    var selected by remember { mutableStateOf(privatePreset(RadioRegion.UsCanada, Random(0))) }
     val fallbackState = remember { MutableStateFlow(MeshLinkState.NeedsRadio) }
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
-    val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
     val state by (link?.state ?: fallbackState).collectAsState()
     val info by (link?.selfInfo ?: fallbackInfo).collectAsState()
-    val device by (link?.deviceInfo ?: fallbackDevice).collectAsState()
 
     LaunchedEffect(address) {
+        // A private tuple is the default and it is not a public MeshCore
+        // channel, so the app-side airtime meter starts open. The radio's own
+        // duty cycle still applies.
+        onBudget(RadioBudgetMode.Open)
         if (address.isEmpty()) {
             note = "choose a radio first"
             return@LaunchedEffect
@@ -128,7 +128,7 @@ internal fun RadioPresetDialog(
             return@LaunchedEffect
         }
         link = l
-        l.setBudgetMode(budget)
+        l.setBudgetMode(RadioBudgetMode.Open)
         try {
             l.connect()
             l.readDeviceInfo()
@@ -138,98 +138,53 @@ internal fun RadioPresetDialog(
             note = e.message ?: "radio did not answer"
         }
     }
-    DisposableEffect(link) { onDispose { link?.close() } }
+    DisposableEffect(link) { onDispose { link?.release() } }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("radio preset", color = Fg) },
+        title = { Text("radio", color = Fg) },
         containerColor = Surface,
         tonalElevation = 0.dp,
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(address.ifEmpty { "no radio selected" }, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                Text(meshLinkLabel(state), color = Dim, fontSize = 12.sp)
-                val s = info
-                if (s != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    address.ifEmpty { "no radio" } + "  ·  " + meshLinkLabel(state),
+                    color = Dim,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                info?.let {
                     Text(
-                        "${s.frequencyMhz} MHz  ${s.bandwidthKhz} kHz  SF${s.spreadingFactor}  CR${s.codingRate}  ${s.txPowerDbm} dBm",
-                        color = Fg,
-                        fontSize = 12.sp,
+                        "${it.frequencyMhz} MHz  ${it.bandwidthKhz} kHz  SF${it.spreadingFactor}  CR${it.codingRate}  ${it.txPowerDbm} dBm",
+                        color = Dim,
+                        fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
-                val d = device
-                if (d != null) {
-                    Text(
-                        "path ${d.pathHashSize}-byte  ·  fw ${d.firmwareVersion.ifEmpty { "?" }}  ·  max contacts ${d.maxContacts}",
-                        color = Dim,
-                        fontSize = 11.sp,
-                    )
-                }
-                Text("region", color = Accent, fontSize = 12.sp)
+                Text("region", color = Dim, fontSize = 11.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     for (r in RadioRegion.entries) {
                         MiniTextButton(onClick = {
                             region = r
-                            selected = publicPresets(r).first().preset
+                            selected = privatePreset(r, Random(seed))
                         }) {
                             Text(r.label, color = if (region == r) Accent else Dim, fontSize = 10.sp, maxLines = 1)
                         }
                     }
                 }
-                Text("public preset", color = Dim, fontSize = 11.sp)
-                for (choice in publicPresets(region)) {
-                    MiniTextButton(onClick = { selected = choice.preset }) {
-                        Text(
-                            choice.label,
-                            color = if (selected == choice.preset) Accent else Fg,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                        )
-                    }
-                }
-                MiniTextButton(onClick = {
-                    selected = privatePreset(region, Random(seed))
-                    seed += 1
-                }) {
-                    Text("generate private tuple", color = Accent, fontSize = 11.sp)
-                }
+                Text("private tuple", color = Dim, fontSize = 11.sp)
                 Text(
                     presetLine(selected),
                     color = Fg,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                 )
-                Text(
-                    "the host radio must use the same frequency, bandwidth and SF. It is configured separately unless it is also reachable over BLE.",
-                    color = Dim,
-                    fontSize = 11.sp,
-                )
-                Text("data budget", color = Dim, fontSize = 11.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    for (mode in RadioBudgetMode.entries) {
-                        MiniTextButton(onClick = {
-                            budget = mode
-                            link?.setBudgetMode(mode)
-                            onBudget(mode)
-                        }) {
-                            Text(
-                                mode.name.lowercase(),
-                                color = if (budget == mode) Accent else Dim,
-                                fontSize = 11.sp,
-                            )
-                        }
-                    }
+                MiniTextButton(onClick = {
+                    seed += 1
+                    selected = privatePreset(region, Random(seed))
+                }) {
+                    Text("new tuple", color = Accent, fontSize = 11.sp)
                 }
-                Text(
-                    if (budget == RadioBudgetMode.Metered) {
-                        "metered: 36 s of data airtime per hour (control and handshake are not gated)"
-                    } else {
-                        "open: no app airtime budget. Use only on a private tuple that your region allows; the radio's own duty cycle still applies."
-                    },
-                    color = Dim,
-                    fontSize = 11.sp,
-                )
                 note?.let { Text(it, color = Warn, fontSize = 11.sp) }
             }
         },
@@ -241,22 +196,18 @@ internal fun RadioPresetDialog(
                     busy = true
                     scope.launch {
                         note = try {
-                            if (l.applyPreset(selected)) {
-                                "applied and verified"
-                            } else {
-                                "the radio did not confirm the new tuple; it may have been put back"
-                            }
+                            if (l.applyPreset(selected)) "applied" else "not confirmed"
                         } catch (e: RadioLinkException) {
                             radioLinkProblemLine(e.state)
                         } catch (e: Exception) {
-                            e.message ?: "the preset did not finish"
+                            e.message ?: "did not finish"
                         } finally {
                             busy = false
                         }
                     }
                 },
             ) {
-                Text(if (busy) "applying…" else "apply tuple", color = Accent, fontSize = 12.sp)
+                Text(if (busy) "applying…" else "apply", color = Accent, fontSize = 12.sp)
             }
         },
         dismissButton = { MiniTextButton(onClick = onDismiss) { Text("close", color = Dim) } },
@@ -264,8 +215,7 @@ internal fun RadioPresetDialog(
 }
 
 private fun presetLine(p: RadioPreset): String =
-    "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  " +
-        "${p.txPowerDbm} dBm  ${p.pathHashSize}-byte paths  ·  ${RadioAirtime.opsPerHour(p)} records/hour at 36 s"
+    "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm"
 
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {
     RadioScanProblem.PermissionDenied -> "Bluetooth permission is off. Grant it, then scan again."

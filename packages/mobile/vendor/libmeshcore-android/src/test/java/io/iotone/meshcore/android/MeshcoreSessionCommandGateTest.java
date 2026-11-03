@@ -157,4 +157,40 @@ public class MeshcoreSessionCommandGateTest {
         assertTrue(session.isIdle());
         session.close();
     }
+
+    private static byte[] contact() {
+        return new FrameBuilder()
+                .u8(0x03)
+                .raw(new byte[32])
+                .u8(1).u8(0).u8(0)
+                .raw(new byte[64])
+                .raw(new byte[32])
+                .u32(0).i32(0).i32(0).u32(0)
+                .build();
+    }
+
+    @Test
+    public void aSingleContactAnswerReleasesTheAnswerSlot() {
+        FakeTransport transport = new FakeTransport();
+        MeshcoreSession session = readySession(transport, new Listener());
+
+        session.getContact(new byte[32]);
+        assertFalse(session.isIdle());
+        transport.deliver(contact());
+        assertTrue(session.isIdle());
+        session.close();
+    }
+
+    @Test
+    public void aContactDumpStaysBusyUntilEndOfContacts() {
+        FakeTransport transport = new FakeTransport();
+        MeshcoreSession session = readySession(transport, new Listener());
+
+        session.requestContacts();
+        transport.deliver(contact());
+        assertFalse(session.isIdle());
+        transport.deliver(new FrameBuilder().u8(0x04).u32(0).build());
+        assertTrue(session.isIdle());
+        session.close();
+    }
 }

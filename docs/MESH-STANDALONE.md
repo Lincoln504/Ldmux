@@ -178,6 +178,11 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   use write-without-response only when that is the only property. A write
   failure ends the link and fails a pending raw callback.
 - APP_START is sent only after the bond, MTU and notification setup complete.
+- One BLE link exists per radio address and is reference-counted. Settings and
+  the mesh terminal acquire the same link; opening Settings over a live
+  terminal used to start a second GATT client on the same address, which left
+  the first link half-dead and the dialog stuck at `closed`. The link closes
+  when the last owner releases it.
 - The mesh route uses the same foreground service as the tailnet route, so the
   BLE link survives a short app switch.
 
@@ -188,17 +193,23 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   awaited, then the next is written. A raw send is refused while any tracked
   command is queued or in flight, and a tracked command waits while a raw send
   is in flight.
+- A by-key contact answer is one `ContactFrame` with no END_OF_CONTACTS. It
+  releases the answer slot itself; a contact dump stays busy until
+  END_OF_CONTACTS. Treating the single answer like a dump left the session
+  permanently non-idle, and the connect path closed a healthy link 2.5 s after
+  APP_START.
 - A raw timeout is a dead link, not permission to send again. One raw send in
   flight. A late OK must not resolve a later send.
 - LDMUX disables the MeshCore message drain. It has no chat consumer, and every
   drain command shares the same answer window.
 - Radio `OK` means the frame was handed to the transmitter. It never means
   delivery. The L3 ARQ owns delivery.
-- Airtime has two modes: **metered**, the default, and **open**. Metered spends
-  a 36 s/hour budget on data records (control and handshake records are not
-  gated). Open is for a private tuple where the operator has chosen to use the
-  band freely, and it must still respect the regional duty cycle. The status
-  line shows records left when metered; `null` is not "unlimited".
+- Airtime has two modes. **Open is the default** because the default preset is a
+  private tuple, not a public MeshCore channel. **Metered** spends a 36 s/hour
+  budget on data records (control and handshake records are not gated) and is
+  available for an operator who explicitly joins a public mesh. Open must still
+  respect the regional duty cycle. The status line shows records left when
+  metered; `null` is not "unlimited".
 - The meter is per adapter session: it adds the LoRa time-on-air of each
   accepted data record, rolls the window after one hour, and refuses a send
   with `RadioSendResult.Budget` when the budget is spent. It is an estimate for
@@ -206,7 +217,9 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   cycle remains the hard outer bound.
 - The old gateway's 36 s/hour governor was removed with the gateway, and the
   standalone path now owns this counter explicitly. The mode is persisted in
-  config (`meshOpenAirtime`) and applied when a connection is built.
+  config (`meshOpenAirtime`, default `true`) and applied when a connection is
+  built. The preset dialog always selects Open because it only writes private
+  tuples.
 
 ### 5.3 Error mapping
 
@@ -230,14 +243,17 @@ The full 172-byte record fits a zero-hop 0x19 send with two bytes to spare. A
   region's legal envelope and applied to both radios by whatever path reaches
   them. The phone can always set its own radio. The host radio is configured
   separately unless it is also reachable over BLE.
-- Public presets remain available for joining an existing mesh: USA/Canada,
+- Public presets remain in the model for joining an existing mesh: USA/Canada,
   EU/UK narrow, Australia, New Zealand and the other entries the region pack
   carries. The host must use the same frequency, bandwidth and SF. CR may
-  differ because every packet carries it.
-- The preset dialog offers a region, the region's public presets, and a
-  generated private tuple. Choosing a radio from the scan opens the preset
-  dialog immediately, so first run is permission → scan → bond → current tuple
-  → choose/apply → verify → host-key/path status.
+  differ because every packet carries it. They are not in the Settings dialog:
+  the dialog is a private-tuple form only, and a public preset is a deliberate
+  code-level choice, not a default the UI invites.
+- The preset dialog is compact: the radio and link state, the region, the
+  generated private tuple and one `new tuple` action. Choosing a radio from the
+  scan opens it immediately, so first run is permission → scan → bond → current
+  tuple → apply → verify → host-key/path status. The app-side airtime meter is
+  open by default; there is no metered/open switch to operate.
 - `RadioAirtime` is a pure Kotlin implementation of the LoRa time-on-air
   formula. It is used for the budget display and the per-record estimate; it
   is not used to claim delivery.
@@ -379,13 +395,17 @@ Measured and code-read on 2026-11-02:
 - Hardware pass: scan, bond/PIN, MTU, SELF_INFO, DEVICE_INFO, 0x19 and 0x41
   round trips, preset apply/rollback, end-to-end shell, background release.
 - First-run is one combined flow: permission, scan, bond, connect, read the
-  current tuple, choose a public or private preset, apply, verify, show the
-  host-key/path status.
+  current tuple, generate and apply a private tuple, verify, show the
+  host-key/path status. Measured on the real WIO on 2026-11-02: a private
+  914.25 MHz / 500 kHz / SF8 / CR5 / 22 dBm tuple was written over BLE and read
+  back. End-to-end shell traffic still depends on the host radio using the same
+  tuple.
 - The host radio must be set to the same tuple. The phone can set a second BLE
   radio; a USB-only host radio needs the host provisioning path. This is not
   implemented in this branch.
-- Airtime counter and the metered/open switch are wired for the phone's own
-  radio. The host radio's budget is not metered by this app.
+- Airtime counter and the metered/open mode are wired for the phone's own
+  radio. The host radio's budget is not metered by this app; Open is the
+  default because the default preset is private.
 - Multi-hop path reset/discovery is a follow-up; do not silently use a
   multi-hop path without it.
 - Desktop history/fit fixes on a separate branch.

@@ -69,7 +69,7 @@ actual object AppPrefs {
             route = meshRouteFromStored(sp.getString(KEY_ROUTE, null)),
             meshRadio = sp.getString(KEY_MESH_RADIO, null) ?: "",
             meshRadioName = sp.getString(KEY_MESH_RADIO_NAME, null) ?: "",
-            meshOpenAirtime = sp.getBoolean(KEY_MESH_OPEN_AIRTIME, false),
+            meshOpenAirtime = sp.getBoolean(KEY_MESH_OPEN_AIRTIME, true),
         )
     }
 

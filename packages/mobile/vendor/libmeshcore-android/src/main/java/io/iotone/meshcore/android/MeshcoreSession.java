@@ -128,6 +128,13 @@ public final class MeshcoreSession {
             new java.util.ArrayDeque<>();
     private int pendingTracked;
     private boolean trackedInFlight;
+    /**
+     * A contact dump ends with END_OF_CONTACTS, not with each ContactFrame.
+     * A single getContact-by-key answer has no terminator of its own, so that
+     * ContactFrame must release the answer slot. Without this the session stays
+     * "not idle" after a by-key lookup and the caller closes a healthy link.
+     */
+    private boolean contactDumpInFlight;
 
     /**
      * Creates a session.
@@ -261,6 +268,7 @@ public final class MeshcoreSession {
      */
     public void requestContacts() {
         if (state.get() != SessionState.READY) return;
+        contactDumpInFlight = true;
         sendTracked(MeshcoreFrameCodec.getContacts());
     }
 
@@ -754,6 +762,7 @@ public final class MeshcoreSession {
                     trackedQueue.clear();
                     pendingTracked = 0;
                     trackedInFlight = false;
+                    contactDumpInFlight = false;
                 }
                 setState(SessionState.DISCONNECTED);
                 draining = false;
@@ -768,6 +777,7 @@ public final class MeshcoreSession {
                 trackedQueue.clear();
                 pendingTracked = 0;
                 trackedInFlight = false;
+                contactDumpInFlight = false;
             }
             setState(SessionState.READY);
             // Drain any messages that accumulated while we were offline.
@@ -798,6 +808,7 @@ public final class MeshcoreSession {
             return;
         }
         if (frame instanceof ContactFrame f) {
+            if (!contactDumpInFlight) trackedAnswered();
             listener.onContact(f);
             continueDrain();
             return;
@@ -810,6 +821,7 @@ public final class MeshcoreSession {
             return;
         }
         if (frame instanceof OkFrame || frame instanceof ErrorFrame) {
+            contactDumpInFlight = false;
             RawSendCallback pending = pendingRaw.getAndSet(null);
             if (pending != null) {
                 if (frame instanceof OkFrame) {
@@ -824,6 +836,7 @@ public final class MeshcoreSession {
             }
         }
         if (frame instanceof io.iotone.meshcore.frames.EndOfContactsFrame) {
+            contactDumpInFlight = false;
             trackedAnswered();
         }
         if (frame instanceof io.iotone.meshcore.frames.DeviceInfoFrame) {

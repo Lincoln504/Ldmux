@@ -317,6 +317,11 @@ fun MeshTerminalScreen(
         when {
             terminalLive -> scope.launch { conn.driver.listShells() }
             view is MeshTermView.Choose || view is MeshTermView.NoShells -> scope.launch { conn.driver.refresh() }
+            view is MeshTermView.HostClosed -> {
+                // A shell the host no longer has must not be resumed forever.
+                resumeShell = ""
+                attempt += 1
+            }
             else -> attempt += 1
         }
     }

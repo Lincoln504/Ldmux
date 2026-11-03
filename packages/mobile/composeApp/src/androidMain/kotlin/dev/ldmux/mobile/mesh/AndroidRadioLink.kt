@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import dev.ldmux.mobile.AndroidApp
 import dev.ldmux.mobile.appLog
 import io.iotone.meshcore.android.AndroidBleTransport
@@ -51,8 +52,20 @@ import java.io.IOException
 class AndroidRadioLink(
     private val context: Context,
     private val address: String,
-    private val hostKey: ByteArray,
+    hostKey: ByteArray,
 ) : RadioLink {
+
+    @Volatile
+    private var hostKey: ByteArray = hostKey
+
+    /** The terminal may learn the host key after Settings opened the link first. */
+    fun updateHostKey(key: ByteArray) {
+        if (key.isNotEmpty()) hostKey = key.copyOf()
+    }
+
+    override fun release() {
+        RadioLinks.release(this)
+    }
 
     private val _state = MutableStateFlow(if (address.isEmpty()) MeshLinkState.NeedsRadio else MeshLinkState.Idle)
     override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
@@ -122,6 +135,7 @@ class AndroidRadioLink(
 
     private val listener = object : SessionListener {
         override fun onStateChanged(state: SessionState) {
+            Log.d("ldmux", "radio state $state closing=$closing")
             if (closing) return
             when (state) {
                 SessionState.DISCONNECTED -> {
@@ -134,6 +148,7 @@ class AndroidRadioLink(
         }
 
         override fun onReady(selfInfo: SelfInfo) {
+            Log.d("ldmux", "radio onReady key=" + selfInfo.publicKey().size)
             if (closing) return
             _selfInfo.value = selfInfo.toRadioSelfInfo()
             refreshStatus()
@@ -217,6 +232,7 @@ class AndroidRadioLink(
             throw RadioLinkException(MeshLinkState.NeedsPermission, "Bluetooth permission is not granted")
         }
 
+        Log.d("ldmux", "radio connect start $address")
         closing = false
         hostPath = null
         _selfInfo.value = null
@@ -236,7 +252,9 @@ class AndroidRadioLink(
         contactDone = contact
         try {
             t.connectToDevice(device)
+            Log.d("ldmux", "radio connectToDevice called")
             withTimeout(CONNECT_TIMEOUT_MS) { gate.await() }
+            Log.d("ldmux", "radio gate open")
             // Wait for the contact dump so the first raw send does not race
             // the only other command the link sends. A radio with no contacts
             // still answers END_OF_CONTACTS; a dead command times out and the
@@ -256,6 +274,7 @@ class AndroidRadioLink(
                 throw RadioLinkException(MeshLinkState.Closed, "closed while connecting")
             }
         } catch (e: TimeoutCancellationException) {
+            Log.d("ldmux", "radio connect timeout: " + e.message)
             closeTransport()
             _state.value = MeshLinkState.RadioUnavailable
             throw RadioLinkException(MeshLinkState.RadioUnavailable, "the radio did not answer APP_START")
@@ -263,6 +282,7 @@ class AndroidRadioLink(
             closeTransport()
             throw e
         } catch (e: Exception) {
+            Log.d("ldmux", "radio connect failed: " + e)
             closeTransport()
             _state.value = MeshLinkState.RadioUnavailable
             throw RadioLinkException(MeshLinkState.RadioUnavailable, e.message ?: "radio connect failed")
@@ -507,5 +527,43 @@ class AndroidRadioLink(
     }
 }
 
-actual fun meshRadioLink(address: String, hostKey: ByteArray): RadioLink? =
-    AndroidRadioLink(AndroidApp.context, address, hostKey)
+actual fun meshRadioLink(address: String, hostKey: ByteArray): RadioLink? {
+    if (address.isEmpty()) return AndroidRadioLink(AndroidApp.context, address, hostKey)
+    return RadioLinks.acquire(address, hostKey)
+}
+
+/**
+ * One BLE link per radio address, shared by every screen that needs it.
+ *
+ * The companion radio accepts one GATT client. Opening Settings while the mesh
+ * terminal is live used to start a second client on the same address, which
+ * left the first link half-dead and the dialog stuck at "closed".
+ */
+private object RadioLinks {
+    private class Entry(val link: AndroidRadioLink, var refs: Int)
+    private val entries = mutableMapOf<String, Entry>()
+
+    @Synchronized
+    fun acquire(address: String, hostKey: ByteArray): AndroidRadioLink {
+        val entry = entries[address]
+        if (entry != null) {
+            entry.refs++
+            entry.link.updateHostKey(hostKey)
+            return entry.link
+        }
+        val link = AndroidRadioLink(AndroidApp.context, address, hostKey)
+        entries[address] = Entry(link, 1)
+        return link
+    }
+
+    @Synchronized
+    fun release(link: AndroidRadioLink) {
+        val address = entries.entries.firstOrNull { it.value.link === link }?.key ?: return
+        val entry = entries[address] ?: return
+        entry.refs--
+        if (entry.refs <= 0) {
+            entries.remove(address)
+            link.close()
+        }
+    }
+}

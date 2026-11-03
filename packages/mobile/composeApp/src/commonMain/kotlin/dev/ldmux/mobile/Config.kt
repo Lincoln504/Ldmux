@@ -75,8 +75,12 @@ data class LdmuxConfig(
     val meshRadio: String = "",
     /** The advertised name of that radio, for the Settings row. Not a secret. */
     val meshRadioName: String = "",
-    /** Data records are metered at 36 s/hour. Open is for a private tuple only. */
-    val meshOpenAirtime: Boolean = false,
+    /**
+     * Data records are metered at 36 s/hour by default only when this is false.
+     * LDMUX defaults to a private tuple, which is not a public MeshCore channel,
+     * so the app budget starts open. The radio's own duty cycle still applies.
+     */
+    val meshOpenAirtime: Boolean = true,
 ) {
 
     /**

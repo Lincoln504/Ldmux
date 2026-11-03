@@ -1,5 +1,6 @@
 package dev.ldmux.mobile.mesh
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -53,10 +54,12 @@ internal fun MeshRouteSection(
     var showPreset by remember { mutableStateOf(false) }
 
     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("mesh route", color = Fg, fontSize = 13.sp)
+        Text("mesh", color = Fg, fontSize = 13.sp)
+        // Healthy credentials are automatic. Only a missing one is worth a line.
         for (c in MeshCredential.entries) {
-            val ok = c in view.present
-            Text(meshCredentialLine(c, ok), color = if (ok) Fg else Warn, fontSize = 12.sp)
+            if (c !in view.present) {
+                Text(meshCredentialLine(c, false), color = Warn, fontSize = 12.sp)
+            }
         }
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
             Text(meshProblemLabel(it.problem), color = Dim, fontSize = 11.sp)
@@ -66,31 +69,30 @@ internal fun MeshRouteSection(
         // not something a person recognises, and the address is kept because that is what BLE
         // needs after a reboot.
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("radio", color = Dim, fontSize = 12.sp, maxLines = 1)
             Text(
-                current.meshRadioName.ifEmpty { current.meshRadio.ifEmpty { "none" } },
+                if (current.meshRadio.isEmpty()) {
+                    "no radio"
+                } else {
+                    current.meshRadioName.ifEmpty { current.meshRadio } + "  " + current.meshRadio
+                },
                 color = if (current.meshRadio.isEmpty()) Warn else Fg,
                 fontSize = 12.sp,
                 maxLines = 1,
-                modifier = Modifier.weight(1f, fill = false),
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .then(
+                        if (current.meshRadio.isEmpty()) Modifier
+                        else Modifier.clickable { showPreset = true }
+                    ),
             )
             MiniTextButton(onClick = { showPicker = true }) {
-                Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1)
+                Text(if (current.meshRadio.isEmpty()) "scan" else "change", color = Accent, fontSize = 12.sp, maxLines = 1)
             }
-            MiniTextButton(
-                enabled = current.meshRadio.isNotEmpty(),
-                onClick = { showPreset = true },
-            ) {
-                Text("set up", color = if (current.meshRadio.isEmpty()) Dim else Accent, fontSize = 12.sp, maxLines = 1)
-            }
-        }
-        if (current.meshRadio.isNotEmpty()) {
-            Text(current.meshRadio, color = Dim, fontSize = 10.sp, maxLines = 1)
         }
 
         // One verb, one target: the ldmux code carries the session keys and the host radio key.
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("scan", color = Dim, fontSize = 12.sp)
+            Text("code", color = Dim, fontSize = 12.sp)
             MiniTextButton(onClick = {
                 note = null
                 CodeScanner.scan { r ->
@@ -103,19 +105,7 @@ internal fun MeshRouteSection(
                         ScanResult.Unavailable -> "scanner unavailable"
                     }
                 }
-            }) { Text("ldmux code", color = Accent, fontSize = 12.sp, maxLines = 1) }
-        }
-
-        // The picker: only routes that can run are offered, so it cannot save one that will not.
-        if (view.choosable.isNotEmpty()) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("route", color = Dim, fontSize = 12.sp)
-                for (route in view.choosable) {
-                    MiniTextButton(onClick = { chooseRoute(current, route, view)?.let(onConfig) }) {
-                        Text(route.name.lowercase(), color = if (current.route == route) Accent else Dim)
-                    }
-                }
-            }
+            }) { Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1) }
         }
         if (view.present.isNotEmpty()) {
             MiniTextButton(onClick = {
@@ -148,7 +138,6 @@ internal fun MeshRouteSection(
     if (showPreset) {
         RadioPresetDialog(
             address = current.meshRadio,
-            budgetMode = if (current.meshOpenAirtime) RadioBudgetMode.Open else RadioBudgetMode.Metered,
             onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
             onDismiss = { showPreset = false },
         )

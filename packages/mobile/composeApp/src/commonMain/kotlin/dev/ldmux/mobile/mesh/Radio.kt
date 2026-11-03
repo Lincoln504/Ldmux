@@ -43,6 +43,13 @@ interface RadioLink {
     fun setBudgetMode(mode: RadioBudgetMode) {}
 
     fun close()
+
+    /**
+     * Drop one owner's reference. The BLE link closes when the last owner
+     * releases it, so Settings can inspect the same radio the terminal is
+     * already using instead of opening a second GATT client.
+     */
+    fun release() = close()
 }
 
 data class RadioPreset(
@@ -283,18 +290,23 @@ class MeshRadioConnection(
         clock = clock,
     )
 
+    private var released = false
+
     suspend fun run() {
         try {
             link.connect()
             driver.run()
         } catch (e: RadioLinkException) {
             driver.onGatewayState(e.state)
-        } finally {
-            link.close()
         }
     }
 
-    fun close() = link.close()
+    /** Ownership release only. The link stays up across a driver rebuild. */
+    fun close() {
+        if (released) return
+        released = true
+        link.release()
+    }
 }
 
 /**

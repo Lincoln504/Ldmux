@@ -7,6 +7,9 @@ import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -233,11 +236,22 @@ public final class AndroidBleTransport implements MeshcoreTransport {
         protected boolean isRequiredServiceSupported(
                 @NonNull BluetoothGatt gatt) {
             BluetoothGattService service = gatt.getService(SERVICE_UUID);
-            if (service == null) return false;
+            if (service == null) {
+                StringBuilder sb = new StringBuilder("ldmux-ble services:");
+                for (BluetoothGattService svc : gatt.getServices()) {
+                    sb.append(' ').append(svc.getUuid());
+                }
+                Log.d("ldmux", sb.toString());
+                return false;
+            }
             rxCharacteristic = service.getCharacteristic(RX_UUID);
             txCharacteristic = service.getCharacteristic(TX_UUID);
             return rxCharacteristic != null && txCharacteristic != null;
         }
+
+        private final Handler main = new Handler(Looper.getMainLooper());
+        private static final int BOND_POLL_MS = 100;
+        private static final int BOND_POLLS = 300;
 
         @Override
         protected void initialize() {
@@ -245,10 +259,43 @@ public final class AndroidBleTransport implements MeshcoreTransport {
             // needs the live GATT link for createBond, and the radio's
             // characteristics are encrypted, so notifications must wait for
             // the bond to be usable.
-            ensureBond()
-                    .done((device) -> negotiateMtuAndSubscribe())
-                    .fail((device, status) -> notifyConnectionChanged(false))
-                    .enqueue();
+            //
+            // Do NOT use ensureBond(): Nordic's ENSURE_BOND enqueues a
+            // removeBond when createBond() returns false (already bonding, or
+            // a bond created concurrently). That removed a live bond on the
+            // real WIO and left the link at status 22. This path only ever
+            // creates a bond and waits for BONDED.
+            awaitBond(getBluetoothDevice(), 0);
+        }
+
+        private void awaitBond(@Nullable BluetoothDevice device, int tries) {
+            if (device == null) {
+                notifyConnectionChanged(false);
+                return;
+            }
+            int state = device.getBondState();
+            if (state == BluetoothDevice.BOND_BONDED) {
+                negotiateMtuAndSubscribe();
+                return;
+            }
+            if (state == BluetoothDevice.BOND_BONDING) {
+                if (tries >= BOND_POLLS) {
+                    notifyConnectionChanged(false);
+                    return;
+                }
+                main.postDelayed(() -> awaitBond(device, tries + 1), BOND_POLL_MS);
+                return;
+            }
+            if (tries == 0) {
+                createBond()
+                        .done((d) -> awaitBond(device, 1))
+                        .fail((d, status) -> awaitBond(device, 1))
+                        .enqueue();
+            } else if (tries >= BOND_POLLS) {
+                notifyConnectionChanged(false);
+            } else {
+                main.postDelayed(() -> awaitBond(device, tries + 1), BOND_POLL_MS);
+            }
         }
 
         private void negotiateMtuAndSubscribe() {
@@ -261,6 +308,7 @@ public final class AndroidBleTransport implements MeshcoreTransport {
                         }
                     })
                     .fail((device, status) -> {
+                        Log.d("ldmux", "ble mtu request failed status=" + status + " mtu=" + getMtu());
                         // Some stacks refuse the request but already carry a
                         // large ATT MTU. Use it only when the ceiling is real.
                         if (getMtu() >= MIN_MTU) {
@@ -285,7 +333,10 @@ public final class AndroidBleTransport implements MeshcoreTransport {
             // completed, and MeshcoreSession sends APP_START on that signal.
             enableNotifications(txCharacteristic)
                     .done((device) -> notifyConnectionChanged(true))
-                    .fail((device, status) -> notifyConnectionChanged(false))
+                    .fail((device, status) -> {
+                        Log.d("ldmux", "ble subscribe failed status=" + status);
+                        notifyConnectionChanged(false);
+                    })
                     .enqueue();
         }
 

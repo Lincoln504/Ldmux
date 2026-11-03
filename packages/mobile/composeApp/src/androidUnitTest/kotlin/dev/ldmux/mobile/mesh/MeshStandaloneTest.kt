@@ -149,6 +149,12 @@ class MeshStandaloneTest {
     }
 
     @Test
+    fun `a fresh config is a private open channel`() {
+        assertTrue(LdmuxConfig.DEFAULT.meshOpenAirtime)
+        assertEquals("", LdmuxConfig.DEFAULT.meshRadio)
+    }
+
+    @Test
     fun `a private tuple stays inside its region envelope`() {
         repeat(40) {
             val us = privatePreset(RadioRegion.UsCanada)
