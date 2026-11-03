@@ -965,8 +965,6 @@ class TerminalController(
             }
             return
         }
-        // A refused grid is not a warning to keep: it is a size the pane will never take, and
-        // the picture keeps being drawn for it. Ask again inside the daemon's bounds.
         // The daemon refused a close or kill because another device holds the shell. The button
         // looked like it worked, so the refusal has to be said rather than dropped on the floor.
         if (code == "not_holder") {
@@ -978,6 +976,8 @@ class TerminalController(
             }
             return
         }
+        // A refused grid is not a warning to keep: it is a size the pane will never take, and
+        // the picture keeps being drawn for it. Ask again inside the daemon's bounds.
         if (code == "bad_size") {
             attach.retryGridAfterRefusal()
             return
