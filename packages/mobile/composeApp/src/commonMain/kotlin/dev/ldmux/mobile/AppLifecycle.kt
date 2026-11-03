@@ -27,6 +27,7 @@ object AppLifecycle {
 
     private var release: BackgroundRelease? = null
     private val backgroundHandlers = mutableListOf<() -> Unit>()
+    private val foregroundHandlers = mutableListOf<() -> Unit>()
 
     /**
      * Run [handler] when the app leaves the screen, immediately (no grace) — for
@@ -36,6 +37,21 @@ object AppLifecycle {
     fun onBackground(handler: () -> Unit): () -> Unit {
         backgroundHandlers += handler
         return { backgroundHandlers -= handler }
+    }
+
+    /**
+     * Run [handler] when the app comes back on screen, before anything is drawn again.
+     *
+     * A socket that spent minutes in the background is not alive because it was never told it
+     * died: the phone's radio slept, the far end timed the flow out, and the first sign either
+     * end gets is a write that goes nowhere. Waiting for the heartbeat to notice cost about
+     * twenty-six seconds of "cannot reach the desktop" after every long absence (measured
+     * 2026-11-03); the handler asks now, with a short deadline, and reconnects if the answer does
+     * not come.
+     */
+    fun onForeground(handler: () -> Unit): () -> Unit {
+        foregroundHandlers += handler
+        return { foregroundHandlers -= handler }
     }
 
     /**
@@ -63,6 +79,7 @@ object AppLifecycle {
         foreground = value
         if (value) {
             release?.onForeground()
+            for (h in foregroundHandlers.toList()) runCatching { h() }
         } else {
             for (h in backgroundHandlers.toList()) runCatching { h() }
             runCatching { release?.onBackground() }

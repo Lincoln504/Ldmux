@@ -87,3 +87,72 @@ class MeshHistoryTest {
         assertEquals(listOf("d", "e"), h.window(screen(7, "g", "h"), 2))
     }
 }
+
+/**
+ * A host that cannot number its lines still scrolls, and the view still has history.
+ *
+ * The running keeper on the test host predates line numbering and reports `totalRows = 0`, so
+ * every screen arrives with `firstLine = 0`. Refusing those left the pad drawing and doing
+ * nothing; the fallback reads the shift the screen itself shows.
+ */
+class MeshHistoryShiftTest {
+
+    private fun screen(vararg lines: String) = MeshScreen(
+        lines = lines.toList(),
+        cursorX = 0,
+        cursorY = lines.lastIndex,
+        alternate = false,
+        dead = false,
+        epoch = 0,
+        cols = 80,
+        firstLine = 0,
+    )
+
+    @Test
+    fun `a shifted screen gives up the rows that left the top`() {
+        val h = MeshHistory()
+        val a = screen("one", "two", "three", "four")
+        val b = screen("two", "three", "four", "five")
+        h.note(a, b)
+        assertEquals(1, h.size, "the top row left")
+        h.scroll(-1)
+        // One row above live: the row that left, then the live screen minus its last row.
+        assertEquals(listOf("one", "two", "three", "four"), h.window(b, 4))
+    }
+
+    @Test
+    fun `two rows leaving is two rows of history`() {
+        val h = MeshHistory()
+        h.note(
+            screen("one", "two", "three", "four", "five", "six"),
+            screen("three", "four", "five", "six", "seven", "eight"),
+        )
+        assertEquals(2, h.size)
+    }
+
+    @Test
+    fun `a repaint that shares nothing is not a scroll`() {
+        val h = MeshHistory()
+        h.note(
+            screen("alpha", "beta", "gamma", "delta"),
+            screen("one", "two", "three", "four"),
+        )
+        assertEquals(0, h.size)
+    }
+
+    @Test
+    fun `blank screens cannot agree by accident`() {
+        val h = MeshHistory()
+        h.note(screen("", "", "", ""), screen("", "", "", ""))
+        assertEquals(0, h.size)
+    }
+
+    @Test
+    fun `the alternate screen never contributes history`() {
+        val h = MeshHistory()
+        val alt = screen("one", "two", "three", "four").copy(alternate = true)
+        val next = screen("two", "three", "four", "five").copy(alternate = true)
+        h.note(alt, next)
+        assertEquals(0, h.size)
+    }
+}

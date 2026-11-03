@@ -33,10 +33,60 @@ internal class MeshHistory(private val max: Int = 2_000) {
      */
     fun note(previous: MeshScreen?, next: MeshScreen) {
         if (previous == null) return
-        if (previous.firstLine == 0 || next.firstLine == 0) return
+        if (previous.firstLine == 0 || next.firstLine == 0) {
+            noteShift(previous, next)
+            return
+        }
         if (next.firstLine <= previous.firstLine) return
         val moved = (next.firstLine - previous.firstLine).toInt().coerceAtMost(previous.lines.size)
-        for (i in 0 until moved) rows.addLast(previous.lines[i])
+        add(previous, moved)
+    }
+
+    /**
+     * The fallback for a host that cannot number its lines.
+     *
+     * A keeper older than the line-numbering change reports `totalRows = 0`, so `firstLine` is 0
+     * on every screen and the exact rule above refuses everything — the pad then draws and does
+     * nothing, which on a device reads as a broken button (measured 2026-11-03: the running
+     * keeper predated the numbering commit). The screen itself still shows a scroll happened: the
+     * rows below the top move up by exactly the number that left. So infer that shift, and only
+     * that shift.
+     *
+     * Deliberately conservative, because inventing history is worse than having none:
+     * - only when neither screen is on the alternate screen and both have the same height,
+     * - at most half a screen moves (a full replacement is a repaint, not a scroll),
+     * - the overlap must match on at least half its rows, counting only non-blank ones, so two
+     *   mostly-empty screens cannot agree by accident,
+     * - a screen that does not match any shift adds nothing.
+     */
+    private fun noteShift(previous: MeshScreen, next: MeshScreen) {
+        if (previous.alternate || next.alternate) return
+        val height = previous.lines.size
+        if (height == 0 || next.lines.size != height) return
+        var best = 0
+        var bestScore = 0
+        for (moved in 1..(height / 2)) {
+            val overlap = height - moved
+            var matched = 0
+            var nonBlank = 0
+            for (i in 0 until overlap) {
+                val p = previous.lines[i + moved]
+                if (p.isNotBlank()) nonBlank++
+                if (p == next.lines[i]) matched++
+            }
+            // Half the overlap, and at least one real row inside it: a screen of blanks matches
+            // every shift, and a shift decided from blanks is a guess.
+            if (nonBlank > 0 && matched * 2 >= overlap && matched > bestScore) {
+                best = moved
+                bestScore = matched
+            }
+        }
+        if (best == 0) return
+        add(previous, best)
+    }
+
+    private fun add(previous: MeshScreen, moved: Int) {
+        for (i in 0 until moved.coerceAtMost(previous.lines.size)) rows.addLast(previous.lines[i])
         while (rows.size > max) rows.removeFirst()
         // The view can never be further up than there is history.
         if (offset > rows.size) offset = rows.size

@@ -118,7 +118,15 @@ internal fun AppContent(
             client.reconnectNow()
             NetworkWake.fire()
         }
-        onDispose { BackgroundSession.stopWatchingNetwork() }
+        // Coming back on screen is a network change as far as the sockets are concerned: the
+        // link they hold across a long absence is dead without having said so, and every socket
+        // re-probes on this signal instead of waiting out its own heartbeat (about twenty-six
+        // seconds before the desktop request could even be sent).
+        val removeForeground = AppLifecycle.onForeground { NetworkWake.fire() }
+        onDispose {
+            BackgroundSession.stopWatchingNetwork()
+            removeForeground()
+        }
     }
 
     // The launcher comes first: a terminal is somewhere you go, and which shell
