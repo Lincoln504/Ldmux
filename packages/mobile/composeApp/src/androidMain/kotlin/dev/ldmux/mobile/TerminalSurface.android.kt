@@ -327,9 +327,16 @@ actual fun TerminalSurfaceFor(
             focusRequester.requestFocus()
             softKeyboard?.show()
             delay(IME_SETTLE_MS)
-            if (!fieldFocused) {
+            // Two more asks, a settle apart, and only while the field has not taken focus. A
+            // focused field with no keyboard does happen (the show is refused while the window
+            // is still settling), so one retry is not always enough; stopping at "focused"
+            // also means the retries end as soon as the platform accepts, rather than fighting
+            // a keyboard the user then closes.
+            repeat(2) {
+                if (fieldFocused) return@LaunchedEffect
                 focusRequester.requestFocus()
                 softKeyboard?.show()
+                delay(IME_SETTLE_MS)
             }
         } else {
             // Landscape has no text field, and it still has to hold focus.
