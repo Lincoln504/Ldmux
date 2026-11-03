@@ -127,6 +127,12 @@ impl SessionHost {
 
     /// One record arrived from the tunnel. `now_ms` is monotonic (ARQ timers); `wall_ms` is Unix
     /// time (the handshake timestamp window).
+    ///
+    /// **A `msg1` while a session is live replaces it.** The host is the responder and keeps no
+    /// rekey timer: `Session::needs_rekey` (twelve hours, or 2^16 records) is answered on the
+    /// phone's side, and the phone opens a fresh handshake when it fires. Replacement here is
+    /// what makes that timer sufficient — the old session's outbox is dropped, a new index is
+    /// taken, and a record still in flight under the old key fails its tag rather than opening.
     pub fn on_record(&mut self, now_ms: u64, wall_ms: u64, record: &[u8]) {
         match record.first().copied() {
             Some(handshake::KIND_MSG1) => self.on_handshake(wall_ms, now_ms, record),
@@ -626,4 +632,34 @@ mod tests {
         );
         fs::remove_dir_all(&dir).unwrap();
     }
+    /// A fresh `msg1` on a live session replaces it, which is what the phone's twelve-hour rekey
+    /// depends on.
+    ///
+    /// The host is the responder and has no rekey timer of its own: `Session::needs_rekey` is
+    /// answered on the phone's side (twelve hours or 2^16 records) and the phone starts a new
+    /// handshake. If this side refused a handshake while a session was live, that timer could
+    /// never complete, and a long-lived link would keep its keys for ever.
+    #[test]
+    fn a_second_handshake_replaces_the_live_session() {
+        let (mut h, gw_pub, saved) = host(true);
+        let phone = Keypair::generate().unwrap();
+        let (_i1, m1) = Initiator::start(&phone, &gw_pub, &PSK, WALL).unwrap();
+        h.on_record(0, WALL, &m1);
+        assert_eq!(h.handshakes, 1);
+        assert_eq!(h.outbox.len(), 1, "the first reply is queued");
+        // The phone's timer fires: a second msg1, twelve hours later (the timestamp window
+        // rejects a repeat of the first) and from the same key.
+        let later = WALL + 12 * 60 * 60 * 1000;
+        let (_i2, m2) = Initiator::start(&phone, &gw_pub, &PSK, later).unwrap();
+        h.on_record(0, later, &m2);
+        assert_eq!(h.handshakes, 2, "the second handshake was accepted");
+        assert!(h.established());
+        assert_eq!(h.outbox.len(), 1, "and answered, with the old reply cleared");
+        assert_eq!(
+            saved.lock().unwrap().len(),
+            2,
+            "each accepted handshake records its timestamp"
+        );
+    }
+
 }
