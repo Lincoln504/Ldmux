@@ -331,9 +331,12 @@ LDMUX changes:
    invalid/unknown handling.
 5. `CMD_SET_PATH_HASH_MODE` 0x3D.
 6. Tracked-command gate and raw-send correlation safety.
-7. BLE write-type selection, MTU gate, bond-after-discovery, manager close.
+7. BLE write-type selection, MTU gate, `awaitBond` (create and wait, never remove),
+   manager close.
 8. RF-log capture keeps bytes, not per-frame hex strings.
 9. Auto-drain can be disabled for LDMUX.
+10. A by-key contact answer releases the command slot; a dump waits for
+    END_OF_CONTACTS.
 
 Remaining gaps for this branch:
 
