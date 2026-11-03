@@ -7,8 +7,9 @@ over-the-air session was 2026-10-29 and the standalone phone-radio path followed
 (`docs/MESH-STANDALONE.md`). Written 2026-10-24 on branch `feat/meshmore-gateway`; status
 corrected 2026-11-02. This supersedes the carriage assumptions in
 [`MESH-TRANSPORT.md`](MESH-TRANSPORT.md) where the two differ, and it is bound by
-[ADR-0020](adr/0020-mesh-link-security.md) wherever it touches security. Nothing
-here is a plan of record until the open decisions at the bottom are taken.
+[ADR-0020](adr/0020-mesh-link-security.md) wherever it touches security. The
+phone-side gateway is superseded by the standalone BLE path; the host gateway still
+uses this carriage contract.
 
 `MESH-TRANSPORT.md` asked whether a terminal over MeshCore is plausible and left
 the carriage unmeasured. This document answers the carriage, because the
@@ -17,14 +18,16 @@ companion-radio API has now been read rather than assumed.
 ## 1. Who owns what
 
 | Piece | Owner | Language |
-|---|---|---|
-| The radio, the companion-protocol BLE link, the local gateway | MeshMore (the phone app) | Dart |
-
-The 2026-11-01 review of whether LDMUX should own the radio instead (the Java
-MeshCore libraries, the single-BLE-session constraint, and the options) is in
-[`MESH-RADIO-OWNERSHIP.md`](MESH-RADIO-OWNERSHIP.md).
+|---|---|---|---|
+| The phone's radio, the companion-protocol BLE link | LDMUX app (standalone) | Kotlin |
+| The host radio, the USB link, the host gateway | MeshMore `meshcore_host` | Dart |
 | The end-to-end Noise session, the record layer | LDMUX app ↔ ldmux host | Kotlin (app) and Rust (host) |
 | The terminal, PTYs, the keeper, libghostty-vt | ldmux as it already is | Rust |
+
+The 2026-11-01 review of whether LDMUX should own the phone radio is in
+[`MESH-RADIO-OWNERSHIP.md`](MESH-RADIO-OWNERSHIP.md); the standalone path now
+does. The host still uses MeshMore's gateway, and this document's carriage
+contract still describes that host leg.
 
 The gateway is a **blind carrier**. It moves opaque records between the LDMUX
 app and the radio. It does not parse them, does not decrypt them, does not
@@ -32,9 +35,9 @@ rewrap them, and does not retransmit them. The one thing it adds is an
 explicit record length, because the radio's own framing cannot express one
 (§3).
 
-That split is what makes this cheap: the transport-specific knowledge stays in
-MeshMore, where the BLE link already lives, and LDMUX gains a socket client
-with no radio code at all.
+The phone side no longer uses this split: LDMUX owns the BLE link and the
+MeshCore session directly. The host side still does, because the USB radio is
+owned by `meshcore_host`.
 
 ## 2. The carriage: two phases, because one of them is much cheaper
 
