@@ -205,3 +205,71 @@ MeshCore's 184-byte payload fits an **interactive** frame with room to spare (a
 keystroke echo measured 9 bytes), and cannot fit a 477-byte one, so a mesh transport
 needs the flush cap at the MTU and snapshot catch-up — the first and fourth rows of
 the table above, both of which are policies rather than formats.
+
+## Latency, hop by hop (2026-11-03)
+
+Bytes and time are different questions, and the second one is the one a user feels. This is the
+chain as built, what each link costs, and which term is worth attacking.
+
+**Tailnet route.** `key → WebSocket → daemon → unix socket → keeper → PTY`, and the echo back the
+same way, then the client's own render throttle.
+
+| Link | Cost | Where it is |
+|---|---|---|
+| client render | 50-200 ms, adaptive on measured RTT, **coalesced rather than delayed** | `FramePacing.kt` |
+| tailnet RTT | the network's | - |
+| WebSocket frame | 8-byte header plus the bytes; input is one small text frame | `crates/protocol/src/frames.rs` |
+| daemon ↔ keeper | one JSON request and reply over a unix socket | `crates/keeper` |
+| PTY write | the kernel's | - |
+
+Measured on this box: a whole `ldmux snapshot` invocation — process start, socket connect, RPC,
+keeper round trip, JSON decode — is a 4.7-5.9 ms round trip (min/median/max of eight runs). The
+local hops are inside that, so they are not the term that matters. What does matter on this route
+is the network RTT and the fact that a keystroke is echoed by the *program*, so the round trip is
+at least two network legs. That is what predictive echo is for (`docs/PREDICTIVE-ECHO.md`), and
+the phone has the setting off by default.
+
+**Mesh route.** `key → BLE → radio → LoRa → radio → USB serial → gateway → TCP JSON → daemon →
+unix socket → keeper → PTY`, and the mirror image for the screen. The terms, in order:
+
+1. **Airtime per record**, 0.5-3.5 s depending on the preset. Nothing else in the chain is close.
+2. **The bridge's burst gap**, up to 1 s by design (`BURST_GAP`): a screen that keeps changing is
+   sent once a second, because a record carrying the present screen is worth more than several
+   carrying moments that have already passed.
+3. **The phone's input batch**, 100 ms after the last key or 200 ms from the first
+   (`MeshInput.IDLE_MS` / `MAX_HOLD_MS`): one record for a burst of typing instead of one per key.
+4. **The ARQ's ack delay**, 150 ms, and only when nothing else is going out — an ack rides on the
+   next record whenever there is one.
+5. **BLE notification spacing**, 60 ms on the ESP32 firmware: at most about 16 records a second
+   from the radio, whatever the radio is doing.
+6. **The gateway's TCP JSON hop**: loopback, sub-millisecond. Negligible.
+
+## Intermediaries: which ones earn their place
+
+- **The keeper is not a relay.** It owns the PTYs, outlives the daemon so shells survive a daemon
+  restart, and runs the terminal emulator the daemon snapshots. Removing it would put PTY ownership
+  in the daemon and lose the survival property; its latency cost is local and measured above as
+  negligible.
+- **The host gateway is a real intermediate.** It owns the USB serial port, speaks the MeshCore
+  companion protocol and re-exposes the L2 contract as JSON over loopback. Its *latency* cost is
+  negligible, so removing it is not a latency project. It is an operational one: one more process,
+  one more language (Dart), one more repository (`meshmore-sns`), one more version to keep in step,
+  and one more thing that can be down while the daemon looks healthy. The removal is a Rust
+  companion-protocol client inside `crates/mesh` over a serial port: the frame codec already exists
+  twice in this tree (`packages/mobile/vendor/libmeshcore` in Java, and the Dart reference it was
+  ported from), and `crates/mesh` already contains the L2 contract the daemon speaks, so the work
+  is the transport and the command/event mapping rather than the protocol.
+- **The bridge is not an intermediary but a translator**, and it is where the mesh latency control
+  lives: it decides when a screen update becomes a record.
+
+## What to attack next, in order of latency per unit of risk
+
+1. **Predictive echo on a slow link.** The machinery exists and is off by default; turning it on
+   where the measured RTT is high is the only change that hides a whole round trip.
+2. **A shorter burst gap for small, interactive updates.** One second is right for a screen that is
+   scrolling; it is long for a prompt that printed one line. A gap that adapts to how much of the
+   screen changed is the obvious next step, and needs a radio to measure honestly.
+3. **The gateway removal, for operations rather than latency.** One process and one language fewer,
+   and a daemon that cannot be up while its radio path is a missing service.
+4. **Nothing on the tailnet local path.** It is already inside the 5 ms the CLI proves, and the
+   remaining cost is the network and the program's own echo.
