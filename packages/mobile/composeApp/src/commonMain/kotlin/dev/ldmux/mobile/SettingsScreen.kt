@@ -61,6 +61,10 @@ internal fun SettingsScreen(
     /** The mesh route's setup, or null where this build has no mesh route. */
     mesh: MeshRouteActions? = null,
 ) {
+    // The system back gesture means what the `back` button means, and it must not be allowed to
+    // fall through to the activity: leaving the app from a settings screen that is one tap from
+    // the launcher reads as a crash.
+    BackToLauncher(enabled = true) { onBack() }
     Column(
         Modifier
             .fillMaxSize()

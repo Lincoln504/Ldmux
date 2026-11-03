@@ -125,13 +125,68 @@ pub fn render_snapshot(s: &Snapshot) -> Vec<u8> {
         if i > 0 {
             out.extend_from_slice(b"\r\n");
         }
-        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(clip_row(line, s.cols).as_bytes());
     }
     // The daemon's cursor is the authority, clamped as the mobile client clamps
     // it so a malformed frame cannot place the cursor outside the grid.
     let x = s.cursor_x.min(s.cols.saturating_sub(1)) + 1;
     let y = s.cursor_y.min(s.rows.saturating_sub(1)) + 1;
     out.extend_from_slice(format!("\x1b[{y};{x}H").as_bytes());
+    out
+}
+
+/// How long a burst of window-change signals is allowed to settle before one resize is sent.
+const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// One pane row, cut to what this window can show.
+///
+/// The pane's grid is shared, so it can be wider than the window showing it (another device
+/// resized it, or this window is a read-only mirror that must not resize it). Writing such a
+/// row verbatim makes the terminal hard-wrap it: eighty-two rows became a hundred and sixty-four
+/// lines, the screen scrolled, and the cursor was then placed on the wrong row. Escape sequences
+/// are copied whole and do not count toward the width, so a styled row is cut, not corrupted.
+fn clip_row(line: &str, cols: u64) -> String {
+    let cols = cols as usize;
+    let mut out = String::with_capacity(line.len());
+    let mut width = 0usize;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            out.push(c);
+            if let Some(kind) = chars.next() {
+                out.push(kind);
+                if kind == '[' {
+                    // CSI: parameters and intermediates, ended by a final byte 0x40..=0x7e.
+                    for d in chars.by_ref() {
+                        out.push(d);
+                        if ('\u{40}'..='\u{7e}').contains(&d) {
+                            break;
+                        }
+                    }
+                } else if kind == ']' {
+                    // OSC: ended by BEL or ST.
+                    while let Some(d) = chars.next() {
+                        out.push(d);
+                        if d == '\u{7}' {
+                            break;
+                        }
+                        if d == '\u{1b}' {
+                            if let Some('\\') = chars.peek().copied() {
+                                out.push(chars.next().unwrap());
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if width >= cols {
+            break;
+        }
+        out.push(c);
+        width += 1;
+    }
     out
 }
 
@@ -254,7 +309,17 @@ fn should_reassert(
     readonly: bool,
     asserted: Option<(u64, u64)>,
 ) -> bool {
-    !readonly && (cols, rows) != (snap_cols, snap_rows) && asserted != Some((cols, rows))
+    // Clamped first: the daemon clamps, and a window outside the range would otherwise see a
+    // mismatch on every snapshot and re-assert on the 2 s retry for ever (a tty taller than
+    // 255 rows, or narrower than 20 columns, is reachable).
+    let (cols, rows) = ldmux_protocol::clamp_pane_size(cols, rows);
+    if readonly || (cols, rows) == (snap_cols, snap_rows) {
+        return false;
+    }
+    match asserted {
+        Some((c, r)) => (c, r) != (cols, rows),
+        None => true,
+    }
 }
 
 /// What a window leaves the terminal in when it exits, undone. Unconditional and
@@ -587,7 +652,14 @@ where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    let (mut cols, mut rows) = tty_size();
+    // The daemon clamps to the same range, so the window's own idea of its grid has to be
+    // the clamped one: comparing a raw 300-row tty against a 255-row pane is a disagreement
+    // that no resize can ever settle, and the re-assert below would retry it for ever.
+    let (mut cols, mut rows) = {
+        // One read: calling `tty_size` twice can straddle a resize between the two fields.
+        let (c, r) = tty_size();
+        ldmux_protocol::clamp_pane_size(c, r)
+    };
     let (mut sink, mut stream) = ws.split();
 
     // Keep-alive. The daemon reaps a connection that has said nothing for
@@ -824,7 +896,12 @@ where
                 .await;
             }
             _ = sigwinch.recv() => {
-                let (c, r) = tty_size();
+                // **A drag emits tens of these.** Every one used to become a PTY resize, an
+                // emulator reflow and a full screen snapshot back, so dragging a window edge
+                // was a stream of repaints of widths nobody ever saw. Waiting out the gesture
+                // costs the resize one beat and sends the size the drag ended on.
+                tokio::time::sleep(RESIZE_SETTLE).await;
+                let (c, r) = ldmux_protocol::clamp_pane_size(tty_size().0, tty_size().1);
                 if (c, r) != (cols, rows) {
                     cols = c;
                     rows = r;
@@ -931,7 +1008,7 @@ mod stall_tests {
 
 #[cfg(test)]
 mod render_tests {
-    use super::{Snapshot, first_attach, render_snapshot, should_reassert};
+    use super::{Snapshot, clip_row, first_attach, render_snapshot, should_reassert};
 
     fn snap(screen: &str) -> Snapshot<'_> {
         Snapshot {
@@ -972,6 +1049,37 @@ mod render_tests {
         assert!(!should_reassert(158, 82, 48, 17, true, None));
         // Once in step again, the next mismatch is a new one to answer.
         assert!(should_reassert(158, 82, 48, 17, false, Some((100, 40))));
+    }
+
+    /// A window outside the daemon's range must not re-assert for ever: the pane can never
+    /// report a grid this window will agree with, so the clamp is what makes it settle.
+    #[test]
+    fn an_out_of_range_window_does_not_loop_on_its_own_size() {
+        // 600 columns and 300 rows are clamped by the daemon to 500 x 255.
+        assert!(!should_reassert(600, 300, 500, 255, false, None));
+        // A window inside the range is still taken back.
+        assert!(should_reassert(300, 100, 48, 17, false, None));
+    }
+
+    #[test]
+    fn a_wide_pane_row_is_cut_to_the_window_not_wrapped() {
+        assert_eq!(clip_row("abcdefghij", 4), "abcd");
+        assert_eq!(clip_row("ab", 4), "ab", "short rows are untouched");
+        // Escape sequences are copied whole and do not count toward the width.
+        assert_eq!(clip_row("\u{1b}[31mabcdef\u{1b}[0m", 3), "\u{1b}[31mabc");
+        // An OSC 52 clipboard write is not cut in the middle.
+        assert_eq!(clip_row("\u{1b}]52;c;AAAA\u{7}xy", 1), "\u{1b}]52;c;AAAA\u{7}x");
+    }
+
+    /// A snapshot whose grid is wider than this window must not reflow the window.
+    #[test]
+    fn a_snapshot_wider_than_the_window_is_clipped_per_row() {
+        let mut s = snap("0123456789\nab\n");
+        s.cols = 3;
+        s.rows = 2;
+        let out = String::from_utf8(render_snapshot(&s)).unwrap();
+        assert!(out.contains("012\r\nab"), "{out:?}");
+        assert!(!out.contains("345"), "the row was not clipped: {out:?}");
     }
 
     /// A bare LF moves down without returning the column, so the screen
