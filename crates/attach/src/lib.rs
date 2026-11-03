@@ -838,6 +838,22 @@ where
                                         }),
                                     )
                                     .await;
+                                } else if code == "input_failed" {
+                                    // The pane did not take the bytes: the shell died under the
+                                    // keystroke, or its pty is gone. The window accepted them and
+                                    // nothing else says so, so a key that went nowhere had no
+                                    // trace at all.
+                                    let _ = output
+                                        .write_all(b"\r\n  This shell did not take that input.\r\n")
+                                        .await;
+                                    let _ = output.flush().await;
+                                } else if code == "not_holder" {
+                                    let _ = output
+                                        .write_all(
+                                            b"\r\n  Only the device holding this shell can close it.\r\n",
+                                        )
+                                        .await;
+                                    let _ = output.flush().await;
                                 } else if code == "unknown_session" || code == "session_dead" {
                                     let _ = output
                                         .write_all(b"\r\n  This shell has ended.\r\n")
