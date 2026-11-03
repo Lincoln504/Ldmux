@@ -1743,7 +1743,9 @@ async fn spawn_clamps_the_size_like_resize() {
     .await
     .unwrap()
     {
-        KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (500, 255)),
+        // The protocol's ceiling, not the old 500 that sat below a real wide window
+        // (`ldmux_protocol::MAX_PANE_COLS`, raised to 2000 on 2026-11-02).
+        KeeperMessage::State(st) => assert_eq!((st.cols, st.rows), (2000, 255)),
         other => panic!("expected State, got {other:?}"),
     }
     // The emulator's grid is the clamped one too.
