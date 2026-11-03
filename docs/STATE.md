@@ -219,8 +219,10 @@ Product and mobile:
   (`crates/mesh`, `packages/mobile/.../mesh`, `packages/meshcore_host`). The phone
   owns its BLE radio standalone and the mesh route is wired. The daemon still has
   no listener or RPC surface for MeshCore; the host gateway is its only ingress.
-  The standalone path has a two-radio hardware pass (2026-11-02). No multi-hop
-  path recovery yet. The host radio is brought up by hand — firmware, gateway,
+  The standalone path has a two-radio hardware pass (2026-11-02) and a second run on
+  2026-11-03 with the burst pacing and the current client: the session established on the
+  first handshake, the host's shell list arrived over the air, a shell attached and
+  mirrored, and typed text echoed back. No multi-hop path recovery yet. The host radio is brought up by hand — firmware, gateway,
   environment — and `docs/MESH-HOST-RADIO.md` is the whole of that procedure, including
   what each failure means. `ldmux mesh status` now prints the host radio key, because a
   pairing code without one cannot be used.
