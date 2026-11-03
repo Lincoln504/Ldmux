@@ -135,3 +135,22 @@ would then reach the daemon the same way the Android phone already does, with no
 5. Keep the invariant that made this possible: nothing enters `commonMain` that cannot
    be expressed without a platform, and a seam is only a seam when the platform cannot
    express the shared concept.
+
+## The scope the owner accepted (2026-11-03)
+
+**Tailscale only. No LoRa on iOS, and none attempted.** That decision removes the hard half of
+this document: nothing on iOS needs CoreBluetooth, the MeshCore companion session, the radio
+preset picker, the shared-link reference count or the Android BLE bond repair. The mesh route
+is not offered on the platform at all, so `MeshRoute.kt`'s route resolution simply reports the
+tailnet route and Settings draws no LoRa section there — the same divergence the platform
+already has for anything a phone cannot do.
+
+What remains is the ten actuals in the table above, of which `TerminalPainter` is the work, and
+step 3 of the list below (the simulator) is the first honest milestone because it needs no
+provisioning. The Xcode 26.1.1 guest in `~/vms/macos-sequoia-vm` is the host for it.
+
+The reason the split is clean is worth recording: `commonMain` holds no crypto, no radio and no
+socket policy of its own — the L3 session is the C ABI (`libldmux_session.so`, JNI on Android, a
+plain C call on iOS), the attach connection is Ktor's WebSocket client, which has an iOS engine,
+and the terminal core is C. A Tailscale-only iOS client is therefore a painter and ten actuals,
+not a port.
