@@ -63,6 +63,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 
@@ -601,6 +602,25 @@ internal fun AppContent(
     var killTarget by remember { mutableStateOf<Session?>(null) }
     val currentHandle = shown?.id?.let { handles[it] }
 
+    // **The page's own link decides when the page has become unusable.**
+    //
+    // The launcher socket can still read as `Online` on a network that has silently dropped
+    // both of them — a VPN interface that stays up, a NAT that forgot the flow — and the
+    // attach gives up on its own heartbeat first. A terminal that waited for the launcher to
+    // notice stayed up, frozen, with the keyboard still open and nothing to type into. The
+    // rule is the same as the launcher's: a short grace for a handover, then the shell list,
+    // because the shell lives in the keeper and re-opening it is one attach.
+    val noStats = remember { MutableStateFlow(LinkStats(rttMs = 0, frameIntervalMs = 0, measured = false)) }
+    val pageLink by (currentHandle?.link ?: noStats).collectAsState()
+    LaunchedEffect(currentHandle, pageLink.offline, showLauncher) {
+        if (showLauncher || !pageLink.offline) return@LaunchedEffect
+        delay(LINK_FAILURE_GRACE_MS)
+        if (!showLauncher && currentHandle?.link?.value?.offline == true) {
+            pageOrder = emptyList()
+            showLauncher = true
+        }
+    }
+
     // **One microphone, and it belongs to the app.** Dictation is bound to the shell
     // that is on screen when it starts, because a transcript is for the shell you
     // were looking at when you spoke. Switching shells *ends* it rather than
@@ -797,6 +817,14 @@ internal fun AppContent(
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
             onSettings = onOpenSettings,
+            // The link's own line, only when it has something to say. A failed link used to be
+            // silence on this screen once the terminal had gone, and the user had no way to tell
+            // a slow list from a link that was not there.
+            linkText = if (link != LinkState.Online && link != LinkState.Unpaired) {
+                linkLabel(link, config)
+            } else {
+                null
+            },
         )
         }
         // What the daemon said, whenever it said no — a bad path in "+ shell",

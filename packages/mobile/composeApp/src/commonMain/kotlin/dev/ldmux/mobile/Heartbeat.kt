@@ -24,3 +24,14 @@ internal const val CLIENT_PING_INTERVAL_MS = 4_000L
  * that forgot the flow it does not notice for a long time.
  */
 internal const val CLIENT_MISSED_PONGS = 3
+
+/**
+ * How long one heartbeat frame may take to hand to the socket.
+ *
+ * A write into a socket whose peer and route have both vanished does not fail: on Android it
+ * suspends until the kernel buffer drains, which may be never. The heartbeat used to sit inside
+ * that suspension, so the pinger never reached its own missed-pong check and the page stayed up
+ * and frozen on a link that was long dead (measured 2026-11-03: airplane mode, forty seconds, the
+ * terminal still showing a shell it could not reach). Bounding the write lets the beat happen.
+ */
+internal const val CLIENT_PING_SEND_TIMEOUT_MS = 2_000L

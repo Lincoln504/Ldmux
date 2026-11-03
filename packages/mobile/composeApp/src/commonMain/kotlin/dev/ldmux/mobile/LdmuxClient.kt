@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -171,6 +173,16 @@ class LdmuxClient(private var config: LdmuxConfig) {
      * lived, backgrounded or not.
      */
     private var httpClient: HttpClient? = null
+    /**
+     * Tear the socket down without cancelling the coroutine that is reading it (the same reason
+     * as `AttachClient.dropSocket`: a close is a write that hangs, a cancel kills the retry loop).
+     */
+    private fun dropSocket() {
+        val c = httpClient
+        httpClient = null
+        runCatching { c?.close() }
+    }
+
     private val http: HttpClient get() = httpClient ?: HttpClient { ldmuxWebSockets() }.also { httpClient = it }
 
     /** The id this device announces itself as. Not an account, not a credential. */
@@ -529,11 +541,18 @@ class LdmuxClient(private var config: LdmuxConfig) {
                         while (isActive) {
                             delay(CLIENT_PING_INTERVAL_MS)
                             if (missed.beat()) {
-                                appLog("launcher link silent; reconnecting")
-                                runCatching { this@webSocket.close() }
+                                appLog("launcher link silent; reporting unreachable")
+                                // Reported, not cancelled: see AttachClient's heartbeat for why
+                                // neither a close nor a cancel can be relied on here.
+                                _link.value = LinkState.Unreachable
                                 break
                             }
-                            runCatching { send(Frame.Text("""{"type":"ping"}""")) }
+                            runCatching {
+                                // Bounded: see CLIENT_PING_SEND_TIMEOUT_MS.
+                                withTimeout(CLIENT_PING_SEND_TIMEOUT_MS) {
+                                    send(Frame.Text("""{"type":"ping"}"""))
+                                }
+                            }
                         }
                     }
                     // The network changed under a socket that still looks open: ask
@@ -544,8 +563,9 @@ class LdmuxClient(private var config: LdmuxConfig) {
                             runCatching { send(Frame.Text("""{"type":"ping"}""")) }
                             delay(NETWORK_PROBE_MS)
                             if (pongCount == before) {
-                                appLog("launcher link silent after a network change; reconnecting")
-                                runCatching { this@webSocket.close() }
+                                appLog("launcher link silent after a network change; reporting unreachable")
+                                _link.value = LinkState.Unreachable
+                                dropSocket()
                             }
                         }
                     }

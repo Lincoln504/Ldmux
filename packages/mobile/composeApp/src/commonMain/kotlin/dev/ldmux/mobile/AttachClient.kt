@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -337,6 +339,21 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         scope?.launch { runCatching { current.close() } }
     }
 
+    /**
+     * Tear the socket down without cancelling the coroutine that is reading it.
+     *
+     * Neither `close()` nor `cancel()` on the session works here. A close is a *write* (the close
+     * frame), and on a socket whose route has vanished that write is exactly what hangs; a
+     * cancellation takes the caller's coroutine with it, so the reconnect loop dies silently and
+     * `onOffline` is never reported. Closing the engine is immediate, non-suspending, and leaves
+     * the read loop free to observe the failure and say so.
+     */
+    private fun dropSocket() {
+        val c = http
+        http = null
+        runCatching { c?.close() }
+    }
+
     private var pingSeq = 0
     private var pingSentAt: TimeMark? = null
     private val missed = MissedPongs()
@@ -421,7 +438,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                         while (isActive) {
                             val id = ++pingSeq
                             pingSentAt = TimeSource.Monotonic.markNow()
-                            runCatching { send(Frame.Text("""{"type":"ping","id":$id}""")) }
+                            runCatching {
+                                // Bounded: see CLIENT_PING_SEND_TIMEOUT_MS.
+                                withTimeout(CLIENT_PING_SEND_TIMEOUT_MS) {
+                                    send(Frame.Text("""{"type":"ping","id":$id}"""))
+                                }
+                            }
                             // A ping nobody answers does not detect anything: the
                             // socket is only known to be dead when the OS says so,
                             // and on a sleeping radio or a NAT that has forgotten
@@ -429,7 +451,18 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                             // terminal just stops updating. Three unanswered pings
                             // is a link that is not there, whatever it claims.
                             if (missed.beat()) {
-                                runCatching { ws?.close() }
+                                // **Say the link is down from here.** Killing the socket does not
+                                // work: a close is a write that hangs on a route that no longer
+                                // exists, and cancelling the session takes this loop's coroutine
+                                // with it, so the failure is never reported at all (measured
+                                // 2026-11-03: airplane mode, forty seconds, a terminal still
+                                // showing a shell it could not reach). The page does not need the
+                                // socket to be dead to know it is: three unanswered beats are the
+                                // fact. It stops beating and reports; the caller's grace then
+                                // returns the user to the shell list, where re-opening is one
+                                // attach.
+                                appLog("page $sessionId: link silent; reporting offline")
+                                guarded("offline") { onOffline?.invoke() }
                                 break
                             }
                             delay(PING_INTERVAL_MS)
@@ -442,11 +475,16 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                     val netWatch = launch {
                         NetworkWake.wakes.collect {
                             val before = pongCount
-                            runCatching { send(Frame.Text("""{"type":"ping","id":$PROBE_PING_ID}""")) }
+                            runCatching {
+                                withTimeout(CLIENT_PING_SEND_TIMEOUT_MS) {
+                                    send(Frame.Text("""{"type":"ping","id":$PROBE_PING_ID}"""))
+                                }
+                            }
                             delay(NETWORK_PROBE_MS)
                             if (pongCount == before) {
-                                appLog("page $sessionId: no answer after a network change; reconnecting")
-                                runCatching { ws?.close() }
+                                appLog("page $sessionId: no answer after a network change; reporting offline")
+                                guarded("offline") { onOffline?.invoke() }
+                                dropSocket()
                             }
                         }
                     }

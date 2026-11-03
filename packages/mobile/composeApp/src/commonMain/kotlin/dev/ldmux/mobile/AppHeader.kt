@@ -15,10 +15,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -56,10 +52,6 @@ internal fun AppHeader(
     /** A refresh in flight: the arrow dims rather than turning into text. */
     refreshing: Boolean = false,
     onSettings: () -> Unit,
-    /** Selectable routes, when this build has more than one. Empty hides the control. */
-    routes: List<RouteChoice> = emptyList(),
-    currentRoute: RouteChoice? = null,
-    onRoute: (RouteChoice) -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -69,29 +61,6 @@ internal fun AppHeader(
             // It also held the height of a line even when empty, which is the sort of thing that
             // looks like a layout bug.
             Text(title, color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-        }
-        if (routes.size > 1 && currentRoute != null) {
-            Box {
-                var open by remember { mutableStateOf(false) }
-                Text(
-                    currentRoute.label,
-                    color = Accent,
-                    fontSize = 13.sp,
-                    maxLines = 1,
-                    modifier = Modifier
-                        .padding(4.dp)
-                        .clickable(role = Role.Button) { open = true },
-                )
-                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                    for (route in routes) {
-                        DropdownMenuItem(
-                            text = { Text(if (route == currentRoute) "${route.label} ✓" else route.label, color = Fg, fontSize = 13.sp) },
-                            onClick = { open = false; onRoute(route) },
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.width(6.dp))
         }
         if (onRefresh != null) {
             HeaderIcon(label = if (refreshing) "refreshing" else "refresh", onClick = onRefresh) {
@@ -120,6 +89,3 @@ internal fun HeaderIcon(label: String, onClick: () -> Unit, content: @Composable
         content()
     }
 }
-
-/** A route this build offers, as the header shows it: the app's own name for the link. */
-data class RouteChoice(val label: String, val mesh: Boolean)

@@ -181,6 +181,11 @@ class TerminalController(
         rttMs = pacing.rttMs,
         frameIntervalMs = pacing.intervalMs,
         measured = pacing.measured,
+        // **The flag is the whole reason this value exists.** `linkOffline` was set and then
+        // dropped here, so `LinkStats.offline` was always false: the terminal's own "offline ·
+        // input is not being sent" line never appeared, and neither did the rule that returns
+        // the user to the shell list when the page can no longer reach the host.
+        offline = linkOffline,
     )
 
     init {

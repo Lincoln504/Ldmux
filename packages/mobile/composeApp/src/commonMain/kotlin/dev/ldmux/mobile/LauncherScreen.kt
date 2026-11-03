@@ -73,9 +73,11 @@ fun LauncherScreen(
     liveResult: LiveResult?,
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
-    routes: List<RouteChoice> = emptyList(),
-    currentRoute: RouteChoice? = null,
-    onRoute: (RouteChoice) -> Unit = {},
+    /**
+     * The link's own line, when it has something to say (a wait, a failure). Null while it is
+     * healthy and while it is unpaired, which say it elsewhere or not at all.
+     */
+    linkText: String? = null,
     /**
      * Under the header when the saved route cannot run: what is missing, and the one action that
      * helps. Drawn only by the caller that knows the route's problem; the tailnet draws nothing.
@@ -110,10 +112,11 @@ fun LauncherScreen(
             onRefresh = onRefresh,
             refreshing = desktopLoading,
             onSettings = onSettings,
-            routes = routes,
-            currentRoute = currentRoute,
-            onRoute = onRoute,
         )
+        linkText?.let { line ->
+            Text(line, color = Dim, fontSize = 11.sp)
+            Spacer(Modifier.height(LocalTouch.current.rowPad))
+        }
 
         // Where a new shell goes is asked for in the dialogue that creates it, and
         // where a pushed window goes is asked for when it is pushed. There used to
