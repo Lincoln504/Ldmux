@@ -176,7 +176,11 @@ fun MeshTerminalScreen(
             BackgroundSession.setActive(false, "")
             conn.close()
         }
-        onDispose { remove() }
+        onDispose {
+            remove()
+            // A rebuilt connection must not leak its reference to the shared link.
+            conn.close()
+        }
     }
     // The other half of that decision: a connection that ended while the app was off screen gets a
     // fresh one as soon as it is back. `released` needs no flag of its own: the release closes the
