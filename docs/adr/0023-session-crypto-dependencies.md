@@ -103,3 +103,17 @@ and `subtle` carry it. Both are permissive; neither was previously in the lockfi
 - **−** A new unaudited-library risk the ADR names instead of burying.
 - **−** The phone's implementation is the same Rust code behind an FFI boundary, so the unsafe
   surface is one crate (`crates/session-ffi`, 13 ABI tests) and the mobile build gains a Rust step.
+
+## Review, 2026-11-03
+
+The choice and the code were audited against the Noise Protocol Framework specification and RFC
+8439; `docs/MESH-CRYPTO.md` is the record. The pattern stands: `IKpsk2` with the pairing PSK is the
+right shape for a pinned two-node link, `NNpsk0`-style admission would be the alternative if
+enrolment ever moved onto the wire, and `KK` is rejected because it loses the initiator's ephemeral
+and with it any pretence of forward secrecy from the phone's side.
+
+What the review added to this ADR's reasoning: the two-byte MAC and the ECB mode are what MeshCore's
+own crypto amounts to, which is why the app-level session exists at all; the 16-byte tag is not
+negotiable, so the record's payload ceiling is 143 bytes and padding, not truncation, is the only
+lever on length; and the twelve-hour rekey rule is owned by the phone because it is the initiator,
+with the host's job being to replace a live session when a fresh `msg1` arrives (now tested).
