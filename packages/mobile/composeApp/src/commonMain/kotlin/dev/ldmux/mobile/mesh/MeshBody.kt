@@ -39,8 +39,14 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
         MeshLinkState.Idle, MeshLinkState.Connecting, MeshLinkState.Bound ->
             MeshBody("connecting to the radio")
         MeshLinkState.RadioUnavailable -> MeshBody("the radio is not connected: check that it is on and in range")
-        MeshLinkState.Refused -> MeshBody("the radio refused the record: check that the host is paired")
-        MeshLinkState.SessionFailed -> MeshBody("the host stopped answering: it may be off or out of range. Trying again.")
+        // `Refused` comes from the radio's own error codes (not a contact, unsupported
+        // command, busy), none of which is the L3 pin. Saying "check that the host is paired"
+        // sent the user to the pairing screen for a radio problem.
+        MeshLinkState.Refused -> MeshBody("the radio refused the record: it is busy, or this radio is not a contact of the host's")
+        // Three causes, and only one of them is distance. A host that does not know this
+        // phone answers nothing at all — a pin mismatch ends before its half of the
+        // handshake — so "off or out of range" was the wrong half of the story.
+        MeshLinkState.SessionFailed -> MeshBody("the host did not answer: it is off or out of range, both radios are on different presets, or it does not know this phone. On the host: ldmux code --mesh")
         MeshLinkState.Closed -> MeshBody("the link closed: refresh to connect again")
     }
 }
@@ -49,7 +55,11 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
 fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
     null -> null
     MeshRouteProblem.NeedsSessionKeys -> MeshBody("scan the ldmux code in Settings to pair the mesh route")
-    MeshRouteProblem.NeedsPeer -> MeshBody("the host radio's key is missing: scan the ldmux code in Settings")
+    // Re-scanning cannot fix this one: the code that was scanned simply has no host radio
+    // key in it, so the same scan produces the same state. The cure is on the host.
+    MeshRouteProblem.NeedsPeer -> MeshBody(
+        "the code has no host radio key: print a new one on the host with `ldmux code --mesh` (see `ldmux mesh status`)",
+    )
     MeshRouteProblem.NotOnThisPlatform -> MeshBody("the mesh route is not available on this device")
     MeshRouteProblem.SessionNotBuilt -> MeshBody("the session library did not load on this device")
     MeshRouteProblem.TerminalNotBuilt -> MeshBody("the terminal is unavailable on this device")

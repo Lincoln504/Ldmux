@@ -211,6 +211,18 @@ fn print_mesh_status(v: &serde_json::Value) {
     if let Some(peer) = text("peer") {
         println!("peer     {peer}");
     }
+    // Printed before the radio's own state, because it is the answer to "can I hand a phone
+    // a code at all": a code with no host radio sends it to `NeedsPeer`, and scanning the
+    // same code again cannot help — the key is not in it.
+    match text("hostRadio") {
+        Some(radio) => println!("radio    {radio}"),
+        None => {
+            println!("radio    not set — a pairing code cannot be used without it");
+            println!(
+                "         set LDMUX_MESH_SELF (or the gateway's radioKey) and print the code again"
+            );
+        }
+    }
     match v.get("uplinkRecordMax").and_then(serde_json::Value::as_u64) {
         Some(capacity) => println!("capacity {capacity} B per record"),
         None => println!("capacity unknown (not bound yet)"),
@@ -882,6 +894,15 @@ async fn main() {
                     std::process::exit(1);
                 };
                 let name = machine_hostname();
+                // The code can be printed either way — the two keys in it are real — but a
+                // phone that scans one without a host radio cannot address anything, so say
+                // it here rather than let it fail later as "host not answering".
+                if v.get("hostRadio").and_then(|x| x.as_str()).is_none() {
+                    eprintln!(
+                        "ldmux: warning: this host's radio key is not set, so the phone cannot use \
+                         this code; set LDMUX_MESH_SELF (or the gateway's radioKey) and print it again"
+                    );
+                }
                 if cmd == "code" {
                     match ldmux_daemon::pairing::mesh_only_code_text(&name, &keys) {
                         Ok(text) => print!("{text}"),

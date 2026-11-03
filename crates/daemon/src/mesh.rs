@@ -470,6 +470,7 @@ impl MeshRuntime {
             "lastError": serde_json::Value::Null,
             "reconnects": 0,
             "session": SessionSnapshot::off().to_json(),
+            "hostRadio": serde_json::Value::Null,
         })
     }
 }
@@ -497,7 +498,20 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
 #[must_use]
 pub fn status_json() -> serde_json::Value {
     match MeshRuntime::global() {
-        Some(runtime) => runtime.snapshot().to_json(),
+        Some(runtime) => {
+            let mut v = runtime.snapshot().to_json();
+            // This host's own radio key is not radio state: it is what decides whether a
+            // pairing code can be used at all. A code without it sends the phone to
+            // `NeedsPeer`, and re-scanning the same code cannot fix that because the key is
+            // simply not in it. It belongs in the status the operator reads before printing.
+            if let Some(keys) = runtime.pairing_keys() {
+                v["hostRadio"] = match keys.host_radio {
+                    Some(key) => serde_json::Value::String(hex(&key)),
+                    None => serde_json::Value::Null,
+                };
+            }
+            v
+        }
         None => MeshRuntime::disabled_json(),
     }
 }
@@ -874,6 +888,7 @@ mod tests {
         // The sentinels, not a plausible reading.
         assert_eq!(json["rssi"], -128);
         assert_eq!(json["batteryPercent"], 255);
+        assert!(json.get("hostRadio").is_some(), "the shape is the same when disabled");
     }
 
     #[test]
@@ -900,6 +915,9 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing {key}");
         }
+        // Not status: whether this host knows its own radio decides whether a pairing code
+        // it prints can be used at all, so `mesh status` answers it beside the link.
+        assert_eq!(json["hostRadio"], serde_json::Value::Null);
         assert_eq!(json["peer"], "ab".repeat(32));
     }
 

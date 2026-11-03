@@ -229,7 +229,10 @@ Product and mobile:
   owns its BLE radio standalone and the mesh route is wired. The daemon still has
   no listener or RPC surface for MeshCore; the host gateway is its only ingress.
   The standalone path has a two-radio hardware pass (2026-11-02). No multi-hop
-  path recovery yet.
+  path recovery yet. The host radio is brought up by hand — firmware, gateway,
+  environment — and `docs/MESH-HOST-RADIO.md` is the whole of that procedure, including
+  what each failure means. `ldmux mesh status` now prints the host radio key, because a
+  pairing code without one cannot be used.
 - **Mesh/LoRa pacing and feel**: the bridge coalesces screen updates into bursts of at most
   one a second, input echo and the first change after quiet bypass the wait, and the scrollback
   the phone keeps costs no airtime (`crates/daemon/src/mesh_bridge.rs`, commit 2d8cf10,

@@ -49,7 +49,12 @@ either. It is deliberately simple:
 | [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
 | [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
-| [`docs/MESH-TRANSPORT.md`](docs/MESH-TRANSPORT.md) | LoRa / MeshCore: investigated, not implemented. |
+| [`docs/MESH-STANDALONE.md`](docs/MESH-STANDALONE.md) | **LoRa / MeshCore, as built**: the phone owns its own radio over BLE, the host radio is reached through a gateway, and this is the record of the protocol, the encryption and the hardware runs. |
+| [`docs/MESH-GATEWAY.md`](docs/MESH-GATEWAY.md) | The host half: the gateway that owns a USB radio, and the state file the daemon reads. |
+| [`docs/MESH-HOST-RADIO.md`](docs/MESH-HOST-RADIO.md) | Bringing the host radio up: firmware, gateway, environment, and what each failure means. |
+| [`docs/MESH-LATENCY.md`](docs/MESH-LATENCY.md) | What a mesh update costs on air, and what the software does about it. |
+| [`docs/MESH-TRANSPORT.md`](docs/MESH-TRANSPORT.md) | The original investigation: MeshCore vs Meshtastic, and what was unknown at the time. |
+| [`docs/HARDWARE-VALIDATION.md`](docs/HARDWARE-VALIDATION.md) | The radios, the firmware on them, and every measurement taken on real hardware. |
 | [`docs/archive/`](docs/archive/) | Historical records: the Rust port plan, log and audit, the tmux study (decided: no tmux, ADR-0018), the pre-port investigation, the old state register. |
 | [`docs/adr/`](docs/adr/) | Architecture decision records. |
 | [`AGENTS.md`](AGENTS.md) | Instructions for agents working in this repo. |

@@ -18,7 +18,7 @@ This is the matrix of what exists, not a promise. Anything not listed is unsuppo
 | Windows | **Not supported, not planned** | SPEC §2.2. |
 | Android client | **Done** | Verified on a device (the phone named in AGENTS.md, Environment facts); suites in `docs/archive/STATE.md` §4 are the older record. |
 | iOS client | **Not started** | Nothing is built; `docs/IOS-DEVELOPMENT.md` lists the gating unknowns. |
-| LoRa / MeshCore | **Investigated only** | `docs/MESH-TRANSPORT.md`; no code, no hardware measurement. |
+| LoRa / MeshCore | **Android: built and run on real radios; host: built, run against a real radio** | `docs/MESH-STANDALONE.md` (phone radio over BLE), `docs/MESH-GATEWAY.md` (host radio over USB serial), `docs/HARDWARE-VALIDATION.md` (what was measured). One hardware pass covered the standalone path (2026-11-02); multi-hop path recovery is not implemented. iOS is out of scope by decision: tailnet only (`docs/IOS-DEVELOPMENT.md`). |
 
 ## Linux host
 
@@ -143,10 +143,15 @@ is kept expressible without a platform by `packages/mobile/test/architecture.tes
 
 ## Mesh / LoRa
 
-Investigated, not implemented, and not measured on radios. The target is **MeshCore**;
-Meshtastic is a comparison in `docs/MESH-TRANSPORT.md`, which also states what is
-unknown (real-hardware throughput, MeshCore latency, whether the companion API carries
-arbitrary binary, the regional duty-cycle that decides viability).
+Implemented on Android and run on real radios. The target is **MeshCore**; `docs/MESH-TRANSPORT.md`
+is the original investigation, including the questions it left open, and
+`docs/HARDWARE-VALIDATION.md` records which of them the hardware runs answered. The record of the
+protocol, the encryption and the standalone path is `docs/MESH-STANDALONE.md`; the host radio's
+gateway is `docs/MESH-GATEWAY.md`; what a mesh update costs on air is `docs/MESH-LATENCY.md`.
+
+Two gaps worth stating on this page: multi-hop path recovery is not implemented (a learned
+path is used as-is, and a `NotFound` send falls back to zero-hop), and the iOS client is
+tailnet-only by decision, so it has no LoRa route at all.
 
 ## What would move a row from "read" or "intended" to "verified"
 

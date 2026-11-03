@@ -1,7 +1,8 @@
 # Agent Instructions — ldmux
 
 ldmux is a remote terminal system: a daemon + CLI + native mobile client,
-reachable only over Tailscale. The daemon owns the PTYs. A **keeper** process
+reachable over Tailscale or — from the Android client — over LoRa with MeshCore
+radios (`docs/MESH-STANDALONE.md`). The daemon owns the PTYs. A **keeper** process
 allocates them and supervises the shells, running one **libghostty-vt** terminal
 emulator per session — the same engine the mobile client renders with, so the
 snapshot and the client share one cell model.
@@ -18,6 +19,9 @@ history of that tree is in git; `docs/archive/RUST-PORT-PLAN.md` and
 | `daemon` | registry, ownership, remote WS, streams, desktop + inventory, CLI (`bin/ldmux`), daemon entry (`bin/ldmuxd`) |
 | `attach` | the desktop-window client (`ldmuxd attach`) |
 | `vt-sys` | hand-written FFI against the vendored libghostty-vt headers |
+| `mesh` | the L2 client for MeshCore radios: frames, commands, events (no tokio state) |
+| `session` | the L3 session over that link: Noise `IKpsk2`, records, replay window, ARQ. Pure, no I/O |
+| `session-ffi` | the C ABI the mobile client calls instead of reimplementing the session in Kotlin |
 
 `packages/mobile` is the KMP/Compose client and the JNI shim; it is not part of
 the port and is kept.
