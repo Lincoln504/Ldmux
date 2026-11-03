@@ -43,17 +43,19 @@ pub trait Link {
 /// The daemon as the bridge sees it.
 #[allow(async_fn_in_trait)]
 pub trait Host {
-    /// Ids of the running shells.
-    async fn running(&mut self) -> Vec<String>;
+    /// Ids of the running shells. `None` when the host could not be asked: unknown is not empty.
+    async fn running(&mut self) -> Option<Vec<String>>;
     /// `(id, label, cwd)` of the running shells, for the phone's picker. The default has no labels
     /// and no paths; a host that knows where a shell runs gives the phone the folder, as the
     /// tailnet launcher does.
-    async fn listing(&mut self) -> Vec<(String, String, String)> {
-        self.running()
-            .await
-            .into_iter()
-            .map(|id| (id, String::new(), String::new()))
-            .collect()
+    async fn listing(&mut self) -> Option<Vec<(String, String, String)>> {
+        Some(
+            self.running()
+                .await?
+                .into_iter()
+                .map(|id| (id, String::new(), String::new()))
+                .collect(),
+        )
     }
     async fn screen(&mut self, id: &str) -> Result<Screen, String>;
     async fn input(&mut self, id: &str, bytes: &[u8]) -> Result<(), String>;
@@ -109,6 +111,11 @@ pub struct BridgeStats {
     pub resizes_unchanged: u32,
     pub malformed: u32,
     pub refused_sends: u32,
+    /// Listing or liveness questions the host could not answer. Counted, and answered with
+    /// **silence**: an empty list is a fact ("no shells are running") and a failed call is not, so
+    /// sending one for the other told the phone its shells had all ended (measured 2026-11-03: the
+    /// launcher emptied on a drop while every shell was alive).
+    pub host_unanswered: u32,
 }
 
 struct Attached {
@@ -430,7 +437,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // Remembered even when the attach itself is refused: the phone answers a refusal
                 // with a `List`, and that answer must be in the version this phone speaks.
                 self.versions.insert(shell, version);
-                let running = self.host.running().await;
+                let Some(running) = self.host.running().await else {
+                    // Unknown is not "not found": answering `Closed` here told the phone the
+                    // shell had ended when the host had merely failed to answer. Stay silent and
+                    // let the phone ask again.
+                    self.stats.host_unanswered += 1;
+                    return;
+                };
                 let matches: Vec<&String> = running
                     .iter()
                     .filter(|id| selector.is_empty() || id.starts_with(&selector))
@@ -480,7 +493,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
             }
             Message::List => {
-                let listing = self.host.listing().await;
+                let Some(listing) = self.host.listing().await else {
+                    // An empty page means "no shells are running", which is a fact. A failed call
+                    // is not that fact, and sending it emptied the launcher while every shell was
+                    // alive.
+                    self.stats.host_unanswered += 1;
+                    return;
+                };
                 // A version-5 phone decodes the version-5 form; only a version-6 phone is given
                 // the folder as well. No attach means no version, and no version means the old
                 // form: a page the phone cannot read is worse than one without a path.
@@ -576,38 +595,37 @@ const MESH_DEVICE: &str = "mesh-link";
 pub struct DaemonHost(pub Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>);
 
 impl Host for DaemonHost {
-    async fn running(&mut self) -> Vec<String> {
-        let Ok(v) = self
+    async fn running(&mut self) -> Option<Vec<String>> {
+        let v = self
             .0
             .lock()
             .await
             .handle("list", serde_json::json!({}))
             .await
-        else {
-            return Vec::new();
-        };
-        v.get("sessions")
+            .ok()?;
+        let ids = v
+            .get("sessions")
             .and_then(|s| s.as_array())
             .map(|a| {
                 a.iter()
                     .filter(|s| s.get("status").and_then(|x| x.as_str()) == Some("running"))
                     .filter_map(|s| s.get("id").and_then(|x| x.as_str()).map(str::to_owned))
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        Some(ids)
     }
 
-    async fn listing(&mut self) -> Vec<(String, String, String)> {
-        let Ok(v) = self
+    async fn listing(&mut self) -> Option<Vec<(String, String, String)>> {
+        let v = self
             .0
             .lock()
             .await
             .handle("list", serde_json::json!({}))
             .await
-        else {
-            return Vec::new();
-        };
-        v.get("sessions")
+            .ok()?;
+        let rows = v
+            .get("sessions")
             .and_then(|s| s.as_array())
             .map(|a| {
                 a.iter()
@@ -620,9 +638,10 @@ impl Host for DaemonHost {
                         let cwd = s.get("cwd").and_then(|x| x.as_str()).unwrap_or("");
                         Some((id.to_owned(), label.to_owned(), cwd.to_owned()))
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        Some(rows)
     }
 
     async fn screen(&mut self, id: &str) -> Result<Screen, String> {
@@ -799,19 +818,30 @@ mod tests {
         claimed: Vec<(&'static str, String)>,
         refuse_resize: bool,
         fail_screen: bool,
+        /// The host cannot answer a listing or liveness question at all.
+        fail_list: bool,
     }
     #[derive(Clone, Default)]
     struct FakeHost(Arc<Mutex<HostState>>);
     impl Host for FakeHost {
-        async fn running(&mut self) -> Vec<String> {
-            self.0.lock().unwrap().running.clone()
-        }
-        async fn listing(&mut self) -> Vec<(String, String, String)> {
+        async fn running(&mut self) -> Option<Vec<String>> {
             let s = self.0.lock().unwrap();
-            s.running
-                .iter()
-                .map(|id| (id.clone(), format!("label of {id}"), format!("/work/{id}")))
-                .collect()
+            if s.fail_list {
+                return None;
+            }
+            Some(s.running.clone())
+        }
+        async fn listing(&mut self) -> Option<Vec<(String, String, String)>> {
+            let s = self.0.lock().unwrap();
+            if s.fail_list {
+                return None;
+            }
+            Some(
+                s.running
+                    .iter()
+                    .map(|id| (id.clone(), format!("label of {id}"), format!("/work/{id}")))
+                    .collect(),
+            )
         }
         async fn screen(&mut self, id: &str) -> Result<Screen, String> {
             let s = self.0.lock().unwrap();
@@ -1182,6 +1212,54 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A host that could not answer is not a host with no shells.
+    ///
+    /// The phone draws `Sessions` as the whole list, so an empty page from a failed keeper call
+    /// emptied the launcher while every shell was alive (measured 2026-11-03, on a link drop). The
+    /// distinction the protocol can carry is silence: no page, so the phone keeps what it has.
+    #[tokio::test]
+    async fn a_host_that_cannot_answer_says_nothing_rather_than_none() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().fail_list = true;
+        phone_says(&link, 4, &Message::List);
+        b.tick().await;
+        assert!(
+            sessions_seen(&link, 4).is_empty(),
+            "an unanswerable listing must not be sent as an empty list"
+        );
+        assert_eq!(b.stats.host_unanswered, 1);
+
+        // An attach against the same failure must not pretend the shell is gone either: no
+        // `Closed`, so the phone retries instead of telling the user it ended.
+        phone_says(
+            &link,
+            5,
+            &Message::Attach {
+                version: 6,
+                selector: "ab".into(),
+            },
+        );
+        b.tick().await;
+        let mut d = Decoder::new();
+        let replies: Vec<_> = link
+            .0
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|(s, _)| *s == 5)
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .flatten()
+            .collect();
+        assert!(
+            !replies
+                .iter()
+                .any(|m| matches!(m, Message::Closed { .. })),
+            "unknown is not not-found: {replies:?}"
+        );
+        assert_eq!(b.stats.host_unanswered, 2);
     }
 
     #[tokio::test]

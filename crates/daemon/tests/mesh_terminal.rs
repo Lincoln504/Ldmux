@@ -177,8 +177,8 @@ struct FakeShell(Arc<Mutex<ShellState>>);
 
 type ShellState = (HashMap<String, Screen>, Vec<Vec<u8>>);
 impl Host for FakeShell {
-    async fn running(&mut self) -> Vec<String> {
-        vec!["sess-1".into()]
+    async fn running(&mut self) -> Option<Vec<String>> {
+        Some(vec!["sess-1".into()])
     }
     async fn screen(&mut self, id: &str) -> Result<Screen, String> {
         self.0
