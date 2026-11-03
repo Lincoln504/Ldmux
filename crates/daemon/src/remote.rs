@@ -1491,6 +1491,37 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             stop_viewing(conn, shared).await;
             broadcast_sessions(shared).await;
         }
+        // The device is leaving this shell on purpose: a page was closed, or the app went
+        // away. A socket that closes and a socket that dies look identical on the wire, so
+        // only the client can say which happened, and everyone else waits out
+        // `RECONNECT_GRACE_MS` when it cannot. Releasing here is what lets the desk window
+        // that was waiting on this shell take it back at once instead of fifteen seconds
+        // later.
+        //
+        // `sessionId` omitted means every claim this device holds. A release from a device
+        // that does not hold the shell is a no-op, not an error: a phone that was already
+        // displaced still says goodbye to what it thought it had.
+        "release" => {
+            let device = relock(&conn.inner).device.clone();
+            let id = v
+                .get("sessionId")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(device) = device {
+                let freed = {
+                    let mut d = shared.daemon.lock().await;
+                    if id.is_empty() {
+                        !d.release_device(&device.id).is_empty()
+                    } else {
+                        d.release_claim(&id, &device.id)
+                    }
+                };
+                if freed {
+                    broadcast_sessions(shared).await;
+                }
+            }
+        }
         "attach" => {
             let session_id = v
                 .get("sessionId")

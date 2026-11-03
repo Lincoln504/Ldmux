@@ -402,9 +402,10 @@ class MeshTermDriver(
             if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed)
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves
-            // nothing; with something outstanding, a minute of nothing back means the radio, the
-            // far end, or both are gone, and the terminal would otherwise sit frozen on the last
-            // screen with the user's typing going nowhere.
+            // nothing; with something outstanding, twenty seconds of nothing back is longer than
+            // the ARQ's own retry ladder (2 s, then doubling, five attempts), so a record that
+            // reaches this point has been given up on rather than merely delayed. The terminal
+            // would otherwise sit frozen on the last screen with the typing going nowhere.
             if (terminalView == null && h.pending > 0 && clock() - lastInboundAt > SILENCE_FAILURE_MS) {
                 failed(MeshLinkState.SessionFailed)
             }

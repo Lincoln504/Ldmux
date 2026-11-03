@@ -1,6 +1,14 @@
 # Scrollback over the mesh link
 
-The mesh route has no scrollback at all. `Profile` and `Rows` carry exactly one screen, the phone
+**Status, 2026-11-03: the phone has local scrollback; the host-side history this document designs
+is not implemented.** `MeshHistory.kt` keeps the rows that leave the top of each screen, using the
+absolute line number the host already numbers every screen with (`firstLine`); the host sends no
+history messages, so the `History` / `HistoryRows` pair and the `SCROLLBACK` profile bit described
+below remain the unfilled half. What that buys: scrolling back over what has already arrived costs
+no airtime, and what it cannot do: reach lines that scrolled off before the phone attached. Read the
+rest of this as the design for that gap, not as a description of the code.
+
+The mesh route has no host-side scrollback at all. `Profile` and `Rows` carry exactly one screen, the phone
 is told `Scrollback` is absent (`mesh_term::unsupported::SCROLLBACK`), and the tailnet route has had
 paged history since before this link existed (`crates/protocol/src/messages.rs:241`,
 `crates/keeper/src/emulator.rs:55`). This is the design for closing that gap, and the reasoning for

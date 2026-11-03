@@ -20,6 +20,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.withTimeout
@@ -377,27 +379,62 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         // not call this, so a link that blinks cannot take a shell.
         wantTakeover = true
         ended = false
+        leaving = false
         kick.tryReceive()
         this.scope = scope
         job = scope.launch { loop() }
     }
 
-    /** Detach and stop streaming. The connection is not kept in any form. */
+    /**
+     * Detach and stop streaming. The connection is not kept in any form.
+     *
+     * This is the deliberate kind of leaving — a page closed, or the page left the
+     * foreground — and it says so on the wire before the socket goes. Without that the
+     * daemon cannot tell a goodbye from a crash, holds the claim for
+     * `RECONNECT_GRACE_MS`, and the desk window waiting on the shell has to sit through
+     * fifteen seconds before it can have it back. A crash still takes the grace, because
+     * a socket that simply dies has no chance to say anything.
+     */
     fun stop() {
-        job?.cancel()
+        val socket = ws
+        val client = http
+        val loopJob = job
         job = null
+        leaving = true
         // Consent is for the attach it was given for. A takeover tapped while the
         // link was down must not fire against whoever holds the shell minutes later.
         wantTakeover = false
         attempt = 0
         scope = null
         ws = null
-        http?.let { runCatching { it.close() } }
         http = null
+        if (socket == null) {
+            loopJob?.cancel()
+            client?.let { runCatching { it.close() } }
+            return
+        }
+        // The goodbye runs outside this page's scope: [TerminalController.dispose] cancels
+        // that scope immediately after calling this, and a send launched there would die
+        // before it left. Bounded, so the scope cannot hold anything for long.
+        LEAVING.launch {
+            runCatching {
+                withTimeoutOrNull(RELEASE_SEND_TIMEOUT_MS) {
+                    socket.send(Frame.Text("""{"type":"release","sessionId":"$sessionId"}"""))
+                }
+            }
+            appLog("page $sessionId: left the shell (release sent)")
+            loopJob?.cancel()
+            runCatching { withTimeoutOrNull(RELEASE_SEND_TIMEOUT_MS) { socket.close() } }
+            if (socket.isActive) runCatching { socket.cancel() }
+            client?.let { c -> runCatching { c.close() } }
+        }
     }
 
+    /** Set when the page is leaving on purpose, so the reconnect loop stops for good. */
+    private var leaving = false
+
     private suspend fun loop() {
-        while (currentCoroutineContext().isActive) {
+        while (currentCoroutineContext().isActive && !leaving) {
             var connectedThisRound = false
             var rejected = false
             // A page exists only for a paired app; an unpaired config ends it.
@@ -645,17 +682,24 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      */
     fun setGrid(cols: Int, rows: Int) {
         if (cols <= 0 || rows <= 0) return
-        if (cols == wantCols && rows == wantRows) return
-        wantCols = cols
-        wantRows = rows
+        // Clamped here, not only recovered from: the daemon's bounds are the contract, and asking
+        // for a size it must refuse costs a round trip and an error before the same size is asked
+        // for again. A viewport wide enough to exceed them (a very small font in landscape) now
+        // settles in one message.
+        val c = cols.coerceIn(MIN_COLS, MAX_COLS)
+        val r = rows.coerceIn(1, MAX_ROWS)
+        if (c == wantCols && r == wantRows) return
+        appLog("page $sessionId: grid ${c}x$r (asked $cols x $rows)")
+        wantCols = c
+        wantRows = r
         // Before the socket exists the size rides along with attach; the daemon
         // would have no stream to resize yet anyway.
         if (ws == null) return
         sendControl(
             buildJsonObject {
                 put("type", "resize")
-                put("cols", cols)
-                put("rows", rows)
+                put("cols", c)
+                put("rows", r)
             }.toString(),
         )
     }
@@ -739,3 +783,20 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 private const val MIN_COLS = 20
 private const val MAX_COLS = 500
 private const val MAX_ROWS = 500
+
+/**
+ * How long a leaving page waits to say goodbye before it drops the socket anyway.
+ *
+ * Short on purpose: this runs while a page is being closed, and a network that cannot take one
+ * small frame is a network that has already lost the claim to the grace timer.
+ */
+private const val RELEASE_SEND_TIMEOUT_MS = 400L
+
+/**
+ * The scope a leaving page says goodbye on.
+ *
+ * [TerminalController.dispose] cancels the page's own scope right after calling
+ * [AttachClient.stop], so a send launched there would be cancelled on the next line. This one
+ * belongs to no page, and everything it runs is bounded by [RELEASE_SEND_TIMEOUT_MS].
+ */
+private val LEAVING = CoroutineScope(SupervisorJob() + Dispatchers.Main)

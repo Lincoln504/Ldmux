@@ -645,3 +645,66 @@ async fn a_dropped_socket_keeps_its_claim_long_enough_to_reconnect() {
     drop(desk);
     drop(eager);
 }
+
+/// A device that says goodbye frees the shell at once, so the window waiting for it can take
+/// it back without sitting through `RECONNECT_GRACE_MS`.
+///
+/// This is the difference between a goodbye and a crash. A socket that dies says nothing, so
+/// its claim has to be kept for the whole reconnect grace (the test above). A page the user
+/// closed says `release` on the way out, and the displaced desk window gets the shell back on
+/// the next attach — a round trip, not fifteen seconds of "held elsewhere" on a shell nobody is
+/// looking at.
+#[tokio::test]
+async fn a_device_that_says_goodbye_frees_the_shell_at_once() {
+    let (h, ids) = Harness::new(1).await;
+    let id = ids[0].clone();
+
+    let mut desk = connect(h.port, &h.token).await;
+    send(
+        &mut desk,
+        serde_json::json!({"type":"hello","device":{"id":"desk-1","name":"desk","kind":"desktop"}}),
+    )
+    .await;
+    send(
+        &mut desk,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30}),
+    )
+    .await;
+    let _ = next_of_type(&mut desk, "caps").await;
+
+    let mut phone = connect(h.port, &h.token).await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"hello","device":{"id":"phone-1","name":"phone","kind":"phone"}}),
+    )
+    .await;
+    send(
+        &mut phone,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":80,"rows":24,"takeover":true}),
+    )
+    .await;
+    let _ = next_of_type(&mut phone, "caps").await;
+    let owned = next_of_type(&mut desk, "owned").await;
+    assert_eq!(owned["owner"]["id"], "phone-1", "the phone took the shell: {owned}");
+
+    // The page is closed on the phone, which says so before its socket goes.
+    send(
+        &mut phone,
+        serde_json::json!({"type":"release","sessionId":id}),
+    )
+    .await;
+
+    // The desk takes the shell back with no takeover: nobody holds it any more.
+    send(
+        &mut desk,
+        serde_json::json!({"type":"attach","sessionId":id,"cols":100,"rows":30}),
+    )
+    .await;
+    let back = tokio::time::timeout(Duration::from_millis(1500), next_of_type(&mut desk, "caps")).await;
+    assert!(
+        back.is_ok(),
+        "a released shell is free for the window that was waiting, without the reconnect grace"
+    );
+    // Still open: saying goodbye to a shell is not closing it.
+    assert_eq!(h.arc.lock().await.get_session(&id).unwrap().status, "running");
+}

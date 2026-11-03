@@ -211,13 +211,12 @@ Product and mobile:
   would have shortened the history and then looked like "the keeper has no more", and
   the client would have stopped asking for good. `maybeExtendHistory` in
   `TerminalController.kt` now treats a cap at or below what is held as exhausted.
-- **A deliberate leave costs the other device up to 15 s.** The reclaim grace is one
-  number for every socket close, because there is no detach message on the wire: a
-  phone returning to the launcher and a phone whose link died look the same to the
-  daemon. The consequence is that a waiting desk window reclaims a shell the phone
-  put down after up to `RECONNECT_GRACE_MS`, where it used to be 3 s. Fixing it
-  properly needs a client "I am leaving" message (the client closes its socket
-  without one), and that is a protocol change, not a constant.
+- **A deliberate leave is said on the wire (2026-11-03).** `{type:"release",sessionId?}`
+  frees a claim at once and pushes the session list, so a desk window that was displaced takes
+  the shell back on its next attach rather than after `RECONNECT_GRACE_MS` (15 s). The phone
+  sends it from `AttachClient.stop()`, which is the deliberate kind of leaving: a page closed,
+  or the page left the foreground. A socket that simply dies still gets the whole grace,
+  because a crash says nothing — that is the case the number exists for.
 - **The mobile client advertises `inplaceResync`** (2026-10-24): a client that falls
   behind is now repaired with `caps` + `snapshot` on the same socket instead of a
   reconnect, which is the two-orders-of-magnitude lever in `docs/WIRE-COST.md` and the

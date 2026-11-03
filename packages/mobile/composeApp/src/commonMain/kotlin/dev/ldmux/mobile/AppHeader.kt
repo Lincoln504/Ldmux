@@ -28,8 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * The app's header: the name, the one line that says which link this is and how it is
- * doing, and the two square buttons every screen has.
+ * The app's header: the name, and the two square buttons every screen has.
  *
  * **It is one header, not one per route.** The mesh route drew its own row — a status
  * text and `leave` — so the mesh terminal looked like a different app that had taken the
@@ -40,10 +39,11 @@ import androidx.compose.ui.unit.sp
  * [onRefresh] is null where a refresh would mean nothing; the button is then absent rather
  * than present and inert.
  *
- * [routes] is the way between the tailnet route and the mesh route, and it lives **here**, in
- * the app's own header, as a dropdown: it is a choice about the link, not a setting about the
- * terminal, and it must not be buried in Settings. The mesh route has no separate exit either
- * (no `leave`): the same header switches, on the same screen, in the same app.
+ * There is no route control here, and that was decided twice. It was a dropdown in this header
+ * on the argument that choosing a link is not a setting about the terminal; it became a screen
+ * of its own because a two-item dropdown is a menu hiding a switch, and the same screen is where
+ * the radio is paired, the preset chosen and the shell's link forgotten. The header shows the
+ * result and nothing more.
  */
 @Composable
 internal fun AppHeader(

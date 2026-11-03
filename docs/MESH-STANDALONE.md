@@ -370,23 +370,32 @@ path. Do not repeat the full suite after every edit.
 
 ## 10. Desktop issues (separate branch)
 
-Measured and code-read on 2026-11-02:
+Measured and code-read on 2026-11-02, status re-checked 2026-11-03:
 
 - `ldmux-terminal` runs `ldmux window`, which creates a new shell and a new
   attach window. That is normal separate-shell behavior.
-- **History defect:** the attach client never requests a history page. It sends
-  only `attach` with size/features. The daemon supports `scrollback` and
-  `SnapKind::History`. `render_snapshot` clears the visible screen and paints
-  the current screen only. The terminal emulator's scrollback is therefore not
-  the shell's scrollback.
-- **Fit defect for mirrors:** a read-only mirror cannot resize the PTY
+- **History defect — open.** The attach client never requests a history page. It
+  sends only `attach` with size/features. The daemon supports `scrollback` and
+  `SnapKind::History`. `render_snapshot` clears the visible screen and paints the
+  current screen only. The desk window's own scrollback is therefore the rows it
+  happened to see, not the shell's history.
+- **Fit defect for mirrors — open.** A read-only mirror cannot resize the PTY
   (`should_reassert` returns false for read-only). It paints the holder's grid in
-  its own window. `mirror_argv` carries no geometry.
-- `render_snapshot` writes full-width rows with autowrap still enabled and does
-  not reset scroll/origin/insert modes. That is a real paint hazard.
-- Fix plan: request a bounded history page once per attach, buffer live output
-  until it is painted; paint with autowrap off and modes reset; give a mirror the
-  holder's geometry or a per-client viewport. Separate branch.
+  its own window. `mirror_argv` carries no geometry. A row wider than the mirror
+  is now cut rather than wrapped (`clip_row`), so it reads correctly, but the
+  mirror still shows only the holder's columns.
+- **Paint hazard — fixed (2026-11-03).** `render_snapshot` cut each row to the
+  window but left the program's own modes in place: a scroll region would make the
+  clear apply to that region, insert mode would shift every character, and a
+  pending SGR would colour the pane's text. It now resets the scroll region, insert
+  mode and SGR, disables autowrap for the paint, and restores wrap after the last
+  row. `crates/attach/src/lib.rs`, test `a_snapshot_neutralises_what_the_program_left_behind`.
+- **Resize — fixed (2026-11-03).** A drag's SIGWINCH burst is settled into one
+  resize, rows are clipped, and the re-assert compares clamped sizes:
+  `docs/DESKTOP-RESIZE.md`.
+- Remaining fix plan: request a bounded history page once per attach and buffer
+  live output until it is painted; give a mirror the holder's geometry or a
+  per-client viewport.
 
 ## 11. Branch comparison
 

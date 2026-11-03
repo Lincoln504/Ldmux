@@ -117,6 +117,13 @@ pub fn render_snapshot(s: &Snapshot) -> Vec<u8> {
     } else {
         b"\x1b[?2004l"
     });
+    // A paint is exactly the rows below, so nothing the program left behind may
+    // reinterpret them: a scroll region (`DECSTBM`) would make the clear apply to that
+    // region only and put the first row somewhere else, insert mode would push every
+    // character along, and a pending SGR would colour the cells the pane did not style.
+    // Autowrap is off for the paint and restored after it, because the rows are cut to the
+    // window by `clip_row` and must never wrap.
+    out.extend_from_slice(b"\x1b[r\x1b[4l\x1b[0m\x1b[?7l");
     // The window is already empty when it opens, but a resync re-renders over
     // whatever is on screen, so the visible screen is cleared either way.
     out.extend_from_slice(b"\x1b[2J\x1b[H");
@@ -129,6 +136,7 @@ pub fn render_snapshot(s: &Snapshot) -> Vec<u8> {
     }
     // The daemon's cursor is the authority, clamped as the mobile client clamps
     // it so a malformed frame cannot place the cursor outside the grid.
+    out.extend_from_slice(b"\x1b[?7h");
     let x = s.cursor_x.min(s.cols.saturating_sub(1)) + 1;
     let y = s.cursor_y.min(s.rows.saturating_sub(1)) + 1;
     out.extend_from_slice(format!("\x1b[{y};{x}H").as_bytes());
@@ -1082,6 +1090,18 @@ mod render_tests {
         assert!(!out.contains("345"), "the row was not clipped: {out:?}");
     }
 
+    /// A paint must not inherit the program's scroll region, insert mode or wrap setting.
+    #[test]
+    fn a_snapshot_neutralises_what_the_program_left_behind() {
+        let out = String::from_utf8(render_snapshot(&snap("aa\n"))).unwrap();
+        let reset = out.find("\u{1b}[r\u{1b}[4l\u{1b}[0m\u{1b}[?7l").expect("modes are reset before the clear");
+        let clear = out.find("\u{1b}[2J").expect("the screen is cleared");
+        let wrap_on = out.find("\u{1b}[?7h").expect("wrap comes back");
+        assert!(reset < clear, "reset before the clear: {out:?}");
+        assert!(clear < wrap_on, "wrap returns after the last row: {out:?}");
+        assert!(out[clear..wrap_on].contains("aa"), "the rows are inside the wrap-off span");
+    }
+
     /// A bare LF moves down without returning the column, so the screen
     /// staircases diagonally. Both clients replay a capture, so both need CRLF.
     #[test]
@@ -1106,8 +1126,10 @@ mod render_tests {
     fn the_trailing_newline_is_not_written() {
         fn body(out: &[u8]) -> String {
             let s = String::from_utf8(out.to_vec()).unwrap();
+            // The rows are what sits between the clear and the wrap setting coming
+            // back, which is also where the cursor escape begins.
             let after = s.split("\u{1b}[2J\u{1b}[H").nth(1).unwrap();
-            after.rsplit_once('\u{1b}').unwrap().0.to_string()
+            after.split("\u{1b}[?7h").next().unwrap().to_string()
         }
         let with = render_snapshot(&snap("aa\nbb\n"));
         let without = render_snapshot(&snap("aa\nbb"));
