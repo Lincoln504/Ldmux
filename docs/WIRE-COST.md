@@ -270,6 +270,6 @@ unix socket → keeper → PTY`, and the mirror image for the screen. The terms,
    scrolling; it is long for a prompt that printed one line. A gap that adapts to how much of the
    screen changed is the obvious next step, and needs a radio to measure honestly.
 3. **The gateway removal, for operations rather than latency.** One process and one language fewer,
-   and a daemon that cannot be up while its radio path is a missing service.
+   and a radio path that does not depend on a service running outside this repository.
 4. **Nothing on the tailnet local path.** It is already inside the 5 ms the CLI proves, and the
    remaining cost is the network and the program's own echo.
