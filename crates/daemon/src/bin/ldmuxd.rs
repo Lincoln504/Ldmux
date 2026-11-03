@@ -175,8 +175,10 @@ fn main() {
             // and gets plain-text rows. It only exists when there is a session to carry it.
             if session_on {
                 let host = ldmux_daemon::mesh_bridge::DaemonHost(daemon_ref.clone());
-                tokio::spawn(ldmux_daemon::mesh_bridge::run(
-                    ldmux_daemon::mesh_bridge::Bridge::new(host, runtime),
+                let bridge = ldmux_daemon::mesh_bridge::Bridge::new(host, runtime.clone());
+                tokio::spawn(ldmux_daemon::mesh_bridge::run_publishing(
+                    bridge,
+                    move |stats| runtime.publish_bridge(stats),
                 ));
             }
         }

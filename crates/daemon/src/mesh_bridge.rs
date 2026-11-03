@@ -98,7 +98,7 @@ impl Link for crate::mesh::MeshRuntime {
 }
 
 /// What the bridge has done, for tests and for a future status field.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct BridgeStats {
     pub updates: u32,
     pub messages_sent: u32,
@@ -193,6 +193,12 @@ pub struct Bridge<H, L> {
 }
 
 impl<H: Host, L: Link> Bridge<H, L> {
+    /// The counters so far. Copied, not borrowed: the caller publishes a value, never a handle.
+    #[must_use]
+    pub fn stats(&self) -> BridgeStats {
+        self.stats
+    }
+
     pub fn new(host: H, link: L) -> Self {
         Self {
             host,
@@ -753,6 +759,23 @@ pub async fn run<H: Host, L: Link>(mut bridge: Bridge<H, L>) {
     loop {
         interval.tick().await;
         bridge.tick().await;
+    }
+}
+
+/// As [`run`], and report the counters after every tick.
+///
+/// The report is a copy of ten `u32`s, once per tick: cheap enough not to be worth a lock
+/// discipline, and it is what puts the bridge's numbers in `mesh status`.
+pub async fn run_publishing<H: Host, L: Link>(
+    mut bridge: Bridge<H, L>,
+    publish: impl Fn(BridgeStats),
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        bridge.tick().await;
+        publish(bridge.stats());
     }
 }
 

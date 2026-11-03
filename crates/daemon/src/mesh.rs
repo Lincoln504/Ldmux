@@ -296,6 +296,10 @@ pub struct MeshSnapshot {
     pub reconnects: u32,
     /// The L3 session on top of the link.
     pub session: SessionSnapshot,
+    /// The shell bridge's counters: what the phone asked for and what the host could not
+    /// answer. Published by the bridge task ([`MeshRuntime::publish_bridge`]); zero until it
+    /// runs, which is the honest value when no session is configured.
+    pub bridge: crate::mesh_bridge::BridgeStats,
 }
 
 impl MeshSnapshot {
@@ -313,6 +317,7 @@ impl MeshSnapshot {
             last_error: None,
             reconnects: 0,
             session: SessionSnapshot::off(),
+            bridge: crate::mesh_bridge::BridgeStats::default(),
         }
     }
 
@@ -331,6 +336,18 @@ impl MeshSnapshot {
             "lastError": self.last_error,
             "reconnects": self.reconnects,
             "session": self.session.to_json(),
+            "bridge": {
+                "updates": self.bridge.updates,
+                "messagesSent": self.bridge.messages_sent,
+                "recordsSent": self.bridge.records_sent,
+                "inputs": self.bridge.inputs,
+                "keys": self.bridge.keys,
+                "resizes": self.bridge.resizes,
+                "resizesUnchanged": self.bridge.resizes_unchanged,
+                "malformed": self.bridge.malformed,
+                "refusedSends": self.bridge.refused_sends,
+                "hostUnanswered": self.bridge.host_unanswered,
+            },
         })
     }
 }
@@ -444,6 +461,15 @@ impl MeshRuntime {
     /// The installed runtime, if the link is configured.
     pub fn global() -> Option<&'static MeshRuntime> {
         GLOBAL.get()
+    }
+
+    /// Record what the shell bridge has done, for `mesh status`.
+    ///
+    /// The bridge is its own task with its own counters, so without this the number that says
+    /// "the host could not answer" was invisible from outside - which is the number that tells a
+    /// blank launcher apart from a host with no shells.
+    pub fn publish_bridge(&self, stats: crate::mesh_bridge::BridgeStats) {
+        set(&self.snapshot, |s| s.bridge = stats);
     }
 
     #[must_use]
