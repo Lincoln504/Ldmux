@@ -58,8 +58,8 @@ import dev.ldmux.mobile.AppHeader
 import dev.ldmux.mobile.ChoiceRow
 import dev.ldmux.mobile.OpenBar
 import dev.ldmux.mobile.openLabel
-import dev.ldmux.mobile.RouteChoice
 import dev.ldmux.mobile.PortraitBar
+import dev.ldmux.mobile.ScrollPad
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
 import dev.ldmux.mobile.tildify
@@ -93,9 +93,6 @@ fun MeshTerminalScreen(
     plan: MeshScreenPlan,
     config: LdmuxConfig,
     onOpenSettings: () -> Unit,
-    routes: List<RouteChoice> = emptyList(),
-    currentRoute: RouteChoice? = null,
-    onRoute: (RouteChoice) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (the mesh connection never retries by
@@ -351,6 +348,16 @@ fun MeshTerminalScreen(
     val holding = !terminalLive && !showList && resumeShell.isNotEmpty() && heldScreen != null &&
         (view is MeshTermView.LinkDown || view is MeshTermView.Handshaking || view is MeshTermView.Idle)
 
+    // **A link that stays down returns to the shell list.** The held screen above is the right
+    // answer to a two-second rebuild; it is the wrong answer to a host that has stopped
+    // answering, which is a state the user must be able to leave and retry. The shell is not
+    // lost by going back: re-opening it is one `Attach`, and the list carries the reason.
+    LaunchedEffect(holding) {
+        if (!holding) return@LaunchedEffect
+        delay(dev.ldmux.mobile.LINK_FAILURE_GRACE_MS)
+        if (holding) openList()
+    }
+
     Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
         if (holding) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
@@ -434,6 +441,15 @@ fun MeshTerminalScreen(
                                 WaitingLine("waiting for the shell's screen", attemptNo)
                             }
                         }
+                        // The same three controls as the tailnet route, over the same surface.
+                        // The mesh view has no history from the host, so the source keeps the
+                        // rows the host's line numbers say have scrolled off.
+                        ScrollPad(
+                            onUp = { source.scrollBy(-dev.ldmux.mobile.SCROLL_STEP) },
+                            onDown = { source.scrollBy(dev.ldmux.mobile.SCROLL_STEP) },
+                            onBottom = { source.scrollToBottom() },
+                            modifier = Modifier.align(Alignment.TopEnd),
+                        )
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
                         // What the link adds is said only while it is true, over the terminal like the voice
                         // banner, and never as a row: the tailnet's live screen is the terminal and the
@@ -448,7 +464,7 @@ fun MeshTerminalScreen(
                             Text(
                                 notice,
                                 color = Warn, fontSize = 11.sp,
-                                modifier = Modifier.align(Alignment.TopEnd).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.align(Alignment.TopCenter).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp),
                             )
                         }
                     }
@@ -493,9 +509,6 @@ fun MeshTerminalScreen(
                     onRefresh = onRefresh,
                     refreshing = false,
                     onSettings = onOpenSettings,
-                    routes = routes,
-                    currentRoute = currentRoute,
-                    onRoute = onRoute,
                 )
                 Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
                 val v = view

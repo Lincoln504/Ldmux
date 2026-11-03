@@ -53,17 +53,6 @@ fun App() {
             // The mesh route replaces the whole terminal surface, not a part of it: it is a different,
             // reduced terminal (ADR-0025). Anything that cannot run is left to AppContent, which
             // shows why and opens nothing. The tailnet path below is exactly what it was.
-            // Leaving the mesh screen is a **view** change, not a configuration change. It used
-            // to rewrite the saved route to tailnet, so a person who looked away once came back to
-            // The route is chosen in the app's own header (a dropdown), so there is no
-            // separate exit from the mesh route and no separate screen to come back from.
-            val routes = availableRoutes(currentPlatform).map {
-                RouteChoice(if (it == MeshRoute.Mesh) "mesh" else "tailnet", it == MeshRoute.Mesh)
-            }
-            val current = RouteChoice(if (config.route == MeshRoute.Mesh) "mesh" else "tailnet", config.route == MeshRoute.Mesh)
-            val choose: (RouteChoice) -> Unit = { c ->
-                store.update(config.copy(route = if (c.mesh) MeshRoute.Mesh else MeshRoute.Tailnet))
-            }
             // **Built once per configuration, not once per recomposition.** `MeshScreenPlan` has no
             // equality, and the mesh screen keys its whole connection on it, so every recomposition of
             // this scope (opening Settings is one) made a new plan and with it a new connection: a
@@ -72,28 +61,21 @@ fun App() {
             // `connectionKey` is the radio/tailnet identity without font, theme or other view state.
             var credentialsVersion by remember { mutableStateOf(0) }
             val mesh = remember(config.connectionKey, credentialsVersion) { meshScreenFor(config) }
-            // Settings is drawn **once, here**, for every route. It used to belong to the
-            // tailnet surface, so the mesh terminal had no way in at all: you had to leave
-            // the mesh route to reach Settings, and leaving then reported the route as
-            // unavailable. One app, one Settings.
+            // **Settings is a screen, and it owns the link.** It is drawn once, here, for every
+            // route, because it used to belong to the tailnet surface and the mesh terminal then had
+            // no way in at all. It is also where the link is chosen: the launcher shows the mode the
+            // app is in, and switching modes is a settings decision rather than a menu item.
             var showSettings by remember { mutableStateOf(false) }
-            if (mesh != null) {
-                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
-            } else {
-                AppContent(config, store, onOpenSettings = { showSettings = true }, routes = routes, currentRoute = current, onRoute = choose)
-            }
+            // Leaving settings lands on the launcher, which is the app's main menu: a mode change
+            // is answered by the launcher's own list, and the shells that were open are let go
+            // (they live in the keeper; re-opening one is a single attach).
+            val leaveSettings: () -> Unit = { showSettings = false }
             if (showSettings) {
-                SettingsDialog(
+                SettingsScreen(
                     current = config,
-                    onDismiss = { showSettings = false },
-                    onSave = {
-                        store.update(it)
-                        showSettings = false
-                    },
-                    onPaired = { p ->
-                        store.pair(p)
-                        showSettings = false
-                    },
+                    onBack = leaveSettings,
+                    onSave = { store.update(it) },
+                    onPaired = { p -> store.pair(p) },
                     onUnpair = { store.unpair() },
                     mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
                         MeshRouteActions(
@@ -104,6 +86,10 @@ fun App() {
                         )
                     } else null,
                 )
+            } else if (mesh != null) {
+                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true })
+            } else {
+                AppContent(config, store, onOpenSettings = { showSettings = true })
             }
         }
     }

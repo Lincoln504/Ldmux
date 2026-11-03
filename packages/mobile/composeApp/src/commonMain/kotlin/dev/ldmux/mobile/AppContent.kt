@@ -75,15 +75,21 @@ import kotlinx.coroutines.launch
  */
 private const val PANEL_FLIP_MS = 200L
 
+/**
+ * How long a terminal stays up on a link that has gone down before the app returns to the
+ * shell list.
+ *
+ * Long enough that a wifi handover, a sleeping host's resume or a radio retransmission is a
+ * pause; short enough that "the host is not answering" is never a screen the user is stuck on.
+ */
+internal const val LINK_FAILURE_GRACE_MS = 8_000L
+
 /** The app itself. A separate function only so the theme can wrap all of it. */
 @Composable
 internal fun AppContent(
     config: LdmuxConfig,
     store: ConfigStore,
     onOpenSettings: () -> Unit,
-    routes: List<RouteChoice> = emptyList(),
-    currentRoute: RouteChoice? = null,
-    onRoute: (RouteChoice) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val client = remember { LdmuxClient(config) }
@@ -347,6 +353,29 @@ internal fun AppContent(
     LaunchedEffect(sessions) {
         val gone = pageOrder.filter { id -> sessions.any { it.id == id && !it.attachable } }
         if (gone.isNotEmpty()) pageOrder = pageOrder - gone.toSet()
+    }
+
+    // **A dead link is a reason to go home, not a notice over a frozen screen.**
+    //
+    // The terminal already says "offline · input is not being sent", and that is exactly the
+    // problem: it says it while leaving the user on a screen that cannot do anything. A shell
+    // is not lost by leaving — it lives in the keeper, and reconnecting is one attach — so the
+    // honest answer to a link that is really down is the shell list. A short grace keeps a
+    // radio hiccup or a wifi handover from throwing the user out mid-sentence; a refused token
+    // has nothing to wait for and goes at once.
+    LaunchedEffect(link, showLauncher) {
+        if (showLauncher || link == LinkState.Online) return@LaunchedEffect
+        if (link == LinkState.Rejected) {
+            pageOrder = emptyList()
+            showLauncher = true
+            return@LaunchedEffect
+        }
+        if (link != LinkState.Unreachable) return@LaunchedEffect
+        delay(LINK_FAILURE_GRACE_MS)
+        if (!showLauncher && client.link.value == LinkState.Unreachable) {
+            pageOrder = emptyList()
+            showLauncher = true
+        }
     }
 
     // The notification's Disconnect is the launcher button pressed from outside
@@ -768,9 +797,6 @@ internal fun AppContent(
             liveResult = liveResult,
             onDismissLiveResult = { client.clearLiveResult() },
             onSettings = onOpenSettings,
-            routes = routes,
-            currentRoute = currentRoute,
-            onRoute = onRoute,
         )
         }
         // What the daemon said, whenever it said no — a bad path in "+ shell",

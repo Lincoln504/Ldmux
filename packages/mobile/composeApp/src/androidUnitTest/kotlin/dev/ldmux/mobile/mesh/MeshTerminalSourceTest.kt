@@ -47,7 +47,7 @@ class MeshTerminalSourceTest {
     }
 
     @Test
-    fun `there is no scrollback to scroll, and the surface's measured grid goes out as a resize request`() {
+    fun `nothing to scroll before a screen arrives, and the measured grid goes out as a resize request`() {
         val (s, _, _) = source()
         assertEquals(0, s.scrollBy(-5))
         var asked: Pair<Int, Int>? = null

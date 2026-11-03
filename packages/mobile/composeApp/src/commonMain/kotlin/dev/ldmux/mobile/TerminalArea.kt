@@ -18,6 +18,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+/** Rows one tap of the scroll pad moves. A nudge, not a page: a page is a swipe. */
+internal const val SCROLL_STEP = 3
+
 /**
  * The terminal itself, laid out the same in both modes. Handles are registered
  * here so the chrome (whichever chrome is showing) can drive the visible one.
@@ -139,6 +142,15 @@ internal fun TerminalArea(
                 // Say so when input has nowhere to go. It is refused (not queued, not
                 // painted by prediction) while the link is down, and a refusal with no
                 // message is a terminal that has silently stopped listening.
+                // The scroll controls, always on the terminal rather than only while it is
+                // scrolled: a drag is the reading gesture, and these are the two destinations a
+                // terminal needs without one.
+                ScrollPad(
+                    onUp = { handle.scrollBy(-SCROLL_STEP) },
+                    onDown = { handle.scrollBy(SCROLL_STEP) },
+                    onBottom = { handle.scrollToBottom() },
+                    modifier = Modifier.align(Alignment.TopEnd),
+                )
                 val linkNow by handle.link.collectAsState()
                 val tokenRefused by handle.rejected.collectAsState()
                 if (tokenRefused) {

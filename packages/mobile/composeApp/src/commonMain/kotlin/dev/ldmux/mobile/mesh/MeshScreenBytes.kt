@@ -24,7 +24,7 @@ package dev.ldmux.mobile.mesh
  * engine, and an OSC 52 in one is a clipboard write. Every C0 control, DEL and C1 control is
  * replaced by a space, so the only escapes in the output are the ones above.
  */
-internal fun meshScreenBytes(screen: MeshScreen, cols: Int, rows: Int): ByteArray {
+internal fun meshScreenBytes(screen: MeshScreen, cols: Int, rows: Int, showCursor: Boolean = true): ByteArray {
     if (cols <= 0 || rows <= 0) return ByteArray(0)
     val out = StringBuilder()
     out.append("\u001b[0m\u001b[?7l")
@@ -34,7 +34,7 @@ internal fun meshScreenBytes(screen: MeshScreen, cols: Int, rows: Int): ByteArra
         out.append("\u001b[K")
     }
     out.append("\u001b[?7h")
-    out.append(if (screen.dead) "\u001b[?25l" else "\u001b[?25h")
+    out.append(if (screen.dead || !showCursor) "\u001b[?25l" else "\u001b[?25h")
     val cx = screen.cursorX.coerceIn(0, cols - 1)
     val cy = screen.cursorY.coerceIn(0, rows - 1)
     out.append("\u001b[").append(cy + 1).append(';').append(cx + 1).append('H')

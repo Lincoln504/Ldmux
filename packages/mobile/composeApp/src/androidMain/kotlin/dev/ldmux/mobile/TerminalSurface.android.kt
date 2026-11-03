@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -308,15 +309,28 @@ actual fun TerminalSurfaceFor(
     // the version that lived here was a second opinion that would have fought the
     // launcher's. What remains is the keyboard, which is this surface's business.
     val softKeyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(keyboardRequest) {
-        if (keyboardRequest > 0 && typing && active) {
+    // Whether the IME's own field currently has focus. Used only to decide whether the
+    // show request below needs repeating; the platform can refuse a show issued while the
+    // window is still settling.
+    var fieldFocused by remember { mutableStateOf(false) }
+    // **The keyboard is asked for after the frame, and asked again if it did not take.**
+    //
+    // A cold start in portrait composed the field and requested focus in the same frame the
+    // window was still being attached. The focus arrived, the IME did not: `typing` was already
+    // true and never changed, so the effect that asks for the keyboard never ran again and the
+    // keypad did not appear until the user toggled it twice. Asking on a frame boundary and
+    // repeating the request after a beat is what makes "portrait means typing" true on the
+    // first try, on both routes.
+    LaunchedEffect(typing, active, keyboardRequest) {
+        if (typing && active) {
+            withFrameNanos { }
             focusRequester.requestFocus()
             softKeyboard?.show()
-        }
-    }
-    LaunchedEffect(typing) {
-        if (typing) {
-            focusRequester.requestFocus()
+            delay(IME_SETTLE_MS)
+            if (!fieldFocused) {
+                focusRequester.requestFocus()
+                softKeyboard?.show()
+            }
         } else {
             // Landscape has no text field, and it still has to hold focus.
             // `onPreviewKeyEvent` is delivered from the root down to the focused
@@ -853,33 +867,6 @@ actual fun TerminalSurfaceFor(
         // through producing into. Keyed on the session, because a different shell is
         // a different line, and cleared here rather than inside the callback, which
         // is the whole point.
-        // **Back to now.** A viewport parked in history is somewhere you visit,
-        // not somewhere you live: the prompt, and the output you have not read,
-        // are at the live bottom. While the view is away from the bottom it
-        // carries this control, and one tap returns it. It is a pill rather than
-        // a bare glyph so the touch target is a finger's, not a character's.
-        val shownFrame = frame
-        if (shownFrame != null && !shownFrame.viewportActive &&
-            shownFrame.scrollTotal > shownFrame.scrollLen
-        ) {
-            Box(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Color(0xB3000000))
-                    .clickable {
-                        // A live fling still pushing the viewport up the history
-                        // must not immediately fight this jump back down.
-                        flingJob?.cancel()
-                        flingJob = null
-                        controller.scrollToBottom()
-                    }
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
-            ) {
-                Text("\u2193", color = Fg, fontSize = 16.sp)
-            }
-        }
         if (typing) {
             var field by remember(sessionId) { mutableStateOf("") }
             BasicTextField(
@@ -897,7 +884,8 @@ actual fun TerminalSurfaceFor(
                 modifier = Modifier
                     .size(1.dp)
                     .alpha(0f)
-                    .focusRequester(focusRequester),
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { fieldFocused = it.isFocused },
                 cursorBrush = SolidColor(Color.Transparent),
                 keyboardOptions = KeyboardOptions(
                     autoCorrectEnabled = false,
@@ -1041,6 +1029,14 @@ private const val TAP_SLOP_PX = 20f
  * and it is the one users recognise without noticing it.
  */
 private const val BLINK_MS = 530L
+
+/**
+ * How long the IME gets to act on a show request before it is asked again.
+ *
+ * One frame is enough on a warm window, but a cold start can drop the first ask, and a
+ * keyboard that silently does not appear is indistinguishable from an app that cannot type.
+ */
+private const val IME_SETTLE_MS = 250L
 
 /**
  * Below this release speed (px/s), a drag's momentum is not worth animating —
