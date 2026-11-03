@@ -546,11 +546,10 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
                 // Only a resize the pane accepted starts the screen over: a refused one leaves
                 // the grid as it was and the phone keeps what it has.
-                if self.host.resize(&session, cols, rows).await.is_ok() {
-                    if let Some(a) = self.shells.get_mut(&shell) {
-                        a.geometry = Some((cols, rows));
-                        a.resync();
-                    }
+                let accepted = self.host.resize(&session, cols, rows).await.is_ok();
+                if accepted && let Some(a) = self.shells.get_mut(&shell) {
+                    a.geometry = Some((cols, rows));
+                    a.resync();
                 }
             }
             Message::Resync => {
