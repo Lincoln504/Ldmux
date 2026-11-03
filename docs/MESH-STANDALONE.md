@@ -392,14 +392,18 @@ Measured and code-read on 2026-11-02:
 
 ## 12. Open items
 
-- Hardware pass: scan, bond/PIN, MTU, SELF_INFO, DEVICE_INFO, 0x19 and 0x41
-  round trips, preset apply/rollback, end-to-end shell, background release.
+- Hardware pass, completed 2026-11-02 on the WIO (`ED:76:07:68:5A:9A`) and the
+  HELTEC-BASE host: scan, bond/PIN, MTU 247, SELF_INFO, DEVICE_INFO, a private
+  tuple written and read back (914.25 MHz / 500 kHz / SF8 / CR5 / 22 dBm), a
+  session established over the air, the host's shell listed, and typed input
+  reaching the host terminal. Not yet measured: preset rollback after a
+  rejected write, and the background-release path.
 - First-run is one combined flow: permission, scan, bond, connect, read the
   current tuple, generate and apply a private tuple, verify, show the
-  host-key/path status. Measured on the real WIO on 2026-11-02: a private
-  914.25 MHz / 500 kHz / SF8 / CR5 / 22 dBm tuple was written over BLE and read
-  back. End-to-end shell traffic still depends on the host radio using the same
-  tuple.
+  host-key/path status. It is implemented and measured.
+- The host radio must use the same tuple. It was configured out of band with
+  `meshcore_host/tool/configure_radio.dart`; LDMUX still has no host-side
+  provisioning UI.
 - The host radio must be set to the same tuple. The phone can set a second BLE
   radio; a USB-only host radio needs the host provisioning path. This is not
   implemented in this branch.
