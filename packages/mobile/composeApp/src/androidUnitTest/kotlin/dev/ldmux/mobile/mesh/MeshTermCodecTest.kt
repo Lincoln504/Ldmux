@@ -92,6 +92,13 @@ class MeshTermCodecTest {
         assertEquals(n("maxKeys"), MeshTerm.MAX_KEYS)
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }
         assertEquals(n("unsupportedAllV1"), all)
+        // The radio's own record limits are mirrored from `ldmux_mesh::constants` and were the
+        // one set with nothing asserting they agreed. They live in three files on this side
+        // (`AndroidRadioLink`, `SessionLib`, `Radio`), so the fixture is what holds them down.
+        assertEquals(n("recordFloor"), MeshRecordLimits.FLOOR)
+        assertEquals(n("recordMax"), MeshRecordLimits.MAX)
+        assertEquals(n("recordMax"), SessionLib.RECORD_MAX)
+        assertEquals(n("creditWindow"), MeshRecordLimits.CREDIT_WINDOW)
     }
 
     @Test

@@ -294,7 +294,7 @@ class AndroidRadioLink(
     override suspend fun send(record: ByteArray): RadioSendResult {
         if (record.isEmpty()) return RadioSendResult.TooLong
         if (record.size > uplinkRecordMax) return RadioSendResult.TooLong
-        if (uplinkRecordMax < RECORD_FLOOR) {
+        if (uplinkRecordMax < MeshRecordLimits.FLOOR) {
             _state.value = MeshLinkState.NoPath
             return RadioSendResult.NoPath
         }
@@ -542,7 +542,6 @@ class AndroidRadioLink(
         const val PRESET_SETTLE_MS = 750L
         const val DEVICE_INFO_WAIT_MS = 2_000L
         const val INBOX_CAPACITY = 128
-        const val RECORD_FLOOR = 160
         const val RAW_CUSTOM_DIRECT_HEADER: Byte = 0x3E
     }
 }

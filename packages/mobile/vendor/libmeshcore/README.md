@@ -11,6 +11,13 @@ against the **same JSON golden vectors** (`src/test/resources/vectors/`),
 so they are provably byte-identical on every covered frame, cipher
 composition, and key-exchange step.
 
+> **Pin versus behaviour, as of 2026-11-03.** The pin records where the port came from, not the
+> only firmware it works with: the raw-path code deliberately follows the 1.17.1 / 1.18 rule that
+> the encoded path byte is a byte count (`MeshcoreFrameCodec`, `AndroidRadioLink`'s path
+> handling), and the radios used for ldmux's hardware runs are on 1.17.1. Changing a numeric
+> value still needs the pinned sources read first; treating `FIRMWARE_PIN_TAG` as "the firmware
+> that must be installed" does not.
+
 > **Why this exists:** as of June 2026 there was no Java jar library for
 > the MeshCore companion protocol — the closest JVM option is the Kotlin
 > Multiplatform `Wavesonics/MeshCoreKmp`. This library provides a plain

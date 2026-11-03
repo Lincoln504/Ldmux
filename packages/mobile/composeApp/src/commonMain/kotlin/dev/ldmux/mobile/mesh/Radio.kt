@@ -340,7 +340,9 @@ internal class UnsupportedRadioLink : RadioLink {
     private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
     override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
     override val received: Flow<ByteArray> = emptyFlow()
-    override val uplinkRecordMax: Int = 172
+    // A number this link never uses: it throws on every call. Mirroring the shared constant
+    // keeps it from reading like a measurement of a link that has one.
+    override val uplinkRecordMax: Int = MeshRecordLimits.MAX
     override suspend fun connect() = throw RadioLinkException(MeshLinkState.NeedsRadio, "no radio platform")
     override suspend fun send(record: ByteArray): RadioSendResult = RadioSendResult.Failed
     override suspend fun readDeviceInfo(): RadioDeviceInfo? = null

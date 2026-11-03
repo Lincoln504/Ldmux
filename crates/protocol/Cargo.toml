@@ -16,3 +16,9 @@ uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true
+
+# The fixture the mobile port is checked against carries the L2 record limits, so the
+# constants the radio layer enforces and the ones the port mirrors cannot drift apart
+# without a failed test on both sides.
+[dev-dependencies]
+ldmux-mesh = { path = "../mesh" }
