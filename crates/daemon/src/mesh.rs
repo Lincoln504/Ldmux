@@ -15,8 +15,9 @@
 //! ```
 //!
 //! A fourth, optional, `LDMUX_MESH_PSK` (64 hex characters, the pairing's pre-shared key)
-//! turns on the L3 session ([`crate::mesh_session`]); without it, downlink records are
-//! dropped with a visible `last_error`, as before.
+//! turns on the L3 session ([`crate::mesh_session`]). It is persisted to `mesh-psk` (0600) in the
+//! state directory, so a later start without the environment still speaks the same pairing;
+//! without either source, downlink records are dropped with a visible `last_error`.
 //!
 //! All three of the first group or none. A partial configuration is a startup error rather than a
 //! silent no-op: a daemon that looks configured and is not is worse than one
@@ -24,6 +25,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -178,22 +180,46 @@ impl MeshConfig {
 
 /// The L3 session's configuration: the pairing's PSK and the files beside the other state.
 pub struct SessionSetup {
-    files: SessionFiles,
+    files: Arc<SessionFiles>,
 }
 
 impl SessionSetup {
-    /// `Ok(None)` when `LDMUX_MESH_PSK` is not set.
+    /// `Ok(None)` when neither `LDMUX_MESH_PSK` nor the persisted `mesh-psk` exists.
+    ///
+    /// The environment is authoritative. When it is set, the secret is written to
+    /// `mesh-psk` (0600) so a daemon restart without its environment keeps the same
+    /// pairing. When it is absent, the file supplies the secret.
     pub fn from_env(state_dir: &Path) -> Result<Option<Self>, String> {
-        let Ok(text) = std::env::var("LDMUX_MESH_PSK") else {
-            return Ok(None);
+        let env = std::env::var("LDMUX_MESH_PSK").ok();
+        Self::from_value(state_dir, env.as_deref())
+    }
+
+    fn from_value(state_dir: &Path, env: Option<&str>) -> Result<Option<Self>, String> {
+        let path = state_dir.join("mesh-psk");
+        let psk = match env {
+            Some(text) => {
+                let psk = parse_hex::<32>(text, "LDMUX_MESH_PSK")?;
+                crate::mesh_session::write_private(&path, &psk)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                psk
+            }
+            None => match std::fs::read(&path) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut psk = [0u8; 32];
+                    psk.copy_from_slice(&bytes);
+                    psk
+                }
+                Ok(_) => return Err(format!("{} is not a 32-byte secret", path.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            },
         };
-        let psk = parse_hex::<32>(&text, "LDMUX_MESH_PSK")?;
         Ok(Some(Self::new(state_dir, psk)?))
     }
 
     pub fn new(state_dir: &Path, psk: [u8; 32]) -> Result<Self, String> {
         Ok(Self {
-            files: SessionFiles::load(state_dir, psk)?,
+            files: Arc::new(SessionFiles::load(state_dir, psk)?),
         })
     }
 
@@ -212,6 +238,11 @@ impl SessionSetup {
             psk: self.files.pairing.psk,
             host_radio: host_radio_from_env(),
         }
+    }
+
+    /// The pairing file, shared so a new grant can clear the pin on disk and on the live host.
+    fn files(&self) -> Arc<SessionFiles> {
+        Arc::clone(&self.files)
     }
 }
 
@@ -316,6 +347,8 @@ struct Exchange {
 pub struct MeshRuntime {
     /// The keys a phone needs to pair for the mesh route; `None` when no session is configured.
     pairing_keys: Option<ldmux_protocol::pairing::MeshKeys>,
+    pairing_files: Option<Arc<SessionFiles>>,
+    reset_pin: Arc<AtomicBool>,
     snapshot: Arc<Mutex<MeshSnapshot>>,
     exchange: Arc<Mutex<Exchange>>,
     wake: Arc<Notify>,
@@ -346,6 +379,8 @@ impl MeshRuntime {
         let snapshot = Arc::new(Mutex::new(first));
         let runtime = Self {
             pairing_keys: session.as_ref().map(SessionSetup::pairing_keys),
+            pairing_files: session.as_ref().map(SessionSetup::files),
+            reset_pin: Arc::new(AtomicBool::new(false)),
             snapshot: Arc::clone(&snapshot),
             exchange: Arc::new(Mutex::new(Exchange::default())),
             wake: Arc::new(Notify::new()),
@@ -389,6 +424,18 @@ impl MeshRuntime {
         self.pairing_keys.as_ref()
     }
 
+    /// A new pairing grant clears the pinned phone key, on disk and, on the next loop turn, in
+    /// the live host. The old phone re-pins itself on its next handshake.
+    pub fn clear_pin(&self) -> Result<(), String> {
+        let files = self
+            .pairing_files
+            .as_ref()
+            .ok_or_else(|| "no mesh session is configured".to_owned())?;
+        files.clear_pin().map_err(|e| e.to_string())?;
+        self.reset_pin.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Makes this runtime the one the RPC handler answers from.
     pub fn install(self) {
         let _ = GLOBAL.set(self);
@@ -430,11 +477,15 @@ impl MeshRuntime {
 /// The answer to `mesh.pairing`: the keys for a mesh pairing link, hex. An error says what is
 /// missing; the secret is never in an error or a log line.
 pub fn pairing_json() -> Result<serde_json::Value, String> {
-    let keys = MeshRuntime::global()
-        .and_then(MeshRuntime::pairing_keys)
-        .ok_or_else(|| {
-            "no mesh session is configured (set LDMUX_MESH_PSK, with the link variables)".to_owned()
-        })?;
+    let runtime = MeshRuntime::global().ok_or_else(|| {
+        "no mesh session is configured (set LDMUX_MESH_PSK once, with the link variables)"
+            .to_owned()
+    })?;
+    let keys = runtime.pairing_keys().ok_or_else(|| {
+        "no mesh session is configured (set LDMUX_MESH_PSK once, with the link variables)"
+            .to_owned()
+    })?;
+    runtime.clear_pin()?;
     Ok(serde_json::json!({
         "hostKey": hex(&keys.host_key),
         "psk": hex(&keys.psk),
@@ -542,6 +593,16 @@ async fn session(
     let mut seq: u8 = 0;
 
     loop {
+        if runtime.reset_pin.swap(false, Ordering::SeqCst) {
+            if let Some(h) = host.as_mut() {
+                if let Err(e) = h.clear_pin() {
+                    set(snapshot, |s| {
+                        s.last_error = Some(format!("could not clear the pinned key: {e}"));
+                    });
+                }
+            }
+            set(snapshot, |s| s.session.peer_key = None);
+        }
         // **Anything queued for the phone leaves now.** Waiting on the wake notification alone
         // left a record sitting in the outbound queue for as long as whichever deadline the ARQ
         // was waiting on: measured on the device as eleven seconds between the bridge queueing a
@@ -724,6 +785,26 @@ mod tests {
         // A second load reads the same key from disk, so a re-printed QR does not change it.
         let again = SessionSetup::new(&dir, psk).unwrap();
         assert_eq!(again.pairing_keys().host_key, keys.host_key);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_psk_is_persisted_and_survives_without_the_environment() {
+        let dir = std::env::temp_dir().join(format!("ldmux-mesh-psk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "ab".repeat(32);
+        let setup = SessionSetup::from_value(&dir, Some(&text))
+            .unwrap()
+            .unwrap();
+        assert_eq!(setup.pairing_keys().psk, [0xab; 32]);
+        let again = SessionSetup::from_value(&dir, None).unwrap().unwrap();
+        assert_eq!(again.pairing_keys().psk, [0xab; 32]);
+        assert_eq!(
+            std::fs::metadata(dir.join("mesh-psk")).unwrap().len(),
+            32,
+            "the secret is stored as 32 bytes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

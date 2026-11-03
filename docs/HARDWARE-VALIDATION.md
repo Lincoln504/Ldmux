@@ -726,17 +726,20 @@ and the phone's mesh screen rendered the host's own shell list (`mesh · choose 
 listed). Every earlier run read `session waiting`, so this is the first time the two ends have
 spoken over a radio.
 
-**Two defects were found on the way, both fixed by hand here and neither fixed in code yet.**
+**Two defects were found on the way. Both were worked around by hand here and are now fixed in
+code (2026-11-03).**
 
 1. **Issuing a pairing code does not clear the pinned phone key.** A phone that re-enrols gets a
    new static key, and the daemon then refuses it as `PinMismatch` for ever, because the pin from
    the previous enrolment is still in `mesh-pairing.json`. The pin was cleared by hand to proceed.
-   The rule should be that issuing a code (a new grant) clears the pin: with `pinned = None` the
-   current phone still re-pins itself, so clearing costs nothing and a re-enrolled phone is
+   Fixed: `mesh.pairing` now clears the pin on disk and in the live host. With `pinned = None`
+   the current phone still re-pins itself, so clearing costs nothing and a re-enrolled phone is
    admitted.
 2. **The mesh pairing secret is only in the daemon's environment**, so a daemon restart that loses
    its process loses the secret: it cannot be recovered from disk, and every enrolled phone must be
-   re-enrolled. A fresh secret was generated, and both apps re-enrolled, to proceed.
+   re-enrolled. A fresh secret was generated, and both apps re-enrolled, to proceed. Fixed: the
+   secret is written to `$LDMUX_STATE_DIR/mesh-psk` (0600) when the environment supplies it, and
+   read back when the environment is absent.
 
 Also fixed on the way, and shipped: the automatic handoff was rebuilt on every recomposition and
 the screen's effect keyed on it, so the app asked MeshMore at frame rate — the flashing the user

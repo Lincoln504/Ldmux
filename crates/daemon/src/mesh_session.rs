@@ -160,6 +160,16 @@ impl SessionHost {
         }
     }
 
+    /// Clear the pinned key after a new pairing grant. The caller persists it through the same
+    /// closure that records a handshake.
+    pub fn clear_pin(&mut self) -> std::io::Result<()> {
+        let mut updated = self.pairing.clone();
+        updated.pinned = None;
+        (self.persist)(&updated)?;
+        self.pairing = updated;
+        Ok(())
+    }
+
     fn on_handshake(&mut self, wall_ms: u64, now_ms: u64, msg1: &[u8]) {
         let index = self.next_index;
         let accepted =
@@ -339,6 +349,14 @@ impl SessionFiles {
     /// The pairing as last written to disk. Each L2 connection starts from this, not from the
     /// copy loaded at startup: the handshake timestamp an earlier connection accepted must
     /// still bar a replay of that same message 1 after a reconnect.
+    /// Clear the pinned phone key while keeping the replay timestamp. A new pairing grant must
+    /// let a re-enrolled phone present a new static key.
+    pub fn clear_pin(&self) -> std::io::Result<()> {
+        let mut pairing = self.current_pairing();
+        pairing.pinned = None;
+        write_pairing(&self.pairing_path, &pairing)
+    }
+
     pub fn current_pairing(&self) -> PairingEntry {
         match fs::read_to_string(&self.pairing_path)
             .ok()
@@ -405,14 +423,16 @@ impl SessionFiles {
     /// The closure the host calls to record an accepted handshake.
     pub fn persister(&self) -> Persister {
         let path = self.pairing_path.clone();
-        Box::new(move |p: &PairingEntry| {
-            let json = serde_json::json!({
-                "pinned": p.pinned.map(|k| hex(&k)),
-                "lastTimestampMs": p.last_timestamp_ms,
-            });
-            write_private(&path, json.to_string().as_bytes())
-        })
+        Box::new(move |p: &PairingEntry| write_pairing(&path, p))
     }
+}
+
+fn write_pairing(path: &Path, pairing: &PairingEntry) -> std::io::Result<()> {
+    let json = serde_json::json!({
+        "pinned": pairing.pinned.map(|k| hex(&k)),
+        "lastTimestampMs": pairing.last_timestamp_ms,
+    });
+    write_private(path, json.to_string().as_bytes())
 }
 
 fn parse_pairing(text: &str) -> Option<(Option<[u8; 32]>, u64)> {
@@ -433,7 +453,7 @@ fn parse_pairing(text: &str) -> Option<(Option<[u8; 32]>, u64)> {
 }
 
 /// Write a secret file `0600` from the first byte, atomically (write a sibling, then rename).
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -554,6 +574,15 @@ mod tests {
     }
 
     #[test]
+    fn a_new_grant_clears_the_pinned_phone_key_and_persists_it() {
+        let (mut h, _, saved) = host(true);
+        h.pairing.pinned = Some([7; 32]);
+        h.clear_pin().unwrap();
+        assert_eq!(h.pairing.pinned, None);
+        assert_eq!(saved.lock().unwrap().last().unwrap().pinned, None);
+    }
+
+    #[test]
     fn nothing_is_sent_without_a_session_and_the_queue_is_bounded() {
         let (mut h, gw_pub, _) = host(true);
         assert!(h.send(0, b"x").is_err());
@@ -586,6 +615,10 @@ mod tests {
         );
         assert_eq!(b.pairing.pinned, Some([9; 32]));
         assert_eq!(b.pairing.last_timestamp_ms, 77);
+        b.clear_pin().unwrap();
+        let c = SessionFiles::load(&dir, PSK).unwrap();
+        assert_eq!(c.pairing.pinned, None);
+        assert_eq!(c.pairing.last_timestamp_ms, 77, "the replay bar is kept");
         fs::write(dir.join("mesh-session.key"), b"short").unwrap();
         assert!(
             SessionFiles::load(&dir, PSK).is_err(),
