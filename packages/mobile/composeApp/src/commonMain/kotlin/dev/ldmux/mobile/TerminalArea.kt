@@ -153,10 +153,15 @@ internal fun TerminalArea(
                 )
                 val linkNow by handle.link.collectAsState()
                 val tokenRefused by handle.rejected.collectAsState()
+                val inputRefused by handle.inputRefused.collectAsState()
                 if (tokenRefused) {
                     LinkNotice("pairing rejected \u00b7 pair again in settings")
                 } else if (linkNow.offline && madeVisitable == null) {
                     LinkNotice("offline \u00b7 input is not being sent")
+                } else if (inputRefused != null) {
+                    // Said instead of nothing: the key was taken by this page and then dropped by
+                    // the pane, which is the one case where the screen looks like the typing worked.
+                    LinkNotice(inputRefused!!)
                 }
               }
             }

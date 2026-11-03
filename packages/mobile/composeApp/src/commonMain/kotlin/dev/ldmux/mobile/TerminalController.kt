@@ -902,6 +902,10 @@ class TerminalController(
 
     private val _ownedBy = MutableStateFlow<String?>(null)
 
+    /** The last input the daemon could not deliver; cleared after [INPUT_REFUSED_MS]. */
+    private val _inputRefused = MutableStateFlow<String?>(null)
+    private var inputRefusedJob: Job? = null
+
     /**
      * The shell is gone: ended, or unknown to the daemon.
      *
@@ -923,6 +927,8 @@ class TerminalController(
      * Cleared by a snapshot, which arrives only when the attach succeeded — so
      * this cannot get stuck showing a refusal after a successful takeover.
      */
+    override val inputRefused: StateFlow<String?> = _inputRefused
+
     override val ownedBy: StateFlow<String?> = _ownedBy
     /** The user confirmed: take the shell from whoever has it. */
     override fun takeOver() {
@@ -943,6 +949,18 @@ class TerminalController(
         if (historyLoading) {
             historyLoading = false
             historyRestoreAtTop = false
+        }
+        // A keystroke the shell did not take. It was accepted by this page, so nothing else on
+        // screen would say it went nowhere; say so, and let it fade rather than become chrome
+        // that stays for the life of the page.
+        if (code == "input_failed") {
+            _inputRefused.value = "the shell did not take that input"
+            inputRefusedJob?.cancel()
+            inputRefusedJob = scope.launch {
+                delay(INPUT_REFUSED_MS)
+                _inputRefused.value = null
+            }
+            return
         }
         // A refused grid is not a warning to keep: it is a size the pane will never take, and
         // the picture keeps being drawn for it. Ask again inside the daemon's bounds.
@@ -991,6 +1009,9 @@ class TerminalController(
     }
 
     private companion object {
+        /** How long "the shell did not take that input" stays on screen. */
+        const val INPUT_REFUSED_MS = 4_000L
+
         const val DEFAULT_COLS = 120
         const val DEFAULT_ROWS = 40
         /**

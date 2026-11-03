@@ -196,6 +196,17 @@ interface TerminalHandle {
     val rejected: StateFlow<Boolean>
         get() = EMPTY_ENDED
 
+    /**
+     * The last keystroke the pane refused, or null.
+     *
+     * The daemon answers `input_failed` when the write into a pane fails: the shell died under
+     * the key, or its pty is gone. The tap was accepted here and then lost, and nothing else on
+     * screen would say so — so it is said, briefly, and cleared. A state rather than an event so
+     * a notice that arrives while the page is being composed is still drawn.
+     */
+    val inputRefused: StateFlow<String?>
+        get() = EMPTY_NOTICE
+
     /** The user confirmed: take the shell from whoever has it. */
     fun takeOver() {}
 
@@ -233,6 +244,7 @@ interface TerminalHandle {
         val EMPTY_OWNED: StateFlow<String?> = MutableStateFlow(null)
         /** For surfaces whose shell cannot end (tests). */
         val EMPTY_ENDED: StateFlow<Boolean> = MutableStateFlow(false)
+        val EMPTY_NOTICE: StateFlow<String?> = MutableStateFlow(null)
     }
 }
 

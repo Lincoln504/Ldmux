@@ -894,6 +894,28 @@ async fn main() {
                     std::process::exit(1);
                 };
                 let name = machine_hostname();
+                // `mesh.pairing` is a grant, not a read: it clears the key the host pinned for
+                // whichever phone enrolled last. Printing a code therefore re-opens pairing, and
+                // that phone stops being accepted the moment this runs. Said here because the
+                // other half of the effect (the phone going quiet at the handshake) is
+                // indistinguishable from "the host is off" at the far end.
+                let pinned: Option<String> = daemon_call(&sock, "mesh.status", &serde_json::json!({}))
+                    .await
+                    .ok()
+                    .and_then(|status: serde_json::Value| {
+                        status
+                            .get("session")
+                            .and_then(|s| s.get("peerKey"))
+                            .and_then(|k| k.as_str())
+                            .map(str::to_owned)
+                    });
+                if let Some(key) = pinned {
+                    let short: String = key.chars().take(8).collect();
+                    eprintln!(
+                        "ldmux: this clears the phone key pinned for {short}…; that phone must scan \
+                         this code again before it can connect"
+                    );
+                }
                 // The code can be printed either way — the two keys in it are real — but a
                 // phone that scans one without a host radio cannot address anything, so say
                 // it here rather than let it fail later as "host not answering".
