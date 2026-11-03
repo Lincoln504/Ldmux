@@ -660,6 +660,22 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         )
     }
 
+    /**
+     * The daemon refused the grid with `bad_size`: it clamps to [MIN_COLS]..[MAX_COLS] columns
+     * and wants a positive row count. Nothing re-sends a size on its own, so without this the
+     * pane stays at the old grid for the life of the page while the phone paints the new one —
+     * every later frame arrives for a width nothing matches. Ask again inside the bounds the
+     * daemon enforces, and remember that is what was asked for.
+     */
+    fun retryGridAfterRefusal() {
+        val c = wantCols.coerceIn(MIN_COLS, MAX_COLS)
+        val r = wantRows.coerceIn(1, MAX_ROWS)
+        wantCols = c
+        wantRows = r
+        if (ws == null) return
+        sendControl("""{"type":"resize","cols":$c,"rows":$r}""")
+    }
+
     fun keys(keys: List<String>): Boolean {
         val array = keys.joinToString(",") { quote(it) }
         return sendControl("""{"type":"key","keys":[$array]}""")
@@ -718,3 +734,8 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         const val REJECTED_RECHECK_MS = 300_000L
     }
 }
+
+/** The size bounds the daemon's stream applies (`MIN_PANE_COLS` / `MAX_PANE_COLS` in Rust). */
+private const val MIN_COLS = 20
+private const val MAX_COLS = 500
+private const val MAX_ROWS = 500

@@ -18,7 +18,7 @@ desk-window client, and a native mobile client.
 | FFI to libghostty-vt (static archive built by nix from the pinned commit) | `crates/vt-sys` | Implemented. Verified on x86_64 Linux (glibc); aarch64 Linux evaluates, unbuilt. |
 | Daemon: registry, ownership, remote WebSocket, streams, desktop + inventory, CLI | `crates/daemon` (`ldmuxd`, `ldmux`) | Implemented and deployed. |
 | Desk-window client (`ldmuxd attach`) | `crates/attach` | Implemented. |
-| Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. Key bar: a 3x2 arrow pad in both modes (no empty cells), `paste` in portrait, sticky `Ctrl`/`Alt`/`Shift`. Pages keep the order they were opened in. iOS not started. |
+| Mobile client (KMP + Compose, JNI shim over libghostty-vt) | `packages/mobile` | Android done and device-verified. Key bar: a 3x2 arrow pad in both modes (no empty cells), `paste` in portrait, sticky `Ctrl`/`Alt`/`Shift`. Pages keep the order they were opened in. Settings is a screen, not a dialogue, and it is where the link is chosen. A dead link reports itself and returns to the list rather than leaving a frozen terminal (2026-11-03). iOS not started. |
 
 There is no tmux and no TypeScript daemon: both were removed at D4 (2026-10-04,
 ADR-0018). tmux survives only as a dev-time reference in
@@ -70,6 +70,10 @@ What exists, 2026-10-28:
 4. The daemon host: it answers message 1 (after persisting the pairing's last timestamp and
    pinned phone key, `0600`, refusing the handshake if it cannot), carries the stream, and
    exposes `MeshRuntime::send` / `take_inbound` for a future bridge.
+5. The ARQ's defaults as they now stand (`crates/session/src/arq.rs`, 2026-10-30): window 8
+   (the L2 credit), first retransmit 2 s, cap 30 s, ack delay 150 ms, heartbeat 3 s, queue 64.
+   The earlier numbers (window 4, 20 s, 300 s, 3 s) were judgement calls made before the link
+   was measurable and are superseded.
 
 **Still lacks.**
 
@@ -227,6 +231,11 @@ Product and mobile:
   no listener or RPC surface for MeshCore; the host gateway is its only ingress.
   The standalone path has a two-radio hardware pass (2026-11-02). No multi-hop
   path recovery yet.
+- **Mesh/LoRa pacing and feel**: the bridge coalesces screen updates into bursts of at most
+  one a second, input echo and the first change after quiet bypass the wait, and the scrollback
+  the phone keeps costs no airtime (`crates/daemon/src/mesh_bridge.rs`, commit 2d8cf10,
+  2026-11-03). The budget, what is deliberately left alone (spreading factor, path discovery),
+  and how to measure it: `docs/MESH-LATENCY.md`.
 
 Daemon and protocol:
 - **Shells do not carry the desktop session's display environment.** The keeper

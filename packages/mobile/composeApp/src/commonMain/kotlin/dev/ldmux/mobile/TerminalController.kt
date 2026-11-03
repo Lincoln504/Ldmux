@@ -944,6 +944,12 @@ class TerminalController(
             historyLoading = false
             historyRestoreAtTop = false
         }
+        // A refused grid is not a warning to keep: it is a size the pane will never take, and
+        // the picture keeps being drawn for it. Ask again inside the daemon's bounds.
+        if (code == "bad_size") {
+            attach.retryGridAfterRefusal()
+            return
+        }
         if (code != "no_mouse" && code != "shell_foreground") return
         mouseRefused = true
         pendingTapJob?.cancel()
