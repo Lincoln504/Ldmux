@@ -522,10 +522,9 @@ impl Arq {
             && self
                 .last_sent_at
                 .is_some_and(|t| now_ms >= t.saturating_add(self.cfg.heartbeat_ms))
+            && limits.l2_slots > 0
         {
-            if limits.l2_slots > 0 {
-                out.push(self.control(Kind::Ack));
-            }
+            out.push(self.control(Kind::Ack));
         }
 
         // 4. The close, last, once.

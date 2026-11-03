@@ -842,17 +842,17 @@ impl LdmuxDaemon {
             self.live_windows.remove(&id);
             changed = true;
             self.set_live_window(&id, None, None);
-            if let Some(claim) = self.ownership.owner(&id).cloned() {
-                if claim.device.kind != "desktop" {
-                    // Somebody else has it in their hands. Losing the window is news (the list
-                    // stops showing one), but the shell stays and so does the claim.
-                    println!(
-                        "ldmuxd: session {id} outlives its desk window ({} holds it)",
-                        claim.device.name
-                    );
-                    self.sessions_dirty = true;
-                    continue;
-                }
+            if let Some(claim) = self.ownership.owner(&id).cloned()
+                && claim.device.kind != "desktop"
+            {
+                // Somebody else has it in their hands. Losing the window is news (the list
+                // stops showing one), but the shell stays and so does the claim.
+                println!(
+                    "ldmuxd: session {id} outlives its desk window ({} holds it)",
+                    claim.device.name
+                );
+                self.sessions_dirty = true;
+                continue;
             }
             let _ = self.kill_session(&id, "its desk window closed").await;
         }
@@ -3230,7 +3230,7 @@ mod tests {
             "the phone is typing into it"
         );
         assert!(d.ownership.owner(&id).is_some(), "the phone still holds it");
-        assert!(d.live_windows.get(&id).is_none(), "but the window is gone");
+        assert!(!d.live_windows.contains_key(&id), "but the window is gone");
 
         // A shell nobody holds still ends with its window.
         let record2 = d

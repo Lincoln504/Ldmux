@@ -737,6 +737,17 @@ pub async fn run<H: Host, L: Link>(mut bridge: Bridge<H, L>) {
     }
 }
 
+/// `LDMUX_MESH_TIMING=1` turns on the two timing lines in this file. Off by default: a log line
+/// per keystroke is noise on a link that carries a few dozen records an hour.
+fn timing() -> bool {
+    std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1")
+}
+
+/// The daemon's one timing clock, so a line here can be subtracted from a line in `mesh.rs`.
+fn stamp() -> u128 {
+    crate::mesh::runtime_stamp()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1715,15 +1726,4 @@ mod tests {
         b.tick().await;
         assert!(!b.attached(1));
     }
-}
-
-/// `LDMUX_MESH_TIMING=1` turns on the two timing lines in this file. Off by default: a log line
-/// per keystroke is noise on a link that carries a few dozen records an hour.
-fn timing() -> bool {
-    std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1")
-}
-
-/// The daemon's one timing clock, so a line here can be subtracted from a line in `mesh.rs`.
-fn stamp() -> u128 {
-    crate::mesh::runtime_stamp()
 }

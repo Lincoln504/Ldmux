@@ -1004,7 +1004,8 @@ impl Differ {
         // cursor over text the phone has not been given yet, which the user sees as the cursor
         // running ahead of their typing: the letters arrive a second later, in the next batch.
         // Rows without a commit wait on the phone, so holding the cursor back loses nothing.
-        let commit = out.len() + take + 1 <= room && take == packed_len;
+        // One byte left for the commit message's own header.
+        let commit = out.len() + take < room && take == packed_len;
         self.frame_open = !commit;
         // What the phone will now hold, row by row, from the patches that actually went out.
         let mut carried: Vec<Option<String>> = vec![None; screen.lines.len()];
@@ -1221,7 +1222,7 @@ mod tests {
 
         // Real rows, so the first update actually carries something and commits.
         let rows = ["$ one", "two", "", ""];
-        let refs: Vec<&str> = rows.iter().copied().collect();
+        let refs: Vec<&str> = rows.to_vec();
         let mut at_attach = screen(&refs, 20);
         at_attach.first_line = 7;
 

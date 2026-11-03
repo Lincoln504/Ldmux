@@ -166,10 +166,10 @@ impl MeshConfig {
     /// This radio's public key from the same state file, when `LDMUX_MESH_SELF` is unset.
     #[must_use]
     pub fn self_key_from_env() -> Option<[u8; 32]> {
-        if let Ok(text) = std::env::var("LDMUX_MESH_SELF") {
-            if let Ok(key) = parse_hex::<32>(&text, "LDMUX_MESH_SELF") {
-                return Some(key);
-            }
+        if let Ok(text) = std::env::var("LDMUX_MESH_SELF")
+            && let Ok(key) = parse_hex::<32>(&text, "LDMUX_MESH_SELF")
+        {
+            return Some(key);
         }
         let path = std::env::var("LDMUX_MESH_STATE").ok()?;
         let text = std::fs::read_to_string(path).ok()?;
@@ -607,13 +607,13 @@ async fn session(
     let mut seq: u8 = 0;
 
     loop {
-        if runtime.reset_pin.swap(false, Ordering::SeqCst) {
-            if let Some(h) = host.as_mut() {
-                if let Err(e) = h.clear_pin() {
-                    set(snapshot, |s| {
-                        s.last_error = Some(format!("could not clear the pinned key: {e}"));
-                    });
-                }
+        if runtime.reset_pin.swap(false, Ordering::SeqCst)
+            && let Some(h) = host.as_mut()
+        {
+            if let Err(e) = h.clear_pin() {
+                set(snapshot, |s| {
+                    s.last_error = Some(format!("could not clear the pinned key: {e}"));
+                });
             }
             set(snapshot, |s| s.session.peer_key = None);
         }
@@ -777,6 +777,26 @@ async fn session(
         }
         set(snapshot, |s| s.session = view);
     }
+}
+
+/// Milliseconds since the first call in this process, for cross-task timing lines.
+///
+/// **One clock for every probe.** This and `mesh_bridge::stamp` used to be two separate
+/// `OnceLock<Instant>`s, each started by its own first call, so a line from the bridge and a line
+/// from this loop differed by a constant offset. That offset was read as latency: a constant
+/// 11 550 ms "round trip" that was really 0 ms. Any probe that can be compared with another must
+/// come from here.
+pub(crate) fn runtime_stamp() -> u128 {
+    runtime_start().elapsed().as_millis()
+}
+
+/// The process's single timing origin.
+///
+/// Callers that need elapsed milliseconds keep this instant rather than taking their own, so no
+/// two probes can drift apart by a constant offset.
+pub(crate) fn runtime_start() -> Instant {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(Instant::now)
 }
 
 #[cfg(test)]
@@ -966,24 +986,4 @@ mod tests {
         assert!(err.contains("unreadable"), "{err}");
     }
 
-}
-
-/// Milliseconds since the first call in this process, for cross-task timing lines.
-///
-/// **One clock for every probe.** This and `mesh_bridge::stamp` used to be two separate
-/// `OnceLock<Instant>`s, each started by its own first call, so a line from the bridge and a line
-/// from this loop differed by a constant offset. That offset was read as latency: a constant
-/// 11 550 ms "round trip" that was really 0 ms. Any probe that can be compared with another must
-/// come from here.
-pub(crate) fn runtime_stamp() -> u128 {
-    runtime_start().elapsed().as_millis()
-}
-
-/// The process's single timing origin.
-///
-/// Callers that need elapsed milliseconds keep this instant rather than taking their own, so no
-/// two probes can drift apart by a constant offset.
-pub(crate) fn runtime_start() -> Instant {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *START.get_or_init(Instant::now)
 }
