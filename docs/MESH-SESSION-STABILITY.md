@@ -259,3 +259,51 @@ instead of finishing the Activity. **Fix, LDMUX:** the handoff is attempted auto
 "not serving" (the press is the user's permission to switch apps), then retries on return. Measured:
 MeshMore force-stopped, LDMUX started, button pressed - MeshMore opened, its gateway listened on 41731
 with no visit to Connected apps, Back kept the listener, and LDMUX linked and listed the shells.
+
+---
+
+## 9. Measuring a drop instead of describing one (2026-11-03)
+
+"the connection keeps dropping" cannot be acted on. The daemon already carries every number needed to
+classify a drop; they are only meaningful as deltas against the previous reading. `scripts/mesh_watch.py`
+samples `ldmux mesh status --json` (a local RPC, no radio traffic) and prints one line per sample with the
+deltas and a plain-language note:
+
+| Pattern | Reading |
+|---|---|
+| `retransmits` rising while `sent` and `receivedBytes` are flat | the peer is not answering: a lost link, not lost packets |
+| `retransmits` rising while `sent` rises | records are being lost on the air, or the ack path is |
+| `session state` changing more than once in a run | rehandshakes, i.e. a session dying rather than records dropping |
+| `pending` non-zero and unchanging | the ARQ window is full and the far end is silent |
+| `budgetStalls` rising | the radio's hourly budget is exhausted, not a fault |
+
+Run it for a few minutes around a failure rather than reading the counters once: a single sample cannot
+tell "one retransmit an hour" from "one every two seconds", and those are different products.
+
+## 10. Making a drop cheap rather than rare
+
+The link does not have to be stable for the system to be usable; a reconnect has to be *cheap*. Today it
+is not: a reconnect costs a fresh handshake (message 1, message 2, then the attach) **and a full screen**,
+because the phone's terminal is rebuilt from nothing (`MeshTermDriver` starts a new mirror) and the host's
+differ is dropped when the link goes down (`Bridge::drop_all`). On a 172-byte record with 143 application
+bytes, a 40x12 screen is about ten records, so a drop costs a dozen records — minutes of airtime at the
+tested preset.
+
+The design that fixes it, and why it is not simply "keep the differ":
+
+- **Keep the host's differ across a reconnect, keyed by the phone's static key and the shell.** The
+  session's keys change on a rehandshake; the *screen* does not. Keeping the differ would turn a
+  reconnect into one or two records.
+- **But only with a receipt.** The phone's terminal is rebuilt, so its mirror is empty; a host that
+  assumes otherwise sends a diff into a screen nobody has, and the phone shows a half-painted pane —
+  worse than a full screen, because it looks live. The protocol therefore needs one field: an `Attach`
+  that says "I still hold the screen ending at line N, epoch E", which the current `Attach` (version and
+  selector) does not carry. That is a profile version bump, not a constant.
+- **The epoch already exists for this.** `Differ` keeps an epoch so a frame split across ticks stays one
+  frame; a resume would reuse it as the receipt's identity.
+- **The fallback is the current behaviour.** No receipt, or a receipt the host cannot match, means a full
+  screen — which is what happens today, so the resume is an optimisation and never a correctness risk.
+
+Until that exists, the honest statement is that a drop costs a full repaint, and the pacing work already
+in place (`BURST_GAP`, cursor-row-first, one record per update where it fits) is what keeps that repaint
+from being several times larger than it needs to be.
