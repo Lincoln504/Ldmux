@@ -180,8 +180,8 @@ fn a_record_on_the_wire_is_header_inner_and_tag_around_the_payload() {
             1
         )
     };
-    // 6 clear + 2 inner + 4 ARQ header + 10 payload + 16 tag
-    assert_eq!(len, 6 + 2 + 4 + 10 + 16);
+    // 6 clear + 2 inner + 5 ARQ header (seq, ack, mark) + 10 payload + 16 tag
+    assert_eq!(len, 6 + 2 + 5 + 10 + 16);
     assert_eq!(buf[0], 0x13);
     free(p.phone);
     free(p.host);
@@ -216,13 +216,16 @@ fn poll_never_exceeds_the_budget_the_caller_states() {
     free(p.host);
 }
 
+/// The most a single record can carry: 172 - 24 overhead - 5 ARQ header. 144 was the
+/// number before the ARQ header grew its `mark` byte, and these tests still sent 144, which
+/// the session correctly split into two records.
 #[test]
-fn a_full_144_byte_payload_fits_the_172_byte_record() {
+fn a_full_143_byte_payload_fills_the_172_byte_record() {
     let p = handshake(172);
     // SAFETY: live handle.
     unsafe {
         assert_eq!(
-            ldmux_session_send(p.phone, 0, [5u8; 144].as_ptr(), 144),
+            ldmux_session_send(p.phone, 0, [5u8; 143].as_ptr(), 143),
             LDMUX_OK
         )
     };
