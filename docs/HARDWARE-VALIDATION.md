@@ -771,3 +771,27 @@ holding `/dev/ttyACM1`. A second gateway then fails to open the port, prints its
 says `radio connected`, the phone says `Radio LINKED`, MeshMore says `Talking to HELTEC-BASE` -
 while no frame moves. Check `lsof /dev/ttyACM1` before believing any radio fault; the port has
 exactly one owner.
+
+### Standalone phone radio, no MeshMore on the phone (2026-11-02)
+
+The phone owned the WIO (`ED:76:07:68:5A:9A`) directly over BLE. The host side was unchanged:
+`HELTEC-BASE` on `/dev/ttyACM0`, the host gateway on 127.0.0.1:41731, and `ldmuxd`.
+
+- Both radios at 914.25 MHz / 500 kHz / SF8 / CR5 / 22 dBm.
+- The phone wrote that tuple to the WIO over BLE with `0x0B`, `0x0C`, `0x3D`, reconnected, and
+  read it back as the same values.
+- `ldmux mesh status` reached `session established`, `radio no contact` on the host side was not a
+  failure: the host radio has no contact *path* for WIOld, so it floods, and the phone still
+  receives. Records moved in both directions.
+- The phone listed the host's one shell (`pi-research`, `1 shell`) and the live screen showed the
+  host terminal. Typed input reached it (`Working` appeared in the host's `pi` UI).
+
+Three defects were fixed by this pass, all in `7cd762c`:
+
+1. Nordic `ensureBond()` called `removeBond()` when `createBond()` returned false, which removed a
+   live WIO bond and left the link at status 22. The connect path now only creates and waits.
+2. A single `getContact` by key answers with one `ContactFrame` and no `END_OF_CONTACTS`. The
+   session treated that like a dump, stayed non-idle, and closed a healthy link 2.5 s after
+   `APP_START`. The by-key answer now releases the answer slot.
+3. Settings and the terminal opened two GATT clients on one radio. They now share one
+   reference-counted link. A stale resume shell is also cleared by `refresh` before reconnecting.
