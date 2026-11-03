@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
@@ -121,6 +122,46 @@ struct Attached {
     /// on this link is a burst of records the phone waits through, seen as a freeze while a
     /// full-screen app is open.
     geometry: Option<(u8, u8)>,
+    /// When the last screen update for this shell went out. Pacing needs it to know how long a
+    /// coalesced change has been waiting.
+    last_push: Option<Instant>,
+    /// Whether the previous tick also found a change. A single step after quiet is sent at once
+    /// (that is a command's output appearing); a screen that keeps changing is a burst and is
+    /// held to [`BURST_GAP`].
+    changed_last_tick: bool,
+    /// The user typed into this shell and the echo has not been read yet. Input echo never
+    /// waits for the pacing: the keystroke is what the user is looking for.
+    echo: bool,
+}
+
+impl Attached {
+    /// Whether a change on `shell` may be sent now.
+    ///
+    /// Two things are deliberately not throttled. A change seen after a tick with nothing to
+    /// send is immediate, so a command's output appears the moment it exists. So is the echo of
+    /// what the user typed. Everything else - a build printing, `yes`, a scrolling log - is a
+    /// burst, and a burst is one update per [`BURST_GAP`] rather than one per 50 ms tick: on
+    /// this link the preamble and header of a frame are a third of its airtime, so coalescing
+    /// is the largest single saving available, and a record that carries the present screen is
+    /// worth more than several that each carry a moment that has already passed.
+    fn due(&self, now: Instant) -> bool {
+        if self.echo || !self.changed_last_tick {
+            return true;
+        }
+        self.last_push
+            .is_none_or(|t| now.saturating_duration_since(t) >= BURST_GAP)
+    }
+
+    /// Start the screen over: the differ forgets what the phone holds, and so does the pacing.
+    /// A `Resync`, an accepted `Resize` and a refused send are each "the phone's screen is not
+    /// the one the last push left", so the next update is due the moment it exists - holding it
+    /// would be pacing a burst that has already ended.
+    fn resync(&mut self) {
+        self.differ.reset();
+        self.last_push = None;
+        self.changed_last_tick = false;
+        self.echo = false;
+    }
 }
 
 pub struct Bridge<H, L> {
@@ -134,7 +175,14 @@ pub struct Bridge<H, L> {
     /// precedes it rather than guessed.
     versions: HashMap<u8, u8>,
     generation: u32,
+    /// The window was full on the previous pass. The first pass with room after a stall is a
+    /// phone coming back, not a burst: its diff goes at once rather than waiting out a coalescing
+    /// window that belongs to output it never saw.
+    stalled: bool,
     pub stats: BridgeStats,
+    /// The pacing clock, a field rather than `Instant::now()` at the call site so a test can
+    /// move time without sleeping.
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl<H: Host, L: Link> Bridge<H, L> {
@@ -146,7 +194,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
             decoders: HashMap::new(),
             versions: HashMap::new(),
             generation: 0,
+            stalled: false,
             stats: BridgeStats::default(),
+            clock: Arc::new(Instant::now),
         }
     }
 
@@ -266,7 +316,17 @@ impl<H: Host, L: Link> Bridge<H, L> {
             // The bound that belongs here is the window: past it the queue would only grow.
             let room = PENDING_LIMIT.saturating_sub(self.link.pending());
             if room == 0 {
+                self.stalled = true;
                 break;
+            }
+            if self.stalled {
+                self.stalled = false;
+                // The phone is back after a full window. Nothing it missed is worth pacing
+                // against: send the present screen now.
+                for a in self.shells.values_mut() {
+                    a.last_push = None;
+                    a.changed_last_tick = false;
+                }
             }
             let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
                 continue;
@@ -284,6 +344,23 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     continue;
                 }
             };
+            if self.shells.get(&shell).is_some_and(|a| a.differ.up_to_date(&screen)) {
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.changed_last_tick = false;
+                }
+                continue;
+            }
+            // **Pacing is for bursts, not for every change.** The echo of input and the first
+            // change after a quiet tick go at once; a screen that keeps changing is held to
+            // [`BURST_GAP`], because on this link a record carrying the present screen is worth
+            // more than several carrying moments that have already passed.
+            let now = (self.clock)();
+            if !self.shells.get(&shell).is_some_and(|a| a.due(now)) {
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.changed_last_tick = true;
+                }
+                continue;
+            }
             // **Send only what the window can take, and mean it.** The differ bounds itself to
             // `room` messages and advances its record of the phone's screen only over the rows
             // that actually went out, so a frame too big for the window is spread over ticks
@@ -294,14 +371,22 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 None => continue,
             };
             if messages.is_empty() {
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.changed_last_tick = false;
+                }
                 continue;
             }
             self.stats.updates += 1;
             if !self.reply(shell, &messages) {
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.differ.reset();
+                    a.resync();
                 }
                 continue;
+            }
+            if let Some(a) = self.shells.get_mut(&shell) {
+                a.last_push = Some(now);
+                a.changed_last_tick = true;
+                a.echo = false;
             }
             if screen.dead {
                 self.reply(
@@ -378,6 +463,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 differ: Differ::for_attach(version, one),
                                 version,
                                 geometry: None,
+                                last_push: None,
+                                changed_last_tick: false,
+                                echo: false,
                             },
                         );
                     }
@@ -407,6 +495,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     return;
                 };
                 self.stats.inputs += 1;
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.echo = true;
+                }
                 // Timing probe, off unless asked for (`LDMUX_MESH_TIMING=1`): the phone's own
                 // screen is a native surface with no text to poll, so the only honest way to
                 // measure a keystroke's turnaround is from inside the host. This marks the
@@ -429,6 +520,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
                 let session = a.session.clone();
                 self.stats.keys += 1;
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.echo = true;
+                }
                 // A name the table refuses is the daemon's refusal: nothing reaches the shell.
                 let _ = self.host.keys(&session, &names).await;
             }
@@ -455,13 +549,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 if self.host.resize(&session, cols, rows).await.is_ok() {
                     if let Some(a) = self.shells.get_mut(&shell) {
                         a.geometry = Some((cols, rows));
-                        a.differ.reset();
+                        a.resync();
                     }
                 }
             }
             Message::Resync => {
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.differ.reset();
+                    a.resync();
                 }
             }
             Message::Detach => {
@@ -624,6 +718,16 @@ pub const TICK_MS: u64 = 50;
 /// the session's own window, so the queue can never grow past what the link can carry.
 pub const PENDING_LIMIT: usize = 8;
 
+/// The most often a screen that keeps changing is sent, unless the change is the echo of input.
+///
+/// This is a coalescing window, not a delay added to every update: a change that arrives after a
+/// quiet tick goes at once, so a command's output is as fast as the link allows. Continuous
+/// output (a build, `yes`, a log) is one update a second instead of twenty, which on a link
+/// where a short frame's preamble and header are a third of its airtime is the difference
+/// between the screen being usable and the queue never draining. It is also the hard bound on
+/// staleness: nothing coalesced waits longer than this.
+pub const BURST_GAP: Duration = Duration::from_millis(1000);
+
 /// Run the bridge for the life of the process.
 pub async fn run<H: Host, L: Link>(mut bridge: Bridge<H, L>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
@@ -766,6 +870,15 @@ mod tests {
         }
     }
 
+    /// A clock that is always well past any coalescing window, so a legacy test's "next tick"
+    /// is a tick that sends.
+    fn unpaced_now() -> Instant {
+        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        *BASE.get_or_init(Instant::now)
+            + Duration::from_millis(N.fetch_add(2_000, std::sync::atomic::Ordering::Relaxed))
+    }
+
     fn setup() -> (Bridge<FakeHost, FakeLink>, FakeHost, FakeLink) {
         let host = FakeHost::default();
         host.0.lock().unwrap().running = vec!["abcd-1".into()];
@@ -780,7 +893,12 @@ mod tests {
             l.established = true;
             l.generation = 1;
         }
-        (Bridge::new(host.clone(), link.clone()), host, link)
+        let mut b = Bridge::new(host.clone(), link.clone());
+        // The tests here predate pacing and each asserts "this change goes on the next tick".
+        // A clock that steps past the coalescing window on every read keeps them about what
+        // they are about; the pacing tests install a clock they control.
+        b.clock = Arc::new(unpaced_now);
+        (b, host, link)
     }
 
     fn phone_says(link: &FakeLink, shell: u8, m: &Message) {
@@ -1446,6 +1564,140 @@ mod tests {
         host.0.lock().unwrap().fail_screen = true;
         b.tick().await;
         assert_eq!(phone_view(&link, 1).closed, Some(closed::UNAVAILABLE));
+    }
+
+    // ── pacing ────────────────────────────────────────────────────────────────────────────
+
+    /// A clock a test can move. `Instant` cannot be constructed, so the fake is an origin plus
+    /// whatever the test has advanced the counter to, and it is per-test so the suite can run
+    /// these in parallel.
+    #[derive(Clone)]
+    struct FakeClock(Arc<(std::sync::atomic::AtomicU64, Instant)>);
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self(Arc::new((std::sync::atomic::AtomicU64::new(0), Instant::now())))
+        }
+
+        fn advance(&self, ms: u64) {
+            self.0 .0.fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn reader(&self) -> Arc<dyn Fn() -> Instant + Send + Sync> {
+            let c = self.clone();
+            Arc::new(move || c.0 .1 + Duration::from_millis(c.0 .0.load(std::sync::atomic::Ordering::Relaxed)))
+        }
+    }
+
+    fn paced(host: &FakeHost, lines: &[&str]) {
+        host.0
+            .lock()
+            .unwrap()
+            .screens
+            .insert("abcd-1".into(), screen(lines));
+    }
+
+    async fn attached_paced() -> (Bridge<FakeHost, FakeLink>, FakeHost, FakeLink, FakeClock) {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        // The attach's full screen is a push like any other; start the test after the window it
+        // opened has closed, so "a step after quiet" is what the first change really is.
+        clock.advance(2_000);
+        b.tick().await;
+        (b, host, link, clock)
+    }
+
+    fn sent_records(link: &FakeLink) -> usize {
+        link.0.lock().unwrap().sent.len()
+    }
+
+    #[tokio::test]
+    async fn a_burst_is_coalesced_to_one_update_a_second() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        let base = sent_records(&link);
+
+        clock.advance(50);
+        paced(&host, &["one", ""]);
+        b.tick().await;
+        assert_eq!(sent_records(&link) - base, 1, "a step after quiet is immediate");
+
+        // Inside the window that push opened, further changes are held. Nothing is lost: the
+        // differ still holds the present screen, so the next allowed update carries it.
+        clock.advance(100);
+        paced(&host, &["two", ""]);
+        b.tick().await;
+        assert_eq!(sent_records(&link) - base, 1, "held inside the burst window");
+
+        clock.advance(100);
+        paced(&host, &["three", ""]);
+        b.tick().await;
+        assert_eq!(sent_records(&link) - base, 1, "still held");
+
+        // A second after the last push: whatever the screen says now goes, once.
+        clock.advance(800);
+        paced(&host, &["four", ""]);
+        b.tick().await;
+        assert_eq!(sent_records(&link) - base, 2, "one update for the whole burst");
+        assert_eq!(
+            phone_view(&link, 1).lines,
+            ["four", ""],
+            "the held burst coalesces into the present screen, not a replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn input_echo_is_never_paced() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        let base = sent_records(&link);
+
+        // Put the link into a burst: a change just went out.
+        clock.advance(50);
+        paced(&host, &["before", ""]);
+        b.tick().await;
+        assert_eq!(sent_records(&link) - base, 1);
+
+        // The user types; the shell answers inside the same window.
+        clock.advance(60);
+        phone_says(&link, 1, &Message::Input(b"x".to_vec()));
+        paced(&host, &["beforex", ""]);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            2,
+            "the echo goes now, not at the next window boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quiet_tick_ends_the_burst() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        let base = sent_records(&link);
+
+        clock.advance(50);
+        paced(&host, &["a", ""]);
+        b.tick().await;
+        b.tick().await; // the phone holds the screen: the burst is over
+        assert_eq!(sent_records(&link) - base, 1);
+
+        clock.advance(60);
+        paced(&host, &["abc", ""]);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            2,
+            "a discrete change after quiet is immediate even inside the window"
+        );
     }
 
     #[tokio::test]

@@ -847,6 +847,18 @@ impl Differ {
         self.sent = None;
     }
 
+    /// Whether `screen` is exactly what the phone already holds.
+    ///
+    /// The bridge uses this to decide whether to spend the tick on a diff at all: a screen that
+    /// keeps changing is coalesced, and the coalescing window only makes sense if the decision
+    /// is "there is something new", not "a tick has passed". Conservative in one direction
+    /// only - `false` can still yield no messages (a frame split across ticks), while `true`
+    /// always means nothing to send.
+    #[must_use]
+    pub fn up_to_date(&self, screen: &Screen) -> bool {
+        !self.frame_open && self.sent.as_ref() == Some(screen)
+    }
+
     /// The messages that bring the phone from what it holds to `screen`; empty when nothing
     /// differs. The first call after `new` or `reset` is a full screen, preceded by a `Profile`.
     pub fn update(&mut self, screen: &Screen) -> Vec<Message> {
