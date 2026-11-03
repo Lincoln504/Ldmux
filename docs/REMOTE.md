@@ -110,7 +110,7 @@ Client → server (JSON):
 | `{type:"ping",id?}` | liveness; server replies `{type:"pong",id?}` |
 | `{type:"hello",device,features?}` | identify the device (id, name, kind); identity, not authentication (ADR-0010). Writing and shell-changing messages need it (see below). `features` is an optional list of strings the client understands: `inplaceResync`, `sessionEnded` |
 | `{type:"attach",sessionId,cols?,rows?,takeover?,features?}` | subscribe this connection to a session; a shell held by another device is refused with `owned` unless `takeover`. `features` here has the same meaning as in `hello` |
-| `{type:"resize",cols,rows}` | the client's grid changed; the session's pty is resized and a fresh snapshot follows |
+| `{type:"resize",cols,rows}` | the client's grid changed; the session's pty is resized and a fresh snapshot follows. The daemon clamps to 20..500 columns and answers `bad_size` outside it; `docs/DESKTOP-RESIZE.md` records the desk-window side of this path |
 | `{type:"mouseclick",col,row}` | a tap in a pane whose program enabled SGR mouse reporting |
 | `{type:"input",data}` | type literal text into the pane |
 | `{type:"key",keys:["Enter"]}` | send named keys |
