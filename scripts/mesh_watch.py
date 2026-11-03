@@ -14,6 +14,7 @@ only visible as deltas against a previous reading:
   state  waiting -> established -> waiting   -> rehandshakes, i.e. a session dying
   pending > 0 and flat                       -> the window is full and the peer is silent
   budgetStalls rising                        -> the radio's hourly budget is exhausted
+  bridge.hostUnanswered rising               -> a keeper call failed; the phone was told nothing
 
 Reads `ldmux mesh status --json`, which is a local RPC: no radio traffic is generated.
 """
@@ -27,6 +28,9 @@ import sys
 import time
 
 FIELDS = ("state", "sent", "receivedBytes", "retransmits", "dropped", "pending", "budgetStalls")
+# Bridge counters, one level out from the session: what the phone asked the host and what the
+# host could not answer.
+BRIDGE = ("hostUnanswered", "refusedSends", "updates", "recordsSent")
 
 
 def sample() -> dict | None:
@@ -59,9 +63,13 @@ def main() -> int:
 
     prev: dict | None = None
     prev_session: dict = {}
+    prev_bridge: dict = {}
     n = 0
     first = True
-    print(f"{'time':8}  {'state':11}  {'sent':>5} {'recv':>5} {'retx':>5} {'pend':>4}  note")
+    print(
+        f"{'time':8}  {'state':11}  {'sent':>5} {'recv':>5} {'retx':>5} {'pend':>4} "
+        f"{'nohost':>6}  note"
+    )
     while args.samples == 0 or n < args.samples:
         v = sample()
         if v is None:
@@ -83,6 +91,9 @@ def main() -> int:
                     note.append("window full and flat")
                 if d["budgetStalls"]:
                     note.append("hourly budget exhausted")
+                bridge = v.get("bridge") or {}
+                if bridge.get("hostUnanswered", 0) != prev_bridge.get("hostUnanswered", 0):
+                    note.append("the host could not answer the phone (listing or liveness)")
             if prev is not None and s.get("state") != prev_session.get("state"):
                 note.append(f"session {prev_session.get('state')} -> {s.get('state')}")
             err = v.get("lastError") or s.get("lastError")
@@ -91,8 +102,10 @@ def main() -> int:
             print(
                 f"{time.strftime('%H:%M:%S'):8}  {cur['state']:<11}  "
                 f"{cur['sent']:5} {cur['receivedBytes']:5} {cur['retransmits']:5} "
-                f"{cur['pending']:4}  {'; '.join(note)}"
+                f"{cur['pending']:4} {(v.get('bridge') or {}).get('hostUnanswered', 0):6}  "
+                f"{'; '.join(note)}"
             )
+            prev_bridge = v.get("bridge") or {}
             prev = cur
             prev_session = s
         n += 1

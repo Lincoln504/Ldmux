@@ -276,6 +276,7 @@ deltas and a plain-language note:
 | `session state` changing more than once in a run | rehandshakes, i.e. a session dying rather than records dropping |
 | `pending` non-zero and unchanging | the ARQ window is full and the far end is silent |
 | `budgetStalls` rising | the radio's hourly budget is exhausted, not a fault |
+| `bridge.hostUnanswered` rising | the phone asked something the host could not answer: a keeper call failed, and the bridge now sends nothing rather than an empty list |
 
 Run it for a few minutes around a failure rather than reading the counters once: a single sample cannot
 tell "one retransmit an hour" from "one every two seconds", and those are different products.
