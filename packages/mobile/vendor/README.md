@@ -10,6 +10,10 @@ Local changes in this tree are marked with `LDMUX` comments:
 
 - raw custom send (`CMD_SEND_RAW_DATA`, 0x19), receive (`PUSH_CODE_RAW_DATA`, 0x84), and
   a send-result contract on `MeshcoreSession`;
-- the raw frame/size constants and tests used by the LDMUX adapter.
+- the raw frame/size constants and tests used by the LDMUX adapter;
+- a serialized tracked-command queue (`isIdle()`) and the by-key contact answer slot;
+- an Android bond path that creates a bond and never removes one (`awaitBond`).
+
+The full list is in `docs/MESH-STANDALONE.md` section 8.
 
 License: MIT, reproduced in each library's `LICENSE`.
