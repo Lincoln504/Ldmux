@@ -346,7 +346,7 @@ class TerminalController(
                 ),
             )
             if (history) {
-                // The page-in this controller asked for has been answered. Did it
+                // The history page this controller asked for has been answered. Did it
                 // reach *deeper* than what we already held? A page-in replaces the
                 // scrollback with the keeper's newest `lines` rows, so asking for the
                 // same count again would be a round trip for the same rows. When it
@@ -540,7 +540,10 @@ class TerminalController(
         // Before [begin] the stream is not this controller's to open yet; `begin`
         // reads the flag. After [dispose] there is nothing to open.
         if (!started || disposed) return
-        if (value) attach.start(scope) else attach.stop()
+        // Leaving the *app* frees the shell; moving to another page does not. Both arrive here
+        // as "inactive", and treating them the same made a phone with two pages pass the shell
+        // back to a desk window on every swipe and take it again on the way back.
+        if (value) attach.start(scope) else attach.stop(release = !AppLifecycle.foreground)
     }
 
     override fun sendKey(name: String) {
@@ -1003,7 +1006,8 @@ class TerminalController(
         disposed = true
         staleJob?.cancel()
         latchJob?.cancel()
-        attach.stop()
+        // The page is gone: this is the deliberate kind of leaving.
+        attach.stop(release = true)
         engine.close()
         scope.cancel()
     }

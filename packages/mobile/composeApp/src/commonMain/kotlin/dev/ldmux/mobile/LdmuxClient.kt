@@ -482,6 +482,11 @@ class LdmuxClient(private var config: LdmuxConfig) {
         scope = null
         ws = null
         _connected.value = false
+        // A closed socket is not an online link. Leaving the old state in place meant a
+        // stop/start cycle — the app going away and coming back, or Disconnect then return —
+        // showed `Online` until the next attempt finished, which also suppressed the
+        // `unreachable` line and the rule that returns the user to the shell list.
+        _link.value = initialLink(config)
         httpClient?.let { runCatching { it.close() } }
         httpClient = null
     }

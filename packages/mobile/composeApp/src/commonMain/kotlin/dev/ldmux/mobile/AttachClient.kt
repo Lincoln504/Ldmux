@@ -370,16 +370,17 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         // the page unable to start again.
         if (job?.isActive == true) return
         // Taking the shell over is what opening it on the phone means, and it is
-        // every time the page comes to the front, not once per page. The page gives
-        // the shell back when it swipes away ([stop] closes the socket and the daemon
-        // releases the claim after its grace), so coming back is the same act as
-        // arriving: the swipe the user just made *is* the consent.
+        // every time the page comes to the front, not once per page. A page that stops being the
+        // shown one closes its socket without releasing the claim ([stop]), so the shell stays
+        // this device's while the user is on another page; leaving the shell (closing the page,
+        // or the app going away) is what frees it.
         //
         // A *reconnect* inside one activation does not re-arm: the loop's retry does
         // not call this, so a link that blinks cannot take a shell.
         wantTakeover = true
         ended = false
         leaving = false
+        generation++
         kick.tryReceive()
         this.scope = scope
         job = scope.launch { loop() }
@@ -388,14 +389,13 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
     /**
      * Detach and stop streaming. The connection is not kept in any form.
      *
-     * This is the deliberate kind of leaving — a page closed, or the page left the
-     * foreground — and it says so on the wire before the socket goes. Without that the
-     * daemon cannot tell a goodbye from a crash, holds the claim for
-     * `RECONNECT_GRACE_MS`, and the desk window waiting on the shell has to sit through
-     * fifteen seconds before it can have it back. A crash still takes the grace, because
-     * a socket that simply dies has no chance to say anything.
+     * [release] says this device is *leaving* the shell, not merely looking away: the page was
+     * closed, or the app left the screen. Only then does it send the goodbye, because a goodbye
+     * frees the claim and lets the desk window take the shell back. A pager swipe is not leaving
+     * — it is looking at another page — and releasing there made a phone with two pages and a
+     * desk window pass the shell back and forth on every swipe.
      */
-    fun stop() {
+    fun stop(release: Boolean = false) {
         val socket = ws
         val client = http
         val loopJob = job
@@ -408,21 +408,29 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
         scope = null
         ws = null
         http = null
-        if (socket == null) {
+        if (socket == null || !release) {
             loopJob?.cancel()
             client?.let { runCatching { it.close() } }
             return
         }
+        // A goodbye from a connection that has already been replaced must not free the claim its
+        // successor just took: the daemon's release is keyed by device and session, not by
+        // socket, so a late send is indistinguishable from the new page leaving too.
+        val myGeneration = generation
         // The goodbye runs outside this page's scope: [TerminalController.dispose] cancels
         // that scope immediately after calling this, and a send launched there would die
         // before it left. Bounded, so the scope cannot hold anything for long.
         LEAVING.launch {
-            runCatching {
+            if (generation != myGeneration) return@launch
+            // `appLog` inside the attempt, and only when the frame actually went: a line printed
+            // after the `runCatching` said "release sent" for a send that timed out or threw,
+            // which is exactly the kind of evidence a device check reads and believes.
+            val sent = runCatching {
                 withTimeoutOrNull(RELEASE_SEND_TIMEOUT_MS) {
                     socket.send(Frame.Text("""{"type":"release","sessionId":"$sessionId"}"""))
                 }
-            }
-            appLog("page $sessionId: left the shell (release sent)")
+            }.getOrNull() != null
+            if (sent) appLog("page $sessionId: left the shell (release sent)")
             loopJob?.cancel()
             runCatching { withTimeoutOrNull(RELEASE_SEND_TIMEOUT_MS) { socket.close() } }
             if (socket.isActive) runCatching { socket.cancel() }
@@ -432,6 +440,12 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
 
     /** Set when the page is leaving on purpose, so the reconnect loop stops for good. */
     private var leaving = false
+
+    /**
+     * Bumped by every [start]: a goodbye launched on [LEAVING] carries the generation it was
+     * made for, and is dropped if a newer connection has taken the page since.
+     */
+    private var generation = 0
 
     private suspend fun loop() {
         while (currentCoroutineContext().isActive && !leaving) {
