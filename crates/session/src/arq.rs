@@ -96,12 +96,14 @@ pub struct Config {
     pub max_attempts: u8,
     /// How long an owed acknowledgement may wait for outgoing data to ride on.
     pub ack_delay_ms: u64,
-    /// How long an idle link may stay silent before it says something.
+    /// How long an idle link may stay silent before it says something; **0 means never**.
     ///
-    /// Silence is how both ends decide the other is gone, so an idle session that sends nothing
-    /// is indistinguishable from a dead one. mosh sends a heartbeat every 3 s for the same
-    /// reason. A heartbeat is a pure ack: about 22 bytes, and it carries real information (what
-    /// has been received).
+    /// Silence is how both ends decide the other is gone, but only while something is
+    /// outstanding: with an empty queue and nothing in flight, nobody is waiting on an answer, and
+    /// the ARQ's own ladder detects a dead peer as soon as there is anything to send. mosh
+    /// heartbeats every 3 s because its link is the internet, where a middlebox that forgot the
+    /// flow is the usual failure; on a LoRa link the usual failure is the record budget, and a
+    /// heartbeat is a record. 3 s here was 1200 records an hour spent to say nothing.
     pub heartbeat_ms: u64,
     /// Chunks waiting to be sent. A full queue refuses, it never grows.
     pub queue_max: usize,
@@ -131,7 +133,7 @@ impl Config {
             rto_max_ms: 30_000,
             max_attempts: 5,
             ack_delay_ms: 150,
-            heartbeat_ms: 3_000,
+            heartbeat_ms: 0,
             queue_max: 64,
             max_payload,
         }
@@ -515,10 +517,13 @@ impl Arq {
             }
         }
 
-        // 3b. A heartbeat when the link has gone quiet. Silence is how each end decides the other
+        // 3b. A heartbeat when the link has gone quiet — only if one is configured. On the mesh
+        //     carrier it is not: a record is minutes of budget, and an idle session has nothing to
+        //     say that anyone is waiting for. Silence is how each end decides the other
         //     is gone, so an idle session that says nothing is indistinguishable from a dead one;
         //     a pure ack costs about 22 bytes and carries the receive state.
-        if out.is_empty()
+        if self.cfg.heartbeat_ms > 0
+            && out.is_empty()
             && self
                 .last_sent_at
                 .is_some_and(|t| now_ms >= t.saturating_add(self.cfg.heartbeat_ms))

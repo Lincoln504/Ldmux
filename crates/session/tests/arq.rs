@@ -425,14 +425,17 @@ fn an_ack_is_sent_even_with_no_budget_left() {
     assert_eq!(out[0].kind, Kind::Ack);
 }
 
-/// An idle link that says nothing is indistinguishable from a dead one, and both ends decide
-/// the other is gone by silence. A heartbeat is a pure ack: about 22 bytes, and it carries the
-/// receive state, so it is never wasted.
+/// A heartbeat, when one is configured at all, is a pure ack that carries the receive state.
+///
+/// It is **off by default** (`heartbeat_ms: 0`): an idle session with nothing in flight has
+/// nobody waiting on an answer, and on the mesh carrier a heartbeat costs a record of a budget
+/// measured in dozens per hour. This test pins the mechanism, not the policy.
 #[test]
-fn an_idle_link_heartbeats() {
+fn an_idle_link_heartbeats_when_asked_to() {
     // A long retry timer, so the only thing that could fire is the heartbeat.
     let mut a = Arq::new(Config {
         rto_initial_ms: 60_000,
+        heartbeat_ms: 3_000,
         ..cfg()
     });
     a.send(0, b"x").unwrap();

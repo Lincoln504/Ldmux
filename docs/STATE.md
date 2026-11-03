@@ -98,6 +98,12 @@ What exists, 2026-10-28:
 - **A real-radio pass over the 2026-11-03 controls.** The 2026-11-02 run covered the core
   standalone path (session, shell list, typed input); the newer pause/restore, metered and
   unset-radio controls have not been through it.
+- **Idle sessions no longer spend records (2026-11-03).** The ARQ's heartbeat default was
+  3,000 ms, inherited from mosh, where the link is the internet. On this carrier a heartbeat is
+  a record, so an idle session cost about 1,200 records an hour to say nothing — against a
+  measured budget of dozens. The default is now `0` (never): with nothing in flight nobody is
+  waiting on an answer, and the retransmit ladder detects a dead peer as soon as there is
+  something to send.
 - **Full-screen programs on this link are poor by physics**: a 200x100 screen is about 150
   records against 58 an hour at the tested preset. Not a defect; a reason to keep the terminal
   viewport small and the scrollback local.
