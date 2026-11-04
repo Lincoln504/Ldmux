@@ -54,6 +54,14 @@ const AWAITING_DEADLINE: Duration = Duration::from_secs(10);
 /// before transmitting), and it brings a `STATUS` with the real number, so one probe a minute is
 /// the cheapest way out of that dead end.
 const BUDGET_PROBE: Duration = Duration::from_secs(60);
+
+/// How long the loopback socket may take to connect, handshake, or accept one frame.
+///
+/// The gateway is on the same machine, so seconds are already generous. Before this, a gateway
+/// that accepted the socket and then went quiet — a wedged process, a serial port that stopped
+/// draining — left the daemon waiting in `recv` forever: no error, no backoff, no reconnect, and a
+/// `mesh.status` that said "handshaking" for the life of the process.
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(10);
 use ldmux_mesh::frame::MeshError;
 use ldmux_mesh::messages;
 use ldmux_session::arq::Limits;
@@ -639,11 +647,16 @@ async fn session(
     bound: Arc<AtomicBool>,
 ) -> Result<(), MeshError> {
     let snapshot = &runtime.snapshot;
-    let mut client = MeshClient::connect(&cfg.addr).await?;
+    let mut client = tokio::time::timeout(GATEWAY_TIMEOUT, MeshClient::connect(&cfg.addr))
+        .await
+        .map_err(|_| MeshError::Timeout("gateway connect"))??;
     set(snapshot, |s| s.state = "handshaking");
-    let handshake = client
-        .handshake(&cfg.token, &cfg.peer, CAP_STATUS_PUSH)
-        .await?;
+    let handshake = tokio::time::timeout(
+        GATEWAY_TIMEOUT,
+        client.handshake(&cfg.token, &cfg.peer, CAP_STATUS_PUSH),
+    )
+    .await
+    .map_err(|_| MeshError::Timeout("gateway handshake"))??;
     bound.store(true, Ordering::SeqCst);
     set(snapshot, |s| {
         s.state = "ready";
@@ -869,7 +882,9 @@ async fn session(
         let pending_now = h.snapshot().pending;
         for record in polled {
             let t_write = std::time::Instant::now();
-            client.send_record(seq, &record).await?;
+            tokio::time::timeout(GATEWAY_TIMEOUT, client.send_record(seq, &record))
+                .await
+                .map_err(|_| MeshError::Timeout("gateway write"))??;
             let took = t_write.elapsed().as_millis();
             if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && took > 50 {
                 eprintln!("ldmuxd: mesh timing: socket write took {took} ms");

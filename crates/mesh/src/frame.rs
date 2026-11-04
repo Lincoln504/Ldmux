@@ -28,6 +28,9 @@ pub enum MeshError {
     Closed,
     /// A `HELLO`, `PAIR` or `BIND` was refused.
     Refused(&'static str, u8),
+    /// An exchange did not finish in time. The gateway accepted the socket or the frame and then
+    /// went quiet, which is not the same as a closed connection and must not wait forever.
+    Timeout(&'static str),
     /// The socket failed.
     Io(std::io::Error),
 }
@@ -43,6 +46,7 @@ impl fmt::Display for MeshError {
             Self::BadPayload(what) => write!(f, "malformed payload: {what}"),
             Self::Closed => write!(f, "the gateway closed the connection"),
             Self::Refused(what, code) => write!(f, "{what} refused with code {code}"),
+            Self::Timeout(what) => write!(f, "{what} timed out"),
             Self::Io(e) => write!(f, "socket: {e}"),
         }
     }

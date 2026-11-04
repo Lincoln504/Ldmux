@@ -517,6 +517,18 @@ impl<H: Host, L: Link> Bridge<H, L> {
                             );
                             return;
                         }
+                        // **A re-attach replaces the claim; it must also release the old one.**
+                        // A phone that attaches twice on one channel number (a reconnect that
+                        // raced its own `Detach`) used to overwrite the map entry and leave the
+                        // previous session claimed by a viewer that no longer exists — a desk
+                        // window then could not take the shell back, and nothing would release it
+                        // short of the link dropping. Releasing first is what makes the claim
+                        // count match the viewers.
+                        if let Some(old) = self.shells.remove(&shell)
+                            && old.session != **one
+                        {
+                            self.host.release(&old.session).await;
+                        }
                         self.shells.insert(
                             shell,
                             Attached {
@@ -1940,5 +1952,70 @@ mod tests {
         let (mut b, _host, _link) = setup();
         b.tick().await;
         assert_eq!(b.quiet_ticks, 1);
+    }
+    /// A second attach on the same channel number must release the claim the first one made.
+    /// Without that, the map entry was overwritten and the old session stayed claimed by a viewer
+    /// that no longer existed: a desk window could not take the shell back and nothing released it
+    /// until the link dropped.
+    #[tokio::test]
+    async fn a_re_attach_releases_the_shell_it_replaces() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().running.push("abcd-2".into());
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(b.attached(1));
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-2".into(),
+            },
+        );
+        b.tick().await;
+        let claimed = host.0.lock().unwrap().claimed.clone();
+        assert!(
+            claimed.contains(&("release", "abcd-1".to_owned())),
+            "the replaced shell was never released: {claimed:?}"
+        );
+        assert!(claimed.contains(&("claim", "abcd-2".to_owned())));
+    }
+
+    /// Re-attaching to the shell already attached releases nothing: the claim is still the same
+    /// viewer's, and releasing it would hand the shell back to a desk window mid-session.
+    #[tokio::test]
+    async fn a_re_attach_to_the_same_shell_keeps_its_claim() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        let claimed = host.0.lock().unwrap().claimed.clone();
+        assert_eq!(
+            claimed.iter().filter(|(k, _)| *k == "release").count(),
+            0,
+            "{claimed:?}"
+        );
     }
 }
