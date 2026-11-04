@@ -1,41 +1,56 @@
 # Defects in `meshmore-sns`
 
 - Written 2026-11-04 against branch `feat/ldmux-gateway` at `5d97625`.
+- **Re-verified against the same commit later the same day, after the separation decision.** The
+  items marked VERIFIED below were read again in the tree at `5d97625`, not carried over. The ones
+  that were not re-read say so; treat them as claims from the first pass.
+- **Nothing in this repository was changed.** These are reported, not fixed. MeshMore is its own
+  product now (`06-SEPARATION-PLAN.md`), and several of the items here are deliberate behaviour with
+  tests behind them, so changing them is a product decision rather than a bug fix. What LDMUX can do
+  about each of them is stated in the separation plan.
 - Severity: S1 blocks a user or loses data, S2 wrong behaviour under a real condition, S3 documentation or consistency, S4 hygiene.
 
 ## S1
 
-### 1. The deaf-radio detector restarts the gateway on a quiet but healthy mesh
+### 1. The deaf-radio detector restarts the gateway on a quiet but healthy mesh — OPEN, VERIFIED
 
-- PROVEN. `radioLooksDeaf` returns true when no packet has arrived off the air for two minutes, measured from process start (`meshmore_sns_app/packages/meshcore_host/lib/src/serial_mesh_sender.dart:63-70`).
-- `_heardAirAt` is written in exactly two places, both inbound frames: `RawDataFrame` (`:431`) and `NewAdvertFrame` (`:438`).
-- `_sentSinceHeard` exists and is incremented on every send (`:114,256`), but only `_pathIsSuspect` reads it (`:407`). The deaf check ignores it, and ignores whether any client is bound.
-- The gateway then reboots the radio and exits 75 (`bin/meshmore_gateway.dart:148-165`), and systemd restarts it (`deploy/meshmore-gateway.service:20-27`).
-- Consequence: on a private two-radio link where nothing is sent for two minutes, the gateway reboots the radio, the USB device re-enumerates, and the daemon reports `state down` with a rising restart count. The observed run reached `NRestarts=901` with a restart every two minutes.
-- The behaviour is deliberate and tested (`test/serial_mesh_sender_test.dart:308,317`), so the fix is a change of rule, not a bug fix: require N unanswered sends to a bound peer, and treat "no adverts" as no evidence.
+- Still true at `5d97625`. `radioLooksDeaf` (`serial_mesh_sender.dart:63-69`) consults only
+  `_heardAirAt` and the time since the port opened; `_sentSinceHeard` is incremented on every send
+  (`:256`) and still read only by `_pathIsSuspect` (`:407`). The gateway reboots and exits 75 on a
+  30 s timer (`bin/meshmore_gateway.dart:149-165`), driven by a measurement the comment records
+  (350 contact frames in 70 s, one air packet in 25 minutes, rssi -128).
+- Deliberate, with tests (`test/serial_mesh_sender_test.dart`). On a private link that is simply
+  quiet it reboots a healthy radio every two minutes: the USB device re-enumerates, the daemon
+  reports `state down`, and the restart count rises (the observed run reached `NRestarts=901`).
+- The fix is a rule change, not a code repair: require N unanswered sends to a bound peer, and treat
+  "no adverts" as no evidence.
 
 ## S2
 
-### 2. `PathMode.flood` does not flood
+### 2. `PathMode.flood` does not flood — OPEN, VERIFIED
 
-- PROVEN. `_pathForSend` returns an empty path for `PathMode.flood` (`serial_mesh_sender.dart:412-415`), which becomes `0x19 0x00 <payload>` (`:261`).
-- The firmware turns that into `sendDirect(pkt, path, 0)` (`examples/companion_radio/MyMesh.cpp:1524`), which sets `ROUTE_TYPE_DIRECT` with `path_len = 0` (`src/Mesh.cpp:693-695`). That is a zero-hop direct send, one hop to a neighbour.
+- Still true at `5d97625`: `_pathForSend` returns an empty path for `PathMode.flood`
+  (`serial_mesh_sender.dart:412-414`) and the frame is `0x19 0x00` plus payload
+  (`:261`), which the firmware sends as a zero-hop direct.
 - The enum's own docstring says every record floods (`serial_mesh_sender.dart:26-33`).
 - The real flood carrier is dead code: `MeshCarryCodec.sendBinaryReq` (`mesh_carry.dart:150`) and `lengthPrefixedRecord` (`:171`) appear only in the codec, its tests and a vector file. `GatewayLimits.discoveryRecordMax` (`meshcore_gateway/lib/src/constants.dart:62`) appears only in the constants and one test.
 - Consequence: a user who selects flood to reach a peer two hops away gets a send that never leaves the neighbour, and the radio still answers `OK`.
 
-### 3. `sendRawData` writes a byte count where the firmware decodes an encoded value
+### 3. `sendRawData` writes a byte count where the firmware decodes an encoded value — OPEN, VERIFIED
 
-- PROVEN. The frame writes `path.length` as the length byte (`mesh_carry.dart:205-209`).
+- Still true at `5d97625`: `mesh_carry.dart:207` writes `path.length` as the length byte and
+  `:193-195` refuses a path over `0x7F`. The firmware reads that byte twice, as a byte count and as
+  the packed hop-count/hash-width field, so the two agree only at a one-byte hash.
 - The firmware reads that byte as a byte count in its bounds check (`MyMesh.cpp:1519-1521`) and as an encoded value in `Packet::writePath` (`src/Packet.cpp:20-23`), where `hash_count = path_len & 63` and `hash_size = (path_len >> 6) + 1`.
 - The two readings agree only at a one-byte path hash. At two or three bytes the packet carries the wrong path length and the wrong number of bytes.
 - `mesh_carry.dart:193` also refuses a path longer than `0x7F`, which caps a two-byte-hash path at 63 hops.
 - Consequence: the host is correct by accident at the default hash size and wrong at any other, and the failure looks like a route that never answers.
 - Upstream context, added 2026-11-04 from the field research: MeshCore v1.18.0 (released 2026-10-15) fixed this in firmware, and states that raw data over 2- and 3-byte hashes was broken before it. The radios here run `companion-v1.17.1`, so the host is wrong on this firmware regardless of what any client does, and a firmware upgrade is part of the fix.
 
-### 4. The host and the phone use different carriers for the same send
+### 4. The host and the phone use different carriers for the same send — OPEN, VERIFIED
 
-- PROVEN. The host always sends `0x19` (`serial_mesh_sender.dart:261`). The phone sends `0x41` whenever the encoded path exceeds `0x3F` (`AndroidRadioLink.kt:311-321`), with the reason written at `:124-132`.
+- Still true at `5d97625`: the host always sends `0x19` (`serial_mesh_sender.dart:261`); LDMUX's
+  phone sends `0x41` for every record (`AndroidRadioLink.kt:125-137,474-481`).
 - Consequence: the two ends of the same link exercise different firmware paths, so a defect in one is invisible from the other, and the phone's workaround documents a firmware behaviour the host still gets wrong.
 
 ### 5. The host has no reconnect logic
@@ -78,16 +93,18 @@
 - All three are correct for their own carrier, and no single document says so.
 - Consequence: a reader can take any of them as "the" limit and size a buffer wrong.
 
-### 10. Test counts disagree inside one file
+### 10. Test counts disagree inside one file — OPEN, VERIFIED
 
-- PROVEN. `README.md:8` says 1014 tests. `meshmore_sns_app/README.md:52` says 1014 and `:57` says 940.
-- `packages/meshcore_host/README.md:44` says 30 tests, and the three test files contain about 41.
+- Still true at `5d97625`: `README.md:10` says 1014, `README.md:98` says 125, `README.md:130` says
+  940, `meshmore_sns_app/README.md:40,51` say 1014 and 940, and
+  `packages/meshcore_host/README.md:38` says 30.
 
 ## S4
 
-### 11. One opcode has a constant and no encoder
+### 11. One opcode has a constant and no encoder — OPEN, VERIFIED
 
-- PROVEN. `sendChannelDatagram` (`0x3E`) is declared at `constants.dart:273` and referenced nowhere else, which makes "all 58" off by one.
+- Still true at `5d97625`: `sendChannelDatagram` (`0x3E`) is declared at `constants.dart:273` and
+  referenced nowhere else.
 
 ### 12. The firmware reference in the docs is behind the tree
 
