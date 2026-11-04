@@ -27,6 +27,10 @@ const PSK: [u8; 32] = [0x33; 32];
 struct Seen {
     /// Records the daemon handed the gateway, in order.
     records: Vec<Vec<u8>>,
+    /// The answers still owed to the daemon, one per record written. Empty means `SentDirect`,
+    /// which is what a healthy radio says. A test pushes `ErrBusy` here to refuse one record
+    /// without refusing the next.
+    answers: Vec<ldmux_mesh::SendOutcome>,
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -66,8 +70,12 @@ async fn gateway(
                         }
                         FrameType::Record => {
                             let (seq, rec) = messages::read_record(&frame).unwrap();
-                            seen.lock().unwrap().records.push(rec.to_vec());
-                            write(&mut socket, &messages::send_result(seq, ldmux_mesh::SendOutcome::SentDirect)).await;
+                            let outcome = {
+                                let mut s = seen.lock().unwrap();
+                                s.records.push(rec.to_vec());
+                                s.answers.pop().unwrap_or(ldmux_mesh::SendOutcome::SentDirect)
+                            };
+                            write(&mut socket, &messages::send_result(seq, outcome)).await;
                         }
                         _ => {}
                     }
@@ -366,4 +374,76 @@ async fn without_a_psk_downlink_records_are_dropped_visibly_as_before() {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A refusal must reach the ARQ slot of the record it names, even after the daemon's own write
+/// counter has drifted away from the ARQ's sequence numbers.
+///
+/// The old bug: the daemon numbered records with its own u8 counter, incremented for every record
+/// including pure acks, while the ARQ numbered only new data. After one ack the two disagreed, so
+/// `on_send_refused` found nothing, returned false, and the refusal silently advanced the retry
+/// ladder — the session died five refusals later for a radio that was merely busy.
+///
+/// The test forces the divergence (a pure ack goes out first), refuses the next data record, and
+/// asserts the retry follows the radio's transmit-table pace rather than a full retry interval. The
+/// two outcomes are far apart in time (350 ms against 2 s), so the assertion is about behaviour,
+/// not about a tight deadline.
+#[tokio::test]
+async fn a_refusal_names_the_arq_slot_even_after_the_counters_diverge() {
+    let w = world("refusal", 30).await;
+    wait_for("ready with a budget", &w.runtime, |r| {
+        r.snapshot().records_left == Some(30)
+    })
+    .await;
+    let key = Keypair::generate().unwrap();
+    let mut phone = phone_handshake(&w, &key, wall_ms()).await;
+    wait_for("session established", &w.runtime, |r| {
+        r.snapshot().session.state == "established"
+    })
+    .await;
+
+    // One phone-to-daemon record with nothing to send back: the ARQ now owes an ack, so the next
+    // record the daemon writes is a pure ack and its write counter moves while the ARQ's seq does
+    // not. That is the divergence the old code could not see.
+    phone.send(0, b"ping").unwrap();
+    for rec in phone.poll(0, Limits { records_left: 30, l2_slots: 8 }).unwrap() {
+        w.to_daemon.lock().unwrap().push(rec);
+    }
+    wait_for("the ack goes out", &w.runtime, |_| {
+        w.seen.lock().unwrap().records.len() == 2
+    })
+    .await;
+
+    // Refuse the next record: it never reaches the air.
+    w.seen.lock().unwrap().answers.push(ldmux_mesh::SendOutcome::ErrBusy);
+    w.runtime.send(0, b"refused once").unwrap();
+    wait_for("the record is written and refused", &w.runtime, |_| {
+        w.seen.lock().unwrap().records.len() == 3
+    })
+    .await;
+    assert!(
+        w.runtime
+            .snapshot()
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("given back")),
+        "the refusal is recorded as given back: {:?}",
+        w.runtime.snapshot().last_error
+    );
+
+    // The retry follows the transmit-table pace. Two seconds is a full retry interval; 350 ms is
+    // the pace, so anything under 1.5 s proves the refusal reached the slot.
+    let started = Instant::now();
+    wait_for("the refused record is retried quickly", &w.runtime, |_| {
+        w.seen.lock().unwrap().records.len() == 4
+    })
+    .await;
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_millis(1_500),
+        "the retry took {waited:?}: a refusal should wait about 350 ms, not a full retry interval"
+    );
+    // And the attempt was not spent: the session is still established, not failed.
+    assert_eq!(w.runtime.snapshot().session.state, "established");
+    let _ = std::fs::remove_dir_all(&w.dir);
 }
