@@ -122,19 +122,25 @@ class AndroidRadioLink(
     private var airtimeUsedMs: Double = 0.0
 
     /**
-     * A two- or three-byte path hash cannot use `CMD_SEND_RAW_DATA`:
-     * firmware 1.17.1/1.18 treats the encoded path byte as a byte count in
-     * its bounds check, so a one-hop two-byte path is rejected as too short
-     * for its own value. `CMD_SEND_RAW_PACKET` carries a complete packet and
-     * has no such ambiguity.
+     * **Every send uses `CMD_SEND_RAW_PACKET` (0x41), at every path width.**
+     *
+     * `CMD_SEND_RAW_DATA` (0x19) writes one path-length byte that the firmware reads twice with
+     * two meanings: a byte count in the bounds check (`i + path_len + 4 <= len`) and an encoded
+     * value in `Packet::writePath` (`hash_count = path_len & 63`, `hash_size = (path_len >> 6) + 1`).
+     * The two readings agree only at a one-byte hash. Firmware 1.18.0 lists the multi-byte fix,
+     * so 0x19 was broken for 2- and 3-byte hashes on every earlier build, which includes the
+     * 1.17.1 the radios here run.
+     *
+     * 0x41 carries a complete packet, so the path encoding is ours to write correctly and no
+     * firmware reading of it can disagree with us. It costs two bytes of payload, which is the
+     * whole price of removing the ambiguity instead of gating on a detected version.
      */
-    private val useRawPacket: Boolean
-        get() = (hostPath?.encoded ?: 0) > 0x3F
-
     private val carrierPayloadMax: Int
         get() {
             val path = hostPath ?: RadioPath(0, ByteArray(0))
-            return if (path.encoded > 0x3F) 172 - path.bytes.size else 174 - path.bytes.size
+            // 176-byte companion frame, minus the opcode and priority byte, minus the packet
+            // header and its path-length byte, minus the path itself.
+            return 172 - path.bytes.size
         }
 
     override val uplinkRecordMax: Int
@@ -309,17 +315,12 @@ class AndroidRadioLink(
         if (!s.isIdle()) return RadioSendResult.Failed
         // One immutable path read for this send, including the packet build.
         val path = hostPath ?: RadioPath(0, ByteArray(0))
-        val rawPacket = path.encoded > 0x3F
         val answer = CompletableDeferred<RadioSendResult>()
         val callback = RawSendCallback { ok, errorCode ->
             answer.complete(if (ok) RadioSendResult.Accepted else errorFor(errorCode))
         }
         val queued = try {
-            if (rawPacket) {
-                s.sendRawPacket(0, rawPacketFor(path, record), callback)
-            } else {
-                s.sendRawData(path.encoded, path.bytes, record, callback)
-            }
+            s.sendRawPacket(0, rawPacketFor(path, record), callback)
         } catch (e: Exception) {
             false
         }
@@ -503,15 +504,28 @@ class AndroidRadioLink(
         return context.checkSelfPermission(Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun errorFor(code: Int): RadioSendResult = when (code) {
-        2 -> RadioSendResult.NotFound
-        3, 4 -> RadioSendResult.Busy
-        6 -> RadioSendResult.TooLong
-        1 -> {
-            _state.value = MeshLinkState.SessionFailed
-            RadioSendResult.Failed
+    /**
+     * The firmware's own error codes, each named for what it means.
+     *
+     * 1 unsupported, 2 not found, 3 table full, 4 bad state, 5 file I/O, 6 illegal argument.
+     * The old mapping folded 4 into "busy", so a radio in the wrong state reported backpressure,
+     * and 6 into "too long", so a refused argument reported a size. The code is logged either
+     * way, because the outcome is a category and the number is the fact.
+     */
+    private fun errorFor(code: Int): RadioSendResult {
+        appLog("radio refused a raw send: err $code")
+        return when (code) {
+            2 -> RadioSendResult.NotFound
+            3 -> RadioSendResult.Busy
+            4 -> RadioSendResult.Failed
+            5 -> RadioSendResult.Failed
+            6 -> RadioSendResult.TooLong
+            1 -> {
+                _state.value = MeshLinkState.SessionFailed
+                RadioSendResult.Failed
+            }
+            else -> RadioSendResult.Failed
         }
-        else -> RadioSendResult.Failed
     }
 
     private fun SelfInfo.toRadioSelfInfo() = RadioSelfInfo(
@@ -577,7 +591,14 @@ private object RadioLinks {
 
     @Synchronized
     fun release(link: AndroidRadioLink) {
-        val address = entries.entries.firstOrNull { it.value.link === link }?.key ?: return
+        val address = entries.entries.firstOrNull { it.value.link === link }?.key
+        if (address == null) {
+            // **A link outside the registry still has to close.** An empty radio address means
+            // "no radio yet", and that link is constructed directly rather than acquired, so
+            // returning here left its transport open for the life of the process.
+            link.closeNow()
+            return
+        }
         val entry = entries[address] ?: return
         entry.refs--
         if (entry.refs <= 0) {

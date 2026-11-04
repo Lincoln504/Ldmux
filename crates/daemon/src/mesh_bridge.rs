@@ -3,14 +3,16 @@
 //!
 //! It reads **the keeper's grid** (the `snapshot` RPC, never raw PTY bytes), sends the phone
 //! plain-text rows and then only the rows that changed, and writes the phone's `Input` to the
-//! shell. It holds no socket and no clock of its own: [`Link`] is the session (the runtime in
-//! [`crate::mesh`]) and [`Host`] is the daemon, so every rule here is testable without either.
+//! shell. It holds no socket: [`Link`] is the session (the runtime in [`crate::mesh`]) and
+//! [`Host`] is the daemon, so every rule here is testable without either. Its only clock is a
+//! field a test can move.
 //!
 //! Rules that matter:
 //!
-//! - **One update in flight.** A screen is read and diffed only when the session has nothing
-//!   queued. On a link that carries a record a minute, that yields fewer, newer updates; it
-//!   never builds a queue of stale ones, and a phone that was away converges by one diff.
+//! - **Keep the pipe full, never build a backlog.** A screen is read and diffed while the window
+//!   has room, so an echo does not wait for the previous record's ack; the bound is the session's
+//!   own window ([`PENDING_LIMIT`]), past which the queue would only grow. An earlier design sent
+//!   one update at a time and measured 16 s from keystroke to echo.
 //! - **A failed send resets the diff.** If any message of an update cannot be queued, the
 //!   differ forgets what the phone holds, so the next update is a full screen. The phone is
 //!   never left holding half of a change the host believes it delivered.
@@ -38,6 +40,15 @@ pub trait Link {
     fn pending(&self) -> usize;
     fn send(&self, shell: u8, bytes: &[u8]) -> Result<(), String>;
     fn take_inbound(&self) -> Vec<(u8, Vec<u8>)>;
+    /// A handle that resolves when records may be waiting to be taken.
+    ///
+    /// Without one the timer alone decides when a keystroke is noticed, so the idle cadence is a
+    /// direct delay on every inbound record. With one, the wait is "until a record arrives **or**
+    /// the timer expires", and the timer can be long without costing interactivity. `None` keeps
+    /// the timer-only behaviour, which is what the test link wants.
+    fn incoming(&self) -> Option<Arc<tokio::sync::Notify>> {
+        None
+    }
 }
 
 /// The daemon as the bridge sees it.
@@ -94,6 +105,9 @@ impl Link for crate::mesh::MeshRuntime {
     }
     fn take_inbound(&self) -> Vec<(u8, Vec<u8>)> {
         Self::take_inbound(self)
+    }
+    fn incoming(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(Arc::clone(&self.inbound_wake))
     }
 }
 
@@ -187,6 +201,8 @@ pub struct Bridge<H, L> {
     /// window that belongs to output it never saw.
     stalled: bool,
     pub stats: BridgeStats,
+    /// Consecutive ticks that changed nothing. Drives [Bridge::interval_ms].
+    quiet_ticks: u32,
     /// The pacing clock, a field rather than `Instant::now()` at the call site so a test can
     /// move time without sleeping.
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
@@ -209,6 +225,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             generation: 0,
             stalled: false,
             stats: BridgeStats::default(),
+            quiet_ticks: 0,
             clock: Arc::new(Instant::now),
         }
     }
@@ -283,8 +300,35 @@ impl<H: Host, L: Link> Bridge<H, L> {
         ok
     }
 
-    /// One pass: take what the phone sent, then push what changed on screen.
+    /// How long to wait before the next pass.
+    ///
+    /// **Every pass costs one host round trip per attached shell**, and `DaemonHost::screen`
+    /// takes the daemon-wide mutex across an await. At a fixed 50 ms that is twenty global-lock
+    /// acquisitions per second per shell, paid whether or not the screen moved. A pass that
+    /// changed nothing therefore earns a longer wait, and the first thing that changes puts the
+    /// cadence back to the interactive one on the following tick.
+    #[must_use]
+    pub fn interval_ms(&self) -> u64 {
+        if self.quiet_ticks < QUIET_AFTER_TICKS {
+            TICK_MS
+        } else {
+            QUIET_TICK_MS
+        }
+    }
+
+    /// One pass, counting whether it changed anything.
     pub async fn tick(&mut self) {
+        let before = work(&self.stats);
+        self.tick_once().await;
+        if work(&self.stats) == before {
+            self.quiet_ticks = self.quiet_ticks.saturating_add(1);
+        } else {
+            self.quiet_ticks = 0;
+        }
+    }
+
+    /// One pass: take what the phone sent, then push what changed on screen.
+    async fn tick_once(&mut self) {
         if !self.link.established() {
             self.drop_all().await;
             return;
@@ -738,6 +782,31 @@ impl Host for DaemonHost {
 /// bound does not care: an update waits for an empty queue regardless.
 pub const TICK_MS: u64 = 50;
 
+/// The wait after a pass that changed nothing. A moved screen resets the cadence to
+/// [`TICK_MS`] on the next tick, so interactive work is never paced by this.
+///
+/// Three times the structural cost removed for a first-keystroke echo delayed by at most 150 ms
+/// instead of 50, measured from the moment the bridge notices the input rather than from the
+/// keystroke, which is what the phone already waits for.
+pub const QUIET_TICK_MS: u64 = 150;
+
+/// Passes with no change before the cadence relaxes. At 50 ms this is 400 ms of quiet, which is
+/// longer than one keystroke interval, so typing keeps the interactive cadence throughout.
+pub const QUIET_AFTER_TICKS: u32 = 8;
+
+/// Everything a pass can bump. Any of them moving means the pass did work.
+fn work(stats: &BridgeStats) -> u64 {
+    u64::from(stats.updates)
+        + u64::from(stats.messages_sent)
+        + u64::from(stats.records_sent)
+        + u64::from(stats.inputs)
+        + u64::from(stats.keys)
+        + u64::from(stats.resizes)
+        + u64::from(stats.malformed)
+        + u64::from(stats.refused_sends)
+        + u64::from(stats.host_unanswered)
+}
+
 /// How many unacked records may be in flight before the bridge stops looking at the screen. It is
 /// the session's own window, so the queue can never grow past what the link can carry.
 pub const PENDING_LIMIT: usize = 8;
@@ -752,12 +821,29 @@ pub const PENDING_LIMIT: usize = 8;
 /// staleness: nothing coalesced waits longer than this.
 pub const BURST_GAP: Duration = Duration::from_millis(1000);
 
+/// Wait until either the link has something to say or the cadence expires.
+///
+/// **The timer is the fallback, not the mechanism.** A record the phone sent wakes the bridge the
+/// moment the session queues it, so the cadence only decides how soon a *screen* change is noticed.
+/// That is what lets the idle cadence be long without putting its length on the path of a
+/// keystroke, which is the one latency the user feels directly.
+async fn wait_for_work<H: Host, L: Link>(bridge: &Bridge<H, L>) {
+    let ms = bridge.interval_ms();
+    match bridge.link.incoming() {
+        Some(wake) => {
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
+                () = wake.notified() => {}
+            }
+        }
+        None => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+    }
+}
+
 /// Run the bridge for the life of the process.
 pub async fn run<H: Host, L: Link>(mut bridge: Bridge<H, L>) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        interval.tick().await;
+        wait_for_work(&bridge).await;
         bridge.tick().await;
     }
 }
@@ -770,10 +856,8 @@ pub async fn run_publishing<H: Host, L: Link>(
     mut bridge: Bridge<H, L>,
     publish: impl Fn(BridgeStats),
 ) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(TICK_MS));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        interval.tick().await;
+        wait_for_work(&bridge).await;
         bridge.tick().await;
         publish(bridge.stats());
     }
@@ -1826,5 +1910,35 @@ mod tests {
         link.0.lock().unwrap().established = false;
         b.tick().await;
         assert!(!b.attached(1));
+    }
+    /// The cadence relaxes only after a pass that changed nothing, and the next thing that
+    /// changes puts it back. On an idle link this removes two of every three host round trips
+    /// without pacing interactive work: an inbound record wakes the bridge on its own.
+    #[tokio::test]
+    async fn a_quiet_link_relaxes_the_cadence_and_work_restores_it() {
+        let (mut b, _host, link) = setup();
+        assert_eq!(b.interval_ms(), TICK_MS);
+        b.quiet_ticks = QUIET_AFTER_TICKS;
+        assert_eq!(b.interval_ms(), QUIET_TICK_MS);
+        // A tick that delivers something resets the counter, which restores the fast cadence.
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        assert_eq!(b.quiet_ticks, 0);
+        assert_eq!(b.interval_ms(), TICK_MS);
+    }
+
+    /// A pass with nothing to do must not reset the counter, or the cadence could never relax.
+    #[tokio::test]
+    async fn an_empty_pass_counts_as_quiet() {
+        let (mut b, _host, _link) = setup();
+        b.tick().await;
+        assert_eq!(b.quiet_ticks, 1);
     }
 }

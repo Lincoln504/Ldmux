@@ -210,6 +210,21 @@ Both are computed with the formula above (`radio-config` in MeshMore carries the
 same 613 ms). The 36 s budget is the EU868 equivalent. On US915 no duty cycle
 applies, so it is a courtesy bound, not a legal one.
 
+**Correction 2026-11-04.** LDMUX does not run either 62.5 kHz row. The deployed
+pair was configured to **914.25 MHz / 500 kHz / SF8 / CR5 / 22 dBm** and read back
+on the device (`MESH-STANDALONE.md:415`, `HARDWARE-VALIDATION.md:783`). A 176 B
+packet on that tuple is **138 ms**, which at 36 s per hour is **261 records per
+hour**:
+
+| Deployed LDMUX preset | ms/packet | Records/hour at 36 s | A 6-record operation |
+|---|---|---|---|
+| 914.25 / 500 kHz / SF8 / CR5 | 138 | 261 | about 43 per hour |
+
+So the 62.5 kHz rows describe the public MeshCore presets, which this link cannot
+reach because the bandwidth differs, and the budget conclusion below is right in
+direction and about four times high in magnitude: 261 records an hour, not 58.7.
+A command with a 5-record reply affords about 43 of them an hour, not 10.
+
 The last row decides the profile. On MeshCore's longest-range preset, a whole
 hour of duty-cycle budget buys **under five packets**, and one terminal snapshot
 would cost three hours of it. There is therefore no point in a budget override:
@@ -255,9 +270,16 @@ terminal".
 | **USA/Canada SF7/62.5 kHz (deployed)** | 58.7 | 6 records | **about 10/hour** |
 | **EU/UK Narrow SF8/62.5 kHz CR8 (deployed)** | 21.7 | 6 records | **about 3.6/hour** |
 
-On the preset a North American deployment actually uses, the budget affords about
-ten command-and-reply operations an hour. The mesh profile is a **low-rate command
+On the 62.5 kHz preset a public North American deployment uses, the budget affords
+about ten command-and-reply operations an hour. The mesh profile is a **low-rate
+command
 channel**: send a command, receive the last lines of its output, minutes later.
+
+**Corrected 2026-11-04 for the deployed link.** The pair runs 914.25 / 500 kHz /
+SF8 / CR5, where a record is 138 ms and the 36 s budget buys 261 records an hour.
+A command with a 5-record reply therefore affords about 43 an hour, and the
+"minutes later" above is a property of the narrow public preset, not of this
+link.
 
 This agrees with what this repository already concluded. The `mesh` column in
 [`MESH-TRANSPORT.md`](MESH-TRANSPORT.md) is "plain lines", "one uplink per

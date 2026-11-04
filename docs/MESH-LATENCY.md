@@ -12,6 +12,12 @@ implemented. Numbers are either measured on this project or attributed to a sour
    frame at SF10 is roughly 1.8 s and at SF11 roughly 3.5 s (time-on-air arithmetic, not a
    measurement). Record size therefore dominates everything the protocol can do: one screen
    update is one record, and a record that does not fit waits for the next one.
+
+   **Corrected 2026-11-04.** This link does not run a 62.5 kHz preset. The pair was configured
+   to 914.25 MHz / 500 kHz / SF8 / CR5 and read back on the device (`MESH-STANDALONE.md:415`),
+   where the same 176-byte packet is **138 ms**, so 36 s per hour buys **261 records**, not 58.
+   The 62.5 kHz figures describe the public MeshCore presets, which this link cannot reach
+   because the bandwidth differs.
 2. **The companion BLE link.** MeshCore's ESP32 firmware declares its RX characteristic as
    write-with-response only and spaces TX notifications by 60 ms, so the radio emits at most
    about 16 notifications a second. With a 172-byte frame ceiling that is a hard ~2.4

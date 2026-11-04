@@ -261,6 +261,9 @@ pub struct Arq {
     ack_owed_since: Option<u64>,
     /// When something was last sent, for the heartbeat. `None` before the first record.
     last_sent_at: Option<u64>,
+    /// Smoothed round-trip estimate, in milliseconds, from first-transmission acks only.
+    /// `None` until an ack has taught one.
+    srtt_ms: Option<u64>,
     /// The next per-record mark. Bumped for every record emitted, so no two are identical.
     next_mark: u8,
     close_wanted: bool,
@@ -284,6 +287,7 @@ impl Arq {
             held: vec![None; usize::from(MAX_WINDOW)],
             ack_owed_since: None,
             last_sent_at: None,
+            srtt_ms: None,
             next_mark: 0,
             close_wanted: false,
             close_sent: false,
@@ -306,6 +310,13 @@ impl Arq {
     #[must_use]
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// The smoothed round trip, once an ack has taught one. For `mesh timing` lines and tests,
+    /// never for control flow.
+    #[must_use]
+    pub fn smoothed_rtt_ms(&self) -> Option<u64> {
+        self.srtt_ms
     }
 
     /// Chunks queued plus records in flight.
@@ -353,7 +364,7 @@ impl Arq {
             self.peer_closed = true;
             return out;
         }
-        self.apply_ack(inc.ack);
+        self.apply_ack(inc.ack, now_ms);
         if inc.kind != Kind::Data {
             return out;
         }
@@ -393,23 +404,73 @@ impl Arq {
         });
     }
 
-    fn apply_ack(&mut self, ack: u16) {
+    /// Apply one cumulative ack and learn from it.
+    ///
+    /// **A round-trip sample is taken only from a first transmission.** A retransmitted slot
+    /// cannot say which of its transmissions was acknowledged (Karn's rule), so it teaches the
+    /// estimator nothing and is skipped.
+    ///
+    /// The estimate matters because a fixed first timeout is wrong in both directions on a mesh:
+    /// at 500 kHz SF8 a record is about 138 ms on air, and the firmware's own direct timeout is
+    /// `500 + ((airtime * 6 + 250) * (hops + 1))`, so two hops take 3.7 s and three hops 4.8 s,
+    /// while a direct neighbour answers in well under a second.
+    fn apply_ack(&mut self, ack: u16, now_ms: u64) {
         let base = self.inflight.front().map_or(self.next_seq, |s| s.seq);
         let acked = ack.wrapping_sub(base);
         if usize::from(acked) > self.inflight.len() || acked >= 0x8000 {
             self.stats.bad_acks += 1;
             return;
         }
+        if acked > 0 {
+            let sample = self
+                .inflight
+                .front()
+                .filter(|s| s.attempts == 1)
+                .map(|s| now_ms.saturating_sub(s.sent_at));
+            if let Some(sample) = sample {
+                self.srtt_ms = Some(match self.srtt_ms {
+                    None => sample,
+                    // 1/8 weight, the same smoothing TCP gives its RTT estimate.
+                    Some(srtt) => (srtt.saturating_mul(7) + sample) / 8,
+                });
+            }
+        }
         for _ in 0..acked {
             self.inflight.pop_front();
         }
     }
 
+    /// The radio refused a record without transmitting it.
+    ///
+    /// A refusal is `busy`, `not found` or `too long`: the packet never reached the air, so it is
+    /// **not** a transmission attempt. Counting it as one used to fail the session after five
+    /// refusals, and a refusal is exactly what a radio that has spent its hourly budget sends —
+    /// so a full budget killed the session and forced a handshake it did not need.
+    ///
+    /// The slot's timer restarts from the refusal rather than firing immediately: the radio has
+    /// just said no, and asking again in the same breath is how a retry loop turns into a flood.
+    /// The next try is one full retry interval away, so the attempt ladder only advances when a
+    /// packet really went out and really went unanswered.
+    ///
+    /// Returns `true` when a slot with that sequence number was in flight.
+    pub fn on_refused(&mut self, seq: u16, now_ms: u64) -> bool {
+        let Some(slot) = self.inflight.iter_mut().find(|s| s.seq == seq) else {
+            return false;
+        };
+        slot.attempts = slot.attempts.saturating_sub(1).max(1);
+        slot.sent_at = now_ms;
+        true
+    }
+
+    /// The retry interval for a slot that has been sent `attempts` times.
+    ///
+    /// The floor is the larger of the configured first timeout and the measured round trip, so a
+    /// path that really takes 3.7 s is not retried at 2 s, which used to put one duplicate
+    /// record on the air per expiry. The doubling across attempts is unchanged.
     fn rto(&self, attempts: u8) -> u64 {
+        let base = self.cfg.rto_initial_ms.max(self.srtt_ms.unwrap_or(0));
         let shift = u32::from(attempts.saturating_sub(1)).min(20);
-        self.cfg
-            .rto_initial_ms
-            .saturating_mul(1u64 << shift)
+        base.saturating_mul(1u64 << shift)
             .min(self.cfg.rto_max_ms)
     }
 
@@ -421,8 +482,12 @@ impl Arq {
             .front()
             .map(|s| s.sent_at + self.rto(s.attempts));
         let ack = self.ack_owed_since.map(|t| t + self.cfg.ack_delay_ms);
+        // `heartbeat_ms == 0` means never, which `poll` already honours. Without the guard here
+        // the deadline resolved to `last_sent_at`, an instant in the past, so the caller's wait
+        // was zero after the first record and the session loop spun at full CPU forever.
         let beat = self
             .last_sent_at
+            .filter(|_| self.cfg.heartbeat_ms > 0)
             .map(|t| t.saturating_add(self.cfg.heartbeat_ms));
         let (retx, ack) = match (retx, ack) {
             (Some(a), Some(b)) => (Some(a.min(b)), None),

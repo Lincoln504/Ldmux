@@ -232,4 +232,19 @@ mod tests {
         assert_eq!(w.check(1), Err(RecordError::TooOld));
         assert_eq!(w.check(499), Ok(()));
     }
+    /// Some firmware forks classify a raw-custom packet as media by its first byte alone and
+    /// route `0x56`, `0x57`, `0x72` and `0x53` to a second frequency most nodes do not listen on.
+    /// The radio still answers `OK`, so a collision would look like a peer that never replies.
+    ///
+    /// Every LDMUX record starts with [KIND_TRANSPORT] (`encode`), so no LDMUX record can match
+    /// that heuristic. This test is what keeps a future record kind from quietly joining the set.
+    #[test]
+    fn the_record_kind_cannot_be_mistaken_for_a_media_packet() {
+        for routed_away in [0x53u8, 0x56, 0x57, 0x72] {
+            assert_ne!(
+                KIND_TRANSPORT, routed_away,
+                "a record beginning {routed_away:#04x} would be routed to the second radio profile"
+            );
+        }
+    }
 }

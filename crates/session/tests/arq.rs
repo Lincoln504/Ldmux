@@ -487,3 +487,110 @@ fn two_heartbeats_are_different_packets() {
     assert_eq!(one.ack, two.ack, "the same receive state");
     assert_ne!(one.app_bytes(), two.app_bytes(), "but not the same packet");
 }
+
+/// A path that genuinely takes longer than the configured first timeout must not be retried at
+/// that timeout. Two hops at 500 kHz SF8 answer in about 3.7 s, which is above the 1 s this
+/// config starts with, and the old code put a duplicate record on the air for every expiry.
+#[test]
+fn a_slow_ack_raises_the_retry_floor_to_the_measured_round_trip() {
+    // No heartbeat, so the deadline under test is the retry and not a 3 s beat.
+    let mut a = Arq::new(Config {
+        heartbeat_ms: 0,
+        ..cfg()
+    });
+    a.send(1, b"hello").unwrap();
+    assert_eq!(a.poll(0, PLENTY).len(), 1);
+    let ack = Incoming {
+        kind: Kind::Ack,
+        seq: 0,
+        ack: 1,
+        shell: 0,
+        mark: 0,
+        payload: Vec::new(),
+    };
+    a.on_incoming(3_700, &ack);
+    assert_eq!(a.smoothed_rtt_ms(), Some(3_700));
+    a.send(1, b"again").unwrap();
+    assert_eq!(a.poll(3_700, PLENTY).len(), 1);
+    assert_eq!(
+        a.next_deadline(),
+        Some(3_700 + 3_700),
+        "the retry waits one measured round trip, not the configured 1 s"
+    );
+}
+
+/// Karn's rule: a retransmitted slot cannot say which transmission was acknowledged, so it must
+/// teach the estimator nothing. Otherwise a timeout's own delay is folded in as round-trip time
+/// and the estimate drifts upward forever.
+#[test]
+fn a_retransmission_teaches_no_round_trip_sample() {
+    let mut a = Arq::new(cfg());
+    a.send(1, b"lost").unwrap();
+    assert_eq!(a.poll(0, PLENTY).len(), 1);
+    assert!(a.poll(1_000, PLENTY).pop().unwrap().retransmit);
+    let ack = Incoming {
+        kind: Kind::Ack,
+        seq: 0,
+        ack: 1,
+        shell: 0,
+        mark: 0,
+        payload: Vec::new(),
+    };
+    a.on_incoming(2_000, &ack);
+    assert_eq!(a.smoothed_rtt_ms(), None);
+}
+
+/// `heartbeat_ms: 0` means "never", and the default config uses it. The deadline must then be
+/// the retry time, not `last_sent_at`: the daemon sleeps for `deadline - now`, so a past
+/// deadline makes the session loop spin with no work to do.
+#[test]
+fn a_disabled_heartbeat_does_not_make_the_deadline_due_now() {
+    let mut a = Arq::new(Config {
+        heartbeat_ms: 0,
+        ..cfg()
+    });
+    a.send(0, b"x").unwrap();
+    assert_eq!(a.poll(0, PLENTY).len(), 1);
+    assert_eq!(a.next_deadline(), Some(1_000), "one first timeout, not zero");
+}
+
+/// A refusal never reached the air, so it must not count against the retry ladder. A radio that
+/// has spent its hourly budget refuses every send; counting those as attempts ended the session
+/// after five, and a session end costs a handshake that the budget also has to pay for.
+#[test]
+fn a_refused_record_gets_its_attempt_back_and_waits_a_full_interval() {
+    let mut a = Arq::new(cfg());
+    a.send(0, b"hello").unwrap();
+    let first = a.poll(0, PLENTY);
+    assert_eq!(first.len(), 1);
+    let seq = first[0].seq;
+
+    // The radio says no. The slot must keep its single attempt and restart its timer.
+    assert!(a.on_refused(seq, 10));
+    assert_eq!(a.poll(10, PLENTY).len(), 0, "not due straight after a refusal");
+    assert_eq!(a.failure(), None);
+
+    // Four refusals in a row would have exhausted `max_attempts` before this rule existed.
+    for t in [20, 30, 40, 50] {
+        assert!(a.on_refused(seq, t));
+    }
+    assert_eq!(a.failure(), None, "refusals are not transmissions");
+
+    // One full interval after the last refusal, the retry goes out as attempt 2.
+    let again = a.poll(50 + 1_000, PLENTY);
+    assert_eq!(again.len(), 1);
+    assert!(again[0].retransmit);
+    assert_eq!(again[0].seq, seq);
+}
+
+/// An answer for a sequence number that is not in flight is ignored, not mis-applied to the
+/// oldest slot. The daemon keys its credit accounting on the same number.
+#[test]
+fn a_refusal_for_an_unknown_sequence_does_nothing() {
+    let mut a = Arq::new(cfg());
+    a.send(0, b"hello").unwrap();
+    let _ = a.poll(0, PLENTY);
+    assert!(!a.on_refused(999, 10));
+    // The real slot is still due at its own interval, not immediately.
+    assert_eq!(a.poll(10, PLENTY).len(), 0);
+}

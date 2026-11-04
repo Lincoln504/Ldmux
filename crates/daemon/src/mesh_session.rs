@@ -275,6 +275,17 @@ impl SessionHost {
         out
     }
 
+    /// The radio refused a record without transmitting it.
+    ///
+    /// Routed to the ARQ so the refusal gives its attempt back: a packet that never reached the
+    /// air is not a transmission, and the retry ladder must not advance over one. Returns `true`
+    /// when that sequence number was in flight.
+    pub fn on_send_refused(&mut self, now_ms: u64, seq: u8) -> bool {
+        self.session
+            .as_mut()
+            .is_some_and(|s| s.arq_mut().on_refused(u16::from(seq), now_ms))
+    }
+
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
         self.session.as_ref().and_then(|s| s.arq().next_deadline())

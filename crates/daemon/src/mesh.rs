@@ -34,6 +34,26 @@ use ldmux_mesh::constants::{CAP_STATUS_PUSH, CREDIT_WINDOW, FrameType, RadioStat
 
 /// The longest this loop will sleep with a session attached. See the comment at the wait.
 const MAX_IDLE_WAIT: Duration = Duration::from_millis(50);
+
+/// How long a record may wait for its `SEND_RESULT` before it stops counting against the credit
+/// window.
+///
+/// The radio answers immediately after it queues a packet, so this is a link deadline and not an
+/// airtime estimate. Ten seconds matches the phone's own raw-send timeout. Before this, a lost
+/// `SEND_RESULT` held its slot for the life of the process: the window shrank by one per loss and
+/// the bridge stopped sending entirely once it reached zero, with nothing but a restart to
+/// recover it.
+const AWAITING_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long a budget of zero may block new records before one is sent to test it.
+///
+/// `STATUS` arrives with every send result, so a live link keeps its budget current. The gap is
+/// the idle case: a budget that reached zero just before the hour rolled over stays zero, nothing
+/// is sent, no send result arrives, and so no fresh `STATUS` ever comes — the link would stay
+/// silent until something reconnected. A refusal costs no airtime (the radio's governor refuses
+/// before transmitting), and it brings a `STATUS` with the real number, so one probe a minute is
+/// the cheapest way out of that dead end.
+const BUDGET_PROBE: Duration = Duration::from_secs(60);
 use ldmux_mesh::frame::MeshError;
 use ldmux_mesh::messages;
 use ldmux_session::arq::Limits;
@@ -369,6 +389,14 @@ pub struct MeshRuntime {
     snapshot: Arc<Mutex<MeshSnapshot>>,
     exchange: Arc<Mutex<Exchange>>,
     wake: Arc<Notify>,
+    /// Resolves when a downlink record has been queued for the bridge.
+    ///
+    /// Separate from [`Self::wake`] because the two directions have different waiters: `wake`
+    /// tells the session loop that the daemon queued an uplink record, and this tells the bridge
+    /// that the session loop queued a downlink one. Sharing one handle would make each waiter
+    /// wake for the other's traffic — and would let a permit meant for one be consumed by the
+    /// other, which is a lost wakeup in the direction that did not get it.
+    pub(crate) inbound_wake: Arc<Notify>,
 }
 
 static GLOBAL: OnceLock<MeshRuntime> = OnceLock::new();
@@ -401,6 +429,7 @@ impl MeshRuntime {
             snapshot: Arc::clone(&snapshot),
             exchange: Arc::new(Mutex::new(Exchange::default())),
             wake: Arc::new(Notify::new()),
+            inbound_wake: Arc::new(Notify::new()),
         };
         tokio::spawn(supervise(cfg, session, runtime.clone()));
         runtime
@@ -552,7 +581,11 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
             s.state = "connecting";
             s.last_error = None;
         });
-        match session(&cfg, &runtime, setup.as_mut()).await {
+        // Whether this attempt ever completed a handshake. Only a handshake says the gateway is
+        // healthy, and only then does the backoff go back to its floor: before this, one outage
+        // left every later reconnect waiting the full 30 s cap for the life of the process.
+        let bound = Arc::new(AtomicBool::new(false));
+        match session(&cfg, &runtime, setup.as_mut(), Arc::clone(&bound)).await {
             Ok(()) => {
                 set(&snapshot, |s| {
                     s.state = "down";
@@ -575,9 +608,13 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
                 s.session.state = "waiting";
             }
         });
+        if bound.load(Ordering::SeqCst) {
+            backoff = Duration::from_secs(1);
+        }
         tokio::time::sleep(backoff).await;
         // Capped: a radio that is off for an hour should not be dialled every
-        // second, and a gateway that comes back should be noticed quickly.
+        // second, and a gateway that comes back is noticed on the next 1 s attempt because the
+        // reset above ran for this connection.
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -599,6 +636,7 @@ async fn session(
     cfg: &MeshConfig,
     runtime: &MeshRuntime,
     setup: Option<&mut SessionSetup>,
+    bound: Arc<AtomicBool>,
 ) -> Result<(), MeshError> {
     let snapshot = &runtime.snapshot;
     let mut client = MeshClient::connect(&cfg.addr).await?;
@@ -606,6 +644,7 @@ async fn session(
     let handshake = client
         .handshake(&cfg.token, &cfg.peer, CAP_STATUS_PUSH)
         .await?;
+    bound.store(true, Ordering::SeqCst);
     set(snapshot, |s| {
         s.state = "ready";
         s.uplink_record_max = Some(handshake.bind.uplink_record_max);
@@ -629,8 +668,12 @@ async fn session(
     // latency — 76 748 ms on one run. Anything two probes are compared against comes from here.
     let started = runtime_start();
     let mut budget: Option<u8> = None;
-    let mut awaiting: u8 = 0;
+    // One entry per record written and not yet answered, keyed by its L2 sequence number.
+    // `SEND_RESULT` echoes that number, so an answer can be matched to its record: a late answer
+    // for an expired slot must not decrement a live one. Bounded by `CREDIT_WINDOW`.
+    let mut awaiting: VecDeque<(u8, Instant)> = VecDeque::new();
     let mut seq: u8 = 0;
+    let mut last_status_at = Instant::now();
 
     loop {
         if runtime.reset_pin.swap(false, Ordering::SeqCst)
@@ -674,6 +717,7 @@ async fn session(
                 match frame.kind {
                     FrameType::Status => {
                         let status = messages::read_status(&frame)?;
+                        last_status_at = Instant::now();
                         if status.ops_left_this_hour.is_some() {
                             budget = status.ops_left_this_hour;
                         }
@@ -703,12 +747,38 @@ async fn session(
                         }
                     }
                     FrameType::SendResult => {
-                        awaiting = awaiting.saturating_sub(1);
                         let result = messages::read_send_result(&frame)?;
-                        if result.outcome == SendOutcome::ErrBusy {
-                            set(snapshot, |s| {
-                                s.last_error = Some("the radio refused a record (busy)".to_owned());
-                            });
+                        // Match the answer to its record. An answer whose slot already expired
+                        // (or a duplicate answer) removes nothing: the record it names is gone.
+                        if let Some(i) = awaiting.iter().position(|(s, _)| *s == result.seq) {
+                            awaiting.remove(i);
+                        }
+                        match result.outcome {
+                            SendOutcome::ErrBusy => set(snapshot, |s| {
+                                s.last_error = Some(format!(
+                                    "the radio refused record {} (busy); its retry was given back",
+                                    result.seq
+                                ));
+                            }),
+                            SendOutcome::ErrNotFound | SendOutcome::ErrTooLong => set(snapshot, |s| {
+                                s.last_error = Some(format!(
+                                    "the radio refused record {} ({:?})",
+                                    result.seq, result.outcome
+                                ));
+                            }),
+                            _ => {}
+                        }
+                        // A refusal never reached the air, so it must not count against the retry
+                        // ladder: five refusals used to end the session over a budget that refills.
+                        if matches!(
+                            result.outcome,
+                            SendOutcome::ErrBusy | SendOutcome::ErrNotFound | SendOutcome::ErrTooLong
+                        ) && let Some(h) = host.as_mut()
+                        {
+                            h.on_send_refused(
+                                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                                result.seq,
+                            );
                         }
                     }
                     FrameType::Close => {
@@ -725,6 +795,24 @@ async fn session(
 
         let Some(h) = host.as_mut() else { continue };
         let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // **Credit that was never answered expires.** A `SEND_RESULT` that never arrives used to
+        // hold its slot forever, so a handful of lost answers closed the window permanently.
+        let now = Instant::now();
+        let stale = awaiting
+            .iter()
+            .take_while(|(_, at)| now.saturating_duration_since(*at) >= AWAITING_DEADLINE)
+            .count();
+        if stale > 0 {
+            for _ in 0..stale {
+                awaiting.pop_front();
+            }
+            set(snapshot, |s| {
+                s.last_error = Some(format!(
+                    "{stale} record(s) never got a send result; their credit slots were released"
+                ));
+            });
+        }
 
         // Application bytes queued by the daemon go into the ARQ; a refusal is shown, not hidden.
         let queued: Vec<(u8, Vec<u8>)> = runtime
@@ -750,9 +838,17 @@ async fn session(
 
         // The budget is the gateway's own number. Unknown means zero: a gateway that has not
         // said how much airtime is left has not allowed anything.
+        //
+        // A zero that has blocked us for a minute is tested, because a zero is a number from the
+        // last `STATUS` and the hour may have rolled over while the link was idle. See
+        // [`BUDGET_PROBE`]: the probe is refused without airtime if the budget really is spent.
+        let used = u8::try_from(awaiting.len()).unwrap_or(u8::MAX);
+        let probe = budget == Some(0)
+            && h.wants_poll()
+            && now.saturating_duration_since(last_status_at) >= BUDGET_PROBE;
         let limits = Limits {
-            records_left: budget.unwrap_or(0),
-            l2_slots: CREDIT_WINDOW.saturating_sub(awaiting),
+            records_left: if probe { 1 } else { budget.unwrap_or(0) },
+            l2_slots: CREDIT_WINDOW.saturating_sub(used),
         };
         let t_poll = std::time::Instant::now();
         let polled = h.poll(now_ms, limits);
@@ -763,10 +859,10 @@ async fn session(
         }
         if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && queued_n > 0 {
             eprintln!(
-                "ldmuxd: mesh timing: queued {} -> polled {} at {now_ms} ms (awaiting {awaiting}, budget {budget:?}, l2_slots {})",
+                "ldmuxd: mesh timing: queued {} -> polled {} at {now_ms} ms (awaiting {used}, budget {budget:?}, l2_slots {})",
                 queued_n,
                 polled.len(),
-                CREDIT_WINDOW.saturating_sub(awaiting),
+                CREDIT_WINDOW.saturating_sub(used),
             );
         }
         let sent_now = polled.len();
@@ -778,8 +874,8 @@ async fn session(
             if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && took > 50 {
                 eprintln!("ldmuxd: mesh timing: socket write took {took} ms");
             }
+            awaiting.push_back((seq, Instant::now()));
             seq = seq.wrapping_add(1);
-            awaiting = awaiting.saturating_add(1);
             budget = budget.map(|b| b.saturating_sub(1));
             set(snapshot, |s| s.records_left = budget);
         }
@@ -788,18 +884,25 @@ async fn session(
         // eleven seconds to leave while the link sat idle in between. If the poll returned records
         // and the window still has room, go round again now; a poll that returns nothing falls
         // through to the normal wait, so this cannot spin.
-        if sent_now > 0 && awaiting < CREDIT_WINDOW && pending_now > 0 {
+        if sent_now > 0 && awaiting.len() < usize::from(CREDIT_WINDOW) && pending_now > 0 {
             continue;
         }
 
         let view = h.snapshot();
+        let mut queued_inbound = false;
         if let Ok(mut ex) = runtime.exchange.lock() {
             while let Some(item) = h.inbound.pop_front() {
                 if ex.inbound.len() >= INBOUND_MAX {
                     ex.inbound.pop_front();
                 }
                 ex.inbound.push_back(item);
+                queued_inbound = true;
             }
+        }
+        if queued_inbound {
+            // The bridge waits on this instead of the timer. A permit is stored when nobody is
+            // waiting, so a record queued while the bridge is busy is still noticed at once.
+            runtime.inbound_wake.notify_one();
         }
         set(snapshot, |s| s.session = view);
     }

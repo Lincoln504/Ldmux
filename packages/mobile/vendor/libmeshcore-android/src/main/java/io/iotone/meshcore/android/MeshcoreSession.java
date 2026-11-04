@@ -128,6 +128,8 @@ public final class MeshcoreSession {
             new java.util.ArrayDeque<>();
     private int pendingTracked;
     private boolean trackedInFlight;
+    /** When the in-flight tracked command was written, for the lost-answer deadline. */
+    private long trackedSentAtNanos;
     /**
      * A contact dump ends with END_OF_CONTACTS, not with each ContactFrame.
      * A single getContact-by-key answer has no terminator of its own, so that
@@ -538,8 +540,38 @@ public final class MeshcoreSession {
     /** True when no message drain is running and no raw send is pending. */
     public boolean isIdle() {
         synchronized (trackedLock) {
+            expireTrackedLocked();
             return !draining && pendingRaw.get() == null && pendingTracked == 0;
         }
+    }
+
+    /**
+     * How long a tracked command may hold the one answer slot before it is abandoned.
+     *
+     * <p>The companion protocol has no sequence number and no per-command timeout, so a lost
+     * answer leaves the caller with no event at all. Ten seconds matches the raw-send deadline
+     * the Android link enforces, and is far longer than any command's own answer: a radio that
+     * has not replied in that time is not going to.</p>
+     */
+    private static final long TRACKED_DEADLINE_NANOS = 10_000_000_000L;
+
+    /**
+     * Forget a tracked command whose answer never came.
+     *
+     * <p>Without this, one lost answer left {@code trackedInFlight} set for the life of the
+     * session: {@link #isIdle()} answered false, so every raw send was refused, and every queued
+     * command waited behind a slot that could never free. Nothing but a reconnect recovered it.
+     * The check runs wherever the slot is read, so no timer thread is needed and the recovery is
+     * immediate on the next send.</p>
+     *
+     * <p>Called with {@code trackedLock} held.</p>
+     */
+    private void expireTrackedLocked() {
+        if (!trackedInFlight || trackedSentAtNanos == 0) return;
+        if (System.nanoTime() - trackedSentAtNanos < TRACKED_DEADLINE_NANOS) return;
+        trackedInFlight = false;
+        trackedSentAtNanos = 0;
+        if (pendingTracked > 0) pendingTracked--;
     }
 
     /**
@@ -897,6 +929,7 @@ public final class MeshcoreSession {
             if (pendingTracked == 0) return;
             pendingTracked--;
             trackedInFlight = false;
+            trackedSentAtNanos = 0;
         }
         pumpTracked();
     }
@@ -908,10 +941,12 @@ public final class MeshcoreSession {
     private void pumpTracked() {
         final byte[] next;
         synchronized (trackedLock) {
+            expireTrackedLocked();
             if (trackedInFlight || pendingRaw.get() != null) return;
             next = trackedQueue.pollFirst();
             if (next == null) return;
             trackedInFlight = true;
+            trackedSentAtNanos = System.nanoTime();
         }
         if (!send(next)) trackedAnswered();
     }
