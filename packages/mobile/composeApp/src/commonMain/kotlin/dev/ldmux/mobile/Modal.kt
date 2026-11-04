@@ -3,6 +3,7 @@ package dev.ldmux.mobile
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -56,7 +58,15 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
     // action as tapping the scrim.
     BackToLauncher(enabled = true) { onDismiss() }
     Box(
-        Modifier.fillMaxSize().background(Bg.copy(alpha = 0.72f)).clickable(onClick = onDismiss),
+        Modifier
+            .fillMaxSize()
+            .background(Bg.copy(alpha = 0.72f))
+            // **A scrim that is a tap target, not a clickable.** `clickable` puts an unlabelled
+            // full-screen button in the semantics tree and merges every descendant into it, so a
+            // screen reader read the scrim instead of the dialog. Dismissing by tapping outside is
+            // a pointer convenience; the card's own buttons and the back gesture are the ways out
+            // that a reader can reach.
+            .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) },
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -64,10 +74,18 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
                 .fillMaxWidth(0.92f)
                 .clip(RadiusLarge)
                 .background(Surface)
-                // The click below stops a tap inside the card from reaching the
-                // scrim: a dialogue you dismiss by touching its own contents is a
-                // dialogue that cannot be filled in.
-                .clickable(enabled = false, onClick = {})
+                // **Consumed, not disabled.** `clickable(enabled = false)` does not take the event:
+                // a disabled node does not consume, so the tap fell through to the scrim and a
+                // touch on the card's own title or padding dismissed the dialogue, losing whatever
+                // was half-typed in it. This is the consumer `HeldElsewhere` already uses for the
+                // same reason.
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    }
+                }
                 .padding(LocalTouch.current.rowPad * 2),
             verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
         ) {

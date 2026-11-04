@@ -58,6 +58,7 @@ import dev.ldmux.mobile.voice.VoicePhaseBanner
 import dev.ldmux.mobile.voice.newCapture
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -859,7 +860,11 @@ internal fun AppContent(
                         .padding(horizontal = 12.dp, vertical = LocalTouch.current.pad),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(err.message, color = Fg, fontSize = 12.sp)
+                    // A daemon message can be a paragraph (a rejected path quotes what it got).
+                    // Uncapped in a Row with no width limit, the toast grew to fill the screen and
+                    // sat over the terminal it was about; four lines is enough to read the reason
+                    // and tap it away.
+                    Text(err.message, color = Fg, fontSize = 12.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
                 }
             }
         }

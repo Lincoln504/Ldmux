@@ -72,7 +72,14 @@ data class RadioPreset(
             pathHashSize = 1,
         )
 
-        /** The public USA preset: same frequency, 62.5 kHz, 1-byte paths. */
+        /**
+         * The public USA preset: same frequency, 62.5 kHz, 1-byte paths.
+         *
+         * The path width is **the firmware's default**, not a value the feed states: the MeshCore
+         * preset feed carries `path_hash_size: null` for USA (fetched 2026-10-28), which means
+         * "whatever the radio was built with". It is written as 1 because that is that default,
+         * and a radio whose build differs would report its own value back through `SELF_INFO`.
+         */
         val USA = RadioPreset(
             frequencyMhz = 910.525,
             bandwidthKhz = 62.5,
@@ -119,8 +126,11 @@ fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) 
         )),
     )
     RadioRegion.Australia -> listOf(
+        // CR7, not CR8: the feed's `coding_rate` for this row is "7" (fetched 2026-10-28). The
+        // coding rate does not change whether two radios hear each other, but the airtime meter
+        // is computed from it, and that is the number the app uses to gate a send.
         RadioPresetChoice("Australia narrow", RadioPreset(
-            916.575, 62.5, 7, 8, 22, 1,
+            916.575, 62.5, 7, 7, 22, 1,
         )),
         RadioPresetChoice("Australia mid", RadioPreset(
             915.075, 125.0, 9, 5, 22, 1,
@@ -130,8 +140,11 @@ fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) 
         )),
     )
     RadioRegion.NewZealand -> listOf(
+        // 2-byte paths, not 1: the feed says so for this row (fetched 2026-10-28), and the width
+        // is what a node stamps on what it sends — a 1-byte stamp is a shorter trace than its
+        // neighbours expect to read, and a bigger payload budget than the region allows for.
         RadioPresetChoice("New Zealand narrow", RadioPreset(
-            917.375, 62.5, 7, 5, 22, 1,
+            917.375, 62.5, 7, 5, 22, 2,
         )),
     )
 }

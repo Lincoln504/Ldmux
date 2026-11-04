@@ -276,6 +276,29 @@ cell's own background now, which is also correct on a reverse-video cell because
 are already swapped. This surfaced while making the public-channel echo faint (ADR-0026); it was a
 rendering defect on its own.
 
+### 2b.9 Three more, found while perfecting
+
+- **The modal's card did not stop taps.** `ModalCard` shielded the card with
+  `clickable(enabled = false)`, and a disabled `clickable` does not consume in Compose foundation —
+  so a tap on the card's own title or padding fell through to the scrim and dismissed the dialog,
+  taking a half-typed path with it. The card now consumes with the `pointerInput` loop
+  `HeldElsewhere` already uses, and the scrim is a `detectTapGestures` target rather than a
+  `clickable`, which also removes an unlabelled full-screen button from the semantics tree (it used
+  to merge the dialog's contents into itself). Verified by reading the foundation contract, not on a
+  device; back and the card's buttons remain the reader-reachable ways out.
+- **A daemon error could fill the screen.** The toast drew `err.message` with no line limit in a Row
+  with no width limit, so a rejected request that quoted a path grew to cover the terminal it was
+  about. Four lines and an ellipsis.
+- **Two rows of the radio preset table were wrong against the feed they claim to mirror.** `Australia
+  narrow` was CR8 where the feed says CR7 (the coding rate does not change who hears whom, but the
+  airtime meter is computed from it and that number gates a send), and `New Zealand narrow` asked
+  for 1-byte path stamps where the region uses 2 (the width is what a node stamps on what it sends,
+  so a 1-byte stamp is a shorter trace than neighbours read and a bigger payload budget than the
+  region allows). `USA`'s path width is now documented as *the firmware default* rather than a value
+  the feed states, because the feed carries `null` there. **Still open:** nothing tests the table
+  against the feed, and the feed fixture lives in the other project (`meshmore-sns`), so the check
+  would have to copy it.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
