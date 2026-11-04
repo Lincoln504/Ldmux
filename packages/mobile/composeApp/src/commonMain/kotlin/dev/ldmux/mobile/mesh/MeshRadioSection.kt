@@ -2,9 +2,11 @@ package dev.ldmux.mobile.mesh
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -21,10 +23,18 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
+import dev.ldmux.mobile.AccentBtn
+import dev.ldmux.mobile.Danger
 import dev.ldmux.mobile.Dim
 import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.MiniTextButton
-import dev.ldmux.mobile.Surface
+import dev.ldmux.mobile.ModalActions
+import dev.ldmux.mobile.ModalCard
+import dev.ldmux.mobile.Muted
+import dev.ldmux.mobile.Notice
+import dev.ldmux.mobile.NoticeLine
+import dev.ldmux.mobile.OptionButton
+import dev.ldmux.mobile.OutlinedBtn
 import dev.ldmux.mobile.Warn
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -49,45 +59,46 @@ internal fun RadioPickerDialog(
     }
     DisposableEffect(Unit) { onDispose { RadioScanner.cancel() } }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("mesh radio", color = Fg) },
-        containerColor = Surface,
-        tonalElevation = 0.dp,
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (scanning) {
-                    Text("scanning for MeshCore radios…", color = Dim, fontSize = 12.sp)
-                }
-                val r = result
-                if (r != null && !r.ok) {
-                    Text(radioProblemLine(r.problem), color = Warn, fontSize = 12.sp)
-                }
-                if (r != null && r.devices.isEmpty() && r.ok) {
-                    Text("no radio found", color = Dim, fontSize = 12.sp)
-                }
-                r?.devices?.forEach { d ->
-                    MiniTextButton(
-                        onClick = { onPick(d); onDismiss() },
-                    ) {
-                        Text(
-                            "${d.name}  ${d.address}" + (d.rssi?.let { "  $it dBm" } ?: ""),
-                            color = Fg,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
-                        )
-                    }
+    ModalCard("choose a radio", onDismiss) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (scanning) {
+                Text("scanning…", color = Muted, fontSize = 12.sp)
+            }
+            val r = result
+            if (r != null && !r.ok) {
+                Text(radioProblemLine(r.problem), color = Warn, fontSize = 12.sp)
+            }
+            if (r != null && r.devices.isEmpty() && r.ok) {
+                Text("no radio found", color = Muted, fontSize = 12.sp)
+            }
+            r?.devices?.forEach { d ->
+                MiniTextButton(
+                    onClick = { onPick(d); onDismiss() },
+                ) {
+                    Text(
+                        "${d.name}  ${d.address}" + (d.rssi?.let { "  $it dBm" } ?: ""),
+                        color = Fg,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                    )
                 }
             }
-        },
-        confirmButton = {
-            MiniTextButton(onClick = { token += 1 }) {
-                Text(if (scanning) "scanning…" else "scan again", color = Accent, fontSize = 12.sp)
+        }
+        ModalActions {
+            OutlinedBtn("close", Modifier.weight(1f), onClick = onDismiss)
+            // Disabled while a scan is already running. It used to read `scanning…` and stay
+            // live, which is a button whose label is a state and whose tap restarts the thing
+            // it is describing.
+            MiniTextButton(
+                enabled = !scanning,
+                modifier = Modifier.weight(1f),
+                onClick = { token += 1 },
+            ) {
+                Text("scan again", color = if (scanning) Dim else Accent, fontSize = 12.sp)
             }
-        },
-        dismissButton = { MiniTextButton(onClick = onDismiss) { Text("close", color = Dim) } },
-    )
+        }
+    }
 }
 
 /**
@@ -105,7 +116,8 @@ internal fun RadioPresetDialog(
 ) {
     val scope = rememberCoroutineScope()
     var link by remember(address) { mutableStateOf<RadioLink?>(null) }
-    var note by remember { mutableStateOf<String?>(null) }
+    var note by remember { mutableStateOf<Notice?>(null) }
+    var confirmUnset by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var region by remember { mutableStateOf(RadioRegion.UsCanada) }
     var seed by remember { mutableStateOf(0) }
@@ -132,12 +144,12 @@ internal fun RadioPresetDialog(
 
     LaunchedEffect(address) {
         if (address.isEmpty()) {
-            note = "choose a radio first"
+            note = Notice("choose a radio first", ok = false)
             return@LaunchedEffect
         }
         val l = meshRadioLink(address, ByteArray(0))
         if (l == null) {
-            note = "this build has no radio support"
+            note = Notice("this build has no radio support", ok = false)
             return@LaunchedEffect
         }
         link = l
@@ -146,9 +158,9 @@ internal fun RadioPresetDialog(
             l.connect()
             l.readDeviceInfo()
         } catch (e: RadioLinkException) {
-            note = radioLinkProblemLine(e.state)
+            note = Notice(radioLinkProblemLine(e.state), ok = false)
         } catch (e: Exception) {
-            note = e.message ?: "radio did not answer"
+            note = Notice(e.message ?: "radio did not answer", ok = false)
         }
     }
     // Open on the tuple the radio is actually using, not on a fresh proposal.
@@ -172,24 +184,19 @@ internal fun RadioPresetDialog(
         busy = true
         scope.launch {
             note = try {
-                if (l.applyPreset(p)) "applied" else "not confirmed"
+                if (l.applyPreset(p)) Notice("applied", ok = true) else Notice("not confirmed", ok = false)
             } catch (e: RadioLinkException) {
-                radioLinkProblemLine(e.state)
+                Notice(radioLinkProblemLine(e.state), ok = false)
             } catch (e: Exception) {
-                e.message ?: "did not finish"
+                Notice(e.message ?: "did not finish", ok = false)
             } finally {
                 busy = false
             }
         }
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("radio", color = Fg) },
-        containerColor = Surface,
-        tonalElevation = 0.dp,
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    ModalCard("radio", onDismiss) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     address.ifEmpty { "no radio" } + "  ·  " + meshLinkLabel(state),
                     color = Dim,
@@ -200,17 +207,21 @@ internal fun RadioPresetDialog(
                     Text("current  " + presetLine(current), color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
                 Text("region", color = Dim, fontSize = 11.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                // Wrapped, not one row: four region names ("USA / Canada" is the shortest
+                // two) are wider than a phone's modal, and a row that overflows loses the
+                // last one — the same bug the portrait key bar was rebuilt to avoid.
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     for (r in RadioRegion.entries) {
-                        MiniTextButton(onClick = {
+                        OptionButton(r.label, selected = region == r) {
                             region = r
                             choose(privatePreset(r, Random(seed)))
-                        }) {
-                            Text(r.label, color = if (region == r) Accent else Dim, fontSize = 10.sp, maxLines = 1)
                         }
                     }
                 }
-                Text("tuple", color = Dim, fontSize = 11.sp)
+                Text("preset", color = Dim, fontSize = 11.sp)
                 Text(
                     presetLine(selected),
                     color = Fg,
@@ -221,7 +232,7 @@ internal fun RadioPresetDialog(
                     MiniTextButton(onClick = {
                         seed += 1
                         choose(privatePreset(region, Random(seed)))
-                    }) { Text("new private", color = Accent, fontSize = 11.sp, maxLines = 1) }
+                    }) { Text("randomise", color = Accent, fontSize = 11.sp, maxLines = 1) }
                     MiniTextButton(
                         enabled = original != null && !busy && state == MeshLinkState.Bound,
                         onClick = {
@@ -231,8 +242,10 @@ internal fun RadioPresetDialog(
                             applyNow(o)
                         },
                     ) { Text("restore", color = Accent, fontSize = 11.sp, maxLines = 1) }
+                    // No ellipsis: it expands this card rather than opening another one,
+                    // and `…` is the promise of a new surface everywhere else in the app.
                     MiniTextButton(onClick = { showPublic = !showPublic }) {
-                        Text(if (showPublic) "hide public" else "public…", color = Accent, fontSize = 11.sp, maxLines = 1)
+                        Text(if (showPublic) "hide presets" else "public presets", color = Accent, fontSize = 11.sp, maxLines = 1)
                     }
                 }
                 if (showPublic) {
@@ -243,37 +256,55 @@ internal fun RadioPresetDialog(
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("airtime", color = Dim, fontSize = 11.sp)
-                    MiniTextButton(onClick = {
-                        val next = if (openAirtime) RadioBudgetMode.Metered else RadioBudgetMode.Open
-                        onBudget(next)
-                        link?.setBudgetMode(next)
-                    }) {
-                        Text(if (openAirtime) "open" else "metered", color = Accent, fontSize = 11.sp, maxLines = 1)
+                    // `budget`, not `airtime`: airtime is the quantity, and the choice is
+                    // whether LDMUX applies the 36 s/hour meter of its own accord. `open` and
+                    // `metered` also read as two adjectives where the buttons are verbs
+                    // everywhere else.
+                    Text("budget", color = Dim, fontSize = 11.sp)
+                    OptionButton("metered", selected = !openAirtime) {
+                        onBudget(RadioBudgetMode.Metered)
+                        link?.setBudgetMode(RadioBudgetMode.Metered)
+                    }
+                    OptionButton("unlimited", selected = openAirtime) {
+                        onBudget(RadioBudgetMode.Open)
+                        link?.setBudgetMode(RadioBudgetMode.Open)
                     }
                 }
-                note?.let { Text(it, color = Warn, fontSize = 11.sp) }
+                NoticeLine(note)
             }
-        },
-        confirmButton = {
+        // The row is left-aligned in three parts: the destructive action on its own, then
+        // cancel and apply sharing the rest. `unset` used to fire on one tap while `unpair`
+        // next door asked twice, in the same app, in the same screen.
+        ModalActions {
             MiniTextButton(
-                enabled = link != null && !busy && seeded && state == MeshLinkState.Bound,
-                onClick = { applyNow(selected) },
+                enabled = !busy,
+                onClick = { if (confirmUnset) onUnset() else confirmUnset = true },
             ) {
-                Text(if (busy) "applying…" else "apply", color = Accent, fontSize = 12.sp)
+                Text(if (confirmUnset) "unset?" else "unset", color = Danger, fontSize = 12.sp)
             }
-        },
-        dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                MiniTextButton(enabled = !busy, onClick = onUnset) { Text("unset", color = Warn, fontSize = 12.sp) }
-                MiniTextButton(onClick = onDismiss) { Text("close", color = Dim, fontSize = 12.sp) }
-            }
-        },
-    )
+            Spacer(Modifier.weight(1f))
+            OutlinedBtn("close", Modifier.weight(1f), onClick = onDismiss)
+            // Disabled exactly where a tap cannot work: the radio has not answered
+            // `SELF_INFO` yet, or it is not bound. The tuple line above says which.
+            val canApply = link != null && !busy && seeded && state == MeshLinkState.Bound
+            AccentBtn(
+                label = if (busy) "applying…" else "apply",
+                modifier = Modifier.weight(1f),
+                enabled = canApply,
+            ) { applyNow(selected) }
+        }
+    }
 }
 
+/**
+ * The operating point as one line: frequency, bandwidth, spreading factor, coding rate,
+ * power, and the path-hash width in bytes.
+ *
+ * `SF8` and `CR5` are the radio's own vocabulary and are left as the radio's numbers. The
+ * path width gets a word, because `1B` alone reads as a unit with no quantity.
+ */
 private fun presetLine(p: RadioPreset): String =
-    "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  ${p.pathHashSize}B"
+    "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"
 
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {
     RadioScanProblem.PermissionDenied -> "Bluetooth permission is off. Grant it, then scan again."

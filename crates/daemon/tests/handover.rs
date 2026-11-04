@@ -32,8 +32,16 @@ fn keeper_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper")
 }
 
+/// Wait for the keeper's socket, for longer than a loaded machine needs.
+///
+/// 10 s was enough alone and not always enough in the parallel gate: with every
+/// binary running at once the pool oversubscribes the cores and a keeper's bind can
+/// take longer than that. The wait costs nothing when the socket appears, which is
+/// the normal case, so the bound is set for the slow case only. Observed once as
+/// `handover_size_and_close_does_not_detach` failing in a 14-way pool and passing
+/// five times alone immediately after; the mechanism was not proven.
 async fn wait_socket(path: &std::path::Path) {
-    for _ in 0..400 {
+    for _ in 0..1600 {
         if path.exists() {
             return;
         }

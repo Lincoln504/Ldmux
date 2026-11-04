@@ -27,7 +27,8 @@ import androidx.compose.material3.LocalTextStyle
  * The app, inside one theme.
  *
  * It had no root theme at all. `MaterialTheme` appeared exactly once in this whole
- * package, wrapped around the overflow menu's `DropdownMenu` — so that menu was the
+ * package, wrapped around the overflow menu's `DropdownMenu` (deleted 2026-11-04: it had
+ * one item) — so that menu was the
  * only place in the app where a Material default applied, and every other control
  * took `LocalIndication` (and every other Material composition local) from a platform
  * fallback that nothing here chose and nothing here could see. That is the real reason

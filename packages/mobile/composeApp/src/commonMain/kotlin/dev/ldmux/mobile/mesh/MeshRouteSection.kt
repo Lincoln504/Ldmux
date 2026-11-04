@@ -1,6 +1,5 @@
 package dev.ldmux.mobile.mesh
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,10 +16,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
 import dev.ldmux.mobile.CodeScanner
+import dev.ldmux.mobile.Danger
 import dev.ldmux.mobile.Dim
 import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.LdmuxConfig
 import dev.ldmux.mobile.MiniTextButton
+import dev.ldmux.mobile.Muted
+import dev.ldmux.mobile.Notice
+import dev.ldmux.mobile.NoticeLine
 import dev.ldmux.mobile.ScanResult
 import dev.ldmux.mobile.Warn
 
@@ -54,7 +57,10 @@ internal fun MeshRouteSection(
     var showPreset by remember { mutableStateOf(false) }
 
     Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("mesh", color = Fg, fontSize = 13.sp)
+        // The same label shape as the `tailnet` row, because this is the other half of the
+        // same question. It was a 13sp heading in `Fg`, which made the two pairings look
+        // like a section and a row rather than two rows.
+        Text("mesh", color = Dim, fontSize = 12.sp)
         // Healthy credentials are automatic. Only a missing one is worth a line.
         for (c in MeshCredential.entries) {
             if (c !in view.present) {
@@ -62,16 +68,22 @@ internal fun MeshRouteSection(
             }
         }
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
-            Text(meshProblemLabel(it.problem), color = Dim, fontSize = 11.sp)
+            Text(meshProblemLabel(it.problem), color = Muted, fontSize = 11.sp)
         }
 
         // The radio is the one new physical fact. Its name is shown because a MAC address is
         // not something a person recognises, and the address is kept because that is what BLE
         // needs after a reboot.
+        // **Two actions, both written down.** The name used to be tappable to open the preset
+        // and the button beside it opened the radio picker, so one row carried a hidden action
+        // and a visible one: tapping the name to "select the radio" changed its *operating
+        // point* instead, which on a radio that then stops answering is indistinguishable from
+        // having broken it.
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("radio", color = Dim, fontSize = 12.sp)
             Text(
                 if (current.meshRadio.isEmpty()) {
-                    "no radio"
+                    "none chosen"
                 } else if (current.meshRadioName.isEmpty()) {
                     current.meshRadio
                 } else {
@@ -80,15 +92,15 @@ internal fun MeshRouteSection(
                 color = if (current.meshRadio.isEmpty()) Warn else Fg,
                 fontSize = 12.sp,
                 maxLines = 1,
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .then(
-                        if (current.meshRadio.isEmpty()) Modifier
-                        else Modifier.clickable { showPreset = true }
-                    ),
+                modifier = Modifier.weight(1f, fill = false),
             )
+            if (current.meshRadio.isNotEmpty()) {
+                MiniTextButton(onClick = { showPreset = true }) {
+                    Text("preset", color = Accent, fontSize = 12.sp, maxLines = 1)
+                }
+            }
             MiniTextButton(onClick = { showPicker = true }) {
-                Text(if (current.meshRadio.isEmpty()) "scan" else "change", color = Accent, fontSize = 12.sp, maxLines = 1)
+                Text(if (current.meshRadio.isEmpty()) "choose" else "change", color = Accent, fontSize = 12.sp, maxLines = 1)
             }
         }
 
@@ -118,10 +130,16 @@ internal fun MeshRouteSection(
                     confirmForget = true
                 }
             }) {
-                Text(if (confirmForget) "forget mesh pairing?" else "forget mesh pairing", color = if (confirmForget) Accent else Dim, fontSize = 12.sp)
+                // `unpair`, the word the tailnet row uses, because it is the same act on the
+                // other pairing. It also drops the chosen radio and the saved route, which is
+                // why it asks first and says so.
+                Text(if (confirmForget) "unpair?" else "unpair", color = if (confirmForget) Danger else Dim, fontSize = 12.sp)
+            }
+            if (confirmForget) {
+                Text("this forgets the keys, the radio and the saved route", color = Muted, fontSize = 11.sp)
             }
         }
-        note?.let { Text(it, color = Warn, fontSize = 11.sp) }
+        note?.let { Text(it, color = Danger, fontSize = 11.sp) }
     }
 
     if (showPicker) {

@@ -78,7 +78,10 @@ internal fun SettingsScreen(
         ) {
             MiniTextButton(onClick = onBack) { Text("\u2039 back", color = Accent, fontSize = 14.sp) }
             Spacer(Modifier.width(12.dp))
-            Text("Settings", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            // Lowercase, like every other label in the app and unlike a document title. The
+            // screen said `Settings` while its own three headings said `link`, `pairing` and
+            // `display`, so one screen carried two capitalisation rules.
+            Text("settings", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         }
         Column(
             Modifier
@@ -88,32 +91,68 @@ internal fun SettingsScreen(
                 .padding(horizontal = LocalTouch.current.rowPad * 3),
             verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
         ) {
-            Section("host") {
-                PairingRow(current, onPaired, onUnpair)
-            }
-            if (mesh != null) {
-                Section("link") {
-                    LinkChoice(current, onSave)
+            // The order lives in [settingsGroups], not here: it was `host`, `link`,
+            // `display`, so a person reading top-down met the machine before the choice of
+            // how to reach it — and then found the mesh route's pairing in a different
+            // section from the tailnet one. The route is the first question and pairing is
+            // the second, and the two pairings are the same kind of thing.
+            val groups = settingsGroups(hasMesh = mesh != null)
+            for (group in groups) {
+                Section(group.title) {
+                    when (group) {
+                        SettingsGroup.Link -> LinkChoice(current, onSave)
+                        SettingsGroup.Pairing -> {
+                            PairingRow(current, onPaired, onUnpair, meshPresent = mesh != null)
+                            // The radio, its preset and its credentials are one block, and it is
+                            // the same block the dialog had: it decides nothing itself.
+                            if (mesh != null) {
+                                MeshRouteSection(
+                                    current = current,
+                                    readCredentials = mesh.credentials,
+                                    onMeshPairing = mesh.onPairing,
+                                    onConfig = mesh.onConfig,
+                                    onUnpairMesh = mesh.onUnpair,
+                                )
+                            }
+                        }
+                        SettingsGroup.Display -> {
+                            PanelSide(current, onSave)
+                            ControlSize(current, onSave)
+                            TextSize(current, onSave)
+                        }
+                    }
                 }
-                // The radio, its preset and its credentials are one block, and it is the same
-                // block the dialog had: it decides nothing itself.
-                MeshRouteSection(
-                    current = current,
-                    readCredentials = mesh.credentials,
-                    onMeshPairing = mesh.onPairing,
-                    onConfig = mesh.onConfig,
-                    onUnpairMesh = mesh.onUnpair,
-                )
-            }
-            Section("display") {
-                PanelSide(current, onSave)
-                ControlSize(current, onSave)
-                TextSize(current, onSave)
+                // A gap between sections and none within one: the spacing is what says
+                // "this block is a different kind of thing", because the labels are only
+                // one point apart in size.
+                if (group != groups.last()) {
+                    Spacer(Modifier.height(LocalTouch.current.rowPad))
+                }
             }
             Spacer(Modifier.height(LocalTouch.current.rowPad * 4))
         }
     }
 }
+
+/**
+ * The screen's sections, in the order they are read.
+ *
+ * A named list rather than three `if` branches in the body, so the order is one value
+ * that a test can hold and a later edit cannot quietly invert. `link` is absent where the
+ * platform has no second route: a choice of one is not a choice, and iOS has only the
+ * tailnet.
+ */
+internal enum class SettingsGroup(val title: String) {
+    /** Which link the app runs on. First, because it decides whether the rest applies. */
+    Link("link"),
+    /** Both pairings — the tailnet's and the radio's — under one heading. */
+    Pairing("pairing"),
+    Display("display"),
+}
+
+internal fun settingsGroups(hasMesh: Boolean): List<SettingsGroup> =
+    if (hasMesh) listOf(SettingsGroup.Link, SettingsGroup.Pairing, SettingsGroup.Display)
+    else listOf(SettingsGroup.Pairing, SettingsGroup.Display)
 
 /** A titled block: the small grey label above its rows, and nothing around it. */
 @Composable
@@ -128,48 +167,79 @@ private fun Section(title: String, content: @Composable () -> Unit) {
  * Which link the app runs on: the tailnet, or the phone's own radio.
  *
  * Two buttons rather than a switch, because there are two named things and a switch cannot say
- * either of their names. Choosing `lora` does not start the radio - the mesh screen does that
+ * either of their names. Choosing `radio` does not start the radio - the mesh screen does that
  * when it opens - and it does not touch the tailnet pairing, which stays valid in case the user
  * switches back.
  */
 @Composable
 private fun LinkChoice(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        MiniTextButton(onClick = { if (current.route != MeshRoute.Tailnet) onSave(current.copy(route = MeshRoute.Tailnet)) }) {
-            Text("tailnet", color = if (current.route != MeshRoute.Mesh) Accent else Dim, fontSize = 12.sp)
+        OptionButton("tailnet", selected = current.route != MeshRoute.Mesh) {
+            if (current.route != MeshRoute.Tailnet) onSave(current.copy(route = MeshRoute.Tailnet))
         }
-        MiniTextButton(onClick = { if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh)) }) {
-            Text("lora", color = if (current.route == MeshRoute.Mesh) Accent else Dim, fontSize = 12.sp)
+        // `radio`, not `lora`: the word in the row's own consequence line and in every
+        // message the mesh route prints is "radio", and `lora` is the name of a modulation
+        // the user never chose.
+        OptionButton("radio", selected = current.route == MeshRoute.Mesh) {
+            if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh))
         }
-        Text(
-            if (current.route == MeshRoute.Mesh) "the phone's radio" else "over Tailscale",
-            color = Dim, fontSize = 11.sp,
-        )
+        Text(routeConsequence(current.route), color = Muted, fontSize = 11.sp)
+    }
+}
+
+/**
+ * What choosing a link means, in the row that chooses it.
+ *
+ * The consequence is worth a line because the two routes are not two settings: one is a
+ * machine on a tailnet and the other is a radio in the room, and which one is in use
+ * changes what "paired" even refers to.
+ */
+internal fun routeConsequence(route: MeshRoute): String =
+    if (route == MeshRoute.Mesh) "the phone's radio" else "over Tailscale"
+
+
+/**
+ * One row that names a setting, then the options that set it.
+ *
+ * The label says what is being chosen and the option buttons carry the chosen value, so
+ * no button has to be both a noun and a statement. Every row in this screen has this
+ * shape; the three that did not (a bare pair with no label, a pair whose order did not
+ * match the screen, and a label at a different size from its neighbours) read as three
+ * different kinds of control.
+ */
+@Composable
+private fun SettingRow(label: String, content: @Composable () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, color = Dim, fontSize = 12.sp)
+        content()
     }
 }
 
 @Composable
 private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("panel", color = Dim, fontSize = 12.sp)
-        MiniTextButton(onClick = { if (current.panelLeft) onSave(current.copy(side = "right")) }) {
-            Text("right", color = if (!current.panelLeft) Accent else Dim, fontSize = 12.sp)
+    SettingRow("panel") {
+        // Left before right, because the options sit where the thing they describe sits.
+        // This pair was ordered right, left: a small lie under a thumb.
+        OptionButton("left", selected = current.panelLeft) {
+            if (!current.panelLeft) onSave(current.copy(side = "left"))
         }
-        MiniTextButton(onClick = { if (!current.panelLeft) onSave(current.copy(side = "left")) }) {
-            Text("left", color = if (current.panelLeft) Accent else Dim, fontSize = 12.sp)
+        OptionButton("right", selected = !current.panelLeft) {
+            if (current.panelLeft) onSave(current.copy(side = "right"))
         }
     }
 }
 
 @Composable
 private fun ControlSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("control size", color = Dim, fontSize = 12.sp)
-        MiniTextButton(onClick = { if (current.compact) onSave(current.copy(compact = false)) }) {
-            Text("tall", color = if (!current.compact) Accent else Dim, fontSize = 12.sp)
+    SettingRow("controls") {
+        // `compact` and `comfortable`, not `thin` and `tall`: the setting changes the
+        // height of every control, and "tall"/"thin" describe a shape rather than a
+        // trade the user is making. The value is the same [LdmuxConfig.compact] either way.
+        OptionButton("compact", selected = current.compact) {
+            if (!current.compact) onSave(current.copy(compact = true))
         }
-        MiniTextButton(onClick = { if (!current.compact) onSave(current.copy(compact = true)) }) {
-            Text("thin", color = if (current.compact) Accent else Dim, fontSize = 12.sp)
+        OptionButton("comfortable", selected = !current.compact) {
+            if (current.compact) onSave(current.copy(compact = false))
         }
     }
 }
@@ -199,27 +269,41 @@ private fun TextSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
 }
 
 /**
- * The pairing, as one row (ADR-0017).
+ * The tailnet pairing, as one row labelled next to the mesh one (ADR-0017).
+ *
+ * The `tailnet` label is what makes the two pairings legible as two: the mesh block below
+ * has always had a heading of its own, and this row had none, so the pairing that existed
+ * first was the one you had to infer.
  *
  * Unpaired: `unpaired` and `pair`, which opens the scanner. Paired: the machine's name and
- * `unpair`, which asks once (`unpair?`) because it ends every shell's link. A scan that is not an
- * ldmux code says so on the row, in three words.
+ * `unpair`, which asks once (`unpair?`) because it ends every shell's link. **And it says
+ * what else it takes with it**: `Link.unpair()` also forgets the mesh keys and the radio,
+ * which is not something a button under `tailnet` can be expected to imply.
+ *
+ * A scan that is not an ldmux code says so on the row, in three words.
  */
 @Composable
-private fun PairingRow(current: LdmuxConfig, onPaired: (Pairing) -> Unit, onUnpair: () -> Unit) {
+private fun PairingRow(
+    current: LdmuxConfig,
+    onPaired: (Pairing) -> Unit,
+    onUnpair: () -> Unit,
+    /** Whether a mesh pairing could exist here, which decides if the warning applies. */
+    meshPresent: Boolean,
+) {
     var problem by remember { mutableStateOf<String?>(null) }
     var confirmUnpair by remember(current.connectionKey) { mutableStateOf(false) }
-    Column {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("tailnet", color = Dim, fontSize = 12.sp)
             if (current.isPaired) {
                 Text(current.pairedName, color = Fg, fontSize = 14.sp, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
                 MiniTextButton(onClick = {
                     if (confirmUnpair) onUnpair() else confirmUnpair = true
                 }) {
-                    Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Accent else Dim)
+                    Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Danger else Dim)
                 }
             } else {
-                Text("unpaired", color = Dim, fontSize = 12.sp)
+                Text("unpaired", color = Muted, fontSize = 12.sp)
                 MiniTextButton(onClick = {
                     problem = null
                     CodeScanner.scan { result ->
@@ -234,6 +318,12 @@ private fun PairingRow(current: LdmuxConfig, onPaired: (Pairing) -> Unit, onUnpa
                 }
             }
         }
-        problem?.let { Text(it, color = Dim, fontSize = 11.sp) }
+        // Only while the warning can be true: an install with no mesh route has nothing
+        // else to lose, and a line that describes a consequence that does not exist is
+        // noise on the one screen where the consequence is real.
+        if (confirmUnpair && meshPresent) {
+            Text("this also forgets the mesh keys and the radio", color = Muted, fontSize = 11.sp)
+        }
+        problem?.let { Text(it, color = Danger, fontSize = 11.sp) }
     }
 }

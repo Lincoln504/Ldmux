@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -47,6 +48,13 @@ import androidx.compose.ui.unit.sp
  */
 @Composable
 fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    // **The system back gesture dismisses this card.** It was the one thing Material's
+    // own dialog gave for free and this hand-drawn one did not: with a modal open on the
+    // launcher, back reached the activity and left the app with the user's half-typed
+    // path in a field nobody would see again. The card is the topmost thing on screen,
+    // so it is what back must close, and the caller's `onDismiss` is already the same
+    // action as tapping the scrim.
+    BackToLauncher(enabled = true) { onDismiss() }
     Box(
         Modifier.fillMaxSize().background(Bg.copy(alpha = 0.72f)).clickable(onClick = onDismiss),
         contentAlignment = Alignment.Center,
@@ -67,6 +75,24 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
             content()
         }
     }
+}
+
+/**
+ * The row of buttons at the foot of a modal.
+ *
+ * One composable so every modal puts its actions in the same place, at the same
+ * spacing, in the same order — cancel first, the action that changes something last.
+ * Four dialogs each drawing their own row is how one of them ends up with its primary
+ * button on the left.
+ */
+@Composable
+fun ModalActions(content: @Composable RowScope.() -> Unit) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
 }
 
 /**
@@ -146,7 +172,7 @@ private fun FieldBox(placeholder: String, empty: Boolean, modifier: Modifier = M
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
     ) {
         if (empty) {
-            Text(placeholder, color = Dim.copy(alpha = 0.6f), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            Text(placeholder, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
         }
         content()
     }
@@ -203,7 +229,7 @@ fun NewShellModal(
         }
         Text(
             "Opens the host's login shell there. Empty means your home directory.",
-            color = Dim.copy(alpha = 0.7f),
+            color = Muted,
             fontSize = 10.sp,
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -252,7 +278,7 @@ fun DesktopPickerModal(
 
     ModalCard("send to desktop", onDismiss) {
         if (choosable.isEmpty()) {
-            Text("No desktop is available.", color = Dim, fontSize = 12.sp)
+            Text("no desktop is available", color = Muted, fontSize = 12.sp)
         } else {
             Column(
                 Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),

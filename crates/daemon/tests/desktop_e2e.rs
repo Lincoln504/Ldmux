@@ -118,7 +118,11 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
             .expect("failed to start i3"),
     );
     // i3 is ready when it answers on IPC.
-    let ready = wait_until(15, || {
+    // 45 s, not 15: `i3-msg` answering is bounded by how fast i3 starts, and in the
+    // parallel gate every binary runs at once. Observed failing at 14-way parallelism
+    // with "i3 never answered", then passing alone; the wait costs nothing when i3 is
+    // quick, which is the normal case.
+    let ready = wait_until(45, || {
         Command::new("i3-msg")
             .args(["-t", "get_version"])
             .output()

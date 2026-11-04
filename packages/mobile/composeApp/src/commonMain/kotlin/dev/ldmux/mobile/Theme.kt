@@ -32,6 +32,25 @@ val Fg = Color(0xFFEDEDED)
 val Dim = Color(0xFF8C8C8C)
 
 /**
+ * The quiet end of the palette, and it is a **colour, not [Dim] with an alpha**.
+ *
+ * Explanatory lines and field placeholders used `Dim.copy(alpha = 0.6f)` and `0.7f`,
+ * which over `Bg` works out to about 2.8:1 and 3.6:1 — under the 4.5:1 that body text
+ * needs, on a screen that is otherwise high contrast. A faded colour is also not a
+ * value anyone can look up. `#787878` on `#0A0A0A` is 4.5:1, which is the floor, and
+ * it still reads as quieter than [Dim].
+ */
+val Muted = Color(0xFF787878)
+
+/**
+ * The one destructive colour: ending something.
+ *
+ * It lived as a literal in the close dialog, which is how a palette quietly grows a
+ * second definition of its own warning.
+ */
+val Danger = Color(0xFFE08A8A)
+
+/**
  * An anomaly, not a mood: the amber the app uses to say something is wrong but
  * recoverable. A shell with no window is the one such state a row can show, and
  * it should be rare enough that the eye stops on it.
@@ -72,10 +91,10 @@ val Surface = Color(0xFF1A1A1A)
 /**
  * The palette, as Material sees it.
  *
- * A scheme existed before this, but it was built inline inside `AppMenu` and wrapped
- * only that menu, so it was the single place in the app where Material's defaults
- * applied and everywhere else took a platform fallback. The same scheme, named once
- * and hoisted to the root.
+ * A scheme existed before this, but it was built inline inside the overflow menu and
+ * wrapped only that menu (deleted 2026-11-04: it had one item), so it was the single
+ * place in the app where Material's defaults applied and everywhere else took a
+ * platform fallback. The same scheme, named once and hoisted to the root.
  */
 internal val LdmuxColors = darkColorScheme(
     surface = Surface,

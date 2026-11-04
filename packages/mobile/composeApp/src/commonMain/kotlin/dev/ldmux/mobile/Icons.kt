@@ -103,7 +103,10 @@ fun IconBtn(
     ) {
         content()
         if (caption != null) {
-            Text(caption, color = Dim, fontFamily = FontFamily.Monospace, fontSize = 8.sp)
+            // 9sp and the quiet grey: this sits under a glyph inside a control the size of a
+            // key, so it has to stay small — but 8sp was under the size at which the shapes
+            // survive at all, and it is still read, not decoration.
+            Text(caption, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
         }
     }
 }

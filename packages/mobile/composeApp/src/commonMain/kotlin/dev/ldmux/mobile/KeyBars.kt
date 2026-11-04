@@ -37,9 +37,6 @@ internal fun PortraitBar(
     scope: CoroutineScope,
     keyboardUp: Boolean,
     onToggleKeyboard: () -> Unit,
-    onMenu: () -> Unit,
-    menuExpanded: Boolean,
-    onMenuDismiss: () -> Unit,
     onLauncher: () -> Unit,
     modifiers: Modifiers,
     onSticky: (StickyKey) -> Unit,
@@ -87,12 +84,18 @@ internal fun PortraitBar(
         // survived is top-to-bottom in the corner — which is where a thumb rests,
         // and the pair is a pair: leaving the keyboard and changing the keyboard's
         // shape are the same decision made twice.
+        // **The launcher square opens the launcher.** It used to open a menu whose only
+        // item was "shells", which is two taps and a menu card to reach one screen — and a
+        // dropdown with one row in it is a dropdown that should be a button. The label is
+        // the thing it opens, not the widget it used to be.
         val menuHere: @Composable RowScope.() -> Unit = {
-            Box(Modifier.weight(1f)) {
-                IconBtn(onClick = onMenu, label = "menu", modifier = Modifier.fillMaxWidth(), filled = true) {
-                    IconLauncher(Fg, box = LocalTouch.current.icon)
-                }
-                AppMenu(menuExpanded, onMenuDismiss, onLauncher)
+            IconBtn(
+                onClick = onLauncher,
+                label = "shells",
+                modifier = Modifier.weight(1f),
+                filled = true,
+            ) {
+                IconLauncher(Fg, box = LocalTouch.current.icon)
             }
         }
         // The keyboard, up or down: one toggle, a plain keyboard glyph, lit while

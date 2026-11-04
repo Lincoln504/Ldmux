@@ -63,7 +63,7 @@ internal val PANEL_WIDTH = 190.dp
  * subtitle rather than a second row, because "2 / 3" is not a heading.
  *
  * [showMenu] is false in portrait, where the bar's own row already ends in the
- * same menu button. The menu behind it is the same [AppMenu] either way.
+ * same launcher square. Both call the same `onLauncher`.
  */
 @Composable
 internal fun ShellHeader(
@@ -85,7 +85,7 @@ internal fun ShellHeader(
     val current = pages.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
     val total = pages.size.coerceAtLeast(1)
     val here = pages.getOrNull(current)
-    var menuOpen by remember { mutableStateOf(false) }
+
     // Density, not structure: this is the same row drawn by the same composable in
     // both modes, and `dense` decides only how much height it is allowed.
 
@@ -102,15 +102,10 @@ internal fun ShellHeader(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (showMenu) {
-            Box {
-                IconBtn(onClick = { menuOpen = true }, label = "menu", filled = true) {
-                    IconLauncher(Fg)
-                }
-                AppMenu(
-                    expanded = menuOpen,
-                    onDismiss = { menuOpen = false },
-                    onLauncher = onLauncher,
-                )
+            // The launcher square opens the launcher, in one tap: it used to open a menu
+            // whose only item was "shells". See the note in [PortraitBar].
+            IconBtn(onClick = onLauncher, label = "shells", filled = true) {
+                IconLauncher(Fg)
             }
         }
         NavArrow("\u25c0", enabled = current > 0, dense = dense) { step(-1) }
@@ -127,7 +122,10 @@ internal fun ShellHeader(
                 if (total > 1) "${current + 1} / $total shells" else "1 shell",
                 color = Dim,
                 fontFamily = FontFamily.Monospace,
-                fontSize = 9.sp,
+                // 10sp, not 9: nine-point type on a phone is under the size at which the
+                // shapes of letters survive, and this line is read at a glance while a
+                // finger is on the terminal.
+                fontSize = 10.sp,
                 maxLines = 1,
             )
         }
@@ -282,9 +280,9 @@ internal fun SidePanel(
         linkText?.let {
             Text(
                 it,
-                color = if (link.offline) Accent else Dim.copy(alpha = 0.7f),
+                color = if (link.offline) Accent else Muted,
                 fontFamily = FontFamily.Monospace,
-                fontSize = 9.sp,
+                fontSize = 10.sp,
             )
         }
     }

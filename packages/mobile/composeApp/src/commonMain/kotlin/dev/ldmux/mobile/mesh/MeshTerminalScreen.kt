@@ -264,14 +264,14 @@ fun MeshTerminalScreen(
     // attached at once with no way to choose a second.
     var chosen by remember(conn) { mutableStateOf(listOf<String>()) }
     var pageOrder by remember(conn) { mutableStateOf(listOf<String>()) }
-    var menuOpen by remember(conn) { mutableStateOf(false) }
+
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     // The keyboard is portrait-only and is the user's, as on the tailnet route (AppContent).
     var keyboardWanted by remember { mutableStateOf(true) }
     var keyboardRequest by remember { mutableStateOf(0) }
     val windowSize = LocalWindowInfo.current.containerSize
     val portrait = windowSize.height >= windowSize.width
-    LaunchedEffect(portrait) { if (portrait) { keyboardWanted = true }; menuOpen = false }
+    LaunchedEffect(portrait) { if (portrait) keyboardWanted = true }
     // **A rebuilt connection asks for the keyboard again.** The surface - and the hidden field that
     // carries the IME - is recreated with the connection, so a keyboard the user had open stays
     // drawn by the system while the new field has never been focused: typing went nowhere after a
@@ -488,9 +488,6 @@ fun MeshTerminalScreen(
                             keyboardRequest++
                         }
                     },
-                    onMenu = { menuOpen = true },
-                    menuExpanded = menuOpen,
-                    onMenuDismiss = { menuOpen = false },
                     onLauncher = { openList() },
                     modifiers = handle.modifiers,
                     onSticky = handle::toggleModifier,

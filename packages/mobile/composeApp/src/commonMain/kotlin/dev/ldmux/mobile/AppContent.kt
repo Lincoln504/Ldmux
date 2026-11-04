@@ -16,6 +16,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -167,12 +168,6 @@ internal fun AppContent(
         pageOrder = emptyList()
         showLauncher = true
     }
-    // Whether the portrait bar's menu is open. It lives here, at App()'s top
-    // level, rather than beside the bar that draws it, because the IME watcher
-    // below has to be able to tell a keypad the *user* dismissed from one we
-    // dismissed ourselves by opening a focusable menu. It is the same value
-    // either way, so it has one owner and not two.
-    var portraitMenu by remember { mutableStateOf(false) }
     // How many shells have been asked for and not yet answered. A new shell has no
     // id to page to until the daemon says which one it made — and while that is
     // outstanding the pager is legitimately
@@ -265,11 +260,6 @@ internal fun AppContent(
     // Whether the soft keyboard is actually on screen, for the portrait toggle.
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     var keyboardRequest by remember { mutableStateOf(0) }
-
-    // A popup belongs to the screen it was opened on. The portrait bar leaves the
-    // composition when the mode flips, and a `remember`ed flag inside it survives
-    // that: the menu was found already open on the next flip back to portrait.
-    LaunchedEffect(portrait) { portraitMenu = false }
 
     val terminalOpen = !showLauncher && pages.isNotEmpty()
     LaunchedEffect(terminalOpen, pages.size) {
@@ -751,7 +741,24 @@ internal fun AppContent(
             // A screen with only a header is not a state. Unpaired is the one case with no list and
             // no notice of its own, so it gets the same one line every other dead end gets.
             routeNotice = if (link == LinkState.Unpaired) {
-                { Text("no host paired: scan a pairing code in Settings", color = Dim, fontSize = 12.sp) }
+                {
+                    // **The screen's one job gets the screen's one button.** It used to say
+                    // "scan a pairing code in Settings" and leave the user to find a cog in
+                    // the corner, on the one screen where nothing else can be done. The scan
+                    // is the same one the settings row runs: the scanner's result is the
+                    // intent, so a second confirmation would be asking twice.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text("no computer paired", color = Muted, fontSize = 12.sp)
+                        MiniTextButton(onClick = {
+                            CodeScanner.scan { result ->
+                                (scanOutcome(result) as? PairOutcome.Paired)?.let { store.pair(it.pairing) }
+                            }
+                        }) { Text("scan a code", color = Accent, fontSize = 12.sp) }
+                    }
+                }
             } else if (link == LinkState.RouteUnavailable && config.route == MeshRoute.Mesh) {
                 {
                     // The header names the problem; this says what to do about it, and for a missing
@@ -869,9 +876,10 @@ internal fun AppContent(
         // viewportW=1080` 135 ms later. Every earlier attempt at this bug tried to
         // put the page back afterwards. None asked why it had moved, and it had moved
         // because the pager was thrown away.
-        // (portraitMenu is declared in App()'s top-level state rather than here,
-        // because the IME watcher has to be able to tell a keypad the user
-        // dismissed from one we dismissed ourselves by opening a focusable menu.)
+        // (The portrait bar's launcher square used to open a one-item menu whose
+        // popup had to be tracked at App()'s level, because a focusable menu
+        // dismisses the keypad. It opens the launcher directly now, so there is no
+        // popup to track.)
         // Chrome waits for the window to finish turning over, and there is none
         // before it has: a panel belongs to the shape it was drawn for.
         val chrome = panelArrived
@@ -961,9 +969,6 @@ internal fun AppContent(
                             keyboardRequest++
                         }
                     },
-                    menuExpanded = portraitMenu,
-                    onMenu = { portraitMenu = true },
-                    onMenuDismiss = { portraitMenu = false },
                     onLauncher = {
                         // The launcher is where you choose what to open, so going
                         // back to it lets go of everything: a page is a *hold* on a

@@ -541,17 +541,22 @@ internal fun ordinalIn(entries: List<LauncherEntry>, chosen: List<String>, key: 
  * competing for the eye.
  */
 @Composable
-fun OutlinedBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun OutlinedBtn(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Box(
         modifier
             .clip(RadiusMedium)
             .border(1.dp, Line, RadiusMedium)
             .heightIn(min = LocalTouch.current.min)
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = Fg, fontSize = 13.sp)
+        Text(label, color = if (enabled) Fg else Dim, fontSize = 13.sp)
     }
 }
 
