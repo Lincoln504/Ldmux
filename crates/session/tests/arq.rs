@@ -1,5 +1,5 @@
 use ldmux_session::arq::{
-    Arq, Config, Delivered, Failure, Incoming, Kind, Limits, Outgoing, QueueError,
+    Arq, Config, Delivered, Failure, Incoming, Kind, Limits, Outgoing, QueueError, REFUSED_RETRY_MS,
 };
 
 const PLENTY: Limits = Limits {
@@ -576,8 +576,15 @@ fn a_refused_record_gets_its_attempt_back_and_waits_a_full_interval() {
     }
     assert_eq!(a.failure(), None, "refusals are not transmissions");
 
-    // One full interval after the last refusal, the retry goes out as attempt 2.
-    let again = a.poll(50 + 1_000, PLENTY);
+    // A refusal is "not yet", not "lost": the retry follows the firmware's transmit-table pace,
+    // not the retry interval for a packet that went out and was not answered.
+    let refused_at = 50;
+    assert_eq!(
+        a.poll(refused_at + REFUSED_RETRY_MS - 1, PLENTY).len(),
+        0,
+        "not before the table could have drained"
+    );
+    let again = a.poll(refused_at + REFUSED_RETRY_MS, PLENTY);
     assert_eq!(again.len(), 1);
     assert!(again[0].retransmit);
     assert_eq!(again[0].seq, seq);

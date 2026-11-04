@@ -108,6 +108,13 @@ impl Session {
     }
 
     /// Sealed records to hand to the tunnel now: at most `min(records_left, l2_slots)`.
+    ///
+    /// **Every call seals afresh, retransmissions included.** The ARQ hands back the same plaintext
+    /// when it retries, and sealing it again with the next nonce produces different bytes on the
+    /// wire. That is what keeps a retry alive on this mesh: MeshCore radios deduplicate by payload,
+    /// so a byte-identical retry is dropped by the first relay that forwarded the original and a
+    /// multi-hop transfer stalls at its tail. Caching the sealed bytes to "retransmit cheaply"
+    /// would save one AEAD operation and break delivery.
     pub fn poll(&mut self, now_ms: u64, limits: Limits) -> Result<Vec<Vec<u8>>, SessionError> {
         let mut sealed = Vec::new();
         for o in self.arq.poll(now_ms, limits) {
@@ -116,6 +123,8 @@ impl Session {
         Ok(sealed)
     }
 
+    /// Seal one outgoing record under the next nonce. See [`Session::poll`] for why a retry is
+    /// sealed again rather than replayed.
     fn seal(&mut self, o: &Outgoing) -> Result<Vec<u8>, SessionError> {
         let rec = record::seal(
             &self.est.transport,

@@ -169,3 +169,33 @@ fn a_session_closes_cleanly() {
     let rec = phone.poll(0, PLENTY).unwrap().remove(0);
     assert_eq!(host.receive(0, &rec).unwrap(), Inbound::Closed);
 }
+
+/// A retransmission must not be byte-identical to the original. MeshCore radios deduplicate by
+/// payload, so an identical retry is eaten by the first relay that forwarded the original and a
+/// multi-hop transfer stalls at its tail. The ARQ hands back the same plaintext; the seal makes it
+/// a different packet on the wire. This test is what keeps a future "cache the sealed bytes"
+/// optimisation from quietly reintroducing the stall.
+#[test]
+fn a_retransmission_is_not_byte_identical_to_the_original() {
+    let (mut phone, mut host) = pair(172);
+    phone.send(4, b"the same plaintext twice").unwrap();
+    let first = phone.poll(0, PLENTY).unwrap().remove(0);
+    // No ack: the record stays in flight and its timer runs out.
+    let retry = phone.poll(2_001, PLENTY).unwrap().remove(0);
+    assert_ne!(
+        first, retry,
+        "the radio would drop the second packet as a duplicate"
+    );
+    // Both are the same application record once decrypted, so the peer sees one delivery and a
+    // duplicate, which is what the ARQ expects.
+    match host.receive(0, &first).unwrap() {
+        Inbound::Data(d) => assert_eq!(d[0].payload, b"the same plaintext twice"),
+        other => panic!("first: {other:?}"),
+    }
+    match host.receive(0, &retry).unwrap() {
+        Inbound::Data(d) => assert_eq!(d[0].payload, b"the same plaintext twice"),
+        // A duplicate is filtered by sequence number and reported as quiet, which is also correct.
+        Inbound::Quiet => {}
+        other => panic!("retry: {other:?}"),
+    }
+}

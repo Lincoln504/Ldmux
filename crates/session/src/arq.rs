@@ -241,13 +241,28 @@ pub struct Stats {
     pub budget_stalls: u32,
 }
 
+/// How long to wait before retrying a record the radio refused without transmitting.
+///
+/// A refusal is almost always the firmware's transmit table being full, which happens when records
+/// are handed over faster than the radio can put them on the air. meshcore-sar measured that wall at
+/// about 350 ms per fragment and paces for it, and that is the number here: the retry *is* the pace,
+/// learned from the radio's own answer instead of guessed from a preset. It is deliberately far
+/// shorter than the interval for a packet that really went out and went unanswered — a refusal says
+/// "not yet", not "lost".
+pub const REFUSED_RETRY_MS: u64 = 350;
+
 struct Slot {
     seq: u16,
     shell: u8,
+    /// The plaintext application bytes. The session seals them again on every transmission, so a
+    /// retransmission leaves as a different packet — MeshCore radios drop byte-identical repeats.
     payload: Vec<u8>,
     /// Transmissions so far (>= 1 once sent).
     attempts: u8,
     sent_at: u64,
+    /// The radio refused the last transmission without putting it on the air. The retry then
+    /// waits [`REFUSED_RETRY_MS`], the firmware's transmit-table pace, instead of a retry interval.
+    refused: bool,
 }
 
 pub struct Arq {
@@ -449,16 +464,22 @@ impl Arq {
     ///
     /// The slot's timer restarts from the refusal rather than firing immediately: the radio has
     /// just said no, and asking again in the same breath is how a retry loop turns into a flood.
-    /// The next try is one full retry interval away, so the attempt ladder only advances when a
-    /// packet really went out and really went unanswered.
+    /// The next try is [`REFUSED_RETRY_MS`] away — the firmware's transmit-table pace — not a full
+    /// retry interval, because a refusal means "not yet" rather than "lost". The attempt ladder
+    /// only advances when a packet really went out and really went unanswered.
     ///
     /// Returns `true` when a slot with that sequence number was in flight.
     pub fn on_refused(&mut self, seq: u16, now_ms: u64) -> bool {
-        let Some(slot) = self.inflight.iter_mut().find(|s| s.seq == seq) else {
+        let Some(i) = self.inflight.iter().position(|s| s.seq == seq) else {
             return false;
         };
-        slot.attempts = slot.attempts.saturating_sub(1).max(1);
+        // The interval depends only on the attempt count, so it is computed before the slot is
+        // borrowed mutably and the borrow checker is not asked to prove anything about ordering.
+        let attempts = self.inflight[i].attempts.saturating_sub(1).max(1);
+        let slot = &mut self.inflight[i];
+        slot.attempts = attempts;
         slot.sent_at = now_ms;
+        slot.refused = true;
         true
     }
 
@@ -477,10 +498,13 @@ impl Arq {
     /// The earliest time something becomes due, for the caller's timer.
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
-        let retx = self
-            .inflight
-            .front()
-            .map(|s| s.sent_at + self.rto(s.attempts));
+        let retx = self.inflight.front().map(|s| {
+            if s.refused {
+                s.sent_at + REFUSED_RETRY_MS
+            } else {
+                s.sent_at + self.rto(s.attempts)
+            }
+        });
         let ack = self.ack_owed_since.map(|t| t + self.cfg.ack_delay_ms);
         // `heartbeat_ms == 0` means never, which `poll` already honours. Without the guard here
         // the deadline resolved to `last_sent_at`, an instant in the past, so the caller's wait
@@ -513,10 +537,17 @@ impl Arq {
         let mut wanted = false;
 
         // 1. At most one retransmission: the oldest record, when its timer has run out.
-        if let Some(front) = self.inflight.front()
-            && now_ms >= front.sent_at + self.rto(front.attempts)
+        let front_due = self.inflight.front().map(|s| {
+            if s.refused {
+                s.sent_at + REFUSED_RETRY_MS
+            } else {
+                s.sent_at + self.rto(s.attempts)
+            }
+        });
+        if let Some(due) = front_due
+            && now_ms >= due
         {
-            if front.attempts >= self.cfg.max_attempts {
+            if self.inflight.front().is_some_and(|s| s.attempts >= self.cfg.max_attempts) {
                 self.failed = Some(Failure::RetriesExhausted);
                 return out;
             }
@@ -529,6 +560,7 @@ impl Arq {
                 let front = self.inflight.front_mut().expect("checked above");
                 front.attempts += 1;
                 front.sent_at = now_ms;
+                front.refused = false;
                 out.push(Outgoing {
                     kind: Kind::Data,
                     seq: front.seq,
@@ -558,6 +590,7 @@ impl Arq {
                 payload: payload.clone(),
                 attempts: 1,
                 sent_at: now_ms,
+                refused: false,
             });
             out.push(Outgoing {
                 kind: Kind::Data,
