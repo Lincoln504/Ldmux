@@ -149,13 +149,18 @@
 - What remains true is smaller and worth stating: **the supervisor is the screen**, so a page that is
   not on screen is not reconnected, and the `RadioLink` layer itself still has no supervisor.
 
-### 13. The unsupported link cannot be released — OPEN
+### 13. The unsupported link cannot be released — WRONG
 
-- PROVEN. `meshRadioLink("")` returns `UnsupportedRadioLink`, whose `close()` is empty
-  (`Radio.kt:333-351`, close at `:350`), while `RadioLink.release()` defaults to `close()`.
-- Consequence: a caller that holds it and calls `release()` leaves the reference count where it was,
-  so the real link is never closed. Small, but it is a leak in the one path that runs when no radio
-  exists.
+- The claim was that `meshRadioLink("")` returns `UnsupportedRadioLink` and that calling `release()`
+  on it leaks a reference. Both halves are wrong at this commit.
+- `meshRadioLink` on Android returns a real `AndroidRadioLink` for an empty address and never
+  constructs `UnsupportedRadioLink` (`AndroidRadioLink.kt:567-570`). `UnsupportedRadioLink` exists
+  only as the compile-time stand-in for a platform with no radio (`Radio.kt:332-351`), and it is
+  never registered with `RadioLinks`, so there is no reference count for its empty `close()` to
+  leak (`AndroidRadioLink.kt:579-610`: release closes a link outside the registry rather than
+  returning).
+- Nothing to fix. It stays in the register, marked wrong, so the next reader does not have to
+  repeat the check that produced it.
 
 ### 14. Timing instrumentation is on in production — OPEN, an ops item
 
@@ -178,14 +183,17 @@
 - Fixed by a test that asserts the first byte, so a future record kind cannot reintroduce the
   collision silently (`crates/session/tests/handshake_and_record.rs`).
 
-### 17. Two tests fail without `zbarimg` — OPEN
+### 17. Two tests fail without `zbarimg` — FIXED
 
-- PROVEN. `cargo test --workspace` fails two QR tests with "zbarimg is not on PATH: run the tests
-  inside `nix develop`" (`crates/daemon/src/qr.rs:685,855`).
-- A clean checkout cannot reach a green suite without an undeclared system dependency, and a test
-  that fails for an environment reason teaches people to ignore failures.
-- Fix: skip with a loud message when the binary is absent, or move the check into the flake check
-  that already provides it.
+- Was: `cargo test --workspace` failed two QR tests with "zbarimg is not on PATH: run the tests
+  inside `nix develop`", so a clean checkout could not reach a green suite without an undeclared
+  system dependency, and a test that fails for an environment reason teaches people to ignore
+  failures.
+- Now: both tests call `skip_without_zbar`, which prints `SKIP <what>: zbarimg is not on PATH ...`
+  and returns early (`crates/daemon/src/qr.rs`). The skip is loud on stdout and the decode still runs
+  wherever the binary exists, which is `nix develop` and CI.
+- Verified both ways on this machine: without the binary the two tests skip and the suite is green,
+  with it on `PATH` they run and pass.
 
 ## New defects found by the documentation comb, 2026-11-04
 
@@ -276,6 +284,7 @@
 
 ## Score
 
-- 10 fixed (2, 3, 4, 6, 7, 16, 18, 19, 20, 21), one partial (5), two corrected (10, 12), one open at
-  S1 (1), and the rest open by choice or because they are deployment facts rather than code.
+- 11 fixed (2, 3, 4, 6, 7, 16, 17, 18, 19, 20, 21), one partial (5), three corrected or withdrawn
+  (10, 12, 13), one open at S1 (1), and the rest open by choice or because they are deployment
+  facts rather than code.
 - Every open item above names its smallest correct fix and the file it lives in.
