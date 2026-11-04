@@ -44,7 +44,10 @@
 | Contacts and paths | Contact sync, path updates, a path cache with a trust rule | `serial_mesh_sender.dart:236-290,402-415` |
 | Stats | `CMD_GET_STATS` for `tx_air_secs`, `rx_air_secs`, `noise_floor`, `last_rssi`, `last_snr`, `recv`, `recv_errors` | opcode 56, firmware `MyMesh.cpp` |
 | Health | Reboot only on N unanswered sends to a bound peer, never on silence alone | `03-DEFECTS-MESHMORE.md` defect 1 |
-| Airtime | Build the estimator from `SelfInfo`, not a constant | `gateway_service.dart:207-215` |
+| Airtime | Build the estimator from `SelfInfo`, not a constant, with the `de` rule and the 32/16 preamble split, and test it against the known 613 ms value | `gateway_service.dart:207-215`, `Radio.kt:196-211` |
+| Retry timeout | Derive the first retry from the preset and the hop count, using the firmware's own formula 500 + ((airtime x 6 + 250) x (hops + 1)) ms, so a retry never fires before an answer could arrive | `08-RESEARCH-INTEGRATION.md` |
+| Path codec | Pack and unpack hop count in bits 0 to 5 and hash width minus one in bits 6 and 7, with `0xFF` as no path. Never store the byte raw | firmware `Packet::writePath`, research `protocol-and-firmware.md` |
+| Firmware gate | Read the radio's version and gate the carrier on 1.18.0, which fixed raw data over multi-byte path hashes | firmware release notes, `08-RESEARCH-INTEGRATION.md` |
 
 ### Where it goes
 
@@ -84,6 +87,11 @@
 ### P4, decide the tuple
 
 - Take the decision in `05-RADIO-TUPLE.md`, then make the documentation state one tuple per document with the date it was observed.
+
+## The firmware boundary
+
+- The carrier choice depends on the firmware version, not only on the design: a radio below 1.18.0 needs `0x41` for any path hash wider than one byte, and a radio at or above it does not.
+- So the client must read the version the radio reports and record it, and the daemon's status should show it, because a mixed pair is a real configuration and not a fault.
 
 ## What stays shared
 

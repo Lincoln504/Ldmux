@@ -16,6 +16,7 @@
 | `05-RADIO-TUPLE.md` | The five conflicting radio presets, the airtime arithmetic, and the options with their UX consequences |
 | `06-SEPARATION-PLAN.md` | How to make LDMUX independent of MeshMore, in phases, with what to delete |
 | `07-SOURCES.md` | Firmware and protocol facts, with the line that proves each one |
+| `08-RESEARCH-INTEGRATION.md` | What the parallel field research adds, corrects, and changes in the plan |
 
 ## Status words
 
@@ -30,6 +31,7 @@
 - The Kotlin and Android suites were not run, because they need `nix develop .#mobile`.
 - `cargo test --workspace` ran: 314 passed, 2 failed only because `zbarimg` is not installed.
 - No file in either repository was modified by the audit itself. The fixes in `02` and `03` are proposals until they are applied.
+- A parallel research track wrote `/home/ldeen/Documents/mesh-research/notes/` between 10:50Z and 15:01Z on 2026-11-04. `08-RESEARCH-INTEGRATION.md` records only what that corpus changes here, and every number it contributed was recomputed against local source before it was used.
 
 ## The one-paragraph answer
 

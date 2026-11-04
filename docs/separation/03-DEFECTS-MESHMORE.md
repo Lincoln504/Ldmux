@@ -31,6 +31,7 @@
 - The two readings agree only at a one-byte path hash. At two or three bytes the packet carries the wrong path length and the wrong number of bytes.
 - `mesh_carry.dart:193` also refuses a path longer than `0x7F`, which caps a two-byte-hash path at 63 hops.
 - Consequence: the host is correct by accident at the default hash size and wrong at any other, and the failure looks like a route that never answers.
+- Upstream context, added 2026-11-04 from the field research: MeshCore v1.18.0 (released 2026-10-15) fixed this in firmware, and states that raw data over 2- and 3-byte hashes was broken before it. The radios here run `companion-v1.17.1`, so the host is wrong on this firmware regardless of what any client does, and a firmware upgrade is part of the fix.
 
 ### 4. The host and the phone use different carriers for the same send
 
@@ -41,6 +42,15 @@
 
 - PROVEN. Every recovery path is an `exit(75)` plus systemd `Restart=on-failure` with `RestartSec=5` and `StartLimitBurst=10` per 300 s (`bin/meshmore_gateway.dart:165,192`, `deploy/meshmore-gateway.service:20-27`).
 - Consequence: ten failures in five minutes leave the unit failed and the host radio gone until someone intervenes, and the deaf-radio rule in defect 1 is a reliable way to reach ten.
+
+## Feature gaps, not defects
+
+- These are verified against source in the research corpus and belong to MeshMore's roadmap. They are listed so that the register above is not read as the whole picture.
+- `0x3E CMD_SEND_CHANNEL_DATA` has a constant and no encoder, which blocks every channel media format in the field.
+- `0x42 CMD_RUN_CLI_COMMAND` is not declared at all.
+- The `0x1B` channel datagram decodes and is then dropped, because nothing in the app's dispatch consumes it.
+- The "via" byte is parsed and discarded on `0x84` and `0x1B`, so a second radio is invisible to the app.
+- The gateway is the only consumer of `MeshCarryCodec`, so the gateway is MeshMore's only route to raw sends and should not be deleted as cleanup.
 
 ## S3
 

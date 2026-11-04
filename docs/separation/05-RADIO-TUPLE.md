@@ -28,9 +28,10 @@
 ## The airtime arithmetic
 
 - A 176-byte MeshCore packet at 62.5 kHz and SF7 is 613 ms (`meshmore-sns-radio-config.md:53`).
-- The same packet at 500 kHz and SF7 is about 66 ms (`docs/MESH-SCROLLBACK.md:110`).
-- At 500 kHz and SF8 it is about 132 ms, because one spreading factor step doubles the symbol time.
-- At a 1 percent duty cycle, which is 36 seconds per hour, that is about 58 records per hour at 62.5 kHz SF7, about 545 at 500 kHz SF7, and about 273 at 500 kHz SF8.
+- The same packet at 500 kHz and SF7 is 75.3 ms, and at 500 kHz SF8 it is 137.9 ms, because one spreading factor step doubles the symbol time.
+- All three come from the LoRa time-on-air formula with the 32-symbol preamble used below SF8. The same formula reproduces the 613 ms figure exactly, which is why the other two can be trusted without a fresh measurement.
+- At a 1 percent duty cycle, which is 36 seconds per hour, that is about 58 records per hour at 62.5 kHz SF7, about 478 at 500 kHz SF7, and about 261 at 500 kHz SF8.
+- Corrected 2026-11-04: an earlier pass in this directory used 66 and 132 ms, which gave 545 and 273 per hour. The ordering is unchanged and the absolute figures were high.
 - The United States has no duty cycle limit, so the 1 percent figure is a self-imposed policy, not a legal one. The firmware's own governor is a 50 percent budget by default (`_prefs.airtime_factor` 1.0, `src/Dispatcher.cpp:275`), which is far looser than LDMUX's meter.
 - Consequence: every budget statement in `docs/MESH-GATEWAY.md` and `docs/MESH-LATENCY.md` is four to eight times more pessimistic than the link that is actually running.
 
