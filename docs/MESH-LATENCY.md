@@ -7,26 +7,31 @@ implemented. Numbers are either measured on this project or attributed to a sour
 
 ## The budget, in order
 
-1. **Airtime per record.** MeshCore's second-generation LoRa presets are narrow: 62.5 kHz at
-   SF7-11. A full 172-byte companion frame at SF7/62.5 kHz is about 554 ms on air; the same
-   frame at SF10 is roughly 1.8 s and at SF11 roughly 3.5 s (time-on-air arithmetic, not a
-   measurement). Record size therefore dominates everything the protocol can do: one screen
-   update is one record, and a record that does not fit waits for the next one.
+1. **Airtime per record.** One screen update or one keystroke is one record, and a record that
+   does not fit waits for the next one, so airtime dominates everything the protocol can do.
+   **This link is 138 ms per 176-byte packet**: the pair is configured 914.25 MHz / 500 kHz /
+   SF8 / CR5 and read back on the device (`MESH-STANDALONE.md:415`), which at a 1% duty cycle
+   buys **261 records an hour**. Read every timing below against 138 ms.
 
-   **Corrected 2026-11-04.** This link does not run a 62.5 kHz preset. The pair was configured
-   to 914.25 MHz / 500 kHz / SF8 / CR5 and read back on the device (`MESH-STANDALONE.md:415`),
-   where the same 176-byte packet is **138 ms**, so 36 s per hour buys **261 records**, not 58.
-   The 62.5 kHz figures describe the public MeshCore presets, which this link cannot reach
-   because the bandwidth differs.
+   The public MeshCore presets are narrower and much slower: 62.5 kHz at SF7-11, where a
+   172-byte frame is about **554 ms** at SF7, roughly 1.8 s at SF10 and 3.5 s at SF11
+   (time-on-air arithmetic, not a measurement). This link cannot reach those presets because
+   the bandwidth differs. Quote 554 ms only for someone running a public preset, and say which
+   preset it belongs to: **corrected 2026-11-04**, because quoting it first made this link look
+   four times slower than it is.
 2. **The companion BLE link.** MeshCore's ESP32 firmware declares its RX characteristic as
    write-with-response only and spaces TX notifications by 60 ms, so the radio emits at most
    about 16 notifications a second. With a 172-byte frame ceiling that is a hard ~2.4
    records/s from the radio to the phone, whatever the radio is doing. MTU must be at least
    175 for one frame to fit in one ATT write; the app requests 256 and requires 179.
-3. **The L3 session's own timers.** `ldmux-session` defaults, measured 2026-10-30: window 8,
-   ack delay 150 ms, first retransmit 2 s, heartbeat 3 s. The window is the L2 credit; eight
-   unacked records at 554 ms each is 4.4 s of air, so a burst that fills the window is a
-   burst the user feels.
+3. **The L3 session's own timers.** `ldmux-session` defaults (`crates/session/src/arq.rs`,
+   `Config::for_payload`): window 8, ack delay 150 ms, first retransmit 2 s, **no heartbeat**.
+   The window is the L2 credit; eight unacked records at 138 ms each is 1.1 s of air, so a
+   burst that fills the window is a burst the user feels — but a short one.
+   `heartbeat_ms` is 0 on purpose: silence is only a failure signal while something is
+   outstanding, and the ARQ ladder finds a dead peer as soon as there is anything to send,
+   while a 3 s heartbeat cost 1200 records an hour to say nothing (the comment on the field).
+   An earlier revision of this section said 3 s.
 4. **The host's update pacing.** This is the one large, controllable term, and until 2026-11-03
    it was uncapped: the bridge diffed the screen every 50 ms and sent every change. See below.
 5. **Round-trip confirmation.** The ARQ ack rides on the next record (or a 150 ms ack timer),

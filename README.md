@@ -49,6 +49,7 @@ either. It is deliberately simple:
 | [`docs/DESKTOP-INTEGRATION.md`](docs/DESKTOP-INTEGRATION.md) | Putting a shell on the machine's own screen, and the i3 binding. |
 | [`docs/IOS-DEVELOPMENT.md`](docs/IOS-DEVELOPMENT.md) | What the iOS build needs, and what is still unknown about it. |
 | [`docs/PREDICTIVE-ECHO.md`](docs/PREDICTIVE-ECHO.md) | Perceived latency: what can be predicted, and what must not be. |
+| [`docs/HIGH-LATENCY.md`](docs/HIGH-LATENCY.md) | What breaks on a slow tailnet path (300 ms to 2 s RTT), every constant with its assumption, and the changes still open. |
 | [`docs/MESH-STANDALONE.md`](docs/MESH-STANDALONE.md) | **LoRa / MeshCore, as built**: the phone owns its own radio over BLE, the host radio is reached through a gateway, and this is the record of the protocol, the encryption and the hardware runs. |
 | [`docs/MESH-GATEWAY.md`](docs/MESH-GATEWAY.md) | The host half: the gateway that owns a USB radio, and the state file the daemon reads. |
 | [`docs/MESH-HOST-RADIO.md`](docs/MESH-HOST-RADIO.md) | Bringing the host radio up: firmware, gateway, environment, and what each failure means. |

@@ -465,6 +465,33 @@ impl<W: AsyncWrite + Unpin> WsWriter<W> {
         self.send_data(0x2, b).await
     }
 
+    /// The same, but the payload is written in slices and **every slice** has to be
+    /// accepted within `stall`.
+    ///
+    /// The plain writers have no deadline of their own, and the caller's deadline was
+    /// a single `timeout` around the whole message: a link that was draining a 4 MiB
+    /// snapshot slowly was killed exactly like one that had taken nothing, because
+    /// ten seconds is ten seconds whether the socket buffer is emptying or not. A
+    /// slicing write makes the deadline mean what it says — *nothing* moved for
+    /// `stall` — so a slow link is slow and a wedged one is still cut off. It is
+    /// [`crate::remote::Drained`]'s rule ("without movement, not elapsed") applied to
+    /// the write side.
+    ///
+    /// A slice the deadline expires in leaves a partial frame on the socket, which is
+    /// fine and deliberate: the caller closes the connection, and a half-written frame
+    /// on a socket that is about to die is not worth saving.
+    pub async fn send_text_stalling(&mut self, s: &str, stall: std::time::Duration) -> io::Result<()> {
+        self.send_data_stalling(0x1, s.as_bytes(), stall).await
+    }
+
+    pub async fn send_binary_stalling(
+        &mut self,
+        b: &[u8],
+        stall: std::time::Duration,
+    ) -> io::Result<()> {
+        self.send_data_stalling(0x2, b, stall).await
+    }
+
     pub async fn send_pong(&mut self, payload: &[u8]) -> io::Result<()> {
         self.write_frame(0xa, false, &payload[..payload.len().min(125)])
             .await
@@ -473,6 +500,32 @@ impl<W: AsyncWrite + Unpin> WsWriter<W> {
     pub async fn send_close(&mut self, code: u16) -> io::Result<()> {
         self.write_frame(0x8, false, &code.to_be_bytes()).await?;
         self.w.flush().await
+    }
+
+    async fn send_data_stalling(
+        &mut self,
+        opcode: u8,
+        data: &[u8],
+        stall: std::time::Duration,
+    ) -> io::Result<()> {
+        if data.len() >= MIN_COMPRESS_BYTES && self.deflate.is_some() {
+            let compressed = if data.len() > INLINE_COMPRESS_BYTES {
+                let mut d = self.deflate.take().expect("checked");
+                let owned = data.to_vec();
+                let (d, out) = tokio::task::spawn_blocking(move || {
+                    let out = d.compress(&owned);
+                    (d, out)
+                })
+                .await
+                .map_err(|e| io::Error::other(format!("deflate task: {e}")))?;
+                self.deflate = Some(d);
+                out?
+            } else {
+                self.deflate.as_mut().expect("checked").compress(data)?
+            };
+            return self.write_frame_stalling(opcode, true, &compressed, stall).await;
+        }
+        self.write_frame_stalling(opcode, false, data, stall).await
     }
 
     async fn send_data(&mut self, opcode: u8, data: &[u8]) -> io::Result<()> {
@@ -497,6 +550,37 @@ impl<W: AsyncWrite + Unpin> WsWriter<W> {
             return self.write_frame(opcode, true, &compressed).await;
         }
         self.write_frame(opcode, false, data).await
+    }
+
+    /// Largest slice written between stall checks.
+    const WRITE_SLICE: usize = 64 * 1024;
+
+    async fn write_frame_stalling(
+        &mut self,
+        opcode: u8,
+        rsv1: bool,
+        payload: &[u8],
+        stall: std::time::Duration,
+    ) -> io::Result<()> {
+        let mut head = Vec::with_capacity(10);
+        head.push(0x80 | if rsv1 { 0x40 } else { 0 } | opcode);
+        match payload.len() {
+            n if n < 126 => head.push(n as u8),
+            n if n <= u16::MAX as usize => {
+                head.push(126);
+                head.extend_from_slice(&(n as u16).to_be_bytes());
+            }
+            n => {
+                head.push(127);
+                head.extend_from_slice(&(n as u64).to_be_bytes());
+            }
+        }
+        self.wire_bytes += (head.len() + payload.len()) as u64;
+        stall_check(stall, self.w.write_all(&head)).await?;
+        for slice in payload.chunks(Self::WRITE_SLICE) {
+            stall_check(stall, self.w.write_all(slice)).await?;
+        }
+        stall_check(stall, self.w.flush()).await
     }
 
     async fn write_frame(&mut self, opcode: u8, rsv1: bool, payload: &[u8]) -> io::Result<()> {
@@ -532,6 +616,20 @@ pub struct Upgrade {
     /// `Sec-WebSocket-Key`.
     pub key: String,
     pub deflate: Option<(DeflateParams, String)>,
+}
+
+/// Await one write, failing with a timeout error when it has not completed in `stall`.
+async fn stall_check<F, T>(stall: std::time::Duration, fut: F) -> io::Result<T>
+where
+    F: std::future::Future<Output = io::Result<T>>,
+{
+    match tokio::time::timeout(stall, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the peer took nothing for the whole stall allowance",
+        )),
+    }
 }
 
 /// The `101` response for `up`.
@@ -712,6 +810,130 @@ mod tests {
         let out = d.compress(data).unwrap();
         std::mem::swap(&mut d.c, c);
         out
+    }
+
+    /// A writer that accepts `accept` bytes and then never moves again.
+    ///
+    /// It returns `Pending` without registering a waker, so it is the hardest form of
+    /// a peer that has stopped reading: nothing will ever wake the write.
+    struct Stopped {
+        accept: usize,
+        out: Vec<u8>,
+    }
+
+    impl AsyncWrite for Stopped {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            if self.out.len() >= self.accept {
+                return std::task::Poll::Pending;
+            }
+            let n = buf.len().min(self.accept - self.out.len());
+            self.out.extend_from_slice(&buf[..n]);
+            std::task::Poll::Ready(Ok(n))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Slicing must not change a single byte of the frame: the same payload written
+    /// through either path has to come out identical, or the client's parser sees a
+    /// different protocol than the one it was written for.
+    #[tokio::test]
+    async fn a_sliced_write_is_byte_identical_to_a_plain_one() {
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let mut plain: Vec<u8> = Vec::new();
+        WsWriter::new(&mut plain, None)
+            .send_binary(&payload)
+            .await
+            .unwrap();
+        let mut sliced: Vec<u8> = Vec::new();
+        WsWriter::new(&mut sliced, None)
+            .send_binary_stalling(&payload, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(plain, sliced, "the sliced frame differs from the plain one");
+    }
+
+    /// A peer that takes the header and stops is cut off at the stall allowance, not
+    /// held for ever. This is the property the old single deadline had, and it must
+    /// survive the change.
+    #[tokio::test]
+    async fn a_peer_that_stops_taking_bytes_stalls_at_the_deadline() {
+        let sink = Stopped {
+            accept: 8,
+            out: Vec::new(),
+        };
+        let mut w = WsWriter::new(sink, None);
+        let started = std::time::Instant::now();
+        let r = w
+            .send_binary_stalling(&vec![b'x'; 200_000], std::time::Duration::from_millis(80))
+            .await;
+        let took = started.elapsed();
+        assert!(r.is_err(), "a stopped peer must not report a finished write");
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(
+            took >= std::time::Duration::from_millis(80)
+                && took < std::time::Duration::from_millis(1500),
+            "the stall allowance is the deadline: took {took:?}"
+        );
+    }
+
+    /// **The reason for the change.** A link that keeps accepting bytes, slowly,
+    /// finishes a message that would not have fit inside one deadline for the whole
+    /// write: the socket takes 4 KiB per 2 ms, so a 64 KiB slice lands in ~32 ms and
+    /// the 512 KiB message needs ~260 ms — well past a 100 ms budget for the whole
+    /// write, comfortably inside it for every slice.
+    #[tokio::test]
+    async fn a_slow_link_that_keeps_draining_finishes_the_message() {
+        let (server, mut client) = tokio::io::duplex(4096);
+        // 4 KiB every 2 ms is 2 MB/s: slow enough to outlast a hundred-millisecond
+        // whole-message deadline, fast enough that no single slice comes near it.
+        let reader = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut sink = Vec::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        sink.extend_from_slice(&buf[..n]);
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    }
+                }
+            }
+            sink.len()
+        });
+        let payload = vec![b'y'; 512 * 1024];
+        let mut w = WsWriter::new(server, None);
+        let started = std::time::Instant::now();
+        w.send_binary_stalling(&payload, std::time::Duration::from_millis(100))
+            .await
+            .expect("a draining link must not be cut off");
+        let took = started.elapsed();
+        assert!(
+            took >= std::time::Duration::from_millis(150),
+            "the message must have taken longer than one 100 ms deadline, took {took:?}"
+        );
+        drop(w);
+        let seen = reader.await.unwrap();
+        assert_eq!(
+            seen,
+            payload.len() + 10,
+            "the whole frame arrives (10-byte head for a 512 KiB payload)"
+        );
     }
 
     #[tokio::test]

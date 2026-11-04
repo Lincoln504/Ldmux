@@ -225,12 +225,19 @@ const RELEASE_GRACE_MS: u64 = crate::daemon::RECONNECT_GRACE_MS;
 /// Both of these reach [`Shared`] as fields from the daemon, so a test (and a
 /// deployment on a slow path) can shorten them without a rebuild; these are the
 /// defaults. See [`crate::daemon::CLAIM_TICK_MS`].
-/// How long one write to the socket may take before the peer is declared gone.
+/// How long one write to the socket may go **unaccepted** before the peer is
+/// declared gone.
 ///
-/// A write that never completes (a phone on a dead link: the radio is off, the
+/// A write that makes no progress (a phone on a dead link: the radio is off, the
 /// NAT forgot the flow, nothing ever ACKs) used to hold the connection loop in
 /// `ws.send` for good, and the loop is also what reads the idle sweep's `Close`,
 /// so the connection and its claim were never released.
+///
+/// It is a stall allowance, not a message allowance: the writer checks it per
+/// 64 KiB slice ([`crate::ws::WsWriter::send_binary_stalling`]), so a 4 MiB page on
+/// a link that moves 40 KiB/s survives, and the same page on a link that has taken
+/// nothing for ten seconds does not. The single-deadline form this replaced killed
+/// both, which is how a slow link became a reconnect loop.
 const WS_SEND_TIMEOUT_MS: u64 = 10_000;
 /// Queued control JSON (snapshots, session lists) past this on one connection
 /// means the peer is not reading at all: close it rather than hold it in memory.
@@ -1128,14 +1135,20 @@ async fn flush_output(
     ok
 }
 
-/// One socket write (compression included), bounded. `false` is a timeout or a
-/// socket error.
+/// One socket write (compression included). `false` is a stall or a socket error.
+///
+/// `limit` is **how long one slice may go unaccepted**, not how long the message may
+/// take: the writer checks it per 64 KiB. A single deadline for the whole message
+/// killed a link that was draining a large snapshot slowly, which turned "slow" into
+/// "disconnected" and made the reconnect re-request the same page — a livelock, since
+/// the retry could never be faster than the first attempt. A peer that has taken
+/// nothing for `limit` is still cut off, so a dead link costs no more than before.
 async fn send_bounded(ws: &mut WsWrite, msg: Wire<'_>, limit: std::time::Duration) -> bool {
     let sent = match msg {
-        Wire::Text(t) => tokio::time::timeout(limit, ws.send_text(t)).await,
-        Wire::Binary(b) => tokio::time::timeout(limit, ws.send_binary(b)).await,
+        Wire::Text(t) => ws.send_text_stalling(t, limit).await,
+        Wire::Binary(b) => ws.send_binary_stalling(b, limit).await,
     };
-    matches!(sent, Ok(Ok(())))
+    matches!(sent, Ok(()))
 }
 
 /// Mark the connection seen (any inbound message counts).

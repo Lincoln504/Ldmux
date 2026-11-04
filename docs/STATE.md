@@ -237,7 +237,8 @@ Product and mobile:
   one a second, input echo and the first change after quiet bypass the wait, and the scrollback
   the phone keeps costs no airtime (`crates/daemon/src/mesh_bridge.rs`, commit 2d8cf10,
   2026-11-03). The budget, what is deliberately left alone (spreading factor, path discovery),
-  and how to measure it: `docs/MESH-LATENCY.md`.
+  and how to measure it: `docs/MESH-LATENCY.md`. On a slow tailnet path (300 ms to 2 s
+  RTT), what breaks, what is fixed and what is still a decision: `docs/HIGH-LATENCY.md`.
 
 Daemon and protocol:
 - **Shells do not carry the desktop session's display environment.** The keeper
