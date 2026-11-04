@@ -177,8 +177,9 @@ change them without a rebuild.
 - **Whether `AWAITING_DEADLINE` (mesh, 10 s) or MeshMore's `linkTimeout` (3 s) is right.** Both
   carry the same comment, that the firmware answers as soon as `sendDirect` returns, and they
   differ by 3.3x (`mesh.rs:41-42` against
-  `meshmore_sns_app/packages/meshcore_gateway/lib/src/serial_mesh_sender.dart:88-91`). Neither
-  cites a measurement of how long the firmware actually takes.
+  `meshmore_sns_app/packages/meshcore_host/lib/src/serial_mesh_sender.dart:88-91`, which is the
+  **host** package, not the gateway one). Neither cites a measurement of how long the firmware
+  actually takes.
 - **`MAX_QUEUED_JSON_BYTES` closes a connection that is slow rather than dead.** 16 MiB of queued
   control JSON is reachable by several scrollback pages on a slow link, and the close is
   indistinguishable from a failure at the client. Either the page cap comes first (P2) or this

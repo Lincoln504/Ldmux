@@ -225,10 +225,13 @@ reach because the bandwidth differs, and the budget conclusion below is right in
 direction and about four times high in magnitude: 261 records an hour, not 58.7.
 A command with a 5-record reply affords about 43 of them an hour, not 10.
 
-The last row decides the profile. On MeshCore's longest-range preset, a whole
-hour of duty-cycle budget buys **under five packets**, and one terminal snapshot
-would cost three hours of it. There is therefore no point in a budget override:
-the transfer has to be small by construction.
+The **deployed** row decides the profile. On the narrowest public preset an hour of
+duty-cycle budget buys under five packets and a terminal snapshot would cost three hours of
+it, which is where this section's original conclusion came from. **Corrected 2026-11-04:**
+that is not this link. At 914.25 / 500 kHz / SF8 the hour buys 261 records, so the binding
+constraint is the **1,500 byte packet cap** and the 138 ms airtime, not the meter: a budget
+override would still buy nothing, but for a different reason, and the reason is what a
+reader needs.
 
 ### 6.2 So the output is bounded at the source
 
@@ -267,8 +270,13 @@ terminal".
 | SF7/125 kHz | 120 | 6 records | about 20/hour |
 | SF10/250 kHz | 40 | 6 records | about 6/hour |
 | SF11/62.5 kHz (a proposal, not deployed) | 4.8 | 6 records | under 1 per hour |
-| **USA/Canada SF7/62.5 kHz (deployed)** | 58.7 | 6 records | **about 10/hour** |
-| **EU/UK Narrow SF8/62.5 kHz CR8 (deployed)** | 21.7 | 6 records | **about 3.6/hour** |
+| USA/Canada SF7/62.5 kHz | 58.7 | 6 records | about 10/hour |
+| EU/UK Narrow SF8/62.5 kHz CR8 | 21.7 | 6 records | about 3.6/hour |
+| **Deployed: 914.25 / 500 kHz / SF8 / CR5** | **138** | 6 records | **about 43/hour** |
+
+**Corrected 2026-11-04.** The two 62.5 kHz rows were labelled "(deployed)" and are not:
+they are public MeshCore presets, and this link cannot reach them because the bandwidth
+differs. The deployed row is the third.
 
 On the 62.5 kHz preset a public North American deployment uses, the budget affords
 about ten command-and-reply operations an hour. The mesh profile is a **low-rate
@@ -289,9 +297,16 @@ behind it explicit.
 
 What it means for LDMUX's UI:
 
-- No live cursor, no per-keystroke echo, no spinner that implies a second.
+**Corrected 2026-11-04.** These rules were derived from the narrow public preset. On the
+deployed link the implementation does echo a keystroke (one record each way, about 0.3 s of
+air plus the bridge tick, `MESH-LATENCY.md` §5), and the budget is **about 43**
+command-and-reply operations an hour, not ten. The first, second and third hold for a public
+preset only. The last holds either way.
+
+- No live cursor, no per-keystroke echo, no spinner that implies a second (public narrow
+  preset only).
 - Present the budget as **operations left this hour**, not seconds.
-- Timestamp every reply, because "minutes later" is normal.
+- Timestamp every reply, because "minutes later" is normal (public narrow preset only).
 - Never imply delivery. The carrier cannot know, so the UI must not suggest it.
 
 ## 7. Timers

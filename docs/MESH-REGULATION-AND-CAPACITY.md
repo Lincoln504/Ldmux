@@ -49,10 +49,13 @@ minimum off-time. For a 125 kHz signal in the 250 kHz band O that converts 360 s
 Two things follow for this project.
 
 - **Our current preset is on the digital-modulation path, not the FHSS path.** The live radio runs
-  910.525 MHz at **500 kHz** bandwidth, which meets the 500 kHz floor, and at that width the 8 dBm
-  per 3 kHz density limit and the 1 W ceiling coincide. There is therefore no duty-cycle and no
-  dwell constraint on it. The earlier arithmetic in `docs/MESH-LATENCY.md` that assumed a
-  European 1 % is the *worst* case, not ours.
+  **914.25 MHz** at **500 kHz** bandwidth, read back on the device 2026-11-02
+  (`docs/HARDWARE-VALIDATION.md:783`, `docs/MESH-STANDALONE.md:415`), which meets the 500 kHz
+  floor, and at that width the 8 dBm per 3 kHz density limit and the 1 W ceiling coincide.
+  There is therefore no duty-cycle and no dwell constraint on it. The earlier arithmetic in
+  `docs/MESH-LATENCY.md` that assumed a European 1 % is the *worst* case, not ours.
+  **Corrected 2026-11-04:** this paragraph said 910.525 MHz, which is the app's compiled
+  default and the public US preset's frequency, not what the pair is configured to.
 - **A narrow fixed channel would not be authorised there.** A single 125 kHz channel neither hops
   nor meets the 500 kHz floor, so 15.247 offers no route for it; 15.249 does, but at roughly
   −1.25 dBm EIRP, some 25 dB below what we run. The 500 kHz preset is not an accident of tuning,

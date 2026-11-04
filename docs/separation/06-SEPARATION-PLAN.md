@@ -45,9 +45,15 @@
 | Stats | `CMD_GET_STATS` for `tx_air_secs`, `rx_air_secs`, `noise_floor`, `last_rssi`, `last_snr`, `recv`, `recv_errors` | opcode 56, firmware `MyMesh.cpp` |
 | Health | Reboot only on N unanswered sends to a bound peer, never on silence alone | `03-DEFECTS-MESHMORE.md` defect 1 |
 | Airtime | Build the estimator from `SelfInfo`, not a constant, with the `de` rule and the 32/16 preamble split, and test it against the known 613 ms value | `gateway_service.dart:207-215`, `Radio.kt:196-211` |
-| Retry timeout | Derive the first retry from the preset and the hop count, using the firmware's own formula 500 + ((airtime x 6 + 250) x (hops + 1)) ms, so a retry never fires before an answer could arrive | `08-RESEARCH-INTEGRATION.md` |
+| Retry timeout | Derive the first retry from the preset and the hop count, using the firmware's own formula 500 + ((airtime x 6 + 250) x (hops + 1)) ms, so a retry never fires before an answer could arrive. **Not implemented:** `crates/session/src/arq.rs` quotes that formula as motivation for an estimate and then uses `max(rto_initial_ms, srtt) x 2^(attempts-1)` with no hop term. The plan item and the code comment read alike, which is why the gap is easy to miss | `08-RESEARCH-INTEGRATION.md` |
 | Path codec | Pack and unpack hop count in bits 0 to 5 and hash width minus one in bits 6 and 7, with `0xFF` as no path. Never store the byte raw | firmware `Packet::writePath`, research `protocol-and-firmware.md` |
 | Firmware version | Report it in status for diagnostics. **No carrier gate is needed**: the 1.18.0 fix is in the `0x19` handler and both sides read a whole packet through `0x41` (`02-DEFECTS-LDMUX.md` defect 7) | firmware release notes, `08-RESEARCH-INTEGRATION.md` |
+
+Before deriving the pacing and retry rules from scratch, read what a sibling fork already shipped:
+`mesh-research/notes/topics/recent-timeline.md` records wadamesh-tak's "channel answers to far
+listeners: wait out the request's flood, space packets by hops" (`FloodPace`) and "shorter waits on
+both ends" for faster transfers, both 2026-10-26. It is the same idea as the hop-scaled retry above,
+already implemented, and reading it is cheaper than re-deriving it.
 
 ### Where it goes
 

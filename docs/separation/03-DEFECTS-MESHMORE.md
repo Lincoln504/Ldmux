@@ -108,5 +108,7 @@
 
 ### 12. The firmware reference in the docs is behind the tree
 
-- PROVEN. `meshmore-sns-radio-config.md:192` records `v1.17.1-d929643`. The fork's HEAD is `685a869`, which adds a Heltec V4 FEM rail change.
+- PROVEN. `meshmore-sns-radio-config.md:192` records `v1.17.1-d929643`. The fork's HEAD is `685a869`, three commits further on: `2955792` ("ble: keep one bond record per peer, or the radio can never encrypt again"), `2fc1361` ("ble: report the bond store, and make the prune testable") and `685a869` (a Heltec V4 FEM rail change on every boot that is not a deep-sleep wake). Only the FEM change was noted here before.
+- The **bond-store** pair matters to LDMUX: the phone's BLE path and any re-bond after a pairing reset depend on the peripheral keeping one bond per peer, and that fix is not on the radios. This is a firmware deployment item, not a code item.
+- The clone is shallow, with the boundary at `81dbae5`, which `mesh-research/notes/topics/upstream-direction.md` §1 identifies as the v1.18.0 tag commit: the objects for 1.18.0 are reachable for a read-only `git show` without fetching, even though HEAD is three commits past 1.17.1.
 - Consequence: the document describes what the radios run, which is correct, but a reader comparing it to the tree sees a mismatch with no explanation.
