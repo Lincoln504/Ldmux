@@ -199,3 +199,61 @@ fn a_retransmission_is_not_byte_identical_to_the_original() {
         other => panic!("retry: {other:?}"),
     }
 }
+
+/// The ARQ sequence must travel with the sealed bytes, or a caller cannot say which record the
+/// radio refused. Before this, every caller kept its own counter and guessed the mapping, which is
+/// wrong as soon as a retransmission or a handshake reply shares the tunnel.
+#[test]
+fn a_sealed_record_keeps_the_arq_sequence_that_names_it() {
+    let (mut phone, mut host) = pair(172);
+    phone.send(4, b"one").unwrap();
+    phone.send(4, b"two").unwrap();
+    let sealed = phone.poll_with_seq(0, PLENTY).unwrap();
+    assert_eq!(sealed.len(), 2);
+    // Sequence numbers are the ARQ's, starting at zero and distinct per record.
+    assert_eq!(sealed[0].seq, Some(0));
+    assert_eq!(sealed[1].seq, Some(1));
+    // The bytes are the sealed records, and the plain API still yields exactly them.
+    let (mut other_phone, _) = pair(172);
+    other_phone.send(4, b"one").unwrap();
+    assert_eq!(
+        other_phone.poll(0, PLENTY).unwrap()[0].len(),
+        sealed[0].bytes.len(),
+        "poll and poll_with_seq seal the same way"
+    );
+    // Both are readable by the peer.
+    for s in &sealed {
+        match host.receive(0, &s.bytes).unwrap() {
+            Inbound::Data(_) => {}
+            other => panic!("expected data, got {other:?}"),
+        }
+    }
+}
+
+/// A refusal must reach the slot by its ARQ number and make the retry follow the radio's pace.
+#[test]
+fn refusing_a_sealed_record_by_its_sequence_retries_at_the_radio_pace() {
+    let (mut phone, _host) = pair(172);
+    phone.send(4, b"refused").unwrap();
+    let sealed = phone.poll_with_seq(0, PLENTY).unwrap();
+    let seq = sealed[0].seq.expect("a data record has a slot");
+    // The radio refused it without transmitting, so the slot gives its attempt back and waits the
+    // transmit-table pace, not the retry interval.
+    assert!(phone.arq_mut().on_refused(seq, 10));
+    assert!(
+        phone
+            .poll_with_seq(10 + ldmux_session::arq::REFUSED_RETRY_MS - 1, PLENTY)
+            .unwrap()
+            .is_empty(),
+        "not before the table could have drained"
+    );
+    let retry = phone
+        .poll_with_seq(10 + ldmux_session::arq::REFUSED_RETRY_MS, PLENTY)
+        .unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].seq, Some(seq), "the same slot, not a new record");
+    assert_ne!(
+        retry[0].bytes, sealed[0].bytes,
+        "resealed, so the radio does not drop it as a duplicate"
+    );
+}

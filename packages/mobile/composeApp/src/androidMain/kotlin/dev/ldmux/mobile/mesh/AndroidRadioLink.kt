@@ -519,7 +519,11 @@ class AndroidRadioLink(
             3 -> RadioSendResult.Busy
             4 -> RadioSendResult.Failed
             5 -> RadioSendResult.Failed
-            6 -> RadioSendResult.TooLong
+            // 6 is ERR_CODE_ILLEGAL_ARG: the firmware could not parse the packet we built. On 0x41
+            // that is the only non-table-full failure, so it means a bad packet, never "too long" —
+            // a record over the limit is caught before it is handed to the radio. Reporting it as
+            // TooLong hid the one failure a developer needs to see behind a "no path" message.
+            6 -> RadioSendResult.Failed
             1 -> {
                 _state.value = MeshLinkState.SessionFailed
                 RadioSendResult.Failed

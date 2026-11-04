@@ -209,6 +209,35 @@ JNIEXPORT jint JNICALL JNI(takeRecord)(JNIEnv *env, jclass cls, jlong h, jbyteAr
   return 1;
 }
 
+/* meta[0] = length, meta[1] = the ARQ sequence number that names the record's slot.
+ * Returns 1, 0 or an error. The sequence number is written only on success. */
+JNIEXPORT jint JNICALL JNI(takeRecordSeq)(JNIEnv *env, jclass cls, jlong h, jbyteArray out,
+                                          jintArray meta) {
+  (void)cls;
+  if (!out) return LDMUX_ERR_NULL;
+  uint8_t buf[LDMUX_RECORD_MAX];
+  size_t len = 0;
+  uint16_t seq = 0;
+  jsize cap = (*env)->GetArrayLength(env, out);
+  size_t use = (size_t)cap < sizeof buf ? (size_t)cap : sizeof buf;
+  int rc = ldmux_session_take_record_seq(session_of(h), buf, use, &len, &seq);
+  if (rc == LDMUX_ERR_BUFFER && !put_int(env, meta, 0, (jint)len)) return LDMUX_ERR_ARG;
+  if (rc != 1) return rc;
+  if (!put_exact(env, out, buf, (jsize)len) || !put_int(env, meta, 0, (jint)len) ||
+      !put_int(env, meta, 1, (jint)seq))
+    return LDMUX_ERR_ARG;
+  return 1;
+}
+
+/* The radio refused that record without transmitting it; give the attempt back. Returns 1 when a
+ * slot with that number was in flight, 0 when it was already settled. */
+JNIEXPORT jint JNICALL JNI(refuseSeq)(JNIEnv *env, jclass cls, jlong h, jlong now, jint seq) {
+  (void)env; (void)cls;
+  if (seq < 0) return LDMUX_ERR_ARG;
+  if (seq > 65535) return LDMUX_ERR_ARG;
+  return ldmux_session_refuse_seq(session_of(h), (uint64_t)now, (uint16_t)seq);
+}
+
 JNIEXPORT jint JNICALL JNI(close)(JNIEnv *env, jclass cls, jlong h) {
   (void)env; (void)cls;
   return ldmux_session_close(session_of(h));

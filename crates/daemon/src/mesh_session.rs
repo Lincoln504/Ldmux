@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use ldmux_session::arq::{Delivered, Limits, Stats};
 use ldmux_session::handshake::{self, HandshakeError, Keypair, PairingEntry, Responder};
-use ldmux_session::{Inbound, Session};
+use ldmux_session::{Inbound, Sealed, Session};
 
 /// Records an accepted handshake before it is answered.
 pub type Persister = Box<dyn FnMut(&PairingEntry) -> std::io::Result<()> + Send>;
@@ -239,12 +239,25 @@ impl SessionHost {
     /// (`AirtimePolicy::ownedChannel`); this is the host's half of the same rule: replies, acks and
     /// heartbeats are sent, full stop.
     pub fn poll(&mut self, now_ms: u64, limits: Limits) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
+        self.poll_with_seq(now_ms, limits)
+            .into_iter()
+            .map(|s| s.bytes)
+            .collect()
+    }
+
+    /// As [`SessionHost::poll`], but each record keeps the ARQ sequence number that names it.
+    ///
+    /// The L2 loop needs the number: the radio's `SEND_RESULT` echoes whatever the caller wrote
+    /// into the send frame, and a refusal can only be handed back to the ARQ by the slot's own
+    /// sequence. Queued handshake replies are control traffic with no ARQ slot, so their `seq` is
+    /// `None` and a refusal of one is only reported.
+    pub fn poll_with_seq(&mut self, now_ms: u64, limits: Limits) -> Vec<Sealed> {
+        let mut out: Vec<Sealed> = Vec::new();
         let mut control = CONTROL_RECORDS;
         while control > 0 && usize::from(limits.l2_slots) > out.len() {
             match self.outbox.pop_front() {
-                Some(r) => {
-                    out.push(r);
+                Some(bytes) => {
+                    out.push(Sealed { seq: None, bytes });
                     control -= 1;
                 }
                 None => break,
@@ -259,15 +272,22 @@ impl SessionHost {
                     records_left: budget,
                     l2_slots: budget,
                 };
-                match session.poll(now_ms, rest) {
+                match session.poll_with_seq(now_ms, rest) {
                     Ok(records) => out.extend(records),
                     Err(e) => self.last_error = Some(format!("seal failed: {e:?}")),
                 }
                 self.queued_bytes = session_pending_bytes(session, self.queued_bytes);
             }
-            if session.arq().failure().is_some() {
-                self.last_error =
-                    Some("the phone stopped acknowledging: retries exhausted".to_owned());
+            if let Some(failure) = session.arq().failure() {
+                self.last_error = Some(match failure {
+                    ldmux_session::arq::Failure::RetriesExhausted => {
+                        "the phone stopped acknowledging: retries exhausted".to_owned()
+                    }
+                    ldmux_session::arq::Failure::RadioRefused => format!(
+                        "the radio kept refusing a record without transmitting it for {} s",
+                        ldmux_session::arq::REFUSAL_DEADLINE_MS / 1000
+                    ),
+                });
                 self.session = None;
                 self.queued_bytes = 0;
             }
@@ -280,10 +300,10 @@ impl SessionHost {
     /// Routed to the ARQ so the refusal gives its attempt back: a packet that never reached the
     /// air is not a transmission, and the retry ladder must not advance over one. Returns `true`
     /// when that sequence number was in flight.
-    pub fn on_send_refused(&mut self, now_ms: u64, seq: u8) -> bool {
+    pub fn on_send_refused(&mut self, now_ms: u64, seq: u16) -> bool {
         self.session
             .as_mut()
-            .is_some_and(|s| s.arq_mut().on_refused(u16::from(seq), now_ms))
+            .is_some_and(|s| s.arq_mut().on_refused(seq, now_ms))
     }
 
     #[must_use]

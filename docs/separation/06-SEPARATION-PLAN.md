@@ -47,7 +47,7 @@
 | Airtime | Build the estimator from `SelfInfo`, not a constant, with the `de` rule and the 32/16 preamble split, and test it against the known 613 ms value | `gateway_service.dart:207-215`, `Radio.kt:196-211` |
 | Retry timeout | Derive the first retry from the preset and the hop count, using the firmware's own formula 500 + ((airtime x 6 + 250) x (hops + 1)) ms, so a retry never fires before an answer could arrive | `08-RESEARCH-INTEGRATION.md` |
 | Path codec | Pack and unpack hop count in bits 0 to 5 and hash width minus one in bits 6 and 7, with `0xFF` as no path. Never store the byte raw | firmware `Packet::writePath`, research `protocol-and-firmware.md` |
-| Firmware gate | Read the radio's version and gate the carrier on 1.18.0, which fixed raw data over multi-byte path hashes | firmware release notes, `08-RESEARCH-INTEGRATION.md` |
+| Firmware version | Report it in status for diagnostics. **No carrier gate is needed**: the 1.18.0 fix is in the `0x19` handler and both sides read a whole packet through `0x41` (`02-DEFECTS-LDMUX.md` defect 7) | firmware release notes, `08-RESEARCH-INTEGRATION.md` |
 
 ### Where it goes
 
@@ -90,8 +90,18 @@
 
 ## The firmware boundary
 
-- The carrier choice depends on the firmware version, not only on the design: a radio below 1.18.0 needs `0x41` for any path hash wider than one byte, and a radio at or above it does not.
-- So the client must read the version the radio reports and record it, and the daemon's status should show it, because a mixed pair is a real configuration and not a fault.
+- **The carrier does not depend on the firmware version, and an earlier revision of this plan was
+  wrong to say so.** The 1.18.0 raw-data fix is in the `CMD_SEND_RAW_DATA` (`0x19`) handler, which
+  reads the path-length byte two ways. LDMUX's client sends `CMD_SEND_RAW_PACKET` (`0x41`) for every
+  record, and that opcode hands the whole packet to `Packet::readFrom` on both sides of 1.18.0. So
+  `0x41` is correct on the firmware in the field and on newer firmware, and no version gate is
+  needed for the raw path.
+- The version is still worth reading and showing, for a different reason: it tells an operator which
+  firmware each end runs when a symptom looks like a firmware bug, and a mixed pair is a real
+  configuration rather than a fault. That is diagnostics, not a branch in the send path.
+- What *does* change across 1.18.0 is the multi-interface companion (BLE and WiFi at once). LDMUX's
+  single-central assumption stays true for BLE, and a host reaching the same node over TCP is a
+  second path into one radio, not a second radio.
 
 ## What stays shared
 

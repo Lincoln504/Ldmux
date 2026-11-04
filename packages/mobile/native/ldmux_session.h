@@ -123,6 +123,17 @@ int32_t ldmux_session_poll(LdmuxSession *s, uint64_t now_ms, uint8_t records_lef
 /* Pop one sealed record, at most LDMUX_RECORD_MAX bytes. Returns 1, 0 if none, or an error. */
 int32_t ldmux_session_take_record(LdmuxSession *s, uint8_t *out, size_t cap, size_t *out_len);
 
+/* Pop one sealed record and the ARQ sequence number that names its slot. Use this when the caller
+ * can observe the radio's send result: `seq_out` is what ldmux_session_refuse_seq needs, and it is
+ * written only on success. Returns 1, 0 if none, or an error. */
+int32_t ldmux_session_take_record_seq(LdmuxSession *s, uint8_t *out, size_t cap, size_t *out_len,
+                                      uint16_t *seq_out);
+
+/* Tell the session the radio refused that record without transmitting it. The attempt is given
+ * back and the retry follows the radio's transmit-table pace instead of a full retry interval.
+ * Returns 1 when the slot was in flight, 0 when it was already settled. */
+int32_t ldmux_session_refuse_seq(LdmuxSession *s, uint64_t now_ms, uint16_t seq);
+
 /* End the session once everything queued is acknowledged. */
 int32_t ldmux_session_close(LdmuxSession *s);
 

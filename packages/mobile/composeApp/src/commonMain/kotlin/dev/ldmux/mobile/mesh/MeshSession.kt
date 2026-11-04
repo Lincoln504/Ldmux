@@ -85,20 +85,34 @@ class MeshSession internal constructor(
      * a send result). An unknown budget is the caller's to pass as 0: this class does not guess.
      * Each returned array is one sealed record, ready for the radio gateway's `send`.
      */
-    override fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray> {
+    override fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray> =
+        pollWithSeq(nowMs, recordsLeft, l2Slots).map { it.bytes }
+
+    /**
+     * As [poll], but each record keeps the ARQ sequence number that names its slot, so a refusal
+     * reported by the radio can be handed back to the right record.
+     */
+    override fun pollWithSeq(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<SealedRecord> {
         val n = lib.poll(live(), nowMs, recordsLeft.coerceIn(0, 255), l2Slots.coerceIn(0, 255))
         if (n < 0) throw sessionFailure(n, "poll")
-        val out = ArrayList<ByteArray>(n)
+        val out = ArrayList<SealedRecord>(n)
         val buf = ByteArray(SessionLib.RECORD_MAX)
-        val meta = IntArray(1)
+        // meta[0] = length, meta[1] = the ARQ sequence number (see SessionLib.takeRecordSeq).
+        val meta = IntArray(2)
         while (true) {
-            val rc = lib.takeRecord(live(), buf, meta)
+            meta[0] = 0
+            meta[1] = SessionPort.UNKNOWN_SEQ
+            val rc = lib.takeRecordSeq(live(), buf, meta)
             if (rc == 0) break
             if (rc != 1) throw sessionFailure(rc, "take record")
-            out += buf.copyOf(meta[0])
+            out += SealedRecord(meta[1], buf.copyOf(meta[0]))
         }
         return out
     }
+
+    /** Hand a refused record back to its ARQ slot. False when the number named nothing live. */
+    override fun refuseSeq(nowMs: Long, seq: Int): Boolean =
+        seq >= 0 && lib.refuseSeq(live(), nowMs, seq) == 1
 
     /** End the session once everything queued is acknowledged. */
     override fun requestClose() {

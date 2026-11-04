@@ -53,6 +53,30 @@ interface SessionLib {
 
     /** `meta[0]` = length. Returns 1, 0 or an error. */
     fun takeRecord(h: Long, out: ByteArray, meta: IntArray): Int
+
+    /**
+     * As [takeRecord], but `meta[1]` receives the ARQ sequence number that names the record's slot.
+     *
+     * The number is what [refuseSeq] needs: the radio's send result echoes the sequence *the
+     * caller* wrote into the send frame, and only this number maps that answer back to the slot it
+     * belongs to. The default keeps fakes and older bindings compiling: it reports `-1`, "unknown",
+     * and callers must not refuse a record whose number they do not have.
+     */
+    fun takeRecordSeq(h: Long, out: ByteArray, meta: IntArray): Int {
+        val rc = takeRecord(h, out, meta)
+        if (rc == 1) meta[1] = -1
+        return rc
+    }
+
+    /**
+     * Tell the session the radio refused that record without transmitting it. The attempt is given
+     * back and the retry follows the radio's transmit-table pace instead of a full retry interval,
+     * so a burst the radio could not take becomes a slower burst rather than a dead session.
+     *
+     * Returns 1 when the slot was in flight, 0 when it was already settled. The default does
+     * nothing and reports 0, so a fake or an older binding simply leaves the retry ladder alone.
+     */
+    fun refuseSeq(h: Long, nowMs: Long, seq: Int): Int = 0
     fun close(h: Long): Int
     fun status(h: Long, nowMs: Long): Int
     fun pending(h: Long): Int

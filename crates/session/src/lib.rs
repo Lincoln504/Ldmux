@@ -18,4 +18,4 @@ pub mod record;
 pub mod session;
 
 pub use handshake::{Established, HandshakeError, Initiator, Keypair, PairingEntry, Responder};
-pub use session::{Inbound, Session, SessionError};
+pub use session::{Inbound, Sealed, Session, SessionError};

@@ -24,15 +24,55 @@ interface GatewayPort {
     suspend fun send(record: ByteArray): MeshSendResult
 }
 
+/** One sealed record and the ARQ sequence number that names its slot. */
+data class SealedRecord(
+    /** The ARQ slot. [SessionPort.UNKNOWN_SEQ] when the binding cannot report it. */
+    val seq: Int,
+    /** The sealed bytes, ready for the radio. */
+    val bytes: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is SealedRecord && seq == other.seq && bytes.contentEquals(other.bytes)
+
+    override fun hashCode(): Int = 31 * seq + bytes.contentHashCode()
+}
+
 /** What the driver uses of an established session ([MeshSession] implements it). */
 interface SessionPort {
     fun send(shell: Int, bytes: ByteArray): QueueOutcome
     fun receive(nowMs: Long, record: ByteArray): Received
     fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray>
+
+    /**
+     * As [poll], but each record keeps the ARQ sequence number that names its slot.
+     *
+     * The radio's send result echoes the sequence the *caller* wrote into the send frame. That
+     * number is the caller's, not the ARQ's, so [refuseSeq] needs this one to reach the right slot.
+     * The default reports [UNKNOWN_SEQ], which callers must treat as "cannot refuse this one":
+     * refusing the wrong slot gives an attempt back to a record that really did go out.
+     */
+    fun pollWithSeq(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<SealedRecord> =
+        poll(nowMs, recordsLeft, l2Slots).map { SealedRecord(UNKNOWN_SEQ, it) }
+
+    /**
+     * Tell the session the radio refused that record without transmitting it.
+     *
+     * A refusal means the transmit table was full or the path was not usable: the packet never
+     * reached the air. The ARQ gives the attempt back and retries at the radio's pace, so a burst
+     * the radio could not take becomes a slower burst rather than a dead session. Returns true when
+     * the slot was in flight. The default does nothing.
+     */
+    fun refuseSeq(nowMs: Long, seq: Int): Boolean = false
+
     fun health(nowMs: Long): SessionHealth
     fun nextDeadlineMs(): Long?
     fun requestClose()
     fun close()
+
+    companion object {
+        /** A binding that cannot report the ARQ sequence number reports this. */
+        const val UNKNOWN_SEQ = -1
+    }
 }
 
 /** A started handshake ([PendingHandshake] implements it). Exactly one of finish or abandon. */
@@ -287,7 +327,9 @@ class MeshTermDriver(
         handshake = h
         handshakeSince = clock()
         _view.value = MeshTermView.Handshaking
-        transmit(h.message1)
+        // Message 1 is handshake traffic, not an ARQ record: it has no slot to give back, so it
+        // travels with an unknown sequence.
+        transmit(SealedRecord(SessionPort.UNKNOWN_SEQ, h.message1))
         publish()
     }
 
@@ -767,7 +809,7 @@ class MeshTermDriver(
         // the session, including the acks that keep it alive.
         val left = gateway.status.value?.opsLeftThisHour ?: UNKNOWN_BUDGET
         val records = try {
-            s.poll(clock(), left, L2_WINDOW)
+            s.pollWithSeq(clock(), left, L2_WINDOW)
         } catch (e: MeshSessionException) {
             terminalView = MeshTermView.LinkDown(e.state); return
         }
@@ -777,7 +819,7 @@ class MeshTermDriver(
     }
 
     /** Hand one record to the gateway. False when the link is gone and the rest should wait. */
-    private suspend fun transmit(record: ByteArray): Boolean {
+    private suspend fun transmit(record: SealedRecord): Boolean {
         val result = try {
             // **Bounded, because the lock is held across it.** Every entry point of this driver (a
             // received record, a keystroke, the tick that notices a dead link) takes the same mutex,
@@ -785,7 +827,7 @@ class MeshTermDriver(
             // silence rule lives in `tick`, which could not run. A record with no answer in time is
             // treated like a busy radio — the session's own retransmission covers it — and the rest
             // wait for the next pump.
-            withTimeout(sendTimeoutMs) { gateway.send(record) }
+            withTimeout(sendTimeoutMs) { gateway.send(record.bytes) }
         } catch (e: RadioLinkException) {
             terminalView = MeshTermView.LinkDown(e.state); return false
         } catch (e: TimeoutCancellationException) {
@@ -802,6 +844,24 @@ class MeshTermDriver(
             MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.NoPath)
             // Busy, a local timeout or an unknown answer: the record was not acknowledged by the
             // host, so the session's own bounded retransmission covers it.
+            else -> {}
+        }
+        // **A refusal is not a transmission.** Every outcome below says the packet never reached
+        // the air: the transmit table was full, the path was unusable, the record was over what the
+        // radio takes, the budget was spent, or the radio never answered. Counting one as an
+        // attempt is how five refusals used to end a session and force a handshake that costs more
+        // records than the burst did. Giving it back turns a burst the radio could not take into a
+        // slower burst. An unknown sequence number is left alone: refusing the wrong slot would
+        // give a free attempt to a record that really did go out.
+        when (result.outcome) {
+            MeshSendOutcome.ErrBusy,
+            MeshSendOutcome.ErrNotFound,
+            MeshSendOutcome.ErrTooLong,
+            MeshSendOutcome.ErrBudget,
+            MeshSendOutcome.LocalTimeout,
+            -> if (record.seq != SessionPort.UNKNOWN_SEQ) {
+                runCatching { session?.refuseSeq(clock(), record.seq) }
+            }
             else -> {}
         }
         return terminalView == null

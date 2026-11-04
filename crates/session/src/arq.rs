@@ -142,7 +142,11 @@ impl Config {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Failure {
+    /// Every attempt went out and none was answered.
     RetriesExhausted,
+    /// The radio kept refusing the record without ever transmitting it: a full transmit table that
+    /// never drained, a record the firmware will not parse, or a radio that is not really there.
+    RadioRefused,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -251,6 +255,15 @@ pub struct Stats {
 /// "not yet", not "lost".
 pub const REFUSED_RETRY_MS: u64 = 350;
 
+/// How long one record may keep being refused before the session says the radio is not taking it.
+///
+/// A refusal is "not yet", so it must not consume attempts — but a radio whose transmit table is
+/// permanently full (wrong preset, wrong baud, wedged firmware, or a record the firmware will never
+/// parse) would otherwise be retried every 350 ms for as long as the process runs, with a live
+/// session and no error. Thirty seconds is long enough for a real burst to drain and short enough
+/// that a wedged radio becomes a named failure instead of silence.
+pub const REFUSAL_DEADLINE_MS: u64 = 30_000;
+
 struct Slot {
     seq: u16,
     shell: u8,
@@ -263,6 +276,9 @@ struct Slot {
     /// The radio refused the last transmission without putting it on the air. The retry then
     /// waits [`REFUSED_RETRY_MS`], the firmware's transmit-table pace, instead of a retry interval.
     refused: bool,
+    /// When this slot's refusal run began, so a radio that never takes the record fails the
+    /// session after [`REFUSAL_DEADLINE_MS`] instead of retrying it forever.
+    refused_since: Option<u64>,
 }
 
 pub struct Arq {
@@ -480,6 +496,9 @@ impl Arq {
         slot.attempts = attempts;
         slot.sent_at = now_ms;
         slot.refused = true;
+        // The run starts at the first refusal and is not extended by later ones: the deadline
+        // bounds "this radio is not taking this record", not "the radio is busy right now".
+        slot.refused_since.get_or_insert(now_ms);
         true
     }
 
@@ -527,7 +546,12 @@ impl Arq {
         }
     }
 
-    /// Everything the machine wants sent now, at most `min(records_left, l2_slots)` records.
+    /// Everything the machine wants sent now, bounded by the caller's room.
+    ///
+    /// At most `l2_slots` records in total, and at most `records_left` of them *new*: a
+    /// retransmission is already-paid traffic and is allowed through on top of the budget, which is
+    /// why the count can be `min(records_left, l2_slots) + 1`. The slot bound is absolute, because
+    /// a record the caller has no room for cannot be sent at all.
     pub fn poll(&mut self, now_ms: u64, limits: Limits) -> Vec<Outgoing> {
         let mut out = Vec::new();
         if self.failed.is_some() {
@@ -547,6 +571,16 @@ impl Arq {
         if let Some(due) = front_due
             && now_ms >= due
         {
+            // A refusal run that outlives the deadline is not "yet": the radio is not taking this
+            // record at all, so the session says so instead of asking every 350 ms forever.
+            if self
+                .inflight
+                .front()
+                .is_some_and(|s| s.refused && s.refused_since.is_some_and(|t| now_ms >= t + REFUSAL_DEADLINE_MS))
+            {
+                self.failed = Some(Failure::RadioRefused);
+                return out;
+            }
             if self.inflight.front().is_some_and(|s| s.attempts >= self.cfg.max_attempts) {
                 self.failed = Some(Failure::RetriesExhausted);
                 return out;
@@ -561,6 +595,7 @@ impl Arq {
                 front.attempts += 1;
                 front.sent_at = now_ms;
                 front.refused = false;
+                front.refused_since = None;
                 out.push(Outgoing {
                     kind: Kind::Data,
                     seq: front.seq,
@@ -574,9 +609,22 @@ impl Arq {
             }
         }
 
-        // 2. New data, while the window and the budget allow.
-        while self.inflight.len() < usize::from(self.cfg.window) && !self.queue.is_empty() {
+        // 2. New data, while the window, the budget and the L2 slot count all allow.
+        //
+        // The slot bound matters as much as the budget: the caller has that many slots of room in
+        // its credit window, and records beyond it cannot be sent at all. Filling the window past
+        // them would mark eight records in flight while only one reached the radio, and every one
+        // of the seven would then be retransmitted as a duplicate.
+        //
+        // `wanted` is decided before the gates, so a stall is counted even when there is no slot to
+        // send into: "something is waiting and it did not go" is exactly what the caller reports.
+        if !self.queue.is_empty() && self.inflight.len() < usize::from(self.cfg.window) {
             wanted = true;
+        }
+        while self.inflight.len() < usize::from(self.cfg.window)
+            && !self.queue.is_empty()
+            && out.len() < usize::from(limits.l2_slots)
+        {
             if budget == 0 {
                 break;
             }
@@ -591,6 +639,7 @@ impl Arq {
                 attempts: 1,
                 sent_at: now_ms,
                 refused: false,
+                refused_since: None,
             });
             out.push(Outgoing {
                 kind: Kind::Data,

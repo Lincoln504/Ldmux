@@ -30,6 +30,8 @@ object NativeMeshSession : SessionLib {
     external override fun takeDelivered(h: Long, out: ByteArray, meta: IntArray): Int
     external override fun poll(h: Long, nowMs: Long, recordsLeft: Int, l2Slots: Int): Int
     external override fun takeRecord(h: Long, out: ByteArray, meta: IntArray): Int
+    external override fun takeRecordSeq(h: Long, out: ByteArray, meta: IntArray): Int
+    external override fun refuseSeq(h: Long, nowMs: Long, seq: Int): Int
     external override fun close(h: Long): Int
     external override fun status(h: Long, nowMs: Long): Int
     external override fun pending(h: Long): Int

@@ -1,7 +1,10 @@
 # LDMUX and MeshMore: extent, defects, separation
 
 - What this directory is: the audit record behind the decision to separate LDMUX from MeshMore, and the fix register for both repositories.
-- Written 2026-11-04 against `ldmux` branch `feat/standalone-radio` at `c96d316` and `meshmore-sns` branch `feat/ldmux-gateway` at `5d97625`.
+- Written 2026-11-04 against `ldmux` branch `feat/standalone-radio`, first at `c96d316` and
+  **re-verified at `7b8510b` plus the refusal-pace and sequence work committed after it**. The
+  `meshmore-sns` side is `feat/ldmux-gateway` at `5d97625`. When a file's citations and the tree
+  disagree, the tree is right and the file is a defect.
 - Firmware reference: `meshcore-fw-alerts` at `685a869`, which is ahead of the `companion-v1.17.1` build `d929643` that the radios actually run.
 - Every claim carries a file and line, a commit, or a date. A claim without one is marked NOT EVIDENCED.
 
@@ -17,6 +20,7 @@
 | `06-SEPARATION-PLAN.md` | How to make LDMUX independent of MeshMore, in phases, with what to delete |
 | `07-SOURCES.md` | Firmware and protocol facts, with the line that proves each one |
 | `08-RESEARCH-INTEGRATION.md` | What the parallel field research adds, corrects, and changes in the plan |
+| `09-RESEARCH-LOG.md` | What the MeshMore-side research corpus changes for LDMUX's mesh path specifically, with what is satisfied, what is open, and what another implementation owns |
 
 ## Status words
 
@@ -29,8 +33,15 @@
 
 - No radio was driven. The gateway held the serial port for the whole pass, so "quiet" is not "deaf" and no airtime was measured.
 - The Kotlin and Android suites were not run, because they need `nix develop .#mobile`.
-- `cargo test --workspace` ran: 314 passed, 2 failed only because `zbarimg` is not installed.
-- No file in either repository was modified by the audit itself. The fixes in `02` and `03` are proposals until they are applied.
+- `cargo test --workspace` is green with `zbarimg` on `PATH`; without it, the two QR tests fail for
+  that reason alone (`02`, defect 17). A count is deliberately not written here: it changes with
+  every commit.
+- `docs/separation/02-DEFECTS-LDMUX.md` now carries a status per defect against the current tree and
+  was rewritten for it. Ten of its defects are fixed in code, not proposed.
+- The `meshmore-sns` defects in `03` are still proposals: nothing was changed in that repository.
+- The mobile sources were read, not compiled. The C ABI additions were syntax-checked against the
+  Android NDK headers; the Kotlin side was written to keep every existing fake compiling, through
+  default methods on `SessionPort`, and is unverified until the mobile suite runs.
 - A parallel research track wrote `/home/ldeen/Documents/mesh-research/notes/` between 10:50Z and 15:01Z on 2026-11-04. `08-RESEARCH-INTEGRATION.md` records only what that corpus changes here, and every number it contributed was recomputed against local source before it was used.
 
 ## The one-paragraph answer

@@ -23,8 +23,13 @@
 
 - MeshCore v1.18.0, released 2026-10-15, lists a `CMD_SEND_RAW_DATA` multi-byte path fix: raw data over 2- and 3-byte path hashes was broken before it.
 - The corpus states the rule plainly: any raw-data feature must gate on firmware at or above 1.18.0.
-- The radios here run `companion-v1.17.1` at `d929643`, so they are below the fix, which is why the phone's `0x41` workaround is correct today.
-- What this changes: the `0x41`-only rule is a workaround for a firmware version, not a permanent design. The plan should gate on the firmware version and record which side of 1.18 each radio is on, because the carrier choice legitimately differs.
+- The radios here run `companion-v1.17.1` at `d929643`, so they are below the fix, which is why the phone's `0x41` carrier is correct today.
+- **Correction, 2026-11-04 (this pass): the gate is not needed and the earlier conclusion was
+  wrong.** The 1.18.0 fix is in the `0x19` handler's dual reading of the path-length byte. `0x41`
+  parses a whole packet through `Packet::readFrom` on both sides of the boundary, so the
+  `0x41`-only rule is not a workaround that expires at 1.18.0: it is the design. What the version is
+  still good for is diagnostics and the multi-interface change below, not a branch in the send
+  path.
 
 ## What is new and matters to LDMUX
 
@@ -92,7 +97,8 @@
 - The full airtime formula, with the `de` rule and the 32/16 preamble split, implemented once and tested against the 613 ms known value.
 - The firmware's timeout formula, so the session's retry is not shorter than the carrier's own.
 - A `path_len` codec that packs and unpacks hop count and hash width, with the `0xFF` no-path sentinel.
-- A firmware version gate, because the carrier choice differs across the 1.18.0 boundary.
+- The firmware version, reported for diagnostics only. It is not a branch in the send path: the
+  1.18.0 raw-data fix is in the `0x19` handler, which LDMUX does not use.
 - The first-byte guard test.
 - The reasoning behind the corpus's warning list: do not add a software CRC on LoRa, do not build security on channel authenticity, and do not assume a bridge means mesh to internet.
 

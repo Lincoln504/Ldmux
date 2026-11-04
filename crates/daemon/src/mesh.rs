@@ -684,7 +684,11 @@ async fn session(
     // One entry per record written and not yet answered, keyed by its L2 sequence number.
     // `SEND_RESULT` echoes that number, so an answer can be matched to its record: a late answer
     // for an expired slot must not decrement a live one. Bounded by `CREDIT_WINDOW`.
-    let mut awaiting: VecDeque<(u8, Instant)> = VecDeque::new();
+    //
+    // The third field is the ARQ slot the record belongs to. The wire carries a one-byte sequence
+    // that wraps, so it cannot name an ARQ slot by itself; keeping the mapping here is what lets a
+    // refusal be handed back to the right slot. A queued handshake reply has no ARQ slot (`None`).
+    let mut awaiting: VecDeque<(u8, Instant, Option<u16>)> = VecDeque::new();
     let mut seq: u8 = 0;
     let mut last_status_at = Instant::now();
 
@@ -763,9 +767,15 @@ async fn session(
                         let result = messages::read_send_result(&frame)?;
                         // Match the answer to its record. An answer whose slot already expired
                         // (or a duplicate answer) removes nothing: the record it names is gone.
-                        if let Some(i) = awaiting.iter().position(|(s, _)| *s == result.seq) {
-                            awaiting.remove(i);
-                        }
+                        // The wire sequence names the *record we wrote*; the ARQ sequence names
+                        // the slot that produced it. The two differ (the wire byte wraps, and a
+                        // handshake reply has no slot at all), so the mapping is looked up here and
+                        // dropped with the entry.
+                        let arq_seq = awaiting
+                            .iter()
+                            .position(|(s, _, _)| *s == result.seq)
+                            .and_then(|i| awaiting.remove(i))
+                            .and_then(|(_, _, arq)| arq);
                         match result.outcome {
                             SendOutcome::ErrBusy => set(snapshot, |s| {
                                 s.last_error = Some(format!(
@@ -786,11 +796,12 @@ async fn session(
                         if matches!(
                             result.outcome,
                             SendOutcome::ErrBusy | SendOutcome::ErrNotFound | SendOutcome::ErrTooLong
-                        ) && let Some(h) = host.as_mut()
+                        ) && let Some(arq_seq) = arq_seq
+                            && let Some(h) = host.as_mut()
                         {
                             h.on_send_refused(
                                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                                result.seq,
+                                arq_seq,
                             );
                         }
                     }
@@ -814,7 +825,7 @@ async fn session(
         let now = Instant::now();
         let stale = awaiting
             .iter()
-            .take_while(|(_, at)| now.saturating_duration_since(*at) >= AWAITING_DEADLINE)
+            .take_while(|(_, at, _)| now.saturating_duration_since(*at) >= AWAITING_DEADLINE)
             .count();
         if stale > 0 {
             for _ in 0..stale {
@@ -864,7 +875,7 @@ async fn session(
             l2_slots: CREDIT_WINDOW.saturating_sub(used),
         };
         let t_poll = std::time::Instant::now();
-        let polled = h.poll(now_ms, limits);
+        let polled = h.poll_with_seq(now_ms, limits);
         if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1")
             && t_poll.elapsed().as_millis() > 50
         {
@@ -882,14 +893,14 @@ async fn session(
         let pending_now = h.snapshot().pending;
         for record in polled {
             let t_write = std::time::Instant::now();
-            tokio::time::timeout(GATEWAY_TIMEOUT, client.send_record(seq, &record))
+            tokio::time::timeout(GATEWAY_TIMEOUT, client.send_record(seq, &record.bytes))
                 .await
                 .map_err(|_| MeshError::Timeout("gateway write"))??;
             let took = t_write.elapsed().as_millis();
             if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && took > 50 {
                 eprintln!("ldmuxd: mesh timing: socket write took {took} ms");
             }
-            awaiting.push_back((seq, Instant::now()));
+            awaiting.push_back((seq, Instant::now(), record.seq));
             seq = seq.wrapping_add(1);
             budget = budget.map(|b| b.saturating_sub(1));
             set(snapshot, |s| s.records_left = budget);

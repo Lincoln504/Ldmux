@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::slice;
 
-use ldmux_session::arq::{Failure, Limits, QueueError};
+use ldmux_session::arq::{Limits, QueueError};
 use ldmux_session::handshake::{self, HandshakeError, Initiator, Keypair, PairingEntry, Responder};
 use ldmux_session::record::RecordError;
 use ldmux_session::session::{Inbound, Session, SessionError};
@@ -68,7 +68,11 @@ pub const LDMUX_RECORD_MAX: usize = ldmux_mesh::constants::RECORD_MAX;
 pub struct LdmuxSession {
     inner: Session,
     delivered: VecDeque<(u8, Vec<u8>)>,
-    outbox: VecDeque<Vec<u8>>,
+    /// Sealed records waiting to be handed to the radio, each with the ARQ sequence number that
+    /// names its slot. The number must travel with the bytes: the radio's send result echoes the
+    /// number the *caller* wrote into the send frame, and the only way to say "this one never
+    /// reached the air" is to map that back to the slot it came from.
+    outbox: VecDeque<(u16, Vec<u8>)>,
 }
 
 /// A started handshake awaiting message 2.
@@ -461,7 +465,7 @@ pub unsafe extern "C" fn ldmux_session_poll(
     // SAFETY: see `with_session`.
     unsafe {
         with_session(s, |s| {
-            match s.inner.poll(
+            match s.inner.poll_with_seq(
                 now_ms,
                 Limits {
                     records_left,
@@ -469,7 +473,10 @@ pub unsafe extern "C" fn ldmux_session_poll(
                 },
             ) {
                 Ok(v) => {
-                    s.outbox.extend(v);
+                    s.outbox.extend(
+                        v.into_iter()
+                            .map(|sealed| (sealed.seq.unwrap_or(0), sealed.bytes)),
+                    );
                     i32::try_from(s.outbox.len()).unwrap_or(i32::MAX)
                 }
                 Err(e) => sess_err(e),
@@ -489,16 +496,83 @@ pub unsafe extern "C" fn ldmux_session_take_record(
     // SAFETY: see `with_session`.
     unsafe {
         with_session(s, |s| {
-            let Some(front) = s.outbox.front() else {
+            let Some((_, bytes)) = s.outbox.front() else {
                 return 0;
             };
             // SAFETY: the out pointers are validated inside `put`.
-            let rc = unsafe { put(front, out, cap, out_len) };
+            let rc = unsafe { put(bytes, out, cap, out_len) };
             if rc != LDMUX_OK {
                 return rc;
             }
             s.outbox.pop_front();
             1
+        })
+    }
+}
+
+/// Pop one sealed record together with the ARQ sequence number that names its slot.
+///
+/// Use this instead of [`ldmux_session_take_record`] when the caller can observe the radio's send
+/// result: the number written into the send frame is the caller's own, but *this* number is what
+/// [`ldmux_session_refuse_seq`] needs to hand a refused record back to its slot. `seq_out` receives
+/// it and is written only on success. Returns 1, 0 if none, or an error.
+///
+/// # Safety
+///
+/// `seq_out` must be a non-null, writable, correctly aligned `uint16_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_session_take_record_seq(
+    s: *mut LdmuxSession,
+    out: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+    seq_out: *mut u16,
+) -> i32 {
+    if seq_out.is_null() {
+        return LDMUX_ERR_NULL;
+    }
+    // SAFETY: see `with_session`.
+    unsafe {
+        with_session(s, |s| {
+            let Some((seq, bytes)) = s.outbox.front() else {
+                return 0;
+            };
+            let seq = *seq;
+            // SAFETY: the out pointers are validated inside `put`.
+            let rc = unsafe { put(bytes, out, cap, out_len) };
+            if rc != LDMUX_OK {
+                return rc;
+            }
+            s.outbox.pop_front();
+            // SAFETY: seq_out is non-null and writable, checked above.
+            unsafe { *seq_out = seq };
+            1
+        })
+    }
+}
+
+/// Tell the session the radio refused a record without transmitting it.
+///
+/// A refusal means the transmit table was full, or the path was not usable: the packet never
+/// reached the air. The ARQ gives the attempt back and retries at the radio's pace, so a burst the
+/// radio could not take becomes a slower burst rather than a dead session. `seq` is the value
+/// [`ldmux_session_take_record_seq`] returned for that record. Returns 1 when a slot with that
+/// number was in flight, 0 when it was already settled or never existed.
+///
+/// # Safety
+///
+/// `s` must be a live handle from [`ldmux_session_responder_accept`] or
+/// [`ldmux_session_initiator_finish`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_session_refuse_seq(
+    s: *mut LdmuxSession,
+    now_ms: u64,
+    seq: u16,
+) -> i32 {
+    // SAFETY: see `with_session`.
+    unsafe {
+        with_session(s, |s| {
+            i32::from(s.inner.arq_mut().on_refused(seq, now_ms))
         })
     }
 }
@@ -522,7 +596,9 @@ pub unsafe extern "C" fn ldmux_session_status(s: *mut LdmuxSession, now_ms: u64)
     unsafe {
         with_session(s, |s| {
             let mut bits = 0u32;
-            if s.inner.arq().failure() == Some(Failure::RetriesExhausted) {
+            // Any terminal failure is "failed" to the caller: attempts exhausted, or a radio that
+            // never took the record. The reason is the session's own business; the UI needs one bit.
+            if s.inner.arq().failure().is_some() {
                 bits |= LDMUX_STATUS_FAILED;
             }
             if s.inner.arq().peer_closed() {

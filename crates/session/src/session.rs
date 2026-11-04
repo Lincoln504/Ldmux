@@ -17,6 +17,22 @@ pub enum SessionError {
     RecordLimitTooSmall,
 }
 
+/// One sealed record, and the ARQ sequence number that names it on the wire.
+///
+/// The sequence number has to travel with the bytes: a `SEND_RESULT` from the radio names the
+/// record by the number the *caller* wrote into the send frame, and the only way to say "this one
+/// never reached the air" is to know which ARQ slot that number belongs to. Handing back bare
+/// bytes forced every caller to keep its own counter and guess the mapping, which is wrong as soon
+/// as a retransmission or a handshake reply shares the tunnel.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Sealed {
+    /// The ARQ slot this record belongs to. `None` for control traffic the session did not
+    /// sequence itself (a handshake reply queued by the caller), which has no slot to give back.
+    pub seq: Option<u16>,
+    /// The sealed bytes, ready to hand to the tunnel.
+    pub bytes: Vec<u8>,
+}
+
 /// What a received record produced.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Inbound {
@@ -107,7 +123,10 @@ impl Session {
         })
     }
 
-    /// Sealed records to hand to the tunnel now: at most `min(records_left, l2_slots)`.
+    /// Sealed records to hand to the tunnel now.
+    ///
+    /// At most `l2_slots` in total and at most `records_left` of them new; a retransmission rides
+    /// on top of the budget because it is already-paid traffic. See [`arq::Arq::poll`].
     ///
     /// **Every call seals afresh, retransmissions included.** The ARQ hands back the same plaintext
     /// when it retries, and sealing it again with the next nonce produces different bytes on the
@@ -116,9 +135,31 @@ impl Session {
     /// multi-hop transfer stalls at its tail. Caching the sealed bytes to "retransmit cheaply"
     /// would save one AEAD operation and break delivery.
     pub fn poll(&mut self, now_ms: u64, limits: Limits) -> Result<Vec<Vec<u8>>, SessionError> {
+        Ok(self
+            .poll_with_seq(now_ms, limits)?
+            .into_iter()
+            .map(|s| s.bytes)
+            .collect())
+    }
+
+    /// As [`Session::poll`], but each record keeps the ARQ sequence number that names it.
+    ///
+    /// A caller that receives a send result from the radio must be able to say which record it
+    /// refers to, and a refused record must be handed back to [`arq::Arq::on_refused`] by that
+    /// number. [`Sealed`] carries it; the plain [`Session::poll`] is the convenience wrapper for
+    /// callers that only need the bytes.
+    pub fn poll_with_seq(
+        &mut self,
+        now_ms: u64,
+        limits: Limits,
+    ) -> Result<Vec<Sealed>, SessionError> {
         let mut sealed = Vec::new();
         for o in self.arq.poll(now_ms, limits) {
-            sealed.push(self.seal(&o)?);
+            let seq = o.seq;
+            sealed.push(Sealed {
+                seq: Some(seq),
+                bytes: self.seal(&o)?,
+            });
         }
         Ok(sealed)
     }

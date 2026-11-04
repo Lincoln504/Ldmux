@@ -1,5 +1,6 @@
 use ldmux_session::arq::{
-    Arq, Config, Delivered, Failure, Incoming, Kind, Limits, Outgoing, QueueError, REFUSED_RETRY_MS,
+    Arq, Config, Delivered, Failure, Incoming, Kind, Limits, Outgoing, QueueError,
+    REFUSAL_DEADLINE_MS, REFUSED_RETRY_MS,
 };
 
 const PLENTY: Limits = Limits {
@@ -211,6 +212,38 @@ fn l2_slots_cap_the_burst_too() {
         .len(),
         1
     );
+}
+
+#[test]
+fn l2_slots_bound_new_data_not_only_retransmissions() {
+    // The caller has one free credit slot. Filling the window past it would mark eight records in
+    // flight while one reached the radio, and the other seven would be retransmitted as duplicates
+    // the radio never asked for — the exact flood the slot count exists to prevent.
+    let mut a = Arq::new(cfg());
+    for _ in 0..6 {
+        a.send(0, b"x").unwrap();
+    }
+    let out = a.poll(
+        0,
+        Limits {
+            records_left: 255,
+            l2_slots: 2,
+        },
+    );
+    assert_eq!(out.len(), 2, "no more records than there is room for");
+    // The two that went out are the two in flight; the rest wait for credit, not for a timer.
+    assert_eq!(a.stats().sent, 2);
+    assert_eq!(a.pending(), 6, "two in flight and four still queued");
+    // The window is not full of phantom slots: a later poll with room sends the next two.
+    let more = a.poll(
+        1,
+        Limits {
+            records_left: 255,
+            l2_slots: 2,
+        },
+    );
+    assert_eq!(more.len(), 2);
+    assert_eq!(a.stats().sent, 4);
 }
 
 #[test]
@@ -588,6 +621,34 @@ fn a_refused_record_gets_its_attempt_back_and_waits_a_full_interval() {
     assert_eq!(again.len(), 1);
     assert!(again[0].retransmit);
     assert_eq!(again[0].seq, seq);
+}
+
+/// A radio that keeps refusing one record must fail the session, not retry it at the transmit-table
+/// pace forever. A full table drains; a wedged radio, a wrong preset or a record the firmware will
+/// never parse does not, and the caller needs a named failure rather than silence.
+#[test]
+fn a_refusal_that_outlives_the_deadline_fails_the_session() {
+    // A heartbeat would be extra traffic this test does not mean to exercise.
+    let mut a = Arq::new(Config {
+        heartbeat_ms: 60_000,
+        ..cfg()
+    });
+    a.send(0, b"x").unwrap();
+    let seq = a.poll(0, PLENTY).remove(0).seq;
+
+    // Refused once a second: plenty of refusals, none long enough to trip the deadline.
+    let mut now = 0;
+    for _ in 0..10 {
+        now += 1_000;
+        assert!(a.on_refused(seq, now));
+        assert_eq!(a.poll(now, PLENTY).len(), 0);
+    }
+    assert_eq!(a.failure(), None, "a busy radio is not a failure");
+
+    // The run started at the first refusal, so the deadline is measured from then, not extended.
+    assert_eq!(a.poll(1_000 + REFUSAL_DEADLINE_MS, PLENTY).len(), 0);
+    assert_eq!(a.failure(), Some(Failure::RadioRefused));
+    assert_eq!(a.stats().sent, 1, "one record went out; the rest were refusals");
 }
 
 /// An answer for a sequence number that is not in flight is ignored, not mis-applied to the

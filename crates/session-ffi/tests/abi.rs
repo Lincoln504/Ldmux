@@ -535,3 +535,47 @@ fn the_abi_is_wire_compatible_with_the_safe_api() {
     assert_eq!(rc, LDMUX_OK);
     free(out);
 }
+
+/// The refused-record path over the C ABI: a record is popped with the ARQ sequence that names its
+/// slot, and a refusal for that number gives the attempt back so the retry follows the radio's
+/// transmit-table pace instead of a full retry interval.
+#[test]
+fn a_refused_record_is_named_by_its_sequence_and_retried_at_the_radio_pace() {
+    let p = handshake(172);
+    // SAFETY: the handles are live from `handshake` and the buffers match the header's sizes.
+    unsafe {
+        assert_eq!(ldmux_session_send(p.phone, 4, b"refused".as_ptr(), 7), LDMUX_OK);
+        assert!(ldmux_session_poll(p.phone, NOW, 20, 8) >= 1);
+        let mut buf = [0u8; LDMUX_RECORD_MAX];
+        let mut len = 0usize;
+        let mut seq = 0u16;
+        assert_eq!(
+            ldmux_session_take_record_seq(p.phone, buf.as_mut_ptr(), buf.len(), &mut len, &mut seq),
+            1
+        );
+        // The refusal gives the attempt back: the slot stays in flight.
+        assert_eq!(ldmux_session_refuse_seq(p.phone, NOW + 10, seq), 1);
+        // Nothing is sent before the table could have drained.
+        assert_eq!(
+            ldmux_session_poll(
+                p.phone,
+                NOW + 10 + ldmux_session::arq::REFUSED_RETRY_MS - 1,
+                20,
+                8
+            ),
+            0
+        );
+        // Then the retry, from the same slot.
+        assert!(ldmux_session_poll(p.phone, NOW + 10 + ldmux_session::arq::REFUSED_RETRY_MS, 20, 8) >= 1);
+        let mut seq2 = 0u16;
+        assert_eq!(
+            ldmux_session_take_record_seq(p.phone, buf.as_mut_ptr(), buf.len(), &mut len, &mut seq2),
+            1
+        );
+        assert_eq!(seq2, seq, "the retransmission comes from the same slot");
+        // A number that names no live slot changes nothing and says so.
+        assert_eq!(ldmux_session_refuse_seq(p.phone, NOW + 1000, 999), 0);
+        // The plain accessor still works and ignores the number.
+        assert_eq!(ldmux_session_poll(p.phone, NOW + 2000, 20, 8), 0);
+    }
+}
