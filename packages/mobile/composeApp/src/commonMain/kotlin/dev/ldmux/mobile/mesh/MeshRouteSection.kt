@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
@@ -92,6 +93,7 @@ internal fun MeshRouteSection(
                 color = if (current.meshRadio.isEmpty()) Warn else Fg,
                 fontSize = 12.sp,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false),
             )
             if (current.meshRadio.isNotEmpty()) {

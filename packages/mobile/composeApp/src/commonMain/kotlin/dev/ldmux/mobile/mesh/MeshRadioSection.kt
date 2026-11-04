@@ -164,18 +164,32 @@ internal fun RadioPresetDialog(
         }
     }
     // Open on the tuple the radio is actually using, not on a fresh proposal.
+    //
+    // **Two flags, because one was doing two jobs.** `seeded` meant both "the radio's own tuple
+    // has arrived" and "the user has touched this dialog", and `choose()` set it. So tapping a
+    // region or "randomise" before the radio answered made the seeding effect return early for
+    // good: `original` stayed null, "restore" was disabled forever, the "current …" comparison
+    // never appeared, and "apply" became enabled with no idea what it was replacing. `seeded`
+    // now means only "the radio's tuple has been read"; `userTouched` only "the proposal is the
+    // user's, so the arrival must not overwrite it".
+    var userTouched by remember { mutableStateOf(false) }
     LaunchedEffect(current, device) {
         val c = current ?: return@LaunchedEffect
         if (seeded) return@LaunchedEffect
         original = c
-        region = regionOfPreset(c)
-        selected = c
+        // The user's choice wins over the arrival: they may have started choosing while the
+        // radio was still answering, and a dialog that silently undid that would be worse than
+        // one that opened on a proposal.
+        if (!userTouched) {
+            region = regionOfPreset(c)
+            selected = c
+        }
         seeded = true
     }
     DisposableEffect(link) { onDispose { link?.release() } }
 
     fun choose(p: RadioPreset) {
-        seeded = true
+        userTouched = true
         selected = p
     }
 

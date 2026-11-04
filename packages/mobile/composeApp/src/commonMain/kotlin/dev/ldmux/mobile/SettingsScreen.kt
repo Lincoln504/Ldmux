@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -296,7 +297,14 @@ private fun PairingRow(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("tailnet", color = Dim, fontSize = 12.sp)
             if (current.isPaired) {
-                Text(current.pairedName, color = Fg, fontSize = 14.sp, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                Text(
+                    current.pairedName,
+                    color = Fg,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
                 MiniTextButton(onClick = {
                     if (confirmUnpair) onUnpair() else confirmUnpair = true
                 }) {

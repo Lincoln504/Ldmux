@@ -164,6 +164,109 @@ the intent, so it does not ask twice (ADR-0017).
 also forgets the mesh keys and the radio" when a mesh route exists, and the mesh row says "this
 forgets the keys, the radio and the saved route".
 
+## 2b. Second pass, same day: the scroll controls, the palette, and the system bars
+
+The first pass was the settings screen and the chrome around it. This pass went through the terminal
+surface, the launcher rows, the radio dialog and the Android shell. Each item is a defect with a
+`file:line`, and each was changed in the same commit except where it says otherwise.
+
+### 2b.1 The scroll buttons, and why the up arrow could do nothing
+
+Reported from a field session: "the scroll up/down buttons were not working". Investigated in three
+layers, because the answer differs per layer.
+
+- **The engine is correct**, measured: a probe against `libghostty-vt` (`native/prebuilt/host`) fed
+  30 lines into a 20×6 terminal and read the frame header back at each step.
+  `bottom total=31 offset=25 len=6 active=1`, `up3 offset=22`, `top offset=0`, `down3 offset=3`,
+  `alt offset=0 active=1`. So `scrollBy(-3)` really does move the viewport, the offset counts from
+  the top of the scrollback, and the alternate screen really declines to scroll (which is why a
+  swipe there goes to the program as wheel events).
+- **The tailnet route works, and its first press is a page-in.** `TerminalController.scrollBy`
+  reads the scrollbar before and after (`TerminalController.kt`), repaints, and then calls
+  `maybeExtendHistory()`. At a fresh attach the daemon has sent the live screen only, so the first
+  up-press has nothing above it to move — and the same press asks the keeper for a scrollback page.
+  The reply is a whole-screen snapshot that rebuilds the engine and parks the view at the top of
+  what arrived. So the control does something, but on a slow link the first press looks like
+  nothing until the page arrives. That is a design consequence of "history arrives when you reach
+  the top", not a dead control; it is written down here because it reads as a bug on a phone.
+- **The mesh route had a real dead button, and it was two bugs.**
+  - `MeshTerminalSource.scrollBy` returns 0 when the local history is empty, and *nothing said so*:
+    the pad drew, the tap landed, and the screen did not change. Fixed by naming it —
+    `scrollNotice` becomes `no history yet on this link`, or `start of history` when the view is
+    already at the oldest row, shown for 2.5 s.
+  - The history itself could stay empty for a whole session. `MeshHistory.noteShift` is the fallback
+    for a host that cannot number its rows, and it refused any shift larger than **half a screen**.
+    A build log, a `cat`, or anything that fills a screen between two commits therefore
+    accumulated nothing at all. Fixed: a shift may now be as large as the overlap allows, provided
+    every non-blank row in the overlap matches the new screen except at most one (the row being
+    written now), and at least two real rows are in it. Ties go to the larger shift, because the
+    smaller one only ties by excusing a row it cannot explain. Tests:
+    `a screenful that scrolls at once still accumulates`, `one row being written does not stop the
+    shift being read`, `a replacement with one row in common is not a scroll`.
+  - Both routes' pads remain structurally reachable: the pad is a sibling drawn after the surface
+    inside the page's `Box`, and the surface is a Compose `Canvas`, not a `SurfaceView`, so there is
+    no separate window layer for it to hide behind. **No device was involved in this pass**; the
+    engine probe and the unit tests are the evidence, and the on-device tap is still unverified.
+
+### 2b.2 Two palette values that did not do what their comments said
+
+Measured with the WCAG relative-luminance formula against the real tokens, not estimated.
+
+| Token | Was | Ratio then | Now | Ratio now |
+|---|---|---|---|---|
+| `Muted` | #787878 | 4.48:1 on `Bg` (**under** the 4.5:1 floor, while the comment claimed "4.5:1, which is the floor"), **3.94:1 on `Surface`** — where its explanatory text actually lives | #888888 | 5.58:1 on `Bg`, 4.91:1 on `Surface` |
+| `Dim` | #8C8C8C | 5.18:1 on `Surface`, 4.04:1 on `Raised` | #A0A0A0 | 6.66:1 / 5.19:1 |
+| `Line` used as a control outline | #2A2A2A | **1.21:1 on `Surface`, 1.38:1 on `Bg`** — an "outlined" button outlined in something you cannot see | `Line` stays for dividers; new `Edge` #686868 | 3.55:1 / 3.12:1 |
+
+`Muted` is never drawn on `Raised`; `Dim` is, as icon glyphs on the filled icon button, which is why
+it moved too. `Chosen` (#9A9A9A) is unchanged: it is an outline, and it stays brighter than `Dim`'s
+new value only in role, not in luminance — a relationship worth revisiting if the two ever appear
+side by side.
+
+Also fixed in the same class: **a disabled `AccentBtn` was a `Surface`-coloured box on a `Surface`
+modal**, i.e. no shape at all, with only a dim label floating. It fills with `Line` now, the fix
+`OptionButton` already documented for itself.
+
+### 2b.3 The status bar was invisible on a phone set to light mode
+
+`MainActivity` called `enableEdgeToEdge()` with no arguments. The androidx helper's default is
+`SystemBarStyle.auto`, which chooses **light or dark bar icons from the system's own light/dark
+setting** — and this app is dark-only. On a light-mode phone the clock, the battery and the gesture
+pill were drawn dark on a #0A0A0A app. Fixed with `SystemBarStyle.dark` for both bars, and
+`windowBackground` set to the app's own #0A0A0A (it was pure black, a visible 10/255 step at launch
+and in the recents thumbnail). The `statusBarColor`/`navigationBarColor` items in `themes.xml` were
+dead — edge to edge overrides them — and are gone with a note saying why.
+
+### 2b.4 The row that is the app's primary selection control announced nothing about being chosen
+
+`ChoiceRow` (the launcher's shell rows) was a bare `clickable`. A screen reader got "clickable" and
+no state, while being chosen lived only in a drawn tick and a numeral. It is
+`toggleable(role = Role.Checkbox)` now, so the role, the state and the action are in the semantics
+tree, and the tick-box numeral keeps the visual.
+
+### 2b.5 Long names stopped mid-character with no sign
+
+`TextOverflow.Ellipsis` was used at one site in the whole app. The launcher's title and subtitle, the
+paired machine's name in Settings, the radio row's name and address, and the option labels now
+ellipsize. The radio row matters most: a truncated MAC address makes two radios indistinguishable,
+which is the one thing that row exists to prevent. **Not done:** the other twelve `maxLines = 1`
+sites (the key bars and the radio dialog's short fixed labels), where truncation cannot lose
+meaning.
+
+### 2b.6 `folderName("")` said the shell was at the filesystem root
+
+`Icons.kt` returned `/` for an empty cwd, so the shell header's title asserted a location nobody had
+reported. It answers `shell` now — the one thing that is true when the folder is unknown.
+
+### 2b.7 The radio dialog could lose "restore" permanently
+
+`MeshRadioSection` used one flag (`seeded`) for two facts: "the radio's tuple has arrived" and "the
+user has touched this dialog". `choose()` set it, and the seeding effect returned early when it was
+set — so tapping a region or `randomise` before the radio answered meant `original` stayed null for
+the life of the dialog: `restore` disabled forever, the "current …" comparison never drawn, and
+`apply` enabled with no idea what it was replacing. Split into `seeded` (the radio answered) and
+`userTouched` (the user chose first, and their choice wins).
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
@@ -181,8 +284,14 @@ JAVA_HOME=<jdk-21> ./gradlew --offline :composeApp:assembleDebug        # the AP
 `nix develop .#mobile`. Everything above was run; the unit suite passes and the APK assembles. **No
 device was involved**: nothing here is a claim about how the screens look or feel on a phone.
 
-The Rust gate was run as well, because this pass touched only Kotlin and docs and the gate should
-say so: `scripts/test-parallel.py` is green. It did fail **twice** while this work was being
+The second pass ran the same three commands and the Kotlin suite (595 tests as of this writing, all
+passing), plus the native engine's own suite in `packages/mobile/scripts/test-native.sh` — 290 checks
+and 16 JNI checks — because the scroll investigation needed the engine's real behaviour rather than a
+reading of it (`LDMUX_VT_LIB_DIR` and `LDMUX_VT_INCLUDE_DIR` pointed at `native/prebuilt/host`, which
+is what makes the script runnable outside a nix shell).
+
+The Rust gate was run as well, because the first pass touched only Kotlin and docs and the gate should
+say so: `scripts/test-parallel.py` is green. The second pass touched no Rust, so it was not re-run. It did fail **twice** while this work was being
 verified, in two different binaries, both on a time-bounded wait under pool load —
 `handover_size_and_close_does_not_detach` (the keeper's socket wait) and
 `desktop_e2e::a_window_is_opened_found_placed_and_closed_under_i3` (`i3 never answered`). Each

@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import dev.ldmux.mobile.mesh.RadioScanner
 import dev.ldmux.mobile.voice.Dictation
@@ -22,7 +23,15 @@ class MainActivity : ComponentActivity() {
         CodeScanner.attachHost(this)
         RadioScanner.attachHost(this)
         ScreenOrientation.attachHost(this)
-        enableEdgeToEdge()
+        // **The system bars are told which palette this app is, not asked to guess.**
+        // `enableEdgeToEdge()` with no arguments picks light or dark bar *icons* from the phone's
+        // own light/dark setting — and this app is dark-only. On a phone set to light mode the
+        // clock, the battery and the gesture pill were drawn dark on a near-black app: invisible.
+        // `SystemBarStyle.dark` keeps them light whatever the system theme says.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         // A cold start from a pairing link: held in the inbox until the UI reads it.
         // Not on a restore — the link was already handled by the instance that saw it.
         if (savedInstanceState == null) offerPairingLink(intent)

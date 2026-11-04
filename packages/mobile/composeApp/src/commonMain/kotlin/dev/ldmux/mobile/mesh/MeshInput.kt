@@ -77,6 +77,15 @@ class MeshInputBatcher(
 
     val isEmpty: Boolean get() = runs.isEmpty()
 
+    /** Throw away everything waiting. The one caller is the public-channel mode's "discard". */
+    fun clear() {
+        runs.clear()
+        size = 0
+        urgent = false
+        firstAt = 0L
+        lastAt = 0L
+    }
+
     /** Add typed text. False, and nothing added, when it would pass [capacity]: the caller says so. */
     fun appendText(bytes: ByteArray, nowMs: Long): Boolean {
         if (bytes.isEmpty()) return true
@@ -304,8 +313,58 @@ class MeshTerminalHandle(
         return ok
     }
 
+    /**
+     * Whether anything is waiting. The public-channel mode's "sync" asks this, and the answer
+     * decides whether there is anything to send at all: an empty sync only shows the view.
+     */
+    val hasPending: Boolean get() = !batcher.isEmpty
+
+    /**
+     * What is waiting, counted: typed characters, named keys, and the records it will cost.
+     *
+     * The record count is the number the user cannot otherwise see and the one that matters on
+     * this link: an `Input` record carries [MeshTerm.MAX_INPUT] bytes and the hour has about 58
+     * records, so "12 characters" and "12 characters, 1 key, about 2 records" are different
+     * promises. Counted as the driver will send it, not as bytes divided by a hopeful number.
+     */
+    var heldSummary: String by mutableStateOf("")
+        private set
+
+    /** Throw away everything waiting. The public-channel mode's "discard", and nothing else. */
+    fun discardHeld() {
+        batcher.clear()
+        overflow = false
+        pendingLabel = ""
+        heldSummary = ""
+    }
+
     /** The pump calls this after it sent a piece, so the line under the screen shrinks. */
-    fun refreshPending() { pendingLabel = readable(batcher.pending) }
+    fun refreshPending() {
+        pendingLabel = readable(batcher.pending)
+        heldSummary = summarize(batcher.pending)
+    }
+
+    private fun summarize(items: List<MeshOut>): String {
+        if (items.isEmpty()) return ""
+        var chars = 0
+        var keys = 0
+        var records = 0
+        for (item in items) when (item) {
+            is MeshOut.Text -> {
+                chars += item.bytes.decodeToString().length
+                records += (item.bytes.size + MeshTerm.MAX_INPUT - 1) / MeshTerm.MAX_INPUT
+            }
+            is MeshOut.Keys -> {
+                keys += item.names.size
+                records += 1
+            }
+        }
+        val parts = buildList {
+            if (chars > 0) add(if (chars == 1) "1 character" else "$chars characters")
+            if (keys > 0) add(if (keys == 1) "1 key" else "$keys keys")
+        }
+        return parts.joinToString(" and ") + ", " + if (records == 1) "1 record" else "about $records records"
+    }
 
     private fun readable(items: List<MeshOut>): String = buildString {
         for (item in items) when (item) {

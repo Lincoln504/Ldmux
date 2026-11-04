@@ -198,4 +198,41 @@ class MeshInputTest {
         h.sendKey("")
         assertTrue(b.isEmpty)
     }
+    @Test
+    fun `discard throws away everything waiting, keys included`() {
+        // The public-channel mode's "discard": typed text and named keys, in order, gone without
+        // one byte leaving the phone.
+        val b = MeshInputBatcher()
+        b.appendText(bytes("rm -rf /tmp/x"), 0)
+        b.appendKey("Enter", 10)
+        assertFalse(b.isEmpty)
+        b.clear()
+        assertTrue(b.isEmpty)
+        assertNull(b.peek(10_000))
+        assertTrue(b.nextDueMs() == null, "nothing waiting means nothing to schedule")
+    }
+
+    @Test
+    fun `the held summary counts characters, keys and the records they will cost`() {
+        val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
+        handle.sendText("ls -l")
+        handle.sendKey("Enter")
+        handle.refreshPending()
+        // 5 characters and one named key. The key is its own record; five bytes fit one Input
+        // record. The summary is what the bar shows, so the arithmetic has to be honest about
+        // records rather than about bytes: an Input record carries MeshTerm.MAX_INPUT.
+        assertEquals("5 characters and 1 key, about 2 records", handle.heldSummary)
+        handle.discardHeld()
+        assertEquals("", handle.heldSummary)
+        assertFalse(handle.hasPending)
+    }
+
+    @Test
+    fun `a long paste is counted in the records it will actually take`() {
+        val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
+        handle.sendText("x".repeat(MeshTerm.MAX_INPUT * 2 + 1))
+        handle.refreshPending()
+        assertEquals("${MeshTerm.MAX_INPUT * 2 + 1} characters, about 3 records", handle.heldSummary)
+    }
+
 }

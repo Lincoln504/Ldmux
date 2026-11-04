@@ -168,7 +168,7 @@ private fun FieldBox(placeholder: String, empty: Boolean, modifier: Modifier = M
             .fillMaxWidth()
             .clip(RadiusMedium)
             .background(Bg)
-            .border(1.dp, Line, RadiusMedium)
+            .border(1.dp, Edge, RadiusMedium)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
     ) {
         if (empty) {

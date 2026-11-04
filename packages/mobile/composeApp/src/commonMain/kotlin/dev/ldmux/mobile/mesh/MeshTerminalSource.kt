@@ -63,6 +63,87 @@ class MeshTerminalSource(
     private val _frame = MutableStateFlow<TerminalFrame.Frame?>(null)
     override val frame: StateFlow<TerminalFrame.Frame?> = _frame
 
+    /**
+     * Public-channel mode: input waits on the phone and the view does not follow the host.
+     *
+     * The state is [PublicChannelHold]'s, because the rule is "may this screen be drawn now", and
+     * that question has no engine in it. This source is the only thing that consults it, and the
+     * screen is the only thing that turns it on or asks it to sync. See ADR-0026.
+     */
+    private val hold = PublicChannelHold()
+
+    /** The newest screen the host sent while the view was frozen. */
+    private var pendingScreen: MeshScreen? = null
+
+    /** The mode is engaged: typing is held and the view is frozen until a sync. */
+    val publicChannel: Boolean get() = hold.on
+
+    /** A sync is out and its answer has not arrived. */
+    val awaitingSync: Boolean get() = hold.awaiting
+
+    /**
+     * The buffer is being drained: the pump may send right now.
+     *
+     * True only from the sync press until the buffer is empty. [awaitingSync] stays true after
+     * that, while the answer is on its way — and typing during that wait is held, because "no
+     * data is sent live" does not pause just because a send is in flight.
+     */
+    val flushingHeld: Boolean get() = hold.flushing
+
+    /** Screens the host sent while the view was frozen; the newest is what a pull shows. */
+    val heldUpdates: Int get() = hold.updates
+
+    /**
+     * Turn the mode on or off. Turning it off draws whatever the host sent meanwhile, so leaving
+     * the mode never leaves a stale screen claiming to be live.
+     */
+    fun setPublicChannel(on: Boolean) {
+        if (on == hold.on) return
+        hold.set(on)
+        if (!on) pullHeld()
+    }
+
+    /**
+     * The sync button's action. True when something is waiting and the pump must flush it; false
+     * when nothing was waiting, in which case the newest held screen is drawn now.
+     *
+     * It cannot be a synchronous request and answer: sending queues records on the link and the
+     * host's answer arrives as its next `Commit`, so the answer to "did it work" is "the next
+     * screen". The screen's own deadline is what stops a wait nobody will answer.
+     */
+    fun sync(): Boolean {
+        val pending = input.hasPending
+        // Nothing typed and no screen held: the view is already the newest the host sent, so there
+        // is nothing to send and nothing to show. Starting a wait here would be a wait for an
+        // answer that cannot come, and the deadline would report a failure that did not happen.
+        if (!pending && pendingScreen == null) return false
+        if (hold.sync(pending)) return true
+        pullHeld()
+        return false
+    }
+
+    /** The pump drained the buffer: stop sending and wait for the answer. */
+    fun syncDrained() { hold.drained() }
+
+    /** The wait's deadline passed with no answer: draw what is held and say so. */
+    fun syncTimedOut(): Boolean {
+        if (!hold.timedOut()) return false
+        pullHeld()
+        return true
+    }
+
+    /**
+     * Why a scroll did nothing, while it is worth saying.
+     *
+     * The mesh pad's arrows are the same three controls as the tailnet's, and here they can do
+     * nothing at all: the host sends no history and the client accumulates its own, so a session
+     * that has not scrolled yet has no history to scroll into. A button that returns 0 with no
+     * word about it reads as broken — measured on the device 2026-11-03. Cleared by the next
+     * scroll that moved, or by the screen after it has shown it.
+     */
+    var scrollNotice: String? by mutableStateOf(null)
+        private set
+
     /** The host's `Key` names are the tailnet's, but the mesh bar sends no `S-` forms. */
     override val shiftKeys: Boolean get() = false
 
@@ -95,6 +176,35 @@ class MeshTerminalSource(
      * cells are the wrong shape, and a selection into them would mean nothing.
      */
     fun show(screen: MeshScreen) {
+        if (screen.cols <= 0 || screen.lines.isEmpty()) return
+        // The hold decides whether this screen may be drawn. While frozen the newest screen is
+        // kept rather than drawn, so a sync shows the shell as it is now and not a replay of what
+        // was typed. Nothing else about the link changes: the driver keeps polling and the
+        // session keeps its acks, because a frozen view is a view and not a dead link.
+        if (!hold.acceptScreen(painted = last != null)) {
+            pendingScreen = screen
+            return
+        }
+        pendingScreen = null
+        applyScreen(screen)
+        hold.painted()
+    }
+
+    /**
+     * Draw the newest screen the host sent, without sending anything.
+     *
+     * The honest answer to "sync" when nothing is waiting: there is nothing to send, so the only
+     * thing a button can do is show what the shell last said. False when no screen is held.
+     */
+    fun pullHeld(): Boolean {
+        val held = pendingScreen ?: return false
+        pendingScreen = null
+        applyScreen(held)
+        hold.painted()
+        return true
+    }
+
+    private fun applyScreen(screen: MeshScreen) {
         val c = screen.cols
         val r = screen.lines.size
         if (c <= 0 || r <= 0) return
@@ -155,6 +265,10 @@ class MeshTerminalSource(
         history.clear()
         hasSelection = false
         _frame.value = null
+        // A screen from the shell that is gone is not an answer to anything: drop it so a sync
+        // does not draw the last shell's rows under the next shell's name.
+        pendingScreen = null
+        scrollNotice = null
     }
 
     /** Free the engine. Idempotent. */
@@ -214,15 +328,31 @@ class MeshTerminalSource(
             }
         }
         val moved = history.scroll(rows)
-        if (moved != 0) paint()
+        if (moved != 0) {
+            scrollNotice = null
+            paint()
+        } else if (rows < 0) {
+            // The host sends no history and this client accumulates its own, so "up" can be a tap
+            // with no answer: either nothing has scrolled off yet, or the view is already at the
+            // oldest row. Two different sentences, because the second one means "this is all of
+            // it" and the first means "nothing yet" — and a button that says nothing at all
+            // reads as broken either way.
+            scrollNotice = if (history.size == 0) "no history yet on this link" else "start of history"
+        } else {
+            scrollNotice = null
+        }
         return moved
     }
 
     override fun scrollToBottom() {
+        scrollNotice = null
         if (history.offset == 0) return
         history.toBottom()
         paint()
     }
+
+    /** The screen has shown [scrollNotice]; stop drawing it. */
+    fun clearScrollNotice() { scrollNotice = null }
 
     /**
      * A tap moves the shell's cursor with the arrow keys, by the same plan as the tailnet route

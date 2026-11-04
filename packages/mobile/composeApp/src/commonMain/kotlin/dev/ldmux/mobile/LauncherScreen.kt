@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -34,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -430,7 +432,12 @@ internal fun ChoiceRow(
             // and an outline on top of a tick was three signals for one fact. The
             // row's own shade is reserved for "a phone is using this".
             .background(if (inUse) Accent.copy(alpha = 0.09f) else Surface)
-            .clickable(onClick = onClick)
+            // **The row is a checkbox, and says so.** It was a plain clickable: a screen reader
+            // announced "clickable" and nothing about whether this shell was chosen, while the
+            // tick's state lived only in a drawn tick and a numeral. `toggleable` puts the role,
+            // the state and the action in the semantics tree; the visual stays the tick box that
+            // becomes a page number.
+            .toggleable(value = chosen, role = Role.Checkbox, onValueChange = { onClick() })
             // The folder moved up beside the name, but the row keeps the height it
             // had with two lines: the list's rhythm must not change under the
             // finger. The 8.dp is the removed line's height, split over both sides.
@@ -472,7 +479,16 @@ internal fun ChoiceRow(
         // beside it. Two lines said the same thing twice and made every shell two
         // rows tall.
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, color = Fg, fontSize = 14.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+            Text(
+                title,
+                color = Fg,
+                fontSize = 14.sp,
+                maxLines = 1,
+                // A long hostname or a long shell name just stopped mid-character with no sign
+                // that there was more. An ellipsis is the sign.
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = FontWeight.Medium,
+            )
             if (mobileShell) {
                 // One space after the name, in the grey the address uses: a fact
                 // about this row rather than a control, so it is not a button and
@@ -550,7 +566,7 @@ fun OutlinedBtn(
     Box(
         modifier
             .clip(RadiusMedium)
-            .border(1.dp, Line, RadiusMedium)
+            .border(1.dp, Edge, RadiusMedium)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),

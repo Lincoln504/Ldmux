@@ -29,7 +29,15 @@ val Bg = Color(0xFF0A0A0A)
 
 val Fg = Color(0xFFEDEDED)
 
-val Dim = Color(0xFF8C8C8C)
+/**
+ * Secondary text and glyphs: quieter than [Fg], and quiet enough to read.
+ *
+ * #8C8C8C measured 5.18:1 on [Surface] and 4.04:1 on [Raised] — under the 4.5:1 floor for body
+ * text on the filled icon buttons. #A0A0A0 measures 6.66:1 and 5.19:1, so "dim" is a relationship
+ * rather than a risk. It stays 2.2:1 below [Fg], which is what "dim" has to mean to be seen as
+ * dim at all.
+ */
+val Dim = Color(0xFFA0A0A0)
 
 /**
  * The quiet end of the palette, and it is a **colour, not [Dim] with an alpha**.
@@ -37,10 +45,17 @@ val Dim = Color(0xFF8C8C8C)
  * Explanatory lines and field placeholders used `Dim.copy(alpha = 0.6f)` and `0.7f`,
  * which over `Bg` works out to about 2.8:1 and 3.6:1 — under the 4.5:1 that body text
  * needs, on a screen that is otherwise high contrast. A faded colour is also not a
- * value anyone can look up. `#787878` on `#0A0A0A` is 4.5:1, which is the floor, and
- * it still reads as quieter than [Dim].
+ * value anyone can look up.
+ *
+ * **#787878 was chosen against [Bg] and then used on [Surface], where it is not enough.**
+ * Measured: 4.48:1 on `Bg` (already under the 4.5:1 floor, so the comment claiming "4.5:1,
+ * which is the floor" was optimistic) and 3.94:1 on `Surface` — and `Surface` is where the
+ * explanatory text lives: modal cards, placeholders, the radio dialog's success line, the
+ * link diagnostics. #888888 measures 5.58:1 on `Bg` and 4.91:1 on `Surface`, and stays
+ * visibly quieter than [Dim]. Never drawn on [Raised] (the filled icon button's fill); if
+ * it ever is, it needs a lighter value again.
  */
-val Muted = Color(0xFF787878)
+val Muted = Color(0xFF888888)
 
 /**
  * The one destructive colour: ending something.
@@ -236,5 +251,20 @@ internal val RadiusLarge = RoundedCornerShape(4.dp)
  */
 internal val LocalTouch = staticCompositionLocalOf { ThinTouch }
 
-/** Rules and unselected outlines. */
+/**
+ * Dividers and rules: the subtle end, and **not** a control's edge.
+ *
+ * At #2A2A2A this is 1.21:1 against [Surface] and 1.38:1 against [Bg]. That is right for a line
+ * between two rows — a divider is meant to be barely there — and wrong for the outline of a
+ * control: WCAG 1.4.11 wants 3:1 for the boundary of something you press. The theme used one value
+ * for both, so every "outlined" button was outlined in a colour that is not visible; [Edge] is the
+ * second value that fixes it without brightening every divider in the app.
+ */
 val Line = Color(0xFF2A2A2A)
+
+/**
+ * The edge of a control: an outline you can see. #686868 measures 3.55:1 against [Bg] and 3.12:1
+ * against [Surface] — the floor for a non-text boundary, and still quieter than [Chosen], which is
+ * the outline of a control that is *chosen* rather than merely pressable.
+ */
+val Edge = Color(0xFF686868)

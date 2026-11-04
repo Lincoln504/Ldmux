@@ -372,10 +372,18 @@ Platforms (see `docs/PLATFORMS.md`):
     `Sessions` entries carry `cwd` from profile version 6, gated on the page's own flag because a list is answered
     before an attach can succeed (ADR-0025, "Update, 2026-11-01 (profile version 6)").
   - *Defects found on the way.* Unpairing left the MeshMore gateway token in the Keystore (now cleared with the keys); `MeshRouteWiringTest` pinned the contradiction that a mesh-route device with no daemon reads as "unpaired".
+  - *Public-channel mode* (ADR-0026, 2026-11-04). A mode for a shared channel: typing is held on
+    the phone — text, named keys and Enter, in order — the view is frozen, and one standalone `sync`
+    button sends what is held and draws the shell's answer. The gate is the pump loop, which is the
+    route's only sender; the bar over the terminal shows what is waiting and the records it will
+    cost. It is opt-in, not automatic: a mode that silenced typing when it noticed a public preset
+    would read as the app having stopped accepting input. Tests: `PublicChannelHoldTest`,
+    `MeshInputTest` (discard and the held summary).
   - *Still not done:* preset rollback, background release, multi-hop path recovery, a host-side
     USB provisioning UI, and an iOS build. The daemon now clears a pinned phone on a new pairing
     grant and persists the PSK (2026-11-03). The phone no longer depends on MeshMore; the host
-    still uses its gateway for the USB radio.
+    still uses its gateway for the USB radio. A held buffer dies with the connection (ADR-0026,
+    "Losses and edges").
 - **Mesh work** (ADR-0020, ADR-0023, `docs/MESH-TRANSPORT.md`): the link, the RPC, the CLI
   and the gateway side of the L3 session exist. Missing: the phone's Noise client (a
   decision), the compact encoding and the shell bridge, the pairing ceremony, and the mobile

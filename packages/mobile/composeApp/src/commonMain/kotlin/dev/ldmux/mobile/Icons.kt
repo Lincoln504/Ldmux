@@ -462,9 +462,15 @@ private fun DrawScope.drawMic(tint: Color) {
  * for exactly that reason.
  */
 fun folderName(path: String): String {
-  val home = Regex("^/(home|Users)/[^/]+").find(path)?.value
-  if (home != null && path.trimEnd('/') == home) return "~"
-  val base = path.trimEnd('/').substringAfterLast('/')
+  // An empty path is "not known", not "the filesystem root": the shell header puts this beside a
+  // session's name, and a lone "/" there says the shell is at the root of the filesystem, which is
+  // a false statement about where it is. A session that has not reported a cwd (or reports one the
+  // host could not read) is a shell whose folder is unknown, so it says the one thing that is true.
+  val trimmed = path.trim()
+  if (trimmed.isEmpty()) return "shell"
+  val home = Regex("^/(home|Users)/[^/]+").find(trimmed)?.value
+  if (home != null && trimmed.trimEnd('/') == home) return "~"
+  val base = trimmed.trimEnd('/').substringAfterLast('/')
   return base.ifEmpty { if (home != null) "~" else "/" }
 }
 

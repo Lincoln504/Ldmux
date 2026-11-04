@@ -70,6 +70,15 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
+ * How long a sync waits for the host's answer before the screen stops waiting and says so.
+ *
+ * A radio round trip is about a second and a full screen can be several records, so this is
+ * generous on purpose; a link that has run out of budget never answers, and that is the case this
+ * exists for. Longer than this and a person is sitting on a screen that looks live and is not.
+ */
+internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
+
+/**
  * The mesh route's terminal. It is the **same chrome as the tailnet terminal**: the shared
  * [PortraitBar] (shell header with its arrows, menu, Esc/Tab/Home/End/PgUp/PgDn, the sticky
  * Ctrl/Alt/Shift latch, C/c, paste, Enter, the arrow pad, the keyboard toggle) drives a
@@ -230,10 +239,26 @@ fun MeshTerminalScreen(
 
     // Moves what the user typed to the driver. The poll is never coarser than the batcher's own
     // windows (`IDLE_MS`, `MAX_HOLD_MS`), and a step never sends more than one record.
+    //
+    // **This loop is the only sender**, so it is also where public-channel mode holds: while the
+    // mode is on and no sync is waiting, the loop reads what is waiting and sends nothing. Typing
+    // still accumulates in the batcher, in order, keys and all — and the bar over the terminal
+    // shows it, so "held" is a visible state rather than a silent one. A sync clears the gate for
+    // exactly as long as it takes to drain, and the answer arrives as the host's next screen.
     LaunchedEffect(conn) {
         while (true) {
+            handle.refreshPending()
+            // The gate is `flushingHeld`, not `awaitingSync`: the wait for the host's answer can
+            // last seconds, and typing during it must still be held. A single flag would send
+            // everything typed while the answer was on its way.
+            if (source.publicChannel && !source.flushingHeld) {
+                delay(120)
+                continue
+            }
             val step = pump.step()
             handle.refreshPending()
+            // The drain is over when nothing is left, whatever the step said about windows.
+            if (!handle.hasPending) source.syncDrained()
             when (step) {
                 PumpStep.Sent -> {}
                 PumpStep.Waiting -> delay(150)
@@ -244,6 +269,30 @@ fun MeshTerminalScreen(
                 }
             }
         }
+    }
+
+    // A sync whose answer never comes must not leave the screen frozen with no word about it: the
+    // link may be out of budget or down, and the honest answer is "here is the newest screen we
+    // hold, and no answer came". Twenty seconds is several radio round trips — long enough not to
+    // cry wolf on a slow link, short enough that a person does not sit on a dead screen.
+    var syncNotice by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(source.awaitingSync) {
+        if (!source.awaitingSync) { syncNotice = null; return@LaunchedEffect }
+        delay(SYNC_ANSWER_TIMEOUT_MS)
+        if (source.syncTimedOut()) syncNotice = "no answer yet: the link may be busy or down"
+    }
+    // A notice over a terminal is read while typing, so it must not stay once it has been read.
+    // Two different lifetimes: "no answer" is a fact about the last thing you did and stays a few
+    // seconds; "no history yet" is about a tap and goes as soon as the next scroll moves.
+    LaunchedEffect(syncNotice) {
+        if (syncNotice == null) return@LaunchedEffect
+        delay(4_000)
+        syncNotice = null
+    }
+    LaunchedEffect(source.scrollNotice) {
+        if (source.scrollNotice == null) return@LaunchedEffect
+        delay(2_500)
+        source.clearScrollNotice()
     }
 
     val live = view as? MeshTermView.Live
@@ -451,10 +500,37 @@ fun MeshTerminalScreen(
                             modifier = Modifier.align(Alignment.TopEnd),
                         )
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
+                        // Public-channel mode's one control: the standalone sync button. Drawn over the
+                        // bottom of the terminal rather than in a key row, because it has to say what is
+                        // waiting and how stale the screen is, and because while it is drawn the mode is on.
+                        PublicChannelBar(
+                            on = source.publicChannel,
+                            summary = handle.heldSummary,
+                            awaiting = source.awaitingSync,
+                            flushing = source.flushingHeld,
+                            updates = source.heldUpdates,
+                            onToggle = {
+                                if (!source.publicChannel) {
+                                    source.setPublicChannel(true)
+                                } else {
+                                    // Leaving sends what is held: turning the mode off clears the gate in the
+                                    // pump loop, so the queue drains on its own windows. A mode that could be
+                                    // left while silently dropping what you typed would be worse than one
+                                    // that sends on the way out, and the bar says which it is.
+                                    source.setPublicChannel(false)
+                                }
+                            },
+                            onSync = { source.sync() },
+                            onDiscard = { handle.discardHeld() },
+                            modifier = Modifier.align(Alignment.BottomEnd),
+                        )
                         // What the link adds is said only while it is true, over the terminal like the voice
                         // banner, and never as a row: the tailnet's live screen is the terminal and the
                         // bar. The hour's records and the typing that waits are on the shell list.
                         val notice = when {
+                            syncNotice != null -> syncNotice
+                            source.scrollNotice != null -> source.scrollNotice
+                            handle.overflow && source.publicChannel -> "too much held: sync to send"
                             handle.overflow -> "too much typed: wait for it to send"
                             live?.stalled == true -> "waiting for send budget"
                             live?.screen?.alternate == true -> "full-screen program: updates are large and slow"

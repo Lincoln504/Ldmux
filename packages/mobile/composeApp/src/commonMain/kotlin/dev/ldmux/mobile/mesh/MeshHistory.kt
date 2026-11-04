@@ -16,6 +16,17 @@ package dev.ldmux.mobile.mesh
  */
 internal class MeshHistory(private val max: Int = 2_000) {
 
+    private companion object {
+        /**
+         * The fewest real rows an inferred shift may rest on. Two is the smallest overlap that is
+         * evidence rather than coincidence; with one row in common, a screen of blanks would agree
+         * with every shift, and a guess from blanks is how history acquires rows that never
+         * existed. A shift of "all but one row" leaves one row of overlap and is refused by the
+         * same rule, which is the honest answer: one row cannot say where the rest went.
+         */
+        const val MIN_MATCHED = 2
+    }
+
     private val rows = ArrayDeque<String>()
 
     /** Rows above the live bottom the view is parked on. 0 is live. */
@@ -54,29 +65,49 @@ internal class MeshHistory(private val max: Int = 2_000) {
      *
      * Deliberately conservative, because inventing history is worse than having none:
      * - only when neither screen is on the alternate screen and both have the same height,
-     * - at most half a screen moves (a full replacement is a repaint, not a scroll),
-     * - the overlap must match on at least half its rows, counting only non-blank ones, so two
-     *   mostly-empty screens cannot agree by accident,
+     * - at least [MIN_MATCHED] non-blank rows must sit in the overlap, so a screen of blanks
+     *   cannot agree with every shift, and a shift decided from blanks is a guess,
+     * - **every** non-blank row in the overlap must be the same row in the new screen, except at
+     *   most one: the row a program is still writing (a spinner, a progress bar) is a row that
+     *   legitimately changed without scrolling,
      * - a screen that does not match any shift adds nothing.
+     *
+     * **Why not "at most half a screen".** That was the first rule, and it refuses exactly the
+     * scrolls that matter most: a build log, a `cat`, or anything that fills a screenful between
+     * two snapshots moves the whole screen at once. Measured against the alternative — keep
+     * nothing above the live screen — a rule that accepts a near-full-screen shift and refuses a
+     * replacement is the honest middle: the overlap still has to match row for row.
+     *
+     * A screen that scrolls by more than a screen's worth, or that is replaced outright (a new
+     * program's first screen), has no overlap and therefore adds nothing: a repaint is not a
+     * scroll, and guessing one is how history acquires rows that never existed.
      */
     private fun noteShift(previous: MeshScreen, next: MeshScreen) {
         if (previous.alternate || next.alternate) return
         val height = previous.lines.size
-        if (height == 0 || next.lines.size != height) return
+        if (height < 2 || next.lines.size != height) return
         var best = 0
         var bestScore = 0
-        for (moved in 1..(height / 2)) {
+        for (moved in 1 until height) {
             val overlap = height - moved
             var matched = 0
             var nonBlank = 0
             for (i in 0 until overlap) {
                 val p = previous.lines[i + moved]
-                if (p.isNotBlank()) nonBlank++
+                if (p.isBlank()) continue
+                nonBlank++
                 if (p == next.lines[i]) matched++
             }
-            // Half the overlap, and at least one real row inside it: a screen of blanks matches
-            // every shift, and a shift decided from blanks is a guess.
-            if (nonBlank > 0 && matched * 2 >= overlap && matched > bestScore) {
+            // At most one changed row: the row a program is still writing. Everything else in the
+            // overlap must be the same row, or this shift is a guess about which rows left.
+            if (nonBlank < MIN_MATCHED || matched < nonBlank - 1) continue
+            // **The score falls as the shift grows** — a bigger shift leaves fewer shared rows —
+            // so repeated content (a log of identical lines) yields the smallest shift, which is
+            // the safe reading. A tie happens when the row just above the new bottom changed: the
+            // smaller shift counts one more row as "shared" by allowing that one mismatch, and the
+            // larger one explains the same rows without it. The larger shift is the honest answer,
+            // because it does not need the excuse.
+            if (matched >= bestScore) {
                 best = moved
                 bestScore = matched
             }

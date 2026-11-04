@@ -13,6 +13,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.graphics.Color
@@ -38,7 +39,11 @@ fun AccentBtn(
     Box(
         modifier
             .clip(RadiusMedium)
-            .background(if (enabled) Accent else Surface)
+            // Disabled fills with `Line`, not `Surface`: `ModalCard`'s background *is* `Surface`,
+            // so a disabled button inside a dialog lost its shape entirely and only its dim label
+            // floated. `OptionButton` already documents and fixes this; the two buttons beside it
+            // had the same bug and kept it.
+            .background(if (enabled) Accent else Line)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
@@ -89,7 +94,15 @@ internal fun OptionButton(
             .padding(horizontal = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = if (selected) Fg else Dim, fontSize = 12.sp, maxLines = 1)
+        Text(
+            label,
+            color = if (selected) Fg else Dim,
+            fontSize = 12.sp,
+            maxLines = 1,
+            // An option label longer than the row used to end mid-character, which reads as a
+            // rendering fault rather than as a name that did not fit.
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -120,7 +133,9 @@ fun DangerBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit)
     Box(
         modifier
             .clip(RadiusMedium)
-            .border(1.dp, Line, RadiusMedium)
+            // `Edge`, not `Line`: a destructive button whose edge cannot be seen is a label in a
+            // red nobody can press with confidence.
+            .border(1.dp, Edge, RadiusMedium)
             .heightIn(min = LocalTouch.current.min)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),

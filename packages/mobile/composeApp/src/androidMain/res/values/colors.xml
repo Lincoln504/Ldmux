@@ -2,4 +2,7 @@
 <resources>
     <!-- The app's own background, so the icon and the app agree. -->
     <color name="ic_launcher_background">#0A0A0A</color>
+    <!-- The app's background, `Bg` in Theme.kt. Named here so the launch window and the icon are
+         the same value as the first Compose frame. -->
+    <color name="app_background">#0A0A0A</color>
 </resources>

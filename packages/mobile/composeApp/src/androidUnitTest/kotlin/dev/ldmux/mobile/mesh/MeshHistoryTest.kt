@@ -148,6 +148,50 @@ class MeshHistoryShiftTest {
     }
 
     @Test
+    fun `a screenful that scrolls at once still accumulates`() {
+        // The case the first "at most half a screen" rule refused: a build log, a `cat`, or any
+        // output that fills the screen between two commits. Four of six rows moved, the bottom two
+        // are shared — the overlap is small but it is evidence, and the four rows that left are
+        // history the user can read back.
+        val h = MeshHistory()
+        h.note(
+            screen("one", "two", "three", "four", "five", "six"),
+            screen("five", "six", "seven", "eight", "nine", "ten"),
+        )
+        assertEquals(4, h.size)
+        h.scroll(-4)
+        assertEquals(listOf("one", "two", "three", "four", "five", "six"), h.window(
+            screen("five", "six", "seven", "eight", "nine", "ten"), 6,
+        ))
+    }
+
+    @Test
+    fun `one row being written does not stop the shift being read`() {
+        // A spinner or a progress bar rewrites one row without scrolling; the rest of the overlap
+        // is the same rows, so the shift is still a shift. Refusing it would lose a whole screen of
+        // history every time a program drew a frame.
+        val h = MeshHistory()
+        h.note(
+            screen("one", "two", "three", "four", "five", "six"),
+            screen("three", "four", "five", "six", "seven", "working…"),
+        )
+        assertEquals(2, h.size)
+    }
+
+    @Test
+    fun `a replacement with one row in common is not a scroll`() {
+        // One shared row cannot say where the rest went, and guessing from it is how history
+        // acquires rows that never existed. A screen replaced outright by a new program is the
+        // case this refuses.
+        val h = MeshHistory()
+        h.note(
+            screen("one", "two", "three", "four", "five", "six"),
+            screen("a", "b", "c", "d", "e", "six"),
+        )
+        assertEquals(0, h.size)
+    }
+
+    @Test
     fun `the alternate screen never contributes history`() {
         val h = MeshHistory()
         val alt = screen("one", "two", "three", "four").copy(alternate = true)
