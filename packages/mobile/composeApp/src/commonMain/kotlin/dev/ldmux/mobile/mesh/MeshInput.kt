@@ -336,12 +336,49 @@ class MeshTerminalHandle(
         overflow = false
         pendingLabel = ""
         heldSummary = ""
+        echoText = ""
     }
+
+    /**
+     * What the held input should look like **as characters**, for the local echo.
+     *
+     * Empty while nothing is held. This is the only place the phone renders a key name as
+     * something a terminal can show, and it is deliberately small:
+     *
+     *  - typed text and pasted text are themselves;
+     *  - `Enter` is a line end (`\r\n`), because that is what the user will see when it runs;
+     *  - `Tab` and `BSpace` are their control characters, which the emulator already draws
+     *    correctly (a carriage move and an erase);
+     *  - everything else — arrows, `Escape`, `C-c`, `Home`, `End` — renders as **nothing**.
+     *
+     * That last line is the honest one. An arrow key sent to a shell is a request the shell
+     * interprets: `Up` may recall history, `Left` may move the prompt's cursor, and `C-c` may
+     * cancel the line. The emulator has no shell in it, so painting any of those locally would
+     * *invent* an effect that has not happened. They are counted in [heldSummary] instead, which
+     * says "1 key" without pretending to know what it will do.
+     */
+    var echoText: String by mutableStateOf("")
+        private set
 
     /** The pump calls this after it sent a piece, so the line under the screen shrinks. */
     fun refreshPending() {
         pendingLabel = readable(batcher.pending)
         heldSummary = summarize(batcher.pending)
+        echoText = echoable(batcher.pending)
+    }
+
+    private fun echoable(items: List<MeshOut>): String = buildString {
+        for (item in items) when (item) {
+            is MeshOut.Text -> append(item.bytes.decodeToString())
+            is MeshOut.Keys -> for (n in item.names) {
+                when (n) {
+                    "Enter" -> append("\r\n")
+                    "Tab" -> append('\t')
+                    "BSpace" -> append("\b \b")
+                    else -> {}
+                }
+            }
+        }
     }
 
     private fun summarize(items: List<MeshOut>): String {

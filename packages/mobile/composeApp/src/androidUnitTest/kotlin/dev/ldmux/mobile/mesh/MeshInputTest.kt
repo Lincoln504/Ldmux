@@ -235,4 +235,40 @@ class MeshInputTest {
         assertEquals("${MeshTerm.MAX_INPUT * 2 + 1} characters, about 3 records", handle.heldSummary)
     }
 
+    @Test
+    fun `the local echo shows characters, a line end, a tab and an erase, and nothing else`() {
+        // What the fake draws has to be characters a terminal can show. A named key the shell
+        // interprets — an arrow, Escape, C-c — renders as nothing, because painting one would
+        // invent an effect the shell has not run. They are counted instead.
+        val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
+        handle.sendText("ls")
+        handle.sendKey("Enter")
+        handle.sendText("a\tb")
+        // The first backspace meets a plain character still waiting here, so it removes it and
+        // costs nothing on the air — the batcher's own rule, unchanged by the mode. The second
+        // meets a tab, which it will not fold, so it stays a key.
+        handle.sendKey("BSpace")
+        handle.sendKey("BSpace")
+        handle.sendKey("Up")
+        handle.sendKey("C-c")
+        handle.refreshPending()
+        assertEquals("ls\r\na\t\b \b", handle.echoText)
+        // Four characters ("ls" and "a\t"), four keys (Enter, BSpace, Up, C-c), and one record
+        // per run: text, keys, text, keys. That is the honest count — the record is the unit the
+        // link spends, not the byte.
+        assertEquals("4 characters and 4 keys, about 4 records", handle.heldSummary)
+    }
+
+    @Test
+    fun `an empty buffer echoes nothing, and discard empties the echo`() {
+        val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
+        handle.refreshPending()
+        assertEquals("", handle.echoText)
+        handle.sendText("hello")
+        handle.refreshPending()
+        assertEquals("hello", handle.echoText)
+        handle.discardHeld()
+        assertEquals("", handle.echoText)
+    }
+
 }

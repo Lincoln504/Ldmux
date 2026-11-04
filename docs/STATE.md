@@ -373,12 +373,16 @@ Platforms (see `docs/PLATFORMS.md`):
     before an attach can succeed (ADR-0025, "Update, 2026-11-01 (profile version 6)").
   - *Defects found on the way.* Unpairing left the MeshMore gateway token in the Keystore (now cleared with the keys); `MeshRouteWiringTest` pinned the contradiction that a mesh-route device with no daemon reads as "unpaired".
   - *Public-channel mode* (ADR-0026, 2026-11-04). A mode for a shared channel: typing is held on
-    the phone — text, named keys and Enter, in order — the view is frozen, and one standalone `sync`
-    button sends what is held and draws the shell's answer. The gate is the pump loop, which is the
-    route's only sender; the bar over the terminal shows what is waiting and the records it will
-    cost. It is opt-in, not automatic: a mode that silenced typing when it noticed a public preset
-    would read as the app having stopped accepting input. Tests: `PublicChannelHoldTest`,
-    `MeshInputTest` (discard and the held summary).
+    the phone — text, named keys and Enter, in order — the view is frozen, one standalone button
+    sends what is held and draws the shell's answer, and the held text is **echoed locally at the
+    cursor** so typing looks like typing. The gate is the pump loop, which is the route's only
+    sender; the bar shows what is waiting and the records it will cost. **Forced on a public
+    channel, optional on a private one**: `isPublicChannel` compares the tuple's four channel
+    fields against the region's public presets, the radio dialog writes that into the config, and
+    unknown reads as public. The echo is rebuilt from the host's screen on every change and writes
+    with autowrap off, so it cannot drift and cannot push a fake row into the scrollback. Tests:
+    `PublicChannelHoldTest`, `MeshInputTest` (discard, the held summary, the echo table),
+    `MeshStandaloneTest` (`isPublicChannel`).
   - *Still not done:* preset rollback, background release, multi-hop path recovery, a host-side
     USB provisioning UI, and an iOS build. The daemon now clears a pinned phone on a new pairing
     grant and persists the PSK (2026-11-03). The phone no longer depends on MeshMore; the host

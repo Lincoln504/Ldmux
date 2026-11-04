@@ -284,7 +284,7 @@ JAVA_HOME=<jdk-21> ./gradlew --offline :composeApp:assembleDebug        # the AP
 `nix develop .#mobile`. Everything above was run; the unit suite passes and the APK assembles. **No
 device was involved**: nothing here is a claim about how the screens look or feel on a phone.
 
-The second pass ran the same three commands and the Kotlin suite (595 tests as of this writing, all
+The second pass ran the same three commands and the Kotlin suite (598 tests as of this writing, all
 passing), plus the native engine's own suite in `packages/mobile/scripts/test-native.sh` — 290 checks
 and 16 JNI checks — because the scroll investigation needed the engine's real behaviour rather than a
 reading of it (`LDMUX_VT_LIB_DIR` and `LDMUX_VT_INCLUDE_DIR` pointed at `native/prebuilt/host`, which

@@ -24,7 +24,15 @@ to leave when *they* decide, and the screen to answer then. That is the whole mo
 
 ## Decision
 
-**One mode, engaged explicitly, with one standalone control.**
+**One mode, with one standalone control. Forced on a public channel, optional on a private one.**
+
+Whether the channel is shared is *derived*, not asked: `isPublicChannel(preset)` compares the four
+fields that decide who hears whom (frequency, bandwidth, spreading factor, coding rate) against the
+region's public presets, and the radio dialog writes the answer into the config whenever it reads
+`SELF_INFO` or applies a preset. Unknown reads as public, because that is the safe reading of "not
+proved private". On a public channel the mode cannot be turned off — every keystroke there is a
+broadcast, so held input is the only supported way to type — and the bar says why instead of
+offering a toggle. On a private tuple the user may hold typing or not.
 
 - **Input is held in the existing batcher.** `MeshInputBatcher` already accumulates typed text and
   named keys in order, coalesces them, refuses past a bound, and renders them readably (`⏎`, `^C`,
@@ -43,7 +51,8 @@ to leave when *they* decide, and the screen to answer then. That is the whole mo
   that arrives afterwards is drawn — the host's answer to what was sent. A frozen view never stops
   the link: the driver keeps polling and the session keeps its acks, because a frozen view is a
   view and not a disconnected terminal.
-- **The bar says what is waiting and how stale the view is.** `12 characters and 1 key, about 2
+- **Typing is echoed locally** (see "The local echo" below) and the bar says what is waiting and
+  how stale the view is. `12 characters and 1 key, about 2
   records · view 3 behind`. The record count is the number the user cannot otherwise see and the
   one that matters: an `Input` record carries 96 bytes and the hour has about 58.
 - **A wait nobody answers ends.** Twenty seconds after a sync with no screen, the source draws the
@@ -53,35 +62,71 @@ to leave when *they* decide, and the screen to answer then. That is the whole mo
   view follows again — the bar says which it is (`send what is held and leave`). A mode that could
   be left while silently dropping what you typed is worse than one that sends on the way out.
 
+### The local echo
+
+What is held is **drawn at the cursor of the host's last screen**, so typing looks like typing:
+characters appear where they would have, `Enter` starts a new line, `Tab` moves to the stop, and a
+backspace erases. An earlier draft of this ADR rejected that as corrupting the emulator's truth.
+That was wrong, and the reason it was wrong is worth writing down, because the objection is real if
+the echo is written *incrementally*:
+
+- **Every echo is rebuilt from the host's last screen, never painted onto the previous echo.** So
+  the image is always exactly "the shell as it was, plus what you have typed since". Backspace,
+  wrapping, a deleted character and a long line cannot make it drift, because nothing accumulates.
+- **Autowrap is off while the echo is written** (`\x1b[?7l` … `\x1b[?7h`). A fake line that wrapped
+  would scroll the screen, and a row pushed into the local scrollback by a fake is history that
+  never happened. With autowrap off the text stops at the last column instead.
+- **Nothing is echoed while the view is parked in history**, where typing into the middle of rows
+  above the live screen would be a fake of a screen the user is not looking at.
+- **The host's screen always wins.** The next `Commit` — whether it is the answer to a sync or the
+  frame after the mode is turned off — repaints the screen, which removes the echo. The one case
+  that needed code is a Commit *identical* to the drawn screen: the source compares screens to skip
+  a repaint, so an echo would have survived a sync answered by an unchanged screen. It now repaints
+  when it was echoing.
+
+What is **not** echoed is every named key the shell interprets: an arrow, `Escape`, `Home`, `End`,
+`C-c`. Painting one locally would invent an effect that has not happened — the emulator has no
+shell in it, and `Up` in a shell may recall history rather than move a cursor. They are counted in
+the bar instead ("3 characters and 1 key"), which says what will be sent without pretending to know
+what it will do.
+
+**A limitation, stated rather than hidden:** the mesh profile's `Commit` carries no password flag
+(the tailnet route's frame does), so the phone cannot know it is at a password prompt. Text typed
+into one is echoed locally and shown, exactly as a terminal with echo on would show it. Closing
+that gap is a protocol bump (a flag on `Commit`), which is why it is not in this change.
+
 ### Why one button can both send and receive
 
 It cannot be a request/response, and it does not pretend to be. The mesh link is asynchronous:
 sending queues records for the ARQ, and the host's answer arrives as its next `Commit` whenever the
-screen changes. So the button is **release, then wait for the answer**, and the wait is the same
-thing a separate "receive" button would do. Two buttons would be two ways to start one wait, and a
-user pressing "receive" without having sent anything would get the same screen they already had.
+screen changes. So the button is **release, then wait for the answer**.
+
+**Two buttons were considered and are worse here.** "Send" and "receive" would be two ways to start
+one wait: the host answers a send anyway, so a separate receive only means *holding back* a screen
+the phone already has. It also gives the user two ways to be wrong — send without receive leaves a
+stale view, receive without send shows a screen that predates the typing — where one button has one
+sequence. What the two-button design was really asking for was *immediacy*, and the local echo
+answers that directly: the text appears as it is typed, so pressing sync does not have to produce
+an instant result to feel like it did something.
 
 When nothing is waiting, the button does the only honest thing left: it draws the newest screen the
-host already sent (`pullHeld`). That is a real action on a frozen view — "show me where the shell is
-now" — and it is why the control is never a dead button.
+host already sent (`pullHeld`), and it is labelled **`show`** in that state rather than `sync`,
+because a control should name what it does.
 
 ## What was rejected
 
 - **A second queue or a mode flag inside the batcher.** The batcher's rules (urgency for a line end,
   idle and hold windows, backspace folding into pending text, the capacity refusal) are the product
   of measurement; a parallel "hold" queue would re-implement them or disagree with them.
-- **Writing the typed text into the emulator as a fake local echo.** It is the most literal reading
-  of "displayed locally", and it is wrong here: the engine is a faithful emulator of what the *host*
-  said. Writing un-sent bytes into it corrupts the invariants every other feature relies on — the
-  scrollback, the selection, the tap policy's cursor position, the local history's row identity. The
-  pending text is a *view of the buffer*, drawn over the terminal, not a mutation of the terminal's
-  truth. It also cannot leak a password: a held buffer in a password prompt is shown as a count, not
-  as text, because the text never enters the engine.
-- **Auto-enabling the mode when the applied radio preset is a public one.** Considered and refused:
-  a mode that silences typing on its own is a mode whose first symptom is "the app stopped
-  accepting input", with no way for the user to know why. The preset is knowable
-  (`publicPresets(region)`), so this stays available as a *prompt* — a suggestion in the bar — if
-  field feedback says it should.
+- ~~**Writing the typed text into the emulator as a fake local echo.**~~ **Reversed** — it is
+  implemented, and the section above says how it is kept from drifting. The objection held only
+  against an incremental fake, which this is not.
+- ~~**Auto-enabling the mode when the applied radio preset is a public one.**~~ **Reversed, with
+  the objection kept**: the mode is forced on a public channel, and the objection's real complaint —
+  that a mode which silences typing with no explanation reads as a broken app — is answered by
+  saying so in three places instead of one: the bar is always drawn with `the radio is on a public
+  channel`, Settings' radio row says `public channel · typing is held until you press sync`, and the
+  local echo means typing is never silent even when it is not sent.
 - **A protocol change to ask the host for history or for a screen on demand.** The link has no such
   message and the budget cannot afford one per sync. The freeze is entirely client-side.
 
@@ -97,8 +142,16 @@ now" — and it is why the control is never a dead button.
   nothing is sent either, which is the honest pair.
 - **The view can be frozen for as long as the user leaves it frozen.** `heldUpdates` counts the
   screens that passed, so the bar can say how far behind it is, and the pull shows the newest.
-- **A sync that is answered by a screen identical to the frozen one** still ends the wait (the
-  source treats "the same screen" as an answer). Nothing redraws, which is correct.
+- **A sync that is answered by a screen identical to the frozen one** still ends the wait, and it
+  repaints when it was echoing: without that, a fake line would survive the sync that was supposed
+  to replace it.
+- **A password prompt is echoed.** The mesh `Commit` carries no password flag, so the phone cannot
+  mask it (the tailnet route can). Typed text at a prompt is drawn locally like any other, which is
+  what a terminal with echo on does. A protocol flag on `Commit` would close it; that is a host and
+  phone change with a version bump, deliberately not in this one.
+- **The classification can be stale.** It is written when the radio dialog reads `SELF_INFO` or
+  applies a preset. A tuple changed by another app is not noticed until this app reads the radio,
+  and until then the previous answer stands — including "public", which is the cautious one.
 - **The mode is one buffer for one connection, not one per shell.** The connection carries one
   attached shell at a time (`Attach` per page), so a per-shell buffer would be a buffer for a shell
   the link is not on.

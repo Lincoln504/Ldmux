@@ -44,6 +44,7 @@ actual object AppPrefs {
     private const val KEY_MESH_RADIO = "mesh_radio"
     private const val KEY_MESH_RADIO_NAME = "mesh_radio_name"
     private const val KEY_MESH_OPEN_AIRTIME = "mesh_open_airtime"
+    private const val KEY_MESH_PUBLIC_CHANNEL = "mesh_public_channel"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -70,6 +71,7 @@ actual object AppPrefs {
             meshRadio = sp.getString(KEY_MESH_RADIO, null) ?: "",
             meshRadioName = sp.getString(KEY_MESH_RADIO_NAME, null) ?: "",
             meshOpenAirtime = sp.getBoolean(KEY_MESH_OPEN_AIRTIME, true),
+            meshPublicChannel = sp.getBoolean(KEY_MESH_PUBLIC_CHANNEL, LdmuxConfig.DEFAULT.meshPublicChannel),
         )
     }
 
@@ -88,6 +90,7 @@ actual object AppPrefs {
             .putString(KEY_MESH_RADIO, config.meshRadio)
             .putString(KEY_MESH_RADIO_NAME, config.meshRadioName)
             .putBoolean(KEY_MESH_OPEN_AIRTIME, config.meshOpenAirtime)
+            .putBoolean(KEY_MESH_PUBLIC_CHANNEL, config.meshPublicChannel)
             .apply()
     }
 }

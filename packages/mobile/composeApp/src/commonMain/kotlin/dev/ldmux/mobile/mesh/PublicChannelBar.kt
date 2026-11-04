@@ -52,6 +52,8 @@ import dev.ldmux.mobile.Warn
 @Composable
 internal fun PublicChannelBar(
     on: Boolean,
+    /** The mode is not the user's choice here: the radio is on a public channel. */
+    forced: Boolean = false,
     summary: String,
     /** A send is out and its answer has not arrived. */
     awaiting: Boolean,
@@ -64,6 +66,7 @@ internal fun PublicChannelBar(
     modifier: Modifier = Modifier,
 ) {
     if (!on) {
+        // Forced mode is always on; this branch is the opt-in one only.
         // The way in. A labelled control rather than an icon: "hold input" is the whole feature in
         // two words, and a symbol for "hold" would have to be learned.
         Box(
@@ -127,8 +130,14 @@ internal fun PublicChannelBar(
                         }
                     },
             ) {
+                // `show` when nothing is held: with an empty buffer the button does not send,
+                // it draws the newest screen the host sent, and a control should say what it does.
                 Text(
-                    if (flushing) "sending…" else "sync",
+                    when {
+                        flushing -> "sending…"
+                        summary.isEmpty() -> "show"
+                        else -> "sync"
+                    },
                     color = if (flushing) Dim else Bg,
                     fontSize = 13.sp,
                 )
@@ -140,12 +149,19 @@ internal fun PublicChannelBar(
         // Turning the mode off is a decision about what is waiting, so the bar says which one it
         // is: leaving with text held sends it (a mode that can be left while silently dropping what
         // you typed is worse than one that sends on the way out).
-        MiniTextButton(onClick = onToggle) {
-            Text(
-                if (summary.isEmpty()) "leave public channel mode" else "send what is held and leave",
-                color = Dim,
-                fontSize = 11.sp,
-            )
+        //
+        // On a public channel there is no off: every keystroke would be a broadcast, and this is
+        // the only supported way to type there. The line says why instead of offering a toggle.
+        if (forced) {
+            Text("the radio is on a public channel", color = Muted, fontSize = 11.sp)
+        } else {
+            MiniTextButton(onClick = onToggle) {
+                Text(
+                    if (summary.isEmpty()) "leave public channel mode" else "send what is held and leave",
+                    color = Dim,
+                    fontSize = 11.sp,
+                )
+            }
         }
     }
 }

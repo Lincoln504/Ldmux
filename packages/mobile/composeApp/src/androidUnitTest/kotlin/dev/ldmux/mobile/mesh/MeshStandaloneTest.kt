@@ -198,6 +198,21 @@ class MeshStandaloneTest {
         assertTrue(RadioAirtime.opsPerHour(wide, 172) > RadioAirtime.opsPerHour(narrow, 172))
     }
 
+    @Test
+    fun `a public channel is the tuple other radios share, and a different bandwidth is not it`() {
+        // The four fields that decide who shares a frequency, and nothing else. Transmit power and
+        // path-hash width do not change who hears whom, so they are excluded.
+        assertTrue(isPublicChannel(RadioPreset.USA))
+        assertTrue(isPublicChannel(RadioPreset.CANADA))
+        assertTrue(isPublicChannel(RadioPreset.USA.copy(txPowerDbm = 14, pathHashSize = 2)))
+        // The LDMUX private tuple is the public centre at a *different bandwidth*, which is a
+        // different channel: 500 kHz and 62.5 kHz do not hear each other.
+        assertFalse(isPublicChannel(RadioPreset.LDMUX_PRIVATE))
+        assertFalse(isPublicChannel(RadioPreset.USA.copy(bandwidthKhz = 250.0)))
+        assertFalse(isPublicChannel(RadioPreset.USA.copy(spreadingFactor = 9)))
+        assertFalse(isPublicChannel(RadioPreset.USA.copy(codingRate = 7)))
+    }
+
     private class FakeRadio : RadioLink {
         private val _state = MutableStateFlow(MeshLinkState.Bound)
         override val state: StateFlow<MeshLinkState> = _state.asStateFlow()

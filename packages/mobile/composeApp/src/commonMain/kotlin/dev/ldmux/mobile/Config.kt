@@ -81,6 +81,20 @@ data class LdmuxConfig(
      * so the app budget starts open. The radio's own duty cycle still applies.
      */
     val meshOpenAirtime: Boolean = true,
+    /**
+     * The radio is on a **public channel**: a tuple that other people's radios are also on.
+     *
+     * It is not a setting the user flips; it is a fact derived from the tuple the radio is
+     * actually using, written here by the radio dialog when it reads `SELF_INFO` or applies a
+     * preset. It decides one thing: public-channel mode (ADR-0026) is **forced** on a public
+     * channel and optional on a private one, because on a shared channel every keystroke is a
+     * broadcast and the mode is the only supported way to type there.
+     *
+     * Defaults to true, because true is the safe reading of "unknown": a fresh install that has
+     * not classified its radio has not proved it is on a private tuple, and being wrong towards
+     * "held until sync" costs a tap, while being wrong the other way costs a broadcast.
+     */
+    val meshPublicChannel: Boolean = true,
 ) {
 
     /**

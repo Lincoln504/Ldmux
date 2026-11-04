@@ -271,6 +271,22 @@ fun MeshTerminalScreen(
         }
     }
 
+    // **Public-channel mode is forced on a public channel** (ADR-0026): a tuple other operators'
+    // radios share means every keystroke is a broadcast, so held input is the only supported way
+    // to type there. On a private tuple the mode is the user's choice. `meshPublicChannel` is a
+    // fact derived from the radio's own tuple, written when the radio dialog read or applied it;
+    // unknown reads as public, because that is the safe reading.
+    LaunchedEffect(conn, config.meshPublicChannel) {
+        if (config.meshPublicChannel) source.setPublicChannel(true)
+    }
+
+    // The local echo: what is held is drawn at the cursor of the host's last screen, so typing
+    // looks like typing. It is rebuilt from the host's screen on every change (see `echoHeld`),
+    // so backspace, a line end and a long line cannot make it drift from what it is a fake of.
+    LaunchedEffect(source, handle.echoText, source.publicChannel) {
+        if (source.publicChannel) source.echoHeld(handle.echoText) else source.echoHeld("")
+    }
+
     // A sync whose answer never comes must not leave the screen frozen with no word about it: the
     // link may be out of budget or down, and the honest answer is "here is the newest screen we
     // hold, and no answer came". Twenty seconds is several radio round trips — long enough not to
@@ -505,6 +521,8 @@ fun MeshTerminalScreen(
                         // waiting and how stale the screen is, and because while it is drawn the mode is on.
                         PublicChannelBar(
                             on = source.publicChannel,
+                            // Forced on a public channel: the bar has no way out, and says why.
+                            forced = config.meshPublicChannel,
                             summary = handle.heldSummary,
                             awaiting = source.awaitingSync,
                             flushing = source.flushingHeld,
@@ -512,6 +530,8 @@ fun MeshTerminalScreen(
                             onToggle = {
                                 if (!source.publicChannel) {
                                     source.setPublicChannel(true)
+                                } else if (config.meshPublicChannel) {
+                                    // No-op on a public channel: the mode is not optional there.
                                 } else {
                                     // Leaving sends what is held: turning the mode off clears the gate in the
                                     // pump loop, so the queue drains on its own windows. A mode that could be
@@ -600,7 +620,19 @@ fun MeshTerminalScreen(
                     // is true of every shell in the list, so it belongs beside the route, not above
                     // each list; what the hour has left is the radio's own measurement and the
                     // daemon reports it (`ldmux mesh status`).
-                    if (handle.pendingLabel.isNotEmpty()) Text("waiting to send: ${handle.pendingLabel}", color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    // **Held text is counted, waiting text is quoted.** In public-channel mode the
+                    // buffer can sit there for minutes, and a literal rendering of it would keep a
+                    // password on screen long after it was typed. The count says everything the
+                    // list needs to say. Outside the mode the buffer drains in a moment, so the
+                    // literal is still the useful one — it is what will leave next.
+                    if (handle.pendingLabel.isNotEmpty()) {
+                        val line = if (source.publicChannel) {
+                            "held: ${handle.heldSummary}"
+                        } else {
+                            "waiting to send: ${handle.pendingLabel}"
+                        }
+                        Text(line, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
                 }
                 if (listed != null) {
                     // A list with nothing in it is a sentence, not an empty rectangle above `open`.

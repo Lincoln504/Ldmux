@@ -111,6 +111,14 @@ internal fun RadioPresetDialog(
     address: String,
     openAirtime: Boolean,
     onBudget: (RadioBudgetMode) -> Unit,
+    /**
+     * The radio is on a public channel or not, as read from it and as written by an apply.
+     *
+     * Reported rather than stored here: whether the channel is shared is a fact about the radio
+     * that the app persists beside the pairing, and this dialog is the only place that can read
+     * it (ADR-0026 — it decides whether public-channel mode is forced).
+     */
+    onClassified: (Boolean) -> Unit,
     onUnset: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -173,6 +181,12 @@ internal fun RadioPresetDialog(
     // now means only "the radio's tuple has been read"; `userTouched` only "the proposal is the
     // user's, so the arrival must not overwrite it".
     var userTouched by remember { mutableStateOf(false) }
+    // The radio's own tuple is the truth about which channel it is on, so it is reported every
+    // time it arrives rather than only on the first read.
+    LaunchedEffect(current) {
+        val c = current ?: return@LaunchedEffect
+        onClassified(isPublicChannel(c))
+    }
     LaunchedEffect(current, device) {
         val c = current ?: return@LaunchedEffect
         if (seeded) return@LaunchedEffect
@@ -198,7 +212,13 @@ internal fun RadioPresetDialog(
         busy = true
         scope.launch {
             note = try {
-                if (l.applyPreset(p)) Notice("applied", ok = true) else Notice("not confirmed", ok = false)
+                if (l.applyPreset(p)) {
+                    // Written from what was asked for, not from a read-back: the radio may have
+                    // taken it and the next `SELF_INFO` will correct this if it did not, and the
+                    // mode that depends on it is the cautious one either way.
+                    onClassified(isPublicChannel(p))
+                    Notice("applied", ok = true)
+                } else Notice("not confirmed", ok = false)
             } catch (e: RadioLinkException) {
                 Notice(radioLinkProblemLine(e.state), ok = false)
             } catch (e: Exception) {

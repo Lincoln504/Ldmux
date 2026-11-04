@@ -75,6 +75,9 @@ class MeshTerminalSource(
     /** The newest screen the host sent while the view was frozen. */
     private var pendingScreen: MeshScreen? = null
 
+    /** A held echo is currently drawn on top of the host's screen, so the next paint must clear it. */
+    private var echoing: Boolean = false
+
     /** The mode is engaged: typing is held and the view is frozen until a sync. */
     val publicChannel: Boolean get() = hold.on
 
@@ -208,7 +211,16 @@ class MeshTerminalSource(
         val c = screen.cols
         val r = screen.lines.size
         if (c <= 0 || r <= 0) return
-        if (screen == last && engine != null) return
+        if (screen == last && engine != null) {
+            // A screen identical to the one drawn may still need drawing: if a held echo is on
+            // top of it, this is the moment the echo goes and the truth comes back. Without this
+            // a sync answered by an unchanged screen left the fake text on screen for good.
+            if (echoing) {
+                echoing = false
+                paint()
+            }
+            return
+        }
         // Keep the rows that left before the new screen replaces the old one. A reflow (a new
         // grid) or a jump backwards is not a scroll, and adds nothing.
         val previous = last
@@ -227,8 +239,52 @@ class MeshTerminalSource(
         if (history.offset == 0) paint()
     }
 
+    /**
+     * Write what is being held into the engine, so the user sees their typing at the cursor.
+     *
+     * This is a **fake**, and it is built so that it cannot drift: every call rebuilds the host's
+     * last screen first and then writes the held text on top, so the echo is always exactly "the
+     * shell as it was, plus what you have typed since". Painting each keystroke onto the previous
+     * echo would accumulate an image that disagrees with the screen it is a fake of, and no amount
+     * of care about backspace and wrapping keeps that true.
+     *
+     * Two deliberate limits:
+     *
+     *  - **Autowrap is off while the echo is written.** A long line that wrapped would scroll the
+     *    screen, and a row pushed into the local scrollback by a fake is history that never
+     *    happened. With DECAWM off the text stops at the last column instead.
+     *  - **Nothing is echoed while the view is parked in history** ([MeshHistory.offset]). The
+     *    user is reading rows above the live screen; typing into the middle of them would be a
+     *    fake of the wrong screen.
+     *
+     * An empty [text] removes the echo and draws the host's screen again.
+     */
+    fun echoHeld(text: String) {
+        val screen = last ?: return
+        val e = engine ?: return
+        if (history.offset != 0) return
+        writeBase(screen)
+        if (text.isNotEmpty()) {
+            val payload = "\u001b[?7l" + text + "\u001b[?7h"
+            val bytes = payload.encodeToByteArray()
+            e.write(bytes, bytes.size)
+            echoing = true
+        } else {
+            echoing = false
+        }
+        _frame.value = e.render()
+    }
+
+    /** Write the host's [screen] into the engine, replacing whatever is there. */
+    private fun writeBase(screen: MeshScreen) {
+        val e = engine ?: return
+        val bytes = meshScreenBytes(screen, cols, rows)
+        e.write(bytes, bytes.size)
+    }
+
     /** Draw the live screen, or the history window at [offset] rows above it. */
     private fun paint() {
+        echoing = false
         val screen = last ?: return
         val e = engine ?: return
         if (history.offset == 0) {

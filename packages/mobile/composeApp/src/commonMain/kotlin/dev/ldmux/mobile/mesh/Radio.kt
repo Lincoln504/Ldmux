@@ -136,6 +136,27 @@ fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) 
     )
 }
 
+/**
+ * Whether [preset] is a **public channel**: a tuple that other operators' radios also use.
+ *
+ * Compared on the four fields that make a channel — frequency, bandwidth, spreading factor and
+ * coding rate — and deliberately not on transmit power or path-hash width, which do not change
+ * who shares the frequency. A private tuple is anything else, including a public frequency on a
+ * different bandwidth: 910.525 at 500 kHz is not the public USA channel at 62.5 kHz, and the two
+ * do not hear each other.
+ *
+ * The path-hash width is excluded because it is a per-node stamping choice, not a channel.
+ */
+fun isPublicChannel(preset: RadioPreset): Boolean = RadioRegion.entries.any { r ->
+    publicPresets(r).any {
+        val p = it.preset
+        p.frequencyMhz == preset.frequencyMhz &&
+            p.bandwidthKhz == preset.bandwidthKhz &&
+            p.spreadingFactor == preset.spreadingFactor &&
+            p.codingRate == preset.codingRate
+    }
+}
+
 /** The region a tuple most likely belongs to, used to open the preset dialog on the applied tuple. */
 fun regionOfPreset(preset: RadioPreset): RadioRegion {
     for (r in RadioRegion.entries) {

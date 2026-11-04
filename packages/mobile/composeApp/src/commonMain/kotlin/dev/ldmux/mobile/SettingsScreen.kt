@@ -112,6 +112,12 @@ internal fun SettingsScreen(
                                     readCredentials = mesh.credentials,
                                     onMeshPairing = mesh.onPairing,
                                     onConfig = mesh.onConfig,
+                                    // The same `onSave` the other rows use: the config this screen
+                                    // is drawing is recomposed with the new value, so the next row
+                                    // that saves starts from it.
+                                    onRadioChannel = { public ->
+                                        onSave(current.copy(meshPublicChannel = public))
+                                    },
                                     onUnpairMesh = mesh.onUnpair,
                                 )
                             }

@@ -46,6 +46,8 @@ internal fun MeshRouteSection(
     onMeshPairing: (String) -> MeshPairingScan,
     /** Persist a changed config now (route, radio) without closing Settings. */
     onConfig: (LdmuxConfig) -> Unit,
+    /** The radio's channel is shared (a public tuple) or not. Persisted beside the pairing. */
+    onRadioChannel: (Boolean) -> Unit,
     onUnpairMesh: () -> Unit,
 ) {
     var credentials by remember { mutableStateOf(readCredentials()) }
@@ -106,6 +108,24 @@ internal fun MeshRouteSection(
             }
         }
 
+        // **Which kind of channel the radio is on**, beside the radio itself.
+        //
+        // It is not a setting: it is derived from the tuple the radio reports, and it decides one
+        // thing — whether public-channel mode is forced (ADR-0026). Saying it here is what stops
+        // "typing does nothing until sync" from being a mystery: on a shared channel every
+        // keystroke is a broadcast, so held input is the only supported way to type there.
+        if (current.meshRadio.isNotEmpty()) {
+            Text(
+                if (current.meshPublicChannel) {
+                    "public channel \u00b7 typing is held until you press sync"
+                } else {
+                    "private channel \u00b7 held input is optional"
+                },
+                color = Muted,
+                fontSize = 11.sp,
+            )
+        }
+
         // One verb, one target: the ldmux code carries the session keys and the host radio key.
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("code", color = Dim, fontSize = 12.sp)
@@ -162,6 +182,7 @@ internal fun MeshRouteSection(
             address = current.meshRadio,
             openAirtime = current.meshOpenAirtime,
             onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
+            onClassified = onRadioChannel,
             onUnset = {
                 onConfig(current.copy(meshRadio = "", meshRadioName = ""))
                 showPreset = false
