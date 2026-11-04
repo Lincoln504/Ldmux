@@ -263,9 +263,24 @@ class MeshTerminalSource(
         val screen = last ?: return
         val e = engine ?: return
         if (history.offset != 0) return
+        // **Not on a full-screen program.** The same rule VS Code's local echo follows for `vim`,
+        // `less` and `tmux`: a program that repaints the screen itself decides where text lands,
+        // so a fake written at the cursor is a fake written into somebody else's drawing. The
+        // held text is still counted in the bar.
+        if (screen.alternate) {
+            if (echoing) {
+                echoing = false
+                paint()
+            }
+            return
+        }
         writeBase(screen)
         if (text.isNotEmpty()) {
-            val payload = "\u001b[?7l" + text + "\u001b[?7h"
+            // Autowrap off around the whole echo, and faint (`ESC[2m`) around the text: provisional
+            // text looks provisional. That is the one thing a fake must never be — mistakable for
+            // the shell's own output, which is what the same characters will look like when the
+            // send comes back.
+            val payload = "\u001b[?7l\u001b[2m" + text + "\u001b[22m\u001b[?7h"
             val bytes = payload.encodeToByteArray()
             e.write(bytes, bytes.size)
             echoing = true

@@ -267,6 +267,15 @@ the life of the dialog: `restore` disabled forever, the "current …" comparison
 `apply` enabled with no idea what it was replacing. Split into `seeded` (the radio answered) and
 `userTouched` (the user chose first, and their choice wins).
 
+### 2b.8 Faint text was carried by the frame and never drawn
+
+`ESC[2m` arrives as frame flag bit 3 with the foreground colour untouched, so the client owns half
+of the attribute. `Cell.drawnFg` ignored it, which meant every program that de-emphasises text
+(`ls` extracts, `fzf` rows, a diff's context) was painted at full strength. It blends halfway to the
+cell's own background now, which is also correct on a reverse-video cell because the drawn channels
+are already swapped. This surfaced while making the public-channel echo faint (ADR-0026); it was a
+rendering defect on its own.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
@@ -284,7 +293,7 @@ JAVA_HOME=<jdk-21> ./gradlew --offline :composeApp:assembleDebug        # the AP
 `nix develop .#mobile`. Everything above was run; the unit suite passes and the APK assembles. **No
 device was involved**: nothing here is a claim about how the screens look or feel on a phone.
 
-The second pass ran the same three commands and the Kotlin suite (598 tests as of this writing, all
+The second pass ran the same three commands and the Kotlin suite (599 tests as of this writing, all
 passing), plus the native engine's own suite in `packages/mobile/scripts/test-native.sh` — 290 checks
 and 16 JNI checks — because the scroll investigation needed the engine's real behaviour rather than a
 reading of it (`LDMUX_VT_LIB_DIR` and `LDMUX_VT_INCLUDE_DIR` pointed at `native/prebuilt/host`, which

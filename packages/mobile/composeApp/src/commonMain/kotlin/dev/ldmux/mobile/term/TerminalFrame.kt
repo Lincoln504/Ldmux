@@ -177,10 +177,18 @@ object TerminalFrame {
          * own text hidden inside it.
          */
         val drawnFg: Int
-            get() = when {
-                invisible -> drawnBg
-                inverse -> bg
-                else -> fg
+            get() {
+                if (invisible) return drawnBg
+                val text = if (inverse) bg else fg
+                // Faint (`ESC[2m`) is a *rendering* attribute, and the engine hands it over as a
+                // flag with the colour untouched: the probe in `native/` shows a faint cell
+                // arriving with the same 255,255,255 foreground as a normal one. So half of the
+                // attribute is the client's to draw, and it was not drawn at all — every program
+                // that de-emphasises text (`ls` extracts, a `fzf` list, a diff's context) was
+                // shown at full strength. Half-intensity is a blend halfway to the cell's own
+                // background, which also does the right thing on an inverse cell, where the two
+                // channels are already swapped.
+                return if (faint) dimTowards(text, drawnBg) else text
             }
 
         /**
@@ -189,6 +197,24 @@ object TerminalFrame {
          * hides — see [drawnFg].
          */
         val invisible get() = flags and FLAG_INVISIBLE != 0
+
+        /** Half-intensity text (`ESC[2m`). Drawn, not ignored — see [drawnFg]. */
+        val faint get() = flags and FLAG_FAINT != 0
+
+        /**
+         * [text] blended halfway towards [back], per channel, in `0xRRGGBB`.
+         *
+         * The mean rather than `text + (back - text) / 2`: the two differ by one on odd sums, and
+         * the mean gives the same grey whichever way round the channels are (a dimmed
+         * white-on-black and a dimmed black-on-white are the same colour, which is the property
+         * this is for).
+         */
+        private fun dimTowards(text: Int, back: Int): Int {
+            val r = (((text shr 16) and 0xFF) + ((back shr 16) and 0xFF)) / 2
+            val g = (((text shr 8) and 0xFF) + ((back shr 8) and 0xFF)) / 2
+            val b = ((text and 0xFF) + (back and 0xFF)) / 2
+            return (r shl 16) or (g shl 8) or b
+        }
     }
 
     class Frame(

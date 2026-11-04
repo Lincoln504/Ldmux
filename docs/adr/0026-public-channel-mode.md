@@ -90,6 +90,30 @@ shell in it, and `Up` in a shell may recall history rather than move a cursor. T
 the bar instead ("3 characters and 1 key"), which says what will be sent without pretending to know
 what it will do.
 
+**Prior art, checked rather than assumed** (2026-11-04):
+
+- **VS Code's terminal "Local echo (Preview)"** for remote windows writes unconfirmed keystrokes
+  *dimmed*, turns itself on above ~30 ms of latency, and **disables itself per program** for
+  `vim`, `vi`, `nano` and `tmux` because predicting over a program that repaints the screen is
+  unsafe. Both halves were taken: the echo is drawn faint (`ESC[2m`, rendered by the client), and
+  it is not written at all on the alternate screen.
+- **mosh** shows predicted characters *underlined* until the server confirms them, and the iOS
+  mosh terminal's prediction design adds the rule that makes prediction safe: every prediction
+  expires (at most one frame), nothing speculative lives indefinitely, and **nothing is predicted
+  when the program has turned remote echo off** — its `confirmed_epoch` cannot advance at a
+  password prompt, so a tentative character is not drawn there. Our echo expires differently but
+  for the same reason: it is rebuilt from the confirmed screen on every change and any paint of
+  the host's screen removes it, so no fake can outlive the next truth.
+- **The half-duplex radio argument is the mode's premise**, and the numbers support it:
+  LoRaWAN's `RECEIVE_DELAY1` is 1 s and no uplink may be broadcast during a receive window, and
+  measured device-to-device LoRa round trips start at ~34 ms (SF7/500 kHz) at the physical layer
+  alone. Input genuinely cannot be dribbled out per keystroke on this medium; batching is what the
+  medium does.
+- **What was not taken** is the prediction machinery itself: a held buffer is not a speculative
+  character in flight. Nothing has been sent, so there is no server state to contradict, no rollback
+  to compute and no acknowledgement to track. The simpler invariant — "the confirmed screen plus
+  what has not been sent" — is the whole state.
+
 **A limitation, stated rather than hidden:** the mesh profile's `Commit` carries no password flag
 (the tailnet route's frame does), so the phone cannot know it is at a password prompt. Text typed
 into one is echoed locally and shown, exactly as a terminal with echo on would show it. Closing
@@ -155,6 +179,16 @@ because a control should name what it does.
 - **The mode is one buffer for one connection, not one per shell.** The connection carries one
   attached shell at a time (`Attach` per page), so a per-shell buffer would be a buffer for a shell
   the link is not on.
+
+### One defect found while making the echo dim
+
+Faint (`ESC[2m`) was **carried by the frame and never drawn**. The engine hands it over as flag bit
+3 with the colour untouched — measured: a faint cell arrives with the same `255,255,255` foreground
+as a normal one — so the client owns half of the attribute, and `drawnFg` ignored it. Every program
+that de-emphasises text (`ls` extracts, a `fzf` list, a diff's context) was shown at full strength.
+`drawnFg` now blends halfway to the cell's own background, which is also right on a reverse-video
+cell because the drawn channels are already swapped. Test: `faint text is drawn halfway to its own
+background`. That this was needed for the echo is incidental; it was a rendering defect before it.
 
 ## Tests
 

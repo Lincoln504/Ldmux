@@ -148,6 +148,33 @@ class TerminalFrameTest {
     }
 
     @Test
+    fun `faint text is drawn halfway to its own background, and never at full strength`() {
+        // The engine hands faint over as a flag with the colour untouched (measured: a faint cell
+        // arrives with the same 255,255,255 foreground as a normal one), so half of the attribute
+        // is the client's to draw. It was not drawn at all, which meant every program that
+        // de-emphasises text was shown at full strength.
+        val plain = TerminalFrame.Cell("x", fg = 0xFFFFFF, bg = 0x000000, flags = 0)
+        assertEquals(0xFFFFFF, plain.drawnFg)
+
+        val faint = TerminalFrame.Cell("x", 0xFFFFFF, 0x000000, TerminalFrame.FLAG_FAINT)
+        assertEquals(0x7F7F7F, faint.drawnFg)
+        assertTrue(faint.faint)
+
+        // On a reverse-video cell the channels are swapped, and the blend follows the drawn ones:
+        // white-on-black reversed is black text on white, and half-way there is the same grey.
+        val faintReversed = TerminalFrame.Cell(
+            "x", 0xFFFFFF, 0x000000, TerminalFrame.FLAG_FAINT or TerminalFrame.FLAG_INVERSE,
+        )
+        assertEquals(0x7F7F7F, faintReversed.drawnFg)
+
+        // Concealment still wins: a faint hidden glyph is hidden, not grey.
+        val hidden = TerminalFrame.Cell(
+            "x", 0xFFFFFF, 0x102030, TerminalFrame.FLAG_FAINT or TerminalFrame.FLAG_INVISIBLE,
+        )
+        assertEquals(hidden.drawnBg, hidden.drawnFg)
+    }
+
+    @Test
     fun `a block cursor can always be told apart from the glyph it covers`() {
         // The cursor fills the cell with `drawnFg` and repaints the glyph in
         // `drawnBg`, so those two being equal is a cursor with the character inside
