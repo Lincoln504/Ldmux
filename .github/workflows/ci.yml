@@ -28,7 +28,11 @@ jobs:
         run: nix develop --command cargo clippy --workspace --all-targets --locked -- -D warnings
       # The desktop tests start their own Xvfb when it is on PATH (the flake
       # devShell provides xorgserver); no xvfb-run wrapper is needed.
+      #
+      # One process per test binary, in a pool: the same binaries `cargo test
+      # --workspace` runs, which runs them one at a time and takes four times as
+      # long. The script exits non-zero on any failure and prints its output.
       - name: test
-        run: nix develop --command cargo test --workspace --locked
+        run: nix develop --command python3 scripts/test-parallel.py --locked
       - name: cargo deny
         run: nix develop --command cargo deny check

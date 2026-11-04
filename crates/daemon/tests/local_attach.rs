@@ -23,7 +23,12 @@ async fn a_window_attaches_over_the_local_socket_with_no_remote_configured() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let _reaper = common::Reaper::new(&dir, &dir.join("keeper.sock"));
-    let d = LdmuxDaemon::new(dir.clone(), common::rig::keeper_bin());
+    // The claim grace is shortened: this test waits past it on purpose, and three
+    // seconds is not a test's business. The sweep's cadence comes with it, or the
+    // grace is invisible for up to a tick.
+    let d = LdmuxDaemon::new(dir.clone(), common::rig::keeper_bin())
+        .with_claim_grace_ms(150)
+        .with_claim_tick_ms(50);
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     arc.lock().await.start(&arc).await.unwrap();
 
@@ -61,7 +66,9 @@ async fn a_window_attaches_over_the_local_socket_with_no_remote_configured() {
     // The claim the window holds is backed by this connection, so the sweep that
     // frees unbacked claims leaves it alone (the table is shared with the tailnet
     // listener's).
-    tokio::time::sleep(Duration::from_millis(4500)).await;
+    // Four times the grace and eight times the tick: long enough that a sweep has
+    // run several times, short enough to be a test.
+    tokio::time::sleep(Duration::from_millis(600)).await;
     let list = arc.lock().await.describe_sessions().await;
     let mine = list.iter().find(|s| s.id == sid).unwrap();
     assert_eq!(

@@ -39,14 +39,24 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
   every shell lives in its own scope under `ldmux-shells.slice`; both survive a daemon
   restart. Without systemd the daemon auto-spawns the keeper detached (the ssh-agent
   pattern).
-- `cargo test --workspace` is the gate. The exact commands are in the README's
-  Development section; open items are in `docs/STATE.md`.
+- `scripts/test-parallel.py` is the gate (it runs the same binaries `cargo test
+  --workspace` does, one process per binary, in a pool). The exact commands are in
+  the README's Development section; open items are in `docs/STATE.md`.
 
 ## Rules
 
-- **Tests are the gate.** `cargo test --workspace`, inside `nix develop` (the QR
-  decode tests need `zbarimg`, which only the devShell has). `nix flake check`
-  runs the same gate in the nix sandbox.
+- **Tests are the gate.** `scripts/test-parallel.py`, inside `nix develop` (the QR
+  decode tests need `zbarimg`, which only the devShell has). It builds with
+  `cargo test --no-run`, reads the executables out of the JSON, and runs them in a
+  pool: 52 binaries in about 32 s against 118 s for `cargo test --workspace`,
+  which runs them one at a time. `cargo test --workspace` remains the authority on
+  what the gate is; the script only changes how the same binaries are scheduled.
+  `nix flake check` runs `cargo test --workspace` in the nix sandbox.
+- **A test that waits out a fixed timeout is a bug in the test.** Make the deadline
+  and the tick configurable through the daemon builder (the `LDMUX_*_GRACE_MS` env
+  vars and `with_*` hooks exist for this), then assert the deadline with a short
+  budget. A real wait — three seconds proving a keeper came back — stays, and says
+  in a comment why it is that long.
 - **Lint is clean.** `cargo clippy --workspace --all-targets -- -D warnings`,
   zero warnings: a lint that is tolerated is a lint nobody reads.
 - **Tailnet only.** Never bind a public interface; never disable auth.

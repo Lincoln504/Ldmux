@@ -284,11 +284,17 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
     wait_socket(&keeper_sock).await;
 
     let token = "holder-let-go-token";
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
-        "127.0.0.1".to_string(),
-        0,
-        token.to_string(),
-    );
+    // **The graces are shortened, because they are what this test waits for.**
+    // A phone's claim outlives its connection for the reconnect grace (15 s in
+    // production, sized against the phone's own 2.5 s probe plus 400 ms retry and
+    // its backoff), and the desk window only takes a *free* shell. So the whole
+    // test used to be one 15 s wait with a 15 s `wait_for` around it. The rule
+    // under test is "the claim is given back after the grace and the window comes
+    // back by itself", which is the same rule at 300 ms.
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string())
+        .with_reconnect_grace_ms(300)
+        .with_claim_tick_ms(50);
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -353,14 +359,11 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
     // proof it is live again.
     drop(phone);
     let mut reattached = false;
-    for attempt in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if attempt < 6 {
-            continue; // before the release grace has expired
-        }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
         desk_typing.write_all(b"echo LANDED_9\n").await.unwrap();
         desk_typing.flush().await.unwrap();
-        if wait_for_ms(&mut desk_view, "LANDED_9", 700).await {
+        if wait_for_ms(&mut desk_view, "LANDED_9", 200).await {
             reattached = true;
             break;
         }
@@ -523,12 +526,20 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
     // the sweep run sooner also reaps the *desk window's* connection, and the
     // client reconnects and re-attaches — which recovers the shell by itself and
     // hides the thing under test. It pings every 4 s, so a 20 s deadline leaves it
-    // alone; the sweep still runs every 5 s, and the grace is 3 s.
-    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
-        "127.0.0.1".to_string(),
-        0,
-        token.to_string(),
-    );
+    // alone.
+    //
+    // **The claim grace is shortened.** This test used to take 16 s, and almost
+    // all of it was one grace: the desk window's unbacked claim was treated as a
+    // dropped link (15 s) because the same device had attached to the shell
+    // earlier, so `ever_backed` still held its key. `LdmuxDaemon::claim` now drops
+    // that key when a claim changes hands, so this claim gets the short grace — and
+    // the short grace here is 200 ms, because the rule under test is "an unbacked
+    // claim is given back and the window returns by itself", not "…after three
+    // seconds".
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), 0, token.to_string())
+        .with_claim_grace_ms(200)
+        .with_claim_tick_ms(50);
     let daemon_sock = d.socket_path().to_string_lossy().into_owned();
     let arc = Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -608,7 +619,8 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
     // (Typing into the window would not prove anything here: input from a
     // displaced window is dropped, which is the point of the notice.)
     let mut recovered = false;
-    for _ in 0..15 {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
         arc.lock()
             .await
             .handle(
@@ -617,7 +629,7 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
             )
             .await
             .unwrap();
-        if wait_for_ms(&mut desk_view, "UNBACKED_MARK_4", 1_000).await {
+        if wait_for_ms(&mut desk_view, "UNBACKED_MARK_4", 200).await {
             recovered = true;
             break;
         }

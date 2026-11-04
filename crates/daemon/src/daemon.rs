@@ -99,6 +99,11 @@ pub const CLAIM_GRACE_MS: u64 = 3_000;
 /// window, and the phone reported a takeover nobody had made.
 pub const RECONNECT_GRACE_MS: u64 = 15_000;
 
+/// How often the sweep walks the connection table looking for claims with no
+/// connection behind them. One second against a three-second grace: fine enough
+/// that a freed shell comes back within a beat, coarse enough to cost nothing.
+pub const CLAIM_TICK_MS: u64 = 1_000;
+
 /// How much history `capture --history` asks for: the TypeScript's own cap
 /// (`HISTORY_CAPTURE_LINES`, `origin/main:packages/daemon/src/tmux/control-plane.ts:200`),
 /// which is what a client paging a pane's scrollback expects to be able to reach.
@@ -119,6 +124,28 @@ const LIVE_WINDOW_GRACE_MS: u64 = 5000;
 /// before 1970 is the only way `duration_since` fails, and taking the daemon
 /// down over it would drop every session's stream with it. `remote.rs` had a
 /// second copy of this body and `daemon.rs` had ten copies of a panicking one.
+/// A millisecond duration from the environment, clamped to at least 1 ms.
+///
+/// The claim and restore graces are sized against a client's reconnect policy,
+/// and that policy is not the same over every path: a phone on a BLE link and a
+/// laptop on a tunneled or congested route do not come back at the same speed.
+/// The defaults below are the tuned values; the variables are how a deployment
+/// (or a test) moves them without a rebuild. A value that does not parse is
+/// reported and ignored, so a typo leaves the tuned default in place instead of
+/// silently shortening a grace to 1 ms.
+pub(crate) fn ms_from_env(name: &str, default: u64) -> u64 {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(ms) => ms.max(1),
+        Err(_) => {
+            eprintln!("ldmuxd: {name}={raw:?} is not a number of milliseconds; using {default}");
+            default
+        }
+    }
+}
+
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -339,6 +366,17 @@ pub struct LdmuxDaemon {
     /// when the phone re-attaches — and a waiting desk window took it, which the
     /// phone reported as "the desktop took it over".
     ever_backed: std::collections::HashSet<(String, String)>,
+    /// The two claim graces and the restore grace, as fields rather than only
+    /// constants, so a test can exercise the rules in milliseconds instead of
+    /// seconds. The defaults are the constants; see [`CLAIM_GRACE_MS`].
+    claim_grace_ms: u64,
+    reconnect_grace_ms: u64,
+    restore_grace_ms: u64,
+    /// How often the sweep walks the connection table looking for unbacked
+    /// claims. One second against a three-second grace; a test that shortens
+    /// the grace has to shorten this too, or the grace is invisible for up to a
+    /// tick.
+    claim_tick_ms: u64,
     /// The single-instance lock (the `ldmuxd.lock` pid lockfile); `Drop`
     /// releases it.
     lock: DaemonLock,
@@ -458,6 +496,10 @@ impl LdmuxDaemon {
             unknown_sessions_key: String::new(),
             maintenance_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_window_grace_ms: LIVE_WINDOW_GRACE_MS,
+            claim_grace_ms: ms_from_env("LDMUX_CLAIM_GRACE_MS", CLAIM_GRACE_MS),
+            reconnect_grace_ms: ms_from_env("LDMUX_RECONNECT_GRACE_MS", RECONNECT_GRACE_MS),
+            restore_grace_ms: ms_from_env("LDMUX_RESTORE_GRACE_MS", RESTORE_GRACE_MS),
+            claim_tick_ms: ms_from_env("LDMUX_CLAIM_TICK_MS", CLAIM_TICK_MS),
             dead_seen: HashMap::new(),
             dead_keep_ms: DEAD_KEEP_MS,
             mono_base: std::time::Instant::now(),
@@ -475,6 +517,36 @@ impl LdmuxDaemon {
     /// real, and five seconds per assert is not.
     pub fn with_live_window_grace_ms(mut self, ms: u64) -> Self {
         self.live_window_grace_ms = ms;
+        self
+    }
+
+    /// Shorten the grace a claim with no connection behind it stands for. A
+    /// test hook: the rule it guards is real, and three seconds per assert is
+    /// not. See [`CLAIM_GRACE_MS`].
+    pub fn with_claim_grace_ms(mut self, ms: u64) -> Self {
+        self.claim_grace_ms = ms.max(1);
+        self
+    }
+
+    /// Shorten the grace a claim whose connection went away waits for its device.
+    /// A test hook: fifteen seconds per assert is not a test.
+    /// See [`RECONNECT_GRACE_MS`].
+    pub fn with_reconnect_grace_ms(mut self, ms: u64) -> Self {
+        self.reconnect_grace_ms = ms.max(1);
+        self
+    }
+
+    /// Shorten how long a restored claim waits for its device. A test hook; the
+    /// production value is a minute.
+    pub fn with_restore_grace_ms(mut self, ms: u64) -> Self {
+        self.restore_grace_ms = ms.max(1);
+        self
+    }
+
+    /// Shorten the sweep's cadence. A test hook: a grace shorter than the tick is
+    /// only visible after a tick, so a test that shortens one has to shorten this.
+    pub fn with_claim_tick_ms(mut self, ms: u64) -> Self {
+        self.claim_tick_ms = ms.max(1);
         self
     }
 
@@ -1155,7 +1227,15 @@ impl LdmuxDaemon {
             Some(c) => (c.token.clone(), c.idle_ms, c.send_timeout_ms),
             None => (String::new(), 20_000, 10_000),
         };
-        let shared = crate::remote::Shared::new(arc.clone(), token, idle_ms, send_timeout_ms);
+        let (release_grace_ms, claim_tick_ms) = (self.reconnect_grace_ms, self.claim_tick_ms);
+        let shared = crate::remote::Shared::new(
+            arc.clone(),
+            token,
+            idle_ms,
+            send_timeout_ms,
+            release_grace_ms,
+            claim_tick_ms,
+        );
         self.conn_shared = Some(shared.clone());
         // The local attach socket (E): the desk attach client's way in, with no
         // tailnet involved. A bind failure is logged, not fatal; the client then
@@ -2517,7 +2597,7 @@ impl LdmuxDaemon {
         let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) else {
             return;
         };
-        let deadline = self.mono_ms() + RESTORE_GRACE_MS;
+        let deadline = self.mono_ms() + self.restore_grace_ms;
         for r in rows {
             let (Some(sid), Some(dev)) = (r["sessionId"].as_str(), r.get("device")) else {
                 continue;
@@ -2558,9 +2638,25 @@ impl LdmuxDaemon {
         takeover: bool,
     ) -> crate::ownership::ClaimResult {
         let now = now_ms() as i64;
+        let before = self
+            .ownership
+            .owner(session_id)
+            .map(|c| c.device.id.clone());
         let r = self
             .ownership
             .claim(session_id, device.clone(), takeover, Some(now));
+        // **A new claim is a new claim, even for a device that held this shell
+        // before.** `ever_backed` answers "has this claim had a connection
+        // behind it", and a takeover or a re-claim starts a claim that has not.
+        // Left in place, a key from an earlier attachment made every later claim
+        // by the same device look like a dropped link and gave it the reconnect
+        // grace: the desk window's own unbacked claim waited fifteen seconds
+        // instead of three, which is the symptom `CLAIM_GRACE_MS` exists to fix.
+        if let Some(previous) = before
+            && previous != device.id
+        {
+            self.ever_backed.remove(&(session_id.to_string(), previous));
+        }
         // Who holds a shell is on the wire (`owner`), so a claim is a change.
         self.sessions_dirty = true;
         self.restored.remove(session_id);
@@ -2656,9 +2752,9 @@ impl LdmuxDaemon {
             // grace. Same question as before, but the answer depends on which
             // of the two this claim is.
             let grace = if self.ever_backed.contains(&(sid.clone(), device.clone())) {
-                RECONNECT_GRACE_MS
+                self.reconnect_grace_ms
             } else {
-                CLAIM_GRACE_MS
+                self.claim_grace_ms
             };
             if now.saturating_sub(since) >= grace {
                 self.unbacked_since.remove(&sid);
@@ -2673,6 +2769,11 @@ impl LdmuxDaemon {
     pub fn release_claim(&mut self, session_id: &str, device_id: &str) -> bool {
         let r = self.ownership.release(session_id, device_id);
         if r {
+            // The claim is over: so is the fact that it once had a connection
+            // behind it. Keeping the key would give the *next* claim by this
+            // device the reconnect grace when it may be a window's unbacked one.
+            self.ever_backed
+                .remove(&(session_id.to_string(), device_id.to_string()));
             self.sessions_dirty = true;
             self.restored.remove(session_id);
             self.save_claims();

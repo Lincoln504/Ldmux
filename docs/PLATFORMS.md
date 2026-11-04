@@ -56,7 +56,8 @@ loopback). Verified on the one tailnet it runs on.
 **Toolchain.** `nix develop` provides rustc/cargo (+ Node for the dev-only mobile
 tests and scripts, + zbar for the QR tests) and exports `LDMUX_VT_LIB_DIR` (and
 `LDMUX_VT_INCLUDE_DIR`) pointing at the nix-built libghostty-vt, so plain `cargo` works
-inside it. The gate is `cargo test --workspace` plus `cargo clippy --workspace
+inside it. The gate is `scripts/test-parallel.py` (or `cargo test --workspace`, the
+same binaries run one at a time) plus `cargo clippy --workspace
 --all-targets -- -D warnings`. There is no `just`; installs use `nix run .#install` /
 `scripts/install.sh`, keeper replacement `nix run .#restart-keeper` /
 `scripts/restart-keeper.sh`, Android builds `scripts/android.sh`. The release profile

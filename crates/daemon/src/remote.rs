@@ -221,7 +221,10 @@ const WS_IDLE_MS: u64 = 20_000;
 /// phone then reported "open on desktop" for a shell nobody had taken.
 const RELEASE_GRACE_MS: u64 = crate::daemon::RECONNECT_GRACE_MS;
 /// How often claims are checked for a connection behind them.
-const CLAIM_TICK_MS: u64 = 1_000;
+///
+/// Both of these reach [`Shared`] as fields from the daemon, so a test (and a
+/// deployment on a slow path) can shorten them without a rebuild; these are the
+/// defaults. See [`crate::daemon::CLAIM_TICK_MS`].
 /// How long one write to the socket may take before the peer is declared gone.
 ///
 /// A write that never completes (a phone on a dead link: the radio is off, the
@@ -464,6 +467,11 @@ pub(crate) struct Shared {
     token: String,
     idle_ms: u64,
     send_timeout_ms: u64,
+    /// How long a closed socket's claims wait for the same device to come back
+    /// ([`RELEASE_GRACE_MS`]).
+    release_grace_ms: u64,
+    /// How often the claim sweep runs ([`CLAIM_TICK_MS`]).
+    claim_tick_ms: u64,
     stopped: AtomicBool,
     /// One permit per connection being served (see [`MAX_CONNECTIONS`]).
     slots: Arc<tokio::sync::Semaphore>,
@@ -484,6 +492,8 @@ impl Shared {
         token: String,
         idle_ms: u64,
         send_timeout_ms: u64,
+        release_grace_ms: u64,
+        claim_tick_ms: u64,
     ) -> Arc<Shared> {
         let shared = Arc::new(Shared {
             conns: Mutex::new(HashMap::new()),
@@ -491,6 +501,8 @@ impl Shared {
             token,
             idle_ms,
             send_timeout_ms,
+            release_grace_ms,
+            claim_tick_ms,
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             next_conn: std::sync::atomic::AtomicU64::new(1),
@@ -507,7 +519,8 @@ impl Shared {
             let sweep_step = (sweep_shared.idle_ms / 4).max(25);
             let mut since_sweep = 0u64;
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(CLAIM_TICK_MS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(sweep_shared.claim_tick_ms))
+                    .await;
                 if sweep_shared.stopped.load(Ordering::Relaxed) {
                     break;
                 }
@@ -519,7 +532,7 @@ impl Shared {
                     async move { reconcile_claims(&pass).await },
                 )
                 .await;
-                since_sweep = since_sweep.saturating_add(CLAIM_TICK_MS);
+                since_sweep = since_sweep.saturating_add(sweep_shared.claim_tick_ms);
                 if since_sweep >= sweep_step {
                     since_sweep = 0;
                     let pass = sweep_shared.clone();
@@ -603,6 +616,8 @@ impl RemoteServer {
                 self.cfg.token.clone(),
                 self.cfg.idle_ms,
                 self.cfg.send_timeout_ms,
+                RELEASE_GRACE_MS,
+                crate::daemon::CLAIM_TICK_MS,
             ),
         };
         let accept_shared = shared.clone();
@@ -2415,7 +2430,7 @@ async fn disconnect(conn: Arc<ConnShared>, shared: Arc<Shared>) {
 async fn release_after_grace(shared: &Arc<Shared>, device_id: String, session_id: Option<String>) {
     let shared = shared.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(RELEASE_GRACE_MS)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(shared.release_grace_ms)).await;
         let (device_has_conns, still_viewing) = {
             let map = relock(&shared.conns);
             let has = map.values().any(|c| {
@@ -2760,6 +2775,8 @@ mod tests {
             token: "t".into(),
             idle_ms: 20_000,
             send_timeout_ms: WS_SEND_TIMEOUT_MS,
+            release_grace_ms: RELEASE_GRACE_MS,
+            claim_tick_ms: crate::daemon::CLAIM_TICK_MS,
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             next_conn: std::sync::atomic::AtomicU64::new(1),
@@ -2907,6 +2924,8 @@ mod tests {
             token: "t".into(),
             idle_ms: 20_000,
             send_timeout_ms,
+            release_grace_ms: RELEASE_GRACE_MS,
+            claim_tick_ms: crate::daemon::CLAIM_TICK_MS,
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             next_conn: std::sync::atomic::AtomicU64::new(1),

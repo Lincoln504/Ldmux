@@ -29,7 +29,7 @@ either. It is deliberately simple:
 > (`ldmuxd`) is the live daemon under the systemd user unit; the keeper owns the
 > PTYs and runs libghostty-vt; the native mobile client is done and
 > device-verified for Android, with iOS not started. The one gate is the Rust
-> workspace (`cargo test --workspace`, inside `nix develop`). The
+> workspace (`scripts/test-parallel.py`, inside `nix develop`). The
 > authoritative design is [`docs/SPEC.md`](docs/SPEC.md); historical records (the
 > port, the tmux study, the old state register) are in
 > [`docs/archive/`](docs/archive/).
@@ -77,7 +77,8 @@ needs the Android/KMP toolchain (`nix develop .#mobile`). Supported platforms:
 ```bash
 nix develop                  # rustc/cargo, zbarimg (+ node, dev-only); builds the engine once
 cargo build --workspace      # build every Rust crate (LDMUX_VT_LIB_DIR is set by the shell)
-cargo test --workspace       # the gate (keeper, daemon, protocol, vt-sys, attach)
+scripts/test-parallel.py     # the gate: same binaries as `cargo test --workspace`, ~32 s instead of ~118 s
+cargo test --workspace       # the same gate, one binary at a time (the authority; use it when a script is suspected)
 cargo clippy --workspace --all-targets -- -D warnings   # lint; must be clean
 cargo run -p ldmux-daemon --bin ldmuxd                  # the daemon, in the foreground
 cargo run -q -p ldmux-daemon --bin ldmux -- list        # the CLI: list | run shell | remote | code | pair

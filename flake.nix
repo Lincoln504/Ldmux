@@ -153,7 +153,8 @@
       devShells = forAllSystems ({ pkgs, nodePkgs, ... }:
         let
           engine = engineFor pkgs;
-          common = toolchainTools pkgs ++ testTools pkgs ++ [ nodePkgs.nodejs_26 pkgs.jq pkgs.curl pkgs.sqlite pkgs.cargo-deny pkgs.cargo-audit ];
+          # `python3` runs `scripts/test-parallel.py`, the gate.
+          common = toolchainTools pkgs ++ testTools pkgs ++ [ nodePkgs.nodejs_26 pkgs.jq pkgs.curl pkgs.sqlite pkgs.cargo-deny pkgs.cargo-audit pkgs.python3 ];
         in
         {
           # `nix develop` + plain `cargo build/test/clippy`. The engine is a nix build

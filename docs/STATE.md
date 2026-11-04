@@ -144,7 +144,8 @@ cloud recognition and barge-in (both off), and a portrait entry point.
 
 ```
 nix develop
-cargo test --workspace                                  # the gate
+scripts/test-parallel.py                                # the gate: 52 binaries in a pool, ~32 s
+cargo test --workspace                                  # the same gate, one binary at a time
 cargo clippy --workspace --all-targets -- -D warnings   # must be clean
 nix run .#mobile-test                                   # node --test packages/mobile/test/*.test.ts (dev-only; needs Node)
 nix flake check                                         # all of the above, in the nix sandbox

@@ -100,21 +100,31 @@ impl ControlSocketServer {
     pub async fn serve_one_with(stream: UnixStream, handler: &RpcHandler) -> Result<(), String> {
         let mut stream = stream;
         let mut buf: Vec<u8> = Vec::new();
-        let mut byte = [0u8; 1];
         // Bounded in size and time: a client that never sends the newline must not
         // hold memory and a task for the life of the daemon.
+        //
+        // **Read in chunks, not a byte at a time.** A one-byte buffer is one
+        // `read` syscall per byte of every request, so a 4 KiB request line costs
+        // four thousand syscalls and a large one costs millions: the unit test that
+        // sends five megabytes against the cap took 4.8 s, all of it in syscalls.
+        // The read stops at the first newline and the rest of the chunk is dropped
+        // with the connection, which is correct because this server serves exactly
+        // one request per connection.
         let read_line = async {
+            let mut chunk = [0u8; 8192];
             loop {
-                match stream.read(&mut byte).await {
+                match stream.read(&mut chunk).await {
                     Ok(0) => return Ok(()), // EOF
-                    Ok(_) => {
-                        if byte[0] == b'\n' {
-                            return Ok(());
-                        }
-                        if buf.len() >= MAX_REQUEST_LINE {
+                    Ok(n) => {
+                        let line_end = chunk[..n].iter().position(|b| *b == b'\n');
+                        let take = line_end.unwrap_or(n);
+                        if buf.len() + take > MAX_REQUEST_LINE {
                             return Err("request line too large".to_string());
                         }
-                        buf.push(byte[0]);
+                        buf.extend_from_slice(&chunk[..take]);
+                        if line_end.is_some() {
+                            return Ok(());
+                        }
                     }
                     Err(e) => return Err(format!("read request: {e}")),
                 }

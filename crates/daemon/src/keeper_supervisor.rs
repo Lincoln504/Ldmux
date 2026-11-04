@@ -158,6 +158,15 @@ impl KeeperSupervisor {
     /// retries collapse into the 1 s budget; a live keeper answers within a
     /// poll or two.
     pub async fn is_alive(&self) -> bool {
+        // **No socket file means no keeper, so do not spend the retry budget.**
+        // The retries exist to lose a race against a keeper that has bound but not
+        // yet scheduled its accept loop — a keeper that has not written its file at
+        // all cannot be that, and the twenty attempts cost half a second of every
+        // caller that asks about a dead one. That is a fifth of a second per call
+        // on a machine where the answer is already certain.
+        if !self.socket_path.exists() {
+            return false;
+        }
         for _ in 0..20 {
             if tokio::net::UnixStream::connect(&self.socket_path)
                 .await

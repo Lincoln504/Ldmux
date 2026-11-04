@@ -79,11 +79,10 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
         .output();
     let _ = keeper.wait();
 
-    // The daemon should detect the keeper death and respawn it.
-    // Give it time to respawn.
-    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-
-    // The keeper socket should be back (the daemon respawned it).
+    // The daemon should detect the keeper death and respawn it. `wait_socket`
+    // polls for the socket, so a fixed two-second sleep in front of it only made
+    // the test two seconds long; the assertion is that the socket comes *back*,
+    // and how quickly is not the subject.
     wait_socket(&keeper_sock).await;
 
     // All sessions should be reported dead (the keeper died, so the shells

@@ -660,14 +660,38 @@ mod tests {
         true
     }
 
+    /// Versions the gate decodes, every EC level at each.
+    ///
+    /// Not all forty: zbar's cost grows steeply with the module count, about
+    /// 100 ms per image at version 40 against 10 ms at version 1, so the full
+    /// matrix costs fourteen seconds and buys nothing the spread does not. This
+    /// covers all three error-correction block layouts (1-9, 10-26, 27-40) and
+    /// both render scales (4 below version 21, 2 above), and the exhaustive
+    /// sweep is one `#[ignore]` away when a version-specific bug is suspected.
+    const GATE_VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 40];
+
     #[tokio::test]
     async fn every_version_and_error_correction_level_decodes_back_to_its_payload() {
+        decode_versions(GATE_VERSIONS).await;
+    }
+
+    /// The exhaustive sweep: all forty versions at all four levels. Fourteen
+    /// seconds, so it is out of the gate; run it with
+    /// `cargo test -p ldmux-daemon --lib -- --ignored decode_versions` when a
+    /// version-specific encoding bug is suspected.
+    #[tokio::test]
+    #[ignore = "exhaustive: 40 versions x 4 levels costs ~14 s in zbar"]
+    async fn every_version_and_error_correction_level_decodes_back_to_its_payload_exhaustive() {
+        decode_versions(&(1..=40).collect::<Vec<_>>()).await;
+    }
+
+    async fn decode_versions(vers: &[u32]) {
         // One zbar run for all of them; it reports in file order. Filled to
         // capacity, so each code must land on exactly this version and level.
         let dir = std::env::temp_dir().join(format!("ldmux-qr-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
         let mut cases: Vec<(String, String)> = vec![];
-        for ver in 1..=40u32 {
+        for &ver in vers {
             for (ei, &ecc) in ECC_ORDER.iter().enumerate() {
                 let text = payload(byte_capacity(ver, ecc) as usize, ver * 4 + ei as u32);
                 let code = encode_qr(&text, ecc).unwrap();
