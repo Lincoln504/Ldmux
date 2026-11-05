@@ -182,8 +182,9 @@ because a control should name what it does.
   the next one would be a command the user never composed there. It says so for a few seconds. A
   rotation's `Resize` also clears the screen but is not a switch, so it does not discard.
 - **The buffer is per connection.** Leaving the mesh terminal — to the shell list, to Settings, or
-  by the app being killed — disposes the connection and the buffer with it. The bar's own leave
-  action sends first; the launcher button and a process death do not. A confirm-on-leave was not
+  by the app being killed — disposes the connection and the buffer with it. So does a link rebuild
+  after a radio drop, which is the same disposal by a different route. The bar's own leave action
+  sends first; the launcher button, a process death and a rebuild do not. A confirm-on-leave was not
   added: the launcher is the escape hatch from this screen, and a modal on the way out of a terminal
   is a trap. Recorded here so the next session does not rediscover it as a bug.
 - **A shell that another device takes while text is held** answers the send with `NotLive`; the
