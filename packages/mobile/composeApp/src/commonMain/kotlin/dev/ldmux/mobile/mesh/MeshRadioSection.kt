@@ -29,7 +29,7 @@ import dev.ldmux.mobile.Field
 import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.MiniTextButton
 import dev.ldmux.mobile.ModalActions
-import dev.ldmux.mobile.ModalCard
+import dev.ldmux.mobile.SettingsPanel
 import dev.ldmux.mobile.Muted
 import dev.ldmux.mobile.Notice
 import dev.ldmux.mobile.NoticeLine
@@ -43,7 +43,7 @@ import kotlin.random.Random
 
 /** A bounded scan, shown as a small list. The scan stops itself; closing cancels it. */
 @Composable
-internal fun RadioPickerDialog(
+internal fun RadioPickerPanel(
     onDismiss: () -> Unit,
     onPick: (RadioDevice) -> Unit,
 ) {
@@ -60,7 +60,7 @@ internal fun RadioPickerDialog(
     }
     DisposableEffect(Unit) { onDispose { RadioScanner.cancel() } }
 
-    ModalCard("choose a radio", onDismiss) {
+    SettingsPanel("choose a radio", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (scanning) {
                 Text("scanning…", color = Muted, fontSize = 12.sp)
@@ -108,7 +108,7 @@ internal fun RadioPickerDialog(
  * SELF_INFO/DEVICE_INFO back before it says it worked.
  */
 @Composable
-internal fun RadioPresetDialog(
+internal fun RadioPresetPanel(
     address: String,
     openAirtime: Boolean,
     onBudget: (RadioBudgetMode) -> Unit,
@@ -253,7 +253,7 @@ internal fun RadioPresetDialog(
         }
     }
 
-    ModalCard("radio", onDismiss) {
+    SettingsPanel("radio", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     address.ifEmpty { "no radio" } + "  ·  " + meshLinkLabel(state),

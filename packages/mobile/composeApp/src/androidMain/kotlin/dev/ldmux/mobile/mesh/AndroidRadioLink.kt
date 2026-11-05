@@ -436,7 +436,14 @@ class AndroidRadioLink(
         val s = session ?: return _deviceInfo.value
         val gate = CompletableDeferred<RadioDeviceInfo>()
         deviceInfoDone = gate
-        s.deviceQuery(1)
+        // The argument IS the protocol version this client claims to understand, and the
+        // firmware latches it: `app_target_ver = cmd_frame[1]` (MyMesh.cpp:1028-1031). Both
+        // message queues then choose their frame by it, emitting the V3 forms only at
+        // `>= 3` (`MyMesh.cpp:435` for contacts, `:548` for channels), and the V3 forms are
+        // the only ones carrying the SNR. Sending 1 asked for the legacy frames the vendored
+        // decoder still supports, so nothing broke: the SNR simply never arrived, and the V3
+        // branch was unreachable. 3 is what the rest of this client already assumes.
+        s.deviceQuery(3)
         return withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { gate.await() } ?: _deviceInfo.value
     }
 

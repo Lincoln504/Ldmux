@@ -1,6 +1,9 @@
 # Platforms: what is supported, and how sure we are
 
-Last audited 2026-10-06, on branch `fix/audit-hardening`. Every row says whether it
+Last audited 2026-11-05, on branch `feat/standalone-radio` (the rows added since
+2026-10-06 are the hardware results of 2026-11-02 and the deafness reasoning of
+2026-11-04, both of which post-date the original audit date this line used to
+carry). Every row says whether it
 is **verified** (run, on this machine or the phone, with the evidence named),
 **read** (checked against the source, never run on that platform) or **intended**
 (a design position nobody has tested). Where a claim is only intended, it says so.

@@ -1,7 +1,10 @@
 # ldmux: state of the project
 
-Written 2026-10-06 on branch `fix/audit-hardening`. This is the short current
-position. The design is `docs/SPEC.md` (its tmux-era sections are marked
+Started 2026-10-06 on branch `fix/audit-hardening`; last updated 2026-11-05 on
+branch `feat/standalone-radio`, which is the branch this document describes. It is
+maintained across branches, so read the body rather than this line for what is
+current, and see `docs/STATE-OF-RECORD.md` for the reconciled position on one page.
+This is the short current position. The design is `docs/SPEC.md` (its tmux-era sections are marked
 historical), the decisions are `docs/adr/`, and the records of how the system got
 here are in `docs/archive/`. Claims below name how they were checked; "read" means
 checked against the source and not run.

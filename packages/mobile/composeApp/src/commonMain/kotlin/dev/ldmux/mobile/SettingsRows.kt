@@ -4,8 +4,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -14,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -128,5 +131,48 @@ internal fun SettingsNote(text: String, color: androidx.compose.ui.graphics.Colo
     Row(Modifier.fillMaxWidth()) {
         Box(Modifier.width(LABEL_WIDTH))
         Text(text, color = color, fontSize = 11.sp, modifier = Modifier.weight(1f))
+    }
+}
+
+/**
+ * A sub-flow that opens **under its own row**, not over the screen.
+ *
+ * This replaces [ModalCard] for settings sub-flows, and the reason is a layout fact rather
+ * than a taste: `ModalCard` sizes itself with `fillMaxSize`, but these flows are composed
+ * inside the settings screen's `verticalScroll`, where the height constraint is infinite.
+ * `fillMaxHeight` cannot resolve against infinity, so the card took its content's height
+ * and drew a scrim-coloured block at the end of the list — below every other row, not under
+ * the one that was tapped.
+ *
+ * A panel is the honest shape for these flows anyway: choosing a radio, reading its tuple and
+ * writing a preset are edits to one row, and an editor that covers the row it edits makes the
+ * user remember which row it was. Expanding in place keeps the row, its value and its editor
+ * on one line of sight, and the rows below move down rather than being hidden.
+ *
+ * The back gesture still closes it, because a panel is the topmost thing the user opened and
+ * back must mean "close this", not "leave the app".
+ */
+@Composable
+internal fun SettingsPanel(
+    title: String,
+    onCollapse: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    BackToLauncher(enabled = true) { onCollapse() }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = LocalTouch.current.rowPad * 2)
+            .clip(RadiusLarge)
+            .background(Surface)
+            .padding(LocalTouch.current.rowPad * 2),
+        verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, color = Fg, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            MiniTextButton(onClick = onCollapse) { Text("done", color = Accent, fontSize = 12.sp) }
+        }
+        content()
     }
 }

@@ -99,16 +99,48 @@ internal fun MeshRouteSection(
                 Modifier.weight(1f),
                 color = if (current.meshRadio.isEmpty()) Warn else Fg,
             )
-            MiniTextButton(onClick = { showPicker = true }) {
+            MiniTextButton(onClick = { showPicker = !showPicker; showPreset = false }) {
                 Text(if (current.meshRadio.isEmpty()) "choose" else "change", color = Accent, fontSize = 12.sp, maxLines = 1)
             }
+        }
+        // The picker opens under the row that named the radio, not at the end of the list and
+        // not over the screen: it is an edit to this row, and an editor that hides the row it
+        // edits makes the user remember which one it was.
+        if (showPicker) {
+            RadioPickerPanel(
+                onDismiss = { showPicker = false },
+                onPick = { d ->
+                    onConfig(current.copy(meshRadio = d.address, meshRadioName = d.name))
+                    credentials = readCredentials()
+                    // One flow: choosing a radio moves straight to its operating point,
+                    // so a first run does not stop at an address and leave the radio deaf.
+                    showPicker = false
+                    showPreset = true
+                },
+            )
         }
 
         if (current.meshRadio.isNotEmpty()) {
             // The radio's own operating point and its airtime, read from the radio rather than
             // remembered: the tuple is what the radio is actually on, and the airtime is the
             // duty-cycle figure the budget is spent against.
-            MeshRadioFacts(address = current.meshRadio, onOpenPreset = { showPreset = true })
+            MeshRadioFacts(
+                address = current.meshRadio,
+                onOpenPreset = { showPreset = !showPreset; showPicker = false },
+            )
+            if (showPreset) {
+                RadioPresetPanel(
+                    address = current.meshRadio,
+                    openAirtime = current.meshOpenAirtime,
+                    onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
+                    onClassified = onRadioChannel,
+                    onUnset = {
+                        onConfig(current.copy(meshRadio = "", meshRadioName = ""))
+                        showPreset = false
+                    },
+                    onDismiss = { showPreset = false },
+                )
+            }
 
             // **Which kind of channel the radio is on**, beside the radio itself.
             //
@@ -181,32 +213,6 @@ internal fun MeshRouteSection(
         note?.let { SettingsNote(it, color = Danger) }
     }
 
-    if (showPicker) {
-        RadioPickerDialog(
-            onDismiss = { showPicker = false },
-            onPick = { d ->
-                onConfig(current.copy(meshRadio = d.address, meshRadioName = d.name))
-                credentials = readCredentials()
-                // One flow: choosing a radio moves straight to its operating point,
-                // so a first run does not stop at an address and leave the radio deaf.
-                showPicker = false
-                showPreset = true
-            },
-        )
-    }
-    if (showPreset) {
-        RadioPresetDialog(
-            address = current.meshRadio,
-            openAirtime = current.meshOpenAirtime,
-            onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
-            onClassified = onRadioChannel,
-            onUnset = {
-                onConfig(current.copy(meshRadio = "", meshRadioName = ""))
-                showPreset = false
-            },
-            onDismiss = { showPreset = false },
-        )
-    }
 }
 
 /** What the Settings dialog calls into for the mesh route. One place wires it to the real stores. */
