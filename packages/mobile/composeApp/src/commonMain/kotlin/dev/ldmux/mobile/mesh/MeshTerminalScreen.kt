@@ -861,7 +861,7 @@ private fun MeshShellList(
             }
         }
         Spacer(Modifier.height(LocalTouch.current.rowPad))
-        OpenBar(openLabel(picked.size), empty = picked.isEmpty()) { onOpen(picked) }
+        OpenBar(openLabel(picked.size), enabled = picked.isNotEmpty()) { onOpen(picked) }
     }
 }
 

@@ -218,7 +218,13 @@ fun LauncherScreen(
         // chosen — a shell can die between two taps, and a page number that counts a
         // row nobody can see is a number that disagrees with the pager.
         val pickedNow = chosen.mapNotNull { key -> entries.firstOrNull { it.key == key } }
-        OpenBar(openButtonLabel(pickedNow), empty = pickedNow.isEmpty()) { onOpen(pickedNow) }
+        // A chosen shell is not openable while the host is unreachable: the terminal it
+        // would open cannot connect, and the header already says the link is down. The row
+        // selection survives, so the action returns by itself when the link does.
+        OpenBar(
+            openButtonLabel(pickedNow),
+            enabled = pickedNow.isNotEmpty() && link == LinkState.Online,
+        ) { onOpen(pickedNow) }
     }
 
     if (newShellOpen) {
@@ -367,21 +373,27 @@ internal fun openLabel(count: Int): String = if (count == 0) "open" else "open (
  * Both routes draw this one, so choosing and then opening is the same gesture on either.
  */
 @Composable
-internal fun OpenBar(label: String, empty: Boolean, onOpen: () -> Unit) {
+internal fun OpenBar(label: String, enabled: Boolean, onOpen: () -> Unit) {
+    // `enabled` goes into `clickable`, not into the lambda. The bar used to stay a live
+    // button whenever nothing was chosen and swallow the tap inside its own body: the
+    // label dimmed, so it looked disabled, while a screen reader still announced "Button"
+    // and a double-tap did nothing with no explanation. Every other control in the app
+    // passes `enabled` through (`AccentBtn`, `MiniTextButton`); this one did not.
     Box(
         Modifier
             .fillMaxWidth()
             .clip(RadiusMedium)
             .background(Surface)
-            .clickable(role = Role.Button) { if (!empty) onOpen() }
+            .clickable(role = Role.Button, enabled = enabled) { onOpen() }
             .padding(vertical = LocalTouch.current.rowPad * 2),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, color = if (empty) Dim else Fg, fontSize = 14.sp)
+        Text(label, color = if (enabled) Fg else Dim, fontSize = 14.sp)
     }
 }
 
-/** One workspace, as a chip to aim a new shell at. */@Composable
+/** One workspace, as a chip to aim a new shell at. */
+@Composable
 internal fun ChoiceRow(
     title: String,
     subtitle: String,

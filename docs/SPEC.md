@@ -8,7 +8,11 @@
 >   (ADR-0018); Node survives only as a dev tool for the mobile tree's `.ts`
 >   tests and the two scripts under `scripts/`. Every "Bun" or "Node" below is
 >   historical.
-> - **The pi extension has been removed.** ldmux is not a pi plugin; the
+> - **Pi RPC is not part of this product** (2026-11-05). §4.5 and the
+  `SessionDriver` seam are deleted: ldmux is a shell app, and nothing here drives
+  pi semantically. The section existed because an earlier design considered a
+  semantic pi UI; that is not something this software does.
+- **The pi extension has been removed.** ldmux is not a pi plugin; the
 >   `packages/extension` package, the `install-extension` CLI command, and the
 >   `register`/`session_end` RPC methods are gone, along with the RPC-only session
 >   expiry that existed to serve them. Sessions are created with `new`/`adopt`.
@@ -340,17 +344,6 @@ are **stripped**: a session is its own terminal (2026-10-24).
 `LDMUX_DAEMON_TOKEN` is **not** implemented: children reach the daemon through
 the Unix socket, whose 0600 permission plus a 0700 state dir is the boundary.
 
-### 4.5 Pi RPC as a complementary channel
-
-pi 0.85.1 exposes `pi --mode rpc` (JSONL over stdin/stdout; `prompt`, `steer`,
-`follow_up`, `abort`, `new_session`, `get_state`, `get_entries`, `set_model`,
-extension-UI round-trips, streaming events) and an `RpcClient`. This enables
-**semantic** control that raw terminal I/O cannot express.
-
-**v1 decision:** terminal-first; RPC is not required. The daemon defines a
-`SessionDriver` seam so a future `pi-rpc` driver can expose a semantic pi UI on
-mobile (as `pi-mobile`/`pi-remote` do) without disturbing the terminal path.
-
 ### 4.6 Session discovery and adoption scope (FR-1)
 
 Honest v1 scope:
@@ -360,8 +353,9 @@ Honest v1 scope:
    registers the session and opens a pane stream. Adoption is explicit, never
    automatic.
 3. **Bare `pi` processes** (started outside ldmux): **not
-   terminal-attachable in v1.** They are only reachable via the §4.5 RPC driver
-   (future). This is a stated limitation, not a bug.
+   terminal-attachable.** There is no RPC driver and none is planned: ldmux is a
+   shell app, and a process started outside it is not one of its sessions. This
+   is a stated limitation, not a bug.
 
 The mobile app always shows ldmux sessions; adopted sessions appear after opt-in.
 
@@ -1143,7 +1137,7 @@ ldmux is not a pi plugin.
 | R8 | i3 placement races. | **Corrected 2026-10-05.** `for_window` is not an IPC command at all (`docs/DESKTOP-INTEGRATION.md`, measured), so the mitigation that stands is `exec` and then a criteria-targeted move, polling `i3-msg -t get_tree` for the window's class — `ldmux-live-<id>` for a desk window, `ldmux-mirror-<id>` for a mirror. This is what §9 and `crates/daemon/src/desktop.rs` do. |
 | R9 | Token/identity security. | Tailnet-or-loopback bind and peer check (ADR-0016), WireGuard encryption, token `0600` (plaintext at rest; its directory is `0700`). No identity allow list or per-device tokens yet. |
 | R10 | Language choice. | **Closed**: Rust (ADR-0018). The TS/Bun v1 was ported and deleted. |
-| R11 | pi RPC UI sprawl. | Out of v1; `SessionDriver` seam. |
+| R11 | ~~pi RPC UI sprawl.~~ Moot: there is no pi RPC surface. Removed 2026-11-05 (§4.5 deleted, `SessionDriver` seam dropped) because the product is a shell app: a terminal, three ways to reach it, and nothing Pi-specific. |
 | R12 | ~~Control-mode parser robustness.~~ Moot: the keeper protocol is our own framed JSON/binary. | Split-UTF-8 carry (`protocol::utf8::Utf8Carry`) and frame tests. |
 | R13 | iOS scope creep. | v1 = Android; iOS is a documented target. |
 | Q1 | Wrapper attaches interactively? | Recommend yes (gmux parity). |

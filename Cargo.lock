@@ -330,6 +330,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ldmux-companion"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
+ "tokio",
+]
+
+[[package]]
 name = "ldmux-daemon"
 version = "0.1.0"
 dependencies = [
