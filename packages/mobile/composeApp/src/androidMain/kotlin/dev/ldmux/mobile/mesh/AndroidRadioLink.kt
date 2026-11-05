@@ -15,6 +15,7 @@ import io.iotone.meshcore.android.RawSendCallback
 import io.iotone.meshcore.android.SessionListener
 import io.iotone.meshcore.android.SessionState
 import io.iotone.meshcore.frames.ContactFrame
+import io.iotone.meshcore.frames.BatteryStorageFrame
 import io.iotone.meshcore.frames.DeviceInfoFrame
 import io.iotone.meshcore.frames.EndOfContactsFrame
 import io.iotone.meshcore.frames.ErrorFrame
@@ -166,6 +167,10 @@ class AndroidRadioLink(
             _status.value = _status.value.copy(radioState = 0)
             _state.value = MeshLinkState.Bound
             ready?.complete(Unit)
+            // One command, one reply, and the only way the phone learns how much charge its own
+            // radio has. The host's gateway asks the same question; this link had never asked, so
+            // a board running on a battery could die with the screen showing nothing about it.
+            session?.requestBatteryStorage()
             // Learning the host's path is one command by full key, not a full
             // contact dump. The wait is bounded in connect(); if the radio has
             // no contact yet the zero-hop route is still a valid direct send to
@@ -208,9 +213,15 @@ class AndroidRadioLink(
                 is EndOfContactsFrame -> contactDone?.complete(Unit)
                 is ErrorFrame -> contactDone?.complete(Unit)
                 is DeviceInfoFrame -> {
-                    val info = frame.info().toRadioDeviceInfo()
+                    val info = frame.info().toRadioDeviceInfo().copy(batteryMillivolts = batteryMv)
                     _deviceInfo.value = info
                     deviceInfoDone?.complete(info)
+                }
+                is BatteryStorageFrame -> {
+                    // May arrive before the device query's reply; kept so the device info carries it
+                    // when it does arrive, and applied immediately when it already has.
+                    batteryMv = frame.battery().batteryMillivolts()
+                    _deviceInfo.value = _deviceInfo.value?.copy(batteryMillivolts = batteryMv)
                 }
                 else -> Unit
             }
@@ -531,6 +542,9 @@ class AndroidRadioLink(
             else -> RadioSendResult.Failed
         }
     }
+
+    /** The last battery voltage the radio reported, carried into [RadioDeviceInfo] as it arrives. */
+    private var batteryMv: Int? = null
 
     private fun SelfInfo.toRadioSelfInfo() = RadioSelfInfo(
         name = name(),

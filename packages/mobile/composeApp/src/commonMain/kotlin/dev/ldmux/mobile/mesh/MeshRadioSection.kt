@@ -396,11 +396,12 @@ private fun RadioFacts(info: RadioSelfInfo?, device: RadioDeviceInfo?, status: M
         FactLine("firmware", device.firmwareVersion)
     }
     val rssi = status?.rssiDbm
-    val battery = status?.batteryPercent
-    if (rssi != null || battery != null) {
+    val volts = device?.batteryMillivolts?.let { "%.2f V".format(it / 1000.0) }
+    val battery = status?.batteryPercent?.let { "$it%" }
+    if (rssi != null || volts != null || battery != null) {
         FactLine(
             "signal",
-            listOfNotNull(rssi?.let { "$it dBm" }, battery?.let { "$it%" }).joinToString("  ·  "),
+            listOfNotNull(rssi?.let { "$it dBm" }, volts ?: battery).joinToString("  ·  "),
         )
     }
     if (info != null) {

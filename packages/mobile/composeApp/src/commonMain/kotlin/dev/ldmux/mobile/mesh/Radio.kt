@@ -270,6 +270,15 @@ data class RadioDeviceInfo(
     val maxGroupChannels: Int,
     /** 0 = 1-byte, 1 = 2-byte, 2 = 3-byte path hashes. */
     val pathHashMode: Int,
+    /**
+     * The radio's own battery voltage in millivolts, or null when it has not reported one.
+     *
+     * **Voltage, not percent.** The companion reports millivolts (`RESP_CODE_BATT_AND_STORAGE`),
+     * and turning volts into a percentage needs the cell chemistry and a discharge curve this app
+     * does not know — a made-up percentage is worse than a measured voltage. The host's gateway
+     * does report a percentage, from the same firmware, and the app does not second-guess it.
+     */
+    val batteryMillivolts: Int? = null,
 ) {
     val pathHashSize: Int get() = (pathHashMode and 0x03) + 1
 }
