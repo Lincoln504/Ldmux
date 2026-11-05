@@ -426,6 +426,9 @@ impl MeshSnapshot {
 struct Exchange {
     outbound: VecDeque<(u8, Vec<u8>)>,
     inbound: VecDeque<(u8, Vec<u8>)>,
+    /// Records dropped on the way to the bridge because the queue was full. The session layer
+    /// has already acknowledged them, so this counter is the only evidence the bytes existed.
+    dropped_inbound: u64,
 }
 
 /// The running link, shared with the RPC handler.
@@ -988,6 +991,15 @@ async fn session<C: Carrier>(
             while let Some(item) = h.inbound.pop_front() {
                 if ex.inbound.len() >= INBOUND_MAX {
                     ex.inbound.pop_front();
+                    ex.dropped_inbound = ex.dropped_inbound.saturating_add(1);
+                    // Say it, at powers of two so a flood of drops is one line per doubling.
+                    if ex.dropped_inbound.is_power_of_two() {
+                        eprintln!(
+                            "ldmuxd: mesh bridge queue full, dropped the oldest record \
+                             ({} dropped so far)",
+                            ex.dropped_inbound
+                        );
+                    }
                 }
                 ex.inbound.push_back(item);
                 queued_inbound = true;

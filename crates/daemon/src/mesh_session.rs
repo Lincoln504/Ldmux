@@ -96,6 +96,8 @@ pub struct SessionHost {
     next_index: u8,
     record_limit: usize,
     pub inbound: VecDeque<(u8, Vec<u8>)>,
+    /// Records dropped because the queue was full. Counted so the loss is visible.
+    pub dropped_inbound: u64,
     refused: u32,
     handshakes: u32,
     last_error: Option<String>,
@@ -118,6 +120,7 @@ impl SessionHost {
             next_index: 1,
             record_limit,
             inbound: VecDeque::new(),
+            dropped_inbound: 0,
             refused: 0,
             handshakes: 0,
             last_error: None,
@@ -159,8 +162,20 @@ impl SessionHost {
 
     fn take(&mut self, chunks: Vec<Delivered>) {
         for c in chunks {
+            // The ARQ above has already acknowledged this record to the phone, so a drop here
+            // is bytes that reach the session layer and never reach the pty, with nothing said.
+            // Count and name it: a large paste or a slow keeper shows up as a number in
+            // `mesh status` instead of as a shell that quietly ate half a line.
             if self.inbound.len() >= INBOUND_MAX {
                 self.inbound.pop_front();
+                self.dropped_inbound = self.dropped_inbound.saturating_add(1);
+                if self.dropped_inbound.is_power_of_two() {
+                    eprintln!(
+                        "ldmuxd: mesh inbound queue full, dropped the oldest record \
+                         ({} dropped so far)",
+                        self.dropped_inbound
+                    );
+                }
             }
             self.inbound.push_back((c.shell, c.payload));
         }
