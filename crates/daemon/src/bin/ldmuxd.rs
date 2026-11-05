@@ -123,11 +123,16 @@ fn main() {
     // The MeshMore link, if this machine has a gateway. Started before the
     // runtime is built would be wrong (it needs a reactor), so it is installed
     // inside `block_on` below.
+    // A misconfigured mesh link must not take the daemon with it. `exit(1)` here meant one
+    // stale variable in an environment file — `LDMUX_MESH_PSK` left behind when the rest of
+    // the link was removed — stopped the daemon, every shell, the tailnet listener and the
+    // CLI, and the only symptom was "the app does not work". The mesh route is one feature;
+    // say why it is off and start the rest.
     let mesh_cfg = match ldmux_daemon::mesh::MeshConfig::from_env() {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("ldmuxd: {e}");
-            std::process::exit(1);
+            eprintln!("ldmuxd: mesh link disabled: {e}");
+            None
         }
     };
 
@@ -138,11 +143,17 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // The same rule as above, expressed once more for the session half: a mesh session with
+    // no link to carry it is useless, not fatal. Together these two `exit(1)` calls are what
+    // made one stale `LDMUX_MESH_PSK` stop the daemon, every shell and the CLI.
+    let mut mesh_session = mesh_session;
     if mesh_session.is_some() && mesh_cfg.is_none() {
         eprintln!(
-            "ldmuxd: LDMUX_MESH_PSK is set but the link is not (LDMUX_MESH_ADDR, _TOKEN, _PEER)"
+            "ldmuxd: mesh link disabled: LDMUX_MESH_PSK is set but the link is not \
+             (LDMUX_MESH_SERIAL, or LDMUX_MESH_ADDR, _TOKEN, _PEER). Remove the key or \
+             name the link; the daemon runs either way."
         );
-        std::process::exit(1);
+        mesh_session = None;
     }
 
     // Wrap the daemon in an `Arc<tokio::sync::Mutex>` so the control socket's
