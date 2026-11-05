@@ -125,15 +125,25 @@ async fn workloads(rig: &Rig, offer: Option<&str>) -> Vec<(&'static str, Cost)> 
         )
         .await,
     ));
+    // 5000 lines, not 100. A hundred lines is a handful of frames, so its "ratio" is
+    // mostly frame overhead and mostly a function of how the scheduler batched it: the same
+    // workload measured 2.2x, 1.78x and 1.22x on three runs, and a floor cannot be both
+    // meaningful and reachable when the quantity itself moves by 80 percent. Five thousand
+    // lines is large enough that the compressor, not the framing, decides the number.
     rows.push((
-        "seq 1 100",
-        run(&mut ws, "seq 1 100; echo D_$((6*8))\n", "D_48").await,
+        "seq 1 5000",
+        run(&mut ws, "seq 1 5000; echo D_$((6*8))\n", "D_48").await,
     ));
     rows.push((
-        "ls -laR (8000 lines)",
+        // 2000 lines from a bounded tree, not 8000 from `/usr/lib`. The old workload walked
+        // a tree that is large and growing, and on a loaded machine the marker never arrived
+        // inside the wait: this binary took 318 s against a 300 s ceiling while the same
+        // measurement alone takes about 20 s. What the workload is for is deflate on
+        // repetitive listing text, and 2000 lines of it measures the same thing.
+        "ls -laR (2000 lines)",
         run(
             &mut ws,
-            "ls -laR /usr/lib 2>/dev/null | head -n 8000; echo D_$((6*9))\n",
+            "ls -laR /usr/lib 2>/dev/null | head -n 2000; echo D_$((6*9))\n",
             "D_54",
         )
         .await,
@@ -194,8 +204,8 @@ async fn compression_cuts_the_wire_cost_of_every_real_workload() {
     // test exists to catch.
     for (name, floor) in [
         ("ls -la", 3.0),
-        ("seq 1 100", 1.5),
-        ("ls -laR (8000 lines)", 5.0),
+        ("seq 1 5000", 2.5),
+        ("ls -laR (2000 lines)", 5.0),
         ("yes flood (4 MB)", 100.0),
         ("attach snapshot", 2.5),
     ] {

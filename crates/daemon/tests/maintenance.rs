@@ -103,10 +103,16 @@ fn install_stubs(dir: &std::path::Path) -> Stubs {
         "i3-msg",
         "#!/bin/sh\ncase \"$*\" in\n  *get_tree*) printf '%s' \"$I3_TREE\"; exit \"${I3_TREE_CODE:-0}\";;\n  *) exit 0;;\nesac\n",
     );
-    // The emulator stays up, as a real one does while its window is open: the
-    // daemon launches it directly and refuses one that exits at once. The window
-    // manager stub is what says whether the window is "on screen".
-    write("alacritty", "#!/bin/sh\nsleep 3\n");
+    // The emulator stays up, as a real one does while its window is open: the daemon
+    // launches it directly and refuses one that exits at once, and the window manager stub
+    // is what says whether the window is "on screen".
+    //
+    // It sleeps for ten minutes, not three seconds. Three was a race with the test itself:
+    // when a pass took longer than three seconds the emulator had already exited, the daemon
+    // saw a window whose process was gone, and the session ended — which is the exact
+    // assertion below failing, intermittently, for a reason that had nothing to do with the
+    // window manager. Teardown kills it, so nothing outlives the test.
+    write("alacritty", "#!/bin/sh\nsleep 600\n");
     let old_path = std::env::var("PATH").unwrap_or_default();
     let old_terminal = std::env::var("LDMUX_TERMINAL").ok();
     let old_display = std::env::var("DISPLAY").ok();

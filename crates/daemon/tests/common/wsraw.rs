@@ -271,12 +271,14 @@ impl RawWs {
         quiet: std::time::Duration,
     ) {
         let mut seen = needle.is_empty() || String::from_utf8_lossy(out).contains(needle);
-        // Two minutes, not one. The suite runs several binaries at once, each of which
-        // spawns a daemon and keepers, and on a loaded machine this test needs about
-        // 66 s to see its marker: with a 60 s budget it failed under the pool and passed
-        // alone, which reads as a code defect and is not one. The assertion below is
-        // about ordering, not about speed, so the budget should be generous.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        // Five minutes, and it is a ceiling rather than an expectation. The suite runs
+        // several binaries at once, each spawning a daemon and keepers, and this wait has
+        // been measured at 11 s alone, 66 s under a pool, and 165 s under a pool on a
+        // machine that is also building Rust. Each of those passes; only the budget ever
+        // failed, which reads as a code defect and is not one. The assertion below is about
+        // ordering, never about speed, so the ceiling is generous and the pool's own
+        // per-binary timeout (600 s) stays the thing that catches a genuine hang.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             let wait = if seen {
                 quiet

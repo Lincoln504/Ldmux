@@ -98,6 +98,11 @@ def run_one(b: Binary, args: list[str], threads: int) -> tuple[Binary, int, floa
     return b, proc.returncode, took, proc.stdout + proc.stderr
 
 
+#: Binaries that spawn a real daemon, keeper and shell and push megabytes through them.
+#: They run one at a time; see the comment at the scheduling site for the measurements.
+HEAVY_BINARIES = ("flood_and_endings", "wire_compression", "desk_attach_flood", "remote_e2e")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("-p", "--package", action="append", default=[], help="limit to a crate")
@@ -188,9 +193,9 @@ def main() -> int:
     if bin_args:
         threads = 0
 
-    def one(b: Binary) -> None:
+    def one(b: Binary, thread_override: int | None = None) -> None:
         try:
-            r = run_one(b, bin_args, threads)
+            r = run_one(b, bin_args, threads if thread_override is None else thread_override)
         except subprocess.TimeoutExpired:
             r = (b, -1, float(timeout), f"timed out after {timeout} s")
         with lock:
@@ -200,9 +205,33 @@ def main() -> int:
             mark = "ok" if r[1] == 0 else "FAIL"
             print(f"  {r[2]:6.2f} s  {mark:<4}  {b.name}", flush=True)
 
+    # Binaries that drive a real daemon, keeper and shell and push megabytes through them
+    # run ONE AT A TIME, after the rest. They are the whole reason this pool needed three
+    # timeout increases: `flood_and_endings` took 11 s alone and 165 s under a pool, and
+    # `wire_compression` needs over 300 s under contention against 20 s alone. Contention
+    # does not make them wrong, it makes them slow, and a gate that measures compression of
+    # a 4 MB flood is not testing anything about compression when it is competing for cores
+    # with three other daemons. Everything else stays parallel, which is where the wall time
+    # is won: those binaries are milliseconds each.
+    heavy = [b for b in binaries if any(h in b.name for h in HEAVY_BINARIES)]
+    light = [b for b in binaries if b not in heavy]
+    if heavy:
+        print(
+            f"test-parallel: {len(light)} parallel, {len(heavy)} heavy run one at a time "
+            f"({', '.join(b.name for b in heavy)})",
+            flush=True,
+        )
     # A hung binary must not wedge the pool forever.
+    # Heavy binaries FIRST, one thread each, before the parallel pool. Not just one at a
+    # time: `flood_and_endings` passes in 21 s on a quiet machine and took 329 s after the
+    # other forty-eight binaries had run, because whatever daemons and shells the earlier
+    # tests leave behind are still there when it asks a pane to produce four megabytes.
+    # Running them first costs nothing when they are fast and removes the class of failure
+    # that is about the pool rather than about the code.
+    for b in heavy:
+        one(b, thread_override=1)
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        list(pool.map(one, binaries))
+        list(pool.map(one, light))
 
     wall = time.monotonic() - t0
     results.sort(key=lambda r: -r[1])

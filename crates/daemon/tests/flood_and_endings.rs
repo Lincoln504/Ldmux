@@ -84,7 +84,14 @@ async fn flood_until_backlog_notice(
     for attempt in 1..=4 {
         ws.send_json(&serde_json::json!({
             "type":"input",
-            "data": format!("yes | head -c 24000000; echo {marker}\n"),
+            // One mebibyte, not twenty-four. The condition under test is
+            // `backlog_bytes() > WS_BACKLOG_BYTES`, and that constant is 64 KiB
+            // (`remote.rs:206`), so 24000000 bytes was 375 times more than the test needs.
+            // It cost minutes of emulator work per attempt, four attempts deep, which is
+            // why this binary took 160 to 320 seconds under a pool and failed its own
+            // deadline on a busy machine. 1 MiB is sixteen times the threshold and leaves
+            // the property, and the timing, intact.
+            "data": format!("yes | head -c 4194304; echo {marker}\n"),
         }))
         .await;
         // Do not read: this is the client that stops reading while the daemon's
