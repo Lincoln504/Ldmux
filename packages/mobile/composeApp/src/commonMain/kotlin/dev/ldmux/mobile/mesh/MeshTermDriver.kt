@@ -402,7 +402,7 @@ class MeshTermDriver(
             val s = try {
                 h.finish(record, gateway.uplinkRecordMax, clock())
             } catch (e: MeshSessionException) {
-                terminalView = MeshTermView.LinkDown(e.state); publish(); return@withLock
+                failed(e.state); publish(); return@withLock
             }
             session = s
             handshakeTries = 0
@@ -623,6 +623,10 @@ class MeshTermDriver(
      */
     suspend fun listShells() = lock.withLock {
         if (session == null || terminalView != null || pick != Pick.Attached) return@withLock
+        // **A list already in flight is not asked for again.** The screen asks whenever it is
+        // showing the list and has no entries, which is once per frame until the answer lands;
+        // without this guard that is a record per frame on a link that allows about 58 an hour.
+        if (listingForHeader) return@withLock
         listingForHeader = true; pages = ArrayList()
         queue(TermMessage.ListRequest); pump(); publish()
     }
@@ -850,7 +854,13 @@ class MeshTermDriver(
         val records = try {
             s.pollWithSeq(clock(), left, L2_WINDOW)
         } catch (e: MeshSessionException) {
-            terminalView = MeshTermView.LinkDown(e.state); return
+            // **A dead session ends the connection, not just the view.** This used to set the
+            // view and return, which left `run`'s loop ticking over a session that could never
+            // send again: the screen showed the failure, the caller's rebuild was never reached
+            // because `run` never returned, and the only cure was the refresh button. Measured on
+            // the device 2026-11-04: "the host did not answer" until refresh, then working in two
+            // seconds. `failed` is the one place that says "this connection is over".
+            failed(e.state); return
         }
         for (r in records) {
             if (!transmit(r)) break
@@ -868,7 +878,9 @@ class MeshTermDriver(
             // wait for the next pump.
             withTimeout(sendTimeoutMs) { gateway.send(record.bytes) }
         } catch (e: RadioLinkException) {
-            terminalView = MeshTermView.LinkDown(e.state); return false
+            // Same rule as `pump`: the radio refusing to carry a record is the transport's word,
+            // and a transport that has stopped carrying records cannot be revived from inside it.
+            failed(e.state); return false
         } catch (e: TimeoutCancellationException) {
             return false
         }
@@ -876,7 +888,12 @@ class MeshTermDriver(
         when (result.outcome) {
             // The host is not a contact, or the record is over what the radio takes: retrying
             // changes nothing, so it is a visible failure rather than a silent loop.
-            MeshSendOutcome.ErrNotFound -> terminalView = MeshTermView.LinkDown(
+            // **A refusal is the transport's word, so it ends the connection.** It used to set
+            // the view and keep looping, which is the same dead end as `pump` above: the screen
+            // said "the radio refused the record" and nothing ever tried again. A refusal is
+            // often transient (a busy transmit table, a path that has not resolved yet), and the
+            // caller's rebuild is exactly the retry that cures it.
+            MeshSendOutcome.ErrNotFound -> failed(
                 if (gateway.state.value == MeshLinkState.NoPath) MeshLinkState.NoPath
                 else MeshLinkState.Refused,
             )

@@ -518,6 +518,89 @@ What remains on that link is a genuine asymmetry under load: the daemon reported
 `5 bytes received` over one session, so phone → host records were not arriving while host → phone
 ones were. That is radio, not layout, and it is recorded rather than diagnosed here.
 
+## 2d. Fourth pass: the settings page, the two input modes, and a reconnect that lands home
+
+Reported: "fields are being enumerated and it is super unclear — it is like saying Debian or
+Meshcore right next to the name of the setting, and things are just thrown on the page." And
+separately: two modes, **live** and **manual sync**, with the mode chosen in Settings beside the
+channel, no leave button in the terminal, and the sync controls gone in live mode. And: a long-idle
+shell that announces "the host did not answer" and stays there until refresh.
+
+### 2d.1 Every row had its label and its value run together
+
+`tailnet  debian  unpair`, `radio  WIOld  AA:BB:CC  preset  change`, `code  scan  unpair`. There was
+no column and no divider, so the eye had no place to stop between the name of a setting and its
+value, and two adjacent facts read as one phrase. The screen now has one shape: a section heading
+with a hairline under it, then rows whose labels sit in a fixed 92 dp column and whose values line
+up on one vertical line down the page. Consequences move to a muted line under the row they explain,
+indented to the value column (`SettingsRows.kt`, used by `SettingsScreen` and `MeshRouteSection`).
+
+Two rows needed more than that:
+
+- **The value can be two lines.** `914.25 MHz  500.0 kHz  SF8 · CR5` and `0.0 s of 36 s this hour`
+  were both cut with an ellipsis, and the part cut was the part the user opened the screen to read.
+  A measurement may wrap to two lines; a name stays one, because a wrapped name makes one row into
+  two.
+- **The radio's facts are read, not remembered.** `preset` and `airtime` come from the radio itself
+  (`MeshRadioFacts`), so a value in the config cannot drift from the hardware. Airtime is the
+  duty-cycle figure the budget is spent against, and the records line is what is left of the hour.
+
+### 2d.2 Two modes, and the terminal's own switch removed
+
+`meshInputMode` is `live` or `manual sync`, persisted by name (not by ordinal), and chosen in
+Settings next to the channel. `meshHoldsInput` is the one derived value the terminal reads: a public
+channel forces manual sync (ADR-0026), a private one takes the user's choice. The label was changed
+from "typing is your choice" to "mode is your choice" at the user's request, because the choice is
+about the mode, not about typing.
+
+In **live** mode the terminal now draws no mode row at all: there is nothing to hold and nothing to
+release, and a sync button would be a control for a mode that is not running. In **manual sync** the
+row is drawn in every state, dimmed where it cannot act. The `hold input` / `leave` pair is gone from
+the terminal: leaving a mode is changing a setting, and a connection-level decision does not belong
+on a per-screen row next to the keys.
+
+### 2d.3 A link that dropped needed a manual refresh
+
+Three separate faults, all on the failure path, and each one alone was enough to strand the screen:
+
+1. **A failure set the view and kept looping.** `transmit` (a radio refusal), `pump` (a session
+   exception) and `onRecord` (a handshake record that could not be finished) all did
+   `terminalView = LinkDown(...)` and returned. They never set `transportDead`, which is the only
+   thing that ends `run`'s loop, so the caller's rebuild — the retry — was never reached. The screen
+   said "the host did not answer" and stayed there until the refresh button built the connection it
+   had stopped building. All three now go through `failed`, the one place that ends a connection.
+2. **`NoPath` and `Refused` stopped the retry for good.** The rebuild effect treated them as states a
+   retry cannot cure. Both are the radio's word about *one record* — a busy transmit table, a path
+   that has not resolved yet — and they are the two most likely transient failures on this link. The
+   set is now `NeedsRadio` and `NeedsPermission`, which are genuinely the user's to fix.
+3. **The ladder stopped climbing at thirty seconds and the screen could give up.** It now climbs
+   2, 4, 8, 16, 32, 64, 128, 256 seconds and stays there (`rebuildCapMs`, tested). A handshake costs
+   several records against an hourly budget of dozens, so the cap is deliberate: five minutes at
+   worst to pick a returning link, one handshake every four minutes while it is gone.
+
+### 2d.4 A handshake lands on the shell list, and the words stopped accusing the host
+
+A rebuilt connection is a new session, so the screen now lands on the **list**, not the shell it was
+in: the host may have restarted and the shell may be gone, and the list is the truth about what it
+has now. Measured on the device after this change: a link dropped while a shell was open, no refresh
+was pressed, and about ninety seconds later the list had refilled by itself with every shell.
+
+The message was the other half of the problem. "the host did not answer: it is off or out of range,
+both radios are on different presets, or it does not know this phone" asserted a diagnosis on the
+first failed record, before the app had retried once. `MeshBody` now carries a short line and a muted
+detail: **"the link dropped"**, then "this screen keeps retrying by itself; refresh to try now. If it
+never connects: ...". The checklist is still there for a link that never comes back, but it is no
+longer the first thing a user reads while the app is already recovering.
+
+### 2d.5 One defect found by looking at the screen
+
+`preset` and `airtime` said "not read" and never filled in, and the Bluetooth log showed the GATT
+link opening and being torn down again within eight seconds. The cause was in the composable, not the
+radio: `DisposableEffect(link) { onDispose { link?.release() } }` captures a **delegated state
+property** and reads it at dispose time, when it already holds the *new* value. The effect created
+for `null` disposed after the acquire and released the link that had just been acquired. The value
+is captured in a local now, in both places that had the pattern.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
@@ -560,9 +643,11 @@ phone (`adb` + the app's `ldmux` log tag) against the mesh route, with the host-
 grid, and what it drew afterwards. It still says nothing about whether a screen looks right; that
 needs eyes, and this pass had them only as screenshots.
 
-The same three Gradle commands ran, plus `:composeApp:testDebugUnitTest --rerun-tasks` (**611 tests,
+The same three Gradle commands ran, plus `:composeApp:testDebugUnitTest --rerun-tasks` (**619 tests,
 0 failures, 0 errors**) and the native suite (`16 checks, 0 failures` in the non-sanitized run).
-Three new tests in `MeshTermDriverTest` pin the grid rules of §2c.2.
+Three tests in `MeshTermDriverTest` pin the grid rules of §2c.2, four more pin the failure paths of
+§2d.3 (a radio refusal, a polling exception, a handshake that cannot finish, and a list asked for
+once while in flight), and `MeshReconnectTest` pins the ladder and the mode's truth table.
 
 The radio work in §2c.7 is in the other repository and was verified there: `dart test` in
 `packages/meshcore_host` is 39 tests green, including two rewritten deafness cases and one new one

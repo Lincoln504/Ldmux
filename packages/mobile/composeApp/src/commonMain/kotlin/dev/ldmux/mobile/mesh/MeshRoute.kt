@@ -9,6 +9,17 @@ package dev.ldmux.mobile.mesh
  */
 enum class MeshRoute { Tailnet, Mesh }
 
+/**
+ * How typing leaves the phone on the mesh route.
+ *
+ * The names are the user's words, not the implementation's: `live` is "it goes as I type" and
+ * `manual sync` is "it waits until I press sync". The old name for the second one was
+ * "public-channel mode", which described *why* it exists rather than what it does, and it was
+ * forced on a public channel — so a user on a private channel had a mode named after a condition
+ * that was not true for them.
+ */
+enum class MeshInputMode { Live, ManualSync }
+
 /** The platforms the mobile app ships on. iOS is tailnet only: no MeshCore, no gateway. */
 enum class MobilePlatform { Android, Ios }
 
@@ -118,8 +129,8 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
     MeshLinkState.Connecting -> "mesh · connecting"
     MeshLinkState.Bound -> "mesh · bound"
     MeshLinkState.RadioUnavailable -> "mesh · radio unavailable"
-    MeshLinkState.Refused -> "mesh · refused"
-    MeshLinkState.SessionFailed -> "mesh · host not answering"
+    MeshLinkState.Refused -> "mesh · the radio refused that record, retrying"
+    MeshLinkState.SessionFailed -> "mesh · link dropped, reconnecting"
     MeshLinkState.Closed -> "mesh · closed"
 }
 

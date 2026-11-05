@@ -91,6 +91,21 @@ internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
 internal const val MESH_FAILURE_GRACE_MS = 30_000L
 
 /**
+ * The longest wait before a dropped link is rebuilt, for the Nth rebuild of this screen.
+ *
+ * **The ladder keeps climbing and it never stops.** Two seconds doubling to a 256-second cap
+ * (in seconds: 2, 4, 8, 16, 32, 64, 128, 256): a link that comes back is picked up within four minutes at
+ * worst, and a link that is gone costs one handshake every four minutes rather than one every
+ * thirty seconds — which matters because a handshake is several records against an hourly budget
+ * of dozens. The refresh square is the immediate retry for a user who is watching.
+ *
+ * Pure, so the ladder is a value a test can hold rather than an expression inside an effect. The
+ * wait itself is drawn below the cap (full jitter): two ends that double in lockstep keep meeting.
+ */
+internal fun rebuildCapMs(rebuilds: Int): Long =
+    (2_000L shl rebuilds.coerceIn(0, 7)).coerceAtMost(300_000L)
+
+/**
  * The mesh route's terminal. It is the **same chrome as the tailnet terminal**: the shared
  * [PortraitBar] (shell header with its arrows, menu, Esc/Tab/Home/End/PgUp/PgDn, the sticky
  * Ctrl/Alt/Shift latch, C/c, paste, Enter, the arrow pad, the keyboard toggle) drives a
@@ -144,6 +159,10 @@ fun MeshTerminalScreen(
     // is that reload, on the same backoff: two seconds doubling to thirty, and back to two as soon
     // as the link is live.
     var rebuilds by remember(plan) { mutableStateOf(0) }
+    // **Which screen this connection is showing.** Declared here rather than beside the list
+    // because the rebuild below has to be able to land on it: a handshake is a new session, and
+    // the screen it lands on is the list, not the shell the old session was in.
+    var showList by remember(conn) { mutableStateOf(false) }
     // The connection ended while the app was already off screen, after the jitter below had begun.
     // The return decides then, so a backoff meant for a failure someone was watching never spends
     // the radio on a screen nobody is looking at.
@@ -166,26 +185,38 @@ fun MeshTerminalScreen(
             attempt += 1
             return@LaunchedEffect
         }
-        // A state that a retry cannot cure must not spin the rebuild loop. The plan or settings
-        // change is the user's cure, and that rebuilds this screen anyway.
+        // **Only a state the user must cure stops the retry.** `NoPath` and `Refused` used to be
+        // in this set, and both are the radio's word about one record — a busy transmit table, a
+        // path that has not resolved yet — so a transient refusal ended the retry loop for good.
+        // That is the reported "the host is not connected or out of range", cured by one refresh
+        // and working two seconds later: the refresh built the connection the loop had stopped
+        // building. A missing radio or a missing permission is the user's to fix, and nothing
+        // this screen does can.
         val terminal = conn.driver.view.value
         if (terminal is MeshTermView.LinkDown && terminal.link in setOf(
                 MeshLinkState.NeedsRadio,
                 MeshLinkState.NeedsPermission,
-                MeshLinkState.NoPath,
-                MeshLinkState.Refused,
             )
         ) {
             return@LaunchedEffect
         }
-        // **Full jitter, because two ends that double in lockstep keep colliding.** The cap is the same
-        // two-to-thirty seconds as before, but the wait is drawn uniformly below it: a phone and a host
-        // that both back off on 2, 4, 8, 16 meet again on 2, 4, 8, 16, which is the shape every account
-        // of a reconnect storm prescribes against.
-        val cap = (2_000L shl rebuilds.coerceAtMost(4)).coerceAtMost(30_000L)
+        // **Full jitter, because two ends that double in lockstep keep colliding.** The wait is
+        // drawn uniformly below the ladder's cap ([rebuildCapMs]): a phone and a host that both
+        // back off on 2, 4, 8, 16 meet again on 2, 4, 8, 16, which is the shape every account of a
+        // reconnect storm prescribes against.
+        val cap = rebuildCapMs(rebuilds)
         rebuilds += 1
         delay(Random.nextLong(1, cap + 1))
-        if (AppLifecycle.foreground) attempt += 1 else ended = true
+        if (AppLifecycle.foreground) {
+            // **A rebuilt connection lands on the shell list, not in the shell it was in.** A
+            // handshake is a new session: the host may have restarted, the shell may be gone, and
+            // the screen the user was looking at is a picture of a session that no longer exists.
+            // Landing in it would show a stale screen under a live link. The list is the truth
+            // about what the host has now, and opening a shell from it is one tap.
+            showList = true
+            resumeShell = ""
+            attempt += 1
+        } else ended = true
     }
     DisposableEffect(conn) {
         // **A long stay off screen is not a pause the link survives.** The tailnet route lets go of
@@ -294,8 +325,11 @@ fun MeshTerminalScreen(
     // to type there. On a private tuple the mode is the user's choice. `meshPublicChannel` is a
     // fact derived from the radio's own tuple; unknown reads as public, because that is the safe
     // reading.
-    LaunchedEffect(conn, config.meshPublicChannel) {
-        if (config.meshPublicChannel) source.setPublicChannel(true)
+    // **The mode is the config's, not the screen's.** It is chosen in Settings beside the channel
+    // (a public channel forces it), so this effect is the only place the source learns it, and it
+    // re-runs when the setting changes without rebuilding the connection.
+    LaunchedEffect(conn, config.meshHoldsInput) {
+        source.setPublicChannel(config.meshHoldsInput)
     }
 
     // **The tuple is read from the radio, so the answer is a fact and not a default.** It used to
@@ -393,8 +427,8 @@ fun MeshTerminalScreen(
     }
 
     // The list of the host's shells is this route's launcher: the tailnet's menu → shells leaves the
-    // terminal for a screen with the header and the list, and so does this one.
-    var showList by remember(conn) { mutableStateOf(false) }
+    // terminal for a screen with the header and the list, and so does this one. The state itself is
+    // declared above, beside the rebuild that lands on it.
     // **Which shells are pages, and nothing else: the tailnet's rule.** A row is ticked, not opened,
     // and the one `open` at the bottom makes exactly the ticked rows the pages the header's arrows
     // walk, in the order they were ticked. Before there was a selection every shell the host listed
@@ -433,6 +467,13 @@ fun MeshTerminalScreen(
     }
 
     val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
+    // **The list asks for the host's shells when it is shown over a live link.** After a rebuild
+    // the screen lands here with nothing listed yet, and the list is the only thing that can say
+    // what the host has now. `listShells` is idempotent while a list is in flight, so this costs
+    // one record rather than one per frame.
+    LaunchedEffect(showList, terminalLive, shells.entries.size) {
+        if (showList && terminalLive && shells.entries.isEmpty()) conn.driver.listShells()
+    }
     // Leaving the terminal is the user's decision, so it is also the one that cancels the resume: a
     // rebuild after this must land on the list, not drag them back into a shell they left.
     val openList = {
@@ -520,33 +561,24 @@ fun MeshTerminalScreen(
     // screen's own layout: above the key pad in portrait, at the foot of the side panel in
     // landscape. It used to be a card floating over the bottom-right of the terminal, which covered
     // the shell's last line and its cursor — the two things a terminal is read for.
-    val barRow: @Composable (Modifier) -> Unit = { m ->
-        PublicChannelBar(
-            on = source.publicChannel,
-            // Forced on a public channel: the row has no way out, and says why.
-            forced = config.meshPublicChannel,
-            summary = handle.heldSummary,
-            awaiting = source.awaitingSync,
-            reported = source.answerOverdue,
-            flushing = source.flushingHeld,
-            updates = source.heldUpdates,
-            onToggle = {
-                if (!source.publicChannel) {
-                    source.setPublicChannel(true)
-                } else if (config.meshPublicChannel) {
-                    // No-op on a public channel: the mode is not optional there.
-                } else {
-                    // Leaving sends what is held: turning the mode off clears the gate in the pump
-                    // loop, so the queue drains on its own windows. A mode that could be left while
-                    // silently dropping what you typed would be worse than one that sends on the
-                    // way out, and the row says which it is.
-                    source.setPublicChannel(false)
-                }
-            },
-            onSync = { source.sync() },
-            modifier = m,
-        )
-    }
+    // **The row exists only in manual sync mode.** In live mode there is nothing to hold and
+    // nothing to release, so a sync button would be a control for a mode that is not running —
+    // and the mode is not switched from here any more: it is a property of the link, set in
+    // Settings beside the channel. What is left in the terminal is the one control the mode
+    // needs, and it is drawn in every state of that mode (dimmed when it cannot act).
+    val barRow: (@Composable (Modifier) -> Unit)? = if (config.meshHoldsInput) {
+        { m ->
+            PublicChannelBar(
+                summary = handle.heldSummary,
+                awaiting = source.awaitingSync,
+                reported = source.answerOverdue,
+                flushing = source.flushingHeld,
+                updates = source.heldUpdates,
+                onSync = { source.sync() },
+                modifier = m,
+            )
+        }
+    } else null
 
     Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
         if (holding) {
@@ -599,7 +631,7 @@ fun MeshTerminalScreen(
                     press = handle::sendKey,
                     shownId = shownId,
                     onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
-                    modeRow = { m -> barRow(m) },
+                    modeRow = barRow,
                 )
             }
             Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -689,8 +721,8 @@ fun MeshTerminalScreen(
                 if (!portrait && !config.panelLeft) panel()
             }
             if (portrait) {
-                // The space above the keyboard: the mode's row, then the keys.
-                barRow(Modifier.fillMaxWidth())
+                // The space above the keyboard: the mode's row (manual sync only), then the keys.
+                barRow?.invoke(Modifier.fillMaxWidth())
                 PortraitBar(
                     handle = handle,
                     pages = pages,

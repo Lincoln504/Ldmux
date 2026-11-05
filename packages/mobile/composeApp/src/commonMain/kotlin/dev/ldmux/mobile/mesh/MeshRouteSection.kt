@@ -1,11 +1,12 @@
 package dev.ldmux.mobile.mesh
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,9 +24,14 @@ import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.LdmuxConfig
 import dev.ldmux.mobile.MiniTextButton
 import dev.ldmux.mobile.Muted
+import dev.ldmux.mobile.OptionButton
 import dev.ldmux.mobile.Notice
 import dev.ldmux.mobile.NoticeLine
 import dev.ldmux.mobile.ScanResult
+import dev.ldmux.mobile.SettingsNote
+import dev.ldmux.mobile.SettingsRow
+import dev.ldmux.mobile.SettingsValue
+import kotlinx.coroutines.flow.MutableStateFlow
 import dev.ldmux.mobile.Warn
 
 /**
@@ -48,6 +54,8 @@ internal fun MeshRouteSection(
     onConfig: (LdmuxConfig) -> Unit,
     /** The radio's channel is shared (a public tuple) or not. Persisted beside the pairing. */
     onRadioChannel: (Boolean) -> Unit,
+    /** How typing leaves the phone: live, or held until sync. Persisted beside the pairing. */
+    onInputMode: (MeshInputMode) -> Unit,
     onUnpairMesh: () -> Unit,
 ) {
     var credentials by remember { mutableStateOf(readCredentials()) }
@@ -59,32 +67,28 @@ internal fun MeshRouteSection(
     var showPicker by remember { mutableStateOf(false) }
     var showPreset by remember { mutableStateOf(false) }
 
-    Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        // The same label shape as the `tailnet` row, because this is the other half of the
-        // same question. It was a 13sp heading in `Fg`, which made the two pairings look
-        // like a section and a row rather than two rows.
-        Text("mesh", color = Dim, fontSize = 12.sp)
-        // Healthy credentials are automatic. Only a missing one is worth a line.
+    Column(Modifier.fillMaxWidth()) {
+        // Healthy credentials are automatic. Only a missing one is worth a line, and it is a note
+        // under the rows rather than a heading of its own: the rows are the settings, and a
+        // missing credential is a fact about them.
         for (c in MeshCredential.entries) {
-            if (c !in view.present) {
-                Text(meshCredentialLine(c), color = Warn, fontSize = 12.sp)
-            }
+            if (c !in view.present) SettingsNote(meshCredentialLine(c), color = Warn)
         }
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
-            Text(meshProblemLabel(it.problem), color = Muted, fontSize = 11.sp)
+            SettingsNote(meshProblemLabel(it.problem))
         }
 
-        // The radio is the one new physical fact. Its name is shown because a MAC address is
-        // not something a person recognises, and the address is kept because that is what BLE
-        // needs after a reboot.
-        // **Two actions, both written down.** The name used to be tappable to open the preset
-        // and the button beside it opened the radio picker, so one row carried a hidden action
-        // and a visible one: tapping the name to "select the radio" changed its *operating
-        // point* instead, which on a radio that then stops answering is indistinguishable from
-        // having broken it.
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("radio", color = Dim, fontSize = 12.sp)
-            Text(
+        // The radio is the one new physical fact. Its name is shown because a MAC address is not
+        // something a person recognises, and the address is kept because that is what BLE needs
+        // after a reboot.
+        //
+        // **Two actions, both written down.** The name used to be tappable to open the preset and
+        // the button beside it opened the radio picker, so one row carried a hidden action and a
+        // visible one: tapping the name to "select the radio" changed its *operating point*
+        // instead, which on a radio that then stops answering is indistinguishable from having
+        // broken it.
+        SettingsRow("radio") {
+            SettingsValue(
                 if (current.meshRadio.isEmpty()) {
                     "none chosen"
                 } else if (current.meshRadioName.isEmpty()) {
@@ -92,43 +96,56 @@ internal fun MeshRouteSection(
                 } else {
                     current.meshRadioName + "  " + current.meshRadio
                 },
+                Modifier.weight(1f),
                 color = if (current.meshRadio.isEmpty()) Warn else Fg,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
             )
-            if (current.meshRadio.isNotEmpty()) {
-                MiniTextButton(onClick = { showPreset = true }) {
-                    Text("preset", color = Accent, fontSize = 12.sp, maxLines = 1)
-                }
-            }
             MiniTextButton(onClick = { showPicker = true }) {
                 Text(if (current.meshRadio.isEmpty()) "choose" else "change", color = Accent, fontSize = 12.sp, maxLines = 1)
             }
         }
 
-        // **Which kind of channel the radio is on**, beside the radio itself.
-        //
-        // It is not a setting: it is derived from the tuple the radio reports, and it decides one
-        // thing — whether public-channel mode is forced (ADR-0026). Saying it here is what stops
-        // "typing does nothing until sync" from being a mystery: on a shared channel every
-        // keystroke is a broadcast, so held input is the only supported way to type there.
         if (current.meshRadio.isNotEmpty()) {
-            Text(
-                if (current.meshPublicChannel) {
-                    "public channel \u00b7 typing is held until you press sync"
-                } else {
-                    "private channel \u00b7 held input is optional"
-                },
-                color = Muted,
-                fontSize = 11.sp,
-            )
+            // The radio's own operating point and its airtime, read from the radio rather than
+            // remembered: the tuple is what the radio is actually on, and the airtime is the
+            // duty-cycle figure the budget is spent against.
+            MeshRadioFacts(address = current.meshRadio, onOpenPreset = { showPreset = true })
+
+            // **Which kind of channel the radio is on**, beside the radio itself.
+            //
+            // It is not a setting: it is derived from the tuple the radio reports, and it decides
+            // one thing — whether typing is held (ADR-0026). Saying it here is what stops "typing
+            // does nothing until sync" from being a mystery.
+            SettingsRow("channel") {
+                SettingsValue(
+                    if (current.meshPublicChannel) {
+                        "public · every keystroke is a broadcast"
+                    } else {
+                        "private · mode is your choice"
+                    },
+                    Modifier.weight(1f),
+                )
+            }
+
+            // **The mode is a property of the link, so it is set where the link is set.** It used
+            // to be a `hold input` / `leave` pair in the terminal's own row, which made a
+            // connection-level decision look like a per-screen toggle and put a "leave" button
+            // next to the keys. `live` is unavailable on a public channel, and it is drawn dim
+            // rather than removed so the row keeps its shape.
+            SettingsRow("input") {
+                OptionButton("live", selected = !current.meshHoldsInput, enabled = !current.meshPublicChannel) {
+                    if (current.meshInputMode != MeshInputMode.Live) onInputMode(MeshInputMode.Live)
+                }
+                OptionButton("manual sync", selected = current.meshHoldsInput) {
+                    if (current.meshInputMode != MeshInputMode.ManualSync) onInputMode(MeshInputMode.ManualSync)
+                }
+            }
+            if (current.meshPublicChannel) {
+                SettingsNote("a public channel forces manual sync: every keystroke there is a broadcast")
+            }
         }
 
         // One verb, one target: the ldmux code carries the session keys and the host radio key.
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("code", color = Dim, fontSize = 12.sp)
+        SettingsRow("code") {
             MiniTextButton(onClick = {
                 note = null
                 CodeScanner.scan { r ->
@@ -142,26 +159,26 @@ internal fun MeshRouteSection(
                     }
                 }
             }) { Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1) }
-        }
-        if (view.present.isNotEmpty()) {
-            MiniTextButton(onClick = {
-                if (confirmForget) {
-                    onUnpairMesh()
-                    credentials = readCredentials()
-                } else {
-                    confirmForget = true
+            if (view.present.isNotEmpty()) {
+                MiniTextButton(onClick = {
+                    if (confirmForget) {
+                        onUnpairMesh()
+                        credentials = readCredentials()
+                    } else {
+                        confirmForget = true
+                    }
+                }) {
+                    // `unpair`, the word the tailnet row uses, because it is the same act on the
+                    // other pairing. It also drops the chosen radio and the saved route, which is
+                    // why it asks first and says so.
+                    Text(if (confirmForget) "unpair?" else "unpair", color = if (confirmForget) Danger else Dim, fontSize = 12.sp)
                 }
-            }) {
-                // `unpair`, the word the tailnet row uses, because it is the same act on the
-                // other pairing. It also drops the chosen radio and the saved route, which is
-                // why it asks first and says so.
-                Text(if (confirmForget) "unpair?" else "unpair", color = if (confirmForget) Danger else Dim, fontSize = 12.sp)
-            }
-            if (confirmForget) {
-                Text("this forgets the keys, the radio and the saved route", color = Muted, fontSize = 11.sp)
             }
         }
-        note?.let { Text(it, color = Danger, fontSize = 11.sp) }
+        if (confirmForget) {
+            SettingsNote("this forgets the keys, the radio and the saved route")
+        }
+        note?.let { SettingsNote(it, color = Danger) }
     }
 
     if (showPicker) {
@@ -200,3 +217,93 @@ class MeshRouteActions(
     val onConfig: (LdmuxConfig) -> Unit,
     val onUnpair: () -> Unit,
 )
+
+/**
+ * The radio's own operating point and its airtime, read from the radio.
+ *
+ * **Read, not remembered.** The tuple is what the radio is actually on, and the airtime is the
+ * duty-cycle figure the budget is spent against — both are facts about the hardware, so a copy in
+ * the config would be a second truth that drifts. The link is the app's shared one
+ * (`RadioLinks`), so opening Settings while the terminal is live does not start a second GATT
+ * client; `connect` returns at once when it is already bound.
+ *
+ * The airtime line is the one the user asked for: "the app can track in settings, like duty cycle
+ * use". It is the radio's own estimate for the current hour, and the records line is what is left
+ * of the hourly budget at the current record size. Both are display only — the budget is enforced
+ * where records are sent, not here.
+ */
+@Composable
+private fun MeshRadioFacts(address: String, onOpenPreset: () -> Unit) {
+    var link by remember(address) { mutableStateOf<RadioLink?>(null) }
+    val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
+    val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
+    val fallbackStatus = remember { MutableStateFlow<MeshStatus?>(null) }
+    val info by (link?.selfInfo ?: fallbackInfo).collectAsState()
+    val device by (link?.deviceInfo ?: fallbackDevice).collectAsState()
+    val status by (link?.status ?: fallbackStatus).collectAsState()
+    LaunchedEffect(address) {
+        if (address.isEmpty()) return@LaunchedEffect
+        val l = meshRadioLink(address, ByteArray(0)) ?: return@LaunchedEffect
+        link = l
+        // A read, not a session: the radio answers SELF_INFO/DEVICE_INFO without a peer, and a
+        // failure here is not worth a line — the rows below say "not read" instead.
+        runCatching { l.connect() }
+    }
+    // **Capture the link, do not read the state in `onDispose`.** `link` is a delegated state
+    // property, so a closure that reads it inside `onDispose` reads the value *at dispose time* —
+    // which is the new link when the key changed from the old one. That released the instance the
+    // effect had just been created for, taking the refcount to zero and closing a live BLE link
+    // the moment it was acquired (measured on the device: the GATT opened and was torn down again
+    // within eight seconds, and the radio's facts stayed "not read").
+    DisposableEffect(link) {
+        val held = link
+        onDispose { held?.release() }
+    }
+
+    val preset = info?.let {
+        RadioPreset(
+            frequencyMhz = it.frequencyMhz,
+            bandwidthKhz = it.bandwidthKhz,
+            spreadingFactor = it.spreadingFactor,
+            codingRate = it.codingRate,
+            txPowerDbm = it.txPowerDbm,
+            pathHashSize = (device?.pathHashMode ?: 0) + 1,
+        )
+    }
+    SettingsRow("preset") {
+        SettingsValue(
+            preset?.let { presetLine(it) } ?: "not read",
+            Modifier.weight(1f),
+            color = if (preset == null) Muted else Fg,
+            // Two lines: the tuple is five facts and the row has a button beside it, so one line
+            // cut it at `SF8 …` on the device.
+            maxLines = 2,
+        )
+        MiniTextButton(onClick = onOpenPreset) {
+            Text("preset", color = Accent, fontSize = 12.sp, maxLines = 1)
+        }
+    }
+    SettingsRow("airtime") {
+        SettingsValue(airtimeLine(status), Modifier.weight(1f), maxLines = 2)
+    }
+}
+
+/**
+ * The hour's airtime and what is left of the budget, in the radio's own units.
+ *
+ * `txAirtimeTenthsThisHour` is tenths of a second, and the app's own budget is
+ * [RadioAirtime.BUDGET_MS_PER_HOUR] (36 s, the 1 % duty cycle). The records figure is null when
+ * the budget is open, which is a different fact from "zero left" and is said as such.
+ */
+internal fun airtimeLine(status: MeshStatus?): String {
+    if (status == null) return "not read"
+    val used = status.txAirtimeTenthsThisHour / 10.0
+    val budget = RadioAirtime.BUDGET_MS_PER_HOUR / 1000.0
+    val left = status.opsLeftThisHour
+    val records = when {
+        left == null -> "no hourly cap"
+        left >= 255 -> "255 or more records left"
+        else -> "$left records left"
+    }
+    return "%.1f s of %.0f s this hour · %s".format(used, budget, records)
+}

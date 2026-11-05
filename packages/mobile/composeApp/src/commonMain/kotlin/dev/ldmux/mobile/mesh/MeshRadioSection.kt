@@ -215,7 +215,16 @@ internal fun RadioPresetDialog(
         }
         seeded = true
     }
-    DisposableEffect(link) { onDispose { link?.release() } }
+    // **Capture the link, do not read the state in `onDispose`.** `link` is a delegated state
+    // property, so a closure that reads it inside `onDispose` reads the value *at dispose time* —
+    // which is the new link when the key changed from the old one. That released the instance the
+    // effect had just been created for, taking the refcount to zero and closing a live BLE link
+    // the moment it was acquired (measured on the device: the GATT opened and was torn down again
+    // within eight seconds, and the radio's facts stayed "not read").
+    DisposableEffect(link) {
+        val held = link
+        onDispose { held?.release() }
+    }
 
     fun choose(p: RadioPreset) {
         userTouched = true
@@ -393,7 +402,7 @@ internal fun RadioPresetDialog(
  * `SF8` and `CR5` are the radio's own vocabulary and are left as the radio's numbers. The
  * path width gets a word, because `1B` alone reads as a unit with no quantity.
  */
-private fun presetLine(p: RadioPreset): String =
+internal fun presetLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"
 
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {

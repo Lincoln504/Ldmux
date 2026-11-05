@@ -1,6 +1,7 @@
 package dev.ldmux.mobile
 
 import android.content.Context
+import dev.ldmux.mobile.mesh.MeshInputMode
 import dev.ldmux.mobile.mesh.meshRouteFromStored
 
 /**
@@ -45,6 +46,7 @@ actual object AppPrefs {
     private const val KEY_MESH_RADIO_NAME = "mesh_radio_name"
     private const val KEY_MESH_OPEN_AIRTIME = "mesh_open_airtime"
     private const val KEY_MESH_PUBLIC_CHANNEL = "mesh_public_channel"
+    private const val KEY_MESH_INPUT_MODE = "mesh_input_mode"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -72,6 +74,11 @@ actual object AppPrefs {
             meshRadioName = sp.getString(KEY_MESH_RADIO_NAME, null) ?: "",
             meshOpenAirtime = sp.getBoolean(KEY_MESH_OPEN_AIRTIME, true),
             meshPublicChannel = sp.getBoolean(KEY_MESH_PUBLIC_CHANNEL, LdmuxConfig.DEFAULT.meshPublicChannel),
+            // Stored by name, not by ordinal: an enum's order is an implementation detail, and a
+            // value that moved would silently change the mode of every install that had saved it.
+            meshInputMode = sp.getString(KEY_MESH_INPUT_MODE, null)
+                ?.let { name -> MeshInputMode.entries.firstOrNull { it.name == name } }
+                ?: LdmuxConfig.DEFAULT.meshInputMode,
         )
     }
 
@@ -91,6 +98,7 @@ actual object AppPrefs {
             .putString(KEY_MESH_RADIO_NAME, config.meshRadioName)
             .putBoolean(KEY_MESH_OPEN_AIRTIME, config.meshOpenAirtime)
             .putBoolean(KEY_MESH_PUBLIC_CHANNEL, config.meshPublicChannel)
+            .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
             .apply()
     }
 }

@@ -24,24 +24,38 @@ to leave when *they* decide, and the screen to answer then. That is the whole mo
 
 ## Decision
 
-**One mode, with one standalone control. Forced on a public channel, optional on a private one.**
+**Two modes — `live` and `manual sync` — chosen in Settings beside the channel. Manual sync is
+forced on a public channel and optional on a private one.**
+
+An earlier revision put the switch in the terminal as a `hold input` / `leave` pair. That was wrong
+in two ways and both were fixed on 2026-11-05. A mode is a property of the *link*, so it belongs
+where the link is configured, next to the channel and the preset — a per-screen toggle made a
+connection-level decision look like a view setting, and a `leave` button next to the keys made
+leaving a mode look like leaving a shell. And in `live` mode there is nothing to hold and nothing to
+release, so the terminal draws no mode row at all: a sync button there would be a control for a mode
+that is not running. What remains in the terminal, in `manual sync` only, is the one control the mode
+needs, drawn in every state of that mode and dimmed where it cannot act.
+
+The rule is one derived value, `LdmuxConfig.meshHoldsInput`: true on a public channel whatever the
+user chose, and otherwise the user's choice. The terminal reads that and nothing else.
 
 Whether the channel is shared is *derived*, not asked: `isPublicChannel(preset)` compares the four
 fields that decide who hears whom (frequency, bandwidth, spreading factor, coding rate) against the
 region's public presets, and the radio dialog writes the answer into the config whenever it reads
 `SELF_INFO` or applies a preset. Unknown reads as public, because that is the safe reading of "not
-proved private". On a public channel the mode cannot be turned off — every keystroke there is a
-broadcast, so held input is the only supported way to type — and the bar says why instead of
-offering a toggle. On a private tuple the user may hold typing or not.
+proved private". On a public channel `live` cannot be chosen — every keystroke there is a
+broadcast, so held input is the only supported way to type — and the Settings row draws `live` dim
+with a line saying why, rather than removing it. On a private tuple the user chooses.
 
-- **The row is drawn in full in both states, and nothing in it comes and goes.** It used to
-  collapse to a lone `hold input` button while the mode was off, which removed the sync button in
-  exactly the state a user looking for sync is most likely to be in, and moved the one remaining
-  control from the left edge to the right when the mode came on. Off is a state of the row, not a
-  different row: the status reads `held input off`, and the sync button is drawn in `Dim` and is not
-  clickable, because there is nothing held to send. The same rule governs every control this screen
-  dims: a control that cannot act right now stays where it is and loses its contrast, because one
-  that vanishes reads as a feature that does not exist and moves the controls beside it.
+- **The mode is not switched from the terminal.** Changing it is Settings → `input`; the terminal's
+  row only releases what is held (`sync`, or `show` when nothing is held). There is no `leave`
+  button: leaving the mode is changing the setting, and a button that ended a mode sat next to the
+  keys, where it read like a way to leave the shell.
+- **Nothing in the row comes and goes.** It is drawn in every state of the mode it belongs to, with
+  the parts that cannot act dim rather than absent: while a send is out the button says `sending…`
+  and cannot be pressed, and the status says what is waited for. A control that cannot act right now
+  stays where it is and loses its contrast, because one that vanishes reads as a feature that does
+  not exist and moves the controls beside it.
 - **Portrait puts the row under the terminal, above the key pad; landscape puts it at the top of the
   side panel's scrolling area.** It used to sit at the panel's foot in landscape, which is the one
   place a thumb does not reach without scrolling first. The panel is 190 dp wide, so the row has two
@@ -88,9 +102,10 @@ offering a toggle. On a private tuple the user may hold typing or not.
   mode exists for — the answer is late rather than absent, and the first version cancelled both the
   wait and the drain, throwing away an answer that was still coming. The pull that draws the held
   screen is what ends the wait, because a paint is what ends a wait.
-- **Leaving the mode sends what is held.** Turning it off clears the gate, the queue drains, and the
-  view follows again — the bar says which it is (`send what is held and leave`). A mode that could
-  be left while silently dropping what you typed is worse than one that sends on the way out.
+- **Leaving the mode sends what is held.** Choosing `live` in Settings clears the gate, the queue
+  drains, and the view follows again. A mode that could be left while silently dropping what you
+  typed is worse than one that sends on the way out. (It is not a button in the terminal, from
+  2026-11-05; the behaviour of the transition is unchanged.)
 
 ### The local echo
 
@@ -200,8 +215,9 @@ because a control should name what it does.
   rotation's `Resize` also clears the screen but is not a switch, so it does not discard.
 - **The buffer is per connection.** Leaving the mesh terminal — to the shell list, to Settings, or
   by the app being killed — disposes the connection and the buffer with it. So does a link rebuild
-  after a radio drop, which is the same disposal by a different route. The bar's own leave action
-  sends first; the launcher button, a process death and a rebuild do not. A confirm-on-leave was not
+  after a radio drop, which is the same disposal by a different route. Choosing `live` in Settings
+  sends first (that is the "leaving the mode sends what is held" rule); the launcher button, a
+  process death and a rebuild do not. A confirm-on-leave was not
   added: the launcher is the escape hatch from this screen, and a modal on the way out of a terminal
   is a trap. Recorded here so the next session does not rediscover it as a bug.
 - **A shell that another device takes while text is held** answers the send with `NotLive`; the

@@ -77,6 +77,13 @@ fun AccentBtn(
 internal fun OptionButton(
     label: String,
     selected: Boolean,
+    /**
+     * False where the option exists but cannot be chosen right now (a public channel forces
+     * manual sync, so `live` is not available there). Drawn dim and inert rather than removed:
+     * an option that vanishes reads as one the app does not have, and the row's other option
+     * would move under the thumb.
+     */
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     Box(
@@ -89,14 +96,18 @@ internal fun OptionButton(
             // theme already names for "the outline of a control that is chosen".
             .background(if (selected) Line else Color.Transparent)
             .border(1.dp, if (selected) Chosen else Color.Transparent, RadiusMedium)
-            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
             .heightIn(min = LocalTouch.current.min)
             .padding(horizontal = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             label,
-            color = if (selected) Fg else Dim,
+            color = when {
+                !enabled -> Dim.copy(alpha = 0.45f)
+                selected -> Fg
+                else -> Dim
+            },
             fontSize = 12.sp,
             maxLines = 1,
             // An option label longer than the row used to end mid-character, which reads as a

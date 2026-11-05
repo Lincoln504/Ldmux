@@ -1,5 +1,6 @@
 package dev.ldmux.mobile
 
+import dev.ldmux.mobile.mesh.MeshInputMode
 import dev.ldmux.mobile.mesh.MeshRoute
 import dev.ldmux.mobile.mesh.MeshRouteProblem
 import dev.ldmux.mobile.mesh.MeshRouteResolution
@@ -95,7 +96,32 @@ data class LdmuxConfig(
      * "held until sync" costs a tap, while being wrong the other way costs a broadcast.
      */
     val meshPublicChannel: Boolean = true,
+    /**
+     * How typing leaves the phone on the mesh route: as it is typed, or when the user presses sync.
+     *
+     * **Two modes, chosen in Settings, not in the terminal.** The terminal used to carry the
+     * switch as a `hold input` / `leave` pair in its own row, which made a connection-level
+     * decision look like a per-screen toggle and put a "leave" button next to the keys. The mode
+     * is a property of the link, so it is set where the link is set, beside the channel.
+     *
+     * [MeshInputMode.Live] is the default: a private channel is the app's own radio talking to
+     * the app's own host, and a keystroke that waits for a button is a keystroke the user has to
+     * remember to release. [MeshInputMode.ManualSync] is the mode for a shared channel and for a
+     * link whose budget is the constraint.
+     */
+    val meshInputMode: MeshInputMode = MeshInputMode.Live,
 ) {
+
+    /**
+     * Whether typing is held until the user presses sync.
+     *
+     * A public channel forces it (ADR-0026): every keystroke there is a broadcast to everyone in
+     * range, so held input is the only supported way to type. On a private channel it is the
+     * user's choice. This is the one value the terminal reads, so the rule lives in one place
+     * rather than in a condition repeated at every call site.
+     */
+    val meshHoldsInput: Boolean
+        get() = meshPublicChannel || meshInputMode == MeshInputMode.ManualSync
 
     /**
      * Paired means there is somewhere to connect and something to connect with — and

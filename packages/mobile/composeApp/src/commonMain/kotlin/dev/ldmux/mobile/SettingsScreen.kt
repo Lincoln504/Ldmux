@@ -118,6 +118,9 @@ internal fun SettingsScreen(
                                     onRadioChannel = { public ->
                                         onSave(current.copy(meshPublicChannel = public))
                                     },
+                                    onInputMode = { mode ->
+                                        onSave(current.copy(meshInputMode = mode))
+                                    },
                                     onUnpairMesh = mesh.onUnpair,
                                 )
                             }
@@ -161,13 +164,16 @@ internal fun settingsGroups(hasMesh: Boolean): List<SettingsGroup> =
     if (hasMesh) listOf(SettingsGroup.Link, SettingsGroup.Pairing, SettingsGroup.Display)
     else listOf(SettingsGroup.Pairing, SettingsGroup.Display)
 
-/** A titled block: the small grey label above its rows, and nothing around it. */
+/**
+ * A titled block: the heading, a rule, then its rows.
+ *
+ * The rule is what makes a settings screen read as a menu rather than as a paragraph. Without it
+ * the headings were the same size and colour as the labels under them, so `link` and `route` read
+ * as two rows of the same list instead of a heading and its first row.
+ */
 @Composable
 private fun Section(title: String, content: @Composable () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad)) {
-        Text(title, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-        content()
-    }
+    SettingsSection(title, content)
 }
 
 /**
@@ -180,17 +186,21 @@ private fun Section(title: String, content: @Composable () -> Unit) {
  */
 @Composable
 private fun LinkChoice(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        OptionButton("tailnet", selected = current.route != MeshRoute.Mesh) {
-            if (current.route != MeshRoute.Tailnet) onSave(current.copy(route = MeshRoute.Tailnet))
+    Column {
+        SettingsRow("route") {
+            OptionButton("tailnet", selected = current.route != MeshRoute.Mesh) {
+                if (current.route != MeshRoute.Tailnet) onSave(current.copy(route = MeshRoute.Tailnet))
+            }
+            // `radio`, not `lora`: the word in the row's own consequence line and in every
+            // message the mesh route prints is "radio", and `lora` is the name of a modulation
+            // the user never chose.
+            OptionButton("radio", selected = current.route == MeshRoute.Mesh) {
+                if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh))
+            }
         }
-        // `radio`, not `lora`: the word in the row's own consequence line and in every
-        // message the mesh route prints is "radio", and `lora` is the name of a modulation
-        // the user never chose.
-        OptionButton("radio", selected = current.route == MeshRoute.Mesh) {
-            if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh))
-        }
-        Text(routeConsequence(current.route), color = Muted, fontSize = 11.sp)
+        // The consequence belongs under the value it explains, not beside the buttons: it used to
+        // sit on the same line, where it read as a third option.
+        SettingsNote(routeConsequence(current.route))
     }
 }
 
@@ -215,11 +225,8 @@ internal fun routeConsequence(route: MeshRoute): String =
  * different kinds of control.
  */
 @Composable
-private fun SettingRow(label: String, content: @Composable () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, color = Dim, fontSize = 12.sp)
-        content()
-    }
+private fun SettingRow(label: String, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
+    SettingsRow(label, content = content)
 }
 
 @Composable
@@ -253,8 +260,7 @@ private fun ControlSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
 
 @Composable
 private fun TextSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("text size", color = Dim, fontSize = 12.sp)
+    SettingsRow("text size") {
         // Disabled at the ends of the range rather than silently doing nothing: a live button
         // that produces no visible change looks broken and hides the reason.
         val smaller = current.fontSp > LdmuxConfig.MIN_FONT_SP
@@ -299,25 +305,17 @@ private fun PairingRow(
 ) {
     var problem by remember { mutableStateOf<String?>(null) }
     var confirmUnpair by remember(current.connectionKey) { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("tailnet", color = Dim, fontSize = 12.sp)
+    Column {
+        SettingsRow("tailnet") {
             if (current.isPaired) {
-                Text(
-                    current.pairedName,
-                    color = Fg,
-                    fontSize = 14.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+                SettingsValue(current.pairedName, Modifier.weight(1f))
                 MiniTextButton(onClick = {
                     if (confirmUnpair) onUnpair() else confirmUnpair = true
                 }) {
                     Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Danger else Dim)
                 }
             } else {
-                Text("unpaired", color = Muted, fontSize = 12.sp)
+                SettingsValue("unpaired", Modifier.weight(1f), color = Muted)
                 MiniTextButton(onClick = {
                     problem = null
                     CodeScanner.scan { result ->
@@ -336,8 +334,8 @@ private fun PairingRow(
         // else to lose, and a line that describes a consequence that does not exist is
         // noise on the one screen where the consequence is real.
         if (confirmUnpair && meshPresent) {
-            Text("this also forgets the mesh keys and the radio", color = Muted, fontSize = 11.sp)
+            SettingsNote("this also forgets the mesh keys and the radio")
         }
-        problem?.let { Text(it, color = Danger, fontSize = 11.sp) }
+        problem?.let { SettingsNote(it, color = Danger) }
     }
 }

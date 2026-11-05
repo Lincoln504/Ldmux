@@ -53,7 +53,10 @@ class MeshTermDriverTest {
             return queueOutcome
         }
         override fun receive(nowMs: Long, record: ByteArray) = nextReceive
+        /** Thrown from [poll] when set, the way a session whose keys have gone says so. */
+        var failPoll: MeshSessionException? = null
         override fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray> {
+            failPoll?.let { throw it }
             pollCalls += recordsLeft to l2Slots
             // A fake that honours the contract: never more than the budget or the window.
             val n = minOf(recordsLeft, l2Slots, queued.size - out)
@@ -716,6 +719,59 @@ class MeshTermDriverTest {
             listOf(TermMessage.Resize(30, 10)),
             resizes(d),
             "the request is retried rather than lost for the life of the page",
+        )
+    }
+
+    // ── the transport's word ends the connection ────────────────────────────────────────
+    //
+    // Every failure below used to set the view and *keep looping*, so `run` never returned and the
+    // screen's rebuild — the retry that cures a transient refusal — was never reached. That is the
+    // reported "the host is not connected or out of range", cured by one refresh and working in
+    // two seconds: the refresh built the connection the driver had stopped building.
+
+    @Test
+    fun `a radio that refuses the record ends the connection so it can be rebuilt`() = runBlocking<Unit> {
+        val d = driver()
+        live(d)
+        gw.outcome = MeshSendOutcome.ErrNotFound
+        d.input("x".toByteArray())
+        assertIs<MeshTermView.LinkDown>(d.view.value)
+        assertTrue(sess.freed, "the session is dropped, not kept over a transport that will not carry")
+        assertTrue(withTimeout(5_000) { d.run(); true }, "run returns, so the caller can rebuild")
+    }
+
+    @Test
+    fun `a session that throws while polling ends the connection`() = runBlocking<Unit> {
+        val d = driver()
+        live(d)
+        sess.failPoll = MeshSessionException(MeshLinkState.SessionFailed, -1, "gone")
+        d.tick()
+        assertIs<MeshTermView.LinkDown>(d.view.value)
+        assertTrue(withTimeout(5_000) { d.run(); true }, "run returns rather than ticking over a dead session")
+    }
+
+    @Test
+    fun `a handshake record that cannot be finished ends the connection`() = runBlocking<Unit> {
+        hs = FakeHandshake(sess, MeshSessionException(MeshLinkState.SessionFailed, -1, "bad msg2"))
+        val d = driver()
+        d.start()
+        d.onRecord(byteArrayOf(7))
+        assertIs<MeshTermView.LinkDown>(d.view.value)
+        assertTrue(withTimeout(5_000) { d.run(); true }, "run returns rather than retrying over the same transport")
+    }
+
+    @Test
+    fun `a list already in flight is not asked for again`() = runBlocking<Unit> {
+        val d = driver()
+        live(d)
+        val before = sess.messages().count { it is TermMessage.ListRequest }
+        d.listShells()
+        d.listShells()
+        d.listShells()
+        assertEquals(
+            1,
+            sess.messages().count { it is TermMessage.ListRequest } - before,
+            "the screen asks once per frame until the answer lands; each ask is a record",
         )
     }
 }

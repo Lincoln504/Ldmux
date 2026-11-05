@@ -1,18 +1,26 @@
 package dev.ldmux.mobile.mesh
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Fg
+import dev.ldmux.mobile.Muted
 
 /**
- * What the mesh screen says under the header when there is no list to draw: one sentence for what
- * is happening. Every state that is not a wait or a list lands here, so a dead link or a closed
- * shell is a sentence and not a black rectangle. The refresh square in the header is the retry for
- * all of them, so it is not repeated as a button.
+ * What the mesh screen says under the header when there is no list to draw.
+ *
+ * [line] is the short fact, always drawn. [detail] is the second sentence, in the muted colour:
+ * what the screen is doing about it, and only then what to check. The split is deliberate — a
+ * state the app is already recovering from is not an error, and drawing a three-clause diagnosis
+ * at full brightness made a reconnect that was working look like a broken link ("makes them feel
+ * like it's actually broken", 2026-11-05). The refresh square in the header is the retry for all
+ * of these, so it is not repeated as a button.
  */
-class MeshBody(val line: String)
+class MeshBody(val line: String, val detail: String? = null)
 
 /** Null for the states that draw something else: the waits (with their seconds) and the lists. */
 fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
@@ -35,19 +43,35 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
     is MeshTermView.LinkDown -> when (view.link) {
         MeshLinkState.NeedsRadio -> MeshBody("choose the radio in Settings")
         MeshLinkState.NeedsPermission -> MeshBody("Bluetooth permission is off for LDMUX")
-        MeshLinkState.NoPath -> MeshBody("the host's stored path is not usable for this record: refresh the host contact or move closer")
+        MeshLinkState.NoPath -> MeshBody(
+            "the host's stored path is not usable",
+            "the screen retries by itself; refresh to try now, or move closer to the host radio",
+        )
         MeshLinkState.Idle, MeshLinkState.Connecting, MeshLinkState.Bound ->
             MeshBody("connecting to the radio")
-        MeshLinkState.RadioUnavailable -> MeshBody("the radio is not connected: check that it is on and in range")
+        MeshLinkState.RadioUnavailable -> MeshBody(
+            "the radio is not connected",
+            "check that it is on and in range; this screen keeps retrying",
+        )
         // `Refused` comes from the radio's own error codes (not a contact, unsupported
         // command, busy), none of which is the L3 pin. Saying "check that the host is paired"
         // sent the user to the pairing screen for a radio problem.
-        MeshLinkState.Refused -> MeshBody("the radio refused the record: it is busy, or this radio is not a contact of the host's")
-        // Three causes, and only one of them is distance. A host that does not know this
-        // phone answers nothing at all — a pin mismatch ends before its half of the
-        // handshake — so "off or out of range" was the wrong half of the story.
-        MeshLinkState.SessionFailed -> MeshBody("the host did not answer: it is off or out of range, both radios are on different presets, or it does not know this phone. On the host: ldmux code --mesh")
-        MeshLinkState.Closed -> MeshBody("the link closed: refresh to connect again")
+        MeshLinkState.Refused -> MeshBody(
+            "the radio refused that record",
+            "that is usually a busy radio or a path that has not resolved yet; this screen retries by itself",
+        )
+        // **A dropped link is not a diagnosis.** Three causes are possible and only one is
+        // distance, so the old line asserted "it is off or out of range" on the first failed
+        // record — before the app had retried once. The short line says what happened; the detail
+        // says the screen is working on it, and lists what to check only if it never connects.
+        MeshLinkState.SessionFailed -> MeshBody(
+            "the link dropped",
+            "this screen keeps retrying by itself; refresh to try now. If it never connects: the host is off, both radios are on different presets, or this phone is not paired (on the host: ldmux code --mesh)",
+        )
+        MeshLinkState.Closed -> MeshBody(
+            "the link closed",
+            "refresh to connect again; the screen is already trying",
+        )
     }
 }
 
@@ -67,5 +91,10 @@ fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
 
 @Composable
 internal fun MeshBodyBlock(body: MeshBody, modifier: Modifier = Modifier) {
-    Text(body.line, color = Fg, fontSize = 13.sp, modifier = modifier)
+    Column(modifier) {
+        Text(body.line, color = Fg, fontSize = 13.sp)
+        body.detail?.let {
+            Text(it, color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
 }
