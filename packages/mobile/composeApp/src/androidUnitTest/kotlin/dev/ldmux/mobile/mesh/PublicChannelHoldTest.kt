@@ -65,20 +65,23 @@ class PublicChannelHoldTest {
     }
 
     @Test
-    fun `a wait nobody answers times out once, and the view can be drawn`() {
+    fun `a wait nobody answers reports, and keeps waiting`() {
+        // A congested channel answers slowly rather than never, so the deadline is a statement, not
+        // a cancellation: cancelling would throw away an answer that was still coming and stop a
+        // drain that was still making progress. The caller's pull ends the wait, because a paint is
+        // what ends a wait.
         val h = PublicChannelHold()
         h.set(true)
         h.sync(pending = true)
-        assertTrue(h.timedOut())
-        assertFalse(h.awaiting)
-        assertFalse(h.timedOut(), "one timeout per wait: a second would clear a later wait's clock")
-        // The mode is still on, so the next screen is kept again rather than drawn. The source
-        // draws what it already holds when the wait times out (`pullHeld`), which is what ends the
-        // freeze for this moment — not a second exemption here.
+        assertTrue(h.timedOut(), "the deadline says nothing has come")
+        assertTrue(h.awaiting, "a slow channel still owes an answer")
+        assertTrue(h.flushing, "and a drain in progress is not cancelled by a deadline either")
+        // The mode is still on, so the next screen is kept again rather than drawn.
         assertFalse(h.acceptScreen(painted = true))
         assertEquals(1, h.updates)
         h.painted()
         assertEquals(0, h.updates)
+        assertFalse(h.awaiting)
     }
 
     @Test
@@ -108,12 +111,11 @@ class PublicChannelHoldTest {
         assertFalse(h.awaiting, "but the wait for the answer is over")
         assertTrue(h.drained())
         assertFalse(h.flushing)
-        // A deadline does stop a drain: on a link that is not carrying records, continuing to try
-        // costs airtime for a send the user is about to be told may be down.
+        // A deadline does not stop a drain either: a slow link is still a link.
         h.sync(pending = true)
         assertTrue(h.timedOut())
-        assertFalse(h.flushing)
-        assertFalse(h.awaiting)
+        assertTrue(h.flushing)
+        assertTrue(h.awaiting)
     }
 
     @Test

@@ -68,9 +68,12 @@ offering a toggle. On a private tuple the user may hold typing or not.
   how stale the view is. `12 characters and 1 key, about 2
   records · view 3 behind`. The record count is the number the user cannot otherwise see and the
   one that matters: an `Input` record carries 96 bytes and the hour has about 58.
-- **A wait nobody answers ends.** Twenty seconds after a sync with no screen, the source draws the
-  newest held screen and says `no answer yet: the link may be busy or down`. Without that, a link
-  out of budget would leave a screen that looks live and is not.
+- **A wait nobody answers says so, without cancelling the wait.** Twenty seconds after a sync with
+  no screen, the source draws the newest held screen and says `no answer yet: the link may be busy
+  or down`. The deadline is a statement, not a cancellation: on a congested channel — the case this
+  mode exists for — the answer is late rather than absent, and the first version cancelled both the
+  wait and the drain, throwing away an answer that was still coming. The pull that draws the held
+  screen is what ends the wait, because a paint is what ends a wait.
 - **Leaving the mode sends what is held.** Turning it off clears the gate, the queue drains, and the
   view follows again — the bar says which it is (`send what is held and leave`). A mode that could
   be left while silently dropping what you typed is worse than one that sends on the way out.

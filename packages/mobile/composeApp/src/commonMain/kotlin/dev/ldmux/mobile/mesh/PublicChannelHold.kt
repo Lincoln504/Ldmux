@@ -140,15 +140,16 @@ internal class PublicChannelHold {
     /**
      * The wait's deadline passed with no answer. True means the newest held screen should be drawn.
      *
-     * It stops a drain as well as a wait, deliberately: a deadline that fires while the buffer is
-     * still full means the link is not carrying records, and continuing to try costs airtime for a
-     * send the user is about to be told may be down. What stays held stays visible in the bar, so
-     * nothing is silently dropped — the next press sends it.
+     * It **does not end the wait or the drain**, and that is a correction: the first version
+     * cancelled both. A congested channel — the very case this mode exists for — answers slowly
+     * rather than never, so a deadline that cancelled the wait threw away an answer that was still
+     * coming and stopped a drain that was still making progress. The deadline's output is a
+     * statement ("nothing yet"), and the caller's pull is what ends the wait, because a paint is
+     * what ends a wait ([painted]). What stays held stays visible in the bar, so nothing is silently
+     * dropped either way.
      */
     fun timedOut(): Boolean {
         if (!awaiting) return false
-        awaiting = false
-        flushing = false
         return true
     }
 }
