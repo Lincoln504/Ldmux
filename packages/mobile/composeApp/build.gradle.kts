@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -43,6 +44,35 @@ kotlin {
     }
 }
 
+// The signing inputs, read once. `keystore.properties` is the local form; the four
+// `LDMUX_KEYSTORE*` variables are the CI form. Absent is not an error for a debug build,
+// and it is not an error here either: the release task is the place that must fail.
+val keystoreProperties = Properties().apply {
+    val file = rootProject.file("keystore.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun signingValue(key: String, env: String): String? =
+    keystoreProperties.getProperty(key) ?: System.getenv(env)
+
+val releaseStorePath: String? = signingValue("storeFile", "LDMUX_KEYSTORE")
+val releaseStorePassword: String? = signingValue("storePassword", "LDMUX_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = signingValue("keyAlias", "LDMUX_KEY_ALIAS")
+val releaseKeyPassword: String? = signingValue("keyPassword", "LDMUX_KEY_PASSWORD")
+val releaseSigningAvailable: Boolean = listOf(
+    releaseStorePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
+/** The repository's commit count, or null when this is not a git checkout. */
+fun gitCommitCount(): Int? = runCatching {
+    val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+        .directory(rootProject.projectDir)
+        .redirectErrorStream(true)
+        .start()
+    val text = process.inputStream.bufferedReader().readText().trim()
+    if (process.waitFor() == 0) text.toIntOrNull() else null
+}.getOrNull()
+
 android {
     namespace = "dev.ldmux.mobile"
     // Compile against the latest released platform (37.2), but TARGET 36 and
@@ -60,17 +90,42 @@ android {
         applicationId = "dev.ldmux.mobile"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Monotonic without a human remembering: the commit count only goes up. Play
+        // rejects any upload whose versionCode it has already seen, so a literal 1 was
+        // a release that could be made exactly once. `LDMUX_VERSION_CODE` overrides it
+        // for a rebuild of an already-uploaded commit.
+        versionCode = (System.getenv("LDMUX_VERSION_CODE")?.toIntOrNull())
+            ?: gitCommitCount()
+            ?: 1
+        versionName = System.getenv("LDMUX_VERSION_NAME") ?: "0.1.0"
     }
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 
+    // **Release signing is never in the repository.** Four values come from
+    // `packages/mobile/keystore.properties` (gitignored) or from the environment, and a
+    // release bundle built without them is unsigned, which Play will not accept. The
+    // environment route is what CI uses, so the keystore can live in a secret rather than
+    // on a workstation.
+    signingConfigs {
+        if (releaseSigningAvailable) {
+            create("release") {
+                storeFile = file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            if (releaseSigningAvailable) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -117,4 +172,18 @@ val buildSessionAndroid = tasks.register<Exec>("buildSessionAndroid") {
 }
 tasks.matching { it.name.startsWith("merge") && it.name.contains("JniLib") }.configureEach {
     dependsOn(buildSessionAndroid)
+}
+
+// A release bundle with no signing config is not a release: Play rejects it, and the
+// failure is silent until the upload. Fail where the mistake is made instead.
+tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.configureEach {
+    doFirst {
+        if (!releaseSigningAvailable) {
+            throw GradleException(
+                "release signing is not configured: put storeFile/storePassword/keyAlias/keyPassword " +
+                    "in packages/mobile/keystore.properties, or set LDMUX_KEYSTORE, " +
+                    "LDMUX_KEYSTORE_PASSWORD, LDMUX_KEY_ALIAS and LDMUX_KEY_PASSWORD",
+            )
+        }
+    }
 }

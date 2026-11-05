@@ -133,10 +133,26 @@ fun LauncherScreen(
         routeNotice?.let { it(); Spacer(Modifier.height(LocalTouch.current.rowPad * 2)) }
 
         // ── one list ─────────────────────────────────────────────────────────
-        // Unpaired, there is no list and nothing to open: the header says
-        // `unpaired`, and pairing is in Settings. The app does not jump to a scanner
-        // by itself (ADR-0017).
-        if (link == LinkState.Unpaired) return@Column
+        // Unpaired, there is no list and nothing to open, and pairing is in Settings. The app
+        // does not jump to a scanner by itself (ADR-0017).
+        //
+        // It used to return here and draw nothing at all, which on a fresh install is a blank
+        // screen under a header reading `unpaired`: that reads as a broken app, not an unpaired
+        // one, and it is the first thing a stranger and a store reviewer both see. Two lines say
+        // what this is, what it needs, and the one action that helps.
+        if (link == LinkState.Unpaired) {
+            Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
+            Text("this phone is not paired with a host", color = Fg, fontSize = 13.sp)
+            Spacer(Modifier.height(LocalTouch.current.rowPad))
+            Text(
+                "ldmux runs on a Linux machine you own. On that machine run `ldmux code`, then " +
+                    "scan the code from Settings, under pairing. A phone with its own radio can " +
+                    "reach the same machine over the air instead.",
+                color = Dim,
+                fontSize = 11.sp,
+            )
+            return@Column
+        }
         run {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),

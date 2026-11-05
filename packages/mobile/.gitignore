@@ -13,3 +13,8 @@ composeApp/src/androidMain/jniLibs/
 
 # Host build of the engine + the compiled shim tests (scripts/test-native.sh).
 native/build/
+
+# Release signing: never commit the keystore or its passwords.
+keystore.properties
+*.jks
+*.keystore
