@@ -364,6 +364,25 @@ the only control offered. Also corrected: the vendored binding's doc comment cal
 `CMD_SET_ADVERT_LATLON` `0x0C`; the opcode table and the codec both say `0x0E` (0x0C is TX power).
 A comment-only defect, but it is the kind that sends the next reader to the wrong byte.
 
+### 2b.13 The app can be told the host's channel
+
+The chicken-and-egg of a two-radio mesh: the phone cannot learn the host's tuple over the link,
+because it needs to be on that tuple to reach the link. The dialog offered a region preset or a
+random private one — enough to *pick* a channel, and no way to *join* the one the host is already
+on. A host radio is configured once and stays put; the phone is the thing that must land on it.
+So the dialog now has a `custom` field: one line, four numbers, in the order the firmware prints them
+(`910.525 500 7 5`, units and commas accepted), with power and path width kept from the current
+selection because they are not part of "which channel". A text that does not parse disables `apply`
+rather than committing the previous selection — a control that changes a radio's frequency must not
+act on something other than what its field says. `parseRadioTuple` is a pure function with its own
+tests, including the round trip through `radioTupleText`.
+
+**The better fix needs three repos**: carrying the host's preset in the pairing code would remove
+the guess entirely. The gateway knows the preset and prints it, but its protocol does not expose it;
+so the code cannot carry it without a gateway change (in `meshcore_host`, a different repository).
+Until then, the operator reads the preset from the gateway's start-up line — or from this app, which
+now reads its own radio's tuple and can be typed into.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
@@ -381,7 +400,7 @@ JAVA_HOME=<jdk-21> ./gradlew --offline :composeApp:assembleDebug        # the AP
 `nix develop .#mobile`. Everything above was run; the unit suite passes and the APK assembles. **No
 device was involved**: nothing here is a claim about how the screens look or feel on a phone.
 
-The second pass ran the same three commands and the Kotlin suite (600 tests as of this writing, all
+The second pass ran the same three commands and the Kotlin suite (605 tests as of this writing, all
 passing), plus the native engine's own suite in `packages/mobile/scripts/test-native.sh` — 290 checks
 and 16 JNI checks — because the scroll investigation needed the engine's real behaviour rather than a
 reading of it (`LDMUX_VT_LIB_DIR` and `LDMUX_VT_INCLUDE_DIR` pointed at `native/prebuilt/host`, which

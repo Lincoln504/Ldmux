@@ -116,11 +116,13 @@ fun ModalActions(content: @Composable RowScope.() -> Unit) {
 /**
  * One line of text, in the app's own colours.
  *
- * A monospace field, because everything typed here is a path or a command and the
- * one thing both need is that the characters line up with what is on the host.
+ * A monospace field, because everything typed here is a path, a command or a radio tuple and the
+ * one thing all three need is that the characters line up with what is on the host. Public because
+ * the radio dialog's custom tuple is the second caller, and a second hand-drawn field would be a
+ * second look for the same thing.
  */
 @Composable
-private fun Field(
+fun Field(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,

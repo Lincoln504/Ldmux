@@ -26,6 +26,7 @@ import dev.ldmux.mobile.Accent
 import dev.ldmux.mobile.AccentBtn
 import dev.ldmux.mobile.Danger
 import dev.ldmux.mobile.Dim
+import dev.ldmux.mobile.Field
 import dev.ldmux.mobile.Fg
 import dev.ldmux.mobile.MiniTextButton
 import dev.ldmux.mobile.ModalActions
@@ -133,6 +134,13 @@ internal fun RadioPresetDialog(
     var original by remember { mutableStateOf<RadioPreset?>(null) }
     var seeded by remember { mutableStateOf(false) }
     var showPublic by remember { mutableStateOf(false) }
+    // The host's tuple cannot be discovered by this phone before the two radios are on the same
+    // channel — that is the chicken and egg — so the app has to be able to be *told* it. The
+    // region presets and "randomise" cover "pick a channel"; this covers "join the channel the host
+    // is already on", which is the case a user actually hits: the host radio is configured once and
+    // stays put, and the phone must land on it.
+    var custom by remember { mutableStateOf(false) }
+    var customText by remember { mutableStateOf("") }
     val fallbackState = remember { MutableStateFlow(MeshLinkState.NeedsRadio) }
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
     val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
@@ -151,6 +159,11 @@ internal fun RadioPresetDialog(
             pathHashSize = (device?.pathHashMode ?: 0) + 1,
         )
     }
+
+    // What the custom field currently parses to. Null when it does not parse, which is also what
+    // disables "apply": applying the previous selection because the text was malformed would be a
+    // silent surprise on a control that changes the radio's frequency.
+    val typed = if (custom && customText.isNotBlank()) parseRadioTuple(customText, selected) else null
 
     LaunchedEffect(address) {
         if (address.isEmpty()) {
@@ -272,6 +285,31 @@ internal fun RadioPresetDialog(
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                 )
+                if (custom) {
+                    // One line, four numbers, in the order the radio prints them: MHz, kHz, SF, CR.
+                    // The host's own preset appears in the gateway's start-up line; typing it here is
+                    // how the phone's board joins the channel the host is already on. Power and path
+                    // width stay as they are, because they are not part of "which channel".
+                    Field(
+                        value = customText,
+                        onValueChange = { text ->
+                            customText = text
+                            parseRadioTuple(text, selected)?.let { choose(it) }
+                        },
+                        placeholder = "910.525 500 7 5",
+                    )
+                    Text(
+                        if (customText.isBlank()) {
+                            "MHz kHz SF CR — the host's radio prints its preset when its gateway starts"
+                        } else if (typed == null) {
+                            "not a tuple: four numbers, 137-1020 MHz, 62.5-500 kHz, SF5-12, CR5-8"
+                        } else {
+                            "the tuple the host's radio is on"
+                        },
+                        color = if (customText.isNotBlank() && typed == null) Warn else Dim,
+                        fontSize = 11.sp,
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     MiniTextButton(onClick = {
                         seed += 1
@@ -286,6 +324,11 @@ internal fun RadioPresetDialog(
                             applyNow(o)
                         },
                     ) { Text("restore", color = Accent, fontSize = 11.sp, maxLines = 1) }
+                    // The way to join the host's channel instead of proposing a new one.
+                    MiniTextButton(onClick = {
+                        custom = !custom
+                        if (custom) customText = radioTupleText(selected)
+                    }) { Text(if (custom) "hide custom" else "custom", color = Accent, fontSize = 11.sp, maxLines = 1) }
                     // No ellipsis: it expands this card rather than opening another one,
                     // and `…` is the promise of a new surface everywhere else in the app.
                     MiniTextButton(onClick = { showPublic = !showPublic }) {
@@ -330,7 +373,10 @@ internal fun RadioPresetDialog(
             OutlinedBtn("close", Modifier.weight(1f), onClick = onDismiss)
             // Disabled exactly where a tap cannot work: the radio has not answered
             // `SELF_INFO` yet, or it is not bound. The tuple line above says which.
-            val canApply = link != null && !busy && seeded && state == MeshLinkState.Bound
+            // A custom tuple that does not parse must not leave "apply" live: it would commit the
+            // previous selection, which is not what the text says.
+            val customOk = !custom || customText.isBlank() || typed != null
+            val canApply = link != null && !busy && seeded && state == MeshLinkState.Bound && customOk
             AccentBtn(
                 label = if (busy) "applying…" else "apply",
                 modifier = Modifier.weight(1f),

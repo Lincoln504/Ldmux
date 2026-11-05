@@ -160,6 +160,50 @@ fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) 
  *
  * The path-hash width is excluded because it is a per-node stamping choice, not a channel.
  */
+/**
+ * A tuple as the radio prints it: `MHz kHz SF CR`, in that order, separated by spaces or commas.
+ *
+ * The order is the firmware's own (`preset  910.525 MHz / 500.0 kHz / SF7 / CR5`), because the one
+ * place a user reads a tuple is a radio's own output — the host's gateway start-up line, a MeshCore
+ * serial console, `info` in another app. Reordering it for the app's convenience would mean copying
+ * four numbers in a different order than the screen they came from, which is how a frequency ends
+ * up in the bandwidth field.
+ *
+ * [base] supplies the two fields that are not part of "which channel": the transmit power and the
+ * path-hash width. A tuple that parses changes the channel and leaves those alone.
+ *
+ * Returns null for anything that is not four numbers in range. Deliberately strict: the caller is
+ * about to change a radio's frequency, and "close enough" is a radio that hears nobody.
+ */
+fun parseRadioTuple(text: String, base: RadioPreset): RadioPreset? {
+    val parts = text.split(' ', ',', '/', '\t')
+        .map { it.trim() }
+        // The firmware's line carries units; "910.525" and "910.525MHz" are the same number to a
+        // person reading it, and only the number matters. A token that is *only* a unit ("MHz" after
+        // a comma) is dropped rather than read as a number.
+        .map { it.removeSuffix("MHz").removeSuffix("kHz") }
+        .filter { it.isNotEmpty() }
+    if (parts.size != 4) return null
+    val mhz = parts[0].toDoubleOrNull() ?: return null
+    val khz = parts[1].toDoubleOrNull() ?: return null
+    val sf = parts[2].removePrefix("SF").removePrefix("sf").toIntOrNull() ?: return null
+    val cr = parts[3].removePrefix("CR").removePrefix("cr").toIntOrNull() ?: return null
+    if (mhz < 137.0 || mhz > 1020.0) return null
+    if (khz < 62.5 || khz > 500.0) return null
+    if (sf < 5 || sf > 12) return null
+    if (cr < 5 || cr > 8) return null
+    return base.copy(
+        frequencyMhz = mhz,
+        bandwidthKhz = khz,
+        spreadingFactor = sf,
+        codingRate = cr,
+    )
+}
+
+/** [preset] as the radio prints it, so the custom field opens on what it would change. */
+fun radioTupleText(preset: RadioPreset): String =
+    "${preset.frequencyMhz} ${preset.bandwidthKhz} ${preset.spreadingFactor} ${preset.codingRate}"
+
 fun isPublicChannel(preset: RadioPreset): Boolean = RadioRegion.entries.any { r ->
     publicPresets(r).any {
         val p = it.preset
