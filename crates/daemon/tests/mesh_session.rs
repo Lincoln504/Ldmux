@@ -152,6 +152,7 @@ async fn world(tag: &str, left: u8) -> World {
     let runtime = MeshRuntime::start_with_session(
         MeshConfig {
             addr,
+            serial: None,
             token: TOKEN,
             peer: PEER,
         },
@@ -358,6 +359,7 @@ async fn without_a_psk_downlink_records_are_dropped_visibly_as_before() {
     tokio::spawn(gateway(listener, seen, to_daemon, Arc::new(Mutex::new(9))));
     let runtime = MeshRuntime::start(MeshConfig {
         addr,
+        serial: None,
         token: TOKEN,
         peer: PEER,
     });

@@ -13,7 +13,14 @@
 
 ## S1
 
-### 1. The host reaches its radio only through MeshMore's Dart gateway — OPEN
+### 1. The host reaches its radio only through MeshMore's Dart gateway — FIXED in code, UNVERIFIED on hardware (2026-11-05)
+
+- Now: `LDMUX_MESH_SERIAL=<device>` makes the daemon own the radio through `crates/companion`
+  (serial framing, `APP_START`, `DEVICE_QUERY` at protocol 3, `0x41` raw send, `0x88` receive),
+  served on a dedicated thread behind the `Carrier` trait in `crates/mesh`. No gateway process, no
+  socket, no token, no Dart. The gateway remains as the alternative carrier for one release.
+- Unverified: no hardware pass has been run on the serial carrier yet; the unit and scripted-carrier
+  tests are the only evidence. Marked fixed-in-code rather than closed.
 
 - PROVEN. `ldmuxd` opens a loopback TCP connection to a process in another repository, which owns
   the USB serial port (`crates/daemon/src/mesh.rs`, connect and the write loop).

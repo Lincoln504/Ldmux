@@ -35,6 +35,7 @@ pub mod fake_keeper;
 pub mod keeper_supervisor;
 pub mod mesh;
 pub mod mesh_bridge;
+pub mod mesh_serial;
 pub mod mesh_session;
 pub mod ownership;
 pub mod pairing;

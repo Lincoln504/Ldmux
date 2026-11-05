@@ -101,6 +101,7 @@ async fn wait_for(runtime: &MeshRuntime, mut condition: impl FnMut(&MeshRuntime)
 fn config(addr: String) -> MeshConfig {
     MeshConfig {
         addr,
+        serial: None,
         token: TOKEN,
         peer: PEER,
     }

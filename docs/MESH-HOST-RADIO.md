@@ -12,12 +12,15 @@ screen and no packaging.
 | Piece | Lives in | Its job |
 |---|---|---|
 | Firmware | MeshCore (a fork with the USB-serial companion environment) | the radio's own stack: MeshCore routing, the companion protocol, the LoRa preset |
-| Gateway | MeshMore `packages/meshcore_host` (Dart) — **a different repository** | owns the USB serial port, speaks the companion protocol, exposes the L2 contract `ldmux-mesh` on loopback |
-| Daemon | `crates/daemon` (`LDMUX_MESH_*`) | dials the gateway, runs the L3 session, carries the terminal |
+| Serial carrier | `crates/companion` (in this repository) | owns the USB serial port, speaks the companion protocol, hands records to the daemon — **selected by `LDMUX_MESH_SERIAL`** |
+| Gateway (alternative) | MeshMore `packages/meshcore_host` (Dart) — **a different repository** | owns the same port and exposes the L2 contract on loopback; still supported for one release, and no longer required |
+| Daemon | `crates/daemon` (`LDMUX_MESH_*`) | runs the L3 session on whichever carrier, carries the terminal |
 | Phone | `packages/mobile` | owns the other radio over BLE, runs the same L3 session through `libldmux_session.so` |
 
-The daemon owns no radio and knows nothing about presets, paths or contacts. Everything about the
-air stays on the gateway's side of the socket.
+With `LDMUX_MESH_SERIAL=/dev/serial/by-id/...` the daemon drives the radio itself and **no gateway
+runs at all** (2026-11-05). Without it, the gateway path is unchanged: the daemon dials loopback and
+learns nothing about presets, paths or contacts. The serial path reads one thing from the radio —
+the preset it reports — and derives its airtime budget from it.
 
 ## The steps, in the order that works
 

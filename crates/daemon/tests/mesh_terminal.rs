@@ -145,6 +145,7 @@ async fn world(tag: &str, left: u8) -> World {
     let runtime = MeshRuntime::start_with_session(
         MeshConfig {
             addr,
+            serial: None,
             token: TOKEN,
             peer: PEER,
         },

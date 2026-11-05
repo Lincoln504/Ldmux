@@ -18,11 +18,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod carrier;
 pub mod client;
 pub mod constants;
 pub mod frame;
 pub mod messages;
 
+pub use carrier::{Bound, Carrier, Event, GatewayCarrier};
 pub use client::{Handshake, MeshClient};
 pub use constants::{
     BindError, CAP_RECV_CREDIT, CAP_STATUS_PUSH, CREDIT_WINDOW, CloseReason, DISCOVERY_RECORD_MAX,
