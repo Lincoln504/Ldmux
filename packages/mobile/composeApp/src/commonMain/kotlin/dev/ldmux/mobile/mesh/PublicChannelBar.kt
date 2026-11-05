@@ -15,7 +15,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -111,7 +113,18 @@ internal fun PublicChannelBar(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("public channel", color = Fg, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-            Text(status, color = if (awaiting || flushing) Warn else Muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            // **A live region, because the status is the feature.** "sending…" then "waiting for the
+            // answer" then "2 characters" is the only place the mode says what it is doing, and it
+            // changes without the user touching the control that caused it — so a screen reader
+            // would otherwise read the bar once and never say that the send finished or that the
+            // answer arrived. Polite: it waits for the current utterance rather than interrupting.
+            Text(
+                status,
+                color = if (awaiting || flushing) Warn else Muted,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             // The standalone sync button. Filled, because it is the thing to press; disabled only

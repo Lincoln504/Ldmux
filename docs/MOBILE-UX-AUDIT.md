@@ -333,6 +333,20 @@ record count divided by 96 where the sender backs off to a character boundary, s
 was occasionally 3. The ADR's "no fake can outlive the next truth" was an overclaim — while frozen,
 nothing paints — and is now "the next paint".
 
+### 2b.11 Two more on the sync bar
+
+- **The radio's channel is now read from the radio.** The classification was written only by the
+  settings radio dialog, so an install that never opened it ran on the cautious default — public —
+  and was *forced* into held typing while the bar asserted "the radio is on a public channel", which
+  on a private tuple is false. Forcing a mode on a guess is the exact symptom ADR-0026 warned about.
+  The link reads `SELF_INFO` as part of its own handshake, so the terminal screen hears the answer
+  and saves it; `connectionKey` excludes the field, so saving does not rebuild the connection. A
+  radio that turns out private does not turn the mode off by itself — leaving stays the user's call.
+- **The sync bar's status is a polite live region.** "sending…" → "waiting for the answer" → "2
+  characters" is the only place the mode says what it is doing, and it changes without the user
+  touching the control that caused it, so a reader would otherwise hear it once and never learn the
+  send finished. A polite region waits for the current utterance rather than interrupting.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
