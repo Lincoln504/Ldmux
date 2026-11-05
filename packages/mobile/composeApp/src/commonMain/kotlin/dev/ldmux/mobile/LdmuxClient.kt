@@ -547,9 +547,15 @@ class LdmuxClient(private var config: LdmuxConfig) {
                             delay(CLIENT_PING_INTERVAL_MS)
                             if (missed.beat()) {
                                 appLog("launcher link silent; reporting unreachable")
-                                // Reported, not cancelled: see AttachClient's heartbeat for why
-                                // neither a close nor a cancel can be relied on here.
+                                // Reported, then the socket is dropped. Reporting alone left the
+                                // read loop parked in `for (frame in incoming)` below, so `loop()`
+                                // never reached its retry: on a stable network with a silently dead
+                                // path (NAT expiry, a hung daemon, a blackholed tailnet route) the
+                                // launcher said "unreachable" and never tried again. Dropping is what
+                                // the network-change probe already does for the same reason.
                                 _link.value = LinkState.Unreachable
+                                _connected.value = false
+                                dropSocket()
                                 break
                             }
                             runCatching {
@@ -570,6 +576,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                             if (pongCount == before) {
                                 appLog("launcher link silent after a network change; reporting unreachable")
                                 _link.value = LinkState.Unreachable
+                                _connected.value = false
                                 dropSocket()
                             }
                         }

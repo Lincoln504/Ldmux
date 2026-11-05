@@ -714,9 +714,22 @@ class MeshTermDriver(
         return s.send(SHELL, m.encode())
     }
 
+    /**
+     * How long a resync may stay unanswered before the request is made again.
+     *
+     * `resyncing` is cleared by a full screen or by a reset, so an answer that is
+     * lost while the session stays healthy left the status line saying "resyncing
+     * the screen" indefinitely, and nothing asked again. The ARQ owns delivery, so
+     * this re-asks the request; it does not start a second optical resync.
+     */
+    private val resyncRetryMs = 4_000L
+    private var resyncAskedAt = Long.MIN_VALUE
+
     private fun requestResync() {
-        if (resyncing) return
+        val now = clock()
+        if (resyncing && now - resyncAskedAt < resyncRetryMs) return
         resyncing = true
+        resyncAskedAt = now
         queue(TermMessage.Resync)
     }
 
