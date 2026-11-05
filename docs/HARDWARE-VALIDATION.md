@@ -153,6 +153,65 @@ find the socket, pass the same `LDMUX_STATE_DIR`/`LDMUX_SOCK` it was started wit
 One board, one radio: the host chain proves L2 and the L3 host being ready, not an over-the-air
 session. That needs a second radio on the phone side.
 
+## 2b. Public-channel mode: what to plug in, and what to look at
+
+Written 2026-11-04, after the sync mode's state machine was audited and six defects were fixed.
+Nothing in this section has been run on a device; it is the checklist for the next session that
+has one.
+
+### What has to be plugged in
+
+| # | Piece | Detail |
+|---|---|---|
+| 1 | **Phone** over ADB, USB debugging on | `adb devices -l` must list it. The APK is `packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk`. |
+| 2 | **Two radios**, not one | The phone's board on the BLE image (`heltec_v4_companion_radio_ble`), the host's on the USB image (`heltec_v4_companion_radio_usb`). One board cannot prove an over-the-air session. |
+| 3 | **Both on the same preset** | The app sets the phone's (Settings → radio → preset); the host's is set by `meshcore_host/tool/configure_radio.dart`. If they differ in frequency, bandwidth, SF or CR they cannot hear each other, and the failure looks like "the host did not answer". |
+| 4 | **Host radio key** | `dart run tool/hardware_smoke.dart /dev/ttyACM0` prints it (64 hex) → `LDMUX_MESH_SELF`. |
+| 5 | **Phone radio key** | `LDMUX_MESH_PEER` on the host. It is the key the phone prints in its own mesh settings once its radio is up. |
+| 6 | **PSK** | 64 hex, both sides: `LDMUX_MESH_PSK` on the host, carried in the `ldmux code --mesh` QR for the phone. |
+| 7 | **A pairing code printed *after* the host is configured** | `ldmux code --mesh` clears the pinned phone key — it is a grant, not a read. Re-print it whenever the phone's key changed. |
+
+Commands (host, after both processes are up):
+
+```
+export LDMUX_STATE_DIR=/tmp/ldmux-live LDMUX_SOCK=/tmp/ldmux-live/ldmuxd.sock
+./target/debug/ldmux mesh status          # radio key must print; without it the code is unusable
+./target/debug/ldmux code --mesh          # scan this in the phone's Settings → code
+```
+
+### The checklist, in the order the defects bite
+
+Each row is a thing to do and what proves it worked. The first four are the ones that were broken
+and fixed; they are also the ones a device would have caught and the tests could not.
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Open the mesh terminal on a radio whose tuple is **private** (a random preset, not a regional public one) | The bar does **not** say "the radio is on a public channel" — the classification now arrives from the link's own `SELF_INFO`, not from the settings dialog. Before this change it said "public" on a private tuple unless the dialog had been opened. |
+| 2 | Switch the radio to a **public** preset (Settings → radio → a regional preset), return to the terminal | The bar says "the radio is on a public channel" and offers no way out. |
+| 3 | Type two lines, press Enter, press `sync` once | **Both** lines leave. The bug sent only the first record's worth (~96 bytes) and parked the rest with nothing in flight. Watch the host's `mesh status` record count rise by the full amount. |
+| 4 | Type 200+ characters and press sync | The bar says "sending…" until the buffer empties, then "waiting for the answer", then the shell's answer appears. It must not say "nothing held" while text is still held. |
+| 5 | Type while the answer is on its way | The text stays held (bar counts it) and is not sent. The echo stays drawn faintly — it used to be erased by the answer's repaint while the bar still counted it. |
+| 6 | Press sync, and while "sending…" the host's output arrives | The view stays frozen until the send finishes, then draws the answer. |
+| 7 | Let a sync go unanswered for 20 s (radio off or out of range) | "no answer yet: the link may be busy or down" stays up for ~4 s. It used to be erased in the same frame it was written. |
+| 8 | Press sync, wait 15 s, press sync again | The deadline restarts: the message comes ~20 s after the second press, not 5 s. |
+| 9 | Hold text, then switch shells (launcher → another shell → open) | "held text discarded: the shell changed", and the new shell receives nothing. |
+| 10 | Hold text and rotate the phone | Nothing is discarded; the text stays held and echoed. |
+| 11 | Hold text, scroll back into history, then scroll to the bottom | No echo is drawn while parked in history; the echo comes back at the bottom. |
+| 12 | Hold text on a full-screen program (`vim`, `top`) | No echo at all (it would be a fake written into somebody else's drawing); the bar still counts it. |
+| 13 | Watch a long build while frozen, sync, then scroll back | The rows that passed during the freeze are in scrollback. They used to be dropped. |
+| 14 | Leave the mode with text held (private tuple) | The text sends and the view follows again. |
+| 15 | Switch to the launcher mid-hold and come back | The text is gone: the buffer belongs to the connection. Documented, not a bug. |
+
+### What to watch while doing it
+
+```
+adb logcat -s ldmux:V AndroidRuntime:E
+./target/debug/ldmux mesh status --json     # records, budget, handshakes, last bind
+```
+
+No device run can prove a *protocol* claim, so each row above is a UI claim. The protocol's own
+claims stay in `docs/MESH-TRANSPORT.md` and `docs/MESH-LATENCY.md`.
+
 ## 3. Restore the BLE image (so the phone app works again)
 
 ```
