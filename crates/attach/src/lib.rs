@@ -663,6 +663,14 @@ where
     // The daemon clamps to the same range, so the window's own idea of its grid has to be
     // the clamped one: comparing a raw 300-row tty against a 255-row pane is a disagreement
     // that no resize can ever settle, and the re-assert below would retry it for ever.
+    // **The signal handler comes first.** A window that opens under a window manager is placed
+    // (and therefore resized) while this process is still starting, and a SIGWINCH delivered
+    // before the handler exists is simply ignored — the default disposition for that signal is
+    // to do nothing. Registering it before the size is read means a placement resize is queued
+    // for the loop below rather than lost.
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
+            .map_err(|e| e.to_string())?;
     let (mut cols, mut rows) = {
         // One read: calling `tty_size` twice can straddle a resize between the two fields.
         let (c, r) = tty_size();
@@ -696,9 +704,6 @@ where
     }
     send(&mut sink, &first_attach(session_id, cols, rows)).await?;
 
-    let mut sigwinch =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-            .map_err(|e| e.to_string())?;
     let mut inbuf = [0u8; 4096];
     // A multi-byte character can straddle two reads (a large paste): decoding
     // each read alone turned both halves into U+FFFD in the user's shell.
@@ -729,6 +734,25 @@ where
                             Some("snapshot") => {
                                 detached = false;
                                 let snap = Snapshot::from_json(&v);
+                                // **Measure the window now rather than trusting the size cached
+                                // at startup.** That size is a reading taken before the window
+                                // manager had necessarily finished placing the window, and it is
+                                // also the fallback `80x24` when `TIOCGWINSZ` fails on a pty whose
+                                // size has not been set yet. Either way the pane was resized to
+                                // the wrong grid by the attach that carried it, so the snapshot
+                                // *agrees* with the stale value and no later mismatch reveals it.
+                                // The reported symptom was exactly that: a window opened at the
+                                // wrong size that only a manual resize cured, because that resize
+                                // is the first SIGWINCH the loop ever sees. One ioctl per snapshot
+                                // is cheaper than a repaint and cannot disagree with the window.
+                                let (wc, wr) = {
+                                    let (c, r) = tty_size();
+                                    ldmux_protocol::clamp_pane_size(c, r)
+                                };
+                                if (wc, wr) != (cols, rows) {
+                                    cols = wc;
+                                    rows = wr;
+                                }
                                 // **The pane is shared, and a window keeps its own
                                 // size.** Another device that attached and resized
                                 // (then left) leaves the pty at its grid, and this
@@ -925,7 +949,13 @@ where
                 // was a stream of repaints of widths nobody ever saw. Waiting out the gesture
                 // costs the resize one beat and sends the size the drag ended on.
                 tokio::time::sleep(RESIZE_SETTLE).await;
-                let (c, r) = ldmux_protocol::clamp_pane_size(tty_size().0, tty_size().1);
+                // One read, for the same reason the startup read is one: two calls can
+                // straddle a resize and produce a width from one window and a height from the
+                // next, which is a grid neither window ever had.
+                let (c, r) = {
+                    let (c, r) = tty_size();
+                    ldmux_protocol::clamp_pane_size(c, r)
+                };
                 if (c, r) != (cols, rows) {
                     cols = c;
                     rows = r;

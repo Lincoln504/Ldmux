@@ -24,6 +24,26 @@ fn keeper_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-keeper")
 }
 
+/// The attach binary, which lives in another crate so `CARGO_BIN_EXE_` cannot name it.
+///
+/// The window needs a **real pty**: the client measures its terminal's size from fd 0, and a
+/// test process's stdin is the harness's, not a terminal. Cargo does not necessarily build
+/// another member's binary for `-p ldmux-daemon`, so a missing one skips the test out loud
+/// rather than failing on the build schedule.
+fn child_keeper(keeper: &mut std::process::Child) -> std::io::Result<()> {
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    Ok(())
+}
+
+fn attach_bin() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ldmux-attach");
+    p.exists().then_some(p)
+}
+
 /// The port the daemon's remote actually bound.
 ///
 /// The tests ask for port 0 — any free port the kernel has — so two test
@@ -651,4 +671,129 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
         .output();
     let _ = keeper.wait();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A desk window opens at the size of the window it is drawn in.**
+///
+/// The reported fault: a window opened at the wrong grid and only a manual resize cured it. The
+/// client reads its terminal's size once at startup and sends it with the attach, so the first
+/// snapshot already matches the pane — which means a wrong reading at startup is never corrected
+/// by the mismatch check afterwards. This test gives the client a pty of exactly 100x30 and asks
+/// the shell inside the pane what size it has: `stty size` must say `30 100`.
+#[cfg(unix)]
+// **Multi-threaded, because this test blocks.** The pty is read with `std::fs` and the deadline
+// is `std::thread::sleep`; on the default single-threaded runtime that stalls the daemon itself,
+// which then never accepts the window and the test fails with an empty screen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_opens_at_the_size_of_the_terminal_it_is_drawn_in() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+    let mut keeper = std::process::Command::new(keeper_bin())
+        .arg(keeper_sock.to_string_lossy().as_ref())
+        .spawn()
+        .unwrap();
+    wait_socket(&keeper_sock).await;
+
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin())
+        .with_remote("127.0.0.1".to_string(), 0, "size-token".to_string());
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+    let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+    let id = arc
+        .lock()
+        .await
+        .create_session("shell", &cwd, None, "local")
+        .await
+        .unwrap()
+        .id;
+
+    // The window: a pty of exactly 100x30, which is what the client will read.
+    let size = nix::pty::Winsize {
+        ws_row: 30,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let Some(attach_bin) = attach_bin() else {
+        eprintln!("skipping: target/debug/ldmux-attach is not built; run `cargo build -p ldmux-attach`");
+        arc.lock().await.stop();
+        let _ = child_keeper(&mut keeper);
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let pty = nix::pty::openpty(Some(&size), None).unwrap();
+    let slave = std::fs::File::from(pty.slave);
+    let slave_out = slave.try_clone().unwrap();
+    let mut child = std::process::Command::new(attach_bin)
+        .arg(&id)
+        .env("LDMUX_STATE_DIR", &dir)
+        .stdin(std::process::Stdio::from(slave))
+        .stdout(std::process::Stdio::from(slave_out))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut master = std::fs::File::from(pty.master);
+    // Non-blocking reads inside a deadline, so a client that never answers fails the test
+    // rather than hanging it.
+    nix::fcntl::fcntl(master.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK))
+        .unwrap();
+
+    // Wait for the first screen, then ask the shell what size it thinks it has.
+    let mut seen = String::new();
+    let mut asked = false;
+    let mut buf = [0u8; 8192];
+    let mut status = None;
+    for _ in 0..400 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if let Ok(Some(st)) = child.try_wait() {
+            status = Some(st);
+            break;
+        }
+        match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+        if !asked && !seen.is_empty() {
+            master.write_all(b"stty size\n").unwrap();
+            asked = true;
+        }
+        if seen.contains("30 100") {
+            break;
+        }
+    }
+    let ok = seen.contains("30 100");
+    let _ = child.kill();
+    let err = child
+        .stderr
+        .take()
+        .and_then(|mut e| {
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut e, &mut s).ok().map(|_| s)
+        })
+        .unwrap_or_default();
+    let _ = child.wait();
+    if !ok {
+        eprintln!("attach exit: {:?} stderr: {err}", status);
+    }
+    arc.lock().await.stop();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        ok,
+        "the pane must be the window's own grid (30 100); terminal said {:?}",
+        seen.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()
+    );
 }

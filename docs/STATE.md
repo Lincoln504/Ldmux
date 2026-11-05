@@ -100,6 +100,13 @@ What exists, 2026-10-28:
   `53 sent` against `5 bytes received` in one session, so phone → host records were not arriving
   while host → phone ones were. The layout and grid defects in that section were measured against a
   link that stayed up for minutes at a time, and none of them are radio defects.
+- **A desk window could open at the wrong grid and stay there** (fixed 2026-11-05). The attach
+  client cached its terminal size once, and the daemon resized the pty to that value before the
+  snapshot, so a wrong reading was self-confirming: nothing later could see it. It now measures the
+  window on every snapshot, registers `SIGWINCH` before the attach, and reads the size once per
+  resize. See `docs/DESKTOP-RESIZE.md`. The new test is
+  `crates/daemon/tests/attach_client.rs::a_window_opens_at_the_size_of_the_terminal_it_is_drawn_in`;
+  the lost-signal race itself is not reproduced by a test.
 - **The host gateway's deafness rule rebooted a healthy idle radio every two minutes** until
   2026-11-04. `radioLooksDeaf` judged a port by "opened N minutes ago and heard nothing off the air",
   which is also what a link with nothing to say looks like; the daemon sends no records while the

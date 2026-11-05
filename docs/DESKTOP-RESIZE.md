@@ -54,3 +54,35 @@ reporting `40 620` inside the shell, where the same probe reported `40 500` befo
 
 The keeper is a long-lived process and clamps on its own, so a host that has not restarted the
 keeper and the daemon still has the old ceiling.
+
+## A window that opened at the wrong grid (fixed 2026-11-05)
+
+Reported: a desk window opened normally paints a terminal that does not match the window it is in,
+and only resizing the window makes the text fit. Two defects in `crates/attach/src/lib.rs` together
+produce exactly that, and neither is visible once the window is open, which is why it read as a
+start-up problem that fixed itself "sometimes".
+
+1. **The cached size was never re-measured.** The client reads its tty size once, sends it with the
+   attach, and from then on compares the *cached* value with each snapshot. The daemon resizes the
+   pty to that value before the snapshot, so the snapshot **agrees** with it — whatever it was. A
+   wrong reading at start-up (a window the manager had not finished placing, or `TIOCGWINSZ`
+   returning zero on a pty whose size is not set yet, which falls back to 80x24) is therefore baked
+   in for the life of the window, and the re-assert below it can never see it. The fix measures the
+   window on every snapshot: one ioctl, which cannot disagree with the window.
+2. **The SIGWINCH handler was registered after the attach was sent.** A window manager places a
+   window (and therefore resizes it) while the client is starting. A `SIGWINCH` delivered before the
+   handler exists is ignored — its default disposition is to do nothing — so a placement resize in
+   that gap was lost with no trace. The handler is now registered before the size is read.
+3. **Two ioctls per resize.** The `SIGWINCH` branch called `tty_size()` twice, so a resize between
+   the two calls produced a width from one window and a height from the next: a grid neither window
+   ever had. One call now.
+
+Checked with a new test in `crates/daemon/tests/attach_client.rs`,
+`a_window_opens_at_the_size_of_the_terminal_it_is_drawn_in`: the attach binary runs on a real pty of
+100x30 against a real daemon and keeper, `stty size` is typed into the pane, and the answer must be
+`30 100`. It pins the opening path — a window whose size is known before it starts ends at exactly
+that grid. **The lost-signal race itself is not reproduced by a test.** It needs a resize inside the
+space between the attach write and the handler registration, which a test can only reach by luck,
+and a timing-dependent test here would fail on the schedule of the machine rather than on the code.
+What the test does prove is that the pane follows the window's measured size rather than a value
+invented on the way, which is the part that made a wrong reading permanent.
