@@ -1054,7 +1054,7 @@ mod key_name_tests {
     fn every_name_modifiers_kt_can_produce_is_known() {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/mobile/composeApp/src/commonMain/kotlin/dev/ldmux/mobile/Modifiers.kt"
+            "/../../packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/Modifiers.kt"
         ))
         .expect("Modifiers.kt");
         // NAMED_KEYS: the quoted strings between `setOf(` and `)`.

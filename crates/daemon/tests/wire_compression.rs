@@ -183,10 +183,18 @@ async fn compression_cuts_the_wire_cost_of_every_real_workload() {
     println!();
 
     let get = |rows: &Vec<(&'static str, Cost)>, n: &str| rows.iter().find(|r| r.0 == n).unwrap().1;
-    // The ratio floors: well under the measured, far over 1.
+    // The ratio floors: under the measured, far over 1.
+    //
+    // `seq 1 100` is 1.5, not 2.0, because its ratio depends on how many messages the
+    // 100-line burst is batched into: three plain messages against two compressed ones
+    // measures 1.78x, while a run that batches into two and two measures over 2x. Both are
+    // correct behaviour and which one happens depends on timing, so a 2.0 floor failed on a
+    // loaded machine and passed on an idle one. With the extension off the ratio is 1.0 and
+    // with a per-message dictionary it is also ~1.0, so 1.5 still catches exactly what this
+    // test exists to catch.
     for (name, floor) in [
         ("ls -la", 3.0),
-        ("seq 1 100", 2.0),
+        ("seq 1 100", 1.5),
         ("ls -laR (8000 lines)", 5.0),
         ("yes flood (4 MB)", 100.0),
         ("attach snapshot", 2.5),
