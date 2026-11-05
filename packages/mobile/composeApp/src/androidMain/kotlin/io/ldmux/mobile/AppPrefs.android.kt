@@ -1,6 +1,7 @@
 package io.ldmux.mobile
 
 import android.content.Context
+import io.ldmux.mobile.mesh.KeystoreBlob
 import io.ldmux.mobile.mesh.MeshInputMode
 import io.ldmux.mobile.mesh.meshRouteFromStored
 
@@ -10,10 +11,12 @@ import io.ldmux.mobile.mesh.meshRouteFromStored
  * Its own file: it lived inside the 900-line terminal surface, where nothing about
  * it belonged.
  *
- * The token is stored the way it always was, in the app's private preferences
- * (`allowBackup="false"`, so it is not copied off the device by a backup). It is
- * the same secret `ldmux code` shows on screen; a hardware-backed keystore would
- * guard it from a rooted device, and is the next step if that matters.
+ * The token is **encrypted at rest** with the same mechanism the mesh keys already used: one
+ * AES-256-GCM blob under a non-exportable Android Keystore key, ciphertext only in this file.
+ * It used to be plain text here, which made the strongest credential in the app the weakest
+ * stored secret — `MODE_PRIVATE` and `allowBackup="false"` stop other apps and the cloud, not a
+ * rooted device or `adb run-as` on a debuggable build. A token written by an older build is
+ * read once, re-encrypted, and removed from the plaintext key.
  */
 object AndroidApp {
     lateinit var context: Context
@@ -34,7 +37,8 @@ actual fun deviceLabel(): String = android.os.Build.MODEL.ifEmpty { "phone" }
 actual object AppPrefs {
     private const val FILE = "ldmux"
     private const val KEY_HOST = "host"
-    private const val KEY_TOKEN = "token"
+    private const val KEY_TOKEN = "token" // legacy plaintext; migrated on first load
+    private const val KEY_TOKEN_BLOB = "tailnet_token"
     private const val KEY_PAIR_NAME = "pair_name"
     private const val KEY_SIDE = "side"
     private const val KEY_FONT = "font_sp"
@@ -61,7 +65,7 @@ actual object AppPrefs {
             ?: deviceLabel().also { sp.edit().putString(KEY_DEVICE_LABEL, it).apply() }
         return LdmuxConfig(
             host = storedHost(sp.getString(KEY_HOST, null)),
-            token = sp.getString(KEY_TOKEN, null) ?: "",
+            token = loadToken(sp),
             pairName = sp.getString(KEY_PAIR_NAME, null) ?: "",
             side = sp.getString(KEY_SIDE, null) ?: LdmuxConfig.DEFAULT.side,
             fontSp = sp.getFloat(KEY_FONT, LdmuxConfig.DEFAULT_FONT_SP)
@@ -82,11 +86,24 @@ actual object AppPrefs {
         )
     }
 
+    /** The token, from the Keystore blob, migrating a plaintext one from an older build. */
+    private fun loadToken(sp: android.content.SharedPreferences): String {
+        tokenBlob.load()?.let { return String(it, Charsets.UTF_8) }
+        val legacy = sp.getString(KEY_TOKEN, null) ?: return ""
+        if (legacy.isEmpty()) return ""
+        // Keep the plaintext until the encrypted copy is actually written: a Keystore that
+        // refuses would otherwise lose the pairing on the next launch.
+        val stored = runCatching { tokenBlob.save(legacy.toByteArray(Charsets.UTF_8)) }.isSuccess
+        if (stored) sp.edit().remove(KEY_TOKEN).apply()
+        return legacy
+    }
+
+    private val tokenBlob by lazy { KeystoreBlob(AndroidApp.context, KEY_TOKEN_BLOB, FILE) }
+
     actual fun save(config: LdmuxConfig) {
         AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_HOST, config.host)
-            .putString(KEY_TOKEN, config.token)
             .putString(KEY_PAIR_NAME, config.pairName)
             .putString(KEY_SIDE, config.side)
             .putFloat(KEY_FONT, config.fontSp)
@@ -100,5 +117,17 @@ actual object AppPrefs {
             .putBoolean(KEY_MESH_PUBLIC_CHANNEL, config.meshPublicChannel)
             .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
             .apply()
+        // Encrypt BEFORE dropping the plaintext. If the Keystore refuses — a restored backup, a
+        // reset keystore — keeping the old plaintext key is the difference between a pairing that
+        // still works and one the user has to redo. The plaintext is removed only on success.
+        val encrypted = runCatching {
+            tokenBlob.save(config.token.toByteArray(Charsets.UTF_8))
+        }.isSuccess
+        if (encrypted) {
+            AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_TOKEN)
+                .apply()
+        }
     }
 }

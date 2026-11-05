@@ -20,7 +20,7 @@
 
 #include "ldmux_terminal.h"
 
-#define JNI(name) Java_dev_ldmux_mobile_term_NativeTerminal_##name
+#define JNI(name) Java_io_ldmux_mobile_term_NativeTerminal_##name
 
 JNIEXPORT jlong JNICALL JNI(create)(JNIEnv *, jclass, jint, jint);
 JNIEXPORT void JNICALL JNI(destroy)(JNIEnv *, jclass, jlong);

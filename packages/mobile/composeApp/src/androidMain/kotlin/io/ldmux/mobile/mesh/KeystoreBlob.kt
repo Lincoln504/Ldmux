@@ -20,7 +20,11 @@ import javax.crypto.spec.GCMParameterSpec
  * outstanding. Any failure to decrypt (restored backup, reset keystore, lost key) is null from
  * [load], the honest "needs pairing" state.
  */
-internal class KeystoreBlob(private val context: Context, private val prefsKey: String) {
+internal class KeystoreBlob(
+    private val context: Context,
+    private val prefsKey: String,
+    private val file: String = FILE,
+) {
     fun load(): ByteArray? = try {
         val raw = prefs().getString(prefsKey, null) ?: return null
         val blob = Base64.decode(raw, Base64.NO_WRAP)
@@ -43,7 +47,7 @@ internal class KeystoreBlob(private val context: Context, private val prefsKey: 
         prefs().edit().remove(prefsKey).apply()
     }
 
-    private fun prefs() = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+    private fun prefs() = context.getSharedPreferences(file, Context.MODE_PRIVATE)
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

@@ -16,7 +16,7 @@
 
 #include "ldmux_session.h"
 
-#define JNI(name) Java_dev_ldmux_mobile_mesh_NativeMeshSession_##name
+#define JNI(name) Java_io_ldmux_mobile_mesh_NativeMeshSession_##name
 
 /* Largest array accepted from Java in one call. A delivered chunk and a record are both
  * under 172 bytes; send() is the only large one. */

@@ -46,21 +46,21 @@ static uint16_t clamp_dim(jint v) {
 #define LDMUX_JNI_CHUNK 16384
 
 JNIEXPORT jlong JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_create(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_create(JNIEnv *env, jclass cls,
                                                  jint cols, jint rows) {
   (void)env; (void)cls;
   return (jlong)(intptr_t)ldmux_terminal_new(clamp_dim(cols), clamp_dim(rows));
 }
 
 JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_destroy(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_destroy(JNIEnv *env, jclass cls,
                                                   jlong handle) {
   (void)env; (void)cls;
   ldmux_terminal_free(handle_of(handle));
 }
 
 JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_write(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_write(JNIEnv *env, jclass cls,
                                                 jlong handle, jbyteArray data,
                                                 jint len) {
   (void)cls;
@@ -83,7 +83,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_write(JNIEnv *env, jclass cls,
 }
 
 JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_resize(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_resize(JNIEnv *env, jclass cls,
                                                  jlong handle, jint cols,
                                                  jint rows) {
   (void)env; (void)cls;
@@ -91,14 +91,14 @@ Java_dev_ldmux_mobile_term_NativeTerminal_resize(JNIEnv *env, jclass cls,
 }
 
 JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_scroll(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_scroll(JNIEnv *env, jclass cls,
                                                  jlong handle, jint delta) {
   (void)env; (void)cls;
   ldmux_terminal_scroll(handle_of(handle), (int32_t)delta);
 }
 
 JNIEXPORT jbyteArray JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
                                                  jlong handle) {
   (void)cls;
   const uint8_t *buf = NULL;
@@ -120,7 +120,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_render(JNIEnv *env, jclass cls,
  * which is what NULL means.
  */
 JNIEXPORT jbyteArray JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
                                                         jlong handle) {
   (void)cls;
   const uint8_t *buf = NULL;
@@ -147,7 +147,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_takeClipboard(JNIEnv *env, jclass cls,
  * and anything outside the BMP would come back mangled.
  */
 JNIEXPORT void JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_setGeometry(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_setGeometry(JNIEnv *env, jclass cls,
                                                       jlong handle, jint columns,
                                                       jint cell_w, jint cell_h,
                                                       jint pad_left,
@@ -159,21 +159,21 @@ Java_dev_ldmux_mobile_term_NativeTerminal_setGeometry(JNIEnv *env, jclass cls,
 }
 
 JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionClear(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_selectionClear(JNIEnv *env, jclass cls,
                                                           jlong handle) {
   (void)env; (void)cls;
   return ldmux_terminal_select_clear(handle_of(handle)) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionSelectAll(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_selectionSelectAll(JNIEnv *env, jclass cls,
                                                               jlong handle) {
   (void)env; (void)cls;
   return ldmux_terminal_select_all(handle_of(handle)) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jbyteArray JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionText(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_selectionText(JNIEnv *env, jclass cls,
                                                         jlong handle) {
   (void)cls;
   size_t len = 0;
@@ -186,7 +186,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionText(JNIEnv *env, jclass cls,
 }
 
 JNIEXPORT jboolean JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionSet(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_selectionSet(JNIEnv *env, jclass cls,
                                                        jlong handle, jint startCol,
                                                        jint startRow, jint endCol,
                                                        jint endRow) {
@@ -207,7 +207,7 @@ Java_dev_ldmux_mobile_term_NativeTerminal_selectionSet(JNIEnv *env, jclass cls,
  * calls could interleave them with a frame and draw a handle in the wrong place.
  */
 JNIEXPORT jintArray JNICALL
-Java_dev_ldmux_mobile_term_NativeTerminal_selectionBounds(JNIEnv *env, jclass cls,
+Java_io_ldmux_mobile_term_NativeTerminal_selectionBounds(JNIEnv *env, jclass cls,
                                                           jlong handle) {
   (void)cls;
   int sc = 0, sr = 0, ec = 0, er = 0;
