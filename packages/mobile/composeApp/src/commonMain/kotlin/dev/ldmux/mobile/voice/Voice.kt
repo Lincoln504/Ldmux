@@ -81,43 +81,6 @@ expect object Dictation {
     fun stop()
 }
 
-/** The one line voice mode shows for [phase], or null when it has nothing to say (off). */
-internal fun voicePhaseLine(phase: VoicePhase): String? = when (phase) {
-    VoicePhase.Idle -> null
-    VoicePhase.Listening -> "voice \u00b7 listening"
-    VoicePhase.Capturing -> "voice \u00b7 hearing you"
-    VoicePhase.Submitting -> "voice \u00b7 sending"
-    VoicePhase.Thinking -> "voice \u00b7 waiting for the agent"
-    VoicePhase.Speaking -> "voice \u00b7 speaking"
-    VoicePhase.Interrupted -> "voice \u00b7 interrupted"
-    is VoicePhase.Denied -> when (phase.why) {
-        VoiceDenial.Permission -> "voice \u00b7 microphone permission denied"
-        VoiceDenial.NotHolder -> "voice \u00b7 another device holds this shell, so it cannot be spoken into"
-    }
-    VoicePhase.Unavailable -> "voice \u00b7 no on-device speech recognition"
-    is VoicePhase.Failed -> "voice \u00b7 ${phase.reason}"
-}
-
-/** Voice mode's own banner: its phase, and the last notice the machine raised. */
-@Composable
-internal fun VoicePhaseBanner(phase: VoicePhase, notice: String?, modifier: Modifier) {
-    val line = voicePhaseLine(phase) ?: notice ?: return
-    val bad = phase is VoicePhase.Denied || phase == VoicePhase.Unavailable || phase is VoicePhase.Failed
-    Box(
-        modifier
-            .padding(8.dp)
-            .background(Surface)
-            .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
-    ) {
-        Text(
-            if (voicePhaseLine(phase) != null && notice != null) "$line \u00b7 $notice" else line,
-            color = if (bad) Color(0xFFFF6B6B) else Accent,
-            fontSize = 12.sp,
-            fontFamily = MonoFont,
-        )
-    }
-}
-
 /** What the microphone is doing, drawn over the terminal it will type into. */
 @Composable
 internal fun VoiceBanner(state: VoiceState, modifier: Modifier) {

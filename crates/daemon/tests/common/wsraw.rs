@@ -271,7 +271,12 @@ impl RawWs {
         quiet: std::time::Duration,
     ) {
         let mut seen = needle.is_empty() || String::from_utf8_lossy(out).contains(needle);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // Two minutes, not one. The suite runs several binaries at once, each of which
+        // spawns a daemon and keepers, and on a loaded machine this test needs about
+        // 66 s to see its marker: with a 60 s budget it failed under the pool and passed
+        // alone, which reads as a code defect and is not one. The assertion below is
+        // about ordering, not about speed, so the budget should be generous.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let wait = if seen {
                 quiet

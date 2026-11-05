@@ -148,12 +148,6 @@ internal fun SidePanel(
     handles: Map<String, TerminalHandle>,
     onKill: (Session) -> Unit = {},
     onVoice: () -> Unit,
-    voiceOn: Boolean = false,
-    // Null where there is no speech channel to run a voice mode over (the mesh link carries
-    // none): the button is then **drawn dim and inert** rather than removed. A key row whose
-    // members come and go moves the keys beside it, and a control that vanishes reads as "this
-    // app does not do that" — where the truth is "this link does not".
-    onVoiceMode: (() -> Unit)? = {},
     /**
      * Drawn first in the panel's scrolling area: the mesh route's mode row. It belongs at the top,
      * beside the reading area it governs, rather than at the panel's foot — a control the user
@@ -223,15 +217,6 @@ internal fun SidePanel(
                     val text = clipboard.getText()?.text
                     if (!text.isNullOrEmpty()) handle?.paste(text)
                 }
-                // Voice mode: hands-free, bound to this shell. Not the same control as the mic,
-                // which is one dictation: this one keeps listening and speaks the agent's reply.
-                // Drawn even where the link carries no speech channel: dim, and it does nothing.
-                KeyBtn(
-                    "voice",
-                    Modifier.weight(1f),
-                    active = voiceOn,
-                    enabled = onVoiceMode != null,
-                ) { onVoiceMode?.invoke() }
                 IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
             }
             PanelDivider()

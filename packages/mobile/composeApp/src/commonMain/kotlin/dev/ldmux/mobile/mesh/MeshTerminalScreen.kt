@@ -624,9 +624,6 @@ fun MeshTerminalScreen(
                     onVoice = {
                         Dictation.toggle(onText = { source.sendText(it) }, onState = { voice = it })
                     },
-                    // No speech channel crosses this link, so there is no voice mode to run.
-                    // Drawn dim rather than removed: the key row keeps its shape either way.
-                    onVoiceMode = null,
                     onLauncher = { openList() },
                     press = handle::sendKey,
                     shownId = shownId,

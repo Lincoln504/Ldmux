@@ -76,18 +76,6 @@ class TerminalController(
      */
     override var onClipboardRequest: ((ClipboardRequest) -> Unit)? = null
 
-    /**
-     * Where something the agent wants said goes, from either producer: the daemon's typed
-     * `speech` message and a private OSC sequence in the byte stream (`docs/VOICE-MODE.md`
-     * section 3.5). Both arrive here, so a listener sees one stream of events and never which
-     * channel carried them.
-     */
-    private val speech = dev.ldmux.mobile.voice.SpeechIntake()
-
-    override fun setSpeechListener(listener: ((dev.ldmux.mobile.voice.SpeechEvent) -> Unit)?) {
-        speech.listener = listener
-    }
-
     /** Server-reported terminal modes (affects input encoding later). */
     var modes by mutableStateOf(TerminalModes())
         private set
@@ -227,7 +215,6 @@ class TerminalController(
             _ownedBy.value = null
             _ended.value = true
         }
-        attach.onSpeech = { speech.deliver(it) }
         attach.onSessions = { owners ->
             // The holder let go (`owner: null`, or it is us): the shell is free and
             // this page can attach again. Without this the notice was final until
@@ -289,8 +276,6 @@ class TerminalController(
      * survives.
      */
     private fun applySnapshot(cols: Int, rows: Int, screen: String, history: Boolean, m: TerminalModes) {
-        // A sequence half-read before a rebuild must not complete against the new picture.
-        speech.resetParser()
         // A snapshot is the truth: any outstanding prediction is settled by it (this is
         // also the recovery path after a mispredict).
         predictor.reset()
@@ -415,9 +400,6 @@ class TerminalController(
      * nothing to show for it, and it would be a path nobody thought to check.
      */
     private fun feed(bytes: ByteArray, length: Int = bytes.size) {
-        // Observe, never remove: the engine ignores OSC 1338 (see `SpeechOscParser`), so the
-        // same bytes still go to it. Only parsed when someone is listening.
-        speech.feedBytes(bytes, length)
         engine.write(bytes, length)
         // Read the clipboard slot only when someone can take it. The read both
         // answers and *consumes*, so draining it with no handler installed would

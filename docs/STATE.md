@@ -137,12 +137,12 @@ What exists, 2026-10-28:
 
 ## Voice mode
 
-Built and unit-tested 2026-10-29; `docs/VOICE-MODE.md` section 15 is the table. Daemon relay and CLI
-(4 integration tests), the phone's two parsers behind `SpeechIntake`, `VoiceMode`/`VoiceDriver`/
-`VoiceController`, a VAD with barge-in capture, the Android speaker, microphone loop and capture,
-a landscape side-panel toggle, and the pi extension (11 node tests plus a live harness against a
-real pi 1.4.0). Mobile suite 589 pass. **Not done:** iOS, any run on a device, a UI control for
-cloud recognition and barge-in (both off), and a portrait entry point.
+**Withdrawn 2026-11-05.** It was a pi extension (`packages/pi-voice-extension`) and the only
+producer of the daemon's `speech` RPC; the phone chain behind it (`SpeechIntake`, `VoiceMode`,
+`VoiceDriver`, `VoiceController`, the VAD and the speaker) had no other source and was therefore
+unreachable without it. ldmux is a shell app, so the extension, the RPC, the phone module, its
+tests and `docs/VOICE-MODE.md` are gone and ADR-0024 is withdrawn rather than amended. Dictation —
+the phone's own speech-to-text for typing into a shell — is unaffected and stays.
 
 ## What is deployed
 
@@ -205,11 +205,8 @@ Product and mobile:
   Compose renderer hardening: cursor blink, zoom). Detail in `docs/archive/STATE.md` §5.
   The session-switching failures (scroll/tap/selection doing nothing after a switch)
   are fixed; see `docs/MOBILE-STATE-AUDIT.md`.
-- **Live voice mode** (hands-free conversation with a coding agent): built and unit-tested,
-  not run on a device (see the "Voice mode" section above and `docs/VOICE-MODE.md` section 15).
-  *CORRECTION 2026-10-29: this bullet used to read "planned only ... Nothing implemented; it
-  needs an ADR and an amendment to ADR-0009 before any code." The ADRs are 0024 (voice
-  extension, amending ADR-0009) and the code exists.*
+- **Live voice mode**: withdrawn 2026-11-05 with ADR-0024. It was a pi extension and had no
+  producer in a shell app; see the "Voice mode" section above.
 - **Multi-client pane geometry** (confirmed on a device 2026-10-06): the phone set a
   session's shared pane to 48x17 while the desk window's own tty was 158x82, so the
   desk window rendered thin. One pane has one size, so two clients of different sizes

@@ -163,7 +163,12 @@ def main() -> int:
     # machine (measured: 37 s at twelve, 31 s at six) and leaves nothing for the
     # editor the developer is iterating in.
     cores = os.cpu_count() or 4
-    jobs = jobs or int(os.environ.get("LDMUX_TEST_JOBS") or 0) or max(4, cores // 2)
+    # A quarter of the cores, not half. At six jobs on a twelve-core machine two tests
+    # fail intermittently and both pass alone: the daemon flood test needs ~66 s against
+    # a 60 s wait (now 120 s), and a keeper cursor test loses a race. Two consecutive
+    # runs at four jobs were green; the suite is a gate, so it is sized for correctness
+    # rather than for the shortest wall time.
+    jobs = jobs or int(os.environ.get("LDMUX_TEST_JOBS") or 0) or max(4, cores // 4)
     binaries, build_s = build(cargo_flags)
     if not binaries:
         print("test-parallel: nothing to run", file=sys.stderr)

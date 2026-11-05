@@ -667,12 +667,9 @@ capabilities {scrollback}}`, `snapshot {…state fields…, history?, resync?}`,
 messages it always got. `inplaceResync` — a stale picture is repaired with `caps` +
 `snapshot{resync:true}` on the same socket. `sessionEnded` — the end of a session is a
 `session_ended` message (and a just-ended session can be attached for its final screen).
-`speechChannel` — the client is in (or can enter) voice mode and wants `speech` messages:
-`{"type":"speech","sessionId","id","text","final","seq"}`, sent to every connection
-viewing that session and advertising this feature, never to one that did not. `seq` rises per
-session and is the ordering. Produced by the daemon RPC `speech` (`{sessionId, text, id?,
-final?}`, text 1 to 4096 bytes) and `ldmux speak`; the daemon relays and holds no speech state
-(`docs/VOICE-MODE.md`).
+`speechChannel` and its `speech` message **were withdrawn on 2026-11-05** with ADR-0024: the
+only producer was a pi extension, which a shell app does not have. The feature name is not
+advertised and the message is not sent.
 Writes (`input`, `key`, `mouseclick`) need a `hello` and the holding device
 (`hello_required`, `not_holder`); `new`, `kill`, `close`, `makelive`, `closelive` need a
 `hello`; delivery failures are `input_failed`, `kill_failed`, `close_failed`.
@@ -1198,7 +1195,7 @@ tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing)
 | **ADR-0022** | **The terminal answers its own queries:** the keeper's emulator answers DA/DSR, DECRQM, XTVERSION, kitty-keyboard and window-size queries so they never reach the client, and modified Enter uses the Kitty keyboard protocol (`CSI 13;2u` for `Shift+Enter`). |
 | **ADR-0023** | **The L3 session's crypto dependencies:** `snow` (Noise `IKpsk2_25519_ChaChaPoly_SHA256`) plus `hmac`, `sha2` and `zeroize` in `crates/session` only, with `default-features = false` so the C-backed `ring` stays out. No hand-rolled cryptography. |
 | **ADR-0025** | **The mesh terminal profile:** inside the L3 session the host sends the keeper's screen as plain-text rows, then only changed rows, in messages of at most 133 bytes (one record each); the phone paints on commit; scrollback, colour, hyperlinks, mouse, images, resize and clipboard are declared unsupported in `Profile`. Host side built; phone side not. |
-| **ADR-0024** | **A pi extension returns, for voice only:** a pi-side extension publishes the assistant's spoken summary to the daemon over `LDMUX_SOCKET`; it registers no sessions. Amends the no-extension half of ADR-0009 for voice alone. |
+| **ADR-0024** | ~~A pi extension returns, for voice only.~~ **Withdrawn 2026-11-05:** ldmux is a shell app; the extension, the `speech` RPC and the phone chain are deleted. |
 
 ADR-0006 to ADR-0015 (divergences, native engine, UI modes, the Node runtime,
 exclusive ownership, orientation, background/sleep, cross-platform seams, text

@@ -1,6 +1,17 @@
 # ADR-0024: A pi extension returns, for voice only
 
-**Status:** Accepted (2026-10-28). Amends the "no pi extension" half of ADR-0009.
+**Status:** Withdrawn (2026-11-05). Supersedes its own acceptance of 2026-10-28.
+
+**Why it was withdrawn.** ldmux is a shell app. This decision existed to let a pi extension
+publish what an assistant said aloud, and that extension was the **only** producer of the
+daemon's `speech` RPC; remove it and the phone side (`SpeechIntake`, `VoiceMode`, `VoiceDriver`,
+`VoiceController`, the VAD, the speaker and the side-panel control) had no source at all, so a
+whole chain of code was unreachable and a 511-line design document and a second language in the
+product had to be evaluated by anyone reviewing a release. Withdrawn, not amended: the
+extension, the RPC, the phone module, its tests and `docs/VOICE-MODE.md` are deleted. The
+product keeps one microphone — Dictation, the phone's own speech-to-text for typing into a
+shell — which is an input affordance and was never part of this decision. The text below is the
+record of what was decided and is kept unedited.
 
 **Update 2026-10-29.** The extension has now been observed inside a real pi 1.4.0 (RPC mode, an isolated
 agent directory, a stub model and a stub daemon socket): load, `/voice on` persisted and restored,
