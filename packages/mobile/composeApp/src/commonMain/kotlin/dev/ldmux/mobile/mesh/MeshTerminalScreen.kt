@@ -56,6 +56,8 @@ import dev.ldmux.mobile.LocalTouch
 import dev.ldmux.mobile.TerminalSurfaceFor
 import dev.ldmux.mobile.AppHeader
 import dev.ldmux.mobile.ChoiceRow
+import dev.ldmux.mobile.HoldOrientation
+import dev.ldmux.mobile.OrientationPolicy
 import dev.ldmux.mobile.OpenBar
 import dev.ldmux.mobile.openLabel
 import dev.ldmux.mobile.PortraitBar
@@ -77,6 +79,16 @@ import kotlinx.coroutines.launch
  * exists for. Longer than this and a person is sitting on a screen that looks live and is not.
  */
 internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
+
+/**
+ * How long a link may be down before this route leaves the held screen for the shell list.
+ *
+ * Longer than the tailnet's [dev.ldmux.mobile.LINK_FAILURE_GRACE_MS] on purpose: the tailnet's
+ * eight seconds is a socket's tolerance, while this route's own verdicts are slower — the driver
+ * calls a session dead after twenty seconds of silence and retries its first handshake at eight —
+ * so eight seconds would abandon a rebuild that is working. See the effect that uses it.
+ */
+internal const val MESH_FAILURE_GRACE_MS = 30_000L
 
 /**
  * The mesh route's terminal. It is the **same chrome as the tailnet terminal**: the shared
@@ -333,7 +345,10 @@ fun MeshTerminalScreen(
     LaunchedEffect(source.syncSeq) {
         if (source.syncSeq == 0) return@LaunchedEffect
         delay(SYNC_ANSWER_TIMEOUT_MS)
-        if (source.syncTimedOut()) syncNotice = "no answer yet: the link may be busy or down"
+        // Reports through the bar's own status line ("no answer yet: the link may be busy or down")
+        // rather than a notice over the terminal: the row is where the mode speaks, and the answer
+        // that arrives late is still drawn when it arrives.
+        source.syncTimedOut()
     }
     // **Held text belongs to one shell.** A switch clears the screen, and the buffer would go to the
     // shell the user switched *to* — text typed for one shell, sent into another, without a press
@@ -343,9 +358,15 @@ fun MeshTerminalScreen(
     var heldFor by remember(conn) { mutableStateOf(shells.current) }
     LaunchedEffect(shells.current) {
         val now = shells.current ?: return@LaunchedEffect
-        if (heldFor != null && heldFor != now && handle.hasPending) {
-            handle.discardHeld()
-            syncNotice = "held text discarded: the shell changed"
+        if (heldFor != null && heldFor != now) {
+            if (handle.hasPending) {
+                handle.discardHeld()
+                syncNotice = "held text discarded: the shell changed"
+            }
+            // One shell's rows are never under another's name: the engine and its scrollback go
+            // when the shell does. Here rather than on `ProfileMissing`, which a rotation also
+            // produces — see the note beside `toShow`.
+            source.clear()
         }
         heldFor = now
     }
@@ -449,7 +470,18 @@ fun MeshTerminalScreen(
     // 2026-10-31) and the one escape hatch from a dead link looked disabled. A retry is cheap and
     // idempotent, so the button stays live.
     // Back is the launcher button, as on the tailnet route: the same call, not a second way.
-    BackToLauncher(enabled = terminalLive && !showList) { openList() }
+    // **Enabled while the screen is holding a dead link too.** It used to require `terminalLive`,
+    // so during a rebuild the one control that could leave a frozen screen with no other control
+    // on it was switched off — and the frozen screen has no header, no keys and no bar, because
+    // holding draws the terminal alone. The gesture that leaves has to leave from there.
+    BackToLauncher(enabled = !showList) { openList() }
+
+    // **The shell list is this route's launcher, and a launcher stays portrait** (ADR-0011).
+    // The tailnet route holds portrait for its list and every dialog opened from it; this route
+    // never did, so the same screen turned over on the mesh side and not on the other. The
+    // terminal itself still follows the device — that is the whole point of the rotation work —
+    // and leaving the list restores `FollowDevice` by construction ([HoldOrientation]).
+    if (showList) HoldOrientation(OrientationPolicy.Portrait)
 
     // safeDrawingPadding first: this is drawn instead of AppContent's own Column, so without it the
     // status line sits under the clock and the nav bar eats the last row.
@@ -469,10 +501,51 @@ fun MeshTerminalScreen(
     // answer to a two-second rebuild; it is the wrong answer to a host that has stopped
     // answering, which is a state the user must be able to leave and retry. The shell is not
     // lost by going back: re-opening it is one `Attach`, and the list carries the reason.
+    //
+    // **Thirty seconds, not the tailnet's eight.** Eight seconds is a WebSocket's tolerance for a
+    // silent socket. This link's own verdict is slower by design: the driver calls a session dead
+    // only after [MeshTermDriver]'s twenty-second silence rule, and its first handshake retry is
+    // eight seconds — so a grace of eight seconds fires *inside* a retry that is still working, and
+    // measured on the device 2026-11-04 a rotation whose resize answer was still in flight was
+    // declared a dead link, which threw the user out of the shell and then — because the list is
+    // portrait-only (ADR-0011) — rotated the phone back to portrait under them. A rotation is not
+    // a failure, and a slow answer is not a dead link.
     LaunchedEffect(holding) {
         if (!holding) return@LaunchedEffect
-        delay(dev.ldmux.mobile.LINK_FAILURE_GRACE_MS)
+        delay(MESH_FAILURE_GRACE_MS)
         if (holding) openList()
+    }
+
+    // **The mode's row, wherever the chrome goes.** One control, one row, drawn as part of the
+    // screen's own layout: above the key pad in portrait, at the foot of the side panel in
+    // landscape. It used to be a card floating over the bottom-right of the terminal, which covered
+    // the shell's last line and its cursor — the two things a terminal is read for.
+    val barRow: @Composable (Modifier) -> Unit = { m ->
+        PublicChannelBar(
+            on = source.publicChannel,
+            // Forced on a public channel: the row has no way out, and says why.
+            forced = config.meshPublicChannel,
+            summary = handle.heldSummary,
+            awaiting = source.awaitingSync,
+            reported = source.answerOverdue,
+            flushing = source.flushingHeld,
+            updates = source.heldUpdates,
+            onToggle = {
+                if (!source.publicChannel) {
+                    source.setPublicChannel(true)
+                } else if (config.meshPublicChannel) {
+                    // No-op on a public channel: the mode is not optional there.
+                } else {
+                    // Leaving sends what is held: turning the mode off clears the gate in the pump
+                    // loop, so the queue drains on its own windows. A mode that could be left while
+                    // silently dropping what you typed would be worse than one that sends on the
+                    // way out, and the row says which it is.
+                    source.setPublicChannel(false)
+                }
+            },
+            onSync = { source.sync() },
+            modifier = m,
+        )
     }
 
     Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
@@ -501,6 +574,15 @@ fun MeshTerminalScreen(
             // header belongs to the list screen, which is where Settings is, as on the tailnet.
             val pages = meshPagesFor(shells, pageOrder)
             val shownId = shells.current ?: pages.firstOrNull()?.id
+            // **The panel *is* [SidePanel], with the mode's row in its scrolling area.** It used
+            // to be a Column wrapping the panel with the row beneath it, and that wrapper broke
+            // the landscape layout: with no width of its own it measured its children against the
+            // whole Row, and the `fillMaxWidth()` rows inside took all of it — so the terminal's
+            // Column, the Row's weighted child, was measured at zero width. Measured on the
+            // device after rotating to landscape: `surface <shell> viewport 0x950`, a black
+            // terminal that never asked the host to fit and so never repainted. The tailnet route
+            // has no wrapper, which is why only this route went blank. The row also belongs at
+            // the *top* of the scroll, beside the keys it sits above, not at the panel's foot.
             val panel: @Composable () -> Unit = {
                 SidePanel(
                     pages = pages,
@@ -511,11 +593,13 @@ fun MeshTerminalScreen(
                         Dictation.toggle(onText = { source.sendText(it) }, onState = { voice = it })
                     },
                     // No speech channel crosses this link, so there is no voice mode to run.
+                    // Drawn dim rather than removed: the key row keeps its shape either way.
                     onVoiceMode = null,
                     onLauncher = { openList() },
                     press = handle::sendKey,
                     shownId = shownId,
                     onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
+                    modeRow = { m -> barRow(m) },
                 )
             }
             Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -529,10 +613,17 @@ fun MeshTerminalScreen(
                     // drawing that was the black terminal. Until a screen is committed the surface keeps
                     // what it had; a switch to another shell drops it, so one shell's rows are never
                     // under another's name.
+                    // **Draw what the driver committed; do not clear on a re-description.** The old
+                    // version cleared the source whenever the view was `ProfileMissing`, which is
+                    // produced by a *shell switch* and by a `Resize`/rotation alike. On a rotation
+                    // the clear raced the host's next screen: the screen was drawn into the engine
+                    // and the clear erased it, so the terminal sat black until the shell next
+                    // changed. A resize keeps the old screen up until the new one arrives — the same
+                    // thing the tailnet's surface does — and the switch clears in the shell effect
+                    // below, where "the shell changed" is actually known.
                     val toShow = meshScreenToShow(view)
-                    val switching = view is MeshTermView.ProfileMissing
-                    LaunchedEffect(source, toShow, switching) {
-                        if (toShow != null) source.show(toShow) else if (switching) source.clear()
+                    LaunchedEffect(source, toShow) {
+                        if (toShow != null) source.show(toShow)
                     }
                     val drawn by source.frame.collectAsState()
                     // The host fits its pty to what the surface measures (`Resize`, profile version
@@ -568,34 +659,6 @@ fun MeshTerminalScreen(
                             modifier = Modifier.align(Alignment.TopEnd),
                         )
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
-                        // Public-channel mode's one control: the standalone sync button. Drawn over the
-                        // bottom of the terminal rather than in a key row, because it has to say what is
-                        // waiting and how stale the screen is, and because while it is drawn the mode is on.
-                        PublicChannelBar(
-                            on = source.publicChannel,
-                            // Forced on a public channel: the bar has no way out, and says why.
-                            forced = config.meshPublicChannel,
-                            summary = handle.heldSummary,
-                            awaiting = source.awaitingSync,
-                            flushing = source.flushingHeld,
-                            updates = source.heldUpdates,
-                            onToggle = {
-                                if (!source.publicChannel) {
-                                    source.setPublicChannel(true)
-                                } else if (config.meshPublicChannel) {
-                                    // No-op on a public channel: the mode is not optional there.
-                                } else {
-                                    // Leaving sends what is held: turning the mode off clears the gate in the
-                                    // pump loop, so the queue drains on its own windows. A mode that could be
-                                    // left while silently dropping what you typed would be worse than one
-                                    // that sends on the way out, and the bar says which it is.
-                                    source.setPublicChannel(false)
-                                }
-                            },
-                            onSync = { source.sync() },
-                            onDiscard = { handle.discardHeld() },
-                            modifier = Modifier.align(Alignment.BottomEnd),
-                        )
                         // What the link adds is said only while it is true, over the terminal like the voice
                         // banner, and never as a row: the tailnet's live screen is the terminal and the
                         // bar. The hour's records and the typing that waits are on the shell list.
@@ -626,6 +689,8 @@ fun MeshTerminalScreen(
                 if (!portrait && !config.panelLeft) panel()
             }
             if (portrait) {
+                // The space above the keyboard: the mode's row, then the keys.
+                barRow(Modifier.fillMaxWidth())
                 PortraitBar(
                     handle = handle,
                     pages = pages,

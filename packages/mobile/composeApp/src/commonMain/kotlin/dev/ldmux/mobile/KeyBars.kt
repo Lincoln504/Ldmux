@@ -200,8 +200,8 @@ private fun PortraitKeyRow(
             KeyBtn(
                 label,
                 Modifier.weight(weights.getOrElse(i) { 1f }),
-                active.getOrElse(i) { false },
-                action,
+                active = active.getOrElse(i) { false },
+                onClick = action,
             )
         }
     }
@@ -238,6 +238,13 @@ internal fun KeyBtn(
     label: String,
     modifier: Modifier = Modifier,
     active: Boolean = false,
+    /**
+     * False when the key cannot act *right now*. It stays drawn and greyed rather than
+     * vanishing: a key row whose members come and go makes the user hunt for the one they
+     * wanted, and a control that is present but dim says "not now" where an absent one says
+     * "there is no such thing".
+     */
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     // Padding is only breathing room now. It was sized for a key that measured
@@ -249,15 +256,19 @@ internal fun KeyBtn(
     Box(
         modifier
             .clip(RadiusMedium)
-            .background(if (active) Accent else Bg)
+            .background(if (active && enabled) Accent else Bg)
             .heightIn(min = LocalTouch.current.min)
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
             .padding(horizontal = pad, vertical = LocalTouch.current.pad),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             label,
-            color = if (active) Bg else Fg,
+            color = when {
+                !enabled -> Dim
+                active -> Bg
+                else -> Fg
+            },
             fontFamily = FontFamily.Monospace,
             // Three-character labels get a point less: they are the widest thing
             // in a five-key row, and a point of type is cheaper than a key that

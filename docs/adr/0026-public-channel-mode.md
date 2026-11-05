@@ -34,6 +34,20 @@ proved private". On a public channel the mode cannot be turned off — every key
 broadcast, so held input is the only supported way to type — and the bar says why instead of
 offering a toggle. On a private tuple the user may hold typing or not.
 
+- **The row is drawn in full in both states, and nothing in it comes and goes.** It used to
+  collapse to a lone `hold input` button while the mode was off, which removed the sync button in
+  exactly the state a user looking for sync is most likely to be in, and moved the one remaining
+  control from the left edge to the right when the mode came on. Off is a state of the row, not a
+  different row: the status reads `held input off`, and the sync button is drawn in `Dim` and is not
+  clickable, because there is nothing held to send. The same rule governs every control this screen
+  dims: a control that cannot act right now stays where it is and loses its contrast, because one
+  that vanishes reads as a feature that does not exist and moves the controls beside it.
+- **Portrait puts the row under the terminal, above the key pad; landscape puts it at the top of the
+  side panel's scrolling area.** It used to sit at the panel's foot in landscape, which is the one
+  place a thumb does not reach without scrolling first. The panel is 190 dp wide, so the row has two
+  shapes: one line in portrait, and stacked full-width controls in the panel's 166 dp of content
+  width, because three controls in one line there truncated `hold input` (measured on the device: an
+  even split drew `hold ir`, a 1.3 share drew `hold in…`).
 - **Input is held in the existing batcher.** `MeshInputBatcher` already accumulates typed text and
   named keys in order, coalesces them, refuses past a bound, and renders them readably (`⏎`, `^C`,
   `‹Up›`). Public-channel mode is *not a second queue*: it is a gate on the one pump loop that

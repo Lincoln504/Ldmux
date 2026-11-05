@@ -1,5 +1,6 @@
 package dev.ldmux.mobile.mesh
 
+import dev.ldmux.mobile.appLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -452,6 +453,11 @@ class MeshTermDriver(
                 failed(MeshLinkState.SessionFailed)
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
+            // **A fit the session refused to queue is asked again here.** Otherwise a resize
+            // dropped on a full queue left the host's pty at the old grid for the life of the
+            // page, and only leaving the shell and re-entering it could cure it. A fit already
+            // recorded returns immediately, so a tick with nothing to do costs nothing.
+            if (terminalView == null) fitHost()
             pump()
         } else if (handshake != null) {
             val waited = clock() - handshakeSince
@@ -527,12 +533,22 @@ class MeshTermDriver(
     /**
      * The phone's grid in cells, from the surface's own geometry. The host is asked to fit its pty
      * to it once per attached shell and grid (version 3 and above), so a line is never wider than
-     * the screen, as on the tailnet. Called again on rotation or a font change; the same grid for
-     * the same shell is not asked twice, so a host that clamps it cannot start a loop.
+     * the screen, as on the tailnet. Called again on rotation or a font change.
+     *
+     * **The bookkeeping is "what did we ask for", not "what did the host last say"** — the same
+     * rule as the tailnet's [setGrid], and the difference matters on a link whose answers take a
+     * second or more. The host's `Profile` is an answer to a request already in flight, so treating
+     * it as "the host is already at the right size" throws away the request the user's rotation
+     * just made. Measured on the device 2026-11-04: portrait → landscape → portrait inside one
+     * round trip left the pty at the landscape width while the phone painted the portrait one,
+     * because the second `setGrid` found the *old* profile equal to the new grid and sent nothing.
+     * Asking against [requestedFit] cannot do that, and still cannot loop: the same grid for the
+     * same shell is asked for once, however often the host's answer lands.
      */
     suspend fun setGrid(cols: Int, rows: Int) = lock.withLock {
         if (cols !in 1..255 || rows !in 1..255) return@withLock
         wantedGrid = cols to rows
+        appLog("mesh grid ${cols}x$rows (host ${mirror.profile?.cols}x${mirror.profile?.rows}, v$hostVersion, asked $requestedFit)")
         if (session != null && terminalView == null) { fitHost(); pump(); publish() }
     }
 
@@ -544,16 +560,32 @@ class MeshTermDriver(
         val (cols, rows) = wantedGrid ?: return
         val profile = mirror.profile ?: return
         if (hostVersion < MeshTerm.RESIZE_VERSION) return
-        if (profile.cols == cols && profile.rows == rows) return
         val key = Triple(attachedId ?: mirror.shell, cols, rows)
+        // This exact grid for this exact shell is already on its way.
         if (requestedFit == key) return
+        // Nothing has been asked for on this connection and the host already fits: the first
+        // `Profile` after an attach usually reports the size the pty kept from the previous
+        // client. Asking anyway would spend two records on a link that allows about 58 an hour.
+        // Only the *first* time, though — after a request, the reported size is an answer to it
+        // and must not be read as "already right".
+        if (requestedFit == null && profile.cols == cols && profile.rows == rows) return
         requestedFit = key
-        queue(TermMessage.Resize(cols, rows))
+        appLog("mesh fit: asking ${cols}x$rows (host ${profile.cols}x${profile.rows})")
         // The resize recreates the phone's engine at the new grid, so whatever is on it is gone:
         // the host resizes the pty and, without this, sends nothing at all, which measured on the
         // device as a blank terminal until the shell was left and re-entered. Asking for the whole
         // screen in the same breath costs one record and makes the resize visible immediately.
+        //
+        // **A request the session refused to queue is not a request.** The outcome used to be
+        // dropped, so a fit that hit a full queue was silently lost and the screen kept the old
+        // grid for the life of the page — the same failure the tailnet answers with
+        // `retryGridAfterRefusal`. Clearing the record lets the next tick ask again.
+        val queued = queue(TermMessage.Resize(cols, rows))
         queue(TermMessage.Resync)
+        if (queued != QueueOutcome.Queued) {
+            requestedFit = null
+            appLog("mesh fit: resize not queued ($queued); will ask again")
+        }
     }
 
     private suspend fun sendToShell(message: TermMessage): InputOutcome {
@@ -668,9 +700,14 @@ class MeshTermDriver(
 
     // ── internals (lock held) ──────────────────────────────────────────────────────────
 
-    private fun queue(m: TermMessage) {
-        val s = session ?: return
-        s.send(SHELL, m.encode())
+    /**
+     * Put [m] in the session's send queue. Returns what the session said, so a caller that must
+     * know whether its request left (the fit, which retries) can tell a dropped record from a
+     * sent one. Callers that do not care simply ignore the result.
+     */
+    private fun queue(m: TermMessage): QueueOutcome {
+        val s = session ?: return QueueOutcome.NotOpen
+        return s.send(SHELL, m.encode())
     }
 
     private fun requestResync() {
@@ -697,6 +734,7 @@ class MeshTermDriver(
         when (m) {
             is TermMessage.Profile -> {
                 if (pick == Pick.Probing) pick = Pick.Attached
+                appLog("mesh profile ${m.cols}x${m.rows} v${m.version} shell ${m.shell}")
                 hostVersion = m.version
                 unsupported = m.unsupported
                 // The host names the shell it attached (version 2), so the header's current marker
@@ -800,6 +838,7 @@ class MeshTermDriver(
         lastEpoch = m.epoch
         painted = true
         if (full) resyncing = false
+        appLog("mesh commit epoch ${m.epoch} full=$full rows=${mirror.lines.size} cols=${mirror.profile?.cols}")
     }
 
     private suspend fun pump() {

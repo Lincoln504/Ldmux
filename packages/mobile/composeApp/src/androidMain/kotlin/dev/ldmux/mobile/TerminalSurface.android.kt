@@ -415,7 +415,10 @@ actual fun TerminalSurfaceFor(
         Canvas(
             Modifier
                 .fillMaxSize()
-                .onSizeChanged { viewport = it }
+                .onSizeChanged {
+                    appLog("surface $sessionId viewport ${it.width}x${it.height}")
+                    viewport = it
+                }
                 .pointerInput(controller) {
                     // A tap places the cursor. The hit-test is the exact inverse of
                     // the draw below — both read the same GridPlacement, which is

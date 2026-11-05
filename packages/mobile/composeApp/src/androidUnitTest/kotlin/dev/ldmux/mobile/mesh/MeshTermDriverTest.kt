@@ -659,4 +659,63 @@ class MeshTermDriverTest {
         }
         assertTrue(sess.messages().none { it == TermMessage.Resync })
     }
+
+    // ── the grid: what the phone asks for, and when ────────────────────────────────────────
+    //
+    // The bookkeeping is "what did we ask for", not "what did the host last say". The host's
+    // `Profile` is an answer to a request already in flight, so reading it as "the host is
+    // already the right size" throws away the request a rotation just made. Measured on the
+    // device 2026-11-04: portrait → landscape → portrait inside one round trip left the pty at
+    // the landscape width while the phone painted the portrait one.
+
+    private fun resizes(d: MeshTermDriver) = sess.messages().filterIsInstance<TermMessage.Resize>()
+
+    /** A live session whose host speaks version 3, so it can be asked to fit. */
+    private suspend fun liveV3(d: MeshTermDriver) {
+        d.start(); d.onRecord(byteArrayOf(2))
+        deliver(d, TermMessage.Profile(3, 20, 10, 0), rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+    }
+
+    @Test
+    fun `a rotation back to a grid the host has not answered yet still asks`() = runBlocking<Unit> {
+        val d = driver()
+        liveV3(d)                                 // host profile: 20x10
+        d.setGrid(30, 10)                         // rotate to landscape
+        assertEquals(listOf(TermMessage.Resize(30, 10)), resizes(d))
+        // Back to portrait before the host's answer arrives: the profile still says 20x10, which
+        // is exactly the grid being asked for. Comparing against it would send nothing, and the
+        // host would finish resizing to 30x10 under a phone painting 20x10.
+        d.setGrid(20, 10)
+        assertEquals(
+            listOf(TermMessage.Resize(30, 10), TermMessage.Resize(20, 10)),
+            resizes(d),
+            "the second rotation is a request of its own",
+        )
+    }
+
+    @Test
+    fun `the same grid for the same shell is asked for once`() = runBlocking<Unit> {
+        val d = driver()
+        liveV3(d)
+        d.setGrid(30, 10)
+        d.setGrid(30, 10)
+        d.setGrid(30, 10)
+        assertEquals(1, resizes(d).size, "a host that clamps it cannot start a loop")
+    }
+
+    @Test
+    fun `a resize the session refused to queue is asked again on the next tick`() = runBlocking<Unit> {
+        val d = driver()
+        liveV3(d)
+        sess.queueOutcome = QueueOutcome.Full
+        d.setGrid(30, 10)
+        assertTrue(resizes(d).isEmpty(), "a full queue takes nothing")
+        sess.queueOutcome = QueueOutcome.Queued
+        d.tick()
+        assertEquals(
+            listOf(TermMessage.Resize(30, 10)),
+            resizes(d),
+            "the request is retried rather than lost for the life of the page",
+        )
+    }
 }

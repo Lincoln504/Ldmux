@@ -102,6 +102,9 @@ class MeshTerminalSource(
     /** A sync is out and its answer has not arrived. */
     val awaitingSync: Boolean get() = hold.awaiting
 
+    /** The deadline passed and the bar should say so. Cleared by the answer or by the next press. */
+    val answerOverdue: Boolean get() = hold.reported
+
     /**
      * The buffer is being drained: the pump may send right now.
      *
@@ -148,8 +151,16 @@ class MeshTerminalSource(
         // Nothing typed and no screen held: the view is already the newest the host sent, so there
         // is nothing to send and nothing to show. Starting a wait here would be a wait for an
         // answer that cannot come, and the deadline would report a failure that did not happen.
-        if (!pending && pendingScreen == null) return false
+        if (!pending && pendingScreen == null) {
+            // Nothing to send and nothing to show, so a wait left over from an earlier press must
+            // end here: the bar said "waiting for the answer" while the button it belongs to could
+            // do nothing about it. Nothing is drawn, because there is nothing held to draw.
+            hold.settle()
+            return false
+        }
         if (hold.sync(pending)) return true
+        // "Show": draw the newest held screen and end the wait — the user asked to see the shell,
+        // not to wait for an answer to a send that did not happen.
         pullHeld()
         return false
     }
@@ -164,13 +175,36 @@ class MeshTerminalSource(
      */
     fun syncDrained() {
         hold.drained()
-        if (hold.awaiting && pendingScreen != null) pullHeld()
+        if (hold.awaiting) drawHeldKeepingWait()
     }
 
-    /** The wait's deadline passed with no answer: draw what is held and say so. */
+    /**
+     * The wait's deadline passed with no answer: draw what is held and say so.
+     *
+     * **The wait survives it.** Drawing what is held does not end the wait, because the answer to a
+     * sync is "the next screen the host sends" and a slow answer is the normal answer on this link.
+     * Clearing the wait here meant the late answer was *held* and the user pressed the button again
+     * — the press they had already made, spent on nothing. The bar says "no answer yet" until the
+     * answer arrives, and the answer is drawn when it does.
+     */
     fun syncTimedOut(): Boolean {
         if (!hold.timedOut()) return false
-        pullHeld()
+        drawHeldKeepingWait()
+        return true
+    }
+
+    /**
+     * Draw the newest held screen without ending the wait.
+     *
+     * The difference from [pullHeld] is one flag: [PublicChannelHold.painted] ends the wait, and a
+     * paint that happens *while* waiting (a drain finishing, a deadline passing) must not, or the
+     * answer that follows is held instead of drawn.
+     */
+    private fun drawHeldKeepingWait(): Boolean {
+        val held = pendingScreen ?: return false
+        pendingScreen = null
+        applyScreen(held)
+        hold.drewHeld()
         return true
     }
 
@@ -257,6 +291,7 @@ class MeshTerminalSource(
         val c = screen.cols
         val r = screen.lines.size
         if (c <= 0 || r <= 0) return
+        dev.ldmux.mobile.appLog("mesh show ${c}x$r engine ${cols}x$rows offset ${history.offset} same ${screen == last}")
         if (screen == last && engine != null) {
             // A screen identical to the one drawn may still need drawing: if a held echo is on
             // top of it, this is the moment the echo goes and the truth comes back. Without this

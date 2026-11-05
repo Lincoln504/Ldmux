@@ -151,8 +151,17 @@ internal fun SidePanel(
     onVoice: () -> Unit,
     voiceOn: Boolean = false,
     // Null where there is no speech channel to run a voice mode over (the mesh link carries
-    // none): the button is then absent rather than present and inert.
+    // none): the button is then **drawn dim and inert** rather than removed. A key row whose
+    // members come and go moves the keys beside it, and a control that vanishes reads as "this
+    // app does not do that" — where the truth is "this link does not".
     onVoiceMode: (() -> Unit)? = {},
+    /**
+     * Drawn first in the panel's scrolling area: the mesh route's mode row. It belongs at the top,
+     * beside the reading area it governs, rather than at the panel's foot — a control the user
+     * presses while reading should be where the reading starts, and the foot of a scroll is the
+     * one place a thumb does not reach without scrolling first.
+     */
+    modeRow: (@Composable (Modifier) -> Unit)? = null,
     onLauncher: () -> Unit,
     press: (String) -> Unit,
     shownId: String?,
@@ -176,6 +185,8 @@ internal fun SidePanel(
             Modifier.weight(1f).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
         ) {
+            // The route's own row, above the keys: the mesh route's hold-input/sync control.
+            modeRow?.invoke(Modifier.fillMaxWidth())
             // One row per group, each row sharing the panel's width between its
             // keys. Keys used to be chips sized to their own text, which made a
             // ragged column where "C-c" and "|" had the same weight and nothing
@@ -215,7 +226,13 @@ internal fun SidePanel(
                 }
                 // Voice mode: hands-free, bound to this shell. Not the same control as the mic,
                 // which is one dictation: this one keeps listening and speaks the agent's reply.
-                if (onVoiceMode != null) KeyBtn("voice", Modifier.weight(1f), active = voiceOn) { onVoiceMode() }
+                // Drawn even where the link carries no speech channel: dim, and it does nothing.
+                KeyBtn(
+                    "voice",
+                    Modifier.weight(1f),
+                    active = voiceOn,
+                    enabled = onVoiceMode != null,
+                ) { onVoiceMode?.invoke() }
                 IconBtn(onClick = onVoice, label = "voice input") { IconMic(tint = Fg) }
             }
             PanelDivider()

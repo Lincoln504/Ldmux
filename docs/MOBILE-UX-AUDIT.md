@@ -383,6 +383,141 @@ so the code cannot carry it without a gateway change (in `meshcore_host`, a diff
 Until then, the operator reads the preset from the gateway's start-up line — or from this app, which
 now reads its own radio's tuple and can be typed into.
 
+## 2c. Third pass: rotation, the landscape panel, and the controls that vanished
+
+Reported: "the row/layout placement looks great, but the system does not seem to respond correctly
+to a rotation switch. Rotation should request a new view the same way the view/prev-next buttons
+do." And after that: "buttons should always stay, greyed out when they are not touchable right now,
+not fully disappear", and "in horizontal mode put these in the scroll area, at the top rather than
+the bottom".
+
+Everything below was measured on the device against the mesh route, with the app's own log lines
+(`appLog`, tag `ldmux`) as the evidence. Before this pass the mesh route logged **nothing** at all —
+no grid, no profile, no commit — which is also why the first finding took an instrumented build to
+see. The tailnet route has logged its grid since it had one; the mesh route now logs its grid, its
+profile, its commits and the surface's viewport.
+
+### 2c.1 The landscape panel was as wide as the screen, so the terminal had no width
+
+The mesh route wraps `SidePanel` in a `Column` so the mode's row can sit under the panel's keys.
+That wrapper had no width, and its children did (`Box(Modifier.fillMaxWidth())`,
+`barRow(Modifier.fillMaxWidth())`), so the wrapper measured at the Row's full width and the
+terminal's `Column` — the Row's weighted child — was measured at **zero**.
+
+Measured, portrait to landscape on the device, before the fix:
+
+```
+surface 910cebb8aa viewport 0x131
+surface 910cebb8aa viewport 0x950
+```
+
+and nothing after it: no `mesh grid` line, because `setGrid` returns early on a zero-width pane, and
+no repaint, because the surface had nothing to draw into.
+
+The visible result was a black terminal with the panel's `Surface` colour across the whole screen
+(sampled: `#1A1A1A`, the panel's background, at x = 2000 of 2400), and no line explaining it: the
+"waiting for the shell's screen" line only draws when nothing has been drawn at all, and an old
+screen *had* been drawn into a zero-width surface. The tailnet route has no wrapper — its panel is
+`SidePanel` itself, which carries `PANEL_WIDTH` — which is why only this route went blank.
+
+**Fixed by deleting the wrapper**, not by giving it a width: the mode's row is now a slot *inside*
+the panel's scrolling area (`SidePanel(modeRow = …)`), which is also what the second request asked
+for. The row is at the top of that scroll, above `paste`, where a control the user presses while
+reading belongs.
+
+### 2c.2 Rotation asked the host for a new grid, but the bookkeeping could skip it
+
+Rotation's request and the header's ◀ ▶ buttons are two different requests and both are right:
+the arrows send an `Attach` for another shell (a new view of a different pane), while a rotation
+sends a `Resize` and a `Resync` for the shell already attached — a rotation must not tear down the
+pty or lose what the pane had. That request existed. What could lose it was the guard that decided
+whether to make it:
+
+```kotlin
+if (profile.cols == cols && profile.rows == rows) return   // the host's *last answer*
+```
+
+That compares the phone's measurement against the host's **last reported** size, and on this link
+the report is an answer to a request that is still in flight. Rotate portrait → landscape →
+portrait inside one round trip and the second `setGrid` finds the *old* profile (portrait) equal to
+the new grid (portrait), sends nothing, and leaves the pty at the landscape width while the phone
+paints the portrait one. The tailnet's `setGrid` never had this fault because it compares against
+what it **asked for** (`wantCols`/`wantRows`), and the mesh route now does the same: the same grid
+for the same shell is asked for once (so a host that clamps cannot start a loop), and the host's
+"already right" is only trusted before anything has been asked on that connection.
+
+The request can also be *dropped*: `queue()` returned nothing and the outcome was discarded, so a
+`Resize` that hit a full session queue vanished and the pane kept the old grid for the life of the
+page. The queue now reports its outcome, the fit is retried from `tick()` when the request did not
+go, and `MeshTermDriverTest` pins all three rules (a rotation back to an unanswered grid asks
+again; the same grid is asked once; a refused resize is asked again).
+
+### 2c.3 A rotation that took longer than eight seconds threw the user out of the shell
+
+The mesh screen leaves the held screen for the shell list when the link has been down for
+`LINK_FAILURE_GRACE_MS` (8 s, the tailnet's value). This link's own verdicts are slower than that:
+the driver calls a session dead after **20 s** of silence and retries its first handshake at **8 s**,
+so the grace fired *inside* a retry that was still working. Measured on the device: a rotation whose
+resize answer was still in flight was declared a dead link, the screen went to the list, and — the
+list being portrait-only per ADR-0011 — the phone **rotated itself back to portrait** under the
+user. The report's "does not respond correctly to a rotation" is exactly this: the rotation worked,
+and then the app undid it.
+
+Fixed in two places: the mesh route's own grace is `MESH_FAILURE_GRACE_MS = 30_000` (longer than the
+driver's 20 s silence rule and its 8 s retry, so only a real verdict leaves the shell), and the
+system back gesture is enabled while the screen is holding a dead link — it used to require
+`terminalLive`, so the one control that could leave a frozen screen with no header, no keys and no
+bar was switched off exactly when it was the only way out.
+
+### 2c.4 The mesh route's shell list did not hold portrait
+
+ADR-0011 makes the launcher portrait-only on both routes. The tailnet route composes
+`HoldOrientation(Portrait)` for its list; the mesh route never did, so the same screen turned over
+on one route and not the other. `if (showList) HoldOrientation(OrientationPolicy.Portrait)` — the
+terminal itself still follows the device, and leaving the list restores `FollowDevice` by
+construction.
+
+### 2c.5 Controls that vanished instead of dimming
+
+The mode's row collapsed to a lone `hold input` button whenever the mode was off, so the status
+line and the **sync button were absent in exactly the state a user looking for sync is most likely
+to be in** (the mode was off and they had not noticed). It also moved its one remaining control from
+the left edge to the right when the mode came on. The row now draws all three things in both
+states: the status, the sync button, and the mode's own switch. What cannot act is drawn in `Dim`
+and is not clickable — never removed.
+
+The same rule applied where else it bit:
+
+- `SidePanel`'s `voice` key was absent where the link carries no speech channel (the mesh route);
+  it is now drawn dim and inert, so the key row keeps its shape between routes.
+- `KeyBtn` gained `enabled`, which dims the label and drops the click. No key row reflows when a key
+  becomes unavailable.
+
+### 2c.6 The row has two shapes, because it lives in two widths
+
+Portrait gives it the whole screen under the terminal; the landscape panel gives it 166 dp of
+content width. Three things do not fit in 166 dp side by side: measured, an even split drew
+`hold ir`, a 1.3 share drew `hold in…`, and `TextOverflow.Ellipsis` then made the truncation honest
+but still useless. Narrow stacks: the status (wrapping to two lines when it must), then `show`, then
+`hold input`, each full width. That also gives each control a thumb-sized target rather than two
+halves of one, and it is what the panel shows on the device now.
+
+### 2c.7 What the radio link was doing meanwhile, and one cause removed
+
+The device pass could not have found any of the above without the link staying up, and it did not
+stay up. The host gateway was restarting **every two minutes** with `nothing heard off the air for
+two minutes; rebooting the radio and exiting` (exit 75), each restart dropping the phone's link. Its
+deafness rule judged a port by "opened N minutes ago and heard nothing off the air", which is also
+the description of a healthy idle link: the daemon sends nothing while the phone sits at a prompt.
+The rule now requires a **send that went unanswered** — silence with nothing asked is not evidence —
+and with it the gateway stayed up for the rest of the session (no restart between 21:28 and the end
+of the pass, against one every ~2 minutes before). That fix is in `meshmore-sns`
+(`packages/meshcore_host/lib/src/serial_mesh_sender.dart`), with its own tests.
+
+What remains on that link is a genuine asymmetry under load: the daemon reported `53 sent` against
+`5 bytes received` over one session, so phone → host records were not arriving while host → phone
+ones were. That is radio, not layout, and it is recorded rather than diagnosed here.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
@@ -418,6 +553,20 @@ rather than widening again.
 
 The new `SettingsLayoutTest` pins the two decisions a later edit can silently invert: the section
 order, and that the link's consequence line does not reintroduce the word `lora`.
+
+**The third pass is the first one with a device in it.** Every measured claim in §2c comes from the
+phone (`adb` + the app's `ldmux` log tag) against the mesh route, with the host-side truth read from
+`ldmux mesh status`. What it establishes is *behaviour*: which records the app asked for, at which
+grid, and what it drew afterwards. It still says nothing about whether a screen looks right; that
+needs eyes, and this pass had them only as screenshots.
+
+The same three Gradle commands ran, plus `:composeApp:testDebugUnitTest --rerun-tasks` (**611 tests,
+0 failures, 0 errors**) and the native suite (`16 checks, 0 failures` in the non-sanitized run).
+Three new tests in `MeshTermDriverTest` pin the grid rules of §2c.2.
+
+The radio work in §2c.7 is in the other repository and was verified there: `dart test` in
+`packages/meshcore_host` is 39 tests green, including two rewritten deafness cases and one new one
+("an idle link is not deaf").
 
 ## 4. What is still open, and why it is not fixed here
 

@@ -60,12 +60,44 @@ internal class PublicChannelHold {
     var seq: Int by mutableStateOf(0)
         private set
 
+    /**
+     * The deadline passed and the user has been told. It changes what the bar *says*, and nothing
+     * else — [awaiting] deliberately survives it.
+     *
+     * The deadline used to clear the wait, so an answer that arrived ten seconds late was *held*
+     * and the user had to press the button a second time to see it: the press they had already
+     * made, spent on nothing. An answer is an answer whenever it arrives, and the slow answer is
+     * the normal one on a congested channel — the very case this mode exists for.
+     */
+    var reported: Boolean by mutableStateOf(false)
+        private set
+
     /** Turn the mode on or off. Turning it off clears any wait; the caller draws what it has. */
     fun set(value: Boolean) {
         if (on == value) return
         on = value
         awaiting = false
         flushing = false
+        reported = false
+        updates = 0
+    }
+
+    /**
+     * Nothing to send and nothing held to show: stop waiting.
+     *
+     * "Show" with an empty buffer used to do literally nothing, so a wait left over from an earlier
+     * press kept the bar saying "waiting for the answer" — a control reporting a wait for something
+     * it cannot receive. [awaiting] stays false here on purpose: the user has just asked to see the
+     * shell and there is nothing to show, so the next screen belongs to the frozen view like any
+     * other, not to a sync.
+     */
+    fun settle() {
+        awaiting = false
+        reported = false
+    }
+
+    /** The held screen was drawn without ending the wait: the answer may still be coming. */
+    fun drewHeld() {
         updates = 0
     }
 
@@ -106,6 +138,7 @@ internal class PublicChannelHold {
      */
     fun painted() {
         awaiting = false
+        reported = false
         updates = 0
     }
 
@@ -120,6 +153,7 @@ internal class PublicChannelHold {
         if (!on) return false
         awaiting = true
         flushing = pending
+        reported = false
         seq += 1
         return pending
     }
@@ -140,16 +174,22 @@ internal class PublicChannelHold {
     /**
      * The wait's deadline passed with no answer. True means the newest held screen should be drawn.
      *
-     * It **does not end the wait or the drain**, and that is a correction: the first version
-     * cancelled both. A congested channel — the very case this mode exists for — answers slowly
-     * rather than never, so a deadline that cancelled the wait threw away an answer that was still
-     * coming and stopped a drain that was still making progress. The deadline's output is a
-     * statement ("nothing yet"), and the caller's pull is what ends the wait, because a paint is
-     * what ends a wait ([painted]). What stays held stays visible in the bar, so nothing is silently
-     * dropped either way.
+     * It **ends the drain but not the wait**, and the asymmetry is the point:
+     *
+     *  - The drain stops. Twenty seconds with text still held means the pump has been trying for
+     *    longer than this buffer's records take at ~600 ms each, so the link is not carrying them;
+     *    continuing costs airtime for a send the user is about to be told may be down. What stays
+     *    held stays counted in the bar, so nothing is silently dropped — the next press sends it.
+     *  - The wait does not stop. A congested channel answers slowly rather than never, and the very
+     *    case this mode exists for is the slow one. Cancelling the wait meant the answer that came
+     *    ten seconds late was *held*, and the user pressed the button again — the press they had
+     *    already made, spent on nothing. [reported] is what changes: the bar says "no answer yet"
+     *    until the answer arrives, and the answer is drawn when it does.
      */
     fun timedOut(): Boolean {
         if (!awaiting) return false
+        reported = true
+        flushing = false
         return true
     }
 }

@@ -95,6 +95,17 @@ What exists, 2026-10-28:
 - **PSK rotation from the CLI.** `LDMUX_MESH_PSK` is the only source.
 - **Host-radio provisioning.** Flashing, starting the gateway, reading its state file and
   setting six variables are all a person's job: `docs/MESH-HOST-RADIO.md`.
+- **A real-radio pass over rotation and the mode row was done on 2026-11-04 and is recorded in
+  `docs/MOBILE-UX-AUDIT.md` §2c; the link it ran over is unreliable.** The daemon counted
+  `53 sent` against `5 bytes received` in one session, so phone → host records were not arriving
+  while host → phone ones were. The layout and grid defects in that section were measured against a
+  link that stayed up for minutes at a time, and none of them are radio defects.
+- **The host gateway's deafness rule rebooted a healthy idle radio every two minutes** until
+  2026-11-04. `radioLooksDeaf` judged a port by "opened N minutes ago and heard nothing off the air",
+  which is also what a link with nothing to say looks like; the daemon sends no records while the
+  phone sits at a prompt. It now requires a *send that went unanswered*. The fix is in
+  `meshmore-sns` (`packages/meshcore_host/lib/src/serial_mesh_sender.dart`), with its tests; on the
+  device pass that followed, the gateway stayed up for the rest of the session.
 - **A real-radio pass over the 2026-11-03 controls.** The 2026-11-02 run covered the core
   standalone path (session, shell list, typed input); the newer pause/restore, metered and
   unset-radio controls have not been through it.

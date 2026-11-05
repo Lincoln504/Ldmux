@@ -66,22 +66,22 @@ class PublicChannelHoldTest {
 
     @Test
     fun `a wait nobody answers reports, and keeps waiting`() {
-        // A congested channel answers slowly rather than never, so the deadline is a statement, not
-        // a cancellation: cancelling would throw away an answer that was still coming and stop a
-        // drain that was still making progress. The caller's pull ends the wait, because a paint is
-        // what ends a wait.
+        // A congested channel answers slowly rather than never, so the deadline reports and stops a
+        // send that is going nowhere — but it does not cancel the wait, because the answer may still
+        // be coming and the press the user already made must not be spent on nothing.
         val h = PublicChannelHold()
         h.set(true)
         h.sync(pending = true)
         assertTrue(h.timedOut(), "the deadline says nothing has come")
         assertTrue(h.awaiting, "a slow channel still owes an answer")
-        assertTrue(h.flushing, "and a drain in progress is not cancelled by a deadline either")
-        // The mode is still on, so the next screen is kept again rather than drawn.
-        assertFalse(h.acceptScreen(painted = true))
-        assertEquals(1, h.updates)
+        assertTrue(h.reported, "and the bar is told to say so")
+        assertFalse(h.flushing, "the drain is cancelled: a send going nowhere costs airtime")
+        // The answer arrives late: it is drawn, not held, so the user does not press again.
+        assertTrue(h.acceptScreen(painted = true))
         h.painted()
         assertEquals(0, h.updates)
         assertFalse(h.awaiting)
+        assertFalse(h.reported, "the report is spent once the answer arrives")
     }
 
     @Test
@@ -111,11 +111,13 @@ class PublicChannelHoldTest {
         assertFalse(h.awaiting, "but the wait for the answer is over")
         assertTrue(h.drained())
         assertFalse(h.flushing)
-        // A deadline does not stop a drain either: a slow link is still a link.
+        // A deadline does stop a drain: twenty seconds with text still held means the link is not
+        // carrying records, and continuing to try costs airtime for a send the user is being told
+        // may be down. The text stays counted, so the next press sends it. The wait survives.
         h.sync(pending = true)
         assertTrue(h.timedOut())
-        assertTrue(h.flushing)
-        assertTrue(h.awaiting)
+        assertFalse(h.flushing, "a deadline stops a send that is going nowhere")
+        assertTrue(h.awaiting, "but the answer it asked for may still be coming")
     }
 
     @Test
@@ -130,6 +132,52 @@ class PublicChannelHoldTest {
         assertTrue(h.sync(pending = true), "the buffer refilled while waiting: send it too")
         assertTrue(h.awaiting)
         assertTrue(h.seq > first, "every press is a new deadline")
+    }
+
+    @Test
+    fun `the deadline reports without ending the wait, so a late answer is drawn`() {
+        // The press the user already made must not be spent on nothing: on a congested channel the
+        // answer is slow, not absent. Clearing the wait at the deadline meant the answer that came
+        // ten seconds late was *held*, and the user had to press again to see it.
+        val h = PublicChannelHold()
+        h.set(true)
+        h.sync(pending = true)
+        assertTrue(h.timedOut())
+        assertTrue(h.reported, "the bar says nothing has come yet")
+        assertTrue(h.awaiting, "and the answer is still owed, so it is drawn when it arrives")
+        assertTrue(h.acceptScreen(painted = true), "the late answer is drawn, not held")
+        h.painted()
+        assertFalse(h.reported, "the report is spent once the answer arrives")
+        assertFalse(h.awaiting)
+    }
+
+    @Test
+    fun `show with nothing to send stops a wait left over from an earlier press`() {
+        // "show" pressed on an empty buffer used to do nothing at all, so the bar went on saying
+        // "waiting for the answer" for a send that was no longer in flight — a control reporting a
+        // wait for something it cannot receive.
+        val h = PublicChannelHold()
+        h.set(true)
+        h.sync(pending = true)
+        h.timedOut()
+        assertTrue(h.awaiting)
+        h.settle()
+        assertFalse(h.awaiting, "nothing to send and nothing to show: stop saying waiting")
+        assertFalse(h.reported)
+    }
+
+    @Test
+    fun `a held screen drawn while waiting does not end the wait`() {
+        // `drewHeld` is the paint a drain or a deadline makes: the count resets because the newest
+        // screen is now on the glass, but the wait stays because the answer has not arrived.
+        val h = PublicChannelHold()
+        h.set(true)
+        h.sync(pending = true)
+        assertFalse(h.acceptScreen(painted = true))
+        assertEquals(1, h.updates)
+        h.drewHeld()
+        assertEquals(0, h.updates, "the newest held screen is drawn, so nothing is behind")
+        assertTrue(h.awaiting, "but the answer is still owed")
     }
 
     @Test
