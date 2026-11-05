@@ -202,6 +202,25 @@ and fixed; they are also the ones a device would have caught and the tests could
 | 14 | Leave the mode with text held (private tuple) | The text sends and the view follows again. |
 | 15 | Switch to the launcher mid-hold and come back | The text is gone: the buffer belongs to the connection. Documented, not a bug. |
 
+### Two host-side facts that will bite during a session
+
+- **The gateway reboots the radio after two minutes of hearing nothing.** It is a deafness
+  watchdog, not a fault (`serial_mesh_sender.radioLooksDeaf`: "350 contact frames in seventy
+  seconds, one air packet in twenty-five minutes, `rssi -128` throughout" was the incident). It
+  exits with `EX_TEMPFAIL` and systemd restarts it with a fresh handle. Measured 2026-11-04 on this
+  host: **restart counter 1351**, one restart every ~2 minutes with no peer on the air. The L3
+  session's heartbeat is `heartbeat_ms = 0` on this link on purpose (3 s heartbeats were 1200
+  records an hour to say nothing), so a pause of more than two minutes in a live session drops the
+  link and the app's rebuild is what recovers it. **Keep the session active, or expect a drop.** A
+  configurable window in the gateway is the fix, and it belongs in `meshcore_host`.
+- **The two radios must be on the same tuple and nothing in the app enforces it.** The app can
+  choose a region's public preset or randomise a private one; it cannot type an arbitrary tuple. If
+  the host radio is on 910.525 MHz / 500 kHz / SF7 / CR5 (the LDMUX private tuple this host's gateway
+  printed), the phone's board must be put on exactly that — from MeshMore, or by reconfiguring the
+  host to match what the app chose. The failure looks like "the host did not answer", not like "the
+  radios are on different channels". Carrying the host's tuple in the pairing code would remove the
+  guess; it needs the gateway to expose the preset and the code to carry it.
+
 ### What to watch while doing it
 
 ```
