@@ -155,7 +155,14 @@ fn main() {
     let daemon_ref = daemon_arc.clone();
     rt.block_on(async move {
         if let Some(cfg) = mesh_cfg {
-            println!("ldmuxd: mesh link to {} (peer {})", cfg.addr, {
+            // Name the carrier that is actually in use. A serial link has no address, so
+            // this printed "mesh link to  (peer 00000000)" — two empty fields where the one
+            // fact worth logging was which radio the daemon had taken over.
+            let endpoint = match &cfg.serial {
+                Some(device) => format!("{device} (serial, owned by this daemon)"),
+                None => format!("{} (gateway)", cfg.addr),
+            };
+            println!("ldmuxd: mesh link to {endpoint} (peer {})", {
                 let mut shown = String::new();
                 for byte in &cfg.peer[..4] {
                     shown.push_str(&format!("{byte:02x}"));
