@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.Text
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import kotlin.math.PI
 import kotlin.math.cos
@@ -106,7 +105,7 @@ fun IconBtn(
             // 9sp and the quiet grey: this sits under a glyph inside a control the size of a
             // key, so it has to stay small — but 8sp was under the size at which the shapes
             // survive at all, and it is still read, not decoration.
-            Text(caption, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+            Text(caption, color = Muted, fontFamily = MonoFont, fontSize = 9.sp)
         }
     }
 }

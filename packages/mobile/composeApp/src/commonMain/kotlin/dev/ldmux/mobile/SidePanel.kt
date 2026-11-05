@@ -24,7 +24,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -113,7 +112,7 @@ internal fun ShellHeader(
             Text(
                 folderName(here?.cwd ?: ""),
                 color = Fg,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = MonoFont,
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -121,7 +120,7 @@ internal fun ShellHeader(
             Text(
                 if (total > 1) "${current + 1} / $total shells" else "1 shell",
                 color = Dim,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = MonoFont,
                 // 10sp, not 9: nine-point type on a phone is under the size at which the
                 // shapes of letters survive, and this line is read at a glance while a
                 // finger is on the terminal.
@@ -298,7 +297,7 @@ internal fun SidePanel(
             Text(
                 it,
                 color = if (link.offline) Accent else Muted,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = MonoFont,
                 fontSize = 10.sp,
             )
         }

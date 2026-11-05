@@ -15,7 +15,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -68,6 +67,6 @@ private fun PadButton(label: String, glyph: String, onClick: () -> Unit) {
             .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        Text(glyph, color = Dim, fontSize = 15.sp, fontFamily = FontFamily.Monospace)
+        Text(glyph, color = Dim, fontSize = 15.sp, fontFamily = MonoFont)
     }
 }

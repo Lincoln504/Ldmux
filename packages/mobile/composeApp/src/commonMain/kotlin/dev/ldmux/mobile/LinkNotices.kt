@@ -16,7 +16,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -32,7 +31,7 @@ internal fun BoxScope.LinkNotice(text: String) {
             .border(1.dp, Line, RadiusMedium)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
     ) {
-        Text(text, color = Warn, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text(text, color = Warn, fontFamily = MonoFont, fontSize = 11.sp)
     }
 }
 

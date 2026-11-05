@@ -9,11 +9,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
 import dev.ldmux.mobile.Surface
+import dev.ldmux.mobile.MonoFont
 
 /** What the voice button is doing, for the little on-screen indicator. */
 sealed interface VoiceState {
@@ -113,7 +113,7 @@ internal fun VoicePhaseBanner(phase: VoicePhase, notice: String?, modifier: Modi
             if (voicePhaseLine(phase) != null && notice != null) "$line \u00b7 $notice" else line,
             color = if (bad) Color(0xFFFF6B6B) else Accent,
             fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = MonoFont,
         )
     }
 }
@@ -144,6 +144,6 @@ internal fun VoiceBanner(state: VoiceState, modifier: Modifier) {
             .background(Surface)
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.rowPad),
     ) {
-        Text(text, color = accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        Text(text, color = accent, fontSize = 12.sp, fontFamily = MonoFont)
     }
 }

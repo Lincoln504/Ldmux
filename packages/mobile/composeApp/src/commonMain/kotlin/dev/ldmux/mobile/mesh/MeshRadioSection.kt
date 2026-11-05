@@ -19,7 +19,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
@@ -37,6 +36,7 @@ import dev.ldmux.mobile.NoticeLine
 import dev.ldmux.mobile.OptionButton
 import dev.ldmux.mobile.OutlinedBtn
 import dev.ldmux.mobile.Warn
+import dev.ldmux.mobile.MonoFont
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlin.random.Random
@@ -80,7 +80,7 @@ internal fun RadioPickerDialog(
                         "${d.name}  ${d.address}" + (d.rssi?.let { "  $it dBm" } ?: ""),
                         color = Fg,
                         fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = MonoFont,
                         maxLines = 1,
                     )
                 }
@@ -259,10 +259,10 @@ internal fun RadioPresetDialog(
                     address.ifEmpty { "no radio" } + "  ·  " + meshLinkLabel(state),
                     color = Dim,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = MonoFont,
                 )
                 if (current != null && current != selected) {
-                    Text("current  " + presetLine(current), color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    Text("current  " + presetLine(current), color = Dim, fontSize = 11.sp, fontFamily = MonoFont)
                 }
                 // **What the radio says about itself, before what it could be set to.** Every field
                 // here was already read — `SELF_INFO` on the handshake, `DEVICE_INFO` on request,
@@ -292,7 +292,7 @@ internal fun RadioPresetDialog(
                     presetLine(selected),
                     color = Fg,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = MonoFont,
                 )
                 if (custom) {
                     // One line, four numbers, in the order the radio prints them: MHz, kHz, SF, CR.
@@ -475,7 +475,7 @@ private fun RadioFacts(info: RadioSelfInfo?, device: RadioDeviceInfo?, status: M
 @Composable
 private fun FactLine(label: String, value: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-        Text(value, color = Fg, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(label, color = Dim, fontSize = 11.sp, fontFamily = MonoFont)
+        Text(value, color = Fg, fontSize = 11.sp, fontFamily = MonoFont, maxLines = 1)
     }
 }

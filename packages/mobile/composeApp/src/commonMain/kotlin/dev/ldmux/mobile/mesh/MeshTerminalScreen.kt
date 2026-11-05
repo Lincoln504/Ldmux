@@ -44,7 +44,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.ldmux.mobile.Accent
@@ -65,6 +64,7 @@ import dev.ldmux.mobile.ScrollPad
 import dev.ldmux.mobile.Session
 import dev.ldmux.mobile.Warn
 import dev.ldmux.mobile.tildify
+import dev.ldmux.mobile.MonoFont
 import kotlin.random.Random
 import kotlin.time.TimeSource
 import kotlinx.coroutines.delay
@@ -587,7 +587,7 @@ fun MeshTerminalScreen(
                 // link talking rather than as chrome.
                 Text(
                     meshTermLabel(view),
-                    color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                    color = Dim, fontSize = 11.sp, fontFamily = MonoFont,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
                 val keep = heldScreen
@@ -786,7 +786,7 @@ fun MeshTerminalScreen(
                         } else {
                             "waiting to send: ${handle.pendingLabel}"
                         }
-                        Text(line, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Text(line, color = Dim, fontSize = 11.sp, fontFamily = MonoFont)
                     }
                 }
                 if (listed != null) {
@@ -925,5 +925,5 @@ private fun WaitingLine(text: String, key: Any?) {
             secs += 1
         }
     }
-    Text("$text · ${secs} s", color = Dim, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+    Text("$text · ${secs} s", color = Dim, fontSize = 12.sp, fontFamily = MonoFont)
 }

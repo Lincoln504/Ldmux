@@ -14,7 +14,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,7 +43,7 @@ internal fun SettingsSection(title: String, content: @Composable () -> Unit) {
             title,
             color = Dim,
             fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = MonoFont,
             modifier = Modifier.padding(bottom = 6.dp),
         )
         SettingsDivider()

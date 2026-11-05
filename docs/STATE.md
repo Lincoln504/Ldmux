@@ -125,6 +125,11 @@ What exists, 2026-10-28:
 - **Full-screen programs on this link are poor by physics**: a 200x100 screen is about 150
   records against 58 an hour at the tested preset. Not a defect; a reason to keep the terminal
   viewport small and the scrollback local.
+- **The mobile app's monospace face is Fira Mono**, bundled (Regular and Bold, SIL OFL 1.1 in
+  `THIRD-PARTY-NOTICES.md`) and used by the terminal painter and every monospace label. It replaced
+  `FontFamily.Monospace` / `Typeface.MONOSPACE`, which is whatever the device calls monospace — a
+  different advance per device, and a terminal grid that changes with it. Measured on the device
+  2026-11-05: the portrait grid is unchanged at 46 columns for 12sp.
 - **iOS**: no LoRa route, by decision (`docs/IOS-DEVELOPMENT.md`).
 
 ## Voice mode

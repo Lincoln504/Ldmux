@@ -10,7 +10,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -60,7 +59,7 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
 private fun PairingFact(label: String, value: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(label, color = Dim, fontSize = 12.sp, modifier = Modifier.width(56.dp))
-        Text(value, color = Fg, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text(value, color = Fg, fontFamily = MonoFont, fontSize = 12.sp)
     }
 }
 

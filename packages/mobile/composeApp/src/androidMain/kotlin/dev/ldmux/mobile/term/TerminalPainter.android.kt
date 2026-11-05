@@ -3,6 +3,8 @@ package dev.ldmux.mobile.term
 
 import android.graphics.Paint
 import android.graphics.Typeface
+import dev.ldmux.mobile.AndroidApp
+import dev.ldmux.mobile.R
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -22,8 +24,21 @@ private const val LINK_ALPHA = 0xA0 shl 24
 /** Android renderer: draws the grid straight onto the Compose canvas. */
 actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
 
+    /**
+     * Fira Mono, the app's own face, not the platform's `MONOSPACE`.
+     *
+     * A terminal's grid is one advance per character, so a face that changes with the OEM build
+     * changes the grid with it — and the bundled face is what every measured layout here assumes.
+     * The regular cut is used for regular cells and the bold cut for bold ones; a failed load falls
+     * back to the platform face (and to a synthesised bold) rather than to nothing.
+     */
+    private val regularFace: Typeface =
+        AndroidApp.context.resources.getFont(R.font.fira_mono_regular)
+    private val boldFace: Typeface =
+        AndroidApp.context.resources.getFont(R.font.fira_mono_bold)
+
     private val measuring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Typeface.MONOSPACE
+        typeface = regularFace
         textSize = fontSizePx
     }
     private val bgPaint = Paint()
@@ -38,7 +53,7 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
     }
     private val lineBuf = FloatArray(UnderlineGeometry.MAX_SEGMENTS * 4)
     private val fgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Typeface.MONOSPACE
+        typeface = regularFace
         textSize = fontSizePx
     }
 
@@ -101,7 +116,7 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 drawUnderline(nc, cell, x, y, span * m.width, m)
                 if (cell.text.isBlank()) continue
                 fgPaint.color = argb(cell.drawnFg)
-                fgPaint.isFakeBoldText = cell.bold
+                fgPaint.typeface = if (cell.bold) boldFace else regularFace
                 fgPaint.textSkewX = if (cell.italic) -0.25f else 0f
                 fgPaint.isUnderlineText = false
                 val baseline = y + m.baseline
@@ -205,7 +220,7 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                     // swapped — repainting it in `cell.bg` on an inverse cell would
                     // draw the glyph in the colour it is already on top of.
                     fgPaint.color = argb(cell.drawnBg)
-                    fgPaint.isFakeBoldText = cell.bold
+                    fgPaint.typeface = if (cell.bold) boldFace else regularFace
                     fgPaint.textSkewX = if (cell.italic) -0.25f else 0f
                     fgPaint.isUnderlineText = false
                     nc.drawText(cell.text, x, y + m.baseline, fgPaint)

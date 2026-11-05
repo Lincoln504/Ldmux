@@ -20,7 +20,6 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,6 +35,7 @@ import dev.ldmux.mobile.Muted
 import dev.ldmux.mobile.RadiusMedium
 import dev.ldmux.mobile.Surface
 import dev.ldmux.mobile.Warn
+import dev.ldmux.mobile.MonoFont
 
 /**
  * Manual sync mode's one control: what is held, and the button that releases it.
@@ -102,7 +102,7 @@ internal fun PublicChannelBar(
             status,
             color = statusColor,
             fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = MonoFont,
             maxLines = lines,
             overflow = TextOverflow.Ellipsis,
             modifier = m.semantics { liveRegion = LiveRegionMode.Polite },

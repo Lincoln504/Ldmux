@@ -141,6 +141,15 @@ Findings that transfer directly:
 - Note: their `rendererType: 'canvas'` advice is stale for xterm.js 6 (no such
   option) — same finding ldmux already hit.
 
+**The face is the app's, not the platform's.** `TerminalPainter` draws with Fira Mono, bundled at
+`packages/mobile/composeApp/src/androidMain/res/font/`, and every monospace label in the mobile UI
+uses the same family (`dev.ldmux.mobile.MonoFont`). `Typeface.MONOSPACE` is whatever the OEM build
+calls monospace, and a terminal's grid is one advance per character, so a face that varies by device
+varies the grid with it. Fira Mono ships Regular, Bold and Medium only, so italic cells are slanted
+by the renderer (`textSkewX`), which changes no advance. Licence: SIL OFL 1.1, recorded in
+`THIRD-PARTY-NOTICES.md`.
+
+
 ## Recommendation (revised 2026-09-14)
 
 The goal is a **native** terminal on both phones, from **one shared Kotlin

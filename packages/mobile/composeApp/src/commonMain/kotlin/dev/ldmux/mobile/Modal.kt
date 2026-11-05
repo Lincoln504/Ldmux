@@ -35,7 +35,6 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -192,14 +191,14 @@ private fun FieldBox(placeholder: String, empty: Boolean, modifier: Modifier = M
             .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
     ) {
         if (empty) {
-            Text(placeholder, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            Text(placeholder, color = Muted, fontFamily = MonoFont, fontSize = 13.sp)
         }
         content()
     }
 }
 
 /** One text style for every field, so the fields line up with each other. */
-private val FieldText = TextStyle(color = Fg, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+private val FieldText = TextStyle(color = Fg, fontFamily = MonoFont, fontSize = 13.sp)
 
 /** A labelled field, because "which box is the path" is not a question to ask. */
 @Composable

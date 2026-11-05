@@ -20,7 +20,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -269,7 +268,7 @@ internal fun KeyBtn(
                 active -> Bg
                 else -> Fg
             },
-            fontFamily = FontFamily.Monospace,
+            fontFamily = MonoFont,
             // Three-character labels get a point less: they are the widest thing
             // in a five-key row, and a point of type is cheaper than a key that
             // clips or a row that wraps.

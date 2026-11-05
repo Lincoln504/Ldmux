@@ -34,7 +34,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -464,7 +463,7 @@ internal fun ChoiceRow(
                     Text(
                         "$ordinal",
                         color = Bg,
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = MonoFont,
                         fontSize = 10.sp,
                         maxLines = 1,
                     )
@@ -508,7 +507,7 @@ internal fun ChoiceRow(
                     color = if (stateWarn) Warn else Dim,
                     fontSize = 11.sp,
                     maxLines = 1,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = MonoFont,
                     modifier = Modifier.weight(1f, fill = false),
                 )
             }
