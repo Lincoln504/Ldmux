@@ -228,3 +228,28 @@ inbound wake); `packages/mobile/.../AndroidRadioLink.kt` (`0x41` carrier, `error
 
 Firmware, read at `meshcore-fw-alerts`: `examples/companion_radio/MyMesh.cpp:120-145` (error codes),
 `:1519-1544` (raw-data guard and its failure modes).
+
+### 2026-11-04 — the deafness watchdog, measured on the device, and the one cause removed
+
+The device run in `../MOBILE-UX-AUDIT.md` §2c needed a link that stayed up and did not get one. The
+host gateway (`meshmore-gateway.service`) was restarting every ~2 minutes with
+`warning: nothing heard off the air for two minutes; rebooting the radio and exiting`
+(`status=75/TEMPFAIL`), each restart dropping the phone's BLE link and sending the app back to "the
+host did not answer". `journalctl --user -u meshmore-gateway.service` at 21:21:01, 21:22:12 (both my
+own restarts) and 21:24:16 (the watchdog) is the evidence, plus `retries 2389` in
+`ldmux mesh status`.
+
+The rule was `radioLooksDeaf(since)`: "opened N minutes ago and heard nothing off the air", where
+`since` is when the port opened. That is also the description of a healthy idle link — the daemon
+sends no records while the phone sits at a prompt — so a quiet band rebooted a working radio. Fixed
+in `meshmore-sns` `1e66a8d`: the judgement now needs a *send that went unanswered* (`_lastSentAt`
+plus `_heardAirAt`). Registered as S1 #1 in `03-DEFECTS-MESHMORE.md`, now FIXED there.
+
+What remains is not layout and not this rule: over one session the daemon counted `53 sent` against
+`5 bytes received`, so phone → host records were not arriving while host → phone ones were. That is
+a radio/BLE asymmetry and it is recorded, not diagnosed.
+
+Also noted while chasing it: the gateway's own `key` line at start-up is the **radio's** public key
+(`info.publicKey`, `bin/meshmore_gateway.dart:131`), while the daemon's "gateway key" is its own
+`SessionFiles` key (`mesh-session.key`, stable across restarts). The two are different keys with
+confusingly similar names; only the second one is what a phone pins.

@@ -4,15 +4,18 @@
 - **Re-verified against the same commit later the same day, after the separation decision.** The
   items marked VERIFIED below were read again in the tree at `5d97625`, not carried over. The ones
   that were not re-read say so; treat them as claims from the first pass.
-- **Nothing in this repository was changed.** These are reported, not fixed. MeshMore is its own
-  product now (`06-SEPARATION-PLAN.md`), and several of the items here are deliberate behaviour with
-  tests behind them, so changing them is a product decision rather than a bug fix. What LDMUX can do
-  about each of them is stated in the separation plan.
+- **One of these was fixed; the rest are reported, not fixed.** S1 #1 (the deafness watchdog) was
+  changed on 2026-11-04 in `meshmore-sns` commit `1e66a8d` after the device run in
+  `../MOBILE-UX-AUDIT.md` §2c.7 measured it rebooting a healthy radio every two minutes and dropping
+  the phone's link each time. Everything else stands as reported: MeshMore is its own product now
+  (`06-SEPARATION-PLAN.md`), and several of the items here are deliberate behaviour with tests behind
+  them, so changing them is a product decision rather than a bug fix. What LDMUX can do about each of
+  them is stated in the separation plan.
 - Severity: S1 blocks a user or loses data, S2 wrong behaviour under a real condition, S3 documentation or consistency, S4 hygiene.
 
 ## S1
 
-### 1. The deaf-radio detector restarts the gateway on a quiet but healthy mesh — OPEN, VERIFIED
+### 1. The deaf-radio detector restarts the gateway on a quiet but healthy mesh — FIXED 2026-11-04
 
 - Still true at `5d97625`. `radioLooksDeaf` (`serial_mesh_sender.dart:63-69`) consults only
   `_heardAirAt` and the time since the port opened; `_sentSinceHeard` is incremented on every send
@@ -24,6 +27,19 @@
   reports `state down`, and the restart count rises (the observed run reached `NRestarts=901`).
 - The fix is a rule change, not a code repair: require N unanswered sends to a bound peer, and treat
   "no adverts" as no evidence.
+
+**Fixed 2026-11-04** (`1e66a8d`, in `meshmore-sns`). The rule is now "a deaf radio is one that was
+asked and did not answer": `_lastSentAt` records when a record was last handed to the radio, and
+silence before that is idleness rather than deafness. A send older than the window with no air packet
+since is still deaf, so the failure the watchdog exists for is still caught. Three tests, two of them
+rewritten to the new rule plus "an idle link is not deaf: silence with nothing asked is not
+evidence" (39 in the package, all passing).
+
+The measurement that prompted it, from the device run: the gateway exited 75 at `21:24:16`, 2m04s
+after opening, having heard nothing because nothing had been sent — the daemon sends no records while
+the phone sits at a prompt — and the phone answered "the host did not answer" every time. After the
+fix the gateway stayed up for the rest of the session (no exit between `21:28:17` and the end of the
+run) against one every ~2 minutes before.
 
 ## S2
 
