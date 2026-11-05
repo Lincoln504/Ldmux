@@ -592,7 +592,27 @@ detail: **"the link dropped"**, then "this screen keeps retrying by itself; refr
 never connects: ...". The checklist is still there for a link that never comes back, but it is no
 longer the first thing a user reads while the app is already recovering.
 
-### 2d.5 One defect found by looking at the screen
+### 2d.5 What the device showed
+
+- **Settings**, read back through `uiautomator`: every label at x=45 and every value at x=275, the
+  preset and the airtime on two lines, `channel  private · mode is your choice`,
+  `input  live  manual sync`.
+- **The mode persists by name**: tapping `manual sync` wrote
+  `<string name="mesh_input_mode">ManualSync</string>`. In live mode the terminal drew **no mode
+  row** at all; in manual sync it drew `view 6 behind` and a filled `show`, which became
+  `1 key, 1 record · view 42 behind` with `sync` once input was held. No `hold input` and no
+  `leave` anywhere.
+- **The reconnect landed home twice with no refresh pressed.** Once from the terminal's own list
+  button (the link dropped, "handshake · 10 s" for a few seconds, then the full list) and once while
+  the screen sat untouched after a settings visit: twenty seconds after a dump that read only
+  `handshaking · 10 s`, the same list held every shell. That is the reported complaint cured: the
+  app rebuilt the connection itself and came back to the home screen.
+- **Not verified this pass**: switching between two ticked shells (the link dropped while the second
+  shell was opening, and a later attempt reopened the list), and the landscape stacking of the
+  sync row (it is the same `BoxWithConstraints` branch measured in §2c.6, and the code did not
+  change). Both are open items below rather than claims.
+
+### 2d.6 One defect found by looking at the screen
 
 `preset` and `airtime` said "not read" and never filled in, and the Bluetooth log showed the GATT
 link opening and being torn down again within eight seconds. The cause was in the composable, not the
