@@ -202,9 +202,16 @@ because a control should name what it does.
   mask it (the tailnet route can). Typed text at a prompt is drawn locally like any other, which is
   what a terminal with echo on does. A protocol flag on `Commit` would close it; that is a host and
   phone change with a version bump, deliberately not in this one.
-- **The classification can be stale.** It is written when the radio dialog reads `SELF_INFO` or
-  applies a preset. A tuple changed by another app is not noticed until this app reads the radio,
-  and until then the previous answer stands — including "public", which is the cautious one.
+- **The classification is read from the radio, not only from the dialog.** It used to be written
+  only when the radio dialog read `SELF_INFO` or applied a preset, so an install that never opened
+  that dialog was classified "public" — the safe default — and then *forced* into held typing while
+  the bar said "the radio is on a public channel", which on a private tuple was simply false. The
+  link reads `SELF_INFO` as part of its own handshake, so the terminal screen now hears the answer
+  and saves it; `connectionKey` excludes the field, so saving does not rebuild the connection. A
+  tuple changed by another app is still only noticed when this app reads the radio, and until then
+  the previous answer stands — including "public", which is the cautious one. A radio classified
+  *private* while the mode is on does not turn the mode off by itself: leaving is the user's
+  decision, and the bar offers it once the mode stops being forced.
 - **The mode is one buffer for one connection, not one per shell.** The connection carries one
   attached shell at a time (`Attach` per page), so a per-shell buffer would be a buffer for a shell
   the link is not on.

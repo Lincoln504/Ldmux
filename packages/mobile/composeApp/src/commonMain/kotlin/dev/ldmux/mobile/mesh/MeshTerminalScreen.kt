@@ -102,6 +102,12 @@ fun MeshTerminalScreen(
     plan: MeshScreenPlan,
     config: LdmuxConfig,
     onOpenSettings: () -> Unit,
+    /**
+     * What the radio says its channel is, written back to the config so the public-channel rule is a
+     * fact about this radio rather than the default. See the effect below for why the screen does
+     * this and the settings dialog no longer has to.
+     */
+    onRadioClassified: (Boolean) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (the mesh connection never retries by
@@ -274,10 +280,36 @@ fun MeshTerminalScreen(
     // **Public-channel mode is forced on a public channel** (ADR-0026): a tuple other operators'
     // radios share means every keystroke is a broadcast, so held input is the only supported way
     // to type there. On a private tuple the mode is the user's choice. `meshPublicChannel` is a
-    // fact derived from the radio's own tuple, written when the radio dialog read or applied it;
-    // unknown reads as public, because that is the safe reading.
+    // fact derived from the radio's own tuple; unknown reads as public, because that is the safe
+    // reading.
     LaunchedEffect(conn, config.meshPublicChannel) {
         if (config.meshPublicChannel) source.setPublicChannel(true)
+    }
+
+    // **The tuple is read from the radio, so the answer is a fact and not a default.** It used to
+    // be written only by the radio dialog, which meant an install that never opened that dialog
+    // was classified "public" — the safe default — and then *forced* into held typing while the
+    // bar said "the radio is on a public channel", which on a private tuple was simply false. The
+    // link reads `SELF_INFO` as part of its own handshake (`onReady`), so the screen can hear the
+    // answer without asking anyone to open a dialog. Saving it does not rebuild the connection:
+    // `connectionKey` excludes this field on purpose.
+    val classifiedNow by rememberUpdatedState(config.meshPublicChannel)
+    LaunchedEffect(conn) {
+        conn.radio.selfInfo.collect { info ->
+            if (info == null) return@collect
+            val preset = RadioPreset(
+                frequencyMhz = info.frequencyMhz,
+                bandwidthKhz = info.bandwidthKhz,
+                spreadingFactor = info.spreadingFactor,
+                codingRate = info.codingRate,
+                txPowerDbm = info.txPowerDbm,
+                // The channel is four fields and path width is not one of them, so the firmware's
+                // stamp width cannot change this answer; 1 stands in for "not read here".
+                pathHashSize = 1,
+            )
+            val public = isPublicChannel(preset)
+            if (public != classifiedNow) onRadioClassified(public)
+        }
     }
 
     // The local echo: what is held is drawn at the cursor of the host's last screen, so typing

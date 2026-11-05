@@ -320,6 +320,13 @@ class MeshRadioConnection(
     private val origin = TimeSource.Monotonic.markNow()
     private val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
 
+    /**
+     * The radio this connection owns, for the two facts the screen needs about it and nothing
+     * else: its own `SELF_INFO` (which channel it is really on) and its device info. The driver
+     * sends through the same object; this is a read-only window onto it, not a second owner.
+     */
+    val radio: RadioLink get() = link
+
     val driver = MeshTermDriver(
         gateway = MeshRadioGateway(link),
         begin = {

@@ -88,7 +88,14 @@ fun App() {
                     } else null,
                 )
             } else if (mesh != null) {
-                MeshTerminalScreen(mesh, config, onOpenSettings = { showSettings = true })
+                MeshTerminalScreen(
+                    mesh, config,
+                    onOpenSettings = { showSettings = true },
+                    // The radio's own tuple, saved when the link reads it, so "public channel" is a
+                    // reading and not the cautious default. `connectionKey` excludes this field, so
+                    // saving does not rebuild the connection.
+                    onRadioClassified = { public -> store.update(store.config.value.copy(meshPublicChannel = public)) },
+                )
             } else {
                 AppContent(config, store, onOpenSettings = { showSettings = true })
             }
