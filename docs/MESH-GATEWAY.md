@@ -428,7 +428,7 @@ Also: the gateway's airtime estimate is only correct for the radio preset it is 
 > records the earlier Kotlin implementation; the phone now owns BLE directly. Current record:
 > [`MESH-STANDALONE.md`](MESH-STANDALONE.md).
 
-**Built (LDMUX mobile, Kotlin, `packages/mobile/composeApp`, package `dev.ldmux.mobile.mesh`):**
+**Built (LDMUX mobile, Kotlin, `packages/mobile/composeApp`, package `io.ldmux.mobile.mesh`):**
 
 - `MeshGatewayFrame.kt`: L2 frame codec, typed builders, total readers, an incremental
   decoder with a sticky error and no resync. Pinned byte for byte to the Dart reference

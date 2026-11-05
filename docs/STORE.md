@@ -110,11 +110,13 @@ The radio route needs two MeshCore companion radios and no network at all.
 
 ## Decisions that must be made before the first upload
 
-- **`applicationId` is `dev.ldmux.mobile`**, which asserts a domain. Play does not verify
-  ownership, but publishing under a domain the project does not control is an impersonation
-  risk, and the id cannot be changed after the first upload. Confirm ownership of
-  `ldmux.dev` before the first bundle, or change the id now.
-- **The privacy policy needs a URL.** The text above is ready; hosting it is not.
+- **`applicationId` is `io.ldmux.mobile`**, settled 2026-11-05 when the project took
+  `ldmux.io`. The reverse-domain id follows the owned domain, which is the point: the previous
+  value, `dev.ldmux.mobile`, asserted `ldmux.dev`, a domain the project does not control, and
+  Play does not verify ownership but the id can never be changed after the first upload. The
+  Kotlin package moved with it, so the namespace, the manifest and the id agree.
+- **The privacy policy needs a URL.** The text above is ready, and the project now owns
+  `ldmux.io`, so the page can live at `https://ldmux.io/privacy`. Publishing it is a deploy step.
 - **Store assets do not exist yet**: feature graphic (1024x500), phone screenshots, a 512x512
   icon. The launcher icon in `res/` is an in-app icon, not a store asset.
 

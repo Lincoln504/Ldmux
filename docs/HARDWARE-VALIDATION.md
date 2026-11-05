@@ -8,7 +8,7 @@ board serves the phone over BLE today, and the host chain needs it reflashed to 
 
 | Artifact | Path | Size | SHA-256 |
 |---|---|---|---|
-| LDMUX debug APK, package `dev.ldmux.mobile` | `ldmux/packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk` | 67,955,440 B | `20a9ee26a806ca8153eda545f7b9099da7f18da5031223d52b2af3d0520246ac` |
+| LDMUX debug APK, package `io.ldmux.mobile` | `ldmux/packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk` | 67,955,440 B | `20a9ee26a806ca8153eda545f7b9099da7f18da5031223d52b2af3d0520246ac` |
 | USB companion firmware, env `heltec_v4_companion_radio_usb` | `/tmp/mc-hwprep/.pio/build/heltec_v4_companion_radio_usb/firmware.bin` (+ `bootloader.bin`, `partitions.bin`) | 642,048 B | `2546bcdd04a467a288b1b5c784d96b0f7afc87b57b69af0e0499bcd93ba01a64` |
 | MeshMore debug APK, package `com.iotone.meshmore_sns_app` | **NOT BUILT** (see below) | | |
 
@@ -42,7 +42,7 @@ $ADB devices -l                       # must list the phone; none was attached o
 $ADB install -r meshmore-sns/meshmore_sns_app/responsive_starter_app/build/app/outputs/flutter-apk/app-debug.apk
 $ADB install -r ldmux/packages/mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk
 $ADB shell am start -n com.iotone.meshmore_sns_app/.MainActivity   # launchable-activity verified with aapt on the (stale) APK
-$ADB shell am start -n dev.ldmux.mobile/.MainActivity               # verified with aapt on the LDMUX APK
+$ADB shell am start -n io.ldmux.mobile/.MainActivity               # verified with aapt on the LDMUX APK
 $ADB logcat -s flutter:V ldmux:V AndroidRuntime:E
 ```
 

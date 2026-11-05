@@ -374,7 +374,7 @@ turn rather than being drawn into the old window and carried round with it.
 
 `am force-stop` followed by an install kills the process with no crash record. It
 was mistaken for an app crash during development. Check
-`adb shell dumpsys activity exit-info dev.ldmux.mobile` before believing a crash
+`adb shell dumpsys activity exit-info io.ldmux.mobile` before believing a crash
 report: `reason=16 (PACKAGE UPDATED)` is a reinstall, `reason=5/6 (CRASH)` is not.
 
 ### The four arrow keys draw nothing — RETRACTED. All four render.

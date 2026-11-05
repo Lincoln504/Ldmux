@@ -74,7 +74,7 @@ fun gitCommitCount(): Int? = runCatching {
 }.getOrNull()
 
 android {
-    namespace = "dev.ldmux.mobile"
+    namespace = "io.ldmux.mobile"
     // Compile against the latest released platform (37.2), but TARGET 36 and
     // MIN 28: Android 8.0 reached end of security support in January 2021, so a
     // phone on 26 or 27 has had no security updates for five years and cannot
@@ -87,7 +87,7 @@ android {
     compileSdkMinor = 2
 
     defaultConfig {
-        applicationId = "dev.ldmux.mobile"
+        applicationId = "io.ldmux.mobile"
         minSdk = 28
         targetSdk = 36
         // Monotonic without a human remembering: the commit count only goes up. Play

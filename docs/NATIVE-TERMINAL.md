@@ -143,7 +143,7 @@ Findings that transfer directly:
 
 **The face is the app's, not the platform's.** `TerminalPainter` draws with Fira Mono, bundled at
 `packages/mobile/composeApp/src/androidMain/res/font/`, and every monospace label in the mobile UI
-uses the same family (`dev.ldmux.mobile.MonoFont`). `Typeface.MONOSPACE` is whatever the OEM build
+uses the same family (`io.ldmux.mobile.MonoFont`). `Typeface.MONOSPACE` is whatever the OEM build
 calls monospace, and a terminal's grid is one advance per character, so a face that varies by device
 varies the grid with it. Fira Mono ships Regular, Bold and Medium only, so italic cells are slanted
 by the renderer (`textSkewX`), which changes no advance. Licence: SIL OFL 1.1, recorded in
