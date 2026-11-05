@@ -87,11 +87,16 @@ internal fun PublicChannelBar(
         return
     }
 
+    // **"View N behind" is the point of the freeze, so it cannot be shadowed by "nothing held".**
+    // It used to be tested after the empty summary, so a frozen view with an empty buffer reported
+    // "nothing held" and never how stale it was — which is the one thing the bar is for once the
+    // buffer is empty. Ordered so the sentence is always true and always says the most useful part.
     val status = when {
         flushing -> "sending…"
         awaiting -> "waiting for the answer"
-        summary.isEmpty() -> "nothing held"
+        updates > 0 && summary.isEmpty() -> "view $updates behind"
         updates > 0 -> "$summary · view $updates behind"
+        summary.isEmpty() -> "nothing held"
         else -> summary
     }
     Column(
@@ -142,8 +147,13 @@ internal fun PublicChannelBar(
                     fontSize = 13.sp,
                 )
             }
-            MiniTextButton(onClick = onDiscard, enabled = summary.isNotEmpty() && !awaiting) {
-                Text("discard", color = if (summary.isNotEmpty() && !awaiting) Dim else Muted, fontSize = 11.sp)
+            // **Discard stays live while a wait is running.** It used to be disabled for the whole
+            // 20 s wait, so on a dead link the only control that could clear held text was greyed
+            // out exactly when the user most wanted it. Nothing is lost by allowing it: a discard
+            // while sending leaves the piece already on the air and drops the rest, which is what
+            // "discard" means; a discard while only waiting leaves nothing in flight at all.
+            MiniTextButton(onClick = onDiscard, enabled = summary.isNotEmpty()) {
+                Text("discard", color = if (summary.isNotEmpty()) Dim else Muted, fontSize = 11.sp)
             }
         }
         // Turning the mode off is a decision about what is waiting, so the bar says which one it

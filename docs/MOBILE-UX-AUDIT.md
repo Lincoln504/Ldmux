@@ -299,6 +299,40 @@ rendering defect on its own.
   against the feed, and the feed fixture lives in the other project (`meshmore-sns`), so the check
   would have to copy it.
 
+### 2b.10 The sync mode's own state machine, audited
+
+Six defects in ADR-0026's implementation, four of them user-visible on the link the mode exists for:
+
+1. **A sync sent only its first record's worth.** `PublicChannelHold.painted()` cleared `flushing`
+   as well as `awaiting`, contradicting its own neighbour's doc ("clears when the buffer is empty,
+   not when the answer arrives"). A screen arriving mid-drain — the normal case, since an `Input`
+   costs a record and the ARQ queue holds two — closed the drain and left the rest of the text held
+   with nothing in flight. A two-line command sent its first line. A paint now ends only the wait;
+   the drain ends when the buffer empties, at the deadline, or on leaving the mode.
+2. **The "no answer yet" notice cleared itself.** The deadline effect was keyed on `awaitingSync`,
+   which the deadline's own action sets false — so the write re-keyed the effect and the relaunched
+   body nulled the notice. The ADR's promised line rendered for one frame. Keyed on a press count
+   now, which also fixes a second press inheriting the first press's remaining clock.
+3. **A shell switch sent shell A's held text to shell B.** `clear()` dropped the held screen but not
+   the buffer, which lives in the handle. Discarded on a change of shell id — not on `clear()`,
+   which also runs on a rotation's `Resize`.
+4. **The echo did not survive a paint**, so a sync answer erased text the bar still counted. The
+   source remembers it and every paint re-applies it (never on the alternate screen or in history).
+5. **Held text was written into the engine unsanitised.** Host rows go through `cleanRow`; the echo
+   path had no such filter, so a pasted `ESC[2J` executed against the phone's copy of the host's
+   screen. C0/DEL/C1 are dropped now except the four the echo itself builds.
+6. **Rows that scrolled while frozen were dropped from scrollback** — `show()` kept the newest screen
+   without noting the pair to `MeshHistory`, so a build log watched through a freeze could not be
+   scrolled back past it. Noted once per pair now.
+
+Plus four smaller ones: the echo and the count lagged up to 120 ms behind typing (`settle` refreshed
+only the literal line); "view N behind" was shadowed by "nothing held"; "too much held: sync to send"
+named a button that does nothing when the refusal left the buffer empty; `discard` was disabled for
+the whole 20 s wait — exactly when a dead link makes it the only control worth pressing; and the
+record count divided by 96 where the sender backs off to a character boundary, so "about 2 records"
+was occasionally 3. The ADR's "no fake can outlive the next truth" was an overclaim — while frozen,
+nothing paints — and is now "the next paint".
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
@@ -316,7 +350,7 @@ JAVA_HOME=<jdk-21> ./gradlew --offline :composeApp:assembleDebug        # the AP
 `nix develop .#mobile`. Everything above was run; the unit suite passes and the APK assembles. **No
 device was involved**: nothing here is a claim about how the screens look or feel on a phone.
 
-The second pass ran the same three commands and the Kotlin suite (599 tests as of this writing, all
+The second pass ran the same three commands and the Kotlin suite (600 tests as of this writing, all
 passing), plus the native engine's own suite in `packages/mobile/scripts/test-native.sh` — 290 checks
 and 16 JNI checks — because the scroll investigation needed the engine's real behaviour rather than a
 reading of it (`LDMUX_VT_LIB_DIR` and `LDMUX_VT_INCLUDE_DIR` pointed at `native/prebuilt/host`, which

@@ -292,10 +292,30 @@ fun MeshTerminalScreen(
     // hold, and no answer came". Twenty seconds is several radio round trips — long enough not to
     // cry wolf on a slow link, short enough that a person does not sit on a dead screen.
     var syncNotice by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(source.awaitingSync) {
-        if (!source.awaitingSync) { syncNotice = null; return@LaunchedEffect }
+    // **Keyed on the press count, not on "a wait is running".** It used to be keyed on
+    // `awaitingSync`, which the deadline's own action sets to false — so the notice was written
+    // into a state change that re-keyed the effect, whose first line nulled the notice. The message
+    // the ADR promises was rendered for at most one frame. A Boolean also cannot express "the user
+    // pressed sync again", so a second press 15 s into a 20 s wait inherited 5 s of clock it had not
+    // earned. A count restarts the deadline on every press and nothing else.
+    LaunchedEffect(source.syncSeq) {
+        if (source.syncSeq == 0) return@LaunchedEffect
         delay(SYNC_ANSWER_TIMEOUT_MS)
         if (source.syncTimedOut()) syncNotice = "no answer yet: the link may be busy or down"
+    }
+    // **Held text belongs to one shell.** A switch clears the screen, and the buffer would go to the
+    // shell the user switched *to* — text typed for one shell, sent into another, without a press
+    // being repeated. Discarded rather than sent, and said so for a few seconds. Keyed on the shell
+    // id and not on `clear()`: `clear()` also runs on a rotation's `Resize`, where throwing away what
+    // was typed would be a bug of its own.
+    var heldFor by remember(conn) { mutableStateOf(shells.current) }
+    LaunchedEffect(shells.current) {
+        val now = shells.current ?: return@LaunchedEffect
+        if (heldFor != null && heldFor != now && handle.hasPending) {
+            handle.discardHeld()
+            syncNotice = "held text discarded: the shell changed"
+        }
+        heldFor = now
     }
     // A notice over a terminal is read while typing, so it must not stay once it has been read.
     // Two different lifetimes: "no answer" is a fact about the last thing you did and stays a few
@@ -550,7 +570,13 @@ fun MeshTerminalScreen(
                         val notice = when {
                             syncNotice != null -> syncNotice
                             source.scrollNotice != null -> source.scrollNotice
-                            handle.overflow && source.publicChannel -> "too much held: sync to send"
+                            // The refusal drops the whole keystroke and sends nothing, so a
+                            // notice that says "sync to send" over an empty buffer names a button
+                            // that does nothing. Say what there is to do in each state.
+                            handle.overflow && source.publicChannel && handle.hasPending ->
+                                "too much held: sync to send"
+                            handle.overflow && source.publicChannel ->
+                                "input refused: the held text is at its limit"
                             handle.overflow -> "too much typed: wait for it to send"
                             live?.stalled == true -> "waiting for send budget"
                             live?.screen?.alternate == true -> "full-screen program: updates are large and slow"

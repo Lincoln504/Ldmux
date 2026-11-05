@@ -52,6 +52,14 @@ internal class PublicChannelHold {
     var updates: Int by mutableStateOf(0)
         private set
 
+    /**
+     * How many syncs have been pressed. A monotonic count, not a flag, because the screen's
+     * deadline is keyed on it: a second press while a wait is running must restart the clock, and
+     * a Boolean that stays true cannot tell a re-launched effect that anything changed.
+     */
+    var seq: Int by mutableStateOf(0)
+        private set
+
     /** Turn the mode on or off. Turning it off clears any wait; the caller draws what it has. */
     fun set(value: Boolean) {
         if (on == value) return
@@ -70,16 +78,34 @@ internal class PublicChannelHold {
      * would be a mode with no reason on screen.
      */
     fun acceptScreen(painted: Boolean): Boolean {
-        if (!on || awaiting) return true
+        if (!on) return true
         if (!painted) return true
+        // **Mid-send, a screen is held too.** The drain leaves in more than one record on this
+        // link (`QueueFull` is the normal case, not the error case), and a screen that arrives
+        // between two records is the pty's reaction to a partial command. Drawing it would end
+        // the wait, close the drain and strand the rest of what the user typed — measured in
+        // review as the reason a two-line command sent only its first line. The answer is only
+        // the answer when the send is complete.
+        if (flushing) {
+            updates += 1
+            return false
+        }
+        if (awaiting) return true
         updates += 1
         return false
     }
 
-    /** A screen was drawn. A wait that was running is over. */
+    /**
+     * A screen was drawn. The wait for the answer is over — [flushing] is *not* touched here.
+     *
+     * It used to clear both, which is the bug this separation was written for and then broken by:
+     * a screen arriving while the buffer was still draining closed the drain, so the pump parked
+     * with text still held and nothing in flight to send it. The drain ends on [drained] (the
+     * buffer emptied), on [timedOut] (the deadline), or when the mode is turned off — never on a
+     * paint. See [acceptScreen] for why a paint mid-drain does not even happen.
+     */
     fun painted() {
         awaiting = false
-        flushing = false
         updates = 0
     }
 
@@ -94,15 +120,31 @@ internal class PublicChannelHold {
         if (!on) return false
         awaiting = true
         flushing = pending
+        seq += 1
         return pending
     }
 
-    /** The buffer is empty: stop sending. Called by the pump's own loop, not by the answer. */
-    fun drained() {
+    /**
+     * The buffer is empty: stop sending. Called by the pump's own loop, not by the answer.
+     *
+     * True when a drain was actually running, so the caller knows whether it just finished a send
+     * or merely looked at an idle batcher. [awaiting] deliberately survives: the send is over and
+     * the answer is still owed, which is the pair of facts the bar draws.
+     */
+    fun drained(): Boolean {
+        if (!flushing) return false
         flushing = false
+        return true
     }
 
-    /** The wait's deadline passed with no answer. True means the newest held screen should be drawn. */
+    /**
+     * The wait's deadline passed with no answer. True means the newest held screen should be drawn.
+     *
+     * It stops a drain as well as a wait, deliberately: a deadline that fires while the buffer is
+     * still full means the link is not carrying records, and continuing to try costs airtime for a
+     * send the user is about to be told may be down. What stays held stays visible in the bar, so
+     * nothing is silently dropped — the next press sends it.
+     */
     fun timedOut(): Boolean {
         if (!awaiting) return false
         awaiting = false

@@ -45,7 +45,20 @@ offering a toggle. On a private tuple the user may hold typing or not.
 - **The mode and "flushing" are two flags.** `flushing` is true only from the sync press until the
   buffer is empty; `awaiting` stays true until the host's answer arrives. A single flag would send
   everything typed while the answer was on its way, which is exactly the live sending the mode
-  exists to prevent.
+  exists to prevent. The pair has to be two *independent* lifetimes, and an earlier version made
+  them one: `painted()` cleared both, so a screen arriving mid-drain — which on this link is the
+  normal case, because an `Input` costs a record and the ARQ queue holds two — closed the drain and
+  left the rest of a two-line command held with nothing in flight. Only three things end a drain:
+  the buffer emptying, the deadline, and leaving the mode. A paint ends only the wait.
+- **A screen that arrives mid-drain is held, not drawn.** It is the pty's reaction to a partial
+  command, so drawing it would end the wait before the send was complete. The drain finishing is
+  what draws the newest held screen ("send what is held, then show the shell's view" is honoured by
+  the source, not by the user pressing again).
+- **Every press restarts the deadline.** A monotonic press count, not "a wait is running": a Boolean
+  that is already true cannot tell the screen's timer that the user pressed again, so a second press
+  15 s into a 20 s wait inherited 5 s of clock it had not earned — and the deadline's own action set
+  the Boolean false, which re-keyed the timer whose first line cleared the notice it had just
+  written. The "no answer yet" line therefore rendered for at most one frame.
 - **The view is frozen, and "sync" unfreezes it.** While the mode is on, a screen the host sends is
   *kept* (the newest one) rather than drawn. The sync button drains the buffer, and the first screen
   that arrives afterwards is drawn — the host's answer to what was sent. A frozen view never stops
@@ -73,6 +86,11 @@ the echo is written *incrementally*:
 - **Every echo is rebuilt from the host's last screen, never painted onto the previous echo.** So
   the image is always exactly "the shell as it was, plus what you have typed since". Backspace,
   wrapping, a deleted character and a long line cannot make it drift, because nothing accumulates.
+  The held text is remembered so that *every* paint puts it back: a repaint used to erase the echo
+  while the bar went on counting the text, leaving the user counting something the screen no longer
+  showed. It is sanitised on the way in, too — the host's rows are stripped of control characters by
+  the screen encoder, and a pasted `ESC[2J` reaching the engine would clear the phone's copy of the
+  host's screen (healed by the next paint, but a dropped byte is a smaller lie than a repaint).
 - **Autowrap is off while the echo is written** (`\x1b[?7l` … `\x1b[?7h`). A fake line that wrapped
   would scroll the screen, and a row pushed into the local scrollback by a fake is history that
   never happened. With autowrap off the text stops at the last column instead.
@@ -103,7 +121,10 @@ what it will do.
   when the program has turned remote echo off** — its `confirmed_epoch` cannot advance at a
   password prompt, so a tentative character is not drawn there. Our echo expires differently but
   for the same reason: it is rebuilt from the confirmed screen on every change and any paint of
-  the host's screen removes it, so no fake can outlive the next truth.
+  the host's screen replaces it, so no fake outlives the next *paint*. Note the word: while the
+  view is frozen the host's screens are kept rather than painted, so the base the echo is drawn on
+  is as old as the freeze — which is what the bar's `view N behind` is counting, and the reason a
+  frozen view should not be left frozen for long.
 - **The half-duplex radio argument is the mode's premise**, and the numbers support it:
   LoRaWAN's `RECEIVE_DELAY1` is 1 s and no uplink may be broadcast during a receive window, and
   measured device-to-device LoRa round trips start at ~34 ms (SF7/500 kHz) at the physical layer
@@ -156,6 +177,10 @@ because a control should name what it does.
 
 ## Losses and edges, stated rather than hidden
 
+- **The buffer is per connection, and per shell.** A switch to another shell discards what was
+  held, because the text was addressed to a shell that is no longer on screen and sending it into
+  the next one would be a command the user never composed there. It says so for a few seconds. A
+  rotation's `Resize` also clears the screen but is not a switch, so it does not discard.
 - **The buffer is per connection.** Leaving the mesh terminal — to the shell list, to Settings, or
   by the app being killed — disposes the connection and the buffer with it. The bar's own leave
   action sends first; the launcher button and a process death do not. A confirm-on-leave was not
@@ -165,7 +190,10 @@ because a control should name what it does.
   pump reports `Blocked`, the buffer stays, and the bar keeps showing it. Nothing is lost but
   nothing is sent either, which is the honest pair.
 - **The view can be frozen for as long as the user leaves it frozen.** `heldUpdates` counts the
-  screens that passed, so the bar can say how far behind it is, and the pull shows the newest.
+  screens that passed, so the bar can say how far behind it is, and the pull shows the newest. The
+  rows that scrolled while frozen are still kept as scrollback: the host numbers them, so they are
+  history whether or not the screen was drawn, and a build log watched through a freeze scrolls
+  back to its beginning afterwards.
 - **A sync that is answered by a screen identical to the frozen one** still ends the wait, and it
   repaints when it was echoing: without that, a fake line would survive the sync that was supposed
   to replace it.

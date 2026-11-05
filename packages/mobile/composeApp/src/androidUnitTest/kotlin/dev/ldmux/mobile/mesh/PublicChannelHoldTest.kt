@@ -44,12 +44,21 @@ class PublicChannelHoldTest {
     }
 
     @Test
-    fun `a sync with something waiting starts the wait and the next screen ends it`() {
+    fun `a screen arriving mid-drain is held, so the send is not cut in half`() {
+        // `QueueFull` is the normal case on this link, so a send spanning several records is the
+        // rule: a screen that arrives between two of them is the pty's reaction to a partial
+        // command. Drawing it used to end the wait, which closed the drain and left the rest of the
+        // typed text held with nothing in flight to send it — a two-line command sent only its
+        // first line. The answer is only the answer when the send is complete.
         val h = PublicChannelHold()
         h.set(true)
         assertTrue(h.sync(pending = true))
-        assertTrue(h.awaiting)
-        assertTrue(h.acceptScreen(painted = true), "the answer to a sync is drawn")
+        assertFalse(h.acceptScreen(painted = true), "mid-drain: kept, not drawn")
+        assertEquals(1, h.updates)
+        assertTrue(h.drained(), "the buffer emptied")
+        assertFalse(h.flushing)
+        assertTrue(h.awaiting, "the answer is still owed")
+        assertTrue(h.acceptScreen(painted = true), "and now it is drawn")
         h.painted()
         assertFalse(h.awaiting)
         assertEquals(0, h.updates)
@@ -87,22 +96,48 @@ class PublicChannelHoldTest {
     }
 
     @Test
-    fun `answering clears the drain as well as the wait`() {
+    fun `a paint does not end a drain, only the empty buffer or the deadline does`() {
+        // This is the bug `painted` used to have: it cleared `flushing` too, contradicting its own
+        // neighbour's doc ("clears when the buffer is empty, not when the answer arrives"), so any
+        // paint during a drain parked the pump with text still held and nothing in flight.
         val h = PublicChannelHold()
         h.set(true)
         h.sync(pending = true)
         h.painted()
+        assertTrue(h.flushing, "a paint is not the drain ending")
+        assertFalse(h.awaiting, "but the wait for the answer is over")
+        assertTrue(h.drained())
+        assertFalse(h.flushing)
+        // A deadline does stop a drain: on a link that is not carrying records, continuing to try
+        // costs airtime for a send the user is about to be told may be down.
+        h.sync(pending = true)
+        assertTrue(h.timedOut())
         assertFalse(h.flushing)
         assertFalse(h.awaiting)
     }
 
     @Test
-    fun `a second press while waiting is allowed, and still means send`() {
+    fun `a second press while waiting is allowed, and restarts the deadline`() {
+        // The deadline effect is keyed on `seq`, so a press has to change it: a Boolean that is
+        // already true cannot tell a re-launched effect that anything happened, and a press 15 s
+        // into a 20 s wait would inherit 5 s of clock it did not earn.
         val h = PublicChannelHold()
         h.set(true)
-        h.sync(pending = true)
+        assertTrue(h.sync(pending = true))
+        val first = h.seq
         assertTrue(h.sync(pending = true), "the buffer refilled while waiting: send it too")
         assertTrue(h.awaiting)
+        assertTrue(h.seq > first, "every press is a new deadline")
+    }
+
+    @Test
+    fun `drained says whether a drain was actually running`() {
+        val h = PublicChannelHold()
+        h.set(true)
+        assertFalse(h.drained(), "idle batchers are polled: that is not a send finishing")
+        h.sync(pending = true)
+        assertTrue(h.drained())
+        assertFalse(h.drained(), "once, not once per poll")
     }
 
     @Test

@@ -380,7 +380,10 @@ Platforms (see `docs/PLATFORMS.md`):
     channel, optional on a private one**: `isPublicChannel` compares the tuple's four channel
     fields against the region's public presets, the radio dialog writes that into the config, and
     unknown reads as public. The echo is rebuilt from the host's screen on every change and writes
-    with autowrap off, so it cannot drift and cannot push a fake row into the scrollback. Tests:
+    with autowrap off, so it cannot drift and cannot push a fake row into the scrollback. The
+    drain and the wait are two independent flags — a paint ends the wait, never the drain — and a
+    screen arriving mid-drain is held so the send finishes; every press restarts the deadline, keyed
+    on a press count rather than on "a wait is running". A shell switch discards what was held. Tests:
     `PublicChannelHoldTest`, `MeshInputTest` (discard, the held summary, the echo table),
     `MeshStandaloneTest` (`isPublicChannel`).
   - *Still not done:* preset rollback, background release, multi-hop path recovery, a host-side

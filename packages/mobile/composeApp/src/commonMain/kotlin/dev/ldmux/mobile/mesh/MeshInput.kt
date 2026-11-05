@@ -308,7 +308,11 @@ class MeshTerminalHandle(
 
     private fun settle(ok: Boolean): Boolean {
         overflow = !ok
-        pendingLabel = readable(batcher.pending)
+        // **Everything the bar shows, at the moment the key is typed.** This used to refresh only
+        // the literal line and leave the summary and the echo to the pump's 120 ms poll, so a fast
+        // typist saw the echo stutter a sixth of a second behind their fingers and the count go
+        // stale. The pump still refreshes after it sends; this is the typing half.
+        refreshPending()
         if (ok) onQueued()
         return ok
     }
@@ -389,7 +393,7 @@ class MeshTerminalHandle(
         for (item in items) when (item) {
             is MeshOut.Text -> {
                 chars += item.bytes.decodeToString().length
-                records += (item.bytes.size + MeshTerm.MAX_INPUT - 1) / MeshTerm.MAX_INPUT
+                records += recordsFor(item.bytes)
             }
             is MeshOut.Keys -> {
                 keys += item.names.size
@@ -401,6 +405,29 @@ class MeshTerminalHandle(
             if (keys > 0) add(if (keys == 1) "1 key" else "$keys keys")
         }
         return parts.joinToString(" and ") + ", " + if (records == 1) "1 record" else "about $records records"
+    }
+
+    /**
+     * The records [bytes] will cost, walking the same slice rule [peek] uses.
+     *
+     * Not `(size + 95) / 96`: [peek] backs off to a character boundary, so a 96-byte run ending in
+     * the middle of a character becomes a 95-byte piece and a second piece — two records where the
+     * division promises one. "About 2 records" being 3 is the kind of promise this app would rather
+     * keep, and the count is the one number the user cannot otherwise see.
+     */
+    private fun recordsFor(bytes: ByteArray): Int {
+        var left = bytes.size
+        var records = 0
+        while (left > 0) {
+            var take = minOf(left, MeshTerm.MAX_INPUT)
+            if (take < left) {
+                // A continuation byte (10xxxxxx) cannot start a piece: back off, as `peek` does.
+                while (take > 1 && (bytes[take].toInt() and 0xC0) == 0x80) take--
+            }
+            left -= take
+            records++
+        }
+        return records
     }
 
     private fun readable(items: List<MeshOut>): String = buildString {
