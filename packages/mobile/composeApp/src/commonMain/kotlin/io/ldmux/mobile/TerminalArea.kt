@@ -18,8 +18,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Rows one tap of the scroll pad moves. A nudge, not a page: a page is a swipe. */
-internal const val SCROLL_STEP = 3
+/**
+ * How much of the previous page a page turn leaves on screen.
+ *
+ * Two rows: enough that the line you were reading is still there when you land, which is what
+ * makes a page turn readable rather than disorienting. The page itself is the pane's own height
+ * (see `TerminalHandle.scrollPage`), so this is the only fixed number in the gesture.
+ */
+internal const val SCROLL_OVERLAP = 2
+
+/**
+ * Rows one page turn moves, for a pane [rows] tall.
+ *
+ * Always at least one: a pane shorter than the overlap (or one that has not been measured yet,
+ * so `rows` is 0) must still move rather than refuse, and a step of zero is a button that looks
+ * live and does nothing.
+ */
+internal fun pageStep(rows: Int): Int = (rows - SCROLL_OVERLAP).coerceAtLeast(1)
 
 /**
  * The terminal itself, laid out the same in both modes. Handles are registered
@@ -146,8 +161,8 @@ internal fun TerminalArea(
                 // scrolled: a drag is the reading gesture, and these are the two destinations a
                 // terminal needs without one.
                 ScrollPad(
-                    onUp = { handle.scrollBy(-SCROLL_STEP) },
-                    onDown = { handle.scrollBy(SCROLL_STEP) },
+                    onUp = { handle.scrollPage(-1) },
+                    onDown = { handle.scrollPage(1) },
                     onBottom = { handle.scrollToBottom() },
                     modifier = Modifier.align(Alignment.TopEnd),
                 )

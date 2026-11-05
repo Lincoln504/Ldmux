@@ -94,6 +94,9 @@ class TerminalController(
      */
     private var mouseRefused = false
 
+    /** The pane height the surface last measured. 0 until it has. */
+    private var gridRows = 0
+
     private val attach = AttachClient(config, sessionId)
 
     /** Whether the daemon this page is attached to understands `S-` on named keys. */
@@ -344,7 +347,15 @@ class TerminalController(
                     historyAskLines = (historyAskLines * 2).coerceAtMost(pacing.historyMaxLines())
                 }
                 historyLoading = false
-                if (historyRestoreAtTop) {
+                if (pageAfterHistory > 0) {
+                    // A page turn asked for this page-in. Land one page above the live
+                    // bottom, which is where the tap was aimed; the rows the page-in added
+                    // are above the viewport, so the distance from the bottom is the one
+                    // quantity that survived the round trip.
+                    engine.scrollToBottom()
+                    engine.scrollBy(-pageAfterHistory)
+                    pageAfterHistory = 0
+                } else if (historyRestoreAtTop) {
                     // The request was made from the top of what was loaded, and a page-in
                     // only adds rows above it. How many now sit above the row the user
                     // was reading is not knowable here — live output that arrived between
@@ -528,7 +539,32 @@ class TerminalController(
         if (value) attach.start(scope) else attach.stop(release = !AppLifecycle.foreground)
     }
 
+    /**
+     * Is the viewport on the live bottom?
+     *
+     * The frame's offset counts from the top of what is loaded, so the live bottom is
+     * `scrollTotal - scrollLen`. Not `scrollOffset == 0`: that is the *oldest* row.
+     */
+    private fun atLiveBottom(): Boolean {
+        val f = _frame.value ?: return true
+        return f.scrollOffset >= f.scrollTotal - f.scrollLen
+    }
+
+    /**
+     * Typing goes to the shell's prompt, and the prompt is at the bottom.
+     *
+     * Reading scrollback and then typing used to send the keystrokes to a prompt the reader
+     * could not see: the characters arrived, the shell ran them, and nothing on screen moved,
+     * which reads exactly like a terminal that stopped listening. Input is the user saying
+     * "I am done reading", so the view follows it back to live — the same thing the down
+     * button does, done implicitly and before the keystroke rather than after it.
+     */
+    private fun followInput() {
+        if (!atLiveBottom()) scrollToBottom()
+    }
+
     override fun sendKey(name: String) {
+        followInput()
         val armed = armedModifiers()
         if (armed.armed) {
             // One Ctrl arms one key. Spending it here rather than in the chrome is
@@ -558,6 +594,7 @@ class TerminalController(
      * `Modifiers.kt`).
      */
     override fun sendModifiedKey(key: String, modifiers: Modifiers) {
+        followInput()
         when (val k = modifiedKey(key, modifiers)) {
             is ModifiedKey.None -> {}
             is ModifiedKey.Literal -> sendTextRaw(k.bytes)
@@ -567,6 +604,7 @@ class TerminalController(
 
     override fun sendText(text: String) {
         if (text.isEmpty()) return
+        followInput()
         val armed = armedModifiers()
         if (!armed.armed) {
             sendTextRaw(text)
@@ -647,6 +685,29 @@ class TerminalController(
             }
         }
     }
+    override fun scrollPage(direction: Int) {
+        // The measured pane first, the frame's grid as a fallback for a handle that has not
+        // been laid out yet. `rows == 0` means "not measured", not "zero rows".
+        val rows = if (gridRows > 0) gridRows else (_frame.value?.rows ?: return)
+        val step = pageStep(rows)
+        if (direction < 0) {
+            val f = _frame.value
+            val above = f?.scrollOffset ?: 0L
+            // A page that would run out of loaded history asks for more first, then turns the
+            // page it owed. Without this, the first tap on a freshly attached shell lands on
+            // the oldest loaded row instead of a page up.
+            if (f != null && above < step && !historyExhausted && !historyLoading) {
+                pageAfterHistory = step
+                maybeExtendHistory(force = true)
+                // A request that could not be sent (no socket, or nothing deeper to ask for)
+                // leaves no page owed: the next page-in belongs to somebody else's gesture.
+                if (!historyLoading) pageAfterHistory = 0
+                return
+            }
+        }
+        scrollBy(if (direction < 0) -step else step)
+    }
+
     override fun scrollBy(rows: Int, pageInHistory: Boolean): Int {
         if (rows == 0) return 0
         // What the viewport *did*, not what it was asked to do. The emulator's own
@@ -697,7 +758,7 @@ class TerminalController(
      * scrollback request re-sends the whole screen, so asking on every pixel of
      * drag would be a round trip per frame.
      */
-    private fun maybeExtendHistory() {
+    private fun maybeExtendHistory(force: Boolean = false) {
         val f = _frame.value ?: return
         if (historyLoading || historyExhausted) return
         // The offset is counted from the top of what is loaded — 0 is the oldest
@@ -706,7 +767,9 @@ class TerminalController(
         // the total, which is always the larger number, so the answer was always
         // "not yet" and the daemon was never asked: the scrollback stopped at
         // whatever the client had happened to accumulate.
-        if (f.scrollOffset > 0L) return
+        // `force` is a page turn that is about to run out of history: the user asked for a
+        // page now, so asking from mid-history is the right moment rather than a leak.
+        if (f.scrollOffset > 0L && !force) return
         // Refused (no live socket): leave the latch clear so the next drag asks again.
         // It used to be set before the send and cleared only by an arriving snapshot,
         // so one refused request during a reconnect disabled history for the rest of
@@ -754,6 +817,16 @@ class TerminalController(
     private var historyTotalBefore = 0L
     /** The page-in was asked for from the top of what is loaded. */
     private var historyRestoreAtTop = false
+    /**
+     * A page turn that asked for more history first, and the step it owes.
+     *
+     * A page-up from the live bottom with only one screenful loaded used to clamp at the top of
+     * what was there and stop: the tap moved 17 rows instead of 19 and looked like it had jumped
+     * to the beginning (measured on the device 2026-11-05: `total=38 off=17 step=19`). The next
+     * request now carries the intent, so the reply lands one page above the live bottom rather
+     * than at the oldest row.
+     */
+    private var pageAfterHistory = 0
 
     /**
      * Park the viewport on the live bottom, whatever history it was reading.
@@ -990,6 +1063,12 @@ class TerminalController(
      * screen showing it rather than fixed at creation.
      */
     override fun setGrid(cols: Int, rows: Int) {
+        // Keep the height the surface measured. It is the pane the user can see, and it is the
+        // only honest page size: the rendered frame's `rows` is whatever grid the engine was
+        // last built for, and immediately after an attach the two disagree — a page turn then
+        // used the frame's number and jumped from row 184 to the oldest line in one tap
+        // (measured on the device, 2026-11-05).
+        if (rows > 0) gridRows = rows
         attach.setGrid(cols, rows)
     }
 

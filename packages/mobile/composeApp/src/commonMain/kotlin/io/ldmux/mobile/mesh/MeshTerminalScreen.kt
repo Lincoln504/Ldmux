@@ -682,8 +682,8 @@ fun MeshTerminalScreen(
                         // The mesh view has no history from the host, so the source keeps the
                         // rows the host's line numbers say have scrolled off.
                         ScrollPad(
-                            onUp = { source.scrollBy(-io.ldmux.mobile.SCROLL_STEP) },
-                            onDown = { source.scrollBy(io.ldmux.mobile.SCROLL_STEP) },
+                            onUp = { source.scrollPage(-1) },
+                            onDown = { source.scrollPage(1) },
                             onBottom = { source.scrollToBottom() },
                             modifier = Modifier.align(Alignment.TopEnd),
                         )

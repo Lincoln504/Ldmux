@@ -10,6 +10,8 @@ import io.ldmux.mobile.TerminalHandle
 import io.ldmux.mobile.TerminalSource
 import io.ldmux.mobile.planAltScroll
 import io.ldmux.mobile.planTap
+import io.ldmux.mobile.Modifiers
+import io.ldmux.mobile.SCROLL_OVERLAP
 import io.ldmux.mobile.term.TerminalEngine
 import io.ldmux.mobile.term.TerminalFrame
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -498,6 +500,45 @@ class MeshTerminalSource(
      * Scroll the client's own history, or - on the alternate screen, which has none - send the
      * program the keys a wheel would. Negative is up, as everywhere else.
      */
+    /**
+     * Typing goes to the prompt, and the prompt is the live bottom.
+     *
+     * The same rule the tailnet route follows, stated here because the two handles are
+     * separate: reading history and then typing sent the keys to a prompt off screen, and
+     * nothing moved, which is indistinguishable from a link that stopped listening.
+     */
+    private fun followInput() {
+        if (history.offset != 0) scrollToBottom()
+    }
+
+    override fun sendKey(name: String) {
+        followInput()
+        input.sendKey(name)
+    }
+
+    override fun sendModifiedKey(key: String, modifiers: Modifiers) {
+        followInput()
+        input.sendModifiedKey(key, modifiers)
+    }
+
+    override fun sendText(text: String) {
+        if (text.isEmpty()) return
+        followInput()
+        input.sendText(text)
+    }
+
+    override fun paste(text: String): Boolean {
+        if (text.isEmpty()) return true
+        followInput()
+        return input.paste(text)
+    }
+
+    override fun scrollPage(direction: Int) {
+        if (rows <= 0) return
+        val step = io.ldmux.mobile.pageStep(rows)
+        scrollBy(if (direction < 0) -step else step)
+    }
+
     override fun scrollBy(rows: Int, pageInHistory: Boolean): Int {
         val screen = last ?: return 0
         if (screen.alternate) {

@@ -149,6 +149,19 @@ interface TerminalHandle {
     fun scrollBy(rows: Int, pageInHistory: Boolean = true): Int = 0
 
     /**
+     * Move one **page**: the pane's own height less [SCROLL_OVERLAP] rows, so a page
+     * turns with two lines of the previous one still on screen to read against.
+     *
+     * A page is a geometry question, so the handle answers it rather than the chrome:
+     * only the handle knows how tall its grid is, and the buttons that call this are
+     * drawn before a single frame has been measured.
+     *
+     * [direction] is negative for up and positive for down, the same sign [scrollBy]
+     * takes.
+     */
+    fun scrollPage(direction: Int) {}
+
+    /**
      * Park the viewport on the live bottom, whatever history it was reading.
      *
      * The bottom is where a shell happens — the prompt, and the output the user
