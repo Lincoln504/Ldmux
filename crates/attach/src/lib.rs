@@ -216,11 +216,17 @@ const FEATURES: [&str; 1] = ["inplaceResync"];
 
 /// The first `attach` of a connection: the session, this window's size, and what it
 /// understands.
-fn first_attach(session_id: &str, cols: u64, rows: u64) -> serde_json::Value {
-    serde_json::json!({
-        "type": "attach", "sessionId": session_id, "cols": cols, "rows": rows,
-        "features": FEATURES,
-    })
+fn first_attach(session_id: &str, size: Option<(u64, u64)>) -> serde_json::Value {
+    let mut m = serde_json::json!({
+        "type": "attach", "sessionId": session_id, "features": FEATURES,
+    });
+    // Both fields are optional in the protocol. Sending an invented size would resize the
+    // pane to something the window is not, which is worse than saying nothing.
+    if let Some((cols, rows)) = size {
+        m["cols"] = serde_json::json!(cols);
+        m["rows"] = serde_json::json!(rows);
+    }
+    m
 }
 
 /// How often this client says something to the daemon.
@@ -281,8 +287,15 @@ fn may_reassert_again(
     sent_at.is_some_and(|t| now.saturating_duration_since(t) >= REASSERT_RETRY)
 }
 
-/// The terminal size of fd 0 (the window's pty), or 80x24.
-fn tty_size() -> (u64, u64) {
+/// The terminal size of fd 0 (the window's pty), or `None` when it will not say.
+///
+/// It used to answer `80x24` when the ioctl failed, and that invented size was sent as the
+/// attach and as every later resize. Because the client re-measures on each snapshot, the
+/// invention repeated itself and nothing could ever correct it: the pane was told to be
+/// 24x80, agreed, and the window painted 24x80 in a 2552x1404 frame until the user resized
+/// it by hand. `None` means "no opinion": the pane keeps whatever size it has, and the
+/// first real measurement re-asserts the window's own.
+fn tty_size() -> Option<(u64, u64)> {
     // SAFETY: `winsize` is a plain C struct of four `u16`s, for which the
     // all-zero bit pattern is a valid value.
     let mut ws: nix::libc::winsize = unsafe { std::mem::zeroed() };
@@ -291,14 +304,14 @@ fn tty_size() -> (u64, u64) {
     // frame. fd 0 may be closed or not a tty; that is reported as -1, not UB.
     let r = unsafe { nix::libc::ioctl(0, nix::libc::TIOCGWINSZ, &mut ws) };
     if r == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-        (ws.ws_col as u64, ws.ws_row as u64)
+        Some((ws.ws_col as u64, ws.ws_row as u64))
     } else {
-        (80, 24)
+        None
     }
 }
 
 /// The terminal size helper, exposed for tests.
-pub fn tty_size_for_test() -> (u64, u64) {
+pub fn tty_size_for_test() -> Option<(u64, u64)> {
     tty_size()
 }
 
@@ -671,10 +684,14 @@ where
     let mut sigwinch =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
             .map_err(|e| e.to_string())?;
+    // Unknown until the window says, or until the pane tells us in its first snapshot.
+    // `0, 0` is the sentinel for "no opinion", not a size.
     let (mut cols, mut rows) = {
         // One read: calling `tty_size` twice can straddle a resize between the two fields.
-        let (c, r) = tty_size();
-        ldmux_protocol::clamp_pane_size(c, r)
+        match tty_size() {
+            Some((c, r)) => ldmux_protocol::clamp_pane_size(c, r),
+            None => (0, 0),
+        }
     };
     let (mut sink, mut stream) = ws.split();
 
@@ -702,7 +719,8 @@ where
         )
         .await?;
     }
-    send(&mut sink, &first_attach(session_id, cols, rows)).await?;
+    let announced = if cols == 0 || rows == 0 { None } else { Some((cols, rows)) };
+    send(&mut sink, &first_attach(session_id, announced)).await?;
 
     let mut inbuf = [0u8; 4096];
     // A multi-byte character can straddle two reads (a large paste): decoding
@@ -745,13 +763,22 @@ where
                                 // wrong size that only a manual resize cured, because that resize
                                 // is the first SIGWINCH the loop ever sees. One ioctl per snapshot
                                 // is cheaper than a repaint and cannot disagree with the window.
-                                let (wc, wr) = {
-                                    let (c, r) = tty_size();
-                                    ldmux_protocol::clamp_pane_size(c, r)
-                                };
-                                if (wc, wr) != (cols, rows) {
-                                    cols = wc;
-                                    rows = wr;
+                                match tty_size() {
+                                    Some((c, r)) => {
+                                        let (wc, wr) = ldmux_protocol::clamp_pane_size(c, r);
+                                        if (wc, wr) != (cols, rows) {
+                                            cols = wc;
+                                            rows = wr;
+                                        }
+                                    }
+                                    // The window has no opinion, so adopt the pane's own
+                                    // grid: that is a real size, and comparing against it
+                                    // later cannot manufacture a resize.
+                                    None if cols == 0 || rows == 0 => {
+                                        cols = snap.cols;
+                                        rows = snap.rows;
+                                    }
+                                    None => {}
                                 }
                                 // **The pane is shared, and a window keeps its own
                                 // size.** Another device that attached and resized
@@ -952,11 +979,10 @@ where
                 // One read, for the same reason the startup read is one: two calls can
                 // straddle a resize and produce a width from one window and a height from the
                 // next, which is a grid neither window ever had.
-                let (c, r) = {
-                    let (c, r) = tty_size();
-                    ldmux_protocol::clamp_pane_size(c, r)
-                };
-                if (c, r) != (cols, rows) {
+                let measured = tty_size().map(|(c, r)| ldmux_protocol::clamp_pane_size(c, r));
+                if let Some((c, r)) = measured
+                    && (c, r) != (cols, rows)
+                {
                     cols = c;
                     rows = r;
                     // A read-only mirror holds no claim and must not resize the shared
@@ -1082,7 +1108,7 @@ mod render_tests {
     /// sends no `hello` is covered too).
     #[test]
     fn the_first_attach_advertises_in_place_resync() {
-        let m = first_attach("abc", 158, 82);
+        let m = first_attach("abc", Some((158, 82)));
         assert_eq!(m["type"], "attach");
         assert_eq!(m["sessionId"], "abc");
         assert_eq!(m["cols"], 158);

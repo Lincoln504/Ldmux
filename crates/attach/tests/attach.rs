@@ -2,11 +2,19 @@
 //! tested in `crates/daemon/tests/attach_client.rs` (which can start a daemon;
 //! the attach crate cannot, without a dependency cycle).
 
-/// The terminal size falls back to 80x24 when fd 0 is not a tty.
+/// A tty that will not say its size is reported as unknown, never as an invented 80x24.
+///
+/// The old fallback was the bug: `80x24` was sent as the attach and re-sent on every
+/// snapshot, so a window whose ioctl failed was told to be 24x80 and agreed, and stayed
+/// that way in a frame many times larger until the user resized it by hand.
 #[test]
-fn tty_size_is_sane() {
-    let (c, r) = attach::tty_size_for_test();
-    assert!(c > 0 && r > 0, "size must be positive, got {c}x{r}");
+fn tty_size_is_unknown_rather_than_invented() {
+    match attach::tty_size_for_test() {
+        // No opinion, which is honest and lets the pane keep its own size.
+        None => {}
+        // A real answer is a real size.
+        Some((c, r)) => assert!(c > 0 && r > 0, "a measured size is positive, got {c}x{r}"),
+    }
 }
 
 use std::os::fd::AsFd;

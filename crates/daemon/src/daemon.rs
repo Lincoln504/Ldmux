@@ -2075,14 +2075,20 @@ impl LdmuxDaemon {
             "closeLive" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let result = crate::desktop::close_live(id).await;
+                // A close that failed must not be forgotten. Clearing the record and
+                // releasing the claim anyway left the window on screen and untracked: nothing
+                // would end its shell when it later closed, and another device could claim the
+                // pane while it was still displayed. Keep the record, keep the claim, and say
+                // why it failed so `ldmux unlive` reports it.
+                if let Err(e) = result {
+                    return Ok(serde_json::json!({ "ok": false, "detail": e }));
+                }
                 self.sessions_dirty = true;
                 self.live_windows.remove(id);
                 self.set_live_window(id, None, None);
                 let dd_id = self.desktop_device.id.clone();
                 let _ = self.release_claim(id, &dd_id);
-                Ok(serde_json::json!({
-                    "ok": result.unwrap_or(false),
-                }))
+                Ok(serde_json::json!({ "ok": result.unwrap_or(false) }))
             }
             "deskWindow" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");

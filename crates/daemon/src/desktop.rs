@@ -866,11 +866,28 @@ fn tracked() -> &'static Mutex<Tracked> {
 /// emulator that stays in the foreground), None when it is not ours to say.
 fn tracked_state(class: &str) -> Option<&'static str> {
     let mut g = tracked().lock().unwrap_or_else(|e| e.into_inner());
-    let (child, foreground) = g.get_mut(class)?;
-    match child.try_wait() {
+    // Read the child's state, then drop the borrow, because an exited child is removed.
+    // Nothing used to remove one: `kill_tracked` was the only path that did, so a window the
+    // user closed itself left its entry and its `Child` in this process-global map for the
+    // life of the daemon.
+    let (state, foreground) = {
+        let (child, foreground) = g.get_mut(class)?;
+        (child.try_wait(), *foreground)
+    };
+    match state {
         Ok(None) => Some("present"),
-        Ok(Some(_)) if *foreground => Some("absent"),
-        _ => None,
+        Ok(Some(_)) => {
+            g.remove(class);
+            if foreground {
+                Some("absent")
+            } else {
+                None
+            }
+        }
+        Err(_) => {
+            g.remove(class);
+            None
+        }
     }
 }
 
@@ -897,12 +914,18 @@ fn kill_tracked(class: &str) -> bool {
 /// opened before this daemon started). The window manager answers an unmatched
 /// criterion with success too, so this says "asked", not "was open".
 pub async fn close_live(session_id: &str) -> Result<bool, String> {
-    let class = live_window_class(session_id);
-    let killed = kill_tracked(&class);
+    // Live and mirror windows are different classes, and only the live one used to be
+    // addressed: a mirror opened by `ldmux mirror` could not be closed by the daemon at all,
+    // and its tracked entry was never removed. Close both.
+    let classes = [
+        live_window_class(session_id),
+        crate::desktop::mirror_window_class(session_id),
+    ];
+    let killed = classes.iter().any(|c| kill_tracked(c));
     let (env, wm) = context().await;
     let mut asked = false;
     if let Some(wm) = wm {
-        for argv in kill_argvs(wm, &class) {
+        for argv in classes.iter().flat_map(|class| kill_argvs(wm, class)) {
             let r = crate::exec::run(
                 argv,
                 crate::exec::ExecOpts {
