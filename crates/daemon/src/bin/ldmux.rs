@@ -1001,7 +1001,12 @@ async fn main() {
             let res: Result<serde_json::Value, CallError> =
                 daemon_call(&sock, "deskWindow", &serde_json::json!({ "id": id })).await;
             match res {
-                Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {}
+                // Print the id on the way out. Every other creating command says what it
+                // made, and this one did not: a window appeared and the only way to capture,
+                // kill or forget the shell behind it was to go looking in `ldmux list`.
+                Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {
+                    println!("{id}");
+                }
                 Ok(v) => {
                     eprintln!(
                         "ldmux: {}",

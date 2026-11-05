@@ -1959,6 +1959,16 @@ impl LdmuxDaemon {
                 if record.keeper_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
                 }
+                // A session the daemon still holds but whose shell is gone is *ended*, not
+                // missing, and saying "no such session" in its keeper name (which is what the
+                // keeper's own error says) reports a session the user can see in `ldmux list`
+                // as one that never existed. Name the ending and its reason instead.
+                if record.status != "running" {
+                    return Err(format!(
+                        "session {id} has ended ({}): its pane is gone",
+                        record.ended_reason.as_deref().unwrap_or(&record.status)
+                    ));
+                }
                 // Take a snapshot (the keeper's `Snapshot` message).
                 let resp = self
                     .keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
@@ -1985,6 +1995,16 @@ impl LdmuxDaemon {
                     .ok_or_else(|| format!("no such session: {id}"))?;
                 if record.keeper_name.is_empty() {
                     return Err("no terminal-backed session".to_string());
+                }
+                // A session the daemon still holds but whose shell is gone is *ended*, not
+                // missing, and saying "no such session" in its keeper name (which is what the
+                // keeper's own error says) reports a session the user can see in `ldmux list`
+                // as one that never existed. Name the ending and its reason instead.
+                if record.status != "running" {
+                    return Err(format!(
+                        "session {id} has ended ({}): its pane is gone",
+                        record.ended_reason.as_deref().unwrap_or(&record.status)
+                    ));
                 }
                 // Take a snapshot (the keeper's `Snapshot` message).
                 let resp = self
