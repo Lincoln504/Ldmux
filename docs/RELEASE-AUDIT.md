@@ -1,0 +1,174 @@
+# Release audit: every way this can fail
+
+Started 2026-11-05. One page per aspect, each item a failure that can actually happen,
+not a checklist of virtues. Status is one of:
+
+- **FIXED** — a defect that was found, with the commit or file that closes it.
+- **OPEN** — known, not yet closed.
+- **OK** — checked and found correct, with what was checked.
+- **UNKNOWN** — plausible, not yet investigated. Every UNKNOWN is a to-do.
+
+This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECORD.md`,
+`docs/MOBILE-UX-AUDIT.md`, `docs/separation/02-DEFECTS-LDMUX.md`, `docs/DESKTOP-RESIZE.md`.
+
+## 1. Build and release
+
+| # | Failure | Status |
+|---|---|---|
+| 1.1 | No signing config, so nothing uploadable | FIXED `b44a8de` |
+| 1.2 | `versionCode` a literal, so the second upload is rejected | FIXED `b44a8de` |
+| 1.3 | No path produces a bundle | FIXED `b44a8de` |
+| 1.4 | An unsigned release builds silently and is rejected at upload | FIXED — the task now fails instead |
+| 1.5 | `applicationId` asserts a domain the project does not own | FIXED `4639f0c` (`io.ldmux.mobile`) |
+| 1.6 | The bundle has never actually been built, so "it will build" is an assumption | **UNKNOWN** — needs one run with a throwaway keystore |
+| 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | OPEN |
+| 1.8 | R8 is off; a release carries unused code | OK for 0.1, decide later |
+| 1.9 | The native session library is rebuilt by a Gradle task, so a stale `.so` is possible | OK — `buildSessionAndroid` runs before packaging |
+
+## 2. Install, upgrade, first run
+
+| # | Failure | Status |
+|---|---|---|
+| 2.1 | Fresh install shows a blank screen under `unpaired`, reads as broken | FIXED `b44a8de` |
+| 2.2 | The package id changed, so the previous install is a different app | FIXED by instruction — uninstall `dev.ldmux.mobile` first |
+| 2.3 | The app on the phone is a 14 September build, so every fix since is invisible | FIXED — needs one install |
+| 2.4 | Upgrading loses the pairing (token in app data) | OPEN — no migration path; document it |
+| 2.5 | A reviewer with no host, no tailnet and no radio cannot get past first run | OPEN by design — the listing must say what it needs |
+| 2.6 | Backup restores a token onto another device | OK — `allowBackup=false`, rules exclude everything |
+
+## 3. Permissions and platform
+
+| # | Failure | Status |
+|---|---|---|
+| 3.1 | Bluetooth permission denied at the moment of use | OK — named state, not silent |
+| 3.2 | `RECORD_AUDIO` requested at launch instead of on use | OK — requested on first mic press |
+| 3.3 | `ACCESS_FINE_LOCATION` needed on API 28-30 for BLE scanning | OK — `maxSdkVersion=30`, declared |
+| 3.4 | Denying notifications leaves a foreground service with no notification | UNKNOWN — check the service's behaviour on denial |
+| 3.5 | The `specialUse` sub-type is read by a reviewer | OK — text present in the manifest |
+| 3.6 | Font scale, RTL, dark mode, split screen break the layout | UNKNOWN |
+
+## 4. Pairing and identity
+
+| # | Failure | Status |
+|---|---|---|
+| 4.1 | QR contains host, port and token; scanned by Play services on device | OK — nothing leaves the device except to that host |
+| 4.2 | A stale pairing points at a host that moved | OK — `RouteUnavailable` with a reason |
+| 4.3 | Two phones pair to one host; who owns a shell | OK — ownership + consent, ADR-0010 |
+| 4.4 | A pairing code is on screen while someone photographs it | OPEN — inherent; the token is bearer |
+| 4.5 | The mesh pairing secret and PSK live in the same code as the token | OK — documented as sensitive |
+
+## 5. Tailnet connection
+
+| # | Failure | Status |
+|---|---|---|
+| 5.1 | Tailscale absent or down: "unreachable" cannot say why | OPEN — degrades the mode, no specific message |
+| 5.2 | Silent link (NAT expiry, hung daemon) reported and never retried | FIXED `8fd09b6` |
+| 5.3 | `connected` disagreed with the link label | FIXED `8fd09b6` |
+| 5.4 | Network change not detected | OK — probe on wake, 4 s heartbeat |
+| 5.5 | Auth refused: retried forever | OK — `Rejected` is terminal until re-pair |
+| 5.6 | Reconnect storms cost the host CPU | UNKNOWN — see failure audit |
+
+## 6. Radio connection
+
+| # | Failure | Status |
+|---|---|---|
+| 6.1 | No radio selected | OK — `NeedsRadio`, named |
+| 6.2 | Radio held by another app (MeshMore) | UNKNOWN — no "another app has the link" state; the connect just fails |
+| 6.3 | Radio stops advertising while connected, so a scan finds nothing | UNKNOWN — the picker says "no radio found" with no cause |
+| 6.4 | The host had no radio at all, so the phone handshook forever | FIXED 2026-11-05 — `LDMUX_MESH_SERIAL`, host owns the Heltec |
+| 6.5 | Preset mismatch between the two ends | OPEN — the decision in `05-RADIO-TUPLE.md` |
+| 6.6 | L3 handshake retried with fresh keys, bounded at 3 tries | OK |
+| 6.7 | Radio unplugged mid-session | OK — transport state drives the loop |
+| 6.8 | Public channel forces manual sync | OK — ADR-0026 |
+| 6.9 | Multi-hop paths unimplemented; a relayed peer is unreachable | OPEN — named, not hidden |
+
+## 7. The session and terminal data path
+
+| # | Failure | Status |
+|---|---|---|
+| 7.1 | Records lost on a lost send result | FIXED `d00111c` (credit expiry) |
+| 7.2 | A tracked command that is never answered wedges the link | FIXED |
+| 7.3 | Reconnect backoff never returns to its floor | FIXED `d00111c` |
+| 7.4 | A replayed record applied twice | FIXED — replay window (`crates/session`) |
+| 7.5 | UTF-8 or an escape sequence straddling two records | OK — `Utf8Carry`, record framing |
+| 7.6 | Record larger than the carrier floor: silently truncated | UNKNOWN — see integrity audit |
+| 7.7 | A resync never answered is never re-asked | FIXED `8fd09b6` |
+| 7.8 | `seq 1 100`-class output batched into more messages than the budget | OK — pacer is open defect 22 |
+| 7.9 | No pacer: a screen update leaves as a burst of up to eight records | OPEN — defect 22 |
+
+## 8. The shell, keeper and host
+
+| # | Failure | Status |
+|---|---|---|
+| 8.1 | Daemon restart loses sessions | OK — keeper owns them; verified live 2026-11-05 |
+| 8.2 | Keeper restart ends every shell | OK by design — warned by the install script |
+| 8.3 | A partial mesh config kills the daemon at startup | OPEN — exit 1 on `PSK` without a link; should warn and disable |
+| 8.4 | A shell dies while a phone is attached | OK — "This shell has ended." then exit |
+| 8.5 | Keeper wedged: daemon waits forever | UNKNOWN — see failure audit |
+| 8.6 | Reaper fails after a panic | FIXED (keeper/daemon) |
+| 8.7 | A shell that ignores SIGTERM | UNKNOWN — see failure audit |
+
+## 9. UX states and error surfaces
+
+| # | Failure | Status |
+|---|---|---|
+| 9.1 | `open` was a live button that did nothing | FIXED `b44a8de` |
+| 9.2 | Control width below the touch target | FIXED `2b27c2e` |
+| 9.3 | A resync that never answers says "resyncing" forever | FIXED `8fd09b6` |
+| 9.4 | The radio's failure reason is discarded | OPEN — `MeshRouteSection.kt:250` `runCatching {}` |
+| 9.5 | A refused action's message vanishes after 4 s, not a live region | OPEN |
+| 9.6 | The shell list survives a dead link with `open` armed | FIXED `b44a8de` |
+| 9.7 | Settings opens as a screen and ends the session | OPEN — a decision, expensive on radio |
+| 9.8 | Settings sub-flows opened at the end of the list | FIXED `ac87947` |
+| 9.9 | No scroll affordance on settings | OPEN |
+| 9.10 | Text size needs 21 taps | OPEN |
+| 9.11 | `AppHeader` always reads `ldmux` | OK — a convention, not a defect |
+
+## 10. Security and privacy
+
+| # | Failure | Status |
+|---|---|---|
+| 10.1 | Token at rest on the phone | UNKNOWN — see security audit |
+| 10.2 | Cleartext permitted where the config says it is not | OK — restricted to tailnet/loopback by code |
+| 10.3 | A terminal program writes the clipboard without consent | OK — `ldmux clipboard-write on|off`, off by default |
+| 10.4 | The gateway token sat in `/tmp` | FIXED 2026-11-05 — gateway removed, file deleted |
+| 10.5 | Timing instrumentation on in production | FIXED 2026-11-05 — env cleaned |
+| 10.6 | No telemetry anywhere | OK — dependency audit finds no analytics SDK |
+
+## 11. Resource limits and failure injection
+
+Whole aspect **UNKNOWN** pending the failure audit: disk full, memory ceilings, wedged
+children, storms, sleep and clock jumps, per-session and global limits.
+
+## 12. Multi-device and ownership
+
+| # | Failure | Status |
+|---|---|---|
+| 12.1 | Two devices hold one shell | OK — ADR-0010, consented takeover |
+| 12.2 | A dead window holds a shell forever | OK — `RECONNECT_GRACE_MS` bounds it |
+| 12.3 | `mirror --rw` on a free shell takes the claim unrecorded, so a second live window can displace it | OPEN — desktop audit |
+| 12.4 | Closing a desk window kills a shell the phone is typing into | FIXED 2026-10 |
+
+## 13. Observability
+
+| # | Failure | Status |
+|---|---|---|
+| 13.1 | A silent radio and a quiet mesh look identical | OK — `mesh status` names the state |
+| 13.2 | The startup line named an empty address for a serial link | FIXED `c70d516` |
+| 13.3 | No crash reporting, so a store crash is invisible | OK by policy — the cost of collecting nothing |
+
+## 14. Release operations
+
+| # | Failure | Status |
+|---|---|---|
+| 14.1 | "Verified on a device" referred to binaries older than HEAD | FIXED 2026-11-05 — deployed build is current |
+| 14.2 | A stale install keeps presenting a fixed bug | OPEN — nothing pins the spawned binary to the running one |
+| 14.3 | The heavy test suite fails under load | MITIGATED — heavy tests serialised, workloads right-sized; still load-sensitive |
+| 14.4 | No tag, ever | OPEN |
+| 14.5 | `main` 220 commits behind the work | OPEN |
+
+## How to use this
+
+Work top-down by status: **OPEN** and **UNKNOWN** are the release's actual to-do list. A
+section with every row FIXED or OK is done and should not be re-litigated without new
+evidence.
