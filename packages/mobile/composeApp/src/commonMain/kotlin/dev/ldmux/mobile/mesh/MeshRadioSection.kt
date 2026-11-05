@@ -136,9 +136,11 @@ internal fun RadioPresetDialog(
     val fallbackState = remember { MutableStateFlow(MeshLinkState.NeedsRadio) }
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
     val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
+    val fallbackStatus = remember { MutableStateFlow<MeshStatus?>(null) }
     val state by (link?.state ?: fallbackState).collectAsState()
     val info by (link?.selfInfo ?: fallbackInfo).collectAsState()
     val device by (link?.deviceInfo ?: fallbackDevice).collectAsState()
+    val status by (link?.status ?: fallbackStatus).collectAsState()
     val current = info?.let {
         RadioPreset(
             frequencyMhz = it.frequencyMhz,
@@ -240,6 +242,14 @@ internal fun RadioPresetDialog(
                 if (current != null && current != selected) {
                     Text("current  " + presetLine(current), color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                 }
+                // **What the radio says about itself, before what it could be set to.** Every field
+                // here was already read — `SELF_INFO` on the handshake, `DEVICE_INFO` on request,
+                // `MeshStatus` for signal and battery — and none of it was shown: the dialog opened
+                // straight onto "region", so the one screen about the radio answered "which channel"
+                // without saying which radio, what firmware, or whether it was in range. A line only
+                // appears when its source answered, so an unbound radio shows nothing rather than
+                // zeros.
+                RadioFacts(info, device, status)
                 Text("region", color = Dim, fontSize = 11.sp)
                 // Wrapped, not one row: four region names ("USA / Canada" is the shortest
                 // two) are wider than a phone's modal, and a row that overflows loses the
@@ -354,4 +364,62 @@ private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
     MeshLinkState.RadioUnavailable -> "the radio is not answering"
     MeshLinkState.NoPath -> "the host path does not fit the terminal"
     else -> meshLinkLabel(state)
+}
+
+/**
+ * The radio's own description, as lines of facts rather than as a form.
+ *
+ * Three lines at most, and each is dropped when its source did not answer:
+ *
+ *  - **name and firmware** — the name is how neighbours see this node, and the firmware version is
+ *    the only thing that says which command set the radio has. The vendor pin (`companion-v1.15.0`)
+ *    is what the code was written against; the boards in the field ran 1.17.1, so this is the line
+ *    that tells a user which one they are on.
+ *  - **signal and battery** — the sentinels the radio uses for "not measured" (-128 dBm, 255 %) are
+ *    rendered as words, as `ldmux mesh status` does, because a figure that is really "unknown" read
+ *    as a measurement is worse than a blank.
+ *  - **power and path width** — the ceiling is regulatory as well as physical, so the dialog states
+ *    the radio's own maximum beside the power it is using; the path width in bytes is what neighbours
+ *    read in the trace of a message this radio sends.
+ *
+ * Deliberately **not** editable. Changing the name or the channel slots is MeshMore's job on these
+ * boards, and two apps writing the same field is how a radio ends up named something neither user
+ * chose. What this screen configures is the operating point — the tuple — and it says so by only
+ * offering that as a control.
+ */
+@Composable
+private fun RadioFacts(info: RadioSelfInfo?, device: RadioDeviceInfo?, status: MeshStatus?) {
+    if (info == null && device == null && status == null) return
+    if (info != null) {
+        FactLine("name", info.name + (device?.let { "  ·  " + it.firmwareVersion } ?: ""))
+    } else if (device != null) {
+        FactLine("firmware", device.firmwareVersion)
+    }
+    val rssi = status?.rssiDbm
+    val battery = status?.batteryPercent
+    if (rssi != null || battery != null) {
+        FactLine(
+            "signal",
+            listOfNotNull(rssi?.let { "$it dBm" }, battery?.let { "$it%" }).joinToString("  ·  "),
+        )
+    }
+    if (info != null) {
+        FactLine(
+            "power",
+            buildList {
+                add("${info.txPowerDbm} of ${info.maxTxPowerDbm} dBm")
+                device?.let { add("path ${it.pathHashSize} B") }
+                device?.let { add("${it.maxContacts} contacts") }
+            }.joinToString("  ·  "),
+        )
+    }
+}
+
+/** One labelled fact, in the app's dim-label/value pairing. */
+@Composable
+private fun FactLine(label: String, value: String) {
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, color = Dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        Text(value, color = Fg, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+    }
 }

@@ -363,7 +363,7 @@ public final class MeshcoreSession {
 
     /**
      * Sets the position this node puts in its own adverts
-     * ({@code CMD_SET_ADVERT_LATLON}, 0x0C). Degrees, converted to the
+     * ({@code CMD_SET_ADVERT_LATLON}, 0x0E). Degrees, converted to the
      * protocol's micro-degrees.
      *
      * <p>This is what other nodes will see and plot. A node with no GPS

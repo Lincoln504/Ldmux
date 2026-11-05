@@ -347,6 +347,23 @@ nothing paints — and is now "the next paint".
   touching the control that caused it, so a reader would otherwise hear it once and never learn the
   send finished. A polite region waits for the current utterance rather than interrupting.
 
+### 2b.12 The radio dialog showed none of what it read
+
+The dialog opened straight onto "region". Every fact it needs was already read — `SELF_INFO` on the
+handshake, `DEVICE_INFO` on request, `MeshStatus` for signal and battery — and the one screen about
+the radio answered "which channel" without saying which radio, what firmware, or whether it was in
+range. It now shows up to three dim lines: name and firmware, signal and battery (with the radio's
+`-128`/`255` sentinels rendered as words, as `ldmux mesh status` does), and power against the radio's
+own maximum plus path width and contact capacity. Each line appears only when its source answered,
+so an unbound radio shows nothing rather than zeros.
+
+**What the screen deliberately does not offer**, and why: the *name*, *channel slots* and *advert
+position* are MeshMore's on these boards, and two apps writing the same field is how a radio ends up
+named something neither user chose. The operating point — the tuple — is what LDMUX owns, and it is
+the only control offered. Also corrected: the vendored binding's doc comment called
+`CMD_SET_ADVERT_LATLON` `0x0C`; the opcode table and the codec both say `0x0E` (0x0C is TX power).
+A comment-only defect, but it is the kind that sends the next reader to the wrong byte.
+
 ## 3. How this was verified
 
 The Kotlin toolchain in this environment needs an explicit JDK: the default
