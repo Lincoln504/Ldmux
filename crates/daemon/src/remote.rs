@@ -1350,8 +1350,9 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             conn.send_json(&serde_json::json!({"type":"desktop","inventory":inv}));
         }
         "new" => {
-            let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("shell");
-            let kind = if kind == "pi" { "pi" } else { "shell" };
+            // A session is a shell (2026-11-05). The client's `kind` is accepted and
+            // ignored rather than refused, so an older build still works.
+            let kind = "shell";
             let cwd = v.get("cwd").and_then(|x| x.as_str());
             let title = v.get("title").and_then(|x| x.as_str());
             // Who opened it: what the client says, else who the client is.

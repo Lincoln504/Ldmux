@@ -258,7 +258,8 @@ pub struct List {}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct New {
-    /// Closed set: `"shell" | "pi"`.
+    /// Accepted and ignored: a session is a shell (2026-11-05). The field stays on the
+    /// wire so an older client is not refused, and nothing spawns a program by name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

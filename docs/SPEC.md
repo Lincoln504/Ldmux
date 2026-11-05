@@ -175,7 +175,9 @@ Tailscale only, and far less functionality than dooboxes.
    rotation and the app owns the keyboard; there is no flip button, and the
    launcher holds portrait (ADR-0011). *(Earlier text said "landscape-only",
    then "chosen by an explicit button"; both are superseded.)*
-4. **G4 — Open shells/pi in any directory from the phone**, optionally mirrored
+4. **G4 — Open shells in any directory from the phone** (2026-11-05: there is no
+   session kind; a shell is the only kind, and `pi` is a program run inside one),
+   optionally mirrored
    live into a desktop `alacritty` window on a chosen i3 workspace.
 5. **G5 — Synchronized multi-view is a nice-to-have**, achieved via the
    daemon's multi-client attach; if it complicates anything, degrade gracefully.
@@ -205,7 +207,8 @@ Tailscale only, and far less functionality than dooboxes.
 - No containers / Docker / devcontainers (that is `dooboxes`).
 - No hosted relay, billing, Supabase, Centrifugo, Play Integrity.
 - No public internet exposure (no Funnel by default).
-- No adapter zoo; only **shell** and **pi** session kinds.
+- No adapter zoo, and no session kinds at all: every session is a shell (2026-11-05).
+  `pi` is a program a shell can run, not a kind of session.
 - No arbitrary command-wrapping; `ldmux` starts keeper sessions.
 - No synchronous live typing requirement.
 - No Windows/macOS server support in v1; Linux (this machine) first.
@@ -216,16 +219,16 @@ Tailscale only, and far less functionality than dooboxes.
 
 | ID | Requirement |
 |----|-------------|
-| FR-1 | pi sessions are discoverable and controllable through `ldmux` (within a defined scope — see §4.6). |
+| FR-1 | Sessions are discoverable and controllable through `ldmux`; there is no session kind, so this is every shell (2026-11-05). |
 | FR-2 | **Dropped** — `ldmux` is not a pi extension (ADR-0009). The daemon is still "up and ready" independent of any client, which is what this requirement was for. |
 | FR-3 | The backend must be a persistent session layer that outlives clients. (Originally "tmux-based"; now the keeper, ADR-0018.) |
 | FR-4 | Remote access is **Tailscale-only**. |
 | FR-5 | A **multi-platform mobile app** exists (KMP/Compose preferred). |
 | FR-6 | ~~The mobile app is landscape-only.~~ Superseded by ADR-0011: the shell view follows the device's rotation; the launcher holds portrait. |
 | FR-7 | Terminal ~3/4 of the screen; control panel 1/4, side (left/right) is a setting. |
-| FR-8 | A **clean swipe UI** between open shells and pi sessions. |
+| FR-8 | A **clean swipe UI** between open shells. |
 | FR-9 | Sessions closed/ended on the host disappear from the mobile live list. |
-| FR-10 | From the phone, open new shells and new pi sessions **in any directory**. |
+| FR-10 | From the phone, open new shells **in any directory**. |
 | FR-11 | Optionally, a live **`alacritty` window** on a chosen workspace (default "last"/`Mod+0`) attached to the same session. |
 | FR-12 | Phone+desktop **synchronized live viewing** desirable but optional; robustness wins. |
 | FR-13 | Clean multi-connection handling (multiple devices/sessions). |

@@ -1649,6 +1649,33 @@ fn spawn_req(
 
 /// Peek the session until `needle` shows up (or the budget runs out); returns
 /// everything seen.
+/// True when `haystack` contains a cursor-position report: `CSI <row> ; <col> R`.
+///
+/// The digits are checked for shape, not for a position, for the reason given where this
+/// is used: the report's cell depends on whether the emulator answered the query before
+/// the pane's own echo of that query moved the cursor.
+fn has_cursor_report(haystack: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            let (mut digits, mut semi) = (false, false);
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'0'..=b'9' => digits = true,
+                    b';' if digits => semi = true,
+                    b'R' if digits && semi => return true,
+                    _ => break,
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 async fn peek_for(socket: &str, id: &str, needle: &str) -> String {
     let mut seen = Vec::new();
     for _ in 0..1200 {
@@ -2445,12 +2472,17 @@ async fn a_cursor_report_and_a_device_attributes_query_are_answered() {
         })
     };
 
-    // DSR 6 = cursor position report, `CSI row ; col R`, cursor at the home cell.
+    // DSR 6 = cursor position report. **The cell is not asserted**: the pane runs `cat`,
+    // which prints the query it reads, and that echo moves the cursor before or after
+    // the emulator answers. Whichever wins decides whether the report says `1;1R` or the
+    // column the echo reached, so asserting `1;1R` made this test pass alone and fail in
+    // a parallel suite while the emulator answered correctly every time. The property the
+    // test is named for is that the query is answered at all.
     keeper_call(&s, &write("\x1b[6n"), DEFAULT_TIMEOUT_MS)
         .await
         .unwrap();
-    let seen = peek_for(&s, "queries", "\x1b[1;1R").await;
-    assert!(seen.contains("\x1b[1;1R"), "no cursor report: {seen:?}");
+    let seen = peek_for(&s, "queries", "R").await;
+    assert!(has_cursor_report(&seen), "no cursor report: {seen:?}");
 
     // DA1 = `CSI c`, answered with a device-attributes report.
     keeper_call(&s, &write("\x1b[c"), DEFAULT_TIMEOUT_MS)

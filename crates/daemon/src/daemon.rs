@@ -1452,35 +1452,27 @@ impl LdmuxDaemon {
     ) -> Result<SessionRecord, String> {
         let cols = cols.clamp(1, 1000);
         let rows = rows.clamp(1, 1000);
-        let kind = if kind == "shell" || kind == "pi" {
-            kind.to_string()
-        } else {
-            return Err(format!("invalid kind: {kind:?} (expected shell or pi)"));
-        };
+        // There is no session kind. A session is a shell; whatever the user runs inside
+        // it, `pi` included, is theirs, and the daemon spawns nothing by name. The field
+        // is still read so an older client is not refused, and it is ignored: this used
+        // to be a closed set of "shell" | "pi" with a `pi` spawn behind it, which put a
+        // Pi-shaped hole in a shell app (dropped 2026-11-05).
+        let _requested_kind = kind;
+        let kind = "shell".to_string();
         let cwd = crate::cwd::resolve_cwd(Some(cwd))?;
         if !std::path::Path::new(&cwd).is_dir() {
             return Err(format!("not a directory: {cwd}"));
         }
         let id = short_id();
         let keeper_name = format!("ldmux-{id}");
-        let command: Vec<String> = if kind == "pi" {
-            vec!["pi".to_string()]
-        } else {
-            vec![]
-        };
+        let command: Vec<String> = Vec::new();
         let now: u64 = now_ms();
         let record = SessionRecord {
             id: id.clone(),
             keeper_name: keeper_name.clone(),
             kind: kind.to_string(),
             cwd: cwd.clone(),
-            title: title.map(|t| t.to_string()).unwrap_or_else(|| {
-                if kind == "pi" {
-                    "pi".to_string()
-                } else {
-                    "shell".to_string()
-                }
-            }),
+            title: title.map(|t| t.to_string()).unwrap_or_else(|| "shell".to_string()),
             created_at: now,
             updated_at: now,
             created_by: created_by.to_string(),
