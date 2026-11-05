@@ -91,7 +91,11 @@ This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECOR
 | 7.3 | Reconnect backoff never returns to its floor | FIXED `d00111c` |
 | 7.4 | A replayed record applied twice | FIXED — replay window (`crates/session`) |
 | 7.5 | UTF-8 or an escape sequence straddling two records | OK — `Utf8Carry`, record framing |
-| 7.6 | Record larger than the carrier floor: silently truncated | UNKNOWN — see integrity audit |
+| 7.6 | Record larger than the carrier floor: silently truncated | OK — sends are all-or-nothing, no truncation exists |
+| 7.10 | Two 1024-record inbound queues dropped the oldest **silently**, after the ARQ had acknowledged it | FIXED `9ceea6d` — counted, logged at powers of two |
+| 7.11 | A record more than 7 ahead of a gap is refused as `out_of_window` | OK — not loss; it stays unacked and is retransmitted, costing one round trip per gap record |
+| 7.12 | `heartbeat_ms` is 0, so an idle session cannot tell a dead peer from an idle one | OPEN — the UI should say when nothing has been heard for N minutes |
+| 7.13 | A `Close` is suppressed while the budget is spent, so an ended session lingers until the peer times out | OPEN — a close should ignore the budget, as a retransmission does |
 | 7.7 | A resync never answered is never re-asked | FIXED `8fd09b6` |
 | 7.8 | `seq 1 100`-class output batched into more messages than the budget | OK — pacer is open defect 22 |
 | 7.9 | No pacer: a screen update leaves as a burst of up to eight records | OPEN — defect 22 |
@@ -128,7 +132,12 @@ This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECOR
 
 | # | Failure | Status |
 |---|---|---|
-| 10.1 | Token at rest on the phone | UNKNOWN — see security audit |
+| 10.1 | Token at rest on the phone, in plain preferences, while the mesh keys beside it were Keystore-encrypted | FIXED `6d4e8d2` — same `KeystoreBlob`, one-time migration |
+| 10.7 | Token embedded in `connectionKey` and used as a Compose rebuild key | OPEN — anything that logs that key leaks the bearer token |
+| 10.8 | Token accepted in the query string as well as the header | OPEN — the probe uses it; URLs travel further than headers |
+| 10.9 | The handshake's filter tag is bespoke crypto that its own comment says wants review | OPEN — the only custom crypto in the tree |
+| 10.10 | The Keystore path has never run on a device | OPEN — one manual round trip closes it |
+| 10.11 | The JNI entry points still carried the old package, so every native call failed | FIXED `6d4e8d2` — caught by `MeshSessionAbiTest`, 11 tests |
 | 10.2 | Cleartext permitted where the config says it is not | OK — restricted to tailnet/loopback by code |
 | 10.3 | A terminal program writes the clipboard without consent | OK — `ldmux clipboard-write on|off`, off by default |
 | 10.4 | The gateway token sat in `/tmp` | FIXED 2026-11-05 — gateway removed, file deleted |
@@ -137,8 +146,20 @@ This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECOR
 
 ## 11. Resource limits and failure injection
 
-Whole aspect **UNKNOWN** pending the failure audit: disk full, memory ceilings, wedged
-children, storms, sleep and clock jumps, per-session and global limits.
+Audited 2026-11-05. The picture is better than expected: almost everything is bounded.
+
+| # | Failure | Status |
+|---|---|---|
+| 11.1 | State file written non-atomically or non-durably | OK — tmp + `sync_all` + rename + dir fsync |
+| 11.2 | A session's output grows without limit | OK — 4 MiB per session, drains in chunks |
+| 11.3 | Scrollback grows without limit | OK — 10 000 lines / 40 MiB, both overridable, never silently zero |
+| 11.4 | Wire-side queues unbounded | OK — input 16 KiB, keys 32, pending 1 MiB, snapshot 4 MiB, backlog 64 KiB, JSON 16 MiB, connections 64 |
+| 11.5 | Mesh queues unbounded | OK — inbound 1024, outbound 8 KiB, pending 8; the phone's inbox 128 |
+| 11.6 | A wedged keeper blocks forever | OK — every keeper call has an 8 s timeout, and a connect failure respawns once |
+| 11.7 | A shell that ignores SIGTERM survives | OK — SIGTERM, grace, then SIGKILL, group and leader |
+| 11.8 | Disk full during a registry or token write | OK for those two (logged, atomic); the pairing write path is UNKNOWN |
+| 11.9 | A client that reconnects every second costs the host CPU | UNKNOWN — no per-peer rate limit found; the 64-connection cap bounds memory, not work |
+| 11.10 | Clock jump or host suspend breaks a deadline | UNKNOWN |
 
 ## 12. Multi-device and ownership
 
