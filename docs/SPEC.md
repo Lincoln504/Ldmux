@@ -529,40 +529,22 @@ closed`, `its desk window closed while the daemon was down`, `killed from
 `dead` and nothing else and the journal said nothing at all — two shells ended
 during an evening of use and the only way to explain either was elimination.
 
-### 5.4 API surface (v1)
+### 5.4 API surface
 
-> **Aspirational — not implemented.** The shipped surface is deliberately
-> smaller: newline-delimited JSON RPC over a Unix socket
-> (`crates/protocol/src/rpc.rs`: ping/list/new/send/capture/snapshot/kill/
-> close/forget/adopt/desktop/makeLive/closeLive/remote_info and a few more), one WebSocket per session at `WS /ws`
-> (JSON control + binary `OUTPUT` frames — `docs/REMOTE.md`). The daemon serves
-> no static files. No REST layer and no `/api/dirs`; a client creates sessions
-> with the `new` WebSocket message. Scrollback paging **is** implemented, as the `scrollback` WebSocket
-> message (a snapshot carrying `history: true`, up to 5,000 lines — the
-the tmux-era `HISTORY_CAPTURE_LINES`; the keeper retains up to 10,000) rather than
-> the REST route below. The table records original intent, not the contract.
+The shipped surface, and the only one: newline-delimited JSON RPC over a Unix
+socket (`crates/protocol/src/rpc.rs`), and one WebSocket per session at `WS /ws`
+(JSON control plus binary `OUTPUT` frames, `docs/REMOTE.md`). The daemon serves no
+static files and has no REST layer.
 
 Local: Unix socket `$XDG_RUNTIME_DIR/ldmux/ldmuxd.sock`.
 Remote: `ws://<tailnet-address>:7625/ws` — the daemon's own tailnet address, no
 proxy (ADR-0016; see §10).
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/api/health` | liveness + keeper reachable + version + transport mode |
-| GET | `/api/sessions` | list (alive first, newest first) |
-| POST | `/api/sessions` | create `{kind, cwd, cmd?, title?, mirror?}` |
-| GET | `/api/sessions/:id` | detail |
-| POST | `/api/sessions/:id/input` | `{data}` or `{keys:[…]}` |
-| GET | `/api/sessions/:id/snapshot` | visible screen + state fields |
-| GET | `/api/sessions/:id/scrollback?from=&lines=` | paged history text |
-| POST | `/api/sessions/:id/mirror` | `{workspace?, readOnly?}` |
-| POST | `/api/sessions/:id/kill` | terminate |
-| GET | `/api/dirs?path=` | directory browsing (read; constrained to configured roots) |
-| WS | `/ws/:id` | terminal channel (see §6) |
-
-Deferred (v0.1 over-specification): SSE `/api/events` (session lifecycle is
-delivered on the WS + a lightweight poll), mirror focus/close endpoints (a shell
-helper suffices), and owner/families.
+A twelve-row REST table stood here until 2026-11-05 and described an API nobody
+was going to build: no `/api/health`, no `/api/sessions`, no `/api/dirs`, no SSE.
+Every one of its rows is served instead by an RPC method or a WebSocket message, so
+the table was a second, contradictory description of the product. Deleted rather
+than marked aspirational a second time.
 
 ### 5.5 Lifecycle and robustness
 

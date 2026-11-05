@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
@@ -182,7 +183,11 @@ internal fun MiniTextButton(
         // A caller's modifier comes first so `weight` decides the width and the height
         // stays the app's own: a button that is wider than its label is a button that
         // lines up with the one beside it.
-        modifier = modifier.height(LocalTouch.current.min),
+        // Square-ish, not just short: the height floor was set and no width floor was, so a
+        // one-glyph `-`/`+` measured about 30x36 dp even in the comfortable density — under
+        // the 48x48 dp every platform guidance asks for, on a control whose whole job is to be
+        // hit. `widthIn` uses the same floor as the height so the two cannot drift apart.
+        modifier = modifier.height(LocalTouch.current.min).widthIn(min = LocalTouch.current.min),
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
         content = content,
     )
