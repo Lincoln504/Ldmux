@@ -1414,7 +1414,14 @@ impl Keeper {
 }
 
 /// How long a terminated session gets between SIGTERM and SIGKILL.
-const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+///
+/// **50 ms is not a grace, it is a formality.** A program that traps SIGTERM to save state — a
+/// server flushing, an editor writing its swap file, a shell running its `trap` — was killed the
+/// moment it started to clean up, so the cleanup never finished and the next start found whatever
+/// the program had been in the middle of. Two seconds is the same order as the terminals and
+/// init systems around it, and it costs nothing when the program exits on the first signal, which
+/// is the common case: this is awaited on a spawned task, so the wait does not stall the keeper.
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Take a live session's process tree down and reap the shell.
 ///

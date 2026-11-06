@@ -90,10 +90,20 @@ async fn pane_in_mode(rig: &Rig, app_cursor: bool) -> common::wsraw::RawWs {
 async fn press_up_through_the_bridge(rig: &Rig) -> (Bridge<DaemonHost, FakeLink>, FakeLink) {
     let link = FakeLink::default();
     let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
+    // **The rig's own WebSocket client holds this shell**, so a plain attach is refused with
+    // `HELD` (version 8) — by design: a phone does not steal a shell another device is watching.
+    // Taking it over is what the phone does when the user answers `take it back`.
     phone_says(
         &link,
         &Message::Attach {
             version: VERSION,
+            selector: rig.session.clone(),
+        },
+    );
+    bridge.tick().await;
+    phone_says(
+        &link,
+        &Message::Takeover {
             selector: rig.session.clone(),
         },
     );
