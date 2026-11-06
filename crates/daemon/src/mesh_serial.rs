@@ -41,6 +41,13 @@ use tokio::sync::mpsc as async_mpsc;
 /// How long the radio thread waits for a command before checking the air.
 const COMMAND_WAIT: Duration = Duration::from_millis(10);
 
+/// How often the radio's countdown is republished while the link is idle.
+///
+/// The session waits on this number: at zero it sends nothing, so nothing is transmitted, so a
+/// status tied to transmission would never refresh. Half a second is invisible to a person and
+/// costs no airtime.
+const STATUS_REFRESH: Duration = Duration::from_millis(500);
+
 /// The firmware's own ceiling for a path, in bytes (`MAX_PATH_SIZE`, `MeshCore.h`).
 const MAX_PATH_SIZE: usize = 64;
 
@@ -304,6 +311,13 @@ fn serve_loop<L: ByteLink>(
     // When the last advert went out; `None` means none yet, so the first idle moment sends one.
     let mut last_advert: Option<Instant> = None;
     let advert_every = advert_interval();
+    // When the last status went out. **A status is published on a timer as well as after a send**,
+    // because the session gates its sends on the countdown this carries: with the countdown at zero
+    // the session polls nothing, the radio transmits nothing, and a status that is only published
+    // after a transmission could never say the hour had rolled over. Measured 2026-11-06: a phone
+    // waiting on "the host has not described a terminal yet" for as long as the countdown stayed
+    // stale.
+    let mut last_status = Instant::now();
 
     // One status before anything else: the loop starts with no budget, and an
     // unknown budget is zero, so without this it would never send the first record.
@@ -394,6 +408,19 @@ fn serve_loop<L: ByteLink>(
                 ))));
             }
             Err(RecvTimeoutError::Timeout) => {
+                // The countdown, refreshed while the link is idle. Not a transmission: it is a
+                // message to this process only, and it is what lets the session see the hour roll
+                // over when it has been held back for the whole hour.
+                if last_status.elapsed() >= STATUS_REFRESH {
+                    last_status = Instant::now();
+                    let left = budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX));
+                    if events
+                        .blocking_send(Ok(Event::Status(status(&settings, left, sent))))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 // Only when nothing is queued: an advert waits its turn behind records, because a
                 // record is an answer to something the user is waiting for.
                 if let Some(every) = advert_every
@@ -728,6 +755,50 @@ mod tests {
         assert_eq!(advert_interval(), Some(Duration::from_secs(1_800)));
         // SAFETY: as above.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
+    }
+
+    /// **The countdown is republished while nothing is sent.** The session gates every send on it,
+    /// so a status tied to transmission was a status that could never say the hour had rolled over:
+    /// at zero the session polled nothing, the radio sent nothing, and the phone waited on a host
+    /// whose budget would never come back (measured 2026-11-06, `held back 3959 times`).
+    #[test]
+    fn the_budget_is_republished_while_the_link_is_idle() {
+        let companion = Companion::new(MemoryLink::new());
+        let (_command_tx, command_rx) = channel();
+        let (event_tx, mut event_rx) = async_mpsc::channel(8);
+        let worker = std::thread::spawn(move || {
+            serve(
+                companion,
+                Settings {
+                    hash_size: 1,
+                    airtime_ms: 137.9,
+                    preset: RadioPreset {
+                        freq_mhz: 914.25,
+                        bw_khz: 500.0,
+                        sf: 8,
+                        cr: 5,
+                        public_key: [7u8; 32],
+                    },
+                },
+                command_rx,
+                event_tx,
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
+
+        // The opening status, then another with no command in between: the refresh.
+        let mut statuses = 0;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while statuses < 2 && Instant::now() < deadline {
+            match event_rx.blocking_recv() {
+                Some(Ok(Event::Status(_))) => statuses += 1,
+                Some(Ok(_)) => {}
+                other => panic!("expected a status, got {other:?}"),
+            }
+        }
+        assert!(statuses >= 2, "the countdown refreshes on its own");
+        drop(_command_tx);
+        let _ = worker.join();
     }
 
     #[test]

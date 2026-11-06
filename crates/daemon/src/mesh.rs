@@ -808,10 +808,21 @@ async fn session<C: Carrier>(
                 last_carrier = Instant::now();
                 match event? {
                     Event::Status(status) => {
-                        // The carrier's count is authoritative: it computed the hour's 1 % from the
-                        // tuple the radio reports, and it decrements as it transmits.
-                        if status.ops_left_this_hour.is_some() {
-                            hour_left = status.ops_left_this_hour;
+                        // **Upward only, and that is the whole fix for a double charge.** The loop
+                        // reserves against the countdown when it hands records to the carrier
+                        // (below), and the carrier reports what it actually transmitted afterwards.
+                        // Taking every report was a second decrement of the same records: 255 in an
+                        // hour became 128, then zero, then a stall that never recovered because at
+                        // zero nothing was polled and nothing transmitted (measured 2026-11-06:
+                        // `held back 3959 times`, a phone waiting on a healthy session).
+                        //
+                        // Taking a *higher* report is how an hour rollover comes back, and it is the
+                        // only thing that can reopen a spent budget.
+                        if let Some(left) = status.ops_left_this_hour {
+                            hour_left = Some(match hour_left {
+                                Some(current) if left <= current => current,
+                                _ => left,
+                            });
                         }
                         set(snapshot, |s| {
                             s.radio_state = Some(status.radio_state);
@@ -961,12 +972,25 @@ async fn session<C: Carrier>(
             );
         }
         let sent_now = polled.len();
-        // Only new data is charged: a retransmission is traffic already paid for, and an ack is
-        // the exchange that keeps the link alive (the ARQ lets both past `records_left`).
-        let charged = polled
-            .iter()
-            .filter(|r| r.new_data)
-            .count();
+        // **One accountant: the carrier.** It counts what it actually transmitted and publishes the
+        // remainder as `Status.ops_left_this_hour`; this loop only reads it.
+        //
+        // It used to decrement here as well, per new record — and the carrier's figure already
+        // accounts for the records it sent, so every record was charged twice. At 500 kHz that is
+        // 255 records an hour becoming 128, and then a stall the link never left: with
+        // `records_left` at zero nothing was polled, so the carrier sent nothing, so it published no
+        // new `Status`, so the countdown could not recover. Measured on this bench, 2026-11-06:
+        // `records 0 left this hour` after 17.8 s of air, `held back 3959 times`, and a phone sitting
+        // on "the host has not described a terminal yet" with a healthy session.
+        //
+        // Retransmissions and acks are not charged by the carrier either: a retransmission is
+        // traffic already paid for, and an ack is the exchange that keeps the link alive. The ARQ
+        // lets both past `records_left`.
+        //
+        // **A reservation, not a second account.** It keeps the loop from handing the carrier more
+        // inside one tick than the countdown allows, before the carrier's own report has arrived;
+        // the rules above make the two agree instead of adding up.
+        let charged = polled.iter().filter(|r| r.new_data).count();
         if let Some(left) = hour_left {
             hour_left = Some(left.saturating_sub(u8::try_from(charged).unwrap_or(u8::MAX)));
             set(snapshot, |s| s.records_left = hour_left);
@@ -1129,6 +1153,13 @@ mod tests {
         to_phone: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
         events: tokio::sync::mpsc::UnboundedReceiver<Event>,
         pending: std::collections::VecDeque<Event>,
+        /// What the carrier last told the loop it had left, and what it counts down from.
+        ///
+        /// **The real radio publishes this after every send**, which is what makes it the one
+        /// accountant: the loop reads the remainder instead of decrementing a copy that would be
+        /// charged twice. `u8::MAX` here means "this carriage does not meter", so the tests that are
+        /// about the protocol rather than the budget are not bounded by an imaginary hour.
+        left: u8,
     }
 
     impl Carrier for AirCarrier {
@@ -1141,6 +1172,17 @@ mod tests {
                 seq,
                 outcome: SendOutcome::SentDirect,
             }));
+            // ...and says what is left of the hour, exactly as `mesh_serial` does after every send.
+            if self.left != u8::MAX {
+                self.left = self.left.saturating_sub(1);
+                self.pending.push_back(Event::Status(ldmux_mesh::messages::Status {
+                    radio_state: RadioState::Connected,
+                    rssi: ldmux_mesh::UNKNOWN_RSSI,
+                    battery_percent: ldmux_mesh::UNKNOWN_BATTERY,
+                    tx_airtime_tenths_this_hour: 0,
+                    ops_left_this_hour: Some(self.left),
+                }));
+            }
             Ok(())
         }
 
@@ -1187,6 +1229,8 @@ mod tests {
             to_phone: to_phone_tx,
             events: event_rx,
             pending: std::collections::VecDeque::new(),
+            // The first status below is what meters this test; until then, unmetered.
+            left: u8::MAX,
         };
         let session_task = tokio::spawn({
             let runtime = runtime.clone();
@@ -1272,6 +1316,42 @@ mod tests {
             left.len()
         );
 
+        // **The hour rolls over and the link comes back.** A fresh countdown is the only thing that
+        // can reopen a spent budget, and it must not require a reconnect: the carrier republishes
+        // `Status` on a timer for exactly this, because a status published only after a
+        // transmission could never arrive while nothing was being transmitted. Measured on this
+        // bench 2026-11-06: `records 0 left this hour` with the loop `held back 3959 times`, and a
+        // phone sitting on "the host has not described a terminal yet" over a healthy session.
+        event_tx
+            .send(Event::Status(ldmux_mesh::messages::Status {
+                radio_state: RadioState::Connected,
+                rssi: ldmux_mesh::UNKNOWN_RSSI,
+                battery_percent: ldmux_mesh::UNKNOWN_BATTERY,
+                tx_airtime_tenths_this_hour: 0,
+                ops_left_this_hour: Some(4),
+            }))
+            .unwrap();
+        let settle = Instant::now() + Duration::from_secs(3);
+        let mut after = Vec::new();
+        while Instant::now() < settle {
+            while let Ok(rec) = to_phone.try_recv() {
+                after.push(rec);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut reopened = 0usize;
+        for rec in &after {
+            if let Ok(ldmux_session::Inbound::Data(d)) = phone.receive(now, rec) {
+                reopened += d.len();
+            }
+            now += 4_000;
+        }
+        assert!(
+            reopened > 0,
+            "a refreshed countdown must let the queued output leave: {} records arrived",
+            after.len()
+        );
+
         session_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1294,6 +1374,8 @@ mod tests {
             to_phone: to_phone_tx,
             events: event_rx,
             pending: std::collections::VecDeque::new(),
+            // The first status below is what meters this test; until then, unmetered.
+            left: u8::MAX,
         };
         let session_task = tokio::spawn({
             let runtime = runtime.clone();
