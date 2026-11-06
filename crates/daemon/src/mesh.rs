@@ -669,13 +669,21 @@ async fn link(
 
 /// How many records this poll may hand to the carrier.
 ///
-/// The radio we own is the meter: its firmware runs the transmitter's duty cycle and refuses a
-/// record it will not send, so there is no second number to apply here. The rule is a function of
-/// the carriage's own declaration rather than a constant so that a carriage which does meter has
-/// somewhere to say so.
-fn poll_budget(source: Budget) -> u8 {
+/// **The carrier's own countdown is the meter, and this loop applies it.** The radio's firmware
+/// does run a transmitter budget — MeshCore's `Dispatcher` charges measured airtime against
+/// `tx_budget_ms` and delays the next send when it is spent — but its factor is 1.0, which is a
+/// 50 % duty cycle (`meshcore/src/Dispatcher.cpp`: `getAirtimeBudgetFactor()` returns 1.0,
+/// `duty_cycle = 1/(1+factor)`, read 2026-11-06). That is not the 1 % a European band allows, so
+/// the firmware's limiter cannot be the whole answer and the serial carrier publishes the 1 %
+/// countdown it computes from the tuple the radio reports. This returns that figure when the
+/// carrier has published one; `u8::MAX` only before the first status arrives.
+///
+/// The ARQ charges `records_left` to **new** records only: retransmissions and pure acks pass on
+/// top of it (`crates/session/src/arq.rs`, `Arq::poll`), so a spent budget stalls new output and
+/// never the exchange that keeps the link alive.
+fn poll_budget(source: Budget, published: Option<u8>) -> u8 {
     match source {
-        Budget::RadioGoverned => u8::MAX,
+        Budget::RadioGoverned => published.unwrap_or(u8::MAX),
     }
 }
 
@@ -725,6 +733,11 @@ async fn session<C: Carrier>(
     // refusal be handed back to the right slot. A queued handshake reply has no ARQ slot (`None`).
     let mut awaiting: VecDeque<(u8, Instant, Option<u16>)> = VecDeque::new();
     let mut seq: u8 = 0;
+    // The hour's remaining 1 % airtime, in full-size records, as the carrier last published it
+    // and as this loop has spent it since. **Decremented here per new data record**, because the
+    // ARQ's limit is per poll: a count that was not decremented would allow that many records
+    // every pass, which is not a budget at all.
+    let mut hour_left: Option<u8> = None;
 
     loop {
         if runtime.reset_pin.swap(false, Ordering::SeqCst)
@@ -794,13 +807,19 @@ async fn session<C: Carrier>(
                 last_carrier = Instant::now();
                 match event? {
                     Event::Status(status) => {
+                        // The carrier's count is authoritative: it computed the hour's 1 % from the
+                        // tuple the radio reports, and it decrements as it transmits.
+                        if status.ops_left_this_hour.is_some() {
+                            hour_left = status.ops_left_this_hour;
+                        }
                         set(snapshot, |s| {
                             s.radio_state = Some(status.radio_state);
                             s.rssi = status.rssi;
                             s.battery_percent = status.battery_percent;
                             s.tx_airtime_tenths = status.tx_airtime_tenths_this_hour;
-                            // The radio's own count of what is left this hour. Published, not
-                            // enforced: the firmware is the meter.
+                            // What is left of the hour's 1 % airtime, computed by the carrier
+                            // from the tuple the radio reports. Enforced on the next poll
+                            // (`poll_budget`), charged to new records only.
                             if status.ops_left_this_hour.is_some() {
                                 s.records_left = status.ops_left_this_hour;
                             }
@@ -916,11 +935,11 @@ async fn session<C: Carrier>(
             }
         }
 
-        // **Who meters the airtime is the carriage's declaration, not a missing number.** The
-        // radio we own runs its own duty cycle in firmware and refuses what it will not send, so
-        // this loop does not gate on a figure it would have to invent.
+        // **The carrier's countdown, applied here.** See [`poll_budget`]: the firmware's own
+        // budget is a 50 % limiter, so the 1 % the operator is held to comes from the carrier's
+        // computation and this is where it takes effect.
         let used = u8::try_from(awaiting.len()).unwrap_or(u8::MAX);
-        let records_left = poll_budget(promise.budget);
+        let records_left = poll_budget(promise.budget, hour_left);
         let limits = Limits {
             records_left,
             l2_slots: CREDIT_WINDOW.saturating_sub(used),
@@ -941,6 +960,16 @@ async fn session<C: Carrier>(
             );
         }
         let sent_now = polled.len();
+        // Only new data is charged: a retransmission is traffic already paid for, and an ack is
+        // the exchange that keeps the link alive (the ARQ lets both past `records_left`).
+        let charged = polled
+            .iter()
+            .filter(|r| r.new_data)
+            .count();
+        if let Some(left) = hour_left {
+            hour_left = Some(left.saturating_sub(u8::try_from(charged).unwrap_or(u8::MAX)));
+            set(snapshot, |s| s.records_left = hour_left);
+        }
         let pending_now = h.snapshot().pending;
         for record in polled {
             let t_write = std::time::Instant::now();
@@ -1136,6 +1165,112 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// **A spent hour stops new output and keeps the link.** The carrier publishes a countdown;
+    /// the loop must hand the ARQ at most that many *new* records, while retransmissions and acks
+    /// still pass (the ARQ does not charge them). Three shells' worth of output is queued against a
+    /// budget of one, so exactly one new record may leave.
+    #[tokio::test]
+    async fn a_published_budget_bounds_new_records() {
+        let dir = e2e_dir("budget");
+        let setup = SessionSetup::new(&dir, E2E_PSK).unwrap();
+        let host_public = hex_key(&setup.public_key_hex());
+        let runtime = test_runtime();
+        // The carrier reports the hour's last record, which is the only way the loop learns its
+        // budget: a value written into the snapshot by hand does not reach `hour_left`.
+        let (to_phone_tx, mut to_phone) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let carrier = AirCarrier {
+            to_phone: to_phone_tx,
+            events: event_rx,
+            pending: std::collections::VecDeque::new(),
+        };
+        let session_task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                let mut setup = setup;
+                let _ = session(
+                    carrier,
+                    Bound {
+                        uplink_record_max: 172,
+                        radio_state: RadioState::Connected,
+                        budget: Budget::RadioGoverned,
+                    },
+                    &runtime,
+                    Some(&mut setup),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await;
+            }
+        });
+
+        // The budget report, as the serial carrier sends one after opening the radio.
+        event_tx
+            .send(Event::Status(ldmux_mesh::messages::Status {
+                radio_state: RadioState::Connected,
+                rssi: ldmux_mesh::UNKNOWN_RSSI,
+                battery_percent: ldmux_mesh::UNKNOWN_BATTERY,
+                tx_airtime_tenths_this_hour: 0,
+                ops_left_this_hour: Some(1),
+            }))
+            .unwrap();
+
+        // Handshake, so the session is established and the budget path is live.
+        let phone_keys = ldmux_session::handshake::Keypair::generate().unwrap();
+        let wall = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let (init, m1) =
+            ldmux_session::handshake::Initiator::start(&phone_keys, &host_public, &E2E_PSK, wall)
+                .unwrap();
+        event_tx.send(Event::Recv(m1)).unwrap();
+        let m2 = tokio::time::timeout(Duration::from_secs(5), to_phone.recv())
+            .await
+            .expect("message 2")
+            .expect("open");
+        let mut phone = ldmux_session::Session::new(init.finish(&m2).unwrap(), 172, 0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.snapshot().session.state != "established" {
+            assert!(Instant::now() < deadline, "never established");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Drain anything the handshake left on the wire.
+        while to_phone.try_recv().is_ok() {}
+
+        // Three shells want to send; the budget says one record of new traffic.
+        for shell in 0..3u8 {
+            runtime.send(shell, b"payload").unwrap();
+        }
+        let settle = Instant::now() + Duration::from_secs(3);
+        let mut left = Vec::new();
+        while Instant::now() < settle {
+            while let Ok(rec) = to_phone.try_recv() {
+                left.push(rec);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The record is sealed, so count what the *phone* can decode as data rather than by shape.
+        let mut data = 0usize;
+        let mut now = 4_000u64;
+        for rec in &left {
+            if let Ok(ldmux_session::Inbound::Data(d)) = phone.receive(now, rec) {
+                data += d.len();
+            }
+            now += 4_000;
+        }
+        assert!(
+            data <= 1,
+            "the budget was one record and {data} arrived: {}",
+            left.len()
+        );
+
+        session_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The whole L3 path over a carrier**: handshake, then one record each way.
@@ -1355,14 +1490,19 @@ mod tests {
         assert_eq!(json["hostRadio"], serde_json::Value::Null);
     }
 
-    /// **The radio is the meter.** Its firmware runs the transmitter's duty cycle and refuses a
-    /// record it will not send, so the loop does not gate on a number the carrier never reported.
+    /// **The carrier's countdown is the meter, and a missing one is not zero.**
     ///
-    /// This is the exact shape of the reported failure: a paired phone retried `attach` for ever
-    /// against a host whose status read `budget 0 records left this hour`, because a missing budget
-    /// was read as "nothing may be sent" — and the serial carrier has nothing to report one.
+    /// Before the first status arrives there is no countdown, and the loop must not read that as
+    /// "nothing may be sent": the reported failure this guards is a paired phone retrying `attach`
+    /// for ever against a host whose status read `budget 0 records left this hour` because a missing
+    /// budget had been taken as a spent one. Once the carrier publishes a countdown, that is what
+    /// bounds new records — the firmware's own factor is 1.0, a 50 % limiter, which cannot stand in
+    /// for the 1 % a European band allows.
     #[test]
-    fn the_radio_owns_the_meter() {
-        assert_eq!(poll_budget(Budget::RadioGoverned), u8::MAX);
+    fn the_carrier_publishes_the_meter_and_a_missing_one_is_not_zero() {
+        assert_eq!(poll_budget(Budget::RadioGoverned, None), u8::MAX);
+        assert_eq!(poll_budget(Budget::RadioGoverned, Some(0)), 0);
+        assert_eq!(poll_budget(Budget::RadioGoverned, Some(17)), 17);
+        assert_eq!(poll_budget(Budget::RadioGoverned, Some(255)), 255);
     }
 }

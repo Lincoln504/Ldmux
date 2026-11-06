@@ -21,7 +21,7 @@ implements are in `docs/adr/`.
 | 1.4 | An unsigned release builds silently and is rejected at upload | FIXED — the task now fails instead |
 | 1.5 | `applicationId` asserts a domain the project does not own | FIXED `4639f0c` (`io.ldmux.mobile`) |
 | 1.6 | The bundle has never actually been built, so "it will build" is an assumption | FIXED 2026-11-05: a signed AAB was produced with a throwaway 4096-bit key, with the licence texts inside it, and the key was then deleted. The real upload key is the operator's to supply |
-| 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | OPEN by decision: CI runs the Rust gate on every branch, and the Android artifact is built locally |
+| 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | CLOSED: there is no CI (`.github/workflows` removed at the operator's instruction, 2026-11-06), so the Kotlin suite and the release build are local commands |
 | 1.8 | R8 is off; a release carries unused code | OK for 0.1, decide later |
 | 1.9 | The native session library is rebuilt by a Gradle task, so a stale `.so` is possible | OK — `buildSessionAndroid` runs before packaging |
 | 1.10 | The bundle shipped `armeabi-v7a` and `x86` splits from a dependency while our own libraries are 64-bit only, so a 32-bit device installs and dies with `UnsatisfiedLinkError` | FIXED 2026-11-06: `ndk { abiFilters }` declares `arm64-v8a` and `x86_64`, and `bundleRelease` now opens the produced bundle and refuses any other ABI or any missing library. The old guard read `jniLibs`, which cannot see what a dependency merged |
@@ -290,7 +290,7 @@ suite (574 cases) green.
 | 17.14 | No bound on live shells: a loop of `new` allocated PTYs until the keeper hit its descriptor limit, with a late and unexplained failure | FIXED — `LDMUX_MAX_SESSIONS` (default 64) refused at `new` with a sentence naming the limit and the cure |
 | 17.15 | `ldmux list` printed a `kind` column that is always `shell` | FIXED — dropped from the row, still in `--json` |
 | 17.16 | `ldmux adopt ""` answered "no such session: ldmux-" (a name the user never typed) | FIXED — usage error before the call |
-| 17.17 | `nix flake check` still listed `the_desktop_inventory_links_a_running_pi_to_its_session` in its skip guard, and that test was deleted: the guard requires exactly one match, so CI's first step would go red | FIXED |
+| 17.17 | `nix flake check` still listed `the_desktop_inventory_links_a_running_pi_to_its_session` in its skip guard, and that test was deleted: the guard requires exactly one match, so the flake check would go red | FIXED |
 | 17.18 | The keeper unit hard-coded `%t/ldmux/keeper.sock` while the daemon derives `<LDMUX_STATE_DIR>/keeper.sock`, so an overridden state directory gave the daemon a socket nobody bound and it spawned a second keeper | FIXED — the keeper resolves the socket through the same `paths` resolver, and the unit passes no path |
 | 17.19 | A release built outside a git checkout silently got `versionCode = 1`, so the second upload is rejected and two builds collide | FIXED — `bundleRelease`/`assembleRelease` fail when neither `LDMUX_VERSION_CODE` nor a commit count is available |
 | 17.20 | `scripts/android.sh release|bundle` never ran the Kotlin suite, so an artifact could ship with a failing app test | FIXED — the test task runs first and a red suite stops the artifact |
@@ -301,6 +301,19 @@ suite (574 cases) green.
 | 17.25 | The keeper unit set `LDMUX_TOKEN_FILE`, which the keeper never reads | REMOVED |
 | 17.26 | The `panel` setting changes nothing while Settings is on screen: it only affects the landscape side panel, and Settings holds portrait, so a press looked ignored | FIXED — the row says "the key panel's side, in landscape" |
 | 17.27 | `protocol::rpc::method` listed RPC names that nothing used and that had already drifted (no `release`, no `resizePane`), so it documented a contract it could not enforce | FIXED — the list is complete and the CLI's calls go through it, so a renamed method is a compile error on the client half |
+| 17.28 | The differ kept an open frame's epoch across `reset`/`Resize`, so a resync mid-frame painted the abandoned patches over the fresh screen, permanently, on rows the host said were blank | FIXED — `reset` clears `frame_open` and moves the epoch; a geometry change does the same; both mirrors drop pending rows on `Profile` |
+| 17.29 | `Arq::poll` gated `Close` on the *data* budget, so a close asked for while the hour's allowance was spent was never sent and counted a stall every poll; the module doc said the opposite of the code | FIXED — control traffic is not budget-gated (slot-bounded only), and the doc says what the code does |
+| 17.30 | `build_raw_direct` truncated a path that was not a whole number of hashes and never checked the 176-byte frame ceiling, producing a packet whose receiver walks the path wrongly: a permanent "peer never answers" | FIXED — both are refused at the builder with a named reason |
+| 17.31 | `plain_row` deleted tabs, so every indented or column-aligned line was reflowed on the phone | FIXED — expanded to the next 8-column stop |
+| 17.32 | A `Profile` body of a shape neither decoder arm matched was skipped as unknown, leaving the phone with no profile and no error | FIXED — malformed |
+| 17.33 | Only `version`, `minVersion`, `cwdVersion` were pinned by the fixture; a bump of `KEY_VERSION`/`RESIZE_VERSION`/`STREAM_VERSION`/`LINE_VERSION`/`ORIGIN_VERSION`/`OWNER_VERSION` on one side was silent | FIXED — all eight published in `fixture_value` and asserted by the app's codec test |
+| 17.34 | The host enforced no airtime budget: the firmware's own limiter is a 50 % duty cycle (`getAirtimeBudgetFactor()` = 1.0, `Dispatcher.cpp`), so the 1 % a European band allows was nobody's job | FIXED — the carrier's published countdown bounds new records, charged per record (the ARQ's limit is per poll); acks and retransmissions still pass |
+| 17.35 | "Waiting for the answer" lingered after the answer: the phone ended a sync wait on a 4 s quiet timer because nothing told it the pane had stopped changing | FIXED — `Commit` carries an additive `IDLE` flag, sent once per burst when the pane has been unchanged for 700 ms; the phone ends the wait on it and keeps the timer as the fallback |
+| 17.36 | The radio route names its holder `"mesh"`, and the app rendered the kind literally: the operator saw "in use on mesh" and could not tell what held the shell | FIXED — kinds are mapped to sentences ("the radio link", "the desktop", "another phone"); a device name passes through |
+| 17.37 | The notification icon's `d` had a 4-unit right side against 2 everywhere else, and its stem stood 2 units from the counter | FIXED — the counter runs to the stem (every stroke 2 units) and the letters are 1 unit apart; the mark is still centred exactly |
+| 17.38 | The Noise prologue was a fixed string that did not name the suite, so a suite change on one end would derive different keys from the same flags instead of failing | FIXED — the prologue carries `SUITE`, with a test that fails if the two drift |
+| 17.39 | CI (`.github/workflows`, removed at the operator's instruction) claimed to run the gate on every branch | REMOVED — the gate is the four local commands, and `docs/ARCHITECTURE.md` says so |
+| 17.40 | R8 was off, so a release carried unused code, and the licence notices were excluded from the artifact by a `META-INF` packaging rule | FIXED — R8 on with per-boundary keep rules (JNI, manifest components) and `dist/licenses` shipped as assets |
 
 ## How to use this
 
@@ -424,5 +437,5 @@ None of these are defects. Each is a decision that changes what ships.
   exercised by `desktop_e2e`; nothing asks for a workspace from a phone today, so the adapter
   is carried, not used.
 - Font scale, RTL, dark mode and split screen are still unverified (3.6).
-- R8 is off, so a release carries unused code (1.8), and CI still does not build the Android
+- R8 is off, so a release carries unused code (1.8), and nothing outside this machine builds the Android
   artifact (1.7).

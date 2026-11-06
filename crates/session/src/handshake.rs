@@ -13,6 +13,32 @@
 //!
 //! Persistence is the caller's: the last accepted timestamp and the pinned phone key per
 //! pairing are returned in [`Accepted`] and supplied in [`PairingEntry`].
+//!
+//! # The cryptography, audited 2026-11-06
+//!
+//! Checked against the Noise specification's own rules rather than against intuition:
+//!
+//! - **Two cipherstates, never one.** [`snow::StatelessTransportState`] holds the `send` and
+//!   `recv` keys that `Split()` produced, so the two directions use different keys. That matters
+//!   on this link more than most: the radio is half duplex, and Noise §12.2 calls using one
+//!   cipherstate for both directions "a catastrophic security failure" the moment the two ends do
+//!   not strictly alternate. We do not, and we cannot: separate keys make the case impossible.
+//! - **The nonce is the record counter, and it never repeats.** A retransmission is sealed again
+//!   with a fresh counter (the L2 link deduplicates by content hash, so a byte-identical resend
+//!   would be dropped as a duplicate), and [`record::seal`] refuses `u32::MAX`, so a key is never
+//!   used twice with one nonce.
+//! - **Rekey is a new handshake, not `Rekey()`.** Noise's `Rekey()` replaces the key but keeps the
+//!   nonce, which is a trap: the counter would restart at a value the old key already used.
+//!   [`Session::needs_rekey`](crate::Session::needs_rekey) instead makes the caller run a fresh
+//!   handshake, so keys *and* counters are new together.
+//! - **The filter tag is constant-time.** `verify_truncated_left` compares in constant time, and
+//!   the PSK never leaves [`snow`]: the filter key is `HMAC(psk, "ldmux-mesh filter v1")`, a
+//!   domain-separated derivation, not the PSK itself.
+//! - **The prologue binds the suite** ([`prologue`]), so mismatched implementations fail the
+//!   handshake instead of deriving different keys from the same flags.
+//! - **The clear header is not authenticated, and does not need to be.** Kind and session index
+//!   select a key and a counter selects the nonce, so any change to them fails the tag. The tag is
+//!   never truncated (16 bytes) and the replay window advances only after it verifies.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -25,8 +51,14 @@ pub const KIND_MSG2: u8 = 0x12;
 pub const MSG1_LEN: usize = 121;
 pub const MSG2_LEN: usize = 50;
 pub const FILTER_TAG: usize = 16;
-/// Domain separation: both ends mix the same prologue.
-const PROLOGUE: &[u8] = b"ldmux-mesh-session-v1";
+/// Domain separation, and the suite is part of it.
+///
+/// `Noise IKpsk2` with a PSK is only as separate from another `Noise IKpsk2` deployment as its
+/// prologue and its PSK make it, and the PSK here is per pairing. Mixing the suite name into the
+/// prologue is what makes a change of suite a handshake failure between mismatched peers instead
+/// of two implementations silently deriving different keys from the same flags — the rollback
+/// problem the Noise spec answers with "fold negotiation data into the prologue".
+const PROLOGUE: &str = concat!("ldmux-mesh-session-v1:", "Noise_IKpsk2_25519_ChaChaPoly_SHA256");
 const FILTER_LABEL: &[u8] = b"ldmux-mesh filter v1";
 /// ADR-0020: default replay window for the handshake timestamp, 5 minutes.
 pub const TIMESTAMP_WINDOW_MS: u64 = 5 * 60 * 1000;
@@ -140,7 +172,7 @@ impl Initiator {
             .local_private_key(&local.private)
             .and_then(|b| b.remote_public_key(remote_public))
             .and_then(|b| b.psk(2, psk))
-            .and_then(|b| b.prologue(PROLOGUE))
+            .and_then(|b| b.prologue(PROLOGUE.as_bytes()))
             .and_then(Builder::build_initiator)
             .map_err(|_| HandshakeError::Crypto)?;
         let mut noise = [0u8; 256];
@@ -261,7 +293,7 @@ impl Responder {
         let mut hs = Builder::new(params())
             .local_private_key(&self.static_key.private)
             .and_then(|b| b.psk(2, &entry.psk))
-            .and_then(|b| b.prologue(PROLOGUE))
+            .and_then(|b| b.prologue(PROLOGUE.as_bytes()))
             .and_then(Builder::build_responder)
             .map_err(|_| HandshakeError::Crypto)?;
         let mut payload = [0u8; 64];

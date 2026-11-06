@@ -67,8 +67,30 @@ pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
     Ok(((hash_size - 1) << 6) | hops)
 }
 
+/// The largest read-path frame the firmware will accept, header included.
+pub const READ_PATH_MAX: usize = 176;
+
 /// Build a raw direct packet around `record`.
+///
+/// **Both ends of the path are checked here.** A path whose length is not a multiple of the hash
+/// width cannot be encoded: the hop count truncates and the receiver walks `hops * hash` bytes,
+/// landing inside the path, so every record fails its tag and the link looks like a radio fault
+/// rather than a caller's mistake. A frame over [`READ_PATH_MAX`] is refused by the firmware's
+/// `readPath` anyway, and refusing it here names the fault at its source.
 pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec<u8>, CodecError> {
+    if !(1..=4).contains(&hash_size) {
+        return Err(CodecError::BadHashSize(hash_size));
+    }
+    if !path.len().is_multiple_of(usize::from(hash_size)) {
+        return Err(CodecError::RaggedPath {
+            len: path.len(),
+            hash: hash_size,
+        });
+    }
+    let total = 2 + path.len() + record.len();
+    if total > READ_PATH_MAX {
+        return Err(CodecError::TooLong { len: total, max: READ_PATH_MAX });
+    }
     let encoded = path_byte(hash_size, (path.len() / hash_size as usize) as u8)?;
     let mut out = Vec::with_capacity(2 + path.len() + record.len());
     out.push(RAW_CUSTOM_DIRECT_HEADER);
@@ -82,6 +104,11 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
 pub enum CodecError {
     BadHashSize(u8),
     TooManyHops(u8),
+    /// A path that does not divide into whole hashes: the hop count would truncate and the
+    /// receiver would split the path in the wrong place.
+    RaggedPath { len: usize, hash: u8 },
+    /// A frame the firmware's `readPath` buffer cannot hold.
+    TooLong { len: usize, max: usize },
     /// A reply that is not the one the parse expected: the firmware answered, but with
     /// another command's frame. A framing fault, not a path one.
     WrongResponse { want: u8, got: u8 },
@@ -92,6 +119,10 @@ impl std::fmt::Display for CodecError {
         match self {
             CodecError::BadHashSize(n) => write!(f, "path hash size {n} is not 1..=4"),
             CodecError::TooManyHops(n) => write!(f, "{n} hops exceeds the 6-bit path length"),
+            CodecError::RaggedPath { len, hash } => {
+                write!(f, "a {len}-byte path is not a whole number of {hash}-byte hashes")
+            }
+            CodecError::TooLong { len, max } => write!(f, "a {len}-byte frame exceeds the {max}-byte read path"),
             CodecError::WrongResponse { want, got } => {
                 write!(f, "expected response {want:#04x}, got {got:#04x}")
             }

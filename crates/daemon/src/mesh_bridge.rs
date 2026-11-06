@@ -204,6 +204,17 @@ struct Attached {
     /// When the last screen update for this shell went out. Pacing needs it to know how long a
     /// coalesced change has been waiting.
     last_push: Option<Instant>,
+    /// The phone typed into this shell and has not yet been told the pane settled.
+    ///
+    /// The marker exists for a wait on an *answer*, and an answer follows input: a repaint nobody
+    /// asked for (an attach, a resize, a scroll) would otherwise spend a record saying "nothing
+    /// more" about a screen nobody was waiting on.
+    answer_owed: bool,
+    /// Whether the "pane has stopped changing" marker went out for the burst that just ended.
+    ///
+    /// One marker per burst: the phone ends its wait for an answer on it, and a marker per tick
+    /// would be a record every 150 ms for nothing.
+    idle_sent: bool,
     /// Whether the previous tick also found a change. A single step after quiet is sent at once
     /// (that is a command's output appearing); a screen that keeps changing is a burst and is
     /// held to [`BURST_GAP`].
@@ -496,6 +507,27 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 a.original = Some((screen.cols, screen.rows));
             }
             if self.shells.get(&shell).is_some_and(|a| a.differ.up_to_date(&screen)) {
+                let now = (self.clock)();
+                // **Tell the phone the answer has finished arriving.** It holds the screen already,
+                // so this is one record with no rows; the phone ends its "waiting for the answer"
+                // on it instead of guessing from a quiet timer.
+                let due = self.shells.get(&shell).is_some_and(|a| {
+                    a.answer_owed
+                        && !a.idle_sent
+                        && a.last_push
+                            .is_some_and(|t| now.saturating_duration_since(t).as_millis() >= IDLE_AFTER_MS)
+                });
+                if due {
+                    let marker = self.shells.get(&shell).and_then(|a| a.differ.idle_marker(&screen));
+                    if let Some(marker) = marker {
+                        self.stats.updates += 1;
+                        if let Some(a) = self.shells.get_mut(&shell) {
+                            a.idle_sent = true;
+                            a.answer_owed = false;
+                        }
+                        self.reply(shell, &[marker]);
+                    }
+                }
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.changed_last_tick = false;
                 }
@@ -537,6 +569,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             if let Some(a) = self.shells.get_mut(&shell) {
                 a.last_push = Some(now);
                 a.changed_last_tick = true;
+                a.idle_sent = false;
                 a.echo = false;
             }
             if screen.dead {
@@ -707,6 +740,8 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 // Answered in the version asked for, naming the shell the host
                                 // chose, so a phone that sent an empty selector learns which.
                                 differ: Differ::for_attach(version, one),
+            answer_owed: false,
+            idle_sent: false,
                                 version,
                                 geometry: None,
                                 last_push: None,
@@ -868,6 +903,8 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 self.stats.inputs += 1;
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.echo = true;
+                    a.answer_owed = true;
+                    a.idle_sent = false;
                 }
                 // Timing probe, off unless asked for (`LDMUX_MESH_TIMING=1`): the phone's own
                 // screen is a native surface with no text to poll, so the only honest way to
@@ -897,6 +934,8 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 self.stats.keys += 1;
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.echo = true;
+                    a.answer_owed = true;
+                    a.idle_sent = false;
                 }
                 // A name the table refuses is the daemon's refusal: nothing reaches the shell.
                 let _ = self.host.keys(&session, &names).await;
@@ -1213,6 +1252,13 @@ impl Host for DaemonHost {
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
 /// bound does not care: an update waits for an empty queue regardless.
 pub const TICK_MS: u64 = 50;
+
+/// How long a pane must be unchanged before the host says "nothing more is coming".
+///
+/// Above one round trip on this link (a record plus its ack is a few hundred milliseconds at the
+/// deployed tuple) and well under the phone's own four-second quiet timer, so the marker is what
+/// ends a wait in practice and the timer only covers a host that does not send one.
+pub const IDLE_AFTER_MS: u128 = 700;
 
 /// The wait after a pass that changed nothing. A moved screen resets the cadence to
 /// [`TICK_MS`] on the next tick, so interactive work is never paced by this.
@@ -1639,6 +1685,57 @@ mod tests {
             1,
             "one record carrying the Rows and its Commit: no Profile, no full screen"
         );
+    }
+
+    /// **The host says when the answer has finished arriving.** After input, once the pane has
+    /// stopped changing, one `Commit` with the idle flag goes out and no more; and a repaint nobody
+    /// typed for sends no marker at all.
+    #[tokio::test]
+    async fn the_host_says_when_a_pane_has_settled_after_input() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd".into(),
+            },
+        );
+        b.tick().await;
+        // Nobody typed: a settled pane is not worth a record.
+        b.tick().await;
+        let quiet = link.0.lock().unwrap().sent.len();
+
+        phone_says(&link, 3, &Message::Input(b"ls\r".to_vec()));
+        host.0
+            .lock()
+            .unwrap()
+            .screens
+            .insert("abcd-1".into(), screen(&["$ ls", "file"]));
+        b.tick().await;
+        b.tick().await;
+        let after = link.0.lock().unwrap().sent[quiet..].to_vec();
+        let mut decoded: Vec<Message> = Vec::new();
+        for (_, bytes) in &after {
+            let mut d = ldmux_protocol::mesh_term::Decoder::default();
+            if let Ok(items) = d.push(bytes) {
+                decoded.extend(items.into_iter().flatten());
+            }
+        }
+        let idle: Vec<_> = decoded
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::Commit { flags, .. }
+                    if flags & ldmux_protocol::mesh_term::commit::IDLE != 0)
+            })
+            .collect();
+        assert_eq!(idle.len(), 1, "one marker for the burst, in {:?}", after.len());
+
+        // Nothing more changes: no second marker.
+        let n = link.0.lock().unwrap().sent.len();
+        b.tick().await;
+        b.tick().await;
+        assert_eq!(link.0.lock().unwrap().sent.len(), n, "one marker per burst");
     }
 
     #[tokio::test]

@@ -3,6 +3,8 @@
   "limits": {
     "creditWindow": 8,
     "cwdVersion": 6,
+    "keyVersion": 2,
+    "lineVersion": 5,
     "maxBody": 300,
     "maxBuffer": 4096,
     "maxCwd": 60,
@@ -15,9 +17,13 @@
     "maxSelector": 40,
     "maxSessions": 16,
     "minVersion": 1,
+    "originVersion": 7,
+    "ownerVersion": 8,
     "recordFloor": 160,
     "recordMax": 172,
     "recordPayload": 143,
+    "resizeVersion": 3,
+    "streamVersion": 4,
     "unsupportedAllV1": 127,
     "version": 8
   },

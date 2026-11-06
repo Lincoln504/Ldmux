@@ -31,6 +31,12 @@ pub struct Sealed {
     pub seq: Option<u16>,
     /// The sealed bytes, ready to hand to the tunnel.
     pub bytes: Vec<u8>,
+    /// **New application data, not a retransmission, an ack or a close.**
+    ///
+    /// A caller that meters airtime must charge only this: the ARQ lets retransmissions and acks
+    /// past its budget (they keep the link alive), so a caller counting every record would spend
+    /// the budget on traffic the session did not consider new.
+    pub new_data: bool,
 }
 
 /// What a received record produced.
@@ -159,6 +165,7 @@ impl Session {
             sealed.push(Sealed {
                 seq: Some(seq),
                 bytes: self.seal(&o)?,
+                new_data: o.kind == crate::arq::Kind::Data && !o.retransmit,
             });
         }
         Ok(sealed)

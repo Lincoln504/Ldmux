@@ -245,6 +245,15 @@ pub mod commit {
     pub const ALTERNATE: u8 = 1 << 0;
     /// The shell has exited.
     pub const DEAD: u8 = 1 << 1;
+    /// **The pane has stopped changing; this commit carries no rows.**
+    ///
+    /// The host is the only end that knows an answer has finished arriving, and the phone used to
+    /// guess: it ended its wait for an answer after [`QUIET_MS`](crate::mesh_term) of silence, so
+    /// the bar said "waiting for the answer" for seconds after the answer was already drawn. One
+    /// extra record per burst says it exactly, and the phone's timer stays as the fallback for a
+    /// host that does not send it. Unknown flag bits are ignored by every decoder, so this is
+    /// additive on the wire.
+    pub const IDLE: u8 = 1 << 2;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -643,6 +652,9 @@ impl Message {
                     shell,
                 }
             }
+            // Neither shape: a `Profile` the phone cannot place. Skipping it left the phone with no
+            // profile and no error, waiting for a screen it would never accept.
+            T_PROFILE => return Err(bad),
             T_ROWS => {
                 if body.len() < 3 {
                     return Err(bad);
@@ -798,7 +810,7 @@ impl Message {
                     entries,
                 }
             }
-            T_RESYNC | T_DETACH | T_PROFILE | T_COMMIT | T_CLOSED | T_LIST | T_RESIZE => {
+            T_RESYNC | T_DETACH | T_COMMIT | T_CLOSED | T_LIST | T_RESIZE => {
                 return Err(bad);
             }
             _ => return Ok(None), // unknown tag: skipped, not fatal
@@ -1003,6 +1015,17 @@ pub fn plain_row(line: &str) -> String {
                 }
                 None => {}
             },
+            // **A tab is layout, not noise.** Dropping it reflowed every indented or
+            // column-aligned line on the phone: `ls -l`, `make`, a Python traceback, `git log
+            // --stat`. Expanded to the next 8-column stop, which is what the shell's own output
+            // assumed.
+            '\t' => {
+                let col = out.chars().count();
+                let stop = 8 - (col % 8);
+                for _ in 0..stop {
+                    out.push(' ');
+                }
+            }
             c if c.is_control() => {}
             c => out.push(c),
         }
@@ -1045,6 +1068,10 @@ pub struct Differ {
     shell: String,
     /// A frame whose rows did not all fit in the window the last time it was offered.
     ///
+    /// Cleared by `reset` and by a geometry change: the phone keeps the `pending` rows of an open
+    /// epoch, so continuing that epoch after either would paint the abandoned frame's patches over
+    /// the new screen.
+    ///
     /// The phone drops rows from an older epoch when the next epoch's rows arrive, so a frame
     /// split across ticks must keep one epoch: otherwise the second batch looks like a new frame
     /// and the first batch is thrown away, which is how a long screen arrived as its last rows
@@ -1083,8 +1110,45 @@ impl Differ {
 
     /// Forget what the phone holds, so the next update is a full screen (`Resync`, or a new
     /// attach).
+    ///
+    /// **The epoch moves and the frame closes.** Clearing only `sent` left a frame that was
+    /// still open (a screen split across ticks, or one whose send was refused) on the *same*
+    /// epoch as the resync that followed it. The phone still holds that frame's `Rows` as
+    /// `pending`, so its `Commit` painted the abandoned patches over the fresh full screen: a row
+    /// the new screen leaves empty gets no replace patch under `full`, so a fragment of the old
+    /// text stayed on a row the host says is blank, permanently, and `up_to_date` then agreed with
+    /// the phone about the wrong screen.
     pub fn reset(&mut self) {
         self.sent = None;
+        self.frame_open = false;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    /// The "nothing more is coming" marker for a pane the phone already has, if one is due.
+    ///
+    /// A `Commit` with [`commit::IDLE`] and no `Rows`: one record, sent once per burst, which is
+    /// what lets the phone end its wait for an answer at the moment the answer ends instead of a
+    /// quiet-timer later. `None` when there is no settled frame to mark (nothing has been sent yet,
+    /// or a frame is still being carried over several ticks).
+    #[must_use]
+    pub fn idle_marker(&self, screen: &Screen) -> Option<Message> {
+        if self.frame_open || self.sent.as_ref() != Some(screen) {
+            return None;
+        }
+        let flags = commit::IDLE
+            | (u8::from(screen.alternate) * commit::ALTERNATE)
+            | (u8::from(screen.dead) * commit::DEAD);
+        Some(Message::Commit {
+            epoch: self.epoch,
+            cursor_x: screen.cursor_x,
+            cursor_y: screen.cursor_y,
+            flags,
+            first_line: if self.version >= STREAM_LINE_VERSION {
+                screen.first_line
+            } else {
+                0
+            },
+        })
     }
 
     /// Whether `screen` is exactly what the phone already holds.
@@ -1128,6 +1192,16 @@ impl Differ {
             .as_ref()
             .is_none_or(|s| s.cols != screen.cols || s.rows != screen.rows);
         let full = geometry_changed;
+        // A geometry change ends an open frame the way a reset does: the `Profile` is the first
+        // message of the new one, and reusing the abandoned frame's epoch unpacks its rows on the
+        // phone under the new geometry. A closed frame needs nothing here (the epoch moves when the
+        // next frame opens), which is what keeps a reset from counting twice.
+        if geometry_changed {
+            if self.frame_open {
+                self.epoch = self.epoch.wrapping_add(1);
+            }
+            self.frame_open = false;
+        }
         // Profile + one `Rows` + `Commit`, the least a geometry change can be said in.
         if full && room < 3 {
             return Vec::new();
@@ -1365,6 +1439,10 @@ impl Mirror {
                 self.profile = Some((*cols, *rows, *unsupported));
                 self.shell = shell.clone();
                 self.lines = vec![String::new(); usize::from(*rows)];
+                // **A profile ends whatever frame was open.** A `Rows` for an epoch that arrived
+                // before it belongs to the geometry being replaced, and painting it over the new
+                // pane is how stale text landed on a row the host says is blank.
+                self.pending = None;
                 false
             }
             Message::Rows {
@@ -1559,6 +1637,53 @@ mod tests {
         assert_eq!(commits, 1, "one frame, one commit");
         assert_eq!(epochs.len(), 1, "every batch belongs to the same frame");
         assert_eq!(rows_seen, 30, "every row is carried once");
+    }
+
+    /// **The idle marker is the host saying "nothing more is coming".** It exists for exactly one
+    /// case: a pane the phone already holds, so it carries no rows and one flag. Before anything
+    /// has been sent there is nothing to mark, and a frame still being carried over several ticks
+    /// is not settled yet, so neither may produce one.
+    #[test]
+    fn the_idle_marker_exists_only_for_a_settled_frame() {
+        let target = screen(&["one", "two"], 20);
+        let mut d = Differ::for_attach(VERSION, "ab12-1");
+        assert!(d.idle_marker(&target).is_none(), "nothing has been sent yet");
+
+        let out = d.update_within(&target, 8);
+        assert!(!out.is_empty(), "the first frame goes out");
+        let marker = d.idle_marker(&target).expect("a settled frame can be marked");
+        match marker {
+            Message::Commit {
+                epoch,
+                flags,
+                cursor_x,
+                cursor_y,
+                ..
+            } => {
+                assert_eq!(flags & commit::IDLE, commit::IDLE, "the flag is the message");
+                assert_eq!(flags & commit::ALTERNATE, 0);
+                let last_epoch = out.iter().find_map(|m| match m {
+                    Message::Commit { epoch, .. } => Some(*epoch),
+                    _ => None,
+                });
+                assert_eq!(Some(epoch), last_epoch, "the marker is for the frame already held");
+                // The cursor is the screen's own, not a default: the marker must not move it.
+                assert_eq!((cursor_x, cursor_y), (2, 0));
+            }
+            other => panic!("expected a commit, got {other:?}"),
+        }
+
+        // A bigger frame than one call can carry is not settled: no marker until its commit goes.
+        let lines: Vec<String> = (0..20).map(|i| format!("row {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let big = screen(&refs, 40);
+        let mut split = Differ::for_attach(VERSION, "ab12-1");
+        let first = split.update_within(&big, 3);
+        assert!(!first.is_empty());
+        assert!(
+            split.idle_marker(&big).is_none() || first.iter().any(|m| matches!(m, Message::Commit { .. })),
+            "a frame still being carried is not marked idle"
+        );
     }
 
     /// A frame bigger than the window is spread over calls and loses nothing: the record of
@@ -2749,7 +2874,10 @@ mod tests {
             "//": "Generated by crates/protocol/src/mesh_term.rs (fixture_value). Do not edit by hand: LDMUX_REGEN_FIXTURES=1 cargo test -p ldmux-protocol mesh_term_fixture. Read by the app's MeshTermCodecTest.",
             "limits": {"maxBody":MAX_BODY,"maxInput":MAX_INPUT,"maxSegment":MAX_SEGMENT,"maxSelector":MAX_SELECTOR,
                        "maxRowsBody":MAX_ROWS_BODY,"maxLabel":MAX_LABEL,"maxCwd":MAX_CWD,"maxSessions":MAX_SESSIONS,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
-                       "version":VERSION,"minVersion":MIN_VERSION,"cwdVersion":CWD_VERSION,"maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1,
+                       "version":VERSION,"minVersion":MIN_VERSION,"cwdVersion":CWD_VERSION,"keyVersion":KEY_VERSION,
+                       "resizeVersion":RESIZE_VERSION,"streamVersion":STREAM_VERSION,"lineVersion":STREAM_LINE_VERSION,
+                       "originVersion":ORIGIN_VERSION,"ownerVersion":OWNER_VERSION,
+                       "maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1,
                        "recordFloor":ldmux_mesh::constants::RECORD_FLOOR,"recordMax":ldmux_mesh::constants::RECORD_MAX,"creditWindow":ldmux_mesh::constants::CREDIT_WINDOW},
             "messages": msg_cases,
             "sessionPages": {"input": many.iter().map(|(i,l,p,by,held)| json!({"id":i,"label":l,"cwd":p,"origin":by,"owner":held})).collect::<Vec<_>>(), "pages": page_cases},

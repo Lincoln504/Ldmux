@@ -32,9 +32,11 @@
 //! - One ordered stream per session. `seq` is a `u16` compared with wrap-around arithmetic;
 //!   the window is at most [`MAX_WINDOW`] (the L2 `CREDIT_WINDOW`), far below half the space.
 //! - `ack` is cumulative: "I have everything before this". Every outgoing record carries it.
-//! - **Budget.** [`Arq::poll`] takes `records_left` and returns at most that many records.
-//!   Every record the host transmits counts: first sends, retransmissions, pure acks and
-//!   close. When the budget is zero nothing is emitted and [`Stats::budget_stalls`] rises.
+//! - **Budget.** [`Arq::poll`] takes `records_left` and returns at most that many **new data**
+//!   records. Retransmissions, pure acks and the close are not charged against it: they are
+//!   traffic already paid for or the exchange that keeps the link alive, and gating them turned a
+//!   spent allowance into a dead session. With the budget at zero new data waits and
+//!   [`Stats::budget_stalls`] rises.
 //! - **Retransmission** is one record at a time (the oldest unacknowledged), on a timeout that
 //!   doubles with each attempt up to a cap. After `max_attempts` the session is
 //!   [`Failure::RetriesExhausted`]; it does not keep trying.
@@ -696,16 +698,21 @@ impl Arq {
         // 4. The close, last, once.
         // Only once everything sent has been acknowledged: a close that overtook lost data would
         // end the session with bytes the peer never got.
+        //
+        // **Not budget-gated.** `budget` counts new *data*; a close is control traffic like an ack
+        // or a retransmission. Gating it on the budget meant a session that asked to close while
+        // the hour's allowance was spent never sent the close at all — and it counted a stall on
+        // every poll for the rest of the hour. The slot bound still applies, because a record the
+        // caller has no room for cannot be sent.
         if self.close_wanted
             && !self.close_sent
             && self.queue.is_empty()
             && self.inflight.is_empty()
+            && limits.l2_slots > 0
         {
             wanted = true;
-            if budget > 0 {
-                out.push(self.control(Kind::Close));
-                self.close_sent = true;
-            }
+            out.push(self.control(Kind::Close));
+            self.close_sent = true;
         }
 
         if !out.is_empty() {

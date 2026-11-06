@@ -282,7 +282,9 @@ impl SessionHost {
         while control > 0 && usize::from(limits.l2_slots) > out.len() {
             match self.outbox.pop_front() {
                 Some(bytes) => {
-                    out.push(Sealed { seq: None, bytes });
+                    // A handshake reply the caller queued: control traffic, never charged to the
+                    // airtime budget (the exchange that establishes the session must go out).
+                    out.push(Sealed { seq: None, bytes, new_data: false });
                     control -= 1;
                 }
                 None => break,
