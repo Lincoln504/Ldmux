@@ -72,13 +72,17 @@ case "$bin_dir" in
     # package it is already in bin/.
     install -m 755 "$deploy/bin/ldmux-terminal" "$rel/bin/ldmux-terminal"
     ln -sfn "$rel" "$state/current.new" && mv -T "$state/current.new" "$state/current"
-    # Keep the current release and the two before it. Every install used to add one for ever:
-    # 24 of them and 237 MB on this machine, none of which can be started by anything.
-    ls -1dt "$state"/releases/*/ 2>/dev/null | tail -n +4 | while IFS= read -r old; do
-      rm -rf "$old"
-    done
     ;;
 esac
+
+# 1b. Releases from earlier installs. Every `cargo`-based install used to add one for ever: 24
+# directories and 237 MB on this machine, none of which anything can start. Keep the newest two,
+# and never remove the one `current` resolves into.
+keep=$(readlink -f "$state/current" 2>/dev/null || true)
+ls -1dt "$state"/releases/*/ 2>/dev/null | tail -n +3 | while IFS= read -r old; do
+  [ "$(cd "$old" && pwd -P)" = "$keep" ] && continue
+  rm -rf "$old"
+done
 
 # 2. ~/.local/bin links (atomic replace; never a plain file we did not make).
 for b in $BINARIES ldmux-terminal; do
