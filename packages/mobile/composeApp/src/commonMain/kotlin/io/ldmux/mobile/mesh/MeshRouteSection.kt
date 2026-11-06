@@ -314,7 +314,7 @@ private fun MeshRadioFacts(
             maxLines = 2,
         )
         MiniTextButton(onClick = onOpenPreset) {
-            Text("preset", color = Accent, fontSize = 12.sp, maxLines = 1)
+            Text("edit", color = Accent, fontSize = 12.sp, maxLines = 1)
         }
     }
     afterPreset()

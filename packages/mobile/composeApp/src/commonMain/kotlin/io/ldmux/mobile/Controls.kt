@@ -96,7 +96,12 @@ internal fun OptionButton(
             // The chosen option carries an outline as well, which is the vocabulary the
             // theme already names for "the outline of a control that is chosen".
             .background(if (selected) Line else Color.Transparent)
-            .border(1.dp, if (selected) Chosen else Color.Transparent, RadiusMedium)
+            // **Every option is outlined, not only the chosen one.** A borderless label beside a
+            // bordered one reads as text beside a button, so the unchosen options looked like
+            // captions and the row looked like it had one control and some words. The chosen
+            // option keeps its stronger outline; the rest keep a hairline so they are visibly
+            // pressable.
+            .border(1.dp, if (selected) Chosen else Line, RadiusMedium)
             .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
             .heightIn(min = LocalTouch.current.min)
             .padding(horizontal = 10.dp),
@@ -187,8 +192,15 @@ internal fun MiniTextButton(
         // one-glyph `-`/`+` measured about 30x36 dp even in the comfortable density — under
         // the 48x48 dp every platform guidance asks for, on a control whose whole job is to be
         // hit. `widthIn` uses the same floor as the height so the two cannot drift apart.
-        modifier = modifier.height(LocalTouch.current.min).widthIn(min = LocalTouch.current.min),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        // **A verb on a row is a button, so it is drawn as one.** These were bare accent text
+        // beside a label (`change`, `scan`, `unpair`, `edit`) and read as links inside a list of
+        // statements; the hairline is what makes them look like something to press.
+        modifier = modifier
+            .height(LocalTouch.current.min)
+            .widthIn(min = LocalTouch.current.min)
+            .clip(RadiusMedium)
+            .border(1.dp, Line, RadiusMedium),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
         content = content,
     )
 }
