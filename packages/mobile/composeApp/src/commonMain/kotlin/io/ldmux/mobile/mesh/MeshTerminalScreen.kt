@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import io.ldmux.mobile.voice.VoiceState
 import io.ldmux.mobile.voice.VoiceBanner
 import io.ldmux.mobile.voice.Dictation
+import io.ldmux.mobile.NewShellRow
 import io.ldmux.mobile.SidePanel
 import io.ldmux.mobile.BackToLauncher
 import io.ldmux.mobile.AppLifecycle
@@ -1026,27 +1027,14 @@ private fun MeshShellList(
                     onKill = if (e.openedByPhone) ({ onClose(e.id) }) else null,
                 ) {
                     if (e.openedByPhone) {
-                        IconBtn(onClick = { onMakeLive(e.id) }, label = "open on the desktop") {
+                        IconBtn(onClick = { onMakeLive(e.id) }, label = "send to desktop") {
                             IconPopOut(Dim)
                         }
                     }
                 }
             }
-            // Starting a shell is the list's last row, exactly as on the tailnet: one more thing you
-            // can open, at the end of the list rather than competing with `open`.
-            item(key = "+shell") {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RadiusMedium)
-                        .background(Surface)
-                        .clickable { onNewShell() }
-                        .padding(vertical = LocalTouch.current.rowPad * 2),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("+ shell", color = Fg, fontSize = 14.sp)
-                }
-            }
+            // The same row the tailnet launcher draws, from the same composable.
+            item(key = "+shell") { NewShellRow(onClick = onNewShell) }
         }
         Spacer(Modifier.height(LocalTouch.current.rowPad))
         OpenBar(openLabel(picked.size), enabled = picked.isNotEmpty()) { onOpen(picked) }

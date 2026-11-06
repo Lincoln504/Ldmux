@@ -217,19 +217,7 @@ fun LauncherScreen(
                 // competing with `open` for the bottom of the screen.
                 // Drawn as a row, on the rows' own background: it is one more entry in
                 // the list, not a second call to action beside `open`.
-                item(key = "+shell") {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(RadiusMedium)
-                            .background(Surface)
-                            .clickable { newShellOpen = true }
-                            .padding(vertical = LocalTouch.current.rowPad * 2),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("+ shell", color = Fg, fontSize = 14.sp)
-                    }
-                }
+                item(key = "+shell") { NewShellRow { newShellOpen = true } }
             }
         }
 
@@ -421,6 +409,28 @@ internal fun OpenBar(label: String, enabled: Boolean, onOpen: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = if (enabled) Fg else Dim, fontSize = 14.sp)
+    }
+}
+
+/**
+ * The list's last row: starting another shell.
+ *
+ * Drawn as a row on the rows' own background, because it is one more entry in the list and not a
+ * second call to action beside `open`. Extracted so the tailnet launcher and the radio route draw
+ * the same thing by construction rather than by two copies kept in step by hand.
+ */
+@Composable
+internal fun NewShellRow(modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .fillMaxWidth()
+            .clip(RadiusMedium)
+            .background(Surface)
+            .clickable { onClick() }
+            .padding(vertical = LocalTouch.current.rowPad * 2),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("+ shell", color = Fg, fontSize = 14.sp)
     }
 }
 
