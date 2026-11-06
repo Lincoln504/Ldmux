@@ -88,7 +88,12 @@ pub trait Host {
     /// window is sent `owned`, not a snapshot, so it stops resizing.
     async fn claim(&mut self, id: &str) -> Result<bool, String>;
     /// Give the shell back, so a desk window can take it again.
-    async fn release(&mut self, id: &str);
+    /// Give the shell back to nobody.
+    ///
+    /// Returns whether the host accepted it. A release that silently fails is the bug that once
+    /// left every claim in place for ever (a device object where a string was expected), and it was
+    /// invisible because the answer was discarded — so the answer is part of the contract now.
+    async fn release(&mut self, id: &str) -> bool;
 
     /// Start a shell in `cwd` (empty = the host's default) and answer its id.
     ///
@@ -158,6 +163,9 @@ pub struct BridgeStats {
     /// sending one for the other told the phone its shells had all ended (measured 2026-11-03: the
     /// launcher emptied on a drop while every shell was alive).
     pub host_unanswered: u32,
+    /// Claims the host refused to give back. A claim that cannot be released keeps the shell held
+    /// by a device that is not there, which is the state that stops a desk window reclaiming it.
+    pub release_failed: u32,
 }
 
 /// What a dropped attach still owes the host: the shell to give back, and the grid to put back.
@@ -253,6 +261,17 @@ pub struct Bridge<H, L> {
 }
 
 impl<H: Host, L: Link> Bridge<H, L> {
+    /// Give a claim back, and count a refusal.
+    ///
+    /// The bridge owns the counters, so the accounting lives here rather than in the host: a failed
+    /// release is a state the operator needs to see, not a return value to drop on the floor.
+    async fn release(&mut self, id: &str) {
+        if !self.host.release(id).await {
+            self.stats.release_failed = self.stats.release_failed.saturating_add(1);
+        }
+    }
+
+
     /// The counters so far. Copied, not borrowed: the caller publishes a value, never a handle.
     #[must_use]
     pub fn stats(&self) -> BridgeStats {
@@ -400,7 +419,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     // The stream is unusable: drop the attach, the phone starts again.
                     self.stats.malformed += 1;
                     if let Some(a) = self.shells.remove(&shell) {
-                        self.host.release(&a.session).await;
+                        self.release(&a.session).await;
                     }
                     self.decoders.remove(&shell);
                     continue;
@@ -536,7 +555,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
         self.decoders.clear();
         self.versions.clear();
         for a in &held {
-            self.host.release(&a.session).await;
+            self.release(&a.session).await;
         }
         for a in &held {
             if let Some((cols, rows)) = a.original.filter(|_| a.resized) {
@@ -618,7 +637,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         if let Some(old) = self.shells.remove(&shell)
                             && old.session != **one
                         {
-                            self.host.release(&old.session).await;
+                            self.release(&old.session).await;
                         }
                         // **The size to put back is read here, before the phone can fit.**
                         // Recorded on the first tick instead, it was already the phone's grid when
@@ -762,7 +781,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 {
                     let session = a.session.clone();
                     self.shells.remove(&shell);
-                    self.host.release(&session).await;
+                    self.release(&session).await;
                 }
                 if let Some(listing) = self.host.listing().await {
                     let with_cwd = version >= CWD_VERSION;
@@ -858,7 +877,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             }
             Message::Detach => {
                 if let Some(a) = self.shells.remove(&shell) {
-                    self.host.release(&a.session).await;
+                    self.release(&a.session).await;
                     self.restore_grid(&a).await;
                 }
             }
@@ -1045,8 +1064,8 @@ impl Host for DaemonHost {
         Ok(v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false))
     }
 
-    async fn release(&mut self, id: &str) {
-        let _ = self
+    async fn release(&mut self, id: &str) -> bool {
+        let answer = self
             .0
             .lock()
             .await
@@ -1056,6 +1075,17 @@ impl Host for DaemonHost {
             // ever, which is why the desk window never got its shell (and its size) back.
             .handle("release", serde_json::json!({ "id": id, "device": MESH_DEVICE }))
             .await;
+        match answer {
+            Ok(_) => true,
+            Err(e) => {
+                // Said out loud here; counted by the bridge, which owns the counters. A claim that
+                // cannot be given back keeps a desk window from ever reclaiming the shell, and the
+                // bug that caused it once (a device object where a string was expected) was silent
+                // because this answer was discarded.
+                eprintln!("ldmuxd: mesh: release {id} refused by the host: {e}");
+                false
+            }
+        }
     }
 
     /// The same `new` the tailnet's WebSocket handler calls, with `createdBy` set to the phone so the
@@ -1253,6 +1283,8 @@ mod tests {
         /// Every claim, in order: `("claim" | "release", session)`.
         claimed: Vec<(&'static str, String)>,
         refuse_resize: bool,
+        /// The host refuses to give a claim back, as a daemon that no longer knows the device would.
+        refuse_release: bool,
         fail_screen: bool,
         /// The host cannot answer a listing or liveness question at all.
         fail_list: bool,
@@ -1349,12 +1381,12 @@ mod tests {
                 .push(("claim", id.to_owned()));
             Ok(true)
         }
-        async fn release(&mut self, id: &str) {
-            self.0
-                .lock()
-                .unwrap()
-                .claimed
-                .push(("release", id.to_owned()));
+        async fn release(&mut self, id: &str) -> bool {
+            let mut s = self.0.lock().unwrap();
+            s.claimed.push(("release", id.to_owned()));
+            // A double that cannot fail cannot be used to test the failure, and the failure is the
+            // one that once left every claim in place for ever without a word.
+            !s.refuse_release
         }
         async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String> {
             let mut s = self.0.lock().unwrap();
@@ -2494,6 +2526,31 @@ mod tests {
         assert!(
             host.0.lock().unwrap().claimed.contains(&("release", "abcd-1".to_owned())),
             "ending the shell gives it back rather than leaving a claim behind"
+        );
+    }
+
+    /// **A release the host refuses is counted, not swallowed.** The bug that once left every claim
+    /// in place for ever — a device object where the daemon expected a string — was invisible
+    /// because the answer was thrown away. A claim that cannot be given back is exactly the state
+    /// that stops a desk window reclaiming its shell, so it gets a counter.
+    #[tokio::test]
+    async fn a_refused_release_is_counted() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().refuse_release = true;
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 3, &Message::Detach);
+        b.tick().await;
+        assert_eq!(
+            b.stats().release_failed, 1,
+            "a refused release must be visible in the counters"
         );
     }
 

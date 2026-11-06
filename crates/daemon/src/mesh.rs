@@ -439,6 +439,7 @@ impl MeshSnapshot {
                 "malformed": self.bridge.malformed,
                 "refusedSends": self.bridge.refused_sends,
                 "hostUnanswered": self.bridge.host_unanswered,
+                "releaseFailed": self.bridge.release_failed,
             },
         })
     }

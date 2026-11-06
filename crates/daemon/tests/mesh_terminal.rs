@@ -200,7 +200,9 @@ impl Host for FakeShell {
     async fn claim(&mut self, _id: &str) -> Result<bool, String> {
         Ok(true)
     }
-    async fn release(&mut self, _id: &str) {}
+    async fn release(&mut self, _id: &str) -> bool {
+        true
+    }
     async fn resize(&mut self, _id: &str, _cols: u8, _rows: u8) -> Result<(), String> {
         Err("this fake shell cannot be resized".into())
     }
