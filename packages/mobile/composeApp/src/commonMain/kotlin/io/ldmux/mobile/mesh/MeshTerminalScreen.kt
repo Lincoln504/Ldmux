@@ -79,6 +79,7 @@ import io.ldmux.mobile.Surface
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import io.ldmux.mobile.AccentBtn
+import io.ldmux.mobile.HeldElsewhere
 
 /**
  * How long a sync waits for the host's answer before the screen stops waiting and says so.
@@ -541,6 +542,15 @@ fun MeshTerminalScreen(
         val choosing = view is MeshTermView.Choose
         scope.launch { if (choosing) conn.driver.choose(first) else conn.driver.selectShell(first) }
     }
+    // **A refusal the user did not ask for is not a page.** A resumed shell (or the launch attach)
+    // can be refused while nothing was opened, and drawing the takeover there put it on the first
+    // screen the user saw — a page state with no page. `pageOrder` is only ever written by
+    // `openChosen`, so an empty one means "the user has not opened anything this session": land on
+    // the home list, where the row says the shell is on the desktop and opening it is deliberate.
+    LaunchedEffect(view) {
+        if (view is MeshTermView.HeldBy && pageOrder.isEmpty()) openList()
+    }
+
     // The header's refresh square, as on the tailnet: it brings the screen up to date. Over a list that
     // is asking the host again; anywhere else it is the reconnect that used to be a button in the body.
     val onRefresh: () -> Unit = {
@@ -651,7 +661,11 @@ fun MeshTerminalScreen(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 )
             }
-        } else if (terminalLive && !showList) {
+        } else if ((terminalLive || view is MeshTermView.HeldBy) && !showList) {
+            // **A held shell is a terminal page, not a bare view.** The tailnet route draws its
+            // `in use on X / take it back` notice *over* the terminal, so the key bar, the pages and
+            // the way back are all where they always are. This route invented a page with nothing
+            // but the notice, which read as a fifth kind of screen between the list and a shell.
             // The terminal, and nothing above it: the tailnet's terminal has no header either. The
             // header belongs to the list screen, which is where Settings is, as on the tailnet.
             val pages = meshPagesFor(shells, pageOrder)
@@ -759,6 +773,15 @@ fun MeshTerminalScreen(
                         }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth()) {
+                        val held = view as? MeshTermView.HeldBy
+                        if (held != null) {
+                            // The page is real — key bar, pager, way back — and only the surface is
+                            // replaced: somebody else is using this shell right now, and taking it
+                            // is one tap. Same component as the tailnet route, so the words and the
+                            // behaviour are the same words and behaviour.
+                            val holder = shells.entries.firstOrNull { it.id == held.shell }?.owner ?: ""
+                            HeldElsewhere(holder) { scope.launch { conn.driver.takeover(held.shell) } }
+                        } else {
                         TerminalSurfaceFor(
                             source = source,
                             key = shells.current ?: "mesh",
@@ -768,6 +791,7 @@ fun MeshTerminalScreen(
                             modifier = Modifier.fillMaxSize(),
                             keyboardRequest = keyboardRequest,
                         )
+                        }
                         // A wait is not a black screen: with nothing drawn yet this says what is awaited, with
                         // the seconds it has taken. (A resize keeps the old screen up, so it needs no line.)
                         if (toShow == null && drawn == null) {
@@ -919,12 +943,6 @@ fun MeshTerminalScreen(
                     // plain attach while another device holds it, and this is the one action that
                     // says "yes, here instead" — the same choice the tailnet route offers, in the
                     // same order: the state first, then the verb.
-                    if (v is MeshTermView.HeldBy) {
-                        Spacer(Modifier.height(LocalTouch.current.rowPad))
-                        AccentBtn("take it back", Modifier.fillMaxWidth()) {
-                            scope.launch { conn.driver.takeover(v.shell) }
-                        }
-                    }
                     Spacer(Modifier.weight(1f))
                 }
                 // The launcher's own create dialogue, over the radio. The host starts the shell and
@@ -934,6 +952,11 @@ fun MeshTerminalScreen(
                         onDismiss = { newShellOpen = false },
                         onCreate = { path ->
                             newShellOpen = false
+                            // **The screen has to leave the list, not just the driver.** Creating a
+                            // shell starts it on the host and attaches the link, but `showList` is
+                            // this screen's own state: without it the new terminal existed and the
+                            // list stayed in front of it, which read as "create did nothing".
+                            showList = false
                             scope.launch { conn.driver.createShell(path) }
                         },
                     )
@@ -1049,12 +1072,8 @@ internal fun meshPagesFor(shells: MeshShells, order: List<String>): List<Session
  * A version-5 host does not send a working directory - the field is not on its wire - so the row
  * falls back to the id it would attach with rather than showing an empty line.
  */
-internal fun meshRowSubtitle(e: SessionEntry): String {
-    val where = if (e.cwd.isEmpty()) e.id else tildify(e.cwd)
-    // Where it is, then who is watching it: a shell on the desk is one this phone has to ask for,
-    // and the row says so before the tap rather than after the refusal.
-    return if (e.heldElsewhere) "$where  ·  on the ${e.owner}" else where
-}
+internal fun meshRowSubtitle(e: SessionEntry): String =
+    if (e.cwd.isEmpty()) e.id else tildify(e.cwd)
 
 /**
  * A wait, in words.

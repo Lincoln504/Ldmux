@@ -25,13 +25,14 @@ class MeshBody(val line: String, val detail: String? = null)
 /** Null for the states that draw something else: the waits (with their seconds) and the lists. */
 fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
     MeshTermView.Idle, MeshTermView.Handshaking, MeshTermView.ProfileMissing, MeshTermView.Listing -> null
+    // **Not a body.** It is a page state for one shell, drawn by the screen's own branch; putting it
+    // here let it appear under the home header, in the empty-list case and in the waiting case,
+    // which is where it was seen with the keyboard up between two screens.
+    is MeshTermView.HeldBy -> null
     is MeshTermView.Live -> null
     is MeshTermView.Choose ->
-        if (view.entries.isEmpty()) MeshBody("the host has no shells", "start one there, then refresh") else null
-    MeshTermView.NoShells -> MeshBody("the host has no shells", "start one there, then refresh")
-    // Same words the tailnet route uses for the same situation: the desk has it, and taking it is
-    // the user's choice.
-    is MeshTermView.HeldBy -> MeshBody("open on the desktop", "take it back to use it here")
+        if (view.entries.isEmpty()) MeshBody("the host has no shells") else null
+    MeshTermView.NoShells -> MeshBody("the host has no shells")
     is MeshTermView.HostClosed -> MeshBody(
         // One fact, then at most one action. Each of these used to carry its action inside the
         // same sentence, so a reader had to parse a colon to find out whether anything was wrong.
@@ -75,14 +76,8 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
         // distance, so the old line asserted "it is off or out of range" on the first failed
         // record — before the app had retried once. The short line says what happened; the detail
         // says the screen is working on it, and lists what to check only if it never connects.
-        MeshLinkState.SessionFailed -> MeshBody(
-            "the link dropped",
-            "retrying; refresh to try now",
-        )
-        MeshLinkState.Closed -> MeshBody(
-            "the link closed",
-            "refresh to reconnect",
-        )
+        MeshLinkState.SessionFailed -> MeshBody("the link dropped")
+        MeshLinkState.Closed -> MeshBody("the link closed")
     }
 }
 

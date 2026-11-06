@@ -229,7 +229,7 @@ private fun SettingRow(
     label: String,
     content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
 ) {
-    SettingsChoice(label, content = content)
+    SettingsInline(label, content = content)
 }
 
 @Composable

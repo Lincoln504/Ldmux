@@ -185,7 +185,16 @@ class MeshTerminalSource(
      */
     fun syncDrained() {
         hold.drained()
-        if (hold.awaiting) drawHeldKeepingWait()
+        if (!hold.awaiting) return
+        // **The answer that arrived during the drain is the answer.** It used to be drawn with the
+        // wait deliberately kept (`drawHeldKeepingWait`), on the reasoning that the wait ends with
+        // the *next* screen — which is true on a shell that keeps printing and false on every shell
+        // that then sits still. On an idle shell no further screen ever came, so the bar said
+        // "waiting for the answer" over a screen the user was already looking at, and the only way
+        // out was pressing `show`. The send is complete and its answer is here: end the wait.
+        // The timeout path keeps its old behaviour, because there the answer genuinely has not
+        // arrived.
+        if (!pullHeld()) drawHeldKeepingWait()
     }
 
     /**

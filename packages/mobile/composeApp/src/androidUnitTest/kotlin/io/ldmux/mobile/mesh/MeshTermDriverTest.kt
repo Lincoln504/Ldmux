@@ -252,6 +252,43 @@ class MeshTermDriverTest {
         assertEquals(TermMessage.Attach(MeshTerm.VERSION, "cc33"), sess.messages().last())
     }
 
+
+    /// **A list the host pushes is applied like one it was asked for.**
+    ///
+    /// Closing a shell this phone opened makes the host send a fresh `Sessions`, and the driver
+    /// threw it away unless the phone had asked for a list: the row stayed until the user pressed
+    /// refresh, so the close looked like it had done nothing. The event had arrived and the state
+    /// ignored it — the same shape as any "nothing happens until I refresh" defect.
+    @Test
+    fun `a list the host pushes without being asked replaces the row set`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        // Attached and live on one shell, with the list fetched for the header.
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11", "RCNT"))))
+        deliver(d, profile, rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+        assertIs<MeshTermView.Live>(d.view.value)
+        assertEquals(listOf("aa11"), d.shells.value.entries.map { it.id })
+        // The host pushes the set that no longer has it (the close the user just asked for).
+        deliver(d, TermMessage.Sessions(true, emptyList()))
+        assertEquals(
+            emptyList(),
+            d.shells.value.entries,
+            "a pushed list is authoritative: the row must go without a refresh",
+        )
+        assertNull(d.shells.value.current, "and the shell it pointed at is gone")
+    }
+
+    /// A pushed list spanning records is still one answer: no half-set is applied.
+    @Test
+    fun `a pushed list is complete only at its last page`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"))))
+        deliver(d, profile, rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+        deliver(d, TermMessage.Sessions(false, listOf(ent("bb22"))))
+        assertEquals(listOf("aa11"), d.shells.value.entries.map { it.id }, "one page is not the answer")
+        deliver(d, TermMessage.Sessions(true, listOf(ent("cc33"))))
+        assertEquals(listOf("bb22", "cc33"), d.shells.value.entries.map { it.id })
+    }
+
     @Test
     fun `a list that comes back empty is no shells`() = runBlocking<Unit> {
         val d = driver(); probed(d)

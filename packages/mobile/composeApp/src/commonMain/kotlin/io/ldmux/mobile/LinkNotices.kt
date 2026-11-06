@@ -41,12 +41,20 @@ internal fun BoxScope.LinkNotice(text: String) {
  * Opening a shell takes it, so this is only seen when somebody took it back while
  * it was open here — the desk pressing `r` in its window, or another phone. One
  * tap takes it again: the tap is as deliberate as opening it was.
+ *
+ * The verb is `take it back` here and in the radio route, and in the notice a desk
+ * window prints, because the same act had three names: `take it over` on this
+ * route, `take it back` on the radio route, and "press r to take it back" at the
+ * desk.
  */
 @Composable
 internal fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
     // Empty means the daemon did not name the device. Saying "another device" would
     // be inventing a name for it; "elsewhere" says what is known and no more.
-    val line = if (holder.isEmpty()) "open elsewhere" else "open on $holder"
+    // "in use on X", not "open on X": `open` reads as a state a shell is in, and every shell in
+    // this app is open on the desktop machine. What this says is that somebody *here-and-now* is
+    // using it there, which is the thing the reader has to know. The radio route says the same.
+    val line = if (holder.isEmpty()) "in use elsewhere" else "in use on $holder"
     Box(
         Modifier
             .fillMaxSize()
@@ -68,7 +76,7 @@ internal fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(line, color = Fg, fontSize = 15.sp)
             Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
-            AccentBtn("take it over", Modifier.width(220.dp)) { onTakeOver() }
+            AccentBtn("take it back", Modifier.width(220.dp)) { onTakeOver() }
         }
     }
 }

@@ -285,3 +285,37 @@ internal fun SettingsPanel(
         content()
     }
 }
+
+/**
+ * A choice whose options sit **on the row's own line, at its trailing edge**.
+ *
+ * [SettingsChoice] puts them under the title, which is right when there are many options (the
+ * radio's four regions wrap) or when each is a sentence. It is wrong for two short words: the row
+ * costs two lines for a one-line fact, and two neighbouring settings of the same kind end up
+ * looking like different kinds of control. `text size` has always drawn its control on the right,
+ * so `panel`, `controls` and `input` do the same now and a row means one thing.
+ */
+@Composable
+internal fun SettingsInline(
+    label: String,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(vertical = SettingsRowPad),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            label,
+            color = Fg,
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        content()
+    }
+}

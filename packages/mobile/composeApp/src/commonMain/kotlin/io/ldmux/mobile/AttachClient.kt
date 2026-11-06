@@ -307,7 +307,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
      * End the current connection so the loop reconnects at once.
      *
      * Closing rather than waiting: the loop's own retry has a deliberate pause
-     * before it reconnects, and a user who just tapped "take it over" should not
+     * before it reconnects, and a user who just tapped "take it back" should not
      * watch that pause.
      *
      * Also the way a page re-attaches after its shell became *free*: a shell that
@@ -641,7 +641,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
             is AttachMessage.Sessions -> guarded("sessions") { onSessions?.invoke(msg.owners) }
             is AttachMessage.Owned -> {
                 // Refused, not broken: the shell is held by another device. Told
-                // as an ordinary outcome so the UI can offer to take it over
+                // as an ordinary outcome so the UI can offer to take it back
                 // rather than showing an error about the link.
                 appLog("page $sessionId: held by ${msg.holder}")
                 guarded("owned") { onOwned?.invoke(msg.holder) }

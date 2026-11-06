@@ -35,6 +35,7 @@ import io.ldmux.mobile.SettingsToggle
 import io.ldmux.mobile.SettingsValue
 import kotlinx.coroutines.flow.MutableStateFlow
 import io.ldmux.mobile.Warn
+import io.ldmux.mobile.SettingsInline
 
 /**
  * The mesh route's setup, in Settings. It draws [meshSetupView] and decides nothing: which
@@ -203,7 +204,7 @@ internal fun MeshRouteSection(
 
             // The mode is a property of the link, so it is set where the link is set. `live` is
             // unavailable on a public channel and is drawn dim rather than removed.
-            SettingsChoice("input") {
+            SettingsInline("input") {
                 OptionButton(
                     "live",
                     selected = !current.meshHoldsInput,

@@ -315,8 +315,23 @@ class MeshTermDriver(
 
     /** The selector of the attach in flight, so a `HELD` refusal can name the shell it was for. */
     private var attempted: String? = null
+
+    /**
+     * Set while the list is showing a shell this phone deliberately let go.
+     *
+     * The list's one-shell convenience — "exactly one shell and we did not know which we took: it
+     * is that one" — would otherwise attach again the instant the list arrived, so going home
+     * released the shell and the next list re-took it: the desk window never got it back, the pty
+     * was fitted to the phone's list height, and the phone was never actually on its home screen.
+     * It is set when a release happens and when a launch attach is refused as held, and cleared
+     * only by the user opening something.
+     */
+    private var listHoldsNothing = false
     /** A list was asked for while attached: its answer fills [shells] and attaches nothing. */
     private var listingForHeader = false
+
+    /** Pages of a list the host pushed (it was not asked for), accumulated until `last`. */
+    private var pushedPages: ArrayList<SessionEntry>? = null
     private val _shells = MutableStateFlow(MeshShells(emptyList(), null))
 
     /**
@@ -449,6 +464,10 @@ class MeshTermDriver(
             // about 58 an hour), answers Closed(NOT_FOUND) for none and Closed(AMBIGUOUS) for
             // several, and only then does the driver ask which (below). It never guesses an id.
             pick = if (selector.isEmpty()) Pick.Probing else Pick.Attached
+            // **Remembered before the answer arrives.** A refusal that names the shell (`HELD`)
+            // has to name it to the screen, and the screen needs it to offer `take it back`; the
+            // empty-selector case learns its id from `Profile`, this one already has it.
+            if (selector.isNotEmpty()) attempted = selector
             queue(TermMessage.Attach(MeshTerm.VERSION, selector))
             pump()
             return@withLock
@@ -651,6 +670,7 @@ class MeshTermDriver(
         pick = Pick.Attached
         attachedId = id
         attempted = id
+        listHoldsNothing = false
         publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
@@ -669,6 +689,7 @@ class MeshTermDriver(
         if (id.isEmpty()) return@withLock false
         terminalView = null
         attempted = id
+        listHoldsNothing = false
         attachedId = id
         mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
         queue(TermMessage.Takeover(id)); pump(); publish()
@@ -704,6 +725,7 @@ class MeshTermDriver(
         held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
         attachedId = id
         attempted = id
+        listHoldsNothing = false
         publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
@@ -777,6 +799,8 @@ class MeshTermDriver(
         if (session == null || terminalView != null) return@withLock
         if (attachedId == null) return@withLock
         queue(TermMessage.Detach); pump()
+        // The list is about to arrive; it must not take the shell straight back.
+        listHoldsNothing = true
         attachedId = null
         mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
         publishShells(); publish()
@@ -898,9 +922,20 @@ class MeshTermDriver(
                 // **Somebody else is holding it.** The tailnet route asks in exactly this
                 // situation; the radio route used to take the shell, which resized the desk
                 // window's pty and stopped its typing with no way back.
+                // **Held is a page state, not a home-screen state.** A launch attach uses an empty
+                // selector and the host picks the shell, so a refusal there says nothing this
+                // screen can act on; the list already shows which shells are held ("on the
+                // desktop"), and that is where the user chooses. Only an open the user asked for
+                // by name becomes `HeldBy`, and only a terminal page draws it.
                 m.reason == MeshTerm.Closed.HELD -> {
-                    terminalView = MeshTermView.HeldBy(attempted ?: attachedId ?: "")
-                    pick = Pick.Attached
+                    val named = (attempted ?: "").ifEmpty { null }
+                    if (named == null) {
+                        listHoldsNothing = true
+                        backToList()
+                    } else {
+                        terminalView = MeshTermView.HeldBy(named)
+                        pick = Pick.Attached
+                    }
                 }
                 m.reason == MeshTerm.Closed.EXITED -> backToList()
                 else -> terminalView = MeshTermView.HostClosed(m.reason)
@@ -911,7 +946,10 @@ class MeshTermDriver(
             // request and the answer.
             is TermMessage.Created -> {
                 createdId = m.id
-                if (terminalView == null && pick != Pick.None) {
+                // No `pick` condition: the answer to a create is this link's to act on whatever the
+                // list was showing. Backing out of a failed list leaves `pick` at `None`, and that
+                // silently swallowed the new shell's id — the create worked and nothing opened.
+                if (terminalView == null) {
                     mirror = RowMirror()
                     held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
                     attachedId = m.id
@@ -954,8 +992,30 @@ class MeshTermDriver(
         queue(TermMessage.ListRequest)
     }
 
+    /**
+     * A list answered, or a list **pushed**.
+     *
+     * The host sends a fresh `Sessions` when a shell it just ended or created changes the set, and
+     * this used to throw every such page away unless the phone had asked for one: pressing the
+     * close button on a shell this phone opened did nothing at all until the user refreshed, at
+     * which point the row vanished. The event had arrived and the state ignored it. A pushed list
+     * is as authoritative as an asked-for one, so it is applied the same way.
+     */
     private fun onSessions(m: TermMessage.Sessions) {
-        if (pick != Pick.Listing && !listingForHeader) return
+        if (pick != Pick.Listing && !listingForHeader) {
+            // Pushed: accumulate its pages and replace the row set, without touching what the
+            // screen is showing (this runs while a shell is open, or on the list).
+            val buf = pushedPages ?: ArrayList<SessionEntry>().also { pushedPages = it }
+            buf.addAll(m.entries)
+            if (!m.last) return
+            pushedPages = null
+            val all = buf.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
+            // The shell this link was on may be the one that just ended.
+            if (attachedId != null && all.none { it.id == attachedId }) attachedId = null
+            _shells.value = MeshShells(all, attachedId)
+            publish()
+            return
+        }
         pages.addAll(m.entries)
         if (!m.last) return
         val all = pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
@@ -969,7 +1029,14 @@ class MeshTermDriver(
         }
         when (all.size) {
             0 -> pick = Pick.None
-            1 -> { pick = Pick.Attached; attachedId = all[0].id; queue(TermMessage.Attach(MeshTerm.VERSION, all[0].id)) }
+            // Showing the one shell as a row rather than opening it: see [listHoldsNothing].
+            1 if listHoldsNothing -> { pick = Pick.Choosing; choices = all }
+            1 -> {
+                pick = Pick.Attached
+                attachedId = all[0].id
+                attempted = all[0].id
+                queue(TermMessage.Attach(MeshTerm.VERSION, all[0].id))
+            }
             else -> { pick = Pick.Choosing; choices = all }
         }
         _shells.value = MeshShells(all, attachedId)
