@@ -777,8 +777,8 @@ impl Keeper {
                 // state fields are defaults (a dead pane's state is not read
                 // from a gone emulator); `dead` is the load-bearing field.
                 Ok(KeeperMessage::State(State {
-                    session_id: k.session_id.clone(),
                     pid,
+                    session_id: k.session_id.clone(),
                     cols: 0,
                     rows: 0,
                     dead: true,
@@ -1054,8 +1054,8 @@ impl Keeper {
             (String::new(), String::new())
         };
         Ok(KeeperMessage::State(State {
-            session_id: s_id,
             pid,
+            session_id: s_id,
             cols: cols as u64,
             rows: rows as u64,
             dead,
@@ -1326,6 +1326,8 @@ impl Keeper {
         }
         Ok(Session {
             id: s.session_id.clone(),
+            // The keeper's own pid for the pane: it kills by it and reaps by it. This is not the
+            // protocol's `State.pid` (removed as unread); it never leaves this process.
             pid,
             master,
             cols,

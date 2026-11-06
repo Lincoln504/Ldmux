@@ -265,9 +265,11 @@ pub struct SnapshotResult {
 #[serde(rename_all = "camelCase")]
 pub struct State {
     pub session_id: String,
-    /// The shell's pid — the session's process-group leader, and the pid every
-    /// process inside the pane descends from. The daemon reports it and kills by it; the
-    /// window manager and the phone identify a shell by it.
+    /// The pane's shell pid: the session's process-group leader.
+    ///
+    /// The daemon does not read it (it kills by session, through `Kill`) and the phone never
+    /// sees a keeper message. The keeper's own tests use it to assert that a spawn produced a
+    /// process and that a kill took it, which is the one place a pid is the fact under test.
     #[serde(default)]
     pub pid: i32,
     pub cols: u64,

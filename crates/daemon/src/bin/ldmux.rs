@@ -28,7 +28,7 @@
 //! There is no verb that opens a window. The one window the daemon opens is the phone's
 //! (`send to desktop`); a person at a keyboard is already in the terminal they want.
 
-use ldmux_protocol::rpc::PingResult;
+use ldmux_protocol::rpc::{PingResult, method};
 use ldmux_protocol::socket::{self as ps, CallError};
 
 /// The daemon socket path, resolved exactly as the daemon resolves it.
@@ -538,7 +538,7 @@ async fn main() {
     match cmd.as_str() {
         "ping" => {
             let r: Result<PingResult, CallError> =
-                daemon_call(&sock, "ping", &serde_json::json!({})).await;
+                daemon_call(&sock, method::PING, &serde_json::json!({})).await;
             match r {
                 Ok(r) => println!("{}", serde_json::to_string(&r).unwrap()),
                 Err(e) => {
@@ -548,7 +548,7 @@ async fn main() {
         }
         "list" => {
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "list", &serde_json::json!({})).await;
+                daemon_call(&sock, method::LIST, &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
                     // `--json` is a contract: it is JSON whatever the answer is, including no
@@ -726,7 +726,7 @@ async fn main() {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "kill", &serde_json::json!({ "id": id })).await;
+                daemon_call(&sock, method::KILL, &serde_json::json!({ "id": id })).await;
             if let Err(e) = r {
                 die(&e, &sock);
             }
@@ -736,7 +736,7 @@ async fn main() {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "close", &serde_json::json!({ "id": id })).await;
+                daemon_call(&sock, method::CLOSE, &serde_json::json!({ "id": id })).await;
             match r {
                 Ok(v) => {
                     let ended = v.get("ended").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -758,7 +758,7 @@ async fn main() {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "forget", &serde_json::json!({ "id": id })).await;
+                daemon_call(&sock, method::FORGET, &serde_json::json!({ "id": id })).await;
             match r {
                 Ok(v) => {
                     let removed = v.get("removed").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -853,7 +853,7 @@ async fn main() {
                 std::process::exit(2);
             }
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "mesh.status", &serde_json::json!({})).await;
+                daemon_call(&sock, method::MESH_STATUS, &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
                     if rest.iter().any(|a| a == "--json") {
@@ -874,7 +874,7 @@ async fn main() {
             }
             let on = arg == Some("on");
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "clipboardWrite", &serde_json::json!({ "on": on })).await;
+                daemon_call(&sock, method::CLIPBOARD_WRITE, &serde_json::json!({ "on": on })).await;
             match r {
                 Ok(v) => {
                     let on = v.get("on").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -898,7 +898,7 @@ async fn main() {
             }
             if mesh_only {
                 let r: Result<serde_json::Value, CallError> =
-                    daemon_call(&sock, "mesh.pairing", &serde_json::json!({})).await;
+                    daemon_call(&sock, method::MESH_PAIRING, &serde_json::json!({})).await;
                 let v = match r {
                     Ok(v) => v,
                     Err(e) => {
@@ -915,7 +915,7 @@ async fn main() {
                 // that phone stops being accepted the moment this runs. Said here because the
                 // other half of the effect (the phone going quiet at the handshake) is
                 // indistinguishable from "the host is off" at the far end.
-                let pinned: Option<String> = daemon_call(&sock, "mesh.status", &serde_json::json!({}))
+                let pinned: Option<String> = daemon_call(&sock, method::MESH_STATUS, &serde_json::json!({}))
                     .await
                     .ok()
                     .and_then(|status: serde_json::Value| {
@@ -962,7 +962,7 @@ async fn main() {
                 return;
             }
             let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
+                daemon_call(&sock, method::REMOTE_INFO, &serde_json::json!({})).await;
             let v = match r {
                 Ok(v) => v,
                 Err(e) => {
@@ -991,7 +991,7 @@ async fn main() {
             // environment, and only when asked for.
             let mesh_keys = if rest.iter().any(|a| a == "--mesh") {
                 let r: Result<serde_json::Value, CallError> =
-                    daemon_call(&sock, "mesh.pairing", &serde_json::json!({})).await;
+                    daemon_call(&sock, method::MESH_PAIRING, &serde_json::json!({})).await;
                 let v = match r {
                     Ok(v) => v,
                     Err(e) => {
@@ -1087,7 +1087,7 @@ async fn main() {
             let mut reused: Option<String> = None;
             {
                 let listed: Result<serde_json::Value, CallError> =
-                    daemon_call(&sock, "list", &serde_json::json!({})).await;
+                    daemon_call(&sock, method::LIST, &serde_json::json!({})).await;
                 match listed {
                     Ok(v) => {
                         let empty = Vec::new();
@@ -1172,7 +1172,7 @@ async fn main() {
                 std::process::exit(2);
             };
             let listed: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "list", &serde_json::json!({})).await;
+                daemon_call(&sock, method::LIST, &serde_json::json!({})).await;
             let v = match listed {
                 Ok(v) => v,
                 Err(e) => {

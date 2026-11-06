@@ -346,6 +346,11 @@ private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             if (current.panelLeft) onSave(current.copy(side = "right"))
         }
     }
+    // The setting only has a visible effect in landscape, and Settings holds portrait
+    // (`OrientationPolicy.Portrait` for the launcher and every dialog opened from it), so a press
+    // here changes nothing on this screen. Saying so is the difference between "the app ignored
+    // me" and "turn the phone".
+    SettingsNote("the key panel's side, in landscape")
 }
 
 @Composable

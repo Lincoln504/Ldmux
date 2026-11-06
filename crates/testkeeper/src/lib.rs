@@ -270,8 +270,8 @@ impl FakeKeeper {
             (s.foreground.clone(), s.cwd.clone())
         };
         State {
-            session_id: s.id.clone(),
             pid: s.pid,
+            session_id: s.id.clone(),
             cols: s.cols as u64,
             rows: s.rows as u64,
             dead: s.dead,

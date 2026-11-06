@@ -299,6 +299,8 @@ suite (574 cases) green.
 | 17.23 | `~/.local/state/ldmux/releases/` grew for ever: 24 releases and 237 MB on this machine | FIXED — the installer keeps the current release and the two before it |
 | 17.24 | `install.sh` rewrote `@BIN_DIR@` inside the unit *comment* that explains the substitution | FIXED — only `ExecStart=` lines are substituted |
 | 17.25 | The keeper unit set `LDMUX_TOKEN_FILE`, which the keeper never reads | REMOVED |
+| 17.26 | The `panel` setting changes nothing while Settings is on screen: it only affects the landscape side panel, and Settings holds portrait, so a press looked ignored | FIXED — the row says "the key panel's side, in landscape" |
+| 17.27 | `protocol::rpc::method` listed RPC names that nothing used and that had already drifted (no `release`, no `resizePane`), so it documented a contract it could not enforce | FIXED — the list is complete and the CLI's calls go through it, so a renamed method is a compile error on the client half |
 
 ## How to use this
 

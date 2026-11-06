@@ -22,6 +22,11 @@ use serde::{Deserialize, Serialize};
 pub const DAEMON_PROTOCOL_VERSION: u32 = crate::messages::PROTOCOL_VERSION;
 
 /// The method names of the daemon RPC, as a const set (the wire is a string).
+/// **The control-socket method names, as the CLI spells them.**
+///
+/// The daemon's dispatch (`crates/daemon/src/daemon.rs`) is the server-side authority and matches
+/// these strings; this module is the client side, so a rename is a compile error on one half
+/// rather than a runtime "unknown method" on the other.
 pub mod method {
     pub const PING: &str = "ping";
     pub const LIST: &str = "list";
@@ -44,6 +49,12 @@ pub mod method {
     pub const DESK_WINDOW: &str = "deskWindow";
     pub const CLIPBOARD_WRITE: &str = "clipboardWrite";
     pub const REMOTE_INFO: &str = "remote_info";
+    pub const KEY: &str = "key";
+    pub const RELEASE: &str = "release";
+    pub const RESIZE_PANE: &str = "resizePane";
+    pub const MESH_STATUS: &str = "mesh.status";
+    pub const MESH_PAIRING: &str = "mesh.pairing";
+    pub const MESH_PRESET: &str = "mesh.preset";
 }
 
 /// A device identity, so two devices can be told apart in a message about a
