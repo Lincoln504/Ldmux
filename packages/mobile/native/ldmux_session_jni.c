@@ -248,6 +248,12 @@ JNIEXPORT jint JNICALL JNI(status)(JNIEnv *env, jclass cls, jlong h, jlong now) 
   return ldmux_session_status(session_of(h), (uint64_t)now);
 }
 
+/* One full record's airtime at the active preset; the session scales its retries by it. */
+JNIEXPORT jint JNICALL JNI(setAirtime)(JNIEnv *env, jclass cls, jlong h, jdouble ms) {
+  (void)env; (void)cls;
+  return ldmux_session_set_airtime(session_of(h), (double)ms);
+}
+
 JNIEXPORT jint JNICALL JNI(pending)(JNIEnv *env, jclass cls, jlong h) {
   (void)env; (void)cls;
   return ldmux_session_pending(session_of(h));

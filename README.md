@@ -15,9 +15,11 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   runs, and parses the wire itself. No WebView, no browser, no remote desktop.
 - **Two transports, one behaviour.** A WebSocket over the tailnet when there is a network; LoRa
   radios when there is not. Same panes, same keys, same ownership.
-- **The radios are optional.** The tailnet needs no radio. The offline mode needs **two MeshCore
-  radios**: one on the desktop's serial port, one that travels with the phone and attaches over
-  Bluetooth. Both must share one frequency, bandwidth, spreading factor and coding rate.
+- **The radios are optional.** The tailnet needs no radio. The offline mode needs **two or more
+  MeshCore radios**: one on the desktop's serial port and one that travels with the phone over
+  Bluetooth, plus any repeaters in between. Both ends must share one frequency, bandwidth,
+  spreading factor and coding rate, and the desktop floods an advert so the phone learns the
+  route back through those repeaters.
 - **Records are sealed end to end.** Each is a Noise session message inside a MeshCore
   `RAW_CUSTOM` packet addressed to the peer radio's key; the radio's own channel encryption is
   never used. [`docs/SECURITY.md`](docs/SECURITY.md).
@@ -32,15 +34,15 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
 |---|---|
 | Linux desktop | `ldmuxd` (daemon), `ldmux-keeper` (owns every PTY), `ldmux` (CLI), desk clients in an existing terminal (`ldmux attach`) |
 | phone | the Android app: KMP/Compose with a native terminal renderer |
-| radios | a MeshCore companion radio on the desktop's serial port, driven by the daemon, and a second one on the phone over Bluetooth |
+| radios | a MeshCore companion radio on the desktop's serial port, driven by the daemon, a second one on the phone over Bluetooth, and any repeaters between them |
 
 ## Modes
 
 | Mode | Carried by | Notes |
 |---|---|---|
 | tailnet | a WebSocket | instant handshake, scrolling with momentum |
-| LoRa live | the two radios | keystrokes leave as typed |
-| LoRa batch | the two radios | typing leaves as one batch on `sync`, forced on a public channel |
+| LoRa live | the radios | keystrokes leave as typed |
+| LoRa batch | the radios | typing leaves as one batch on `sync`, forced on a public channel |
 
 <p align="center">
   <img src="docs/media/01-launcher.png" width="30%" alt="the launcher: new shell, the desktop's shells, and the menu on one this phone started">
@@ -142,13 +144,14 @@ ldmux code --mesh-only            # radio keys only: no address, no token
 `--mesh` code is as sensitive as the token and the secret together
 ([`docs/SECURITY.md`](docs/SECURITY.md)).
 
-The two radios must share one frequency, bandwidth, spreading factor and coding rate. No MeshCore
+Both radios must share one frequency, bandwidth, spreading factor and coding rate; repeaters in
+between may use their own presets, as MeshCore handles that. No MeshCore
 channel key is involved: records are direct packets addressed to the peer's radio key and sealed
 by the session, so a preset is a frequency to share, not a secret to match. The code carries the
 desktop radio's tuple, so the app compares it with its own radio and matches it in one press.
-`ldmux mesh status` prints the tuple; `ldmux mesh preset <MHz> <kHz> <SF> <CR>` sets it. The link
-is one hop in one direction: a phone reaching the desktop through a relay attaches and never hears
-a reply (`docs/ARCHITECTURE.md` §11).
+`ldmux mesh status` prints the tuple; `ldmux mesh preset <MHz> <kHz> <SF> <CR>` sets it. Across
+repeaters the desktop advertises itself on open and every 30 minutes (`LDMUX_MESH_ADVERT_SECS`),
+and every reply follows the path the request arrived by (`docs/ARCHITECTURE.md` §11).
 
 ## Build and test
 

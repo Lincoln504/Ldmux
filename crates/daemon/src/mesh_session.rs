@@ -92,6 +92,8 @@ pub struct SessionHost {
     pairing: PairingEntry,
     persist: Persister,
     session: Option<Session>,
+    /// One record's airtime at the carrier's tuple, for the session's retransmission timing.
+    airtime_ms: Option<f64>,
     /// Handshake replies waiting for budget. Sent before any session record.
     outbox: VecDeque<Vec<u8>>,
     next_index: u8,
@@ -110,11 +112,14 @@ impl SessionHost {
         pairing: PairingEntry,
         record_limit: usize,
         persist: Persister,
+        // How long a record takes on the air, so retransmission timing follows the radio.
+        airtime_ms: Option<f64>,
     ) -> Self {
         Self {
             responder: Responder::new(static_key),
             pairing,
             persist,
+            airtime_ms,
             session: None,
             outbox: VecDeque::new(),
             next_index: 1,
@@ -222,7 +227,12 @@ impl SessionHost {
             self.last_error = Some(format!("handshake refused: could not record it ({e})"));
             return;
         }
-        match Session::new(accepted.established, self.record_limit, now_ms) {
+        match Session::with_airtime(
+            accepted.established,
+            self.record_limit,
+            now_ms,
+            self.airtime_ms,
+        ) {
             Ok(session) => {
                 self.pairing = updated;
                 self.session = Some(session);
@@ -599,6 +609,7 @@ mod tests {
             },
             172,
             persist,
+            None,
         );
         (h, public, saved)
     }

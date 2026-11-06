@@ -26,13 +26,20 @@ pub enum Event {
 }
 
 /// What a carrier promised at connect time.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Bound {
     /// The largest record this peer's path allows. Records are sized to it.
     pub uplink_record_max: u8,
     pub radio_state: RadioState,
     /// Who decides how much may be sent this hour.
     pub budget: Budget,
+    /// How long one full record takes on the air at the carrier's own tuple, when it knows.
+    ///
+    /// The session scales its retransmission timers by this: a record at 62.5 kHz and SF7 is
+    /// 553 ms, and each repeater adds a random forward delay of up to two airtimes, so a fixed
+    /// two-second retry fires while the first copy is still travelling and spends the hour's
+    /// allowance on duplicates.
+    pub airtime_ms: Option<f64>,
 }
 
 /// Where the hourly record budget comes from.
@@ -85,9 +92,12 @@ mod tests {
             uplink_record_max: 172,
             radio_state: RadioState::Connected,
             budget: Budget::RadioGoverned,
+            airtime_ms: Some(69.2),
         };
         assert_eq!(bound.uplink_record_max, 172);
         assert_eq!(bound.radio_state, RadioState::Connected);
+        // Timing follows the radio, so the carrier states it once and every layer reads it here.
+        assert_eq!(bound.airtime_ms, Some(69.2));
     }
 
     #[test]

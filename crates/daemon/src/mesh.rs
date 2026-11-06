@@ -716,6 +716,7 @@ async fn session<C: Carrier>(
             s.files.current_pairing(),
             usize::from(promise.uplink_record_max),
             s.files.persister(),
+            promise.airtime_ms,
         )
     });
     // Same clock as every other probe in the process. A bare `Instant::now()` here was a second
@@ -1098,6 +1099,7 @@ mod tests {
                     uplink_record_max: 172,
                     radio_state: RadioState::Connected,
                     budget: Budget::RadioGoverned,
+                    airtime_ms: None,
                 }, &runtime, None, Arc::new(AtomicBool::new(false)))
                 .await;
             }
@@ -1196,6 +1198,7 @@ mod tests {
                         uplink_record_max: 172,
                         radio_state: RadioState::Connected,
                         budget: Budget::RadioGoverned,
+                        airtime_ms: None,
                     },
                     &runtime,
                     Some(&mut setup),
@@ -1302,6 +1305,7 @@ mod tests {
                         uplink_record_max: 172,
                         radio_state: RadioState::Connected,
                         budget: Budget::RadioGoverned,
+                        airtime_ms: None,
                     },
                     &runtime,
                     Some(&mut setup),

@@ -31,7 +31,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ldmux_companion::{ByteLink, Companion, SerialLink, SessionError};
+use ldmux_companion::{ByteLink, Companion, RAW_CUSTOM_DIRECT_HEADER, SerialLink, SessionError};
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
 use ldmux_mesh::error::MeshError;
@@ -40,6 +40,26 @@ use tokio::sync::mpsc as async_mpsc;
 
 /// How long the radio thread waits for a command before checking the air.
 const COMMAND_WAIT: Duration = Duration::from_millis(10);
+
+/// The firmware's own ceiling for a path, in bytes (`MAX_PATH_SIZE`, `MeshCore.h`).
+const MAX_PATH_SIZE: usize = 64;
+
+/// How often this radio floods an advert, or `None` when adverts are off.
+///
+/// **An advert is how a peer learns a path to us.** The phone cannot reach this radio behind a
+/// repeater until it holds a contact whose out-path was built from an advert that arrived through
+/// those repeaters, because a raw record is a direct packet and a direct packet with no path
+/// reaches only as far as the sender's antenna. MeshCore treats adverts as unacknowledged
+/// broadcasts, so the only lever is how often to spend one, and one record every half hour is
+/// about a hundredth of a percent of a 1 % allowance. `LDMUX_MESH_ADVERT_SECS=0` turns them off
+/// for an operator who does not want the node visible on the mesh at all.
+fn advert_interval() -> Option<Duration> {
+    let secs = std::env::var("LDMUX_MESH_ADVERT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1_800);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
 
 /// How long a dropped carrier waits for the radio thread before leaving it to finish.
 ///
@@ -242,6 +262,7 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
         radio_state: RadioState::Connected,
         // No gateway is in the path: this process owns the radio, and the firmware is the meter.
         budget: Budget::RadioGoverned,
+        airtime_ms: Some(airtime_ms),
     };
     let preset = RadioPreset {
         freq_mhz: self_info.radio_freq_mhz,
@@ -277,6 +298,12 @@ fn serve_loop<L: ByteLink>(
     let mut budget = budget_per_hour(settings.airtime_ms);
     let mut window = Instant::now();
     let mut sent: u32 = 0;
+    // The route to the peer, learned from the last record that arrived. `None` means every packet
+    // so far came zero-hop, so there is nothing to learn and nothing to send along.
+    let mut peer_path: Option<PeerPath> = None;
+    // When the last advert went out; `None` means none yet, so the first idle moment sends one.
+    let mut last_advert: Option<Instant> = None;
+    let advert_every = advert_interval();
 
     // One status before anything else: the loop starts with no budget, and an
     // unknown budget is zero, so without this it would never send the first record.
@@ -300,7 +327,14 @@ fn serve_loop<L: ByteLink>(
 
         match commands.recv_timeout(COMMAND_WAIT) {
             Ok(Command::Record { seq, record }) => {
-                let outcome = match companion.send_raw(settings.hash_size, &[], &record) {
+                // **The reply follows the path the request arrived by.** Without it a phone behind
+                // a repeater is unreachable: a direct packet with no path travels only as far as
+                // this radio's own antenna.
+                let (hash_size, path) = match &peer_path {
+                    Some(p) => (p.hash_size, p.bytes.as_slice()),
+                    None => (settings.hash_size, &[][..]),
+                };
+                let outcome = match companion.send_raw(hash_size, path, &record) {
                     Ok(()) => {
                         sent = sent.saturating_add(1);
                         SendOutcome::SentDirect
@@ -359,7 +393,16 @@ fn serve_loop<L: ByteLink>(
                     &settings, budget, sent,
                 ))));
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // Only when nothing is queued: an advert waits its turn behind records, because a
+                // record is an answer to something the user is waiting for.
+                if let Some(every) = advert_every
+                    && last_advert.is_none_or(|t| t.elapsed() >= every)
+                {
+                    let _ = companion.send_self_advert(true);
+                    last_advert = Some(Instant::now());
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = events.blocking_send(Err(MeshError::Closed));
                 return;
@@ -368,10 +411,19 @@ fn serve_loop<L: ByteLink>(
 
         match companion.next_push(Duration::from_millis(1)) {
             Ok(Some(frame)) => {
-                if let Some(record) = incoming_record(&frame)
-                    && events.blocking_send(Ok(Event::Recv(record))).is_err()
-                {
-                    return;
+                if let Some(incoming) = incoming_record(&frame) {
+                    // A zero-hop packet says nothing about a route; one that crossed repeaters
+                    // replaces whatever was held, because the last path a peer used is the most
+                    // likely to work next time.
+                    if incoming.path.is_some() {
+                        peer_path = incoming.path;
+                    }
+                    if events
+                        .blocking_send(Ok(Event::Recv(incoming.record)))
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
             Ok(None) => {}
@@ -385,28 +437,76 @@ fn serve_loop<L: ByteLink>(
     }
 }
 
-/// One received packet, reduced to the record inside it.
+/// The path a peer's record arrived by, reversed: the hops to reach *it*.
 ///
-/// The guard is the header: only a packet LDMUX itself built (`0x3E`, DIRECT with
-/// payload RAW_CUSTOM) can be a record. Everything else on the air — adverts,
-/// trace routes, another network's channel traffic — is not ours and is ignored
-/// rather than handed to the session, which would have to reject it and would show
-/// the rejection as a defect.
-fn incoming_record(frame: &[u8]) -> Option<Vec<u8>> {
+/// MeshCore appends one hash per repeater as a packet travels, so the path on an arriving packet is
+/// this node's route *to the sender read backwards*. Reversing the hop order (each hop is
+/// `hash_size` bytes) gives a usable path for the reply, which is what makes a phone behind a
+/// repeater reachable at all: a direct packet with no path only travels as far as the sender's own
+/// radio, so every reply to a repeater-reached phone would be heard by nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PeerPath {
+    hash_size: u8,
+    hops: u8,
+    /// `hops * hash_size` bytes, in send order.
+    bytes: Vec<u8>,
+}
+
+impl PeerPath {
+    /// The reverse of a path that arrived, or `None` when there is nothing to reverse (zero hops,
+    /// a malformed length, or a path longer than the firmware's 64-byte limit).
+    fn reversed(hash_size: usize, hops: usize, path: &[u8]) -> Option<Self> {
+        if hops == 0 || hash_size == 0 || path.len() != hops * hash_size {
+            return None;
+        }
+        if path.len() > MAX_PATH_SIZE {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(path.len());
+        for hop in path.chunks_exact(hash_size).rev() {
+            bytes.extend_from_slice(hop);
+        }
+        Some(Self {
+            hash_size: u8::try_from(hash_size).ok()?,
+            hops: u8::try_from(hops).ok()?,
+            bytes,
+        })
+    }
+}
+
+/// One received packet: the record inside it, and the path it arrived by.
+#[derive(Debug, PartialEq, Eq)]
+struct Incoming {
+    record: Vec<u8>,
+    /// `None` for a zero-hop packet: it came straight from the peer's radio, so there is no path
+    /// to learn and nothing to reverse.
+    path: Option<PeerPath>,
+}
+
+/// One received packet, reduced to the record inside it and the path it took.
+///
+/// The guard is the header: only a packet LDMUX itself built (DIRECT with payload RAW_CUSTOM) can
+/// be a record. Everything else on the air — adverts, trace routes, another network's channel
+/// traffic — is not ours and is ignored rather than handed to the session, which would have to
+/// reject it and would show the rejection as a defect.
+///
+/// **A flooded `RAW_CUSTOM` cannot be one of ours**: the firmware drops flood-routed raw packets
+/// before the application sees them (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM` accepts only
+/// `isRouteDirect()`), so a record arrives direct, with a path if it crossed repeaters.
+fn incoming_record(frame: &[u8]) -> Option<Incoming> {
     const PUSH_LOG_RX: u8 = 0x88;
-    const RAW_CUSTOM_DIRECT: u8 = 0x3E;
 
     if frame.first() != Some(&PUSH_LOG_RX) || frame.len() < 5 {
         return None;
     }
     // `MyMesh.cpp:286-296`: `[0x88][snr*4][rssi][packet]`. The packet starts at 3.
     let packet = &frame[3..];
-    if packet.len() < 2 || packet[0] != RAW_CUSTOM_DIRECT {
+    if packet.len() < 2 || packet[0] & 0x3F != RAW_CUSTOM_DIRECT_HEADER & 0x3F {
         return None;
     }
-    let mut offset = 1;
-    // Transport-coded routes carry a four-byte region code before the path byte.
+    // Route type in the low two bits: 0 and 3 carry four bytes of transport codes before the path.
     let route = packet[0] & 0x03;
+    let mut offset = 1;
     if route == 0 || route == 3 {
         offset += 4;
     }
@@ -418,7 +518,11 @@ fn incoming_record(frame: &[u8]) -> Option<Vec<u8>> {
     if body > packet.len() {
         return None;
     }
-    Some(packet[body..].to_vec())
+    let path = PeerPath::reversed(hash, hops, packet.get(offset..body)?);
+    Some(Incoming {
+        record: packet[body..].to_vec(),
+        path,
+    })
 }
 
 /// A carrier-level failure, as the loop's error type.
@@ -508,15 +612,37 @@ mod tests {
     fn a_direct_raw_packet_yields_its_record() {
         // What `build_raw_direct(1, &[], record)` produces: header, zero-hop path byte.
         let packet = build_raw_direct(1, &[], &[9, 8, 7]).unwrap();
-        let record = incoming_record(&log_frame(&packet)).unwrap();
-        assert_eq!(record, vec![9, 8, 7]);
+        let incoming = incoming_record(&log_frame(&packet)).unwrap();
+        assert_eq!(incoming.record, vec![9, 8, 7]);
+        assert!(incoming.path.is_none(), "zero hops: no route to learn");
     }
 
     #[test]
     fn a_two_byte_hash_path_is_skipped_before_the_record() {
         let packet = build_raw_direct(2, &[0xAA, 0xBB], &[1, 2]).unwrap();
-        let record = incoming_record(&log_frame(&packet)).unwrap();
-        assert_eq!(record, vec![1, 2]);
+        let incoming = incoming_record(&log_frame(&packet)).unwrap();
+        assert_eq!(incoming.record, vec![1, 2]);
+    }
+
+    /// **The reply goes back the way the request came.** A packet that crossed two repeaters
+    /// arrives with the hops in travel order, so the path to the *sender* is that list reversed —
+    /// and each hop is `hash_size` bytes, not one, or a 2-byte-hash network would reply to byte
+    /// pairs that mean nothing.
+    #[test]
+    fn the_path_a_record_arrived_by_is_reversed_for_the_reply() {
+        // One-byte hashes, two hops: arrived via r1 then r2, so replies go r2 then r1.
+        let packet = build_raw_direct(1, &[0x11, 0x22], &[7]).unwrap();
+        let incoming = incoming_record(&log_frame(&packet)).unwrap();
+        let path = incoming.path.expect("two hops is a route");
+        assert_eq!(path.bytes, vec![0x22, 0x11]);
+        assert_eq!((path.hash_size, path.hops), (1, 2));
+
+        // Two-byte hashes, two hops: the pairs must not be split.
+        let packet = build_raw_direct(2, &[0xA1, 0xA2, 0xB1, 0xB2], &[7]).unwrap();
+        let incoming = incoming_record(&log_frame(&packet)).unwrap();
+        let path = incoming.path.expect("two hops is a route");
+        assert_eq!(path.bytes, vec![0xB1, 0xB2, 0xA1, 0xA2]);
+        assert_eq!((path.hash_size, path.hops), (2, 2));
     }
 
     #[test]
@@ -563,6 +689,45 @@ mod tests {
             refused(&SessionError::Rejected { code: 4, meaning: "BAD_STATE" }),
             SendOutcome::ErrBusy
         );
+    }
+
+    /// **The radio floods an advert so a peer can learn a path.** Without one, a phone behind a
+    /// repeater has no route to this host at all: a direct raw packet with an empty path reaches
+    /// only the radios in earshot.
+    #[test]
+    fn the_radio_advertises_flooded() {
+        let mut link = MemoryLink::new();
+        link.push_payload(&[0x00]); // OK for the advert
+        let mut companion = Companion::new(link);
+        companion.send_self_advert(true).unwrap();
+        // `[0x3C][u16 len][0x07][1]`: CMD_SEND_SELF_ADVERT with the flood mode.
+        let written = &companion.link_mut().written;
+        assert_eq!(written[0], 0x3C, "frame start");
+        let body = &written[3..];
+        assert_eq!(body[0], ldmux_companion::commands::SEND_SELF_ADVERT);
+        assert_eq!(body[1], 1, "flood, not zero-hop");
+    }
+
+    /// Off means off, and a malformed value falls back to the default rather than silently
+    /// disabling adverts.
+    #[test]
+    fn the_advert_interval_is_configurable() {
+        // SAFETY: this key is read only by `advert_interval`, and this test is the only place in
+        // the binary that writes it, so there is nothing to race with.
+        unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
+        assert_eq!(advert_interval(), Some(Duration::from_secs(1_800)), "the default");
+        // SAFETY: as above; this test owns the key for its whole body.
+        unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "0") };
+        assert_eq!(advert_interval(), None, "off means off");
+        // SAFETY: as above.
+        unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "60") };
+        assert_eq!(advert_interval(), Some(Duration::from_secs(60)));
+        // SAFETY: as above. A malformed value falls back to the default rather than turning
+        // adverts off, because "off" is a decision the operator makes on purpose.
+        unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "often") };
+        assert_eq!(advert_interval(), Some(Duration::from_secs(1_800)));
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
     }
 
     #[test]

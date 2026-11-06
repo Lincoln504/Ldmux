@@ -140,6 +140,10 @@ int32_t ldmux_session_close(LdmuxSession *s);
 /* LDMUX_STATUS_* bits, or a negative error. */
 int32_t ldmux_session_status(LdmuxSession *s, uint64_t now_ms);
 
+/* Retransmission timing for this radio: one full record's airtime at the active preset, in ms.
+ * Zero or less keeps the interactive defaults. Call once the preset is known. */
+int32_t ldmux_session_set_airtime(LdmuxSession *s, double airtime_ms);
+
 /* Chunks queued or in flight. */
 int32_t ldmux_session_pending(LdmuxSession *s);
 

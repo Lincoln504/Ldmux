@@ -140,6 +140,26 @@ impl Config {
             max_payload,
         }
     }
+
+    /// Retransmission timing for a radio whose records take `airtime_ms` on the air.
+    ///
+    /// A record is on air for that long, the ack for as long again, and each repeater adds a
+    /// random forward delay of up to two airtimes, so a first retry at four airtimes is the
+    /// earliest that cannot be a duplicate of a record still in flight; two hops plus the ack is
+    /// about six. The interactive defaults (2 s) are kept when that is larger, so a fast private
+    /// channel still retries quickly, and the cap grows with the airtime so a slow preset does not
+    /// exhaust its attempts inside one round trip.
+    #[must_use]
+    pub fn with_airtime(mut self, airtime_ms: Option<f64>) -> Self {
+        let Some(airtime) = airtime_ms.filter(|a| *a > 0.0) else {
+            return self;
+        };
+        let scaled = (airtime * 6.0).round() as u64;
+        self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(60_000);
+        let cap = (airtime * 40.0).round() as u64;
+        self.rto_max_ms = self.rto_max_ms.max(cap).min(600_000);
+        self
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -307,7 +327,19 @@ pub struct Arq {
 }
 
 impl Arq {
+    /// The live configuration, for a caller that needs to re-scale it.
     #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// Replace the configuration. Window and attempt bounds are re-applied, as in [`Self::new`].
+    pub fn set_config(&mut self, mut cfg: Config) {
+        cfg.window = cfg.window.clamp(1, MAX_WINDOW);
+        cfg.max_attempts = cfg.max_attempts.max(1);
+        self.cfg = cfg;
+    }
+
     pub fn new(mut cfg: Config) -> Self {
         cfg.window = cfg.window.clamp(1, MAX_WINDOW);
         cfg.max_attempts = cfg.max_attempts.max(1);

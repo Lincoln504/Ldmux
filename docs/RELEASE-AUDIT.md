@@ -326,6 +326,10 @@ suite (574 cases) green.
 | 17.50 | The two marks were stacked; they are a wordmark and read as one line | FIXED — side by side on a 1100 x 512 canvas, 588 px apart, centred as one image |
 | 17.51 | The README title read `ldmux` while the repository is `Ldmux`; the two titles are the only places the name is capitalised | FIXED — `# Ldmux`, with every command, binary and file name still lowercase |
 | 17.52 | The description said "no internet and no network at all", which contradicts the project: MeshCore is a network | FIXED — "when there is no internet at all" |
+| 17.53 | The radio link worked only with both radios in direct range: the host sent every record with an empty path (zero-hop), never stored the path an arriving record took, and the phone could not learn a route from a companion host that never advertised | FIXED — the host reverses the arriving path (`PeerPath`) and replies along it; it floods a self-advert on open and every `LDMUX_MESH_ADVERT_SECS` so the phone's radio stores a contact with a route; the phone re-asks for that contact every 45 s without a route and every 10 min with one |
+| 17.54 | The session's first retry was a fixed 2 s, shorter than a round trip at 62.5 kHz (553 ms a record) or across repeaters, so every slow link retransmitted records the peer already had and spent the hour's allowance on duplicates | FIXED — `Config::with_airtime` scales the timers by the record airtime, carried to the host by `Bound::airtime_ms` and to the phone by `ldmux_session_set_airtime` |
+| 17.55 | `commanded::SEND_RAW_DATA` was the name of command 0x41, which is `CMD_SEND_RAW_PACKET`; the misnomer invited the 0x19 path-length ambiguity the phone already avoids | RENAMED — `SEND_RAW_PACKET`, with the difference explained at the constant |
+| 17.56 | Nothing recorded how MeshCore treats a raw record across repeaters, so "one hop" read like a design choice rather than a firmware constraint | DOCUMENTED — `docs/ARCHITECTURE.md` §11 quotes `Mesh.cpp`'s direct-only `RAW_CUSTOM` case and states what the host and app now do about it |
 
 ## How to use this
 

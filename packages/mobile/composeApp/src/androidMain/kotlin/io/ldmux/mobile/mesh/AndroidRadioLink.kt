@@ -26,6 +26,12 @@ import io.iotone.meshcore.model.DeviceInfo
 import io.iotone.meshcore.model.RadioParams
 import io.iotone.meshcore.model.SelfInfo
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -121,6 +127,17 @@ class AndroidRadioLink(
 
     @Volatile
     private var closing = false
+
+    /**
+     * Keeps the host's path current, because a path is learned from the air and the air changes.
+     *
+     * The contact query used to happen once, inside `connect()`. With both radios on one desk that
+     * is enough, because the zero-hop fallback works. Behind a repeater it is not: the host's
+     * advert may arrive after the connect, and a path that worked from one seat stops working
+     * after a walk. This asks again while the link is up — often while no path is known, rarely
+     * once one is — so a repeater-reached host becomes reachable without a reconnect.
+     */
+    private var pathScope: CoroutineScope? = null
 
     @Volatile
     private var budgetMode: RadioBudgetMode = RadioBudgetMode.Metered
@@ -337,6 +354,7 @@ class AndroidRadioLink(
             // radio has - asked here, after the tracked contact query has settled, so it cannot
             // race the one answer window the companion has.
             if (s.isIdle()) s.requestBatteryStorage()
+            startPathRefresh(s)
             if (closing) {
                 closeTransport()
                 throw RadioLinkException(MeshLinkState.Closed, "closed while connecting")
@@ -574,7 +592,29 @@ class AndroidRadioLink(
         return out
     }
 
+    /**
+     * Re-ask the radio for the host's contact: 45 s apart while no path is known, 10 minutes apart
+     * once one is, and never while another tracked command is outstanding (the companion has one
+     * answer window, and a second request inside it makes both answers ambiguous).
+     */
+    private fun startPathRefresh(s: MeshcoreSession) {
+        pathScope?.cancel()
+        if (hostKey.isEmpty()) return
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        pathScope = scope
+        scope.launch {
+            while (isActive && !closing) {
+                val wait = if (hostPath == null) PATH_RETRY_MS else PATH_REFRESH_MS
+                delay(wait)
+                if (closing || !s.isIdle()) continue
+                runCatching { s.getContact(hostKey) }
+            }
+        }
+    }
+
     private fun closeTransport() {
+        pathScope?.cancel()
+        pathScope = null
         val s = session
         val t = transport
         session = null
@@ -660,6 +700,10 @@ class AndroidRadioLink(
          */
         const val BOND_CONNECT_TIMEOUT_MS = 75_000L
         const val CONTACT_WAIT_MS = 3_000L
+        /** Re-ask for the host's path while none is known: often enough to catch a late advert. */
+        const val PATH_RETRY_MS = 45_000L
+        /** Re-ask once a path is known: paths move with the radios, but slowly. */
+        const val PATH_REFRESH_MS = 600_000L
         const val COMMAND_SETTLE_MS = 2_500L
         const val SEND_TIMEOUT_MS = 10_000L
         const val PRESET_COMMAND_WAIT_MS = 3_000L

@@ -51,6 +51,17 @@ class MeshSession internal constructor(
     }
 
     /**
+     * Retransmission timing for the radio this session runs over.
+     *
+     * One full record's airtime at the active preset, from [RadioAirtime.timeOnAirMs]. A fixed
+     * two-second retry is shorter than the round trip on a slow preset or across repeaters, and
+     * every early retry spends airtime on a record the peer already has. Zero keeps the defaults.
+     */
+    fun setAirtime(airtimeMs: Double) {
+        lib.setAirtime(live(), airtimeMs)
+    }
+
+    /**
      * Feed one record from the gateway's `RECV`. A record that fails any check (tag, replay,
      * index, decode) changes no state and comes back as [Received.Rejected]: it is evidence of a
      * noisy link or an attacker, not of a broken session, so it does not end it.
@@ -163,6 +174,11 @@ class MeshSession internal constructor(
             hostPublic: ByteArray,
             psk: ByteArray,
             wallMs: Long,
+            /**
+             * One full record's airtime at the preset the radio is on, so the session's retries
+             * follow the radio rather than a constant. Zero keeps the defaults.
+             */
+            airtimeMs: Double = 0.0,
         ): PendingHandshake {
             require(localPrivate.size == SessionLib.KEY_LEN && localPublic.size == SessionLib.KEY_LEN)
             require(hostPublic.size == SessionLib.KEY_LEN) { "host public key must be 32 bytes" }
@@ -171,7 +187,7 @@ class MeshSession internal constructor(
             val msg1 = ByteArray(SessionLib.MSG1_LEN)
             val rc = lib.initiatorStart(localPrivate, localPublic, hostPublic, psk, wallMs, out, msg1)
             if (rc != SessionLib.OK) throw sessionFailure(rc, "handshake start")
-            return PendingHandshake(lib, out[0], msg1)
+            return PendingHandshake(lib, out[0], msg1, airtimeMs)
         }
 
         /** Generate a static keypair: `first` is private, `second` is public. Store it securely. */
@@ -191,6 +207,7 @@ class PendingHandshake internal constructor(
     private var handle: Long,
     /** Message 1, 121 bytes: send it as one record. */
     override val message1: ByteArray,
+    private val airtimeMs: Double = 0.0,
 ) : HandshakePort {
     /**
      * Consume message 2. [recordLimit] is the carrier's advertised record size, so the layout is
@@ -203,7 +220,9 @@ class PendingHandshake internal constructor(
         val out = LongArray(1)
         val rc = lib.initiatorFinish(h, message2, recordLimit, nowMs, out)
         if (rc != SessionLib.OK) throw sessionFailure(rc, "handshake finish")
-        return MeshSession(lib, out[0])
+        val session = MeshSession(lib, out[0])
+        session.setAirtime(airtimeMs)
+        return session
     }
 
     override fun abandon() {

@@ -305,6 +305,10 @@ by the host radio, by the app before it retunes, and by every budget below.
   preference: the app turns it on and says so.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
+- **The host advertises what it is.** A flooded self-advert goes out when the link opens and every
+  `LDMUX_MESH_ADVERT_SECS` (default half an hour), because a peer behind a repeater cannot learn a
+  route to this radio any other way. An advert is one record of about 130 bytes: roughly 0.05 % of
+  a 1 % allowance at the deployed tuple.
 - **The host gates on the countdown it computed, not on the firmware's limiter.** MeshCore's
   `Dispatcher` charges measured airtime against a budget, but its factor is 1.0, which is a 50 %
   duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`) — not the 1 % a European
@@ -364,13 +368,37 @@ cannot use a radio the host is holding.
    silent: two radios on different tuples simply cannot hear each other, and the
    only symptom is a link that never comes up.
 
-**One hop, and one direction of it.** The phone asks its radio for the host's path
-(`GetContactByKey`) and falls back to a zero-hop send when there is no route; the host
-sends every record zero-hop (`SEND_RAW_DATA` with an empty path) and never looks up a
-route. So a phone that reaches the host through one or more relays receives nothing back:
-its `Attach` arrives, the host counts records sent, and the phone retries until it gives
-up. Multi-hop in both directions is not implemented, and a link that never comes up across
-a relay is this, not a broken pairing.
+**Repeaters: two requirements, both now implemented.**
+
+A raw record is a **direct** packet, and the firmware delivers a `RAW_CUSTOM` packet only
+when its route is direct (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`: it checks
+`pkt->isRouteDirect()` and the flood branch is commented out), so a flooded raw record would
+be transmitted and then ignored by every receiver. Direct means the sender must know a path.
+
+1. **The peer needs a route to this host, and an advert is what teaches it.** A companion does
+   not advertise by itself, so the daemon floods a self-advert (`CMD_SEND_SELF_ADVERT` with
+   mode 1) when the link opens and every `LDMUX_MESH_ADVERT_SECS` (default 1800; `0` turns
+   adverts off). Repeaters forward it and its path accumulates, so the phone's radio stores a
+   contact whose out-path is the route back. The app asks for that contact and sends along it.
+2. **The host replies along the path the request arrived by.** Each record that crosses
+   repeaters arrives with its hops in travel order; `PeerPath::reversed` turns that into a
+   usable out-path (per `hash_size` bytes, not per byte) and the radio thread sends every
+   record along it. Until one arrives, records go zero-hop, which reaches only the radios in
+   earshot.
+
+Consequences worth knowing:
+
+- **Timing follows airtime.** One record at 62.5 kHz SF7 is 553 ms, and each repeater holds a
+  packet for a random delay of up to two airtimes, so the session's first retry is
+  `max(2 s, 6 x airtime)` (`Config::with_airtime`), handed to the session by the carrier
+  (`Bound::airtime_ms`) and by the app (`ldmux_session_set_airtime`). A fixed two-second retry
+  would duplicate records the peer already has and spend the hour's allowance doing it.
+- **Paths move.** The phone re-asks for its contact every 45 s while it has no route and every
+  10 minutes once it has one, so a host that becomes reachable mid-session becomes reachable
+  without a reconnect.
+- **A path is not authenticated by MeshCore.** Route integrity is an 8-bit prefix comparison per
+  hop (issue #1775 in the firmware tracker), so the session's Noise layer, not the path, is what
+  authenticates the peer.
 
 Without `LDMUX_MESH_SERIAL` this desktop has no radios; nothing else about the daemon
 changes.

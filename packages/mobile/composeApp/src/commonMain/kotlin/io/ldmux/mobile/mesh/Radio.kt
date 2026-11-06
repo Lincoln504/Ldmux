@@ -477,6 +477,21 @@ class MeshRadioConnection(
                 creds.keys.hostPublic,
                 creds.keys.psk,
                 Clock.System.now().toEpochMilliseconds(),
+                // The session's retries follow the radio's own airtime: 69 ms at the bench preset,
+                // 553 ms at 62.5 kHz, and longer again behind a repeater. From SELF_INFO, because
+                // that is what the radio is actually tuned to rather than what was asked for.
+                link.selfInfo.value?.let { info ->
+                    RadioAirtime.timeOnAirMs(
+                        RadioPreset(
+                            info.frequencyMhz,
+                            info.bandwidthKhz,
+                            info.spreadingFactor,
+                            info.codingRate,
+                            info.txPowerDbm,
+                        ),
+                        MeshRecordLimits.MAX,
+                    )
+                } ?: 0.0,
             )
         },
         selector = selector,

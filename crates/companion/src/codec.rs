@@ -39,7 +39,22 @@ pub mod commands {
     pub const SET_RADIO_PARAMS: u8 = 0x0B;
     pub const SYNC_NEXT_MESSAGE: u8 = 0x0A;
     pub const DEVICE_QUERY: u8 = 0x16;
-    pub const SEND_RAW_DATA: u8 = 0x41;
+    /// Send a complete packet we built: `priority u8`, then the packet bytes.
+    ///
+    /// This is `CMD_SEND_RAW_PACKET`, the command that takes a whole `[header][path][payload]`
+    /// frame (`examples/companion_radio/MyMesh.cpp`, `tryParsePacket`), so the route type and the
+    /// path encoding are ours to write correctly. Its older sibling `CMD_SEND_RAW_DATA` (0x19)
+    /// takes a path-length byte that the firmware reads both as a byte count and as an encoded
+    /// value, which agrees only at a one-byte hash.
+    pub const SEND_RAW_PACKET: u8 = 0x41;
+    /// Emit this node's advert: `mode u8`, where 1 floods it and 0 sends it zero-hop
+    /// (`MyMesh.cpp:1257-1272`).
+    ///
+    /// **This is how the peer learns a path to us.** A flooded advert is forwarded by repeaters and
+    /// carries the accumulated path, so the receiving companion stores it as a contact with an
+    /// out-path — a route that survives the radio being out of direct range. Nothing else in
+    /// MeshCore tells a peer how to reach a node it has never heard.
+    pub const SEND_SELF_ADVERT: u8 = 0x07;
 }
 
 /// The protocol version this client claims. The firmware latches it from

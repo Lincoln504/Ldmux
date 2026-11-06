@@ -354,6 +354,24 @@ pub unsafe extern "C" fn ldmux_responder_accept(
     })
 }
 
+/// Retransmission timing for the radio this session runs over.
+///
+/// `airtime_ms` is one full record's time on the air at the preset the radio is tuned to (the
+/// same figure the app computes for its budget). A fixed two-second retry is shorter than the
+/// round trip on a slow preset or across repeaters, and every early retry spends airtime on a
+/// duplicate. Called right after the session exists; a value of zero or less keeps the defaults.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_session_set_airtime(s: *mut LdmuxSession, airtime_ms: f64) -> i32 {
+    // SAFETY: the caller passes a live handle from this ABI, or null (which `with_session` refuses).
+    unsafe {
+        with_session(s, |sess| {
+            sess.inner
+                .set_airtime(if airtime_ms > 0.0 { Some(airtime_ms) } else { None });
+            LDMUX_OK
+        })
+    }
+}
+
 /// Run `f` on the session behind `*s`, or `LDMUX_ERR_NULL` if the slot or handle is null.
 unsafe fn with_session(s: *mut LdmuxSession, f: impl FnOnce(&mut LdmuxSession) -> i32) -> i32 {
     guard(|| {

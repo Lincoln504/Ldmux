@@ -77,6 +77,14 @@ interface SessionLib {
      * nothing and reports 0, so a fake or an older binding simply leaves the retry ladder alone.
      */
     fun refuseSeq(h: Long, nowMs: Long, seq: Int): Int = 0
+    /**
+     * Retransmission timing for this radio: one full record's airtime at the active preset.
+     *
+     * A fixed two-second retry is shorter than a round trip on a slow preset or across
+     * repeaters, and every early retry spends airtime on a duplicate. Zero keeps the defaults.
+     */
+    fun setAirtime(h: Long, airtimeMs: Double): Int
+
     fun close(h: Long): Int
     fun status(h: Long, nowMs: Long): Int
     fun pending(h: Long): Int

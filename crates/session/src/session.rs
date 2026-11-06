@@ -64,6 +64,24 @@ impl Session {
     /// `record_limit` is `BIND_OK`'s advertised size, so the layout is sized to what the radio
     /// will actually accept.
     pub fn new(est: Established, record_limit: usize, now_ms: u64) -> Result<Self, SessionError> {
+        Self::with_airtime(est, record_limit, now_ms, None)
+    }
+
+    /// The same session, with its retransmission timing scaled to the radio's own airtime.
+    ///
+    /// **A fixed 2 s retry is wrong on a long link.** One record at 62.5 kHz and SF7 is 553 ms,
+    /// and every repeater holds a flood or a direct packet for a random delay of up to two
+    /// airtimes before it forwards; a round trip over three hops is therefore several seconds. A
+    /// timer shorter than the round trip retransmits records the peer already has, which on a 1 %
+    /// duty cycle spends the hour's allowance on duplicates. `airtime_ms` is the same figure the
+    /// budget is computed from (`time_on_air_ms`), and `None` keeps the interactive defaults for
+    /// a link whose airtime nobody measured.
+    pub fn with_airtime(
+        est: Established,
+        record_limit: usize,
+        now_ms: u64,
+        airtime_ms: Option<f64>,
+    ) -> Result<Self, SessionError> {
         let app = record::application_bytes(record_limit.min(ldmux_mesh::constants::RECORD_MAX));
         if app <= arq::HEADER {
             return Err(SessionError::RecordLimitTooSmall);
@@ -72,11 +90,20 @@ impl Session {
             est,
             counter: 0,
             replay: ReplayWindow::default(),
-            arq: Arq::new(Config::for_payload(app - arq::HEADER)),
+            arq: Arq::new(Config::for_payload(app - arq::HEADER).with_airtime(airtime_ms)),
             record_limit,
             started_ms: now_ms,
             dropped: 0,
         })
+    }
+
+    /// Re-scale the retransmission timers for the radio's airtime.
+    ///
+    /// A session is created when the handshake completes, which on the phone happens before the
+    /// preset is known to this side; this lets the caller hand over the figure afterwards without
+    /// rebuilding the session (which would throw away the keys and the queue).
+    pub fn set_airtime(&mut self, airtime_ms: Option<f64>) {
+        self.arq.set_config(self.arq.config().with_airtime(airtime_ms));
     }
 
     #[must_use]

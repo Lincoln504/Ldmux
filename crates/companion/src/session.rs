@@ -153,6 +153,20 @@ impl<L: ByteLink> Companion<L> {
         Ok(info)
     }
 
+    /// Emit this radio's advert, flooded so repeaters forward it.
+    ///
+    /// The reply means "the firmware queued it", not "a peer heard it": an advert is a broadcast
+    /// with no acknowledgement, which is why the path it teaches can take minutes to appear.
+    pub fn send_self_advert(&mut self, flood: bool) -> Result<(), SessionError> {
+        let mode = u8::from(flood);
+        self.request(
+            &[commands::SEND_SELF_ADVERT, mode],
+            codes::OK,
+            Duration::from_secs(10),
+        )?;
+        Ok(())
+    }
+
     /// Transmit one record as a raw direct packet, building the packet here.
     ///
     /// The reply means "the radio accepted it for transmission", never "the peer
@@ -160,7 +174,7 @@ impl<L: ByteLink> Companion<L> {
     pub fn send_raw(&mut self, hash_size: u8, path: &[u8], record: &[u8]) -> Result<(), SessionError> {
         let packet = build_raw_direct(hash_size, path, record)?;
         let mut payload = Vec::with_capacity(2 + packet.len());
-        payload.push(commands::SEND_RAW_DATA);
+        payload.push(commands::SEND_RAW_PACKET);
         payload.push(0); // priority
         payload.extend_from_slice(&packet);
         self.request(&payload, codes::OK, Duration::from_secs(10))?;
@@ -410,7 +424,7 @@ mod tests {
         let mut companion = Companion::new(link);
         companion.send_raw(2, &[0xAA, 0xBB], &[1, 2, 3]).expect("accepted");
         let written = &companion.link_mut().written;
-        assert_eq!(written[3], commands::SEND_RAW_DATA);
+        assert_eq!(written[3], commands::SEND_RAW_PACKET);
         assert_eq!(written[4], 0, "priority");
         assert_eq!(written[5], 0x3E, "raw custom, direct");
         assert_eq!(written[6], 0x41, "one hop of two-byte hashes");
