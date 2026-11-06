@@ -15,13 +15,15 @@ mkdir -p "$out/crates"
 
 # Filtered to the platform that ships: a crate resolved only for wasm or UEFI is not in the
 # binary, so its notice is not owed by this artifact.
+meta=$(mktemp "${TMPDIR:-/tmp}/ldmux-meta.XXXXXX.json")
+trap 'rm -f "$meta"' EXIT
 cargo metadata --format-version 1 --locked \
-    --filter-platform "$(rustc -vV | awk '/^host: /{print $2}')" > /tmp/ldmux-meta.json
-python3 - "$out" <<'PY'
+    --filter-platform "$(rustc -vV | awk '/^host: /{print $2}')" > "$meta"
+python3 - "$out" "$meta" <<'PY'
 import json, os, pathlib, shutil, sys
 
 out = pathlib.Path(sys.argv[1])
-meta = json.load(open("/tmp/ldmux-meta.json"))
+meta = json.load(open(sys.argv[2]))
 registry = pathlib.Path(os.path.expanduser("~/.cargo/registry/src"))
 
 copied = 0
@@ -54,6 +56,16 @@ for p in meta["packages"]:
 print(f"crates: {copied} copied, {len(missing)} without a licence file")
 for m in missing[:10]:
     print(f"  no licence file in the unpacked source: {m}")
+# **A missing text is a failure, not a note.** The artifact owes the notice, and a count that
+# nobody reads is how a bundle ships without it. The one legitimate reason for a crate to be
+# unmatched is that the registry is not unpacked on this machine (a fresh CI runner), which is
+# also a build that cannot collect: say so and fail.
+if missing:
+    sys.stderr.write(
+        f"collect-licenses: {len(missing)} crates have no licence text in "
+        f"{registry}; the artifact cannot ship without them.\n"
+    )
+    sys.exit(1)
 PY
 
 # The project's own terms, and the list of what the texts above belong to.

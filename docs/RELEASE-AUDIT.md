@@ -292,6 +292,13 @@ suite (574 cases) green.
 | 17.16 | `ldmux adopt ""` answered "no such session: ldmux-" (a name the user never typed) | FIXED — usage error before the call |
 | 17.17 | `nix flake check` still listed `the_desktop_inventory_links_a_running_pi_to_its_session` in its skip guard, and that test was deleted: the guard requires exactly one match, so CI's first step would go red | FIXED |
 | 17.18 | The keeper unit hard-coded `%t/ldmux/keeper.sock` while the daemon derives `<LDMUX_STATE_DIR>/keeper.sock`, so an overridden state directory gave the daemon a socket nobody bound and it spawned a second keeper | FIXED — the keeper resolves the socket through the same `paths` resolver, and the unit passes no path |
+| 17.19 | A release built outside a git checkout silently got `versionCode = 1`, so the second upload is rejected and two builds collide | FIXED — `bundleRelease`/`assembleRelease` fail when neither `LDMUX_VERSION_CODE` nor a commit count is available |
+| 17.20 | `scripts/android.sh release|bundle` never ran the Kotlin suite, so an artifact could ship with a failing app test | FIXED — the test task runs first and a red suite stops the artifact |
+| 17.21 | `collect-licenses.sh` printed "N without a licence file" and exited 0, and the bundle task did not check the licence tree, so an artifact could ship without the notices MIT/BSD/Apache require | FIXED — the collector fails on a missing text, and the release tasks refuse to package without `dist/licenses/THIRD-PARTY-NOTICES.md` |
+| 17.22 | `ldmux-attach` (the desk client binary) was built and shipped but installed by nothing | FIXED — `install.sh` links it with the rest |
+| 17.23 | `~/.local/state/ldmux/releases/` grew for ever: 24 releases and 237 MB on this machine | FIXED — the installer keeps the current release and the two before it |
+| 17.24 | `install.sh` rewrote `@BIN_DIR@` inside the unit *comment* that explains the substitution | FIXED — only `ExecStart=` lines are substituted |
+| 17.25 | The keeper unit set `LDMUX_TOKEN_FILE`, which the keeper never reads | REMOVED |
 
 ## How to use this
 

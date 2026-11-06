@@ -109,7 +109,9 @@ libraries are present for every shipped ABI, and it carries the licence texts
 
 The terminal engine is libghostty-vt, built from one pinned Ghostty commit by a nix
 derivation. `nix develop` exports `LDMUX_VT_LIB_DIR`; outside the shell, point it at a
-directory holding `libghostty-vt.a`.
+directory holding `libghostty-vt.a`. The Android SDK and NDK are **host-provided** (the mobile
+devShell finds `$HOME/Android/Sdk`), so `scripts/android.sh test` on a machine without one
+stops at "SDK location not found" — install the SDK and NDK first.
 
 ## Where to read more
 

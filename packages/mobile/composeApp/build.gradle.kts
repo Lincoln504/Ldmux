@@ -217,6 +217,22 @@ tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.co
 // what Gradle merged from dependencies; this one opens the artifact and refuses any ABI outside the
 // declared list, and any listed ABI without both libraries. A packaging rule that is only asserted
 // against its own input is an assumption about the output.
+tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.configureEach {
+    doFirst {
+        // `scripts/collect-licenses.sh` writes this tree and `android.sh` runs it first. A
+        // missing tree means the artifact would ship without the notices MIT, BSD-3-Clause and
+        // Apache-2.0 require, so refuse here rather than trusting the caller.
+        val licenses = rootDir.resolve("../..").resolve("dist/licenses")
+        val notices = licenses.resolve("THIRD-PARTY-NOTICES.md")
+        if (!notices.isFile) {
+            throw GradleException(
+                "licence texts missing from ${licenses.path}: run scripts/collect-licenses.sh " +
+                    "before packaging, or use scripts/android.sh release/bundle which does it.",
+            )
+        }
+    }
+}
+
 tasks.matching { it.name == "bundleRelease" }.configureEach {
     doLast {
         val aab = file("build/outputs/bundle/release/composeApp-release.aab")
@@ -240,6 +256,24 @@ tasks.matching { it.name == "bundleRelease" }.configureEach {
             if (missing.isNotEmpty()) {
                 throw GradleException("the bundle is missing: ${missing.joinToString(", ")}")
             }
+        }
+    }
+}
+
+// **A release cannot be built with the version-code fallback.** `versionCode` comes from
+// `git rev-list --count HEAD`, so a build from a tarball (no `.git`) would silently produce 1 —
+// the number that has already been uploaded, rejected by Play, and identical for every such
+// build. The fallback stays for debug builds, where nothing reads it.
+val versionCodeKnown: Boolean = (System.getenv("LDMUX_VERSION_CODE")?.toIntOrNull()) != null ||
+    gitCommitCount() != null
+tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.configureEach {
+    doFirst {
+        if (!versionCodeKnown) {
+            throw GradleException(
+                "release versionCode is unknown: this is not a git checkout, so the commit count " +
+                    "cannot be read. Set LDMUX_VERSION_CODE (for example the number the last upload " +
+                    "used, plus one), or build from the repository.",
+            )
         }
     }
 }

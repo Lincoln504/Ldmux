@@ -23,9 +23,9 @@ the list was right only by accident.
 1. **`ldmux attach <id>` is the desk client for a terminal you already have.** It runs the
    attach client in the current terminal and becomes the pane; `ldmux shell` is the same for a
    shell that does not exist yet. These are the verbs a person uses on the host.
-2. **A spawned window is for the cases where nobody is sitting at the terminal already**:
-   the phone's "send to desktop", and the `Mod+Return` keybinding. Those keep working, and
-   `ldmux window` is the command they use.
+2. **A spawned window is for the case where nobody is sitting at the terminal already**: the
+   phone's "send to desktop". A `Mod+Return` keybinding does not need one — the wrapper opens
+   the emulator itself and runs `ldmux shell` inside it.
 3. **A spawned window opens in the terminal the user configured**, in this order: a pin set
    with `ldmux terminal set`, `$TERMINAL`, `xdg-terminal-exec` when installed, **the
    configured terminal of the desktop session that is actually running** (GNOME/Cinnamon/MATE

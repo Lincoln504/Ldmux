@@ -45,7 +45,6 @@ RuntimeDirectoryPreserve=yes
 # `~/.local/bin` and the conventional system directories as a floor and leaves the
 # rest of the inherited PATH alone.
 Environment=LDMUX_STATE_DIR=%t/ldmux
-Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 EnvironmentFile=-%h/.config/ldmux/env
 # No socket argument: the keeper resolves it exactly as the daemon does
 # (`$LDMUX_STATE_DIR/keeper.sock`, ADR: one resolver for every path). A hard-coded

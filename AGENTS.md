@@ -49,7 +49,7 @@ consolidated into them at `731970f` and is readable at `c3d7c56`.
 - **Tests are the gate.** `scripts/test-parallel.py`, inside `nix develop` (the QR
   decode tests need `zbarimg`, which only the devShell has). It builds with
   `cargo test --no-run`, reads the executables out of the JSON, and runs them in a
-  pool: 52 binaries in about 32 s against 118 s for `cargo test --workspace`,
+  pool: 48 binaries in about 80 s against 118 s for `cargo test --workspace`,
   which runs them one at a time. `cargo test --workspace` remains the authority on
   what the gate is; the script only changes how the same binaries are scheduled.
   `nix flake check` runs `cargo test --workspace` in the nix sandbox.

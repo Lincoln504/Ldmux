@@ -29,7 +29,12 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 bin_dir=${1:-${LDMUX_BIN_DIR:-$HERE/../target/release}}
 deploy=${LDMUX_DEPLOY:-$HERE/../deploy}
 
-for b in ldmuxd ldmux ldmux-keeper; do
+# Every binary the package ships. `ldmux-attach` is the desk client as a standalone binary (the
+# daemon's `attach` subcommand runs the same code); it is linked here so a terminal keybinding,
+# a `.desktop` entry or a script can name it directly.
+BINARIES="ldmuxd ldmux ldmux-keeper ldmux-attach"
+
+for b in $BINARIES; do
   [ -x "$bin_dir/$b" ] || {
     echo "error: $bin_dir/$b not found. Build first: nix build   (or: cargo build --release --workspace)" >&2
     exit 1
@@ -60,18 +65,23 @@ case "$bin_dir" in
     stamp=$(date +%Y%m%d%H%M%S)
     rel=$state/releases/$stamp
     mkdir -p "$rel/bin"
-    for b in ldmuxd ldmux ldmux-keeper; do
+    for b in $BINARIES; do
       cp "$bin_dir/$b" "$rel/bin/.$b.new" && chmod 755 "$rel/bin/.$b.new" && mv "$rel/bin/.$b.new" "$rel/bin/$b"
     done
     # The terminal launcher (a keybinding runs it; it opens your emulator and runs `ldmux shell`). In a nix
     # package it is already in bin/.
     install -m 755 "$deploy/bin/ldmux-terminal" "$rel/bin/ldmux-terminal"
     ln -sfn "$rel" "$state/current.new" && mv -T "$state/current.new" "$state/current"
+    # Keep the current release and the two before it. Every install used to add one for ever:
+    # 24 of them and 237 MB on this machine, none of which can be started by anything.
+    ls -1dt "$state"/releases/*/ 2>/dev/null | tail -n +4 | while IFS= read -r old; do
+      rm -rf "$old"
+    done
     ;;
 esac
 
 # 2. ~/.local/bin links (atomic replace; never a plain file we did not make).
-for b in ldmuxd ldmux ldmux-keeper ldmux-terminal; do
+for b in $BINARIES ldmux-terminal; do
   [ -e "$state/current/bin/$b" ] || continue
   if [ -e "$local_bin/$b" ] && [ ! -L "$local_bin/$b" ]; then
     echo "note: replacing the regular file $local_bin/$b (from an older install) with a link"
@@ -87,7 +97,9 @@ install_unit() {
   name=$1
   [ -f "$deploy/$name" ] || { echo "error: $deploy/$name not found" >&2; exit 1; }
   rendered=$state/$name.rendered
-  sed "s|@BIN_DIR@|$state/current/bin|g" "$deploy/$name" > "$rendered"
+  # Only `ExecStart=` carries the substitution. A bare `sed` rewrote the comment that explains
+  # the substitution too, so the installed unit described itself as a path nobody had.
+  sed "/^ExecStart=/s|@BIN_DIR@|$state/current/bin|g" "$deploy/$name" > "$rendered"
   unit=$unit_dir/$name
   if [ ! -e "$unit" ] || [ "${FORCE:-}" = 1 ]; then
     install -m 644 "$rendered" "$unit"
