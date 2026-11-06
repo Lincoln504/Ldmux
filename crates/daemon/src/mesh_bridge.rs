@@ -1186,9 +1186,13 @@ impl Host for DaemonHost {
                 a.iter()
                     .filter_map(|m| {
                         let id = m.get("session").and_then(|x| x.as_str())?.to_owned();
+                        // A kind this build does not know is skipped, not folded into `done`: a
+                        // word added later would otherwise arrive as the wrong mark instead of as
+                        // no mark.
                         let kind = match m.get("kind").and_then(|x| x.as_str()) {
+                            Some("done") => 0,
                             Some("attention") => 1,
-                            _ => 0,
+                            _ => return None,
                         };
                         Some((id, kind))
                     })
