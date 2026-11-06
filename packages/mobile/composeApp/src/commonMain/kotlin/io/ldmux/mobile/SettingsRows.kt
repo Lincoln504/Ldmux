@@ -149,8 +149,6 @@ internal val SettingsRowPad = 8.dp
 /** The gap between two sections. The break is the header's job, not a large blank. */
 internal val SettingsSectionGap = 20.dp
 
-/** How far a line that belongs to the row above it is indented: one character of the label. */
-internal val SettingsIndent = 10.dp
 
 /**
  * A value in a row: the thing the label names.
@@ -180,18 +178,18 @@ internal fun SettingsValue(
 /**
  * A line under a row, explaining what the row does or what it costs.
  *
- * It used to be indented to start where the values started, because there was a label column to
- * clear. There is no column now, so it starts where its row's title starts.
+ * **A dash, not an indent.** The line used to be pushed right by one character, which read as a
+ * hanging indent with nothing to hang from: the eye saw a column that was not there, and the
+ * line looked like a mistake rather than a remark. A leading dash says "this belongs to the row
+ * above" in the space of one character, and it is how the rest of the app writes an aside.
  */
 @Composable
 internal fun SettingsNote(text: String, color: Color = Muted) {
     Text(
-        text,
+        "- " + text,
         color = color,
         fontSize = 11.sp,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = SettingsIndent, bottom = SettingsRowPad),
+        modifier = Modifier.fillMaxWidth().padding(bottom = SettingsRowPad),
     )
 }
 

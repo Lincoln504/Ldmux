@@ -258,11 +258,6 @@ private fun ControlSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             if (current.compact) onSave(current.copy(compact = false))
         }
     }
-    // Said plainly, because the two are not equally good for a thumb: compact is a density
-    // choice for fitting a phone's screen, and it puts controls below the 48 dp touch target
-    // that every platform guidance recommends. A user who finds controls hard to hit should
-    // know which way to switch rather than guess.
-    if (current.compact) SettingsNote("compact controls are smaller than the 48 dp touch target")
 }
 
 @Composable
