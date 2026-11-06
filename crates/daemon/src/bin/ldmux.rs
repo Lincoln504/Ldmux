@@ -339,7 +339,7 @@ fn print_mesh_session(v: &serde_json::Value) {
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|new|shell|attach|terminal|send|key|capture|kill|close|forget|adopt|mesh|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|new|shell|attach|terminal|send|key|capture|buzz|kill|close|forget|adopt|mesh|code|pair|clipboard-write> [args]"
     );
     eprintln!("       ldmux --version    which build this is");
 }
