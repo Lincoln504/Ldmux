@@ -42,10 +42,41 @@ import io.ldmux.mobile.appLog
  * is a few dozen screens, far past what anyone reads back through on a radio. */
 private const val MESH_HISTORY_MAX = 2_000
 
+/** How quiet the shell has to be for a synced answer to count as finished. */
+internal const val SYNC_SETTLE_MS = 900L
+
+/** The longest a sync can hold the view open, however talkative the program is. */
+internal const val SYNC_DRAW_MAX_MS = 8_000L
+
 class MeshTerminalSource(
     private val input: MeshTerminalHandle,
     private val newEngine: (Int, Int) -> TerminalEngine = { c, r -> TerminalEngine(c, r) },
+    /**
+     * The same monotonic clock the handle stamps input with, for the draw-through window.
+     *
+     * Required, not defaulted: a fixed clock would leave the window open for ever, which turns
+     * batch mode into live mode by accident.
+     */
+    private val now: () -> Long,
 ) : TerminalSource, TerminalHandle by input {
+
+    /**
+     * While a synced answer is arriving, the view follows it.
+     *
+     * The wait for an answer ends on the first screen that arrives, which is normally the host
+     * echoing what was sent. The *answer* follows in more screens, and those were frozen — so a
+     * synced command printed its result into a frozen view and the user had to press `show` to see
+     * the outcome of a command they had already sent. Measured on the device, 2026-11-06: `pwd`,
+     * enter, sync, and the bar read "view 2 behind" over a screen with no output.
+     *
+     * **The window is idle-based, not a fixed wait.** Every screen that arrives while it is open
+     * pushes the deadline out by [SYNC_SETTLE_MS], so the view follows the answer until the shell
+     * stops talking and then freezes again by itself — no fixed delay is ever waited for, and a
+     * slow answer is not cut off. [SYNC_DRAW_MAX_MS] is the ceiling, so a program that talks for
+     * ever (a build log) cannot hold the view open against the mode's purpose.
+     */
+    private var drawThroughUntil: Long = 0
+    private var drawThroughCeiling: Long = 0
 
     private var engine: TerminalEngine? = null
     private var cols = 0
@@ -181,7 +212,11 @@ class MeshTerminalSource(
             hold.settle()
             return false
         }
-        if (hold.sync(pending)) return true
+        if (hold.sync(pending)) {
+            drawThroughUntil = now() + SYNC_SETTLE_MS
+            drawThroughCeiling = now() + SYNC_DRAW_MAX_MS
+            return true
+        }
         // "Show": draw the newest held screen and end the wait — the user asked to see the shell,
         // not to wait for an answer to a send that did not happen.
         pullHeld()
@@ -309,7 +344,12 @@ class MeshTerminalSource(
         // empty until a sync. Measured 2026-11-06: the first screen drew at 80x24, the fit
         // re-described the terminal as 46x19, and every screen after that was held.
         val rebuilt = engine == null || screen.cols != cols || screen.lines.size != rows
-        val accept = hold.acceptScreen(painted = last != null && !rebuilt)
+        // A sync opens the view until the answer stops arriving: the answer is not one screen.
+        val t = now()
+        val open = t < drawThroughUntil && t < drawThroughCeiling
+        if (open) drawThroughUntil = minOf(t + SYNC_SETTLE_MS, drawThroughCeiling)
+        val accepting = open
+        val accept = accepting || hold.acceptScreen(painted = last != null && !rebuilt)
         // Which shell a screen belongs to, and whether the hold took it, is the one fact that
         // decides whether a freshly opened shell paints. Logged at the decision, because the two
         // plausible causes (a stale `painted`, a shell id that never changed) look identical from

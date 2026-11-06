@@ -17,10 +17,14 @@ class MeshTerminalSourceTest {
         scrollTotal = 0, scrollOffset = 0, scrollLen = 0, cells = emptyList(),
     )
 
+    /** A clock the test moves by hand, so "now" is a fact rather than a sleep. */
+    private class TestClock { var now: Long = 1_000 }
+    private var clock = TestClock()
+
     private fun source(): Triple<MeshTerminalSource, MeshTerminalHandle, MeshInputBatcher> {
         val b = MeshInputBatcher()
-        val h = MeshTerminalHandle(b, { 0L })
-        return Triple(MeshTerminalSource(h), h, b)
+        val h = MeshTerminalHandle(b, clock = { clock.now })
+        return Triple(MeshTerminalSource(h, now = { clock.now }), h, b)
     }
 
     @Test
@@ -98,5 +102,30 @@ class MeshTerminalSourceTest {
         s.discardHeldScreens()
         assertFalse(s.heldScreenWaiting, "nothing is waiting once the page is left")
         assertEquals(0, s.heldUpdates, "and the bar has nothing to count")
+    }
+
+    /// **A sync opens the view just long enough to see the answer.** The wait ends on the first
+    /// screen that arrives — normally the host echoing what was sent — and the answer follows in
+    /// more screens, which were frozen. Measured on the device: `pwd`, enter, sync, and the bar said
+    /// "view 2 behind" over a screen with no output; the user had to press `show` for the result of
+    /// a command they had already sent.
+    @Test
+    fun `the screens after a sync are drawn, and the freeze returns once the window ends`() {
+        val (s, _, b) = source()
+        s.setPublicChannel(true)
+        s.show(MeshScreen(listOf("first"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
+        s.show(MeshScreen(listOf("frozen"), 0, 0, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
+        assertTrue(s.heldScreenWaiting, "the view is frozen before the sync")
+        // Typing makes `sync` a send rather than a show, which arms the window.
+        b.appendText("pwd".encodeToByteArray(), clock.now)
+        assertTrue(s.sync(), "there was text to send")
+        s.show(MeshScreen(listOf("echo"), 0, 0, alternate = false, dead = false, epoch = 3, cols = 20), "aa11")
+        assertFalse(s.heldScreenWaiting, "the answer must be drawn, not held")
+        s.show(MeshScreen(listOf("/tmp"), 0, 0, alternate = false, dead = false, epoch = 4, cols = 20), "aa11")
+        assertFalse(s.heldScreenWaiting, "and so must the rest of the answer")
+        // Past the window the freeze is back: the mode still means something.
+        clock.now += SYNC_DRAW_MAX_MS + 1
+        s.show(MeshScreen(listOf("later"), 0, 0, alternate = false, dead = false, epoch = 5, cols = 20), "aa11")
+        assertTrue(s.heldScreenWaiting, "after the window the view freezes again")
     }
 }

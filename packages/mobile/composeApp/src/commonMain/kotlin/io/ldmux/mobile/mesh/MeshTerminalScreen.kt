@@ -320,7 +320,7 @@ fun MeshTerminalScreen(
     // addressee.
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
-    val source = remember(conn) { MeshTerminalSource(handle) }
+    val source = remember(conn) { MeshTerminalSource(handle, now = clock) }
     // **A shell that was just opened shows itself, without a timer.** This used to be a 1.5 s
     // `LaunchedEffect` that pulled the held screen, and it was a workaround: the real cause was
     // that the hold judged "has anything been painted" over the source's whole life, so a new
