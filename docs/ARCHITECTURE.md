@@ -286,7 +286,7 @@ by the host radio, by the app before it retunes, and by every budget below.
 | macOS daemon | not supported yet |
 | Windows | not supported, not planned |
 | Android client | done, verified on a device |
-| iOS client | not started, needs a macOS host for the xcframework |
+| iOS client | not in development, and would be tailnet only (the radio route is the Android Bluetooth client). Needs a macOS host for the xcframework |
 | LoRa route, Android plus host | built and run on real radios, multi-hop recovery not implemented |
 
 ## 11. Bringing up the two radios
@@ -348,7 +348,7 @@ changes.
   on every shipped ABI, and carries the licence texts collected into `dist/licenses`.
 - `nix develop` provides the toolchain and `LDMUX_VT_LIB_DIR`. The terminal engine is
   libghostty-vt, built from one pinned Ghostty commit.
-- CI runs on every branch: `nix flake check`, clippy, the Rust pool, `cargo deny`.
+- **There is no CI.** Nothing runs on push: the gate is the four commands in the README's Development section, run by whoever is about to push. `nix flake check` is the one that also builds in the sandbox.
   It does not build the Android artifact, by decision.
 
 ## 13. Where the code is
