@@ -317,6 +317,8 @@ suite (574 cases) green.
 | 17.41 | Nothing recorded *why* the radio route carries its own session instead of using MeshCore's channel encryption, so the next reader would have to re-derive it from the firmware | DOCUMENTED — `docs/adr/0029-the-session-rides-raw-custom.md`, with the firmware evidence, the costs and the rejected alternatives |
 | 17.42 | The README described the app and the host but never the security model, so "encrypted" was a claim with no page behind it | DOCUMENTED — a Security section: what each route protects, what it does not, where secrets live, and which ADR has the reasoning |
 | 17.43 | `docs/ARCHITECTURE.md` §8 and §9 still said the firmware was the airtime meter, and §4 did not list the `Commit` idle flag | FIXED — the budget section describes the host's countdown and its per-record charge, the failure row says what the host now does, and the flag vocabulary is written down |
+| 17.44 | The README carried the security model inline, described things in the second person, and led with prose instead of features | RESTRUCTURED — features first in the operator's words, security moved to `docs/SECURITY.md`, and every sentence impersonal |
+| 17.45 | The mark in the README was a single icon with the launcher's full corner radius | the pair now: tighter radius, `ld` and its vertical mirror which reads `pl`, centred together (`docs/media/README.md` says how to rebuild them) |
 
 ## How to use this
 

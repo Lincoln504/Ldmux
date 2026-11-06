@@ -51,7 +51,7 @@ action the list always offers.
 
 ### The desk surface
 
-**A desk window is a terminal you already have.** `ldmux attach <id>` runs the same client a
+**A desk window is the terminal already open.** `ldmux attach <id>` runs the same client a
 desk window runs, in the terminal it is started in; `ldmux shell` creates a session and becomes
 its window there. The CLI opens nothing: `ldmux new` creates a shell and
 prints its id so a script can carry on.
@@ -236,7 +236,7 @@ ADR-0010 is the decision. The practice:
 - **The decision and its alternatives** are recorded in
   [`docs/adr/0029-the-session-rides-raw-custom.md`](adr/0029-the-session-rides-raw-custom.md); this
   section is the summary and the audit.
-- **Why we carry our own layer at all.** MeshCore's own envelope, for the payload types that
+- **Why a session layer sits inside MeshCore.** Its own envelope, for the payload types that
   carry text, is AES-128-**ECB** with no nonce or IV, a HMAC-SHA256 tag truncated to **two
   bytes**, and a static-static ECDH secret reused in both directions with no rekey (firmware
   evidence: `Utils.cpp`'s `aes.encryptBlock` loop and `resetHMAC(shared_secret, PUB_KEY_SIZE)`,
@@ -244,9 +244,9 @@ ADR-0010 is the decision. The practice:
   never rekey at all"). That is deterministic, forgeable at 1 in 65,536 per attempt, and has no
   forward secrecy. A terminal session needs none of those properties to hold, so ldmux uses the
   payload type the firmware reserves for it: `RAW_CUSTOM` (0x0F), documented in `Packet.h` as
-  "custom packet as raw bytes, for applications with custom encryption, payloads, etc". We do
-  not encrypt twice and we do not rely on a channel key: the packet is addressed to the peer's
-  radio key and its payload is our sealed record.
+  "custom packet as raw bytes, for applications with custom encryption, payloads, etc". Nothing
+  is encrypted twice and no channel key is involved: the packet is addressed to the peer's radio
+  key and its payload is the sealed record.
 - **The session layer, checked against the Noise spec** (audited 2026-11-06): `snow` keeps a
   separate send and receive `CipherState`, so the half-duplex link cannot reuse a key and nonce
   across directions (Noise §12.2 calls the alternative catastrophic); the nonce is the 32-bit
@@ -257,12 +257,12 @@ ADR-0010 is the decision. The practice:
   field either selects the key or is the nonce, so any change fails the tag; and the prologue
   names the suite, so mismatched peers fail the handshake instead of deriving different keys from
   the same flags.
-- **What the session does not give you**: no post-compromise security (no ratchet), no traffic
+- **What the session does not give**: no post-compromise security (no ratchet), no traffic
   analysis resistance (record sizes follow the text, and the L2 path and node hashes are plaintext
   by MeshCore's design), and no protection against a leaked pairing code, which carries the PSK
   and the bearer token together.
 - **A public channel changes nothing about confidentiality.** The channel is a
-  frequency and a preset, not a trust decision: our records travel as direct
+  frequency and a preset, not a trust decision: records travel as direct
   packets addressed to the peer's public key (`RAW_CUSTOM_DIRECT_HEADER = 0x3E`,
   `crates/companion/src/codec.rs`), each one sealed afresh under the session
   (`crates/session/src/session.rs`, handshake `Noise_IKpsk2_25519_ChaChaPoly_SHA256`),

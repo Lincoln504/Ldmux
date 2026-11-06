@@ -1,0 +1,14 @@
+# The README mark
+
+`app-icon.png` is the launcher foreground (`packages/mobile/composeApp/src/androidMain/res/drawable/ic_launcher_foreground.xml`)
+drawn on a `#0A0A0A` rounded rectangle with a 21.5 % corner radius, which is slightly tighter than the
+launcher mask. `app-icon-pair.png` is that image and a vertically flipped copy side by side, 588 px
+apart, on a 1100 x 512 canvas: the flipped copy reads `pl`, so the pair reads as the name.
+
+Rebuild with ImageMagick, from a 512 px render of the icon:
+
+    convert app-icon.png -flip flipped.png
+    convert -size 1100x512 xc:none app-icon.png -geometry +0+0 -composite \
+            flipped.png -geometry +588+0 -composite app-icon-pair.png
+
+Both are referenced from `README.md` only.
