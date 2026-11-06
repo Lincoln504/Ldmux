@@ -105,56 +105,46 @@
   attach through the daemon's ownership model, and synchronized phone+desktop
   viewing.
 
-The primary design goal is to fix the **mobile terminal UX** that made gmux
-painful (scroll jumping, session switching, modifier keys) while staying far
-simpler than gmux because it is keeper-native and pi-native.
+The primary design goal is the **mobile terminal UX**. Scroll jumping, session
+switching and modifier keys are the things that go wrong there, and the design
+answers each one directly. Everything else is kept as small as that goal allows.
 
 ---
 
 ## 1. Background and intent
 
-> *§1 is the background as of v0.1 and names tmux as the intended backbone; it is
-> kept as the record of intent. The built system uses the keeper (ADR-0018).*
+> *§1 is the background as of v0.1, when tmux was the intended backbone. The built
+> system uses the keeper (ADR-0018).*
 
-### 1.1 What exists today
+### 1.1 What the design is answering
 
-- **gmux** (Go, v2.1.0): wraps arbitrary commands in a PTY, auto-starts `gmuxd`,
-  serves a Preact/xterm.js dashboard at `127.0.0.1:8790` (optionally via embedded
-  tsnet). A bash function wraps interactive `pi` as `gmux -- pi "$@"`. Rendered in
-  a **browser**, which is where the mobile UX is worst.
-- **dooboxes** (Rust, `~/Documents/dooboxes`): a container-workspace product with
-  a tmux-backed session bridge, terminal codec, `alacritty_terminal` core, Tauri
-  desktop, and deep prior research on mobile terminal UX/perf and tailnet
-  transport. Different product, excellent lessons.
-- **Tailscale** is installed and running on the host (`<host>.<tailnet>.ts.net`,
-  `100.x.y.z`); the user's Android phone is on the tailnet.
+Mobile terminals fail in a few specific ways, and this project exists to answer them:
 
-### 1.2 Why not fork gmux
+- a scroll position that jumps when output arrives while the reader is looking back
+- session switching that loses where you were
+- modifier keys a phone keyboard cannot express
+- a browser as the renderer, which is where the interaction is worst
 
-gmux's PTY-runner + daemon + adapter + browser stack is more machinery than
-needed. The user wants tmux, a native-ish mobile app, pi-native lifecycle,
-Tailscale only, and far less functionality than dooboxes.
+### 1.2 What that decided
 
-### 1.3 What we keep from gmux
+- Server-authoritative sessions, with thin clients that hold no session state.
+- One terminal renderer behind one client interface, native on the phone.
+- Tailnet-first transport, WireGuard-encrypted, no public exposure and no ACME.
+- End-to-end pins for every cross-component contract.
+- Scroll anchoring as an explicit client state machine rather than a heuristic
+  (ADR-0004).
+- A stateful per-stream sanitizer, byte to line framing, and an incremental UTF-8
+  decoder per pane: the three places a terminal bridge usually corrupts bytes.
+- The validated mobile vocabulary: Termux-style extra keys, gestures, jump to
+  bottom, and a ceiling on frame rate.
 
-- Child-awareness (env vars + a local endpoint the child reports to), simplified.
-- Optional session families / parent-child (phase 2+).
-- The hard-won lesson that scroll anchoring must be an explicit client state
-  machine (gmux PR #500, `@gmux/scroll-anchor`).
-- Tailnet-only remote access.
+### 1.3 What came from the pre-port investigation
 
-### 1.4 What we keep from dooboxes
-
-- tmux control mode (`-C` over pipes) as the real-time transport — the
-  corrected finding (ADR-0001): `-C` needs **no** PTY, only `-CC` does. Its
-  concept of a *stateful per-stream sanitizer* and its diff/scroll lessons are
-  kept; its ControlModeClient is not a reference implementation.
-- A server-authoritative session model; clients are thin.
-- One terminal renderer behind one client interface.
-- Tailnet-first, WireGuard-encrypted, no public ACME.
-- E2E pins for every cross-component contract.
-- The validated mobile UX vocabulary (Termux-style extra keys, gestures,
-  jump-to-bottom) and mobile perf constraints.
+The investigation compared transport options and surveyed session layers, and is
+recorded in [`archive/INVESTIGATION.md`](archive/INVESTIGATION.md). Its finding that
+control mode needs no PTY held, and its survey of session layers, mattered at the
+time. The keeper replaced tmux (ADR-0018), so that material is history rather than
+design.
 
 ---
 
@@ -204,7 +194,7 @@ Tailscale only, and far less functionality than dooboxes.
 
 ### 2.2 Non-goals
 
-- No containers / Docker / devcontainers (that is `dooboxes`).
+- No containers / Docker / devcontainers.
 - No hosted relay, billing, Supabase, Centrifugo, Play Integrity.
 - No public internet exposure (no Funnel by default).
 - No adapter zoo, and no session kinds at all: every session is a shell (2026-11-05).
@@ -469,11 +459,11 @@ A `PaneStream` interface abstracts this; `pipe-pane` (raw bytes) and a
 server-side VT emulator (perfect snapshots) slot in behind it later.
 
 Rationale: `-C` over pipes gives control-mode latency and flow control **without
-the native PTY dependency** the v0.1/v0.2 drafts assumed (dooboxes labelled
-control mode "PTY-based"; that is a convention, not a requirement for `-C`).
+the native PTY dependency** the v0.1/v0.2 drafts assumed. Calling control mode
+PTY-based is a convention, not a requirement for `-C`.
 See [`archive/TRANSPORT.md`](archive/TRANSPORT.md) for the experiments and the parser spec.
 
-**Parser requirements (do not repeat dooboxes' bugs):** byte→line framing on
+**Parser requirements (the three places a naive bridge corrupts bytes):** byte→line framing on
 `\n` (never `readline`; U+2028/9 must not split); octal → **bytes** then a
 **per-pane incremental UTF-8 decoder** (never `byte as char` or per-chunk
 `from_utf8`); correlate `%begin/%end/%error <seq>`; tolerate unknown `%…` lines;
@@ -753,7 +743,7 @@ every VT mode — is closed.)
 
 ---
 
-## 7. Mobile UX specification (the part gmux got wrong)
+## 7. Mobile UX specification (the part that usually goes wrong)
 
 ### 7.1 Orientation & layout
 
@@ -775,7 +765,7 @@ every VT mode — is closed.)
 
 - Session switching is a **drawer** action; the only swipe shortcut is a narrow
   left/right **edge strip** (20 px), because a horizontal drag inside the
-  terminal belongs to the running program (dooboxes `MOBILE_TERMINAL_UX` §5).
+  terminal belongs to the running program.
   The pager lists sessions; tap to jump. Switching is instant.
 - **The page order is the user's, and a page number is stable** (amended
   2026-10-25). A page is a shell the user opened, in the order they opened it:
@@ -827,7 +817,7 @@ every VT mode — is closed.)
 
 ### 7.4 Scroll model — the crown jewel
 
-gmux's bug (PR #500): stale `wasAtBottom`/pixel snapshots racing user wheel input
+The classic bug: stale `wasAtBottom`/pixel snapshots racing user wheel input
 across BSU→ESU→rAF windows (25 wheel-up notches → net −41 lines). Fix: an explicit
 mode state machine.
 
@@ -860,7 +850,7 @@ carries is never read by the client. What is built is the emulator's viewport ab
 which delivers the property this section exists for without needing a line identity
 to do it. The superseded description is left in ADR-0004 as the record of what was
 planned.
-- Local scrollback cap: **1,000 lines on mobile** (dooboxes mobile perf research; the browser client that measured it was deleted)
+- Local scrollback cap: **1,000 lines on mobile** (measured on a browser client that has since been deleted)
   with a configurable max; the keeper's per-session scrollback is bounded by the emulator
   (10,000 lines was the tmux-era figure, ~40 MB/pane) and the `scrollback` message serves older pages on demand.
 
@@ -1122,7 +1112,7 @@ ldmux is not a pi plugin.
 | R11 | ~~pi RPC UI sprawl.~~ Moot: there is no pi RPC surface. Removed 2026-11-05 (§4.5 deleted, `SessionDriver` seam dropped) because the product is a shell app: a terminal, three ways to reach it, and nothing Pi-specific. |
 | R12 | ~~Control-mode parser robustness.~~ Moot: the keeper protocol is our own framed JSON/binary. | Split-UTF-8 carry (`protocol::utf8::Utf8Carry`) and frame tests. |
 | R13 | iOS scope creep. | v1 = Android; iOS is a documented target. |
-| Q1 | Wrapper attaches interactively? | Recommend yes (gmux parity). |
+| Q1 | Wrapper attaches interactively? | Recommend yes: it is what a wrapper is for. |
 | Q2 | ~~serve vs direct bind~~ | **Resolved (ADR-0016): direct tailnet bind**, superseding ADR-0005's `tailscale serve`. |
 | Q3 | Native renderer timing? | Defer behind `TerminalSurface`. |
 | Q4 | Session families? | Phase 2+. |
@@ -1151,10 +1141,10 @@ ldmux is not a pi plugin.
 
 > *Historical: prior art that informed the tmux-era design.*
 
-See [`archive/INVESTIGATION.md`](archive/INVESTIGATION.md) for citations. Summary: gmux (runner/
-daemon/web; scroll-anchor PR #500; two-gate Tailscale auth); dooboxes (tmux
-control mode over PTY; multi-client attachment model; mobile UX/perf research;
-terminal codec; portability lessons); trustmux/ttyd/wetty/gotty/mttyd (tmux+
+See [`archive/INVESTIGATION.md`](archive/INVESTIGATION.md) for citations. Summary: PTY
+runners with web dashboards and two-gate Tailscale auth; tmux control mode over a
+PTY with a multi-client attachment model, mobile UX and performance research, a
+terminal codec and portability lessons; trustmux/ttyd/wetty/gotty/mttyd (tmux+
 Tailscale+web; mobile input fixes); Mosh/Blink/Termius/Termux (mobile interaction
 patterns); pi-mobile/pi-remote/paseo (WebSocket bridges over `pi --mode rpc`);
 tmuxy-core/cdx/tmux-control-mode-js (control-mode parsers); SocketPipe (framing).
@@ -1189,4 +1179,4 @@ lines under `docs/adr/`; every ADR carries a `Status:` line directly under its t
 
 Individual ADRs live under `docs/adr/`. ADR-0001 to ADR-0003 and ADR-0015 are
 superseded and kept as history; ADR-0006 records the deliberate divergences from
-dooboxes/gmux.
+the prior art.

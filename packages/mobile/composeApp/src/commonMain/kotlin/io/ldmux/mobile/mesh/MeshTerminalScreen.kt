@@ -80,6 +80,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import io.ldmux.mobile.AccentBtn
 import io.ldmux.mobile.HeldElsewhere
+import io.ldmux.mobile.Notice
+import io.ldmux.mobile.NoticeLine
 
 /**
  * How long a sync waits for the host's answer before the screen stops waiting and says so.
@@ -831,27 +833,31 @@ fun MeshTerminalScreen(
                         // What the link adds is said only while it is true, over the terminal like the voice
                         // banner, and never as a row: the tailnet's live screen is the terminal and the
                         // bar. The hour's records and the typing that waits are on the shell list.
-                        val notice = when {
-                            syncNotice != null -> syncNotice
-                            source.scrollNotice != null -> source.scrollNotice
+                        // **The app's own notice vocabulary, with its own weight.** These lines
+                        // were all painted in the fault colour, including the two that are merely
+                        // information (`waiting for send budget`, `full-screen program`), which
+                        // teaches the reader to distrust the colour. `Notice` distinguishes them,
+                        // and it is the same type and renderer the tailnet route uses.
+                        val notice: Notice? = when {
+                            syncNotice != null -> Notice(syncNotice!!, ok = false)
+                            source.scrollNotice != null -> Notice(source.scrollNotice!!, ok = true)
                             // The refusal drops the whole keystroke and sends nothing, so a
                             // notice that says "sync to send" over an empty buffer names a button
                             // that does nothing. Say what there is to do in each state.
                             handle.overflow && source.publicChannel && handle.hasPending ->
-                                "too much held: sync to send"
+                                Notice("too much held: sync to send", ok = false)
                             handle.overflow && source.publicChannel ->
-                                "input refused: the held text is at its limit"
-                            handle.overflow -> "too much typed: wait for it to send"
-                            live?.stalled == true -> "waiting for send budget"
-                            live?.screen?.alternate == true -> "full-screen program: updates are large and slow"
+                                Notice("input refused: the held text is at its limit", ok = false)
+                            handle.overflow -> Notice("too much typed: wait for it to send", ok = false)
+                            live?.stalled == true -> Notice("waiting for send budget", ok = true)
+                            live?.screen?.alternate == true ->
+                                Notice("full-screen program: updates are large and slow", ok = true)
                             else -> null
                         }
                         if (notice != null) {
-                            Text(
-                                notice,
-                                color = Warn, fontSize = 11.sp,
-                                modifier = Modifier.align(Alignment.TopCenter).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp),
-                            )
+                            Box(Modifier.align(Alignment.TopCenter).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                                NoticeLine(notice)
+                            }
                         }
                     }
                 }
