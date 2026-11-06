@@ -124,9 +124,14 @@ fun LauncherScreen(
         // be a row of target chips up here that set a mode for both, which is a
         // choice made in one place and spent in another — and the button that spent
         // it did nothing at all until a chip had been pressed.
+        // **The daemon's diagnostic paragraph is not main-menu copy.** It reads "no window manager
+        // could be enumerated (i3/sway/niri/hyprland need their msg tool on PATH; other X11
+        // desktops need xprop)" and was printed verbatim under the title at 10 sp, which is an
+        // error wall above the list. The launcher says whether the desktop is readable; the
+        // reason stays in the RPC for anyone who asks `ldmux desktop`.
         if (desktop?.detail != null) {
             Spacer(Modifier.height(LocalTouch.current.rowPad))
-            Text(desktop.detail, color = Dim, fontSize = 10.sp, maxLines = 2)
+            Text("the desktop could not be read", color = Dim, fontSize = 10.sp, maxLines = 1)
         }
 
         Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
@@ -142,12 +147,12 @@ fun LauncherScreen(
         // what this is, what it needs, and the one action that helps.
         if (link == LinkState.Unpaired) {
             Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
-            Text("this phone is not paired with a host", color = Fg, fontSize = 13.sp)
+            // Two lines, not four sentences. A stranger needs to know what this is and what to do
+            // next; the route options are a Settings row and do not belong in a first-run notice.
+            Text("not paired with a host", color = Fg, fontSize = 13.sp)
             Spacer(Modifier.height(LocalTouch.current.rowPad))
             Text(
-                "ldmux runs on a Linux machine you own. On that machine run `ldmux code`, then " +
-                    "scan the code from Settings, under pairing. A phone with its own LoRa radio can " +
-                    "reach the same machine over the air instead.",
+                "On your Linux machine run `ldmux code`, then scan it in Settings.",
                 color = Dim,
                 fontSize = 11.sp,
             )

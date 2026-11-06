@@ -281,6 +281,15 @@ class MeshTermDriver(
 
     /** The shell this attach is on, by the host's own id, when it is known (see [MeshShells]). */
     private var attachedId: String? = null
+
+    /**
+     * The id the host answered `Create` with, before the attach that follows lands.
+     *
+     * Held rather than inferred: the attach is queued on the answer, so the screen can show "the
+     * host is starting a shell" for exactly the shell it asked for instead of guessing from a list
+     * another client may have changed in between.
+     */
+    private var createdId: String? = null
     /** A list was asked for while attached: its answer fills [shells] and attaches nothing. */
     private var listingForHeader = false
     private val _shells = MutableStateFlow(MeshShells(emptyList(), null))
@@ -650,6 +659,46 @@ class MeshTermDriver(
         true
     }
 
+    /**
+     * Ask the host to start a shell, and attach to the one it makes (version 7).
+     *
+     * **This is the verb the radio route was missing.** Without it a phone could only type into the
+     * shells the desk had started, which made the LoRa list a viewer where the tailnet launcher is a
+     * client. The host records the shell as the phone's, so it stays the phone's after a restart.
+     * The answer is [TermMessage.Created], and the attach happens there rather than here: the id is
+     * the host's to choose.
+     */
+    suspend fun createShell(cwd: String): Boolean = lock.withLock {
+        if (session == null || terminalView != null) return@withLock false
+        // A host that predates version 7 cannot read the message; asking would spend a record on
+        // silence. The list still works, so the row that offers this is what says why.
+        if (hostVersion in 1 until MeshTerm.SHELL_CONTROL_VERSION) return@withLock false
+        createdId = null
+        queue(TermMessage.Create(MeshTerm.VERSION, cwd)); pump(); publish()
+        true
+    }
+
+    /**
+     * Ask the host to end a shell, or put it down when a desk window holds it (version 7).
+     *
+     * The host's `close`, not a destroy: ending a desk shell from a phone is not this app's
+     * decision (ADR-0010), and the host answers with the list that is now true.
+     */
+    suspend fun closeShell(id: String): Boolean = lock.withLock {
+        if (session == null || terminalView != null) return@withLock false
+        if (id.isEmpty()) return@withLock false
+        queue(TermMessage.Close(id)); pump(); publish()
+        true
+    }
+
+    /** Ask the host to open a shell in a desk window: the launcher's "open on desktop" (version 7). */
+    suspend fun makeLive(id: String): Boolean = lock.withLock {
+        if (session == null || terminalView != null) return@withLock false
+        if (id.isEmpty()) return@withLock false
+        queue(TermMessage.MakeLive(id)); pump(); publish()
+        true
+    }
+
     /** Ask the host which shells are running again (after [MeshTermView.NoShells], or from the picker). */
     suspend fun refresh() = lock.withLock {
         if (session == null || terminalView != null) return@withLock
@@ -781,6 +830,19 @@ class MeshTermDriver(
                 else -> terminalView = MeshTermView.HostClosed(m.reason)
             }
             is TermMessage.Sessions -> onSessions(m)
+            // **The host has started a shell for us.** Attach to exactly that id: the list is not
+            // consulted, so another client's shell cannot be picked up by accident between the
+            // request and the answer.
+            is TermMessage.Created -> {
+                createdId = m.id
+                if (terminalView == null && pick != Pick.None) {
+                    mirror = RowMirror()
+                    held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
+                    attachedId = m.id
+                    publishShells()
+                    queue(TermMessage.Attach(MeshTerm.VERSION, m.id))
+                }
+            }
             // Phone→host messages from a host are not ours to act on.
             else -> {}
         }

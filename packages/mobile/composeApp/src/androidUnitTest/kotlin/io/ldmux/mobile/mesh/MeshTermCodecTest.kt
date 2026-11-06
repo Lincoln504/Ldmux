@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -61,9 +62,11 @@ class MeshTermCodecTest {
                         it.jsonObject["id"]!!.jsonPrimitive.content,
                         it.jsonObject["label"]!!.jsonPrimitive.content,
                         it.jsonObject["cwd"]!!.jsonPrimitive.content,
+                        (it.jsonObject["origin"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
                     )
                 },
                 o["cwd"]!!.jsonPrimitive.boolean,
+                (o["origin"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
             )
             else -> error("unknown fixture kind $kind")
         }
@@ -138,6 +141,12 @@ class MeshTermCodecTest {
         assertEquals(input.map { it.jsonObject["id"]!!.jsonPrimitive.content }, got.flatMap { g -> g.entries.map { it.id } })
         // The folder rides the same entries: a path cut by the host decodes to the same cut.
         assertEquals(input.map { it.jsonObject["cwd"]!!.jsonPrimitive.content }, got.flatMap { g -> g.entries.map { it.cwd } })
+        // Version 7: so does who started the shell, and only a phone that asked is sent it.
+        assertTrue(got.all { it.origin }, "the fixture is the version-7 form")
+        assertEquals(
+            input.map { it.jsonObject["origin"]!!.jsonPrimitive.content },
+            got.flatMap { g -> g.entries.map { it.origin } },
+        )
     }
 
     @Test

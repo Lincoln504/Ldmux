@@ -24,7 +24,7 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send.
      */
-    const val VERSION = 6
+    const val VERSION = 7
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -37,10 +37,25 @@ object MeshTerm {
     const val LINE_VERSION = 5
     /** The first version whose `Sessions` entries carry the shell's working directory. */
     const val CWD_VERSION = 6
+
+    /**
+     * The first version that can start and end shells, not only view them (version 7).
+     *
+     * Version 6 and older gave the phone `List`, `Attach`, `Input`, `Key`, `Resize` and `Detach`, so
+     * over the radio a phone could type into the shells the desk had started and could not start one
+     * of its own, could not end one, and could not put one on the desk. That is the whole difference
+     * between the radio route and the tailnet launcher, and it is why this list had no `+ shell`.
+     */
+    const val SHELL_CONTROL_VERSION = 7
+
+    /** The first version whose `Sessions` entries carry who started the shell (version 7). */
+    const val ORIGIN_VERSION = 7
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
     const val MAX_BODY = 300
-    const val MAX_ROWS_BODY = 130
+    // 134, not 130: a version-7 entry is `2 + id 40 + label 24 + cwd 61 + origin 7`, and a page
+    // must hold at least one entry. The message is 137 bytes, inside one record's 143.
+    const val MAX_ROWS_BODY = 134
     const val MAX_MESSAGE = 1 + 2 + MAX_ROWS_BODY
     /** 172 - 24 (ADR-0020) - 5 (ARQ header incl. the per-record mark): one record's capacity. */
     const val RECORD_PAYLOAD = 143
@@ -51,6 +66,9 @@ object MeshTerm {
     const val MAX_LABEL = 24
     /** Longest shell working directory in a `Sessions` entry: worst case 3 + 40 + 24 + 60 < 130. */
     const val MAX_CWD = 60
+
+    /** The longest origin word on the wire: `desktop` is the longest of phone/desktop/local. */
+    const val MAX_ORIGIN = 7
     /** Most shells a host lists. */
     const val MAX_SESSIONS = 16
     const val MAX_BUFFER = 4096
@@ -88,6 +106,10 @@ object MeshTerm {
     internal const val T_LIST = 0x05
     internal const val T_KEY = 0x06
     internal const val T_RESIZE = 0x07
+    internal const val T_CREATE = 0x08
+    internal const val T_CLOSE = 0x09
+    internal const val T_MAKE_LIVE = 0x0a
+    internal const val T_CREATED = 0x86
     internal const val T_SESSIONS = 0x85
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
@@ -99,7 +121,21 @@ object MeshTerm {
  * One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector, [cwd] is where
  * the shell is (version 6; empty from a version-5 host, which does not send the field at all).
  */
-data class SessionEntry(val id: String, val label: String, val cwd: String = "")
+data class SessionEntry(
+    val id: String,
+    val label: String,
+    val cwd: String = "",
+    /**
+     * Who started the shell: `phone`, `desktop` or `local` (version 7; empty from a version-6 host).
+     *
+     * The mesh launcher needs the same fact the tailnet one has: a shell this phone opened keeps its
+     * close and open-on-desktop actions after the app restarts instead of passing for a desk shell.
+     */
+    val origin: String = "",
+) {
+    /** Whether this phone started the shell, so the row may offer to end it or put it on the desk. */
+    val openedByPhone: Boolean get() = origin == "phone"
+}
 
 data class TermPatch(val y: Int, val append: Boolean, val text: String)
 
@@ -143,7 +179,31 @@ sealed interface TermMessage {
      * empty last page). [cwd] says the entries carry their working directory (version 6); the host
      * sets it only for a phone that attached with [MeshTerm.CWD_VERSION] or later.
      */
-    data class Sessions(val last: Boolean, val entries: List<SessionEntry>, val cwd: Boolean = false) : TermMessage
+    data class Sessions(
+        val last: Boolean,
+        val entries: List<SessionEntry>,
+        val cwd: Boolean = false,
+        val origin: Boolean = false,
+    ) : TermMessage
+
+    /**
+     * Phone asks the host to start a shell in [cwd] (empty = the host's default). Version 7 and later
+     * only; a version-6 host answers `Closed { VERSION }` rather than starting a shell the phone
+     * cannot then refer to.
+     */
+    data class Create(val version: Int, val cwd: String) : TermMessage
+
+    /**
+     * Phone asks the host to end that shell, or to put it down when a desk window holds it: the
+     * host's `close`, exactly as the tailnet client's is (ADR-0010). Version 7 and later only.
+     */
+    data class Close(val selector: String) : TermMessage
+
+    /** Phone asks the host to open that shell in a desk window. Version 7 and later only. */
+    data class MakeLive(val selector: String) : TermMessage
+
+    /** Host: the shell `Create` just made, so the phone attaches to that one and not to a guess. */
+    data class Created(val id: String) : TermMessage
 }
 
 /** A field is over its limit, or an `Input` is empty. Nothing is truncated: the caller decides. */
@@ -248,19 +308,49 @@ fun TermMessage.encode(): ByteArray {
             body.add(cols.toByte()); body.add(rows.toByte())
             MeshTerm.T_RESIZE
         }
+        is TermMessage.Create -> {
+            val cwdBytes = cwd.encodeToByteArray()
+            if (cwdBytes.size > MeshTerm.MAX_CWD) throw TermEncodeException("cwd too long")
+            body.add(u8(version, "version"))
+            cwdBytes.forEach { body.add(it) }
+            MeshTerm.T_CREATE
+        }
+        is TermMessage.Close -> {
+            val sel = selector.encodeToByteArray()
+            if (sel.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
+            sel.forEach { body.add(it) }
+            MeshTerm.T_CLOSE
+        }
+        is TermMessage.MakeLive -> {
+            val sel = selector.encodeToByteArray()
+            if (sel.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
+            sel.forEach { body.add(it) }
+            MeshTerm.T_MAKE_LIVE
+        }
+        is TermMessage.Created -> {
+            val i = id.encodeToByteArray()
+            if (i.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("id too long")
+            body.add(i.size.toByte()); i.forEach { body.add(it) }
+            MeshTerm.T_CREATED
+        }
         is TermMessage.Sessions -> {
-            body.add(((if (last) 1 else 0) or (if (cwd) 2 else 0)).toByte())
+            body.add(
+                ((if (last) 1 else 0) or (if (cwd) 2 else 0) or (if (origin) 4 else 0)).toByte(),
+            )
             for (e in entries) {
                 val id = e.id.encodeToByteArray()
                 val label = e.label.encodeToByteArray()
                 val path = e.cwd.encodeToByteArray()
+                val by = e.origin.encodeToByteArray()
                 if (id.size > MeshTerm.MAX_SELECTOR || label.size > MeshTerm.MAX_LABEL) {
                     throw TermEncodeException("session entry too long")
                 }
                 if (cwd && path.size > MeshTerm.MAX_CWD) throw TermEncodeException("session path too long")
+                if (origin && by.size > MeshTerm.MAX_ORIGIN) throw TermEncodeException("origin too long")
                 body.add(id.size.toByte()); id.forEach { body.add(it) }
                 body.add(label.size.toByte()); label.forEach { body.add(it) }
                 if (cwd) { body.add(path.size.toByte()); path.forEach { body.add(it) } }
+                if (origin) { body.add(by.size.toByte()); by.forEach { body.add(it) } }
             }
             if (body.size > MeshTerm.MAX_ROWS_BODY) throw TermEncodeException("sessions body too long")
             MeshTerm.T_SESSIONS
@@ -415,9 +505,29 @@ class TermDecoder {
             }
             MeshTerm.T_RESIZE ->
                 if (body.size == 2 && b(body, 0) != 0 && b(body, 1) != 0) ok(TermMessage.Resize(b(body, 0), b(body, 1))) else Parsed.Bad
+            MeshTerm.T_CREATE -> {
+                if (body.isEmpty()) return Parsed.Bad
+                val version = b(body, 0)
+                if (body.size - 1 > MeshTerm.MAX_CWD) return Parsed.Bad
+                val cwd = utf8(body.copyOfRange(1, body.size)) ?: return Parsed.Bad
+                ok(TermMessage.Create(version, cwd))
+            }
+            MeshTerm.T_CLOSE, MeshTerm.T_MAKE_LIVE -> {
+                if (body.size > MeshTerm.MAX_SELECTOR) return Parsed.Bad
+                val selector = utf8(body) ?: return Parsed.Bad
+                if (tag == MeshTerm.T_CLOSE) ok(TermMessage.Close(selector)) else ok(TermMessage.MakeLive(selector))
+            }
+            MeshTerm.T_CREATED -> {
+                if (body.isEmpty()) return Parsed.Bad
+                val n = b(body, 0)
+                if (n > MeshTerm.MAX_SELECTOR || body.size - 1 != n) return Parsed.Bad
+                val id = utf8(body.copyOfRange(1, body.size)) ?: return Parsed.Bad
+                ok(TermMessage.Created(id))
+            }
             MeshTerm.T_SESSIONS -> {
                 if (body.isEmpty()) return Parsed.Bad
                 val withCwd = body[0].toInt() and 2 != 0
+                val withOrigin = body[0].toInt() and 4 != 0
                 val entries = ArrayList<SessionEntry>()
                 var p = 1
                 fun field(max: Int): String? {
@@ -432,9 +542,10 @@ class TermDecoder {
                     val id = field(MeshTerm.MAX_SELECTOR) ?: return Parsed.Bad
                     val label = field(MeshTerm.MAX_LABEL) ?: return Parsed.Bad
                     val cwd = if (withCwd) field(MeshTerm.MAX_CWD) ?: return Parsed.Bad else ""
-                    entries += SessionEntry(id, label, cwd)
+                    val origin = if (withOrigin) field(MeshTerm.MAX_ORIGIN) ?: return Parsed.Bad else ""
+                    entries += SessionEntry(id, label, cwd, origin)
                 }
-                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries, withCwd))
+                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries, withCwd, withOrigin))
             }
             else -> Parsed.Unknown
         }

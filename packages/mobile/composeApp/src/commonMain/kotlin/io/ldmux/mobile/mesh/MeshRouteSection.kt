@@ -184,20 +184,22 @@ internal fun MeshRouteSection(
                 openAirtime = current.meshOpenAirtime,
                 onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
                 onOpenPreset = { showPreset = !showPreset; showPicker = false },
+                afterPreset = {
+                    if (showPreset) {
+                        RadioPresetPanel(
+                            address = current.meshRadio,
+                            openAirtime = current.meshOpenAirtime,
+                            onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
+                            onClassified = onRadioChannel,
+                            onUnset = {
+                                onConfig(current.copy(meshRadio = "", meshRadioName = ""))
+                                showPreset = false
+                            },
+                            onDismiss = { showPreset = false },
+                        )
+                    }
+                },
             )
-            if (showPreset) {
-                RadioPresetPanel(
-                    address = current.meshRadio,
-                    openAirtime = current.meshOpenAirtime,
-                    onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
-                    onClassified = onRadioChannel,
-                    onUnset = {
-                        onConfig(current.copy(meshRadio = "", meshRadioName = ""))
-                        showPreset = false
-                    },
-                    onDismiss = { showPreset = false },
-                )
-            }
 
             // The mode is a property of the link, so it is set where the link is set. `live` is
             // unavailable on a public channel and is drawn dim rather than removed.
@@ -254,6 +256,16 @@ private fun MeshRadioFacts(
     openAirtime: Boolean,
     onBudget: (RadioBudgetMode) -> Unit,
     onOpenPreset: () -> Unit,
+    /**
+     * Drawn **directly under the preset row**, before anything else this block emits.
+     *
+     * The preset panel used to be emitted by the caller after the whole block, so it landed under
+     * whatever the block ended with — which is now the airtime toggle and its readout. Tapping
+     * `preset` opened a panel two rows below the row that opened it, and the user reported exactly
+     * that (measured 2026-11-05: "the box that comes up is beneath the air time limit"). A slot
+     * keeps the panel tied to its own row by construction, not by emission order in another file.
+     */
+    afterPreset: @Composable () -> Unit = {},
 ) {
     var link by remember(address) { mutableStateOf<RadioLink?>(null) }
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
@@ -304,6 +316,7 @@ private fun MeshRadioFacts(
             Text("preset", color = Accent, fontSize = 12.sp, maxLines = 1)
         }
     }
+    afterPreset()
     // **The limit and its readout, together, on the page.** The meter existed only inside the
     // preset panel, next to the tuple it does not belong to, and the airtime it spends was a
     // separate row in the facts above with no control near it. One setting and one line: the

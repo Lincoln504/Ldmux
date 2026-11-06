@@ -70,6 +70,12 @@ import kotlin.time.TimeSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import androidx.compose.ui.draw.clip
+import io.ldmux.mobile.IconBtn
+import io.ldmux.mobile.IconPopOut
+import io.ldmux.mobile.NewShellModal
+import io.ldmux.mobile.RadiusMedium
+import io.ldmux.mobile.Surface
 
 /**
  * How long a sync waits for the host's answer before the screen stops waiting and says so.
@@ -435,6 +441,9 @@ fun MeshTerminalScreen(
     // was a page, so a header reading `1 / 2 shells` followed a tap on one row, and the tap itself
     // attached at once with no way to choose a second.
     var chosen by remember(conn) { mutableStateOf(listOf<String>()) }
+    // The launcher's own create dialogue, over the radio: it asks where, and the host starts the
+    // shell. This is what the mesh route lacked — it could view the desk's shells and not start one.
+    var newShellOpen by remember(conn) { mutableStateOf(false) }
     var pageOrder by remember(conn) { mutableStateOf(listOf<String>()) }
 
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -795,6 +804,9 @@ fun MeshTerminalScreen(
                         chosen = chosen,
                         onToggle = { id -> chosen = if (id in chosen) chosen - id else chosen + id },
                         onOpen = openChosen,
+                        onNewShell = { newShellOpen = true },
+                        onClose = { id -> scope.launch { conn.driver.closeShell(id) } },
+                        onMakeLive = { id -> scope.launch { conn.driver.makeLive(id) } },
                         modifier = Modifier.weight(1f),
                     )
                 } else {
@@ -817,6 +829,17 @@ fun MeshTerminalScreen(
                     }
                     Spacer(Modifier.weight(1f))
                 }
+                // The launcher's own create dialogue, over the radio. The host starts the shell and
+                // says its id; the driver attaches to that one (version 7).
+                if (newShellOpen) {
+                    NewShellModal(
+                        onDismiss = { newShellOpen = false },
+                        onCreate = { path ->
+                            newShellOpen = false
+                            scope.launch { conn.driver.createShell(path) }
+                        },
+                    )
+                }
             }
         }
     }
@@ -834,6 +857,12 @@ private fun MeshShellList(
     chosen: List<String>,
     onToggle: (String) -> Unit,
     onOpen: (List<SessionEntry>) -> Unit,
+    /** Start a shell on the host (version 7). The same row the tailnet launcher has. */
+    onNewShell: () -> Unit,
+    /** End a shell this phone started, or put it down when a desk window holds it. */
+    onClose: (String) -> Unit,
+    /** Open one of this phone's shells in a desk window on the host. */
+    onMakeLive: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // In the order ticked, skipping anything that left the list meanwhile (a shell can end between two taps).
@@ -854,7 +883,33 @@ private fun MeshShellList(
                     ordinal = picked.indexOfFirst { it.id == e.id }.takeIf { it >= 0 }?.plus(1),
                     inUse = e.id == current,
                     onClick = { onToggle(e.id) },
-                )
+                    // **The same rule as the tailnet launcher**: only a shell this phone started can
+                    // be ended or moved from the phone. The host enforces it too — `close` on a desk
+                    // shell puts it down rather than destroying it — so the row and the host agree.
+                    mobileShell = e.openedByPhone,
+                    onKill = if (e.openedByPhone) ({ onClose(e.id) }) else null,
+                ) {
+                    if (e.openedByPhone) {
+                        IconBtn(onClick = { onMakeLive(e.id) }, label = "open on the desktop") {
+                            IconPopOut(Dim)
+                        }
+                    }
+                }
+            }
+            // Starting a shell is the list's last row, exactly as on the tailnet: one more thing you
+            // can open, at the end of the list rather than competing with `open`.
+            item(key = "+shell") {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RadiusMedium)
+                        .background(Surface)
+                        .clickable { onNewShell() }
+                        .padding(vertical = LocalTouch.current.rowPad * 2),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("+ shell", color = Fg, fontSize = 14.sp)
+                }
             }
         }
         Spacer(Modifier.height(LocalTouch.current.rowPad))
