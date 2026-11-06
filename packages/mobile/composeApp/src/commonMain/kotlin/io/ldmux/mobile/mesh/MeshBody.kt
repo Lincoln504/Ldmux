@@ -41,24 +41,24 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
         },
     )
     is MeshTermView.LinkDown -> when (view.link) {
-        MeshLinkState.NeedsRadio -> MeshBody("choose the radio in Settings")
+        MeshLinkState.NeedsRadio -> MeshBody("choose the LoRa radio in Settings")
         MeshLinkState.NeedsPermission -> MeshBody("Bluetooth permission is off for LDMUX")
         MeshLinkState.NoPath -> MeshBody(
             "the host's stored path is not usable",
-            "the screen retries by itself; refresh to try now, or move closer to the host radio",
+            "the screen retries by itself; refresh to try now, or move closer to the host's LoRa radio",
         )
         MeshLinkState.Idle, MeshLinkState.Connecting, MeshLinkState.Bound ->
-            MeshBody("connecting to the radio")
+            MeshBody("connecting to the LoRa radio")
         MeshLinkState.RadioUnavailable -> MeshBody(
-            "the radio is not connected",
+            "the LoRa radio is not connected",
             "check that it is on and in range; this screen keeps retrying",
         )
         // `Refused` comes from the radio's own error codes (not a contact, unsupported
         // command, busy), none of which is the L3 pin. Saying "check that the host is paired"
         // sent the user to the pairing screen for a radio problem.
         MeshLinkState.Refused -> MeshBody(
-            "the radio refused that record",
-            "that is usually a busy radio or a path that has not resolved yet; this screen retries by itself",
+            "the LoRa radio refused that record",
+            "that is usually a busy LoRa radio or a path that has not resolved yet; this screen retries by itself",
         )
         // **A dropped link is not a diagnosis.** Three causes are possible and only one is
         // distance, so the old line asserted "it is off or out of range" on the first failed
@@ -66,7 +66,7 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
         // says the screen is working on it, and lists what to check only if it never connects.
         MeshLinkState.SessionFailed -> MeshBody(
             "the link dropped",
-            "this screen keeps retrying by itself; refresh to try now. If it never connects: the host is off, both radios are on different presets, or this phone is not paired (on the host: ldmux code --mesh)",
+            "this screen keeps retrying by itself; refresh to try now. If it never connects: the host is off, both LoRa radios are on different presets, or this phone is not paired (on the host: ldmux code --mesh)",
         )
         MeshLinkState.Closed -> MeshBody(
             "the link closed",
@@ -82,7 +82,7 @@ fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
     // Re-scanning cannot fix this one: the code that was scanned simply has no host radio
     // key in it, so the same scan produces the same state. The cure is on the host.
     MeshRouteProblem.NeedsPeer -> MeshBody(
-        "the code has no host radio key: print a new one on the host with `ldmux code --mesh` (see `ldmux mesh status`)",
+        "the code has no host LoRa radio key: print a new one on the host with `ldmux code --mesh` (see `ldmux mesh status`)",
     )
     MeshRouteProblem.NotOnThisPlatform -> MeshBody("the mesh route is not available on this device")
     MeshRouteProblem.SessionNotBuilt -> MeshBody("the session library did not load on this device")

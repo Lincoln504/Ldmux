@@ -38,7 +38,7 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
             PairingFact(if (p.isMeshOnly) "key" else "token", prompt.fingerprint)
             Text(
                 if (p.isMeshOnly) {
-                    "Everything you type will be sent over the mesh radio link to this computer. " +
+                    "Everything you type will be sent over the LoRa radio link to this computer. " +
                         "Your tailnet pairing is not changed."
                 } else {
                     "Everything you type will be sent to this address."

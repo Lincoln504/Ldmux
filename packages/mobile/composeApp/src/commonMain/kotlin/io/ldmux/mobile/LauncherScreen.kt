@@ -146,7 +146,7 @@ fun LauncherScreen(
             Spacer(Modifier.height(LocalTouch.current.rowPad))
             Text(
                 "ldmux runs on a Linux machine you own. On that machine run `ldmux code`, then " +
-                    "scan the code from Settings, under pairing. A phone with its own radio can " +
+                    "scan the code from Settings, under pairing. A phone with its own LoRa radio can " +
                     "reach the same machine over the air instead.",
                 color = Dim,
                 fontSize = 11.sp,

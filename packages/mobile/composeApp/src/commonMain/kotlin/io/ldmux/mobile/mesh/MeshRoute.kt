@@ -122,14 +122,14 @@ fun resolveRoute(
  * which has the room.
  */
 fun meshLinkLabel(state: MeshLinkState): String = when (state) {
-    MeshLinkState.NeedsRadio -> "mesh · choose a radio"
+    MeshLinkState.NeedsRadio -> "mesh · choose a LoRa radio"
     MeshLinkState.NeedsPermission -> "mesh · Bluetooth permission is off"
-    MeshLinkState.NoPath -> "mesh · the host radio has no usable direct path"
+    MeshLinkState.NoPath -> "mesh · the host's LoRa radio has no usable direct path"
     MeshLinkState.Idle -> "mesh · idle"
     MeshLinkState.Connecting -> "mesh · connecting"
     MeshLinkState.Bound -> "mesh · bound"
-    MeshLinkState.RadioUnavailable -> "mesh · radio unavailable"
-    MeshLinkState.Refused -> "mesh · the radio refused that record, retrying"
+    MeshLinkState.RadioUnavailable -> "mesh · LoRa radio unavailable"
+    MeshLinkState.Refused -> "mesh · the LoRa radio refused that record, retrying"
     MeshLinkState.SessionFailed -> "mesh · link dropped, reconnecting"
     MeshLinkState.Closed -> "mesh · closed"
 }
@@ -139,7 +139,7 @@ fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
     MeshRouteProblem.SessionNotBuilt -> "mesh · session library unavailable on this device"
     MeshRouteProblem.TerminalNotBuilt -> "mesh · the terminal is unavailable on this device"
     MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a pairing code made with ldmux code --mesh"
-    MeshRouteProblem.NeedsPeer -> "mesh · needs the host radio's public key"
+    MeshRouteProblem.NeedsPeer -> "mesh · needs the host's LoRa radio public key"
 }
 
 /*

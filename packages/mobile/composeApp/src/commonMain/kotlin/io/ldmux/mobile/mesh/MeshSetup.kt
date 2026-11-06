@@ -73,7 +73,7 @@ fun meshPairingLine(p: MeshPairingProblem): String = when (p) {
 /** One credential as a settings line. */
 fun meshCredentialName(c: MeshCredential): String = when (c) {
     MeshCredential.SessionKeys -> "session keys"
-    MeshCredential.HostRadioKey -> "host radio key"
+    MeshCredential.HostRadioKey -> "host LoRa radio key"
 }
 
 fun meshCredentialLine(c: MeshCredential): String = "\u2717 " + meshCredentialName(c)

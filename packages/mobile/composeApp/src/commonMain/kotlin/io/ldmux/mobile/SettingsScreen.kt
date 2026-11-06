@@ -141,7 +141,8 @@ internal fun SettingsScreen(
                     Spacer(Modifier.height(SettingsSectionGap))
                 }
             }
-            Spacer(Modifier.height(SettingsSectionGap * 2))
+            About()
+            Spacer(Modifier.height(SettingsSectionGap))
         }
     }
 }
@@ -197,7 +198,7 @@ private fun LinkChoice(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
         // `radio`, not `lora`: the word in the row's own consequence line and in every
         // message the mesh route prints is "radio", and `lora` is the name of a modulation
         // the user never chose.
-        OptionButton("radio", selected = current.route == MeshRoute.Mesh) {
+        OptionButton("LoRa radio", selected = current.route == MeshRoute.Mesh) {
             if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh))
         }
     }
@@ -211,7 +212,7 @@ private fun LinkChoice(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
  * changes what "paired" even refers to.
  */
 internal fun routeConsequence(route: MeshRoute): String =
-    if (route == MeshRoute.Mesh) "the phone's radio" else "over Tailscale"
+    if (route == MeshRoute.Mesh) "the phone's LoRa radio" else "over Tailscale"
 
 
 /**
@@ -338,8 +339,36 @@ private fun PairingRow(
         // else to lose, and a line that describes a consequence that does not exist is
         // noise on the one screen where the consequence is real.
         if (confirmUnpair && meshPresent) {
-            SettingsNote("this also forgets the mesh keys and the radio")
+            SettingsNote("this also forgets the mesh keys and the LoRa radio")
         }
         problem?.let { SettingsNote(it, color = Danger) }
+    }
+}
+
+/**
+ * The footer: which build this is, and where the project lives.
+ *
+ * Centred, because it is not a setting and must not read as one — a row is left-aligned
+ * because its label is a thing to scan; this is an aside about the app, and the one line a
+ * support question needs. The version comes from the package, so it cannot drift from what a
+ * store listing says. No copyright line: a claim about ownership answers nothing a reader of
+ * a settings screen asked, and the licence files are where that question belongs.
+ */
+@Composable
+private fun About() {
+    Column(
+        Modifier.fillMaxWidth().padding(top = SettingsSectionGap),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "ldmux " + appVersionName().ifEmpty { "dev" },
+            color = Dim,
+            fontSize = 11.sp,
+            fontFamily = MonoFont,
+        )
+        Spacer(Modifier.height(2.dp))
+        MiniTextButton(onClick = { openUrl("https://ldmux.io") }) {
+            Text("ldmux.io", color = Accent, fontSize = 12.sp)
+        }
     }
 }

@@ -105,49 +105,53 @@ enum class RadioRegion(val label: String) {
     NewZealand("New Zealand"),
 }
 
-/** A named public preset, plus the region it belongs to. */
-data class RadioPresetChoice(val label: String, val preset: RadioPreset)
+/** One public preset, as the community table defines it. */
+data class PublicPreset(
+    val id: String,
+    val label: String,
+    /** The region whose private band it sits in, or null where ldmux offers no private one. */
+    val region: RadioRegion?,
+    val preset: RadioPreset,
+)
 
 /**
- * The public presets a region actually uses. Values mirror the MeshCore app
- * feed on 2026-11-02; the feed is a suggestion, not a legal filter.
+ * **The whole public table, ported value-for-value.**
+ *
+ * Source: MeshMore's `Regions.kt` (itself a port of `lib/meshcore/region_presets.dart`), the
+ * community-curated set mirrored from the canonical MeshCore companion preset table. Read
+ * 2026-11-05.
+ *
+ * ldmux used to carry its own four-region list, and it had **drifted**: Australia was
+ * 915.075/125/SF9 here against 915.8/250/SF10 there, New Zealand SF7 against SF11, the EU narrow
+ * row CR8 against CR5, and every row carried 22 dBm regardless of what the region allows. Two
+ * radios in the same country on the two different tables do not hear each other, and nothing in
+ * either app says so. A second copy of a table of legal operating points is a second copy that
+ * transmits somewhere it should not, so this is a port, not a reinterpretation.
+ *
+ * Transmit power is part of each row rather than a constant: the EU rows are 14 dBm and the
+ * Japanese 13, and a radio left at 22 in either place is operating outside its limit.
  */
-fun publicPresets(region: RadioRegion): List<RadioPresetChoice> = when (region) {
-    RadioRegion.UsCanada -> listOf(
-        RadioPresetChoice("USA", RadioPreset.USA),
-        RadioPresetChoice("Canada (3-byte paths)", RadioPreset.CANADA),
-    )
-    RadioRegion.EuUk -> listOf(
-        RadioPresetChoice("EU/UK narrow", RadioPreset(
-            869.618, 62.5, 8, 8, 22, 1,
-        )),
-        RadioPresetChoice("EU/UK wide (deprecated)", RadioPreset(
-            869.525, 250.0, 11, 5, 22, 1,
-        )),
-    )
-    RadioRegion.Australia -> listOf(
-        // CR7, not CR8: the feed's `coding_rate` for this row is "7" (fetched 2026-10-28). The
-        // coding rate does not change whether two radios hear each other, but the airtime meter
-        // is computed from it, and that is the number the app uses to gate a send.
-        RadioPresetChoice("Australia narrow", RadioPreset(
-            916.575, 62.5, 7, 7, 22, 1,
-        )),
-        RadioPresetChoice("Australia mid", RadioPreset(
-            915.075, 125.0, 9, 5, 22, 1,
-        )),
-        RadioPresetChoice("Australia SA/WA", RadioPreset(
-            923.125, 62.5, 8, 8, 22, 1,
-        )),
-    )
-    RadioRegion.NewZealand -> listOf(
-        // 2-byte paths, not 1: the feed says so for this row (fetched 2026-10-28), and the width
-        // is what a node stamps on what it sends — a 1-byte stamp is a shorter trace than its
-        // neighbours expect to read, and a bigger payload budget than the region allows for.
-        RadioPresetChoice("New Zealand narrow", RadioPreset(
-            917.375, 62.5, 7, 5, 22, 2,
-        )),
-    )
-}
+val PublicPresets: List<PublicPreset> = listOf(
+    PublicPreset("us_canada", "USA / Canada", RadioRegion.UsCanada, RadioPreset(910.525, 62.5, 7, 5, 22, 1)),
+    PublicPreset("us_arizona", "USA \u2014 Arizona", RadioRegion.UsCanada, RadioPreset(908.205, 62.5, 10, 5, 20, 1)),
+    PublicPreset("jp_arib_t108", "Japan (ARIB T108)", null, RadioPreset(923.200, 125.0, 10, 5, 13, 1)),
+    PublicPreset("jp_meshcore", "Japan (MeshCore)", null, RadioPreset(920.800, 125.0, 12, 8, 13, 1)),
+    PublicPreset("eu_uk_long", "EU / UK long", RadioRegion.EuUk, RadioPreset(869.525, 250.0, 11, 5, 14, 1)),
+    PublicPreset("eu_uk_medium", "EU / UK medium", RadioRegion.EuUk, RadioPreset(869.525, 250.0, 10, 5, 14, 1)),
+    PublicPreset("eu_uk_narrow", "EU / UK narrow", RadioRegion.EuUk, RadioPreset(869.618, 62.5, 8, 5, 14, 1)),
+    PublicPreset("ch", "Switzerland", RadioRegion.EuUk, RadioPreset(869.618, 62.5, 8, 5, 14, 1)),
+    PublicPreset("cz", "Czech Republic", RadioRegion.EuUk, RadioPreset(869.432, 62.5, 7, 5, 14, 1)),
+    PublicPreset("pt_869", "Portugal 869", RadioRegion.EuUk, RadioPreset(869.618, 62.5, 7, 5, 14, 1)),
+    PublicPreset("au_default", "Australia", RadioRegion.Australia, RadioPreset(915.800, 250.0, 10, 5, 20, 1)),
+    PublicPreset("au_narrow", "Australia narrow", RadioRegion.Australia, RadioPreset(916.575, 62.5, 7, 5, 20, 1)),
+    PublicPreset("au_sa_wa_qld", "Australia SA/WA/QLD", RadioRegion.Australia, RadioPreset(923.125, 62.5, 8, 5, 20, 1)),
+    PublicPreset("nz_default", "New Zealand", RadioRegion.NewZealand, RadioPreset(917.375, 250.0, 11, 5, 20, 1)),
+    PublicPreset("vn", "Vietnam", null, RadioPreset(920.250, 250.0, 11, 5, 20, 1)),
+)
+
+/** The public presets inside one region's private band, for the region row's own list. */
+fun publicPresets(region: RadioRegion): List<PublicPreset> =
+    PublicPresets.filter { it.region == region }
 
 /**
  * Whether [preset] is a **public channel**: a tuple that other operators' radios also use.

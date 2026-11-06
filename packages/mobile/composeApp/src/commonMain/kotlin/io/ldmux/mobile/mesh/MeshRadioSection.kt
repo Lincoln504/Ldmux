@@ -30,6 +30,8 @@ import io.ldmux.mobile.Fg
 import io.ldmux.mobile.MiniTextButton
 import io.ldmux.mobile.ModalActions
 import io.ldmux.mobile.SettingsPanel
+import io.ldmux.mobile.SettingsRow
+import io.ldmux.mobile.SettingsChoice
 import io.ldmux.mobile.Muted
 import io.ldmux.mobile.Notice
 import io.ldmux.mobile.NoticeLine
@@ -60,7 +62,7 @@ internal fun RadioPickerPanel(
     }
     DisposableEffect(Unit) { onDispose { RadioScanner.cancel() } }
 
-    SettingsPanel("choose a radio", onDismiss) {
+    SettingsPanel("choose a LoRa radio", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (scanning) {
                 Text("scanning…", color = Muted, fontSize = 12.sp)
@@ -70,7 +72,7 @@ internal fun RadioPickerPanel(
                 Text(radioProblemLine(r.problem), color = Warn, fontSize = 12.sp)
             }
             if (r != null && r.devices.isEmpty() && r.ok) {
-                Text("no radio found", color = Muted, fontSize = 12.sp)
+                Text("no LoRa radio found", color = Muted, fontSize = 12.sp)
             }
             r?.devices?.forEach { d ->
                 MiniTextButton(
@@ -167,12 +169,12 @@ internal fun RadioPresetPanel(
 
     LaunchedEffect(address) {
         if (address.isEmpty()) {
-            note = Notice("choose a radio first", ok = false)
+            note = Notice("choose a LoRa radio first", ok = false)
             return@LaunchedEffect
         }
         val l = meshRadioLink(address, ByteArray(0))
         if (l == null) {
-            note = Notice("this build has no radio support", ok = false)
+            note = Notice("this build has no LoRa radio support", ok = false)
             return@LaunchedEffect
         }
         link = l
@@ -183,7 +185,7 @@ internal fun RadioPresetPanel(
         } catch (e: RadioLinkException) {
             note = Notice(radioLinkProblemLine(e.state), ok = false)
         } catch (e: Exception) {
-            note = Notice(e.message ?: "radio did not answer", ok = false)
+            note = Notice(e.message ?: "the LoRa radio did not answer", ok = false)
         }
     }
     // Open on the tuple the radio is actually using, not on a fresh proposal.
@@ -253,10 +255,10 @@ internal fun RadioPresetPanel(
         }
     }
 
-    SettingsPanel("radio", onDismiss) {
+    SettingsPanel("LoRa radio", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    address.ifEmpty { "no radio" } + "  ·  " + meshLinkLabel(state),
+                    address.ifEmpty { "no LoRa radio" } + "  ·  " + meshLinkLabel(state),
                     color = Dim,
                     fontSize = 11.sp,
                     fontFamily = MonoFont,
@@ -272,28 +274,23 @@ internal fun RadioPresetPanel(
                 // appears when its source answered, so an unbound radio shows nothing rather than
                 // zeros.
                 RadioFacts(info, device, status)
-                Text("region", color = Dim, fontSize = 11.sp)
-                // Wrapped, not one row: four region names ("USA / Canada" is the shortest
-                // two) are wider than a phone's modal, and a row that overflows loses the
-                // last one — the same bug the portrait key bar was rebuilt to avoid.
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    for (r in RadioRegion.entries) {
-                        OptionButton(r.label, selected = region == r) {
-                            region = r
-                            choose(privatePreset(r, Random(seed)))
+                // Wrapped, not one row: the region names are wider than a phone's panel, and a
+                // row that overflows loses the last one — the same bug the portrait key bar was
+                // rebuilt to avoid.
+                SettingsChoice("region", summary = "a private band inside the region's rules") {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        for (r in RadioRegion.entries) {
+                            OptionButton(r.label, selected = region == r) {
+                                region = r
+                                choose(privatePreset(r, Random(seed)))
+                            }
                         }
                     }
                 }
-                Text("preset", color = Dim, fontSize = 11.sp)
-                Text(
-                    presetLine(selected),
-                    color = Fg,
-                    fontSize = 11.sp,
-                    fontFamily = MonoFont,
-                )
+                SettingsRow("preset", summary = presetLine(selected))
                 if (custom) {
                     // One line, four numbers, in the order the radio prints them: MHz, kHz, SF, CR.
                     // The host's own preset appears in the gateway's start-up line; typing it here is
@@ -313,7 +310,7 @@ internal fun RadioPresetPanel(
                         } else if (typed == null) {
                             "not a tuple: four numbers, 137-1020 MHz, 62.5-500 kHz, SF5-12, CR5-8"
                         } else {
-                            "the tuple the host's radio is on"
+                            "the tuple the host's LoRa radio is on"
                         },
                         color = if (customText.isNotBlank() && typed == null) Warn else Dim,
                         fontSize = 11.sp,
@@ -345,18 +342,26 @@ internal fun RadioPresetPanel(
                     }
                 }
                 if (showPublic) {
-                    for (c in publicPresets(region)) {
-                        MiniTextButton(onClick = { choose(c.preset) }) {
-                            Text(c.label, color = Dim, fontSize = 11.sp, maxLines = 1)
+                    // **Every public preset, not only this region's.** They are the community's
+                    // operating points, and the one a user needs is often the one for where they
+                    // are going rather than where they are. Each shows its tuple underneath, so
+                    // two regions that share a frequency are still distinguishable.
+                    SettingsRow("public presets", summary = "tap one to adopt its tuple")
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        for (c in PublicPresets) {
+                            OptionButton(c.label, selected = c.preset == selected) {
+                                choose(c.preset)
+                                region = c.region ?: region
+                            }
                         }
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    // `budget`, not `airtime`: airtime is the quantity, and the choice is
-                    // whether LDMUX applies the 36 s/hour meter of its own accord. `open` and
-                    // `metered` also read as two adjectives where the buttons are verbs
-                    // everywhere else.
-                    Text("budget", color = Dim, fontSize = 11.sp)
+                // `budget`, not `airtime`: airtime is the quantity, and the choice is whether
+                // LDMUX applies the 36 s/hour meter of its own accord.
+                SettingsChoice("budget") {
                     OptionButton("metered", selected = !openAirtime) {
                         onBudget(RadioBudgetMode.Metered)
                         link?.setBudgetMode(RadioBudgetMode.Metered)
@@ -408,15 +413,15 @@ internal fun presetLine(p: RadioPreset): String =
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {
     RadioScanProblem.PermissionDenied -> "Bluetooth permission is off. Grant it, then scan again."
     RadioScanProblem.BluetoothOff -> "Bluetooth is off."
-    RadioScanProblem.Unsupported -> "this device has no Bluetooth LE radio."
+    RadioScanProblem.Unsupported -> "this device has no Bluetooth LE support."
     RadioScanProblem.Failed -> "the scan failed. Try again."
     null -> ""
 }
 
 private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
-    MeshLinkState.NeedsRadio -> "choose a radio first"
+    MeshLinkState.NeedsRadio -> "choose a LoRa radio first"
     MeshLinkState.NeedsPermission -> "Bluetooth permission is off"
-    MeshLinkState.RadioUnavailable -> "the radio is not answering"
+    MeshLinkState.RadioUnavailable -> "the LoRa radio is not answering"
     MeshLinkState.NoPath -> "the host path does not fit the terminal"
     else -> meshLinkLabel(state)
 }

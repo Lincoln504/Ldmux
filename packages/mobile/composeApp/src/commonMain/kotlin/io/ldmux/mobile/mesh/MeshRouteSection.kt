@@ -76,7 +76,7 @@ internal fun MeshRouteSection(
         // it, summarises its state, and carries the two verbs.
         val missing = MeshCredential.entries.filter { it !in view.present }
         SettingsRow(
-            "radio pairing",
+            "LoRa pairing",
             summary = when {
                 // Three words beat a list: when nothing is stored the answer to "am I paired"
                 // is "not paired", and which particular key is missing is a detail the scanner
@@ -130,18 +130,23 @@ internal fun MeshRouteSection(
             SettingsNote(meshProblemLabel(it.problem))
         }
         if (confirmForget) {
-            SettingsNote("this forgets the keys, the radio and the saved route")
+            SettingsNote("this forgets the keys, the LoRa radio and the saved route")
         }
 
         // The radio is the one new physical fact. Its name is shown because a MAC address is not
         // something a person recognises, and the address is kept because that is what BLE needs
         // after a reboot.
         SettingsRow(
-            "radio",
+            "LoRa radio",
+            // **The channel belongs here, not in a row of its own.** It is derived from the
+            // preset the panel writes — nothing on this page can change it — so a separate
+            // `channel` row said the same thing twice and made the page look like it had two
+            // radio settings. The address moved into the panel for the same reason: it is the
+            // same fact as the name, and two long strings do not fit one summary line.
             summary = when {
                 current.meshRadio.isEmpty() -> "none chosen"
-                current.meshRadioName.isEmpty() -> current.meshRadio
-                else -> current.meshRadioName + "  " + current.meshRadio
+                current.meshPublicChannel -> (current.meshRadioName.ifEmpty { current.meshRadio }) + " · public channel"
+                else -> (current.meshRadioName.ifEmpty { current.meshRadio }) + " · private channel"
             },
             trailing = {
                 MiniTextButton(onClick = { showPicker = !showPicker; showPreset = false }) {
@@ -190,17 +195,6 @@ internal fun MeshRouteSection(
                     onDismiss = { showPreset = false },
                 )
             }
-
-            // Which kind of channel the radio is on: derived from the tuple it reports, and it
-            // decides one thing — whether typing is held (ADR-0026).
-            SettingsRow(
-                "channel",
-                summary = if (current.meshPublicChannel) {
-                    "public · every keystroke is a broadcast"
-                } else {
-                    "private · mode is your choice"
-                },
-            )
 
             // The mode is a property of the link, so it is set where the link is set. `live` is
             // unavailable on a public channel and is drawn dim rather than removed.
