@@ -28,6 +28,20 @@ import androidx.compose.runtime.setValue
  * frozen view that did not tell the bar it was waiting would be a mode with no indicator.
  */
 internal class PublicChannelHold {
+
+    companion object {
+        /**
+         * Quiet that means "the answer has finished arriving".
+         *
+         * **Four seconds, because that is above this link's cadence, not one round trip.** An answer
+         * arrives as several records and on the shared channel the gap between two of them is
+         * seconds, not milliseconds: measured 2026-11-06, a `echo one` answered by three screens in
+         * about 5 s left two of them held with a 1.2 s window, so the user pressed `show` to see the
+         * output of a command that had already run. Long enough to cover a record, short enough that
+         * the view freezes again without the user noticing a delay.
+         */
+        const val QUIET_MS = 4_000L
+    }
     /** The mode is engaged. */
     var on: Boolean by mutableStateOf(false)
         private set
@@ -162,9 +176,40 @@ internal class PublicChannelHold {
      * paint. See [acceptScreen] for why a paint mid-drain does not even happen.
      */
     fun painted() {
-        awaiting = false
+        // **A paint is not the end of the wait.** The first screen after a send is normally the host
+        // echoing what was sent; the answer follows in more screens, and ending the wait there held
+        // every one of them — so a synced command printed its result into a frozen view and the user
+        // pressed `show` to see the outcome of a command already sent. Measured on the device,
+        // 2026-11-06: `echo hi` reached the host (`inputs: 1`) and the phone said "view 1 behind"
+        // over a screen with no output. The wait ends when the shell goes quiet: [settleIfQuiet].
         reported = false
         updates = 0
+    }
+
+    /** Quiet that means "the answer has finished arriving": about one round trip. */
+    private val quietMs = QUIET_MS
+
+    /** When the last screen was drawn, so "quiet" is measured from evidence. */
+    private var lastPaintAt: Long = 0
+
+    /** A screen was drawn now: the quiet timer restarts. */
+    fun drawn(nowMs: Long) {
+        lastPaintAt = nowMs
+        updates = 0
+    }
+
+    /**
+     * End the wait once the shell has stopped talking.
+     *
+     * Called on a tick while a wait is running. [QUIET_MS] is about one round trip, so an answer
+     * split across two records is not mistaken for a finished one.
+     */
+    fun settleIfQuiet(nowMs: Long): Boolean {
+        if (!awaiting || lastPaintAt == 0L) return false
+        if (nowMs - lastPaintAt < quietMs) return false
+        awaiting = false
+        reported = false
+        return true
     }
 
     /**
@@ -177,7 +222,13 @@ internal class PublicChannelHold {
     fun sync(pending: Boolean, nowMs: Long = 0L): Boolean {
         if (!on) return false
         awaiting = true
-        flushing = pending
+        lastPaintAt = nowMs
+        // **A press never stops a drain that is already running.** `flushing = pending` cleared it
+        // when the batcher happened to be empty at that instant — mid-drain, after the pump had
+        // taken the last piece — and the pump then stopped with records still to send. The user's
+        // text had left the batcher and never left the phone. Only a drain that is not running can
+        // be started here; `drained()` and `timedOut()` are what end one.
+        if (pending) flushing = true
         reported = false
         pressedAt = nowMs
         seq += 1

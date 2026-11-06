@@ -432,12 +432,36 @@ fun MeshTerminalScreen(
     // hold, and no answer came". Twenty seconds is several radio round trips — long enough not to
     // cry wolf on a slow link, short enough that a person does not sit on a dead screen.
     var syncNotice by remember { mutableStateOf<String?>(null) }
+    // **Text that dies with a rebuild is announced.** A rebuilt connection gets a new queue on
+    // purpose (carrying it re-delivered text the old session had already accepted), so anything
+    // still unsent is gone — and it used to go silently: the user pressed sync, the link rebuilt
+    // underneath, the bar emptied itself and nothing had been sent, with no word about it. One
+    // notice, the same word the shell-switch case uses.
+    var heldBeforeRebuild by remember { mutableStateOf(false) }
+    val hadHeld = handle.hasPending
+    LaunchedEffect(hadHeld) { if (hadHeld) heldBeforeRebuild = true }
+    LaunchedEffect(conn) {
+        if (heldBeforeRebuild) {
+            syncNotice = "held text discarded: the link was rebuilt"
+            heldBeforeRebuild = false
+        }
+    }
+
     // **Keyed on the press count, not on "a wait is running".** It used to be keyed on
     // `awaitingSync`, which the deadline's own action sets to false — so the notice was written
     // into a state change that re-keyed the effect, whose first line nulled the notice. The message
     // the ADR promises was rendered for at most one frame. A Boolean also cannot express "the user
     // pressed sync again", so a second press 15 s into a 20 s wait inherited 5 s of clock it had not
     // earned. A count restarts the deadline on every press and nothing else.
+    // **The wait ends when the shell goes quiet, not when the first screen lands.** A short tick
+    // checks whether the answer has stopped arriving; until it has, the view keeps drawing and the
+    // bar keeps saying it is waiting.
+    LaunchedEffect(source.awaitingSync) {
+        while (source.awaitingSync) {
+            delay(300)
+            source.settleIfQuiet()
+        }
+    }
     LaunchedEffect(source.syncSeq) {
         if (source.syncSeq == 0) return@LaunchedEffect
         // What is left of the deadline, not a fresh one: re-entering the page must not give the

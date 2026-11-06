@@ -110,6 +110,14 @@ data class LdmuxConfig(
      * link whose budget is the constraint.
      */
     val meshInputMode: MeshInputMode = MeshInputMode.Live,
+    /**
+     * The tuple the desktop's radio reported in the pairing code, as `freq_khz,bw_hz,sf,cr`.
+     *
+     * Stored so the radio panel can say what the desktop is on and offer to match it, days after the
+     * scan. Empty when the code carried none (an older daemon, or a host behind a gateway), which
+     * reads as "unknown" and shows nothing.
+     */
+    val meshHostPreset: String = "",
 ) {
 
     /**

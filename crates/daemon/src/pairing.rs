@@ -259,6 +259,13 @@ mod tests {
             host_key: [0x11; 32],
             psk: [0x22; 32],
             host_radio: Some([0x33; 32]),
+            // The host's tuple rides along, and the link still fits a code.
+            host_preset: Some(ldmux_protocol::pairing::HostPreset {
+                freq_khz: 910_525,
+                bw_hz: 500_000,
+                sf: 7,
+                cr: 5,
+            }),
         };
         let (pairing, link) =
             pairing_for_with_mesh(&live("100.100.0.1", 7625), "debian", Some(&keys)).unwrap();
@@ -286,6 +293,7 @@ mod tests {
             host_key: [7; 32],
             psk: [9; 32],
             host_radio: None,
+            host_preset: None,
         };
         let text = mesh_only_code_text("debian", &keys).expect("renders");
         assert!(text.trim_end().ends_with("debian  (mesh only)"), "{text}");

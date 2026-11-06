@@ -51,6 +51,8 @@ actual object AppPrefs {
     private const val KEY_MESH_OPEN_AIRTIME = "mesh_open_airtime"
     private const val KEY_MESH_PUBLIC_CHANNEL = "mesh_public_channel"
     private const val KEY_MESH_INPUT_MODE = "mesh_input_mode"
+    /** The desktop's tuple from the pairing code: four numbers, never a secret. */
+    private const val KEY_MESH_HOST_PRESET = "mesh_host_preset"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -80,6 +82,7 @@ actual object AppPrefs {
             meshPublicChannel = sp.getBoolean(KEY_MESH_PUBLIC_CHANNEL, LdmuxConfig.DEFAULT.meshPublicChannel),
             // Stored by name, not by ordinal: an enum's order is an implementation detail, and a
             // value that moved would silently change the mode of every install that had saved it.
+            meshHostPreset = sp.getString(KEY_MESH_HOST_PRESET, null) ?: "",
             meshInputMode = sp.getString(KEY_MESH_INPUT_MODE, null)
                 ?.let { name -> MeshInputMode.entries.firstOrNull { it.name == name } }
                 ?: LdmuxConfig.DEFAULT.meshInputMode,
@@ -116,6 +119,7 @@ actual object AppPrefs {
             .putBoolean(KEY_MESH_OPEN_AIRTIME, config.meshOpenAirtime)
             .putBoolean(KEY_MESH_PUBLIC_CHANNEL, config.meshPublicChannel)
             .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
+            .putString(KEY_MESH_HOST_PRESET, config.meshHostPreset)
             .apply()
         // Encrypt BEFORE dropping the plaintext. If the Keystore refuses — a restored backup, a
         // reset keystore — keeping the old plaintext key is the difference between a pairing that

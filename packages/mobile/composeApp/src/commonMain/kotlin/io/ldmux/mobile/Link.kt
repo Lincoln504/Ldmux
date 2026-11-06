@@ -120,6 +120,17 @@ class ConfigStore(
         } else {
             update(_config.value.paired(p))
         }
+        // **What the desktop's radio is on, kept for later.** The panel compares it with this
+        // phone's radio and offers to match, which turns "get both radios on the same tuple" from
+        // comparing two screens by eye into one press — and a mismatch into a sentence instead of a
+        // link that never comes up. A code without it clears the old value rather than keeping a
+        // stale one: the desktop may since have been retuned.
+        val preset = p.mesh?.hostPreset
+        val text = preset?.let {
+            "${(it.frequencyMhz * 1000).toInt()},${(it.bandwidthKhz * 1000).toInt()}," +
+                "${it.spreadingFactor},${it.codingRate}"
+        } ?: ""
+        if (text != _config.value.meshHostPreset) update(_config.value.copy(meshHostPreset = text))
         return outcome
     }
 

@@ -1,4 +1,5 @@
 package io.ldmux.mobile
+import io.ldmux.mobile.mesh.RadioPreset
 
 /**
  * The pairing link, read (ADR-0017).
@@ -41,6 +42,15 @@ class MeshKeyMaterial(
     val psk: ByteArray,
     /** The host's MeshCore radio public key, which the gateway binds. Null when the daemon was not told it. */
     val hostRadio: ByteArray? = null,
+    /**
+     * The tuple the host's radio is tuned to, when the code carries it.
+     *
+     * Two radios on different tuples cannot hear each other, and the phone had no way to learn the
+     * host's: a code without it left the user comparing two screens by eye, with a mismatch looking
+     * exactly like being out of range. The app shows it beside the phone's own and offers one press
+     * to match.
+     */
+    val hostPreset: RadioPreset? = null,
 ) {
     init {
         require(hostKey.size == 32 && psk.size == 32 && (hostRadio == null || hostRadio.size == 32)) {
@@ -101,7 +111,10 @@ fun parseScannedPairing(link: String): Pairing? {
         if (!HEX32.matches(mk) || !HEX32.matches(psk)) return null
         val mr = params["mr"]
         if (mr != null && !HEX32.matches(mr)) return null
-        MeshKeyMaterial(unhex(mk), unhex(psk), mr?.let(::unhex))
+        // A malformed preset is not a reason to refuse the keys: it is one optional sentence about
+        // the host's radio, and the code is usable without it.
+        val mp = params["mp"]
+        MeshKeyMaterial(unhex(mk), unhex(psk), mr?.let(::unhex), mp?.let(::parseHostPreset))
     }
     val p = Pairing(host = params["host"] ?: "", token = params["token"] ?: "", name = params["name"] ?: "", mesh = mesh)
     // Neither host nor token is a mesh-only link, and only valid if the mesh keys were present
@@ -110,6 +123,31 @@ fun parseScannedPairing(link: String): Pairing? {
         return if (mesh != null && nameOk(p.name)) p else null
     }
     return if (pairingProblem(p) == null) p else null
+}
+
+/**
+ * `freq_khz,bw_hz,sf,cr`, or null when it is not four numbers inside the firmware's bounds.
+ *
+ * Bounds are the radio's own (`150000..2500000` kHz, `7000..500000` Hz, SF 5..12, CR 5..8): a code
+ * that asks for a tuple the firmware would refuse is not a tuple this app should apply.
+ */
+internal fun parseHostPreset(text: String): RadioPreset? {
+    val n = text.split(',').map { it.trim() }
+    if (n.size != 4) return null
+    val freqKhz = n[0].toIntOrNull() ?: return null
+    val bwHz = n[1].toIntOrNull() ?: return null
+    val sf = n[2].toIntOrNull() ?: return null
+    val cr = n[3].toIntOrNull() ?: return null
+    if (freqKhz !in 150_000..2_500_000) return null
+    if (bwHz !in 7_000..500_000) return null
+    if (sf !in 5..12 || cr !in 5..8) return null
+    return RadioPreset(
+        frequencyMhz = freqKhz / 1000.0,
+        bandwidthKhz = bwHz / 1000.0,
+        spreadingFactor = sf,
+        codingRate = cr,
+        txPowerDbm = 22,
+    )
 }
 
 private fun unhex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }

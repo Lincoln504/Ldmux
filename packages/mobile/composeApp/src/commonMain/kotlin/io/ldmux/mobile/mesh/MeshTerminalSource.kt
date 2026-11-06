@@ -360,7 +360,13 @@ class MeshTerminalSource(
         // partial command; drawing it would show half a command's output as if it were the answer,
         // which is the invariant `acceptScreen` states and the window must not quietly break.
         val accepting = open && !hold.flushing
-        val accept = accepting || hold.acceptScreen(painted = last != null && !rebuilt)
+        // **While a sync's answer is arriving, the view follows it.** `awaiting` stays true until the
+        // shell has been quiet for a round trip ([settleIfQuiet]), so the echo, the command's output
+        // and the prompt after it all draw — instead of only the first, with the rest held behind a
+        // `show` press. A drain still overrides this: mid-send a screen is a partial command's
+        // reaction, not the answer.
+        val answering = hold.awaiting && !hold.flushing
+        val accept = answering || accepting || hold.acceptScreen(painted = last != null && !rebuilt)
         // Which shell a screen belongs to, and whether the hold took it, is the one fact that
         // decides whether a freshly opened shell paints. Logged at the decision, because the two
         // plausible causes (a stale `painted`, a shell id that never changed) look identical from
@@ -379,6 +385,7 @@ class MeshTerminalSource(
         }
         pendingScreen = null
         applyScreen(screen)
+        hold.drawn(now())
         hold.painted()
     }
 
@@ -390,6 +397,15 @@ class MeshTerminalSource(
      * ends the question, so returning to it must not resume a count of "view N behind" from a
      * visit that is over — the same rule as the typing that went with it.
      */
+    /**
+     * End a sync's wait when the shell has gone quiet, and report whether it did.
+     *
+     * Called on a short tick by the screen while a wait is running. This is what turns "waiting for
+     * the answer" off on an idle shell that has finished answering — without it the bar kept saying
+     * the wait was on, or the view froze mid-answer and needed `show`.
+     */
+    fun settleIfQuiet(): Boolean = hold.settleIfQuiet(now())
+
     fun discardHeldScreens() {
         pendingScreen = null
         hold.drewHeld()

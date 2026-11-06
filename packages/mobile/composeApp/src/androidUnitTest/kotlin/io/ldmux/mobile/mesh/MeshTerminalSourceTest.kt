@@ -110,7 +110,7 @@ class MeshTerminalSourceTest {
     /// "view 2 behind" over a screen with no output; the user had to press `show` for the result of
     /// a command they had already sent.
     @Test
-    fun `the screens after a sync are drawn, and the freeze returns once the window ends`() {
+    fun `the screens after a sync are drawn, and the freeze returns once the shell goes quiet`() {
         val (s, _, b) = source()
         s.setPublicChannel(true)
         s.show(MeshScreen(listOf("first"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
@@ -126,9 +126,12 @@ class MeshTerminalSourceTest {
         assertFalse(s.heldScreenWaiting, "the answer must be drawn, not held")
         s.show(MeshScreen(listOf("/tmp"), 0, 0, alternate = false, dead = false, epoch = 4, cols = 20), "aa11")
         assertFalse(s.heldScreenWaiting, "and so must the rest of the answer")
-        // Past the window the freeze is back: the mode still means something.
-        clock.now += SYNC_DRAW_MAX_MS + 1
+        // **The wait ends when the shell is quiet, not when the first screen lands.** The echo, the
+        // output and the prompt after it all draw; then, with nothing arriving for a round trip,
+        // the view freezes again — which is what keeps batch mode a mode rather than live.
+        clock.now += PublicChannelHold.QUIET_MS
+        assertTrue(s.settleIfQuiet(), "the shell has gone quiet, so the answer is finished")
         s.show(MeshScreen(listOf("later"), 0, 0, alternate = false, dead = false, epoch = 5, cols = 20), "aa11")
-        assertTrue(s.heldScreenWaiting, "after the window the view freezes again")
+        assertTrue(s.heldScreenWaiting, "after the answer the view freezes again")
     }
 }

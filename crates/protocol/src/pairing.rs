@@ -44,6 +44,50 @@ pub struct Pairing {
     pub name: String,
 }
 
+/// The tuple the host's own radio is tuned to.
+///
+/// Two radios on different tuples cannot hear each other, and until this rode in the code the phone
+/// had no way to know the host's: a mismatch looked exactly like being out of range, with the only
+/// symptom a link that never came up. In the code it is one press to match, and one sentence when
+/// they differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostPreset {
+    pub freq_khz: u32,
+    pub bw_hz: u32,
+    pub sf: u8,
+    pub cr: u8,
+}
+
+impl HostPreset {
+    /// `freq_khz,bw_hz,sf,cr` — four numbers, no text.
+    fn encode(self) -> String {
+        format!("{},{},{},{}", self.freq_khz, self.bw_hz, self.sf, self.cr)
+    }
+
+    fn decode(text: &str) -> Option<Self> {
+        let mut it = text.split(',');
+        let freq_khz = it.next()?.parse().ok()?;
+        let bw_hz = it.next()?.parse().ok()?;
+        let sf = it.next()?.parse().ok()?;
+        let cr = it.next()?.parse().ok()?;
+        if it.next().is_some() {
+            return None;
+        }
+        // The firmware's own bounds: anything outside them would be refused by the radio, and a
+        // code that carries it is not a code this phone should act on.
+        let sane = (150_000..=2_500_000).contains(&freq_khz)
+            && (7_000..=500_000).contains(&bw_hz)
+            && (5..=12).contains(&sf)
+            && (5..=8).contains(&cr);
+        sane.then_some(Self {
+            freq_khz,
+            bw_hz,
+            sf,
+            cr,
+        })
+    }
+}
+
 /// The mesh route's keys, as carried by a link (`mv=1&mk=…&psk=…`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct MeshKeys {
@@ -57,6 +101,8 @@ pub struct MeshKeys {
     /// `LDMUX_MESH_SELF` still overrides it for a host that pins a key. Optional because a daemon
     /// behind a gateway learns nothing about the radio, and a code without it cannot be used.
     pub host_radio: Option<[u8; 32]>,
+    /// The tuple the host's radio reports, so the phone can compare and match it.
+    pub host_preset: Option<HostPreset>,
 }
 
 // A secret never appears in a Debug print.
@@ -108,6 +154,9 @@ pub fn pairing_link_with_mesh(
         if let Some(r) = &m.host_radio {
             fields.push(("mr", hex32(r)));
         }
+        if let Some(p) = m.host_preset {
+            fields.push(("mp", p.encode()));
+        }
     }
     let q: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
     Ok(format!("ldmux://pair?{}", q.join("&")))
@@ -136,6 +185,9 @@ pub fn mesh_only_link(name: &str, mesh: &MeshKeys) -> Result<String, PairingErro
     fields.push(("psk", hex32(&mesh.psk)));
     if let Some(r) = &mesh.host_radio {
         fields.push(("mr", hex32(r)));
+    }
+    if let Some(p) = mesh.host_preset {
+        fields.push(("mp", p.encode()));
     }
     let q: Vec<String> = fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
     Ok(format!("ldmux://pair?{}", q.join("&")))
@@ -186,6 +238,7 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
     let mut mk: Option<String> = None;
     let mut psk: Option<String> = None;
     let mut mr: Option<String> = None;
+    let mut mp: Option<String> = None;
     for part in query.split('&') {
         if part.is_empty() {
             continue;
@@ -205,6 +258,7 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
             "mk" if mk.is_none() => mk = Some(decoded),
             "psk" if psk.is_none() => psk = Some(decoded),
             "mr" if mr.is_none() => mr = Some(decoded),
+            "mp" if mp.is_none() => mp = Some(decoded),
             _ => {}
         }
     }
@@ -227,7 +281,8 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
     } else if pairing_problem(&p).is_some() {
         return None;
     }
-    // Mesh keys: all or nothing, and well formed.
+    // Mesh keys: all or nothing, and well formed. The host's tuple is an *addition* to them, never a
+    // substitute: a code that carried only a preset would name a frequency and no peer.
     let mesh = if mv.is_none() && mk.is_none() && psk.is_none() && mr.is_none() {
         None
     } else {
@@ -241,6 +296,9 @@ pub fn parse_pairing_link_full(link: &str) -> Option<(Pairing, Option<MeshKeys>)
                 Some(r) => Some(parse_hex32(r)?),
                 None => None,
             },
+            // A malformed preset is not a reason to refuse the keys: it is one optional sentence
+            // about the host's radio, and the link is usable without it.
+            host_preset: mp.as_deref().and_then(HostPreset::decode),
         })
     };
     Some((p, mesh))

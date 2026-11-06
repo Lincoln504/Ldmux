@@ -59,9 +59,16 @@ class PublicChannelHoldTest {
         assertFalse(h.flushing)
         assertTrue(h.awaiting, "the answer is still owed")
         assertTrue(h.acceptScreen(painted = true), "and now it is drawn")
+        h.drawn(2_000)
         h.painted()
-        assertFalse(h.awaiting)
+        // **A paint no longer ends the wait.** The first screen after a send is usually the echo,
+        // and the answer follows in more; ending the wait on the echo held the answer behind a
+        // `show` press. The wait ends when the shell goes quiet.
+        assertTrue(h.awaiting, "one screen is not the end of an answer")
         assertEquals(0, h.updates)
+        assertFalse(h.settleIfQuiet(2_500), "not quiet yet")
+        assertTrue(h.settleIfQuiet(2_000 + PublicChannelHold.QUIET_MS), "quiet now")
+        assertFalse(h.awaiting)
     }
 
     @Test
@@ -76,12 +83,15 @@ class PublicChannelHoldTest {
         assertTrue(h.awaiting, "a slow channel still owes an answer")
         assertTrue(h.reported, "and the bar is told to say so")
         assertFalse(h.flushing, "the drain is cancelled: a send going nowhere costs airtime")
-        // The answer arrives late: it is drawn, not held, so the user does not press again.
+        // The answer arrives late: it is drawn, not held, so the user does not press again. The
+        // wait itself ends when the shell goes quiet rather than on the first screen.
         assertTrue(h.acceptScreen(painted = true))
+        h.drawn(9_000)
         h.painted()
         assertEquals(0, h.updates)
-        assertFalse(h.awaiting)
         assertFalse(h.reported, "the report is spent once the answer arrives")
+        assertTrue(h.awaiting, "the wait outlives a single screen")
+        assertTrue(h.settleIfQuiet(9_000 + PublicChannelHold.QUIET_MS), "quiet ends it")
     }
 
     @Test
@@ -106,9 +116,10 @@ class PublicChannelHoldTest {
         val h = PublicChannelHold()
         h.set(true)
         h.sync(pending = true)
+        h.drawn(1_000)
         h.painted()
         assertTrue(h.flushing, "a paint is not the drain ending")
-        assertFalse(h.awaiting, "but the wait for the answer is over")
+        assertTrue(h.awaiting, "and a paint is not the answer arriving either")
         assertTrue(h.drained())
         assertFalse(h.flushing)
         // A deadline does stop a drain: twenty seconds with text still held means the link is not
@@ -146,9 +157,10 @@ class PublicChannelHoldTest {
         assertTrue(h.reported, "the bar says nothing has come yet")
         assertTrue(h.awaiting, "and the answer is still owed, so it is drawn when it arrives")
         assertTrue(h.acceptScreen(painted = true), "the late answer is drawn, not held")
+        h.drawn(5_000)
         h.painted()
         assertFalse(h.reported, "the report is spent once the answer arrives")
-        assertFalse(h.awaiting)
+        assertTrue(h.awaiting, "the wait ends on quiet, not on one screen")
     }
 
     @Test
@@ -209,5 +221,24 @@ class PublicChannelHoldTest {
         h.sync(pending = true)
         h.set(true)
         assertTrue(h.awaiting, "a repeated set(true) must not clear a wait in flight")
+    }
+
+    /// **A second press must not stop a send that is already running.**
+    ///
+    /// `sync(pending)` used to assign `flushing = pending`, so a press that landed while the
+    /// batcher happened to be empty — mid-drain, after the pump had taken the last piece — turned
+    /// the drain off. The pump then stopped with records still unsent: the user's text had left the
+    /// batcher and never left the phone, the bar said "waiting for the answer", and `show` had
+    /// nothing to draw because no answer was coming.
+    @Test
+    fun `pressing again while a drain runs does not end the drain`() {
+        val h = PublicChannelHold()
+        h.set(true)
+        assertTrue(h.sync(pending = true, nowMs = 1_000), "the first press sends")
+        assertTrue(h.flushing, "and starts a drain")
+        assertFalse(h.sync(pending = false, nowMs = 1_500), "a second press with nothing new to add")
+        assertTrue(h.flushing, "must leave the drain running")
+        assertTrue(h.drained(), "and the drain ends only when the pump says it is empty")
+        assertFalse(h.flushing)
     }
 }

@@ -313,6 +313,9 @@ impl SessionSetup {
             host_key: self.files.key.public,
             psk: self.files.pairing.psk,
             host_radio: host_radio_from_env(),
+            // Filled in by the pairing answer, which reads the snapshot; the keys themselves do not
+            // know what the radio is tuned to.
+            host_preset: None,
         }
     }
 
@@ -653,10 +656,17 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
     // complete without a second environment variable that could be stale or mistyped. The
     // variable still wins when set, so an operator who pinned a key keeps that pin.
     let host_radio = keys.host_radio.or_else(|| runtime.snapshot().own_radio_key);
+    // **The tuple, so the phone can match it.** Two radios on different tuples cannot hear each
+    // other, and the phone had no way to learn the host's: a mismatch was silent and looked like
+    // being out of range.
+    let host_preset = runtime.snapshot().radio_preset;
     Ok(serde_json::json!({
         "hostKey": hex(&keys.host_key),
         "psk": hex(&keys.psk),
         "hostRadio": host_radio.map(|r| hex(&r)),
+        "hostPreset": host_preset.map(|(f, b, sf, cr)| vec![
+            u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)
+        ]),
     }))
 }
 
