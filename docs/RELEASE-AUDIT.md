@@ -321,6 +321,7 @@ suite (574 cases) green.
 | 17.45 | The mark in the README was a single icon with the launcher's full corner radius | the pair now: tighter radius, `ld` and its vertical mirror which reads `pl`, centred together (`docs/media/README.md` says how to rebuild them) |
 | 17.46 | The README said "radio route", which names a transport nothing can hold; the offline mode is two physical radios, and the description never said they are optional or that one travels with the phone | REVISED — "the radios" throughout, a bullet stating two MeshCore radios are needed and optional, and the description says "no internet and no network" |
 | 17.47 | The mark in the README sat side by side | it stacks now: `ld` above, the 180-degree copy reading `pl` beneath |
+| 17.48 | The landscape screenshot shared one row with three portrait ones at 24 % width, so a 2400 x 1080 picture rendered smaller than the phones it was meant to show | FIXED — the three portraits take 30 % each, the landscape sits on its own centred line at 62 % |
 
 ## How to use this
 

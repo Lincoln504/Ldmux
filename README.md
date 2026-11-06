@@ -43,10 +43,12 @@ tailnet, or a pair of LoRa radios when there is no internet and no network at al
 | LoRa batch | the two radios | typing leaves as one batch on `sync`, forced on a public channel |
 
 <p align="center">
-  <img src="docs/media/01-launcher.png" width="24%" alt="the launcher: new shell, the desktop's shells, and the menu on one this phone started">
-  <img src="docs/media/02-shell.png" width="24%" alt="a shell in the app, the second of two">
-  <img src="docs/media/03-batch.png" width="24%" alt="batch mode: 12 characters and one record held, waiting for sync">
-  <img src="docs/media/04-landscape.png" width="24%" alt="landscape: the key panel beside the terminal">
+  <img src="docs/media/01-launcher.png" width="30%" alt="the launcher: new shell, the desktop's shells, and the menu on one this phone started">
+  <img src="docs/media/02-shell.png" width="30%" alt="a shell in the app, the second of two">
+  <img src="docs/media/03-batch.png" width="30%" alt="batch mode: 12 characters and one record held, waiting for sync">
+</p>
+<p align="center">
+  <img src="docs/media/04-landscape.png" width="62%" alt="landscape: the key panel beside the terminal">
 </p>
 
 ## The app
