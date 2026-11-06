@@ -2478,6 +2478,7 @@ async fn reconcile_claims(shared: &Arc<Shared>) {
     if !freed.is_empty() {
         broadcast_sessions(shared).await;
     }
+    displace_viewers(shared).await;
 }
 
 /// Reap connections silent for the idle deadline (the TS `sweep`).
@@ -2487,8 +2488,32 @@ async fn sweep_once(shared: &Arc<Shared>) {
         let map = relock(&shared.conns);
         map.values().cloned().collect()
     };
-    // **Who holds what, once per sweep.** Read before any connection is examined so no
-    // connection lock is held while the daemon's is taken (the reverse order is used elsewhere).
+    for c in conns {
+        let (idle, disposed) = {
+            let inner = relock(&c.inner);
+            (
+                now.saturating_duration_since(inner.last_seen),
+                inner.disposed,
+            )
+        };
+        if disposed {
+            continue;
+        }
+        if idle.as_millis() as u64 > shared.idle_ms {
+            let _ = c.tx.send(Out::Close);
+        }
+    }
+}
+
+/// **Tell every connection watching a shell it no longer holds, whoever claimed it.**
+///
+/// The claim handlers in this file tell the displaced window themselves, but a claim can arrive
+/// without touching them: the mesh bridge claims through the daemon's `reclaim` verb for a phone
+/// over the radio, and the CLI does the same. Those claims left the desk window painting live,
+/// resizing the pty under the phone's grid and showing no notice, so the shell looked taken with
+/// no way back (reported 2026-11-05). This runs on the claim tick, beside the check that frees
+/// unbacked claims — the two answer the same question, "who holds this now".
+async fn displace_viewers(shared: &Arc<Shared>) {
     let held: Vec<(String, SessionOwner)> = {
         let d = shared.daemon.lock().await;
         d.ownership()
@@ -2507,32 +2532,25 @@ async fn sweep_once(shared: &Arc<Shared>) {
             })
             .collect()
     };
+    if held.is_empty() {
+        return;
+    }
+    let conns: Vec<Arc<ConnShared>> = {
+        let map = relock(&shared.conns);
+        map.values().cloned().collect()
+    };
     for c in conns {
-        let (idle, disposed, viewing, device) = {
+        let (viewing, device, disposed) = {
             let inner = relock(&c.inner);
             (
-                now.saturating_duration_since(inner.last_seen),
-                inner.disposed,
                 inner.session_id.clone(),
                 inner.device.as_ref().map(|d| d.id.clone()),
+                inner.disposed,
             )
         };
         if disposed {
             continue;
         }
-        if idle.as_millis() as u64 > shared.idle_ms {
-            let _ = c.tx.send(Out::Close);
-            continue;
-        }
-        // **A connection watching a shell another device holds is displaced — whoever claimed it.**
-        //
-        // The claim handlers in this file tell the displaced window themselves, but a claim can
-        // also arrive without touching them: the mesh bridge claims through the daemon's `reclaim`
-        // verb for a phone over the radio, and the CLI does the same. Those claims left the desk
-        // window painting live, resizing the pty under the phone's grid and showing no notice, so
-        // the shell looked taken with no way back (reported 2026-11-05). The sweep is the one place
-        // that sees every connection and the ownership table together, so it is where this belongs:
-        // one rule, every claim source.
         let Some(session_id) = viewing else { continue };
         let Some((_, holder)) = held.iter().find(|(id, _)| *id == session_id) else {
             continue;

@@ -354,6 +354,9 @@ pub struct LdmuxDaemon {
     /// (the device that holds it is part of the value, so a claim that moves
     /// starts its wait again). See [`LdmuxDaemon::release_unbacked_claims`].
     unbacked_since: std::collections::HashMap<String, (String, u64)>,
+    /// Sessions the mesh link is watching. It has no entry in the connection table, so without
+    /// this every mesh claim read as unbacked and was freed on the short grace.
+    mesh_watched: std::collections::HashSet<String>,
     /// `(session, device)` claims that have had a connection attached to that
     /// session at least once.
     ///
@@ -477,6 +480,7 @@ impl LdmuxDaemon {
             control_handle: None,
             sessions_dirty: false,
             unbacked_since: HashMap::new(),
+            mesh_watched: std::collections::HashSet::new(),
             ever_backed: std::collections::HashSet::new(),
             live_windows: HashMap::new(),
             desktop_device: ldmux_protocol::rpc::DeviceInfo {
@@ -2169,6 +2173,8 @@ impl LdmuxDaemon {
             "release" => {
                 let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let device = params.get("device").and_then(|v| v.as_str()).unwrap_or("");
+                // Whoever let go, the mesh link is no longer watching it.
+                self.set_mesh_watched(id, false);
                 Ok(serde_json::json!({ "ok": self.release_claim(id, device) }))
             }
             "reclaim" => {
@@ -2179,6 +2185,14 @@ impl LdmuxDaemon {
                     .and_then(|v| serde_json::from_value(v).ok())
                     .ok_or_else(|| "no device given".to_string())?;
                 let result = self.claim(id, &device, true);
+                // **A mesh claim is watched by a link, not by a connection.** The bridge claims
+                // through this verb, so this is where it says the shell is being looked at; the
+                // unbacked-claim sweep would otherwise give it away inside the short grace.
+                if device.kind == "mesh"
+                    && matches!(result, crate::ownership::ClaimResult::Acquired { .. })
+                {
+                    self.set_mesh_watched(id, true);
+                }
                 Ok(serde_json::json!({
                     "ok": matches!(result, crate::ownership::ClaimResult::Acquired { .. }),
                 }))
@@ -2702,6 +2716,12 @@ impl LdmuxDaemon {
             .retain(|sid, _| claims.iter().any(|(s, _)| s == sid));
         let mut freed = Vec::new();
         for (sid, device) in claims {
+            // The mesh link is a connection the table cannot see; the bridge says so directly.
+            if self.mesh_watched.contains(&sid) {
+                self.ever_backed.insert((sid.clone(), device.clone()));
+                self.unbacked_since.remove(&sid);
+                continue;
+            }
             if attached.contains(&(sid.clone(), device.clone())) {
                 self.ever_backed.insert((sid.clone(), device.clone()));
                 self.unbacked_since.remove(&sid);
@@ -2739,6 +2759,25 @@ impl LdmuxDaemon {
             }
         }
         freed
+    }
+
+    /// Mark a session as **watched by the mesh link**, which is a connection the daemon does not
+    /// have in its connection table.
+    ///
+    /// `release_unbacked_claims` frees a claim that no attached connection is watching, after a
+    /// short grace — right for a claim taken on a window's behalf, wrong for a phone over the
+    /// radio, where the "connection" is the L2 link and the bridge is the only one who knows.
+    /// Without this the phone's claim was freed within the grace, a desk window reclaimed the
+    /// shell, and ownership oscillated under the user: the shell looked taken and then not.
+    pub fn set_mesh_watched(&mut self, session_id: &str, watched: bool) {
+        let changed = if watched {
+            self.mesh_watched.insert(session_id.to_string())
+        } else {
+            self.mesh_watched.remove(session_id)
+        };
+        if changed {
+            self.sessions_dirty = true;
+        }
     }
 
     /// Release a claim (the TS `releaseClaim`).
