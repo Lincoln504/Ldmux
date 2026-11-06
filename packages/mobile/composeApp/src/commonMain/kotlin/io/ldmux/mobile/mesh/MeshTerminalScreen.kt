@@ -110,10 +110,17 @@ internal const val GRID_SETTLE_MS = 250L
  * The keyboard is opened by the app when a terminal appears, and it is an animation plus an IME
  * start: on the device measured it arrived about half a second after the shell did. While it is on
  * its way the surface's grid is the keyboard-DOWN one, and sending it costs a record and starts
- * the shell's program at the wrong height. This bound exists so a keyboard that never appears
+ * the shell's program at the wrong height.
+ *
+ * **700 ms, not 2 s.** The wait sits in front of the first `Resize`, and the host answers a resize
+ * with a full screen — so every millisecond here is a millisecond before the shell's own prompt
+ * appears in its real size. Two seconds was chosen to be safe for a slow IME start and read on the
+ * device as "opening a shell takes two seconds" (reported 2026-11-06). The IME has been measured at
+ * ~500 ms; the bound exists for one that never appears, and a late one still costs only a second
+ * `Resize`. This bound exists so a keyboard that never appears
  * (a hardware keyboard, a refused IME) cannot leave the host at the old size for ever.
  */
-internal const val IME_WAIT_MS = 2_000L
+internal const val IME_WAIT_MS = 700L
 
 /**
  * How long a link may be down before this route leaves the held screen for the shell list.
@@ -532,6 +539,20 @@ fun MeshTerminalScreen(
     LaunchedEffect(showList, terminalLive, shells.entries.size) {
         if (showList && terminalLive && shells.entries.isEmpty()) conn.driver.listShells()
     }
+    // **Opening a shell draws its first screen, once.** In batch mode the view is frozen, so a
+    // shell that was just opened sat blank while the bar counted screens behind it: opening a shell
+    // is the request to see it, and the freeze exists for typing, of which a new shell has none. It
+    // is drawn when the screen actually arrives — keyed on the hold, not on a timer, because a timer
+    // fires before the first screen on a slow channel and then never fires again.
+    var drawnForOpen by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(shells.current, source.heldScreenWaiting) {
+        val id = shells.current ?: return@LaunchedEffect
+        if (drawnForOpen == id || !source.heldScreenWaiting) return@LaunchedEffect
+        if (handle.hasPending) return@LaunchedEffect
+        source.pullHeld()
+        drawnForOpen = id
+    }
+    LaunchedEffect(shells.current) { drawnForOpen = null }
     // **Entering the list ends whatever was typed for the shell that was on screen.** One rule, on
     // the one thing every way in has in common: the buffer is text for a shell, meaningless from the
     // list, and keeping it forced the list to display a shell's private buffer (reported
@@ -786,11 +807,25 @@ fun MeshTerminalScreen(
                                 // layout pass) left the host at the pty's old size for ever —
                                 // measured on the device as no `mesh fit` line at all after a shell
                                 // opened. Waiting is a delay, not a decision.
-                                val left = IME_WAIT_MS - opened.elapsedNow().inWholeMilliseconds
-                                if (left > 0 && keyboardWanted && !imeUp) {
-                                    withTimeoutOrNull(left) {
-                                        snapshotFlow { imeUp }.first { it }
+                                // **Wait on the event, not on a number.** The grid is wrong only
+                                // while the keyboard is still animating in, and that is a fact the
+                                // app can observe (`imeUp`), so the wait ends when it is true and
+                                // the bound is only a ceiling for a keyboard that never arrives.
+                                // The settle after it is for an animation already in progress: a
+                                // keyboard that is up before the first grid means the grid is
+                                // final, and sleeping through it delayed every open by a quarter
+                                // second for nothing.
+                                val settled = imeUp
+                                if (keyboardWanted && !settled) {
+                                    val left = IME_WAIT_MS - opened.elapsedNow().inWholeMilliseconds
+                                    if (left > 0) {
+                                        withTimeoutOrNull(left) {
+                                            snapshotFlow { imeUp }.first { it }
+                                        }
                                     }
+                                } else {
+                                    conn.driver.setGrid(c, r)
+                                    return@launch
                                 }
                                 delay(GRID_SETTLE_MS)
                                 conn.driver.setGrid(c, r)
@@ -1023,6 +1058,9 @@ private fun MeshShellList(
             Modifier.weight(1f).fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
         ) {
+            // First, for the same reason as on the tailnet: it is the list's own action and it
+            // must not move about as shells come and go.
+            item(key = "+shell") { NewShellRow(onClick = onNewShell) }
             items(entries, key = { it.id }) { e ->
                 ChoiceRow(
                     // The folder is the row's second line, as on the tailnet launcher: it is what
@@ -1047,8 +1085,6 @@ private fun MeshShellList(
                     }
                 }
             }
-            // The same row the tailnet launcher draws, from the same composable.
-            item(key = "+shell") { NewShellRow(onClick = onNewShell) }
         }
         Spacer(Modifier.height(LocalTouch.current.rowPad))
         OpenBar(openLabel(picked.size), enabled = picked.isNotEmpty()) { onOpen(picked) }

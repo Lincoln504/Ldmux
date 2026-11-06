@@ -163,6 +163,10 @@ fun LauncherScreen(
                 Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad),
             ) {
+                // **First, not last.** A list is read from the top, and starting a shell is the
+                // one action the list always offers; at the bottom it moved every time a shell
+                // appeared, and on a full list it was below the fold.
+                item(key = "+shell") { NewShellRow { newShellOpen = true } }
                 items(entries, key = { it.key }) { e ->
                     val session = openShells.firstOrNull { it.id == e.sessionId }
                     ChoiceRow(
@@ -217,7 +221,6 @@ fun LauncherScreen(
                 // competing with `open` for the bottom of the screen.
                 // Drawn as a row, on the rows' own background: it is one more entry in
                 // the list, not a second call to action beside `open`.
-                item(key = "+shell") { NewShellRow { newShellOpen = true } }
             }
         }
 
@@ -429,7 +432,7 @@ internal fun shellRowTitle(label: String, cwd: String): String {
 }
 
 /**
- * The list's last row: starting another shell.
+ * The list's first row: starting another shell.
  *
  * Drawn as a row on the rows' own background, because it is one more entry in the list and not a
  * second call to action beside `open`. Extracted so the tailnet launcher and the radio route draw
@@ -446,7 +449,19 @@ internal fun NewShellRow(modifier: Modifier = Modifier, onClick: () -> Unit) {
             .padding(vertical = LocalTouch.current.rowPad * 2),
         contentAlignment = Alignment.Center,
     ) {
-        Text("+ shell", color = Fg, fontSize = 14.sp)
+        // **One row, centred: the label then its mark.** A `Box` centres each child, so a second
+        // child drawn with the label lands on top of it — measured on the device as "new⌷shell".
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("new shell", color = Fg, fontSize = 14.sp)
+            // The same grey phone the shells it starts will carry: a shell created here is the
+            // phone's, and the row that makes them says so before the fact rather than after it.
+            Spacer(Modifier.width(5.dp))
+            IconPhone(
+                tint = Dim,
+                box = 12.dp,
+                modifier = Modifier.semantics { contentDescription = "starts a shell on this phone" },
+            )
+        }
     }
 }
 
