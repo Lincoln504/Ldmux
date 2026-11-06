@@ -95,6 +95,15 @@ class MeshTermCodecTest {
         assertEquals(n("version"), MeshTerm.VERSION)
         assertEquals(n("minVersion"), MeshTerm.MIN_VERSION)
         assertEquals(n("cwdVersion"), MeshTerm.CWD_VERSION)
+        // Every version gate, not only the two the app publishes in its header: a bump on one side
+        // that the other did not take is a feature both halves half-understand, which is the one
+        // thing a version byte exists to prevent.
+        assertEquals(n("keyVersion"), MeshTerm.KEY_VERSION)
+        assertEquals(n("resizeVersion"), MeshTerm.RESIZE_VERSION)
+        assertEquals(n("streamVersion"), MeshTerm.STREAM_VERSION)
+        assertEquals(n("lineVersion"), MeshTerm.LINE_VERSION)
+        assertEquals(n("originVersion"), MeshTerm.ORIGIN_VERSION)
+        assertEquals(n("ownerVersion"), MeshTerm.OWNER_VERSION)
         assertEquals(n("maxKeys"), MeshTerm.MAX_KEYS)
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }
         assertEquals(n("unsupportedAllV1"), all)

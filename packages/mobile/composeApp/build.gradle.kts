@@ -139,7 +139,17 @@ android {
 
     buildTypes {
         getByName("release") {
-            isMinifyEnabled = false
+            // **R8 on.** A release carried every Compose shape and every unused symbol; the
+            // shrinker removes them and the obfuscator renames what is left. The rules that must
+            // survive it are in `proguard-rules.pro`, one per boundary the code crosses: the JNI
+            // entry points, the `@Serializable` wire types the Kotlin/Native session exchange
+            // uses, and Compose's reflection over `@Composable` parameters.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             if (releaseSigningAvailable) {
                 signingConfig = signingConfigs.getByName("release")
             }

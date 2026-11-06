@@ -15,6 +15,23 @@
   stems on one baseline with the `d`'s counter open enough to read as a letter rather
   than a bar. The launcher icon's chamfers and exact stroke weights are noise at 24 px
   and are not reproduced.
+
+  CORRECTED 2026-11-06, on the operator's report that the stem of the `d` stood too far
+  from its counter. Two changes, both measured against a render at 192 px and at 24 px:
+
+  (1) The letters are 1 unit apart instead of 2. The gap was the largest empty run in the
+      mark, so at 24 px the `l` read as a detached bar rather than the first letter of a
+      pair.
+
+  (2) The `d`'s bowl's right wall is the stem itself. Before, the bowl closed at x=16 and
+      the stem occupied 16..18, so the right side of the `d` was 4 units of ink against 2
+      on every other side, and the counter sat 2 units from the stem's edge. The counter
+      now runs to the stem (11.5..15.5 against a stem at 15.5..17.5), which makes every
+      stroke 2 units and puts the counter against the stem instead of across a gap from
+      it.
+
+  The ink is still centred exactly: it spans x 6.5..17.5, centre 12, on a 24 unit
+  viewport, and every stroke is 2 units, which is the floor the comment below states.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
@@ -25,14 +42,16 @@
     <!-- `l`: one stem, ascender to baseline. -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M6,4h2v16h-2z" />
+        android:pathData="M6.5,4h2v16h-2z" />
 
-    <!-- `d`: stem plus a closed bowl with a two-unit counter. -->
+    <!-- `d`: the stem, then a bowl whose right wall is that stem. The counter is 4 units
+         wide and ends where the stem begins, so the two sides of the letter weigh the
+         same. -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M16,4h2v16h-2z" />
+        android:pathData="M15.5,4h2v16h-2z" />
     <path
         android:fillColor="#FFFFFFFF"
         android:fillType="evenOdd"
-        android:pathData="M10,10h6v10h-6zM12,12h2v6h-2z" />
+        android:pathData="M9.5,10h8v10h-8zM11.5,12h4v6h-4z" />
 </vector>

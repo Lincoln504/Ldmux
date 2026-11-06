@@ -406,6 +406,9 @@ class MeshTerminalSource(
      */
     fun settleIfQuiet(): Boolean = hold.settleIfQuiet(now())
 
+    /** The host said the pane has stopped changing: see [PublicChannelHold.answered]. */
+    fun answered(): Boolean = hold.answered()
+
     fun discardHeldScreens() {
         pendingScreen = null
         hold.drewHeld()

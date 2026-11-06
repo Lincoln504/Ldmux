@@ -483,6 +483,16 @@ class MeshRadioConnection(
         clock = clock,
     )
 
+    /**
+     * The host said the pane has stopped changing, forwarded from the driver.
+     *
+     * The screen wires this to its hold, so a sync's wait ends when the answer ends instead of on
+     * a local quiet timer.
+     */
+    var onIdle: (() -> Unit)?
+        get() = driver.onIdle
+        set(value) { driver.onIdle = value }
+
     private var released = false
 
     suspend fun run() {

@@ -47,6 +47,23 @@ internal fun BoxScope.LinkNotice(text: String) {
  * route, `take it back` on the radio route, and "press r to take it back" at the
  * desk.
  */
+/**
+ * A holder, named the way a person reads it.
+ *
+ * The daemon's holder is a device *kind* on the radio route (`"mesh"`, `"desktop"`, `"phone"`) and
+ * a device *name* on the tailnet route, and the mesh route's kind is the only word a reader has
+ * ever seen rendered as itself: "in use on mesh" names a transport, not the thing in front of
+ * them. The kind words are mapped here; anything else (a device name) is passed through, because
+ * "in use on Pixel 9" is already a sentence.
+ */
+internal fun holderLabel(holder: String): String = when (holder) {
+    "mesh" -> "the radio link"
+    "desktop" -> "the desktop"
+    "phone" -> "another phone"
+    "local" -> "this machine"
+    else -> holder
+}
+
 @Composable
 internal fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
     // Empty means the daemon did not name the device. Saying "another device" would
@@ -54,7 +71,7 @@ internal fun BoxScope.HeldElsewhere(holder: String, onTakeOver: () -> Unit) {
     // "in use on X", not "open on X": `open` reads as a state a shell is in, and every shell in
     // this app is open on the desktop machine. What this says is that somebody *here-and-now* is
     // using it there, which is the thing the reader has to know. The radio route says the same.
-    val line = if (holder.isEmpty()) "in use elsewhere" else "in use on $holder"
+    val line = if (holder.isEmpty()) "in use elsewhere" else "in use on ${holderLabel(holder)}"
     Box(
         Modifier
             .fillMaxSize()

@@ -126,6 +126,15 @@ object MeshTerm {
     object CommitFlags {
         const val ALTERNATE = 1 shl 0
         const val DEAD = 1 shl 1
+
+        /**
+         * The host says the pane has stopped changing; this commit carries no rows.
+         *
+         * It exists so a wait for an answer ends when the answer ends rather than [QUIET_MS]
+         * later. Hosts that do not send it are covered by the quiet timer, and a decoder that
+         * does not know the bit ignores it (only the bits it reads are meaningful).
+         */
+        const val IDLE = 1 shl 2
     }
 
     internal const val T_ATTACH = 0x01
@@ -685,6 +694,10 @@ class RowMirror {
                 profile = ProfileInfo(m.cols, m.rows, m.unsupported)
                 shell = m.shell
                 lines = List(m.rows) { "" }
+                // A profile ends whatever frame was open: a `Rows` that arrived before it belongs
+                // to the geometry being replaced, and painting it over the new pane put stale text
+                // on a row the host says is blank (and nothing would ever correct it).
+                hasPending = false; pending = ArrayList()
                 return false
             }
             is TermMessage.Rows -> {

@@ -335,6 +335,13 @@ fun MeshTerminalScreen(
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
     val source = remember(conn) { MeshTerminalSource(handle, now = clock) }
+    // **The wait ends when the host says the answer ended.** One `Commit` with the idle flag is
+    // the exact end of a burst; the four-second quiet timer in the hold stays as the fallback for a
+    // host that does not send it.
+    DisposableEffect(conn, source) {
+        conn.onIdle = { source.answered() }
+        onDispose { conn.onIdle = null }
+    }
     // **A shell that was just opened shows itself, without a timer.** This used to be a 1.5 s
     // `LaunchedEffect` that pulled the held screen, and it was a workaround: the real cause was
     // that the hold judged "has anything been painted" over the source's whole life, so a new

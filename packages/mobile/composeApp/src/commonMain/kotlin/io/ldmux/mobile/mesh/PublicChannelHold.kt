@@ -213,6 +213,20 @@ internal class PublicChannelHold {
     }
 
     /**
+     * The host said the pane has stopped changing: the answer is complete.
+     *
+     * This is the exact end of a wait, and the reason the bar no longer lingers: the host is the
+     * only end that knows, and it says so in one `Commit` with the idle flag. [settleIfQuiet] stays
+     * as the fallback for a host that does not send it.
+     */
+    fun answered(): Boolean {
+        if (!awaiting) return false
+        awaiting = false
+        reported = false
+        return true
+    }
+
+    /**
      * The sync button. True means there is something to send, so the caller must flush the buffer;
      * false means nothing was waiting, and the caller should show the newest screen it holds.
      *

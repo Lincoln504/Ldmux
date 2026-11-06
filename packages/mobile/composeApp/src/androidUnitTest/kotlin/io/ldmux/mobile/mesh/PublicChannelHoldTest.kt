@@ -241,4 +241,19 @@ class PublicChannelHoldTest {
         assertTrue(h.drained(), "and the drain ends only when the pump says it is empty")
         assertFalse(h.flushing)
     }
+
+    @Test
+    fun theHostsIdleMarkerEndsTheWaitAtOnce() {
+        val h = PublicChannelHold()
+        h.set(true)
+        h.sync(pending = true, nowMs = 0)
+        assertTrue(h.awaiting, "a press starts the wait")
+        // The host says the pane has stopped changing. No four-second quiet window: the answer is
+        // over, and the bar must stop saying it is waiting.
+        assertTrue(h.answered(), "the marker ends a wait")
+        assertFalse(h.awaiting, "the wait is over")
+        assertFalse(h.reported, "and it is not reported as an overdue answer")
+        // A marker with no wait running is not an event.
+        assertFalse(h.answered(), "nothing to end")
+    }
 }

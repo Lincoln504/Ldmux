@@ -240,6 +240,14 @@ class MeshTermDriver(
     /** How long the gateway may take to say what the radio did with one record. */
     private val sendTimeoutMs: Long = SEND_RESULT_TIMEOUT_MS,
 ) {
+    /**
+     * Called when the host says the pane has stopped changing (`Commit` with the idle flag).
+     *
+     * The source wires this to its hold, so a sync's wait ends at the moment the answer ends
+     * instead of on a local four-second quiet timer.
+     */
+    var onIdle: (() -> Unit)? = null
+
     private val lock = Mutex()
     private val _view = MutableStateFlow<MeshTermView>(MeshTermView.Idle)
     val view: StateFlow<MeshTermView> = _view.asStateFlow()
@@ -1131,6 +1139,7 @@ class MeshTermDriver(
         mirror.apply(m)
         lastEpoch = m.epoch
         painted = true
+        if (m.flags and MeshTerm.CommitFlags.IDLE != 0) onIdle?.invoke()
         if (full) resyncing = false
         appLog("mesh commit epoch ${m.epoch} full=$full rows=${mirror.lines.size} cols=${mirror.profile?.cols}")
     }
