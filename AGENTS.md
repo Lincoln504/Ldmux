@@ -27,8 +27,10 @@ documents consolidated away at `731970f`, and are readable at `c3d7c56`).
 the port and is kept.
 
 `docs/ARCHITECTURE.md` is the authoritative design: layers, wire, invariants,
-security, failure modes, platform support. `docs/adr/` is the decision record.
-`docs/RELEASE-AUDIT.md` is the open work, aspect by aspect, and the store material.
+security, failure modes, platform support. `docs/adr/` is the decision record, and
+`docs/adr/README.md` lists every one with its status. `docs/RELEASE-AUDIT.md` is the open work,
+aspect by aspect, and the store material. `README.md` is for a person meeting the project.
+A change that alters behaviour updates all three that it touches, in the same commit.
 Those are the whole documentation set (`docs/media` holds the README's images); anything else in `docs/` was
 consolidated into them at `731970f` and is readable at `c3d7c56`.
 

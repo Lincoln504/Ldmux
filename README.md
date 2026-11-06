@@ -90,16 +90,46 @@ for Android.
   preset (region presets, the public table, `randomise`, `restore`, or a `custom` `MHz kHz SF CR`) and
   `apply`. `desktop's radio` has one `match` that copies the four numbers and nothing else.
 - **Input mode** is `live` or `batch`, `live` is refused on a public channel, and the 36 second
-  an hour airtime limit is forced on between 869.4 and 869.65 MHz. The line under it is the
-  radio's own spent airtime.
+  an hour airtime limit is forced on between 869.4 and 869.65 MHz. The host applies the same
+  allowance from the tuple the radio reports, and the line under the switch is the radio's own
+  spent airtime.
 - **The batch bar** says what waits and what it costs (`12 characters, 1 record`), then
-  `sending…`, `waiting for the answer`, or `no answer yet`, and `view N behind` when the screen
-  has fallen behind. Its one button is `sync` while text waits and `show` when only screens do,
+  `sending…`, `waiting for the answer` (until the host says the pane has settled, so it stops when
+  the answer stops), or `no answer yet`, and `view N behind` when the screen has fallen behind. Its one button is `sync` while text waits and `show` when only screens do,
   and held text is dropped when you leave the page.
 - **Limits**: 64 live shells (`LDMUX_MAX_SESSIONS`) and 10 000 lines or 40 MiB of scrollback
   each, both settable.
 - **Privacy**: nothing is collected, there is no analytics or crash SDK, and the token is
   sealed under a non-exportable Keystore key and excluded from backup.
+
+## Security
+
+- **The tailnet route** is a bearer token in an `Authorization` header, checked at the upgrade,
+  and the daemon listens only on your tailnet or on loopback. There is no public listener and no
+  way to turn authentication off.
+- **The radio route is sealed end to end.** A record is a `Noise_IKpsk2` message
+  (`Noise_IKpsk2_25519_ChaChaPoly_SHA256`) inside a MeshCore `RAW_CUSTOM` packet addressed to the
+  peer radio's key, so MeshCore's own encryption is never applied and no channel key is involved.
+  The preset the two radios share is a frequency, not a secret.
+- **Why not use MeshCore's channel encryption**: its channel envelope is AES-128-ECB with no
+  nonce, a two-byte tag and one shared key per channel, which is deterministic and forgeable at
+  1 in 65,536 per attempt, and per-contact traffic uses a static secret that is never rekeyed.
+  `docs/adr/0029-the-session-rides-raw-custom.md` has the evidence and the alternatives.
+- **What the session gives**: a nonce that never repeats, a full 16-byte tag, separate keys per
+  direction, a replay window, forward secrecy per session, and a fresh handshake every 65,536
+  records or 12 hours instead of a rekey that reuses the nonce.
+- **What it does not give**: no ratchet, so no post-compromise security; record sizes follow the
+  text; and the radio's path, node hashes and traffic volume are plaintext by MeshCore's design,
+  so an observer sees that two radios are talking even when not what they say.
+- **The pairing code is the secret.** A `--mesh` code carries the session secret and the bearer
+  token together, so treat a photo of it as a copy of both. Re-pair to rotate.
+- **On disk**: the bearer token, the mesh static key, the pinned phone key and the secret are
+  0600 files in the persist directory (`~/.local/state/ldmux`), never in the tmpfs runtime
+  directory. On the phone they are AES-256-GCM under a non-exportable Keystore key and excluded
+  from backup.
+- **Clipboard writes from the host are refused by default**; `ldmux clipboard-write on` is an
+  explicit grant, and the app shows what a program tried to copy.
+- Nothing is collected: no analytics, no crash SDK, no telemetry.
 
 ## Getting it running on the host
 
@@ -125,8 +155,9 @@ decide. `ldmux terminal --explain` says which, and where the answer came from.
 `key`, `capture`, `kill`, `close`, `forget`, `adopt`, `mesh`, `code`, `pair` and
 `clipboard-write`. Of those, `attach` takes `--readonly`, `capture` takes `--history`, `list`
 takes `--all` and `--json`, and `shell` takes `--name` and `--cwd`. `ldmux --version` and
-`ldmux ping` say which build is running. `nix run .#restart-keeper` ends every shell the
-keeper owns, and prints that before it does it.
+`ldmux ping` say which build is running, and `ldmux terminal --explain` says which emulator a
+phone-requested window would use and why. `nix run .#restart-keeper` ends every shell the keeper
+owns, and prints that before it does it.
 
 ## Pairing a phone
 
@@ -183,5 +214,6 @@ stops at "SDK location not found" — install the SDK and NDK first.
   failure modes, platform support, and how to bring up the host radio.
 - [`docs/RELEASE-AUDIT.md`](docs/RELEASE-AUDIT.md): every way this can fail, what is fixed,
   what is open, and the decisions still to make.
-- [`docs/adr/`](docs/adr/): the decisions and the reasoning behind them.
+- [`docs/adr/`](docs/adr/): the decisions and the reasoning behind them, including
+  `0029-the-session-rides-raw-custom.md` for why the radio route carries its own session.
 - [`AGENTS.md`](AGENTS.md): for agents working in this repo.

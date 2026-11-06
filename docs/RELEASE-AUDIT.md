@@ -148,7 +148,7 @@ implements are in `docs/adr/`.
 | 10.10 | The Keystore path has never run on a device | FIXED — verified on the device 2026-11-06: the stored token is `IV(12) + 64-byte token + tag(16)` in `shared_prefs`, no plaintext key remains, and the app is connected |
 | 10.11 | The JNI entry points still carried the old package, so every native call failed | FIXED `6d4e8d2` — caught by `MeshSessionAbiTest`, 11 tests |
 | 10.2 | Cleartext permitted where the config says it is not | OK — restricted to tailnet/loopback by code |
-| 10.3 | A terminal program writes the clipboard without consent | OK — `ldmux clipboard-write on|off`, off by default |
+| 10.3 | A terminal program writes the clipboard without consent | OK — `ldmux clipboard-write on`/`off`, off by default |
 | 10.4 | The gateway token sat in `/tmp` | FIXED 2026-11-05 — gateway removed, file deleted |
 | 10.5 | Timing instrumentation on in production | FIXED 2026-11-05 — env cleaned |
 | 10.6 | No telemetry anywhere | OK — dependency audit finds no analytics SDK |
@@ -272,7 +272,7 @@ that duplicate a call, and a test double shipped in the binary. Deleted, not hid
 | # | Finding | Status |
 |---|---|---|
 | 17.1 | The desktop inventory scanned `~/.pi/agent/sessions`, paired `pi` processes with transcripts by ancestry and linked them to sessions (~450 lines, one `xprop` per window). The phone parsed `piSessions` and never rendered it: the picker uses workspaces and windows only | DELETED end to end — host scan, `xprop` pid enrichment, the protocol type, the app model, nine tests |
-| 17.2 | The session `kind` was a parameter nothing honoured (`new(kind)` forced `"shell"`, with a comment saying so), and the CLI advertised `new --kind shell|pi` and `run <shell|pi>` | DELETED — the parameter is gone from the RPC, the CLI and the Kotlin client; the record still says `"shell"` |
+| 17.2 | The session `kind` was a parameter nothing honoured (`new(kind)` forced `"shell"`, with a comment saying so), and the CLI advertised `new --kind shell\|pi` and `run <shell\|pi>` | DELETED — the parameter is gone from the RPC, the CLI and the Kotlin client; the record still says `"shell"` |
 | 17.3 | `ldmux desktop`, `ldmux snapshot` and `ldmux remote` printed JSON a human does not read, duplicating RPCs the app and the attach client already call | DELETED — the RPCs stay; `capture` covers the human case |
 | 17.4 | The desk client still fell back to the tailnet WebSocket and bearer token for "a daemon that predates the attach socket" — a second transport nobody can reach | DELETED — one transport, the 0600 peer-uid-checked Unix socket |
 | 17.5 | The 656-line in-memory test keeper was `pub mod` and therefore compiled into `ldmuxd` | MOVED to `crates/testkeeper`, a dev-dependency; `strings` on the release binary finds none of it |
@@ -314,6 +314,9 @@ suite (574 cases) green.
 | 17.38 | The Noise prologue was a fixed string that did not name the suite, so a suite change on one end would derive different keys from the same flags instead of failing | FIXED — the prologue carries `SUITE`, with a test that fails if the two drift |
 | 17.39 | CI (`.github/workflows`, removed at the operator's instruction) claimed to run the gate on every branch | REMOVED — the gate is the four local commands, and `docs/ARCHITECTURE.md` says so |
 | 17.40 | R8 was off, so a release carried unused code, and the licence notices were excluded from the artifact by a `META-INF` packaging rule | FIXED — R8 on with per-boundary keep rules (JNI, manifest components) and `dist/licenses` shipped as assets |
+| 17.41 | Nothing recorded *why* the radio route carries its own session instead of using MeshCore's channel encryption, so the next reader would have to re-derive it from the firmware | DOCUMENTED — `docs/adr/0029-the-session-rides-raw-custom.md`, with the firmware evidence, the costs and the rejected alternatives |
+| 17.42 | The README described the app and the host but never the security model, so "encrypted" was a claim with no page behind it | DOCUMENTED — a Security section: what each route protects, what it does not, where secrets live, and which ADR has the reasoning |
+| 17.43 | `docs/ARCHITECTURE.md` §8 and §9 still said the firmware was the airtime meter, and §4 did not list the `Commit` idle flag | FIXED — the budget section describes the host's countdown and its per-record charge, the failure row says what the host now does, and the flag vocabulary is written down |
 
 ## How to use this
 

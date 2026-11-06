@@ -148,6 +148,12 @@ Version 7 added shell control. Version 8 added the holder and the takeover. A
 byte from a fixed vocabulary, because two length-prefixed words made the worst case
 one byte wider than a record has to carry.
 
+`Commit.flags`: bit 0 alternate screen, bit 1 the shell has exited, bit 2 **idle** — the pane has
+stopped changing and this commit carries no rows. The idle bit is additive (unknown bits are
+ignored), it is sent once per burst about 700 ms after the last row, and it exists so the phone
+can end its wait for an answer at the moment the answer ends instead of on a quiet timer. A host
+that never sends it costs the phone one record of latency, not correctness.
+
 `Closed` reasons: not found, ambiguous, exited, unavailable, version, held.
 
 The phone paints on `Commit` only, so a screen is never half drawn. A record holds
@@ -227,6 +233,34 @@ ADR-0010 is the decision. The practice:
   under a non-exportable Android Keystore key, in private preferences.
 - Held text in batch mode never leaves the process. It is not persisted and the
   screen shows a count rather than the text when the channel is public.
+- **The decision and its alternatives** are recorded in
+  [`docs/adr/0029-the-session-rides-raw-custom.md`](adr/0029-the-session-rides-raw-custom.md); this
+  section is the summary and the audit.
+- **Why we carry our own layer at all.** MeshCore's own envelope, for the payload types that
+  carry text, is AES-128-**ECB** with no nonce or IV, a HMAC-SHA256 tag truncated to **two
+  bytes**, and a static-static ECDH secret reused in both directions with no rekey (firmware
+  evidence: `Utils.cpp`'s `aes.encryptBlock` loop and `resetHMAC(shared_secret, PUB_KEY_SIZE)`,
+  `MeshCore.h`'s `CIPHER_MAC_SIZE 2` under a `// V1` comment, and issue #259's "right now we
+  never rekey at all"). That is deterministic, forgeable at 1 in 65,536 per attempt, and has no
+  forward secrecy. A terminal session needs none of those properties to hold, so ldmux uses the
+  payload type the firmware reserves for it: `RAW_CUSTOM` (0x0F), documented in `Packet.h` as
+  "custom packet as raw bytes, for applications with custom encryption, payloads, etc". We do
+  not encrypt twice and we do not rely on a channel key: the packet is addressed to the peer's
+  radio key and its payload is our sealed record.
+- **The session layer, checked against the Noise spec** (audited 2026-11-06): `snow` keeps a
+  separate send and receive `CipherState`, so the half-duplex link cannot reuse a key and nonce
+  across directions (Noise §12.2 calls the alternative catastrophic); the nonce is the 32-bit
+  record counter, a retransmission is sealed with a fresh one, and `u32::MAX` is refused; rekey is
+  a **fresh handshake**, never `Rekey()`, which would keep the nonce while changing the key; the
+  filter tag verifies in constant time and is derived as `HMAC(psk, label)` rather than using the
+  PSK directly; the clear header (kind, index, counter) needs no associated data because each
+  field either selects the key or is the nonce, so any change fails the tag; and the prologue
+  names the suite, so mismatched peers fail the handshake instead of deriving different keys from
+  the same flags.
+- **What the session does not give you**: no post-compromise security (no ratchet), no traffic
+  analysis resistance (record sizes follow the text, and the L2 path and node hashes are plaintext
+  by MeshCore's design), and no protection against a leaked pairing code, which carries the PSK
+  and the bearer token together.
 - **A public channel changes nothing about confidentiality.** The channel is a
   frequency and a preset, not a trust decision: our records travel as direct
   packets addressed to the peer's public key (`RAW_CUSTOM_DIRECT_HEADER = 0x3E`,
@@ -248,7 +282,7 @@ ADR-0010 is the decision. The practice:
 | the daemon restarts | the phone's session ends and its retry ladder rebuilds it. A shell the phone created survives on the host |
 | the phone takes a shell the desk has | the desk is told and stops, the pane is fitted to the phone, and when the phone lets go the pane is put back to the size it displaced |
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
-| the radio's airtime allowance runs out | the firmware is the meter: it refuses a record it will not send, the refusal is handed back to the retry ladder so it does not count as a lost attempt, and the link says what happened in `last_error` |
+| the radio's airtime allowance runs out | the host stops sending **new** records until the hour refills (`records_left` from the carrier's countdown), while acks and retransmissions still go, so the link stays alive and the pane stops updating; a record the firmware itself refuses is handed back to the retry ladder so it does not count as a lost attempt, and `last_error` says what happened |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
 
 ## 9. Airtime
@@ -271,10 +305,14 @@ by the host radio, by the app before it retunes, and by every budget below.
   preference: the app turns it on and says so.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
-- The host does not gate the radio's airtime. It owns the radio, and the firmware runs the
-  transmitter's duty cycle: a record it will not send is refused, and that refusal costs no
-  airtime. The host publishes the radio's own count of what is left this hour
-  (`ldmux mesh status`), which is information, not a gate.
+- **The host gates on the countdown it computed, not on the firmware's limiter.** MeshCore's
+  `Dispatcher` charges measured airtime against a budget, but its factor is 1.0, which is a 50 %
+  duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`) — not the 1 % a European
+  band allows. So the serial carrier computes the hour's allowance from the tuple the radio
+  reports, publishes it as `recordsLeftThisHour`, and the session loop charges it per new record
+  (`poll_budget`, `crates/daemon/src/mesh.rs`). The ARQ's limit is per poll, so a count that was
+  not decremented would have allowed that many records every pass. Acks and retransmissions are
+  not charged: they are what keeps the link alive. `ldmux mesh status` shows the countdown.
 
 ## 10. Platforms
 
