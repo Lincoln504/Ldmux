@@ -48,6 +48,7 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     MeshTermView.Handshaking -> "mesh · securing the link"
     MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
     MeshTermView.Listing -> "mesh · asking the host which shells are running"
+    is MeshTermView.HeldBy -> "mesh · open on the desktop"
     is MeshTermView.Choose -> "mesh · choose a shell"
     MeshTermView.NoShells -> "mesh · the host is running no shell"
     is MeshTermView.Live -> when {

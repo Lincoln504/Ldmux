@@ -33,12 +33,13 @@
 //! | 0x08 | phone→host | `Create` | `version u8`, `cwd` (0..=[`MAX_CWD`] bytes, empty = the host's default): start a new shell on the host (version 7) |
 //! | 0x09 | phone→host | `Close` | `selector` (0..=[`MAX_SELECTOR`] bytes): end that shell, or let go of it when a desk window holds it (version 7) |
 //! | 0x0a | phone→host | `MakeLive` | `selector`: open it in a desk window on the host (version 7) |
+//! | 0x0b | phone→host | `Takeover` | `selector`: attach, displacing whoever holds it (version 8) |
 //! | 0x81 | host→phone | `Profile` | `version u8`, `cols u8`, `rows u8`, `unsupported u16 LE`, and from version 2 `shell_len u8 \| shell id` |
 //! | 0x82 | host→phone | `Rows` | `epoch u16 LE`, `flags u8` (bit 0 = full), then patches |
 //! | 0x83 | host→phone | `Commit` | `epoch u16 LE`, `cursor_x u8`, `cursor_y u8`, `flags u8` |
 //! | 0x84 | host→phone | `Closed` | `reason u8` |
 //! | 0x86 | host→phone | `Created` | `id_len u8 \| id`: the shell `Create` just made (version 7) |
-//! | 0x85 | host→phone | `Sessions` | `flags u8` (bit 0 = last page, bit 1 = entries carry a `cwd`, bit 2 = entries carry the `created_by` origin), then entries `id_len u8 \| id \| label_len u8 \| label`, when bit 1 is set `cwd_len u8 \| cwd`, and when bit 2 is set `origin_len u8 \| origin` |
+//! | 0x85 | host→phone | `Sessions` | `flags u8` (bit 0 = last page, bit 1 = entries carry a `cwd`, bit 2 = `created_by`, bit 3 = the current holder), then entries `id_len u8 \| id \| label_len u8 \| label`, and after each: `cwd`, `origin`, `owner` when their bits are set |
 //!
 //! A patch is `y u8 | flags u8 (bit 0 = append) | n u8 | n bytes of UTF-8`. A row longer than
 //! [`MAX_SEGMENT`] bytes is sent as a first segment (replace) and further segments (append).
@@ -67,7 +68,7 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 7;
+pub const VERSION: u8 = 8;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
@@ -105,6 +106,16 @@ pub const CWD_VERSION: u8 = 6;
 /// would skip leaves the phone waiting for an answer that cannot come.
 pub const SHELL_CONTROL_VERSION: u8 = 7;
 
+/// The version that says **who holds a shell now**, and lets a phone take one from the desk
+/// (version 8).
+///
+/// A phone that attaches to a shell a desk window is watching used to take it silently: the claim
+/// displaced the window, the pty was fitted to the phone, and the person at the desk saw their
+/// shell go narrow and stop responding to their typing with no way back. That is the same event
+/// the tailnet route has always handled by asking — `HeldBy`, then a takeover the user chooses.
+/// Version 8 carries the holder on each `Sessions` entry and refuses a plain `Attach` on a
+/// shell somebody else holds; `Takeover` is the phone saying yes.
+pub const OWNER_VERSION: u8 = 8;
 /// The version whose `Sessions` entries carry the `created_by` origin (version 7).
 ///
 /// The mesh launcher needs the same fact the tailnet one has: a shell this phone opened stays the
@@ -147,8 +158,47 @@ pub const MAX_SESSIONS: usize = 16;
 pub const MAX_SEGMENT: usize = 120;
 /// Longest `Attach` selector.
 pub const MAX_SELECTOR: usize = 40;
-/// The longest origin word on the wire: `desktop` is the longest of `phone`, `desktop`, `local`.
+/// The longest origin word kept in memory: `desktop` is the longest of `phone`, `desktop`, `local`.
 pub const MAX_ORIGIN: usize = 7;
+
+/// Who started a shell, or who holds it, as one byte on the wire.
+///
+/// A length-prefixed word cost eight bytes where one says it. Two fields per entry made the
+/// worst case `2 + id 40 + label 24 + cwd 61 + origin 8 + owner 8` = 143, one byte past the record
+/// a page has to fit, so a full-length shell could not be listed at all. The vocabulary is five
+/// words and it changes with the protocol, not with the user's data, so a code is the right
+/// representation: 0 nobody, 1 the phone, 2 the desk, 3 the host itself, 4 the mesh link.
+pub mod holder {
+    pub const NONE: u8 = 0;
+    pub const PHONE: u8 = 1;
+    pub const DESKTOP: u8 = 2;
+    pub const LOCAL: u8 = 3;
+    pub const MESH: u8 = 4;
+}
+
+/// The byte for a holder/origin word. An unknown word is [`holder::LOCAL`], which is what the
+/// daemon writes when a caller names nothing.
+fn holder_code(word: &str) -> u8 {
+    match word {
+        "phone" => holder::PHONE,
+        "desktop" => holder::DESKTOP,
+        "mesh" => holder::MESH,
+        "" => holder::NONE,
+        _ => holder::LOCAL,
+    }
+}
+
+/// The word for a code, for the fields the app reads.
+fn holder_word(code: u8) -> String {
+    match code {
+        holder::PHONE => "phone",
+        holder::DESKTOP => "desktop",
+        holder::MESH => "mesh",
+        holder::LOCAL => "local",
+        _ => "",
+    }
+    .to_owned()
+}
 /// A decoder holds at most this much unparsed input.
 pub const MAX_BUFFER: usize = 4096;
 
@@ -211,6 +261,9 @@ pub struct SessionEntry {
     /// Where the shell is (version 6). Empty in a page built for a version-5 phone, where the
     /// field is not on the wire at all.
     pub cwd: String,
+    /// Who holds it now: `desktop`, `phone`, `mesh`, or empty for nobody (version 8). A shell with
+    /// a holder is one the phone must ask to take; the desk's own window is told when it loses it.
+    pub owner: String,
     /// Who started the shell: `phone`, `desktop`, `local` (version 7). Empty in a page built for
     /// a version-6 phone. The mesh launcher reads this to keep a phone-opened shell marked as the
     /// phone's, so its close and open-on-desktop actions survive an app restart.
@@ -276,6 +329,7 @@ pub enum Message {
         last: bool,
         cwd: bool,
         origin: bool,
+        owner: bool,
         entries: Vec<SessionEntry>,
     },
     /// Phone asks the host to start a shell in `cwd` (empty = the host's default directory).
@@ -287,6 +341,13 @@ pub enum Message {
     /// Phone asks the host to end that shell. A shell a desk window holds is put down instead of
     /// destroyed, exactly as the tailnet's `close` does (ADR-0010). Version 7 and later only.
     Close {
+        selector: String,
+    },
+    /// Phone asks to attach to a shell somebody else holds, displacing them. The consent the
+    /// tailnet's takeover is, and the second half of `Closed { HELD }`: a plain `Attach` is
+    /// refused while a desk window holds the shell, so taking it is always something the user
+    /// chose. Version 8 and later only.
+    Takeover {
         selector: String,
     },
     /// Phone asks the host to open that shell in a desk window. Version 7 and later only.
@@ -307,6 +368,7 @@ const T_SESSIONS: u8 = 0x85;
 const T_CREATE: u8 = 0x08;
 const T_CLOSE: u8 = 0x09;
 const T_MAKE_LIVE: u8 = 0x0a;
+const T_TAKEOVER: u8 = 0x0b;
 const T_CREATED: u8 = 0x86;
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
@@ -464,15 +526,15 @@ impl Message {
                 body.extend_from_slice(cwd.as_bytes());
                 T_CREATE
             }
-            Self::Close { selector } | Self::MakeLive { selector } => {
+            Self::Close { selector } | Self::MakeLive { selector } | Self::Takeover { selector } => {
                 if selector.len() > MAX_SELECTOR {
                     return Err(EncodeError::TooLong);
                 }
                 body.extend_from_slice(selector.as_bytes());
-                if matches!(self, Self::Close { .. }) {
-                    T_CLOSE
-                } else {
-                    T_MAKE_LIVE
+                match self {
+                    Self::Close { .. } => T_CLOSE,
+                    Self::MakeLive { .. } => T_MAKE_LIVE,
+                    _ => T_TAKEOVER,
                 }
             }
             Self::Created { id } => {
@@ -487,9 +549,15 @@ impl Message {
                 last,
                 cwd,
                 origin,
+                owner,
                 entries,
             } => {
-                body.push(u8::from(*last) | if *cwd { 2 } else { 0 } | if *origin { 4 } else { 0 });
+                body.push(
+                    u8::from(*last)
+                        | if *cwd { 2 } else { 0 }
+                        | if *origin { 4 } else { 0 }
+                        | if *owner { 8 } else { 0 },
+                );
                 for e in entries {
                     if e.id.len() > MAX_SELECTOR || e.label.len() > MAX_LABEL {
                         return Err(EncodeError::TooLong);
@@ -497,9 +565,7 @@ impl Message {
                     if *cwd && e.cwd.len() > MAX_CWD {
                         return Err(EncodeError::TooLong);
                     }
-                    if *origin && e.origin.len() > MAX_ORIGIN {
-                        return Err(EncodeError::TooLong);
-                    }
+
                     body.push(e.id.len() as u8);
                     body.extend_from_slice(e.id.as_bytes());
                     body.push(e.label.len() as u8);
@@ -509,8 +575,10 @@ impl Message {
                         body.extend_from_slice(e.cwd.as_bytes());
                     }
                     if *origin {
-                        body.push(e.origin.len() as u8);
-                        body.extend_from_slice(e.origin.as_bytes());
+                        body.push(holder_code(&e.origin));
+                    }
+                    if *owner {
+                        body.push(holder_code(&e.owner));
                     }
                 }
                 if body.len() > MAX_ROWS_BODY {
@@ -647,17 +715,17 @@ impl Message {
                     .to_owned();
                 Self::Create { version, cwd }
             }
-            T_CLOSE | T_MAKE_LIVE => {
+            T_CLOSE | T_MAKE_LIVE | T_TAKEOVER => {
                 if body.len() > MAX_SELECTOR {
                     return Err(bad);
                 }
                 let selector = std::str::from_utf8(body)
                     .map_err(|_| bad.clone())?
                     .to_owned();
-                if tag == T_CLOSE {
-                    Self::Close { selector }
-                } else {
-                    Self::MakeLive { selector }
+                match tag {
+                    T_CLOSE => Self::Close { selector },
+                    T_MAKE_LIVE => Self::MakeLive { selector },
+                    _ => Self::Takeover { selector },
                 }
             }
             T_CREATED => {
@@ -675,6 +743,7 @@ impl Message {
                 let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
                 let with_cwd = flags & 2 != 0;
                 let with_origin = flags & 4 != 0;
+                let with_owner = flags & 8 != 0;
                 let mut entries = Vec::new();
                 while !rest.is_empty() {
                     let mut field = |max: usize| -> Result<String, DecodeError> {
@@ -697,7 +766,16 @@ impl Message {
                         String::new()
                     };
                     let origin = if with_origin {
-                        field(MAX_ORIGIN)?
+                        let (&c, tail) = rest.split_first().ok_or(bad.clone())?;
+                        rest = tail;
+                        holder_word(c)
+                    } else {
+                        String::new()
+                    };
+                    let owner = if with_owner {
+                        let (&c, tail) = rest.split_first().ok_or(bad.clone())?;
+                        rest = tail;
+                        holder_word(c)
                     } else {
                         String::new()
                     };
@@ -706,12 +784,14 @@ impl Message {
                         label,
                         cwd,
                         origin,
+                        owner,
                     });
                 }
                 Self::Sessions {
                     last: flags & 1 == 1,
                     cwd: with_cwd,
                     origin: with_origin,
+                    owner: with_owner,
                     entries,
                 }
             }
@@ -793,24 +873,27 @@ fn cut(text: &str, max: usize) -> String {
 /// empty `cwd`. Always at least one page, so "no shells" is an answer.
 #[must_use]
 pub fn session_pages(
-    sessions: &[(String, String, String, String)],
+    sessions: &[(String, String, String, String, String)],
     cwd: bool,
     origin: bool,
+    owner: bool,
 ) -> Vec<Message> {
     let mut pages: Vec<Vec<SessionEntry>> = vec![Vec::new()];
     let mut size = 1; // the flags byte
-    for (id, label, path, by) in sessions.iter().take(MAX_SESSIONS) {
+    for (id, label, path, by, held) in sessions.iter().take(MAX_SESSIONS) {
         let e = SessionEntry {
             id: cut(id, MAX_SELECTOR),
             label: cut(label, MAX_LABEL),
             cwd: if cwd { cut(path, MAX_CWD) } else { String::new() },
             origin: if origin { cut(by, MAX_ORIGIN) } else { String::new() },
+            owner: if owner { cut(held, MAX_ORIGIN) } else { String::new() },
         };
         let cost = 2
             + e.id.len()
             + e.label.len()
             + if cwd { 1 + e.cwd.len() } else { 0 }
-            + if origin { 1 + e.origin.len() } else { 0 };
+            + if origin { 1 } else { 0 }
+            + if owner { 1 } else { 0 };
         if size + cost > MAX_ROWS_BODY {
             pages.push(Vec::new());
             size = 1;
@@ -826,6 +909,7 @@ pub fn session_pages(
             last: i + 1 == n,
             cwd,
             origin,
+            owner,
             entries,
         })
         .collect()
@@ -1612,7 +1696,7 @@ mod tests {
         });
     }
 
-    fn sh(n: usize) -> Vec<(String, String, String, String)> {
+    fn sh(n: usize) -> Vec<(String, String, String, String, String)> {
         (0..n)
             .map(|i| {
                 (
@@ -1620,6 +1704,7 @@ mod tests {
                     format!("shell number {i} long label"),
                     format!("~/projects/shell-{i}"),
                     "phone".to_string(),
+                    String::new(),
                 )
             })
             .collect()
@@ -1630,33 +1715,36 @@ mod tests {
         assert_eq!(Message::List.encode().unwrap(), [0x05, 0x00]);
         // no shells: one page, `last`, no entries
         assert_eq!(
-            session_pages(&[], false, false),
+            session_pages(&[], false, false, false),
             vec![Message::Sessions {
                 last: true,
                 cwd: false,
                 origin: false,
+                owner: false,
                 entries: vec![]
             }]
         );
         assert_eq!(
-            session_pages(&[], false, false).remove(0).encode().unwrap(),
+            session_pages(&[], false, false, false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x01]
         );
         // The same page for a version-6 phone: the cwd flag is set, and there are still no entries.
         assert_eq!(
-            session_pages(&[], true, false).remove(0).encode().unwrap(),
+            session_pages(&[], true, false, false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x03]
         );
         let one = Message::Sessions {
             last: true,
             cwd: false,
             origin: false,
+            owner: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
                 cwd: String::new(),
                         origin: String::new(),
-        }],
+                owner: String::new(),
+    }],
         };
         // flags 1, id_len 2 "ab", label_len 1 "x" (no cwd: version 5 form)
         assert_eq!(
@@ -1667,12 +1755,14 @@ mod tests {
             last: true,
             cwd: true,
             origin: false,
+            owner: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
                 cwd: "~/".into(),
                         origin: String::new(),
-        }],
+                owner: String::new(),
+    }],
         };
         // flags 3, id 2 "ab", label 1 "x", cwd 2 "~/"
         assert_eq!(
@@ -1684,25 +1774,24 @@ mod tests {
             last: true,
             cwd: true,
             origin: true,
+            owner: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
                 cwd: "~/".into(),
                 origin: "phone".into(),
-            }],
+                        owner: String::new(),
+        }],
         };
-        // flags 7 (last|cwd|origin), id 2 "ab", label 1 "x", cwd 2 "~/", origin 5 "phone"
+        // flags 7 (last|cwd|origin), id 2 "ab", label 1 "x", cwd 2 "~/", origin one byte (1 = phone)
         assert_eq!(
             one_with_origin.encode().unwrap(),
-            [
-                0x85, 0x0f, 0x07, 0x02, b'a', b'b', 0x01, b'x', 0x02, b'~', b'/', 0x05, b'p',
-                b'h', b'o', b'n', b'e'
-            ]
+            [0x85, 0x0a, 0x07, 0x02, b'a', b'b', 0x01, b'x', 0x02, b'~', b'/', 0x01]
         );
         // A version-7 page with no shells still carries the origin bit, so the phone knows the
         // entries would have said who started them.
         assert_eq!(
-            session_pages(&[], false, true).remove(0).encode().unwrap(),
+            session_pages(&[], false, true, false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x05]
         );
         assert_eq!(
@@ -1723,7 +1812,7 @@ mod tests {
     fn sessions_pages_fit_one_record_and_say_which_is_last() {
         for with_cwd in [false, true] {
             for n in [0usize, 1, 2, 3, 7, MAX_SESSIONS, MAX_SESSIONS + 5] {
-                let pages = session_pages(&sh(n), with_cwd, with_cwd);
+                let pages = session_pages(&sh(n), with_cwd, with_cwd, with_cwd);
                 let mut total = 0;
                 for (i, m) in pages.iter().enumerate() {
                     let bytes = m.encode().unwrap();
@@ -1747,7 +1836,7 @@ mod tests {
                 );
             }
             assert!(
-                session_pages(&sh(7), with_cwd, with_cwd).len() > 1,
+                session_pages(&sh(7), with_cwd, with_cwd, with_cwd).len() > 1,
                 "a long list really does span records"
             );
         }
@@ -1760,8 +1849,9 @@ mod tests {
             "漢".repeat(20),
             "~/漢".repeat(20),
             "phone".to_string(),
+            String::new(),
         )]; // 60-byte id, 60-byte label, 120-byte path
-        let pages = session_pages(&list, true, true);
+        let pages = session_pages(&list, true, true, true);
         let mut stream = Vec::new();
         for m in &pages {
             stream.extend(m.encode().unwrap());
@@ -1795,24 +1885,28 @@ mod tests {
             last: true,
             cwd: false,
             origin: false,
+            owner: false,
             entries: vec![SessionEntry {
                 id: "x".repeat(MAX_SELECTOR + 1),
                 label: String::new(),
                 cwd: String::new(),
                         origin: String::new(),
-        }],
+                owner: String::new(),
+    }],
         };
         assert_eq!(bad.encode(), Err(EncodeError::TooLong));
         let bad_cwd = Message::Sessions {
             last: true,
             cwd: true,
             origin: false,
+            owner: false,
             entries: vec![SessionEntry {
                 id: "a".into(),
                 label: String::new(),
                 cwd: "p".repeat(MAX_CWD + 1),
                         origin: String::new(),
-        }],
+                owner: String::new(),
+    }],
         };
         assert_eq!(bad_cwd.encode(), Err(EncodeError::TooLong));
         // entry claims 5 bytes of id but only 1 follows
@@ -2405,12 +2499,13 @@ mod tests {
                 "kind":"commit","epoch":epoch,"cursorX":cursor_x,"cursorY":cursor_y,"flags":flags}),
             Message::Closed { reason } => json!({"kind":"closed","reason":reason}),
             Message::List => json!({"kind":"list"}),
-            Message::Sessions { last, cwd, origin, entries } => json!({
-                "kind":"sessions","last":last,"cwd":cwd,"origin":origin,
-                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd,"origin":e.origin})).collect::<Vec<_>>()}),
+            Message::Sessions { last, cwd, origin, owner, entries } => json!({
+                "kind":"sessions","last":last,"cwd":cwd,"origin":origin,"owner":owner,
+                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd,"origin":e.origin,"owner":e.owner})).collect::<Vec<_>>()}),
             Message::Create { version, cwd } => json!({"kind":"create","version":version,"cwd":cwd}),
             Message::Close { selector } => json!({"kind":"close","selector":selector}),
             Message::MakeLive { selector } => json!({"kind":"make_live","selector":selector}),
+            Message::Takeover { selector } => json!({"kind":"takeover","selector":selector}),
             Message::Created { id } => json!({"kind":"created","id":id}),
         }
     }
@@ -2494,50 +2589,57 @@ mod tests {
                 last: true,
                 cwd: false,
                 origin: false,
+                owner: false,
                 entries: vec![],
             },
             Message::Sessions {
                 last: false,
                 cwd: false,
                 origin: false,
+                owner: false,
                 entries: vec![
                     SessionEntry {
                         id: "ab12cd34".into(),
                         label: "RCNT".into(),
                         cwd: String::new(),
                                         origin: String::new(),
-                },
+                                owner: String::new(),
+            },
                     SessionEntry {
                         id: "ef56".into(),
                         label: "héllo 漢".into(),
                         cwd: String::new(),
                                         origin: String::new(),
-                },
+                                owner: String::new(),
+            },
                 ],
             },
             Message::Sessions {
                 last: true,
                 cwd: true,
                 origin: false,
+                owner: false,
                 entries: vec![SessionEntry {
                     id: "ab12cd34".into(),
                     label: "RCNT".into(),
                     cwd: "~/Documents/RCNT".into(),
                                 origin: String::new(),
-            }],
+                        owner: String::new(),
+        }],
             },
         ];
-        let many: Vec<(String, String, String, String)> = (0..7)
+        let many: Vec<(String, String, String, String, String)> = (0..7)
             .map(|i| {
                 (
                     format!("{i:02x}{}", "f".repeat(30)),
                     format!("shell number {i} long label"),
                     format!("~/projects/shell-{i}"),
                     "phone".to_string(),
+                    String::new(),
                 )
             })
             .collect();
-        let page_cases: Vec<_> = session_pages(&many, true, true)
+        let page_cases: Vec<_> = session_pages(&many, true, true, true)
             .iter()
             .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
             .collect();
@@ -2612,7 +2714,7 @@ mod tests {
                        "version":VERSION,"minVersion":MIN_VERSION,"cwdVersion":CWD_VERSION,"maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1,
                        "recordFloor":ldmux_mesh::constants::RECORD_FLOOR,"recordMax":ldmux_mesh::constants::RECORD_MAX,"creditWindow":ldmux_mesh::constants::CREDIT_WINDOW},
             "messages": msg_cases,
-            "sessionPages": {"input": many.iter().map(|(i,l,p,by)| json!({"id":i,"label":l,"cwd":p,"origin":by})).collect::<Vec<_>>(), "pages": page_cases},
+            "sessionPages": {"input": many.iter().map(|(i,l,p,by,held)| json!({"id":i,"label":l,"cwd":p,"origin":by,"owner":held})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,
             "streams": streams,
         })

@@ -29,6 +29,9 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
     is MeshTermView.Choose ->
         if (view.entries.isEmpty()) MeshBody("the host has no shells", "start one there, then refresh") else null
     MeshTermView.NoShells -> MeshBody("the host has no shells", "start one there, then refresh")
+    // Same words the tailnet route uses for the same situation: the desk has it, and taking it is
+    // the user's choice.
+    is MeshTermView.HeldBy -> MeshBody("open on the desktop", "take it back to use it here")
     is MeshTermView.HostClosed -> MeshBody(
         // One fact, then at most one action. Each of these used to carry its action inside the
         // same sentence, so a reader had to parse a colon to find out whether anything was wrong.

@@ -78,6 +78,7 @@ import io.ldmux.mobile.RadiusMedium
 import io.ldmux.mobile.Surface
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
+import io.ldmux.mobile.AccentBtn
 
 /**
  * How long a sync waits for the host's answer before the screen stops waiting and says so.
@@ -914,6 +915,16 @@ fun MeshTerminalScreen(
                         // radio or key is a settings case, not a retry.
                         meshBodyFor(v)?.let { MeshBodyBlock(it) }
                     }
+                    // **Taking a shell from the desk is a tap the user makes.** The host refuses a
+                    // plain attach while another device holds it, and this is the one action that
+                    // says "yes, here instead" — the same choice the tailnet route offers, in the
+                    // same order: the state first, then the verb.
+                    if (v is MeshTermView.HeldBy) {
+                        Spacer(Modifier.height(LocalTouch.current.rowPad))
+                        AccentBtn("take it back", Modifier.fillMaxWidth()) {
+                            scope.launch { conn.driver.takeover(v.shell) }
+                        }
+                    }
                     Spacer(Modifier.weight(1f))
                 }
                 // The launcher's own create dialogue, over the radio. The host starts the shell and
@@ -1038,8 +1049,12 @@ internal fun meshPagesFor(shells: MeshShells, order: List<String>): List<Session
  * A version-5 host does not send a working directory - the field is not on its wire - so the row
  * falls back to the id it would attach with rather than showing an empty line.
  */
-internal fun meshRowSubtitle(e: SessionEntry): String =
-    if (e.cwd.isEmpty()) e.id else tildify(e.cwd)
+internal fun meshRowSubtitle(e: SessionEntry): String {
+    val where = if (e.cwd.isEmpty()) e.id else tildify(e.cwd)
+    // Where it is, then who is watching it: a shell on the desk is one this phone has to ask for,
+    // and the row says so before the tap rather than after the refusal.
+    return if (e.heldElsewhere) "$where  ·  on the ${e.owner}" else where
+}
 
 /**
  * A wait, in words.

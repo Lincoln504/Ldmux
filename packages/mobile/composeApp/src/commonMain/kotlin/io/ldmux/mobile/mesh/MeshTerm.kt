@@ -24,7 +24,7 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send.
      */
-    const val VERSION = 7
+    const val VERSION = 8
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -50,6 +50,27 @@ object MeshTerm {
 
     /** The first version whose `Sessions` entries carry who started the shell (version 7). */
     const val ORIGIN_VERSION = 7
+
+    /**
+     * The first version that says **who holds a shell now**, and lets a phone take one from the
+     * desk (version 8).
+     *
+     * A phone that attached to a shell a desk window was watching took it silently: the claim
+     * displaced the window and the pty was fitted to the phone. The tailnet route has always asked
+     * instead — `HeldBy`, then a takeover the user chooses — and version 8 gives the radio route
+     * the same words: the holder rides each `Sessions` entry, a plain `Attach` on a held shell is
+     * refused with `Closed { HELD }`, and `Takeover` is the phone saying yes.
+     */
+    const val OWNER_VERSION = 8
+
+    /** Holder codes on the wire: one byte, because the vocabulary is five words. */
+    object Holder {
+        const val NONE = 0
+        const val PHONE = 1
+        const val DESKTOP = 2
+        const val LOCAL = 3
+        const val MESH = 4
+    }
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
     const val MAX_BODY = 300
@@ -91,6 +112,14 @@ object MeshTerm {
         const val EXITED = 3
         const val UNAVAILABLE = 4
         const val VERSION = 5
+
+        /**
+         * Another device holds the shell and the host refused to displace it (version 8).
+         *
+         * The answer to a plain `Attach` on a shell a desk window is watching. The screen says
+         * so and offers `take it back`, which is [`MeshTerm.Takeover`].
+         */
+        const val HELD = 6
     }
 
     /** `Commit.flags`. */
@@ -110,6 +139,7 @@ object MeshTerm {
     internal const val T_CLOSE = 0x09
     internal const val T_MAKE_LIVE = 0x0a
     internal const val T_CREATED = 0x86
+    internal const val T_TAKEOVER = 0x0b
     internal const val T_SESSIONS = 0x85
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
@@ -132,9 +162,42 @@ data class SessionEntry(
      * close and open-on-desktop actions after the app restarts instead of passing for a desk shell.
      */
     val origin: String = "",
+    /**
+     * Who holds it now: `desktop`, `phone`, `mesh`, or empty for nobody (version 8).
+     *
+     * A shell with a holder other than this phone is one it must ask to take. The list shows that,
+     * and the attach is refused until the user chooses `take it back`.
+     */
+    val owner: String = "",
 ) {
     /** Whether this phone started the shell, so the row may offer to end it or put it on the desk. */
     val openedByPhone: Boolean get() = origin == "phone"
+
+    /**
+     * Whether another device is watching this shell right now.
+     *
+     * A shell held by the desk is one this phone must ask to take: the attach is refused with
+     * `Closed { HELD }` and the screen offers `take it back`, which is `Takeover`.
+     */
+    val heldElsewhere: Boolean get() = owner.isNotEmpty() && owner != "mesh" && owner != "phone"
+}
+
+/** A holder or origin word as its one-byte wire code. */
+private fun holderCode(word: String): Int = when (word) {
+    "phone" -> MeshTerm.Holder.PHONE
+    "desktop" -> MeshTerm.Holder.DESKTOP
+    "mesh" -> MeshTerm.Holder.MESH
+    "" -> MeshTerm.Holder.NONE
+    else -> MeshTerm.Holder.LOCAL
+}
+
+/** The word for a holder code, for the rows the app draws. */
+internal fun holderWord(code: Int): String = when (code) {
+    MeshTerm.Holder.PHONE -> "phone"
+    MeshTerm.Holder.DESKTOP -> "desktop"
+    MeshTerm.Holder.MESH -> "mesh"
+    MeshTerm.Holder.LOCAL -> "local"
+    else -> ""
 }
 
 data class TermPatch(val y: Int, val append: Boolean, val text: String)
@@ -184,7 +247,11 @@ sealed interface TermMessage {
         val entries: List<SessionEntry>,
         val cwd: Boolean = false,
         val origin: Boolean = false,
+        val owner: Boolean = false,
     ) : TermMessage
+
+    /** Phone asks to attach to a shell somebody else holds, displacing them (version 8). */
+    data class Takeover(val selector: String) : TermMessage
 
     /**
      * Phone asks the host to start a shell in [cwd] (empty = the host's default). Version 7 and later
@@ -321,6 +388,12 @@ fun TermMessage.encode(): ByteArray {
             sel.forEach { body.add(it) }
             MeshTerm.T_CLOSE
         }
+        is TermMessage.Takeover -> {
+            val sel = selector.encodeToByteArray()
+            if (sel.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
+            sel.forEach { body.add(it) }
+            MeshTerm.T_TAKEOVER
+        }
         is TermMessage.MakeLive -> {
             val sel = selector.encodeToByteArray()
             if (sel.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
@@ -335,22 +408,24 @@ fun TermMessage.encode(): ByteArray {
         }
         is TermMessage.Sessions -> {
             body.add(
-                ((if (last) 1 else 0) or (if (cwd) 2 else 0) or (if (origin) 4 else 0)).toByte(),
+                ((if (last) 1 else 0) or (if (cwd) 2 else 0) or (if (origin) 4 else 0) or
+                    (if (owner) 8 else 0)).toByte(),
             )
             for (e in entries) {
                 val id = e.id.encodeToByteArray()
                 val label = e.label.encodeToByteArray()
                 val path = e.cwd.encodeToByteArray()
-                val by = e.origin.encodeToByteArray()
+                val by = holderCode(e.origin)
                 if (id.size > MeshTerm.MAX_SELECTOR || label.size > MeshTerm.MAX_LABEL) {
                     throw TermEncodeException("session entry too long")
                 }
                 if (cwd && path.size > MeshTerm.MAX_CWD) throw TermEncodeException("session path too long")
-                if (origin && by.size > MeshTerm.MAX_ORIGIN) throw TermEncodeException("origin too long")
+
                 body.add(id.size.toByte()); id.forEach { body.add(it) }
                 body.add(label.size.toByte()); label.forEach { body.add(it) }
                 if (cwd) { body.add(path.size.toByte()); path.forEach { body.add(it) } }
-                if (origin) { body.add(by.size.toByte()); by.forEach { body.add(it) } }
+                if (origin) body.add(by.toByte())
+                if (owner) body.add(holderCode(e.owner).toByte())
             }
             if (body.size > MeshTerm.MAX_ROWS_BODY) throw TermEncodeException("sessions body too long")
             MeshTerm.T_SESSIONS
@@ -512,6 +587,11 @@ class TermDecoder {
                 val cwd = utf8(body.copyOfRange(1, body.size)) ?: return Parsed.Bad
                 ok(TermMessage.Create(version, cwd))
             }
+            MeshTerm.T_TAKEOVER -> {
+                if (body.size > MeshTerm.MAX_SELECTOR) return Parsed.Bad
+                val selector = utf8(body) ?: return Parsed.Bad
+                ok(TermMessage.Takeover(selector))
+            }
             MeshTerm.T_CLOSE, MeshTerm.T_MAKE_LIVE -> {
                 if (body.size > MeshTerm.MAX_SELECTOR) return Parsed.Bad
                 val selector = utf8(body) ?: return Parsed.Bad
@@ -528,6 +608,7 @@ class TermDecoder {
                 if (body.isEmpty()) return Parsed.Bad
                 val withCwd = body[0].toInt() and 2 != 0
                 val withOrigin = body[0].toInt() and 4 != 0
+                val withOwner = body[0].toInt() and 8 != 0
                 val entries = ArrayList<SessionEntry>()
                 var p = 1
                 fun field(max: Int): String? {
@@ -542,10 +623,17 @@ class TermDecoder {
                     val id = field(MeshTerm.MAX_SELECTOR) ?: return Parsed.Bad
                     val label = field(MeshTerm.MAX_LABEL) ?: return Parsed.Bad
                     val cwd = if (withCwd) field(MeshTerm.MAX_CWD) ?: return Parsed.Bad else ""
-                    val origin = if (withOrigin) field(MeshTerm.MAX_ORIGIN) ?: return Parsed.Bad else ""
-                    entries += SessionEntry(id, label, cwd, origin)
+                    val origin = if (withOrigin) {
+                        if (p >= body.size) return Parsed.Bad
+                        holderWord(b(body, p)).also { p += 1 }
+                    } else ""
+                    val owner = if (withOwner) {
+                        if (p >= body.size) return Parsed.Bad
+                        holderWord(b(body, p)).also { p += 1 }
+                    } else ""
+                    entries += SessionEntry(id, label, cwd, origin, owner)
                 }
-                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries, withCwd, withOrigin))
+                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries, withCwd, withOrigin, withOwner))
             }
             else -> Parsed.Unknown
         }

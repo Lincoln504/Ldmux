@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
     CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, ORIGIN_VERSION,
-    RESIZE_VERSION, SHELL_CONTROL_VERSION, STREAM_VERSION, Screen, VERSION, closed, session_pages,
+    OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, STREAM_VERSION, Screen, VERSION, closed,
+    session_pages,
 };
 
 /// The session as the bridge sees it.
@@ -56,15 +57,15 @@ pub trait Link {
 pub trait Host {
     /// Ids of the running shells. `None` when the host could not be asked: unknown is not empty.
     async fn running(&mut self) -> Option<Vec<String>>;
-    /// `(id, label, cwd, created_by)` of the running shells, for the phone's picker. The default has
+    /// `(id, label, cwd, created_by, holder)` of the running shells, for the phone's picker. The default has
     /// no labels, no paths and no origin; a host that knows where a shell runs gives the phone the
     /// folder and who started it, as the tailnet launcher does.
-    async fn listing(&mut self) -> Option<Vec<(String, String, String, String)>> {
+    async fn listing(&mut self) -> Option<Vec<(String, String, String, String, String)>> {
         Some(
             self.running()
                 .await?
                 .into_iter()
-                .map(|id| (id, String::new(), String::new(), String::new()))
+                .map(|id| (id, String::new(), String::new(), String::new(), String::new()))
                 .collect(),
         )
     }
@@ -157,6 +158,13 @@ pub struct BridgeStats {
     /// sending one for the other told the phone its shells had all ended (measured 2026-11-03: the
     /// launcher emptied on a drop while every shell was alive).
     pub host_unanswered: u32,
+}
+
+/// What a dropped attach still owes the host: the shell to give back, and the grid to put back.
+struct Detached {
+    session: String,
+    original: Option<(u8, u8)>,
+    resized: bool,
 }
 
 struct Attached {
@@ -440,10 +448,11 @@ impl<H: Host, L: Link> Bridge<H, L> {
             // Before this phone has fitted anything, the pty's size is whatever the desk left it
             // at: that is the size to put back. Recorded once, and only before our own `Resize`
             // has been applied, so a later screen cannot overwrite it with the phone's grid.
-            if let Some(a) = self.shells.get_mut(&shell) {
-                if a.original.is_none() && a.geometry.is_none() {
-                    a.original = Some((screen.cols, screen.rows));
-                }
+            if let Some(a) = self.shells.get_mut(&shell)
+                && a.original.is_none()
+                && a.geometry.is_none()
+            {
+                a.original = Some((screen.cols, screen.rows));
             }
             if self.shells.get(&shell).is_some_and(|a| a.differ.up_to_date(&screen)) {
                 if let Some(a) = self.shells.get_mut(&shell) {
@@ -507,29 +516,30 @@ impl<H: Host, L: Link> Bridge<H, L> {
     /// surely as `Detach` does, and a claim left behind would lock a desk window out of a
     /// shell nobody is watching.
     async fn drop_all(&mut self) {
-        let held: Vec<(String, Option<(u8, u8)>, bool)> = self
+        let held: Vec<Detached> = self
             .shells
             .values()
-            .map(|a| (a.session.clone(), a.original, a.geometry.is_some()))
+            .map(|a| Detached {
+                session: a.session.clone(),
+                original: a.original,
+                resized: a.geometry.is_some(),
+            })
             .collect();
         self.shells.clear();
         self.decoders.clear();
         self.versions.clear();
-        for (id, _, _) in &held {
-            self.host.release(id).await;
+        for a in &held {
+            self.host.release(&a.session).await;
         }
-        for (id, original, resized) in &held {
-            if *resized {
-                if let Some((cols, rows)) = original {
-                    let _ = self.host.resize(id, *cols, *rows).await;
-                }
+        for a in &held {
+            if let Some((cols, rows)) = a.original.filter(|_| a.resized) {
+                let _ = self.host.resize(&a.session, cols, rows).await;
             }
         }
     }
 
-    async fn handle(&mut self, shell: u8, m: Message) {
-        match m {
-            Message::Attach { version, selector } => {
+    /// `Attach`, with or without the consent that displaces whoever holds the shell.
+    async fn attach_with(&mut self, shell: u8, version: u8, selector: &str, takeover: bool) {
                 if !(MIN_VERSION..=VERSION).contains(&version) {
                     self.reply(
                         shell,
@@ -542,7 +552,14 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // Remembered even when the attach itself is refused: the phone answers a refusal
                 // with a `List`, and that answer must be in the version this phone speaks.
                 self.versions.insert(shell, version);
-                let Some(running) = self.host.running().await else {
+                // The holder matters as much as the id: a shell a desk window is watching is
+                // refused rather than stolen, which is what the tailnet route has always done
+                // (`HeldBy`, then a takeover the user chooses). Silence would be worse — the phone
+                // would sit on a screen nobody is feeding.
+                let listing = self.host.listing().await;
+                let Some(running) = listing.as_ref().map(|rows| {
+                    rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>()
+                }) else {
                     // Unknown is not "not found": answering `Closed` here told the phone the
                     // shell had ended when the host had merely failed to answer. Stay silent and
                     // let the phone ask again.
@@ -551,8 +568,20 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 };
                 let matches: Vec<&String> = running
                     .iter()
-                    .filter(|id| selector.is_empty() || id.starts_with(&selector))
+                    .filter(|id| selector.is_empty() || id.starts_with(selector))
                     .collect();
+                // A shell another device holds, and this is a plain Attach: ask first.
+                if let Some(held) = matches.first() {
+                    let holder = listing
+                        .as_ref()
+                        .and_then(|rows| rows.iter().find(|r| r.0 == ***held))
+                        .map(|r| r.4.as_str())
+                        .unwrap_or("");
+                    if !takeover && !holder.is_empty() && holder != "mesh" {
+                        self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
+                        return;
+                    }
+                }
                 match matches.as_slice() {
                     [] => {
                         self.reply(
@@ -621,6 +650,24 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         );
                     }
                 }
+            
+    }
+
+    async fn handle(&mut self, shell: u8, m: Message) {
+        match m {
+            Message::Attach { version, selector } => {
+                self.attach_with(shell, version, &selector, false).await;
+            }
+            // **Taking a shell from the desk is the user's decision, so it is a message of its
+            // own.** The version is the one this phone attached with: a takeover is not a place to
+            // renegotiate the protocol.
+            Message::Takeover { selector } => {
+                let version = self.versions.get(&shell).copied().unwrap_or(0);
+                if version < OWNER_VERSION {
+                    self.reply(shell, &[Message::Closed { reason: closed::VERSION }]);
+                    return;
+                }
+                self.attach_with(shell, version, &selector, true).await;
             }
             Message::List => {
                 let Some(listing) = self.host.listing().await else {
@@ -638,7 +685,11 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // The origin rides the same flag-byte mechanism as the path, for the same reason:
                 // a list is answered before any attach has a profile to gate on.
                 let with_origin = version.is_some_and(|v| v >= ORIGIN_VERSION);
-                self.reply(shell, &session_pages(&listing, with_cwd, with_origin));
+                let with_owner = version.is_some_and(|v| v >= OWNER_VERSION);
+                self.reply(
+                    shell,
+                    &session_pages(&listing, with_cwd, with_origin, with_owner),
+                );
             }
             // ── version 7: the phone starts and ends shells, as the tailnet client does ──
             Message::Create { version, cwd } => {
@@ -687,7 +738,11 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 if let Some(listing) = self.host.listing().await {
                     let with_cwd = version >= CWD_VERSION;
                     let with_origin = version >= ORIGIN_VERSION;
-                    self.reply(shell, &session_pages(&listing, with_cwd, with_origin));
+                    let with_owner = version >= OWNER_VERSION;
+                    self.reply(
+                        shell,
+                        &session_pages(&listing, with_cwd, with_origin, with_owner),
+                    );
                 }
             }
             Message::MakeLive { selector } => {
@@ -845,7 +900,7 @@ impl Host for DaemonHost {
         Some(ids)
     }
 
-    async fn listing(&mut self) -> Option<Vec<(String, String, String, String)>> {
+    async fn listing(&mut self) -> Option<Vec<(String, String, String, String, String)>> {
         let v = self
             .0
             .lock()
@@ -869,11 +924,19 @@ impl Host for DaemonHost {
                         // The mesh launcher shows the phone's own shells' actions, so it needs the
                         // same fact the tailnet launcher has always had.
                         let origin = s.get("createdBy").and_then(|x| x.as_str()).unwrap_or("");
+                        // Who holds it now (`owner.kind`): `desktop`, `phone`, `mesh`, or absent.
+                        // A shell with a holder is one this phone must ask to take.
+                        let holder = s
+                            .get("owner")
+                            .and_then(|o| o.get("kind"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
                         Some((
                             id.to_owned(),
                             label.to_owned(),
                             cwd.to_owned(),
                             origin.to_owned(),
+                            holder.to_owned(),
                         ))
                     })
                     .collect::<Vec<_>>()
@@ -1170,6 +1233,8 @@ mod tests {
         made_live: Vec<String>,
         /// When set, `create` fails the way a host with no room would.
         fail_create: bool,
+        /// Who holds a shell, as `owner.kind` would say it: `desktop`, `phone`, or absent.
+        holders: HashMap<String, String>,
     }
     #[derive(Clone, Default)]
     struct FakeHost(Arc<Mutex<HostState>>);
@@ -1181,7 +1246,7 @@ mod tests {
             }
             Some(s.running.clone())
         }
-        async fn listing(&mut self) -> Option<Vec<(String, String, String, String)>> {
+        async fn listing(&mut self) -> Option<Vec<(String, String, String, String, String)>> {
             let s = self.0.lock().unwrap();
             if s.fail_list {
                 return None;
@@ -1195,6 +1260,7 @@ mod tests {
                             format!("label of {id}"),
                             format!("/work/{id}"),
                             "phone".to_string(),
+                            s.holders.get(id).cloned().unwrap_or_default(),
                         )
                     })
                     .collect(),
@@ -1663,6 +1729,7 @@ mod tests {
                     last,
                     cwd,
                     origin: _,
+                    owner: _,
                     entries,
                 } = m
                 else {
@@ -1731,6 +1798,7 @@ mod tests {
                 last,
                 cwd,
                 origin: _,
+                owner: _,
                 entries,
             } = &sessions_seen(&link, 4)[0]
             else {
@@ -2490,6 +2558,78 @@ mod tests {
             host.0.lock().unwrap().resized.is_empty(),
             "nothing was fitted, so nothing is restored: {:?}",
             host.0.lock().unwrap().resized
+        );
+    }
+
+    /// **A shell a desk window is watching is refused, not stolen.** The phone is told
+    /// `Closed { HELD }` and nothing is claimed, so the desk window keeps the shell and the phone
+    /// can show the same choice the tailnet route shows: open it on the desktop, or take it back.
+    #[tokio::test]
+    async fn an_attach_on_a_shell_the_desk_holds_asks_first() {
+        let (mut b, host, link) = setup();
+        host.0
+            .lock()
+            .unwrap()
+            .holders
+            .insert("abcd-1".into(), "desktop".into());
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            sent(&link, 1)
+                .iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::HELD)),
+            "the refusal has to name the holder, not be silence"
+        );
+        assert!(
+            host.0.lock().unwrap().claimed.is_empty(),
+            "nothing may be claimed before the user says so: {:?}",
+            host.0.lock().unwrap().claimed
+        );
+    }
+
+    /// And `Takeover` is that consent: it claims, and the screen follows.
+    #[tokio::test]
+    async fn a_takeover_takes_the_shell_the_desk_held() {
+        let (mut b, host, link) = setup();
+        host.0
+            .lock()
+            .unwrap()
+            .holders
+            .insert("abcd-1".into(), "desktop".into());
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Takeover {
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert_eq!(
+            *host.0.lock().unwrap().claimed,
+            [("claim", "abcd-1".to_string())],
+            "the takeover is what claims it"
+        );
+        assert!(
+            sent(&link, 1)
+                .iter()
+                .any(|m| matches!(m, Message::Profile { shell, .. } if shell == "abcd-1")),
+            "and the phone is given the screen it asked for"
         );
     }
 }

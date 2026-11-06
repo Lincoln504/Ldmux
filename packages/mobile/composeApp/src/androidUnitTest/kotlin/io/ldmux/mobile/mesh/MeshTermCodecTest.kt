@@ -63,10 +63,12 @@ class MeshTermCodecTest {
                         it.jsonObject["label"]!!.jsonPrimitive.content,
                         it.jsonObject["cwd"]!!.jsonPrimitive.content,
                         (it.jsonObject["origin"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
+                        (it.jsonObject["owner"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
                     )
                 },
                 o["cwd"]!!.jsonPrimitive.boolean,
                 (o["origin"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
+                (o["owner"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
             )
             else -> error("unknown fixture kind $kind")
         }
@@ -146,6 +148,12 @@ class MeshTermCodecTest {
         assertEquals(
             input.map { it.jsonObject["origin"]!!.jsonPrimitive.content },
             got.flatMap { g -> g.entries.map { it.origin } },
+        )
+        // Version 8: and who holds it, which is what the row and the refusal are built on.
+        assertTrue(got.all { it.owner }, "the fixture is the version-8 form")
+        assertEquals(
+            input.map { it.jsonObject["owner"]!!.jsonPrimitive.content },
+            got.flatMap { g -> g.entries.map { it.owner } },
         )
     }
 

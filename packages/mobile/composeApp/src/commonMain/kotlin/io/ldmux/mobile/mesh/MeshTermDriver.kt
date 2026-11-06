@@ -141,6 +141,15 @@ sealed interface MeshTermView {
     /** The host runs more than one shell and none was named: the user must choose. Nothing is guessed. */
     data class Choose(val entries: List<SessionEntry>) : MeshTermView
 
+    /**
+     * Another device holds the shell, and the host refused the attach rather than stealing it.
+     *
+     * This is the mesh route's `HeldBy`: the desk window has it, and the person here can take it
+     * back (`Takeover`) or leave it alone. Without this the phone either stole the shell silently
+     * or sat on a screen nobody was feeding.
+     */
+    data class HeldBy(val shell: String) : MeshTermView
+
     /** The host answered and runs no shell. [MeshTermDriver.refresh] asks again. */
     data object NoShells : MeshTermView
 
@@ -303,6 +312,9 @@ class MeshTermDriver(
      * another client may have changed in between.
      */
     private var createdId: String? = null
+
+    /** The selector of the attach in flight, so a `HELD` refusal can name the shell it was for. */
+    private var attempted: String? = null
     /** A list was asked for while attached: its answer fills [shells] and attaches nothing. */
     private var listingForHeader = false
     private val _shells = MutableStateFlow(MeshShells(emptyList(), null))
@@ -638,9 +650,28 @@ class MeshTermDriver(
         if (choices.none { it.id == id }) return@withLock false
         pick = Pick.Attached
         attachedId = id
+        attempted = id
         publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
+        true
+    }
+
+    /**
+     * Take a shell another device holds: the answer to [MeshTermView.HeldBy] (version 8).
+     *
+     * The host displaces the desk window, which is told and stops; the shell follows whoever asked.
+     * Sent only from the screen's own `take it back`, so stealing a shell is always something the
+     * user chose.
+     */
+    suspend fun takeover(id: String): Boolean = lock.withLock {
+        if (session == null) return@withLock false
+        if (id.isEmpty()) return@withLock false
+        terminalView = null
+        attempted = id
+        attachedId = id
+        mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
+        queue(TermMessage.Takeover(id)); pump(); publish()
         true
     }
 
@@ -672,6 +703,7 @@ class MeshTermDriver(
         mirror = RowMirror()
         held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
         attachedId = id
+        attempted = id
         publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
@@ -863,6 +895,13 @@ class MeshTermDriver(
                 // the tailnet route returns to its launcher when a shell exits. Ending the session
                 // here would spend a whole handshake (minutes on this link) to reach a screen the
                 // host can supply in one record. Everything the ended shell left is dropped first.
+                // **Somebody else is holding it.** The tailnet route asks in exactly this
+                // situation; the radio route used to take the shell, which resized the desk
+                // window's pty and stopped its typing with no way back.
+                m.reason == MeshTerm.Closed.HELD -> {
+                    terminalView = MeshTermView.HeldBy(attempted ?: attachedId ?: "")
+                    pick = Pick.Attached
+                }
                 m.reason == MeshTerm.Closed.EXITED -> backToList()
                 else -> terminalView = MeshTermView.HostClosed(m.reason)
             }
