@@ -36,6 +36,9 @@ import io.ldmux.mobile.SettingsValue
 import kotlinx.coroutines.flow.MutableStateFlow
 import io.ldmux.mobile.Warn
 import io.ldmux.mobile.SettingsInline
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import io.ldmux.mobile.parseHostPreset
 
 /**
  * The mesh route's setup, in Settings. It draws [meshSetupView] and decides nothing: which
@@ -123,6 +126,9 @@ internal fun MeshRouteSection(
             // The radio's own operating point and its airtime, read from the radio rather than
             // remembered.
             MeshRadioFacts(
+                // **What the desktop's radio is on, from the pairing code.** The phone had no way to
+                // learn this: a mismatch was silent and looked exactly like being out of range.
+                hostPreset = parseHostPreset(current.meshHostPreset),
                 address = current.meshRadio,
                 openAirtime = current.meshOpenAirtime,
                 onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
@@ -204,6 +210,8 @@ class MeshRouteActions(
 @Composable
 private fun MeshRadioFacts(
     address: String,
+    /** The desktop's tuple, when the pairing code carried one. */
+    hostPreset: RadioPreset? = null,
     openAirtime: Boolean,
     onBudget: (RadioBudgetMode) -> Unit,
     onOpenPreset: () -> Unit,
@@ -219,6 +227,7 @@ private fun MeshRadioFacts(
     afterPreset: @Composable () -> Unit = {},
 ) {
     var link by remember(address) { mutableStateOf<RadioLink?>(null) }
+    val scope = rememberCoroutineScope()
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
     val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
     val fallbackStatus = remember { MutableStateFlow<MeshStatus?>(null) }
@@ -268,6 +277,20 @@ private fun MeshRadioFacts(
         }
     }
     afterPreset()
+    // **The desktop's radio, when it is on something else.** One row, one press: the alternative was
+    // comparing two screens by eye and guessing which of five numbers was wrong.
+    val mine = preset
+    if (hostPreset != null && mine != null && !sameTuple(mine, hostPreset)) {
+        SettingsRow("desktop's radio") {
+            SettingsValue(presetLine(hostPreset), Modifier.weight(1f), color = Dim, maxLines = 2)
+            MiniTextButton(onClick = {
+                val l = link ?: return@MiniTextButton
+                scope.launch { runCatching { l.applyPreset(hostPreset) } }
+            }) {
+                Text("match", color = Accent, fontSize = 12.sp, maxLines = 1)
+            }
+        }
+    }
     // **The limit and its readout, together, on the page.** The meter existed only inside the
     // preset panel, next to the tuple it does not belong to, and the airtime it spends was a
     // separate row in the facts above with no control near it. One setting and one line: the

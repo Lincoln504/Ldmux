@@ -403,6 +403,18 @@ internal fun RadioPresetPanel(
  * `SF8` and `CR5` are the radio's own vocabulary and are left as the radio's numbers. The
  * path width gets a word, because `1B` alone reads as a unit with no quantity.
  */
+/**
+ * Whether two radios are on the same operating point.
+ *
+ * Compare the four numbers the firmware validates and nothing else: power and path width are local
+ * choices, and a mismatch in either does not stop two radios hearing each other.
+ */
+internal fun sameTuple(a: RadioPreset, b: RadioPreset): Boolean =
+    (a.frequencyMhz - b.frequencyMhz).let { kotlin.math.abs(it) < 0.01 } &&
+        (a.bandwidthKhz - b.bandwidthKhz).let { kotlin.math.abs(it) < 0.1 } &&
+        a.spreadingFactor == b.spreadingFactor &&
+        a.codingRate == b.codingRate
+
 internal fun presetLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"
 

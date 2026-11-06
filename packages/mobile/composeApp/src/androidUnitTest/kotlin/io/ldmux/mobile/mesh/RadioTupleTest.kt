@@ -4,6 +4,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import io.ldmux.mobile.parseHostPreset
+import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 /**
  * A tuple typed as the radio prints it. The order is the firmware's, because the one place a user
@@ -61,5 +64,36 @@ class RadioTupleTest {
         assertEquals(base.bandwidthKhz, back.bandwidthKhz)
         assertEquals(base.spreadingFactor, back.spreadingFactor)
         assertEquals(base.codingRate, back.codingRate)
+    }
+
+    /// **The desktop's tuple, as the pairing code carries it.** Four numbers inside the firmware's
+    /// own bounds, or nothing: a code that asks for a tuple the radio would refuse is not a tuple
+    /// this app should apply.
+    @Test
+    fun `the desktop's tuple parses, and anything the radio would refuse does not`() {
+        val p = parseHostPreset("910525,500000,7,5")!!
+        assertEquals(910.525, p.frequencyMhz, 1e-9)
+        assertEquals(500.0, p.bandwidthKhz, 1e-9)
+        assertEquals(7, p.spreadingFactor)
+        assertEquals(5, p.codingRate)
+        // Bounds are the firmware's: frequency kHz, bandwidth Hz, SF 5..12, CR 5..8.
+        assertNull(parseHostPreset("1000,500000,7,5"), "below the band")
+        assertNull(parseHostPreset("910525,1000,7,5"), "bandwidth below the firmware's floor")
+        assertNull(parseHostPreset("910525,500000,13,5"), "no such spreading factor")
+        assertNull(parseHostPreset("910525,500000,7"), "three numbers is not a tuple")
+        assertNull(parseHostPreset("910525,500000,7,5,9"), "five numbers either")
+        assertNull(parseHostPreset("910525,500000,x,5"), "not a number")
+    }
+
+    /// A mismatch in power or path width does not stop two radios hearing each other, so it is not
+    /// a mismatch this row reports.
+    @Test
+    fun `two tuples match on the four numbers the firmware validates`() {
+        val a = RadioPreset(910.525, 500.0, 7, 5, 22, 1)
+        assertTrue(sameTuple(a, a.copy(txPowerDbm = 14, pathHashSize = 3)))
+        assertFalse(sameTuple(a, a.copy(frequencyMhz = 914.25)))
+        assertFalse(sameTuple(a, a.copy(bandwidthKhz = 62.5)))
+        assertFalse(sameTuple(a, a.copy(spreadingFactor = 8)))
+        assertFalse(sameTuple(a, a.copy(codingRate = 8)))
     }
 }
