@@ -28,13 +28,26 @@ before it does anything.
 |---|---|---|
 | tailnet | a WebSocket to the daemon's tailnet address, bearer token at the upgrade | the full terminal: predictive echo, resync instead of reconnect, a shared pane with a desk window |
 | LoRa live | two MeshCore radios, one on the host's serial port, one on the phone's Bluetooth LE | keystrokes leave as they are typed, so typing is direct and every key costs airtime |
-| LoRa batch | the same radios | typed text is collected on the phone and leaves the radio as one batch when the user sends it, which is forced on a public channel |
+| LoRa batch | the same radios | typed text is collected on the phone and leaves the radio as one batch when the user presses `sync`, which is forced on a public channel |
 
 Batch is the mode name in the app, the docs and the settings row (`input: live |
 batch`). The identifier in the code is still `MeshInputMode.ManualSync`.
 
-Only one phone talks to one desktop at a time, and a public channel is classified
-from the tuple the radio reports, never from a configured name.
+**The batch view is frozen on purpose, and the one control carries both verbs.** It
+reads `sync` when text is waiting (send it) and `show` when only screens are held (draw
+the newest). A press that sends keeps the view open while the answer arrives: every
+screen that lands pushes the deadline out by 900 ms, so the view follows the answer
+until the shell goes quiet and then freezes again, with an 8 s ceiling so a build log
+cannot hold it open. Leaving the shell drops both directions of that state — the typing
+and the held screens — because they belong to the page, not to the link. The bar meters
+what a press costs in records before it is pressed (`about N records`); a long paste is
+split across records by the pump, and the queue limit is a memory bound, not an airtime
+one.
+
+Exclusivity is per shell, not per link: the host accepts up to 64 connections, and a
+public channel is classified from the tuple the radio reports, never from a configured
+name. `new shell` is the first row of the list on both routes, because it is the one
+action the list always offers.
 
 ## 3. Layers
 
@@ -120,6 +133,13 @@ is built to fit one.
    records are per connection and die with it.
 8. Nothing is sent into a queue that cannot report how much it holds. The outbound
    meter reads the ARQ's own queued bytes.
+9. An idle screen costs nothing. The differ records everything it told the phone —
+   rows, cursor, flags **and the absolute top line** — so a screen that has not changed
+   produces no message. A field left out of that record makes `up_to_date` false for
+   ever and spends a record a tick on nothing (measured 2026-11-06: one `Commit` a
+   second on an untouched shell).
+10. Per-shell state lives on that shell's page. The launcher shows shells, never what
+    one of them has typed or has not read.
 
 ## 6. Ownership
 
