@@ -41,7 +41,7 @@ implements are in `docs/adr/`.
 
 | # | Failure | Status |
 |---|---|---|
-| 3.1 | Bluetooth permission denied at the moment of use | OK — named state, not silent |
+| 3.1 | Bluetooth permission denied at the moment of use | FIXED 2026-11-06 — a named state with a verb: "allow Bluetooth", and the app's settings page once the system stops showing the dialog (the only way back from a permanent denial) |
 | 3.2 | `RECORD_AUDIO` requested at launch instead of on use | OK — requested on first mic press |
 | 3.3 | `ACCESS_FINE_LOCATION` needed on API 28-30 for BLE scanning | OK — `maxSdkVersion=30`, declared |
 | 3.4 | Denying notifications leaves a foreground service with no notification | UNKNOWN — check the service's behaviour on denial |
@@ -62,22 +62,22 @@ implements are in `docs/adr/`.
 
 | # | Failure | Status |
 |---|---|---|
-| 5.1 | Tailscale absent or down: "unreachable" cannot say why | OPEN — degrades the mode, no specific message |
+| 5.1 | Tailscale absent or down: "unreachable" cannot say why | PARTLY — the link's own failure sentence is now shown on the radio route and the tailnet probe still collapses refused/timeout/no-route into one word |
 | 5.2 | Silent link (NAT expiry, hung daemon) reported and never retried | FIXED `8fd09b6` |
 | 5.3 | `connected` disagreed with the link label | FIXED `8fd09b6` |
 | 5.4 | Network change not detected | OK — probe on wake, 4 s heartbeat |
 | 5.5 | Auth refused: retried forever | OK — `Rejected` is terminal until re-pair |
-| 5.6 | Reconnect storms cost the host CPU | UNKNOWN — see failure audit |
+| 5.6 | Reconnect storms cost the host CPU | PARTLY — an unwatched session now polls at 4 Hz instead of 100 Hz and an attach wakes it; there is still no per-peer rate limit |
 
 ## 6. Radio connection
 
 | # | Failure | Status |
 |---|---|---|
 | 6.1 | No radio selected | OK — `NeedsRadio`, named |
-| 6.2 | Radio held by another app (MeshMore) | UNKNOWN — no "another app has the link" state; the connect just fails |
-| 6.3 | Radio stops advertising while connected, so a scan finds nothing | UNKNOWN — the picker says "no radio found" with no cause |
+| 6.2 | Radio held by another app (MeshMore) | PARTLY — the picker's empty state names this cause and the link's failure sentence is shown, but there is still no state that detects it |
+| 6.3 | Radio stops advertising while connected, so a scan finds nothing | PARTLY — the empty state names the two causes (powered off, held by another app or phone); a bonded-device fallback still does not exist |
 | 6.4 | The host had no radio at all, so the phone handshook forever | FIXED 2026-11-05 — `LDMUX_MESH_SERIAL`, host owns the Heltec |
-| 6.5 | Preset mismatch between the two ends | OPEN — the decision in `05-RADIO-TUPLE.md` |
+| 6.5 | Preset mismatch between the two ends | FIXED 2026-11-06 — the pairing code carries the host radio's tuple (`mp=`), the app shows a `desktop's radio` row when it differs and one press matches it, applying only the four channel fields so power and path width stay local |
 | 6.6 | L3 handshake retried with fresh keys, bounded at 3 tries | OK |
 | 6.7 | Radio unplugged mid-session | OK — transport state drives the loop |
 | 6.8 | Public channel forces batch mode | OK — ADR-0026 |
@@ -107,11 +107,11 @@ implements are in `docs/adr/`.
 |---|---|---|
 | 8.1 | Daemon restart loses sessions | OK — keeper owns them; verified live 2026-11-05 |
 | 8.2 | Keeper restart ends every shell | OK by design — warned by the install script |
-| 8.3 | A partial mesh config kills the daemon at startup | OPEN — exit 1 on `PSK` without a link; should warn and disable |
+| 8.3 | A partial mesh config kills the daemon at startup | FIXED — a malformed mesh setting now warns, disables the mesh link and leaves the daemon and every shell running (`bin/ldmuxd.rs`) |
 | 8.4 | A shell dies while a phone is attached | OK — "This shell has ended." then exit |
-| 8.5 | Keeper wedged: daemon waits forever | UNKNOWN — see failure audit |
+| 8.5 | Keeper wedged: daemon waits forever | FIXED 2026-11-06 — the replacement now works under systemd (`last_pid` is 0 there, so the old code skipped the kill and returned Ok), restarts the unit, falls back to the detached path, and certifies with a `List` rather than a socket connect |
 | 8.6 | Reaper fails after a panic | FIXED (keeper/daemon) |
-| 8.7 | A shell that ignores SIGTERM | UNKNOWN — see failure audit |
+| 8.7 | A shell that ignores SIGTERM | OK — SIGTERM, a grace, then SIGKILL to the group and the leader |
 
 ## 9. UX states and error surfaces
 
@@ -121,7 +121,7 @@ implements are in `docs/adr/`.
 | 9.2 | Control width below the touch target | FIXED `2b27c2e` |
 | 9.3 | A resync that never answers says "resyncing" forever | FIXED `8fd09b6` |
 | 9.11 | A shell created from the phone appeared on a blank page in one adb-driven run on the tailnet | NOT A DEFECT in normal use: the operator reports the prompt appears on creation, and the host has it. The log for the run showed `attached` twice, then `grid 46x21 (asked 46 x 21)`, then no frame — which is a consistency question worth a test (the surface rebuilds its engine for the measured grid), not a user-visible fault |
-| 9.4 | The radio's failure reason is discarded | OPEN — `MeshRouteSection.kt:250` `runCatching {}` |
+| 9.4 | The radio's failure reason is discarded | FIXED 2026-11-06 — `RadioLink.lastProblem` carries the sentence the link built to the picker and to `LinkDown`; `match` also reports a refused write |
 | 9.5 | A refused action's message vanishes after 4 s, not a live region | OPEN |
 | 9.6 | The shell list survives a dead link with `open` armed | FIXED `b44a8de` |
 | 9.7 | Settings opens as a screen and ends the session | OPEN — a decision, expensive on radio |
@@ -142,10 +142,10 @@ implements are in `docs/adr/`.
 | # | Failure | Status |
 |---|---|---|
 | 10.1 | Token at rest on the phone, in plain preferences, while the mesh keys beside it were Keystore-encrypted | FIXED `6d4e8d2` — same `KeystoreBlob`, one-time migration |
-| 10.7 | Token embedded in `connectionKey` and used as a Compose rebuild key | OPEN — anything that logs that key leaks the bearer token |
-| 10.8 | Token accepted in the query string as well as the header | OPEN — the probe uses it; URLs travel further than headers |
+| 10.7 | Token embedded in `connectionKey` and used as a Compose rebuild key | NOT A DEFECT — it is only a `remember` key; nothing logs it and `Endpoint.toString()` omits it. Recorded so the row is not re-opened |
+| 10.8 | Token accepted in the query string as well as the header | FIXED 2026-11-06 — the query string is no longer a credential; the header is the only path, and the probe and the upgrade read the same one |
 | 10.9 | The handshake's filter tag is bespoke crypto that its own comment says wants review | OPEN — the only custom crypto in the tree |
-| 10.10 | The Keystore path has never run on a device | OPEN — one manual round trip closes it |
+| 10.10 | The Keystore path has never run on a device | FIXED — verified on the device 2026-11-06: the stored token is `IV(12) + 64-byte token + tag(16)` in `shared_prefs`, no plaintext key remains, and the app is connected |
 | 10.11 | The JNI entry points still carried the old package, so every native call failed | FIXED `6d4e8d2` — caught by `MeshSessionAbiTest`, 11 tests |
 | 10.2 | Cleartext permitted where the config says it is not | OK — restricted to tailnet/loopback by code |
 | 10.3 | A terminal program writes the clipboard without consent | OK — `ldmux clipboard-write on|off`, off by default |
@@ -192,10 +192,45 @@ Audited 2026-11-05. The picture is better than expected: almost everything is bo
 | # | Failure | Status |
 |---|---|---|
 | 14.1 | "Verified on a device" referred to binaries older than HEAD | FIXED 2026-11-05 — deployed build is current |
-| 14.2 | A stale install keeps presenting a fixed bug | OPEN — nothing pins the spawned binary to the running one |
+| 14.2 | A stale install keeps presenting a fixed bug | FIXED 2026-11-06 — a build id in every binary, `--version`, the startup line and an additive `build` field on `ping`, so "which build is running" is one command |
 | 14.3 | The heavy test suite fails under load | MITIGATED — heavy tests serialised, workloads right-sized; still load-sensitive |
 | 14.4 | No tag, ever | OPEN |
-| 14.5 | `main` 220 commits behind the work | OPEN |
+| 14.5 | `main` 296 commits behind the work | OPEN — a merge is its own review |
+
+## 15. The 2026-11-06 audit pass
+
+Six independent audits (phone radio, host radio, onboarding, ongoing UX, host
+lifecycle, security) over the whole tree, with the device and the deployed daemon
+in reach. This is what they found that this document did not have a row for, and
+what closed it.
+
+| # | Failure | Status |
+|---|---|---|
+| 15.1 | The radio pairing dies at the first reboot: the mesh static key, the pinned phone key and the PSK lived in `%t/ldmux`, a tmpfs | FIXED — a persist directory (`LDMUX_PERSIST_DIR`), set in the unit, with a one-time adoption from the old place (ADR-0027) |
+| 15.2 | A serial port that stops draining hangs the radio thread and then the supervisor; the link stays `ready` for ever with no error | FIXED — the write is bounded at 2 s and the teardown detaches instead of joining |
+| 15.3 | The receive side is skipped while output is queued, so `SEND_RESULT`s wait and 75 s later the link blames the carriage | FIXED — one biased `select!`, receiving unconditional |
+| 15.4 | A desk takeover does not stop the phone writing into the same pty, and neither side is told | FIXED — `Input`/`Key` ask the in-memory claim table and refuse a non-holder with `Closed { HELD }` |
+| 15.5 | A wedged keeper is never replaced under systemd: `last_pid` is 0 in unit mode, so "replacing it" replaced nothing | FIXED — restart the unit, fall back, certify with a `List` |
+| 15.6 | Every session ever viewed keeps a 100 Hz poller until the shell exits (~0.8 % of a core each, both sides) | FIXED — 250 ms unwatched, 10 ms watched, and `register` wakes the waiter |
+| 15.7 | No binary can say which build it is; the daemon and eight desk windows ran different installs invisibly | FIXED — build id, `--version`, startup line, additive `ping.build` |
+| 15.8 | The bearer token is accepted in the query string, which travels further than a header | FIXED — header only; `scripts/measure_latency.ts` used the query form and is deleted |
+| 15.9 | The first-run scanner throws its outcome away: a wrong code does nothing and a mesh-only code leaves the screen identical | FIXED — every outcome has a sentence and a verb |
+| 15.10 | A phone paired with `ldmux code --mesh-only` can never unpair | FIXED — `unpair` follows either half |
+| 15.11 | No pairing path on a phone without Play services (no paste field anywhere) | FIXED — paste a link, same parser and same fingerprint |
+| 15.12 | A denied Bluetooth permission has no recovery, and the second denial is permanent | FIXED — button on the picker and on `NeedsPermission`; opens the app's settings once the dialog is gone |
+| 15.13 | A first bond can outlast the 30 s connect deadline, and the failure blames `APP_START` | FIXED — 75 s while unbonded, and the line says to accept the pairing request |
+| 15.14 | Every connect failure collapses into one sentence; six causes look identical | FIXED — `RadioLink.lastProblem` reaches the picker and `LinkDown` |
+| 15.15 | The airtime meter is per-link and in memory, so leaving the page refills the legal hour | FIXED — persisted per radio address with a wall clock |
+| 15.16 | An untracked battery request shares the one answer window with a tracked query, so `isIdle()` can lie during the preset write | FIXED — sent after the contact settles |
+| 15.17 | Radio live mode shows a dead link as live for up to 20 s | FIXED — "link quiet · N s" after 10 s |
+| 15.18 | The mesh key bars send keys without returning the view to live (the tailnet fix, missing here) | FIXED |
+| 15.19 | The pane size is re-asserted after the shell was let go | FIXED — skipped while the list is showing |
+| 15.20 | `match` on the desktop's radio adopts the host's power and path width, which are local choices (22 dBm in a 14 dBm band) | FIXED — only the four channel fields, and a refused write is reported |
+| 15.21 | §9's airtime arithmetic and Appendix B's tuple claim were stale: both described 914.25 MHz/SF8 and a deployment that could not be reached | FIXED — the deployed tuple is the app's default, and §9 is computed from the tuple the radio reports |
+| 15.22 | The only "more" link in the app answered HTTP 410 | FIXED — removed; the empty state carries the setup copy |
+| 15.23 | `ldmux mesh --json`, `peer 00000000` for a serial link, "gateway" wording in mesh status, dead rows in `list` | FIXED |
+| 15.24 | Twelve doc references pointed at files deleted in `731970f`, including `AGENTS.md`'s own "read `docs/SPEC.md`" and the units' headers | FIXED — `ARCHITECTURE.md`, `RELEASE-AUDIT.md` and `adr/` are the set, and every reference names one of them |
+| 15.25 | Six leaked test keepers held PTYs since 29 Oct, one from a nix shell | CLEANED — killed by pid; `restart-keeper.sh` still picks the first match by name, which is a real hazard when more than one keeper exists |
 
 ## How to use this
 
@@ -281,17 +316,22 @@ that.
 
 None of these are defects. Each is a decision that changes what ships.
 
-1. The radio tuple the app compiles in. The default is 910.525 MHz, 500 kHz, SF7, CR5, and the
-   host radio here runs 914.25, 500, SF8, CR5, so a fresh install cannot reach this host without
-   the user setting the tuple by hand. The options are: make the compiled default match the
-   deployment, make the deployment match the default, ship no default and adopt what the radio
-   reports, or adopt the public MeshCore preset at 910.525 and 62.5 kHz, which costs about nine
-   times the airtime. The recommendation on record is to adopt what the radio reports and treat
-   the physical tuple as a deployment choice.
+1. ~~The radio tuple the app compiles in.~~ **Closed 2026-11-06.** The deployed radio runs
+   910.525 MHz, 500 kHz, SF7, CR5, which is the app's compiled default, so a fresh install
+   reaches this host with no tuple work. The code also carries the host's tuple, so a
+   deployment that differs is one press to match. The physical tuple stays a deployment
+   choice; the app adopts what the radio reports.
 2. Whether the host radio is a shipped feature. The daemon owns it when `LDMUX_MESH_SERIAL` is
    set, and nothing installs or provisions it, so today the route works for an operator who
-   reads `docs/ARCHITECTURE.md` section 11 and not for a new user.
+   reads `docs/ARCHITECTURE.md` section 11 and not for a new user. The in-app side now says
+   what the hardware must be; the host side still has no command that finds and names the port.
 3. The upload keystore and the store assets, which are the operator's to supply.
+4. Whether the mesh link carries a heartbeat while a phone is attached. Today it does not, so a
+   phone that vanishes without a `Detach` keeps its shell claim until the link is rebuilt or
+   the daemon restarts, and the phone cannot tell a dead host from a quiet one. A record every
+   five minutes costs about 12 of the hour's 255 records at 500 kHz/SF7 and about 4 % of the
+   budget at 62.5 kHz. Open because it trades an invariant ("an idle screen costs nothing")
+   against a liveness guarantee.
 
 ## Appendix C: known unfinished
 
@@ -301,4 +341,24 @@ None of these are defects. Each is a decision that changes what ships.
   actions across an app restart because of it. There is no test that asserts that round trip.
 - Dictation depends on the device's speech recogniser, which may be cloud-based. The app says
   so, and nothing here can change it.
-- Multi-hop path recovery on the radio route is not implemented.
+- Multi-hop is one direction only: the phone looks up a route, the host always sends zero-hop,
+  so a phone one relay away attaches and never hears a reply (`ARCHITECTURE.md` section 11 says
+  so now). Implementing the host-side lookup is a feature, not a fix.
+- The host publishes an airtime budget it does not enforce (`Budget::RadioGoverned` returns
+  `u8::MAX`), on the argument that the firmware runs the duty cycle. That argument is not
+  evidenced in this tree, and `ldmux mesh status` still prints a number as if it were a limit.
+  Either enforce it or stop printing it.
+- Desk windows are spawned into `ldmux.service`'s cgroup: the unit's memory figure is 20x the
+  daemon's real footprint, every restart floods the journal with "Found left-over process …
+  unclean termination", and `stop` leaves the windows behind. The keeper already has the
+  transient-scope code to mirror.
+- The loopback gateway transport still exists (`LDMUX_MESH_ADDR`/`TOKEN`/`PEER`,
+  `crates/mesh/src/client.rs`, `GatewayCarrier`). Nothing ships it and its vocabulary leaks into
+  status output and docs; deleting it is the next cleanup.
+- The notification uses a framework drawable, so on Android 12+ the status bar shows a system
+  glyph rather than the app's mark.
+- Settings has no connection or diagnostics section: no address, state, token fingerprint,
+  last error, or a way to read the app log. The pieces exist; the surface does not.
+- Font scale, RTL, dark mode and split screen are still unverified (3.6).
+- R8 is off, so a release carries unused code (1.8), and CI still does not build the Android
+  artifact (1.7).

@@ -14,6 +14,6 @@ Local changes in this tree are marked with `LDMUX` comments:
 - a serialized tracked-command queue (`isIdle()`) and the by-key contact answer slot;
 - an Android bond path that creates a bond and never removes one (`awaitBond`).
 
-The full list is in `docs/MESH-STANDALONE.md` section 8.
+The full list is in `docs/ARCHITECTURE.md` section 11.
 
 License: MIT, reproduced in each library's `LICENSE`.

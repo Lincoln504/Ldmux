@@ -262,7 +262,7 @@ pointed.
 - **Volume**: a history page is sized by the link (`FramePacing.historyPageLines`:
   5,000 rows fast, 1,000 slow), and the page advertises `inplaceResync` so a client
   that falls behind is repaired with a snapshot instead of a reconnect
-  (`docs/WIRE-COST.md`).
+  (`docs/ARCHITECTURE.md` section 9).
 - **Page order and numbering**: a page is a shell you opened, in the order you
   opened it (`PageOrder.kt`), never the daemon's last-activity order — that order
   changes whenever any shell prints, and following it made the screen slide between

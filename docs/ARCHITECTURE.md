@@ -72,8 +72,9 @@ socket, a WebSocket per viewed session, binary output frames, and snapshots.
 The tailnet route:
 
 - one WebSocket per attached session at `WS /ws` on the daemon's tailnet address
-- bearer token checked at the upgrade, case-insensitive scheme, query token also
-  accepted for compatibility
+- bearer token checked at the upgrade in the `Authorization` header, scheme
+  case-insensitive. **The query string is not a credential**: a URL reaches proxy logs,
+  crash reports and history in ways a header does not, and no client sends one
 - a plain GET answers 401 for a refused token and 400 for an accepted token whose
   upgrade was malformed, which is how the phone tells "wrong password" from
   "machine off"
@@ -155,6 +156,13 @@ ADR-0010 is the decision. The practice:
   link is watching and those claims are kept.
 - When the holder lets go, the daemon broadcasts the session list and a displaced
   desk window takes the shell back by itself, including its own pane size.
+- **Limits, stated rather than implied.** A mesh claim is kept while the link watches the
+  shell, and the radio record carries no heartbeat, so a phone that disappears without a
+  `Detach` keeps its claim until the link itself is rebuilt or the daemon restarts. A mesh
+  viewer is also not told when a desk window takes its shell: the refusal is enforced on
+  `Attach` and on the write path (a non-holder `Input`/`Key` is refused as `HELD`), but the
+  phone learns it when its next write is refused, not when the takeover happens. A
+  heartbeat sized for airtime is the fix for both, and it is open work.
 
 ## 7. Security
 
@@ -171,8 +179,12 @@ ADR-0010 is the decision. The practice:
   zeroized on drop. It gives no post-compromise security, because there is no
   ratchet.
 - The host pins the phone's static key on the first accepted handshake.
-- Host secrets are files in the state directory at 0600. Phone secrets are
-  AES-256-GCM under a non-exportable Android Keystore key, in private preferences.
+- Host secrets are files at 0600 in the **persist directory** (`LDMUX_PERSIST_DIR`,
+  `%S/ldmux` under systemd), never in the state directory: that one is `$XDG_RUNTIME_DIR`, a
+  tmpfs, so a credential kept there is re-minted on every boot. The bearer token, the mesh
+  static key, the pinned phone key and the PSK all live in the persist directory, and a
+  daemon finding them in the old place moves them across once. Phone secrets are AES-256-GCM
+  under a non-exportable Android Keystore key, in private preferences.
 - Held text in batch mode never leaves the process. It is not persisted and the
   screen shows a count rather than the text when the channel is public.
 - **A public channel changes nothing about confidentiality.** The channel is a
@@ -190,20 +202,27 @@ ADR-0010 is the decision. The practice:
 | What fails | What happens |
 |---|---|
 | a handshake gets no answer | it is asked again with fresh keys at 8, 16 and 32 seconds, then the connection is rebuilt |
-| a record goes unanswered | silence is measured from the last record the link carried in either direction, so an idle shell cannot look dead. 20 seconds with something outstanding ends the session |
+| a record goes unanswered | silence is measured from the last record the link carried in either direction, so an idle shell cannot look dead. On the phone, 20 s with something outstanding ends the session (`SILENCE_FAILURE_MS`); on the host the ARQ's own ladder fails at about 62 s and the carriage-silence bound is 75 s |
 | the carriage stops carrying anything | 75 seconds with a record outstanding ends the connection, so `supervise` can build another. The ARQ's own ladder usually fires first |
 | the host restarts | the keeper keeps the shells, the phone reconnects and re-attaches, and the desk window is told when a shell moves |
 | the daemon restarts | the phone's session ends and its retry ladder rebuilds it. A shell the phone created survives on the host |
 | the phone takes a shell the desk has | the desk is told and stops, the pane is fitted to the phone, and when the phone lets go the pane is put back to the size it displaced |
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
-| a budget is spent | the host stops sending data but always sends acks, handshakes and heartbeats |
+| a budget is spent | with a gateway, the host stops sending data but always sends acks, handshakes and heartbeats. With a serial radio the firmware is the meter, so nothing is gated at this layer and acks are ordinary records |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
 
 ## 9. Airtime
 
-This link is 138 ms per record: 914.25 MHz, 500 kHz, SF8, CR5, which at a one
-percent duty cycle buys about 261 records an hour. Everything below is read against
-that number.
+**One number, computed from the tuple the radio reports.** At the deployed tuple
+(910.525 MHz, 500 kHz, SF7, CR5) a full 172-byte record is **69.2 ms** on air, and a
+one-percent duty cycle buys about **520** of them an hour. The wire carries the budget in
+one byte, so a host reports at most 255; `ldmux mesh status` therefore reads `255` on a
+fresh link and counts down as records go out. Two other tuples for scale: 62.5 kHz at SF7
+is 553 ms, and 250 kHz at SF11 is 1542 ms — the same code, so a different preset is a
+different budget, and nothing here is a constant.
+
+The figure lives in one function, `time_on_air_ms` (`crates/companion/src/codec.rs`), used
+by the host radio, by the app before it retunes, and by every budget below.
 
 - One screen update or one keystroke is one record. A record that does not fit waits
   for the next one.
@@ -263,6 +282,14 @@ cannot use a radio the host is holding.
    power and path width are local choices. Getting this wrong without the code was
    silent: two radios on different tuples simply cannot hear each other, and the
    only symptom is a link that never comes up.
+
+**One hop, and one direction of it.** The phone asks its radio for the host's path
+(`GetContactByKey`) and falls back to a zero-hop send when there is no route; the host
+sends every record zero-hop (`SEND_RAW_DATA` with an empty path) and never looks up a
+route. So a phone that reaches the host through one or more relays receives nothing back:
+its `Attach` arrives, the host counts records sent, and the phone retries until it gives
+up. Multi-hop in both directions is not implemented, and a link that never comes up across
+a relay is this, not a broken pairing.
 
 If `LDMUX_MESH_SERIAL` is unset, the older path applies: the daemon dials a loopback
 gateway named by `LDMUX_MESH_ADDR` and learns nothing about presets, paths or

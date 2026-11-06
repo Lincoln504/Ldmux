@@ -38,10 +38,6 @@ The phone opens shells as well as using them: a shell started from the app is ma
 its row, can be sent to a desk window on the host, and can be closed from the phone. The
 row on the right is one of those.
 
-A recording of the phone driving a shell over the tailnet:
-
-[docs/media/04-tailnet-commands.mp4](docs/media/04-tailnet-commands.mp4)
-
 **What each mode is for.** The tailnet is the fast one and the one to use when a network
 is there: a WebSocket, a local terminal emulator, and scrolling with momentum like any
 other terminal app. The radio modes exist for when there is no network at all. `live`

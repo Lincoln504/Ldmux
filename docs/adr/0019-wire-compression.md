@@ -149,7 +149,7 @@ already below any phone RTT, so the interval was not changed.
   states instead of the bytes that produced them). The only approach that suits a
   very low-bandwidth, lossy link such as the mesh (packets of ~184 bytes), and not
   this WebSocket: here the client runs its own libghostty and needs the byte
-  stream, and WIRE-COST.md's finding stands (the lever is fewer frames and state
+  stream, and the wire-cost finding stands (the lever is fewer frames and state
   instead of history, not smaller frames). Recorded as the design for a future
   mesh bridge (ADR-0020); not implemented.
 
