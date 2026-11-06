@@ -16,7 +16,7 @@ only meaningful for the lifetime of a connection.
 
 The bearer token used to live there. It was moved to `%S/ldmux/token` because a
 token re-minted at boot locks out every paired phone (`crates/daemon/src/auth.rs`
-says so in its own words). The radio route's credentials were left behind:
+says so in its own words). The radios' credentials were left behind:
 
 - `mesh-session.key` — the daemon's static X25519 key, which the phone pins at
   pairing;

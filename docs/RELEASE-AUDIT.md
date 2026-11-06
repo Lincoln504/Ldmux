@@ -62,7 +62,7 @@ implements are in `docs/adr/`.
 
 | # | Failure | Status |
 |---|---|---|
-| 5.1 | Tailscale absent or down: "unreachable" cannot say why | PARTLY — the link's own failure sentence is now shown on the radio route and the tailnet probe still collapses refused/timeout/no-route into one word |
+| 5.1 | Tailscale absent or down: "unreachable" cannot say why | PARTLY — the link's own failure sentence is now shown on the radios and the tailnet probe still collapses refused/timeout/no-route into one word |
 | 5.2 | Silent link (NAT expiry, hung daemon) reported and never retried | FIXED `8fd09b6` |
 | 5.3 | `connected` disagreed with the link label | FIXED `8fd09b6` |
 | 5.4 | Network change not detected | OK — probe on wake, 4 s heartbeat |
@@ -248,7 +248,7 @@ what closed it.
 
 ## 16. The tailnet route, audited separately (2026-11-06)
 
-The radio route got most of the attention in this pass; this is the same audit for the
+The radios got most of the attention in this pass; this is the same audit for the
 route that is used every day. Verdict first: **the protocol and the payload are right for
 the medium, and the only thing worth changing is one measurable inefficiency.**
 
@@ -309,16 +309,18 @@ suite (574 cases) green.
 | 17.33 | Only `version`, `minVersion`, `cwdVersion` were pinned by the fixture; a bump of `KEY_VERSION`/`RESIZE_VERSION`/`STREAM_VERSION`/`LINE_VERSION`/`ORIGIN_VERSION`/`OWNER_VERSION` on one side was silent | FIXED — all eight published in `fixture_value` and asserted by the app's codec test |
 | 17.34 | The host enforced no airtime budget: the firmware's own limiter is a 50 % duty cycle (`getAirtimeBudgetFactor()` = 1.0, `Dispatcher.cpp`), so the 1 % a European band allows was nobody's job | FIXED — the carrier's published countdown bounds new records, charged per record (the ARQ's limit is per poll); acks and retransmissions still pass |
 | 17.35 | "Waiting for the answer" lingered after the answer: the phone ended a sync wait on a 4 s quiet timer because nothing told it the pane had stopped changing | FIXED — `Commit` carries an additive `IDLE` flag, sent once per burst when the pane has been unchanged for 700 ms; the phone ends the wait on it and keeps the timer as the fallback |
-| 17.36 | The radio route names its holder `"mesh"`, and the app rendered the kind literally: the operator saw "in use on mesh" and could not tell what held the shell | FIXED — kinds are mapped to sentences ("the radio link", "the desktop", "another phone"); a device name passes through |
+| 17.36 | The radios name their holder `"mesh"`, and the app rendered the kind literally: the operator saw "in use on mesh" and could not tell what held the shell | FIXED — kinds are mapped to sentences ("the radio link", "the desktop", "another phone"); a device name passes through |
 | 17.37 | The notification icon's `d` had a 4-unit right side against 2 everywhere else, and its stem stood 2 units from the counter | FIXED — the counter runs to the stem (every stroke 2 units) and the letters are 1 unit apart; the mark is still centred exactly |
 | 17.38 | The Noise prologue was a fixed string that did not name the suite, so a suite change on one end would derive different keys from the same flags instead of failing | FIXED — the prologue carries `SUITE`, with a test that fails if the two drift |
 | 17.39 | CI (`.github/workflows`, removed at the operator's instruction) claimed to run the gate on every branch | REMOVED — the gate is the four local commands, and `docs/ARCHITECTURE.md` says so |
 | 17.40 | R8 was off, so a release carried unused code, and the licence notices were excluded from the artifact by a `META-INF` packaging rule | FIXED — R8 on with per-boundary keep rules (JNI, manifest components) and `dist/licenses` shipped as assets |
-| 17.41 | Nothing recorded *why* the radio route carries its own session instead of using MeshCore's channel encryption, so the next reader would have to re-derive it from the firmware | DOCUMENTED — `docs/adr/0029-the-session-rides-raw-custom.md`, with the firmware evidence, the costs and the rejected alternatives |
+| 17.41 | Nothing recorded *why* the radios carry their own session instead of using MeshCore's channel encryption, so the next reader would have to re-derive it from the firmware | DOCUMENTED — `docs/adr/0029-the-session-rides-raw-custom.md`, with the firmware evidence, the costs and the rejected alternatives |
 | 17.42 | The README described the app and the host but never the security model, so "encrypted" was a claim with no page behind it | DOCUMENTED — a Security section: what each route protects, what it does not, where secrets live, and which ADR has the reasoning |
 | 17.43 | `docs/ARCHITECTURE.md` §8 and §9 still said the firmware was the airtime meter, and §4 did not list the `Commit` idle flag | FIXED — the budget section describes the host's countdown and its per-record charge, the failure row says what the host now does, and the flag vocabulary is written down |
 | 17.44 | The README carried the security model inline, described things in the second person, and led with prose instead of features | RESTRUCTURED — features first in the operator's words, security moved to `docs/SECURITY.md`, and every sentence impersonal |
 | 17.45 | The mark in the README was a single icon with the launcher's full corner radius | the pair now: tighter radius, `ld` and its vertical mirror which reads `pl`, centred together (`docs/media/README.md` says how to rebuild them) |
+| 17.46 | The README said "radio route", which names a transport nothing can hold; the offline mode is two physical radios, and the description never said they are optional or that one travels with the phone | REVISED — "the radios" throughout, a bullet stating two MeshCore radios are needed and optional, and the description says "no internet and no network" |
+| 17.47 | The mark in the README sat side by side | it stacks now: `ld` above, the 180-degree copy reading `pl` beneath |
 
 ## How to use this
 
@@ -394,7 +396,7 @@ reachable over your own tailnet, which needs no server of ours because there is 
 ours, or over a LoRa radio when there is no network at all. The same shell can be on the phone
 and in a desk window at once. Nothing is collected. What you need is a Linux machine with a
 systemd user session and the daemon installed, Tailscale for the network route, and two
-MeshCore companion radios for the radio route.
+MeshCore companion radios for the offline mode.
 
 Content rating: no user-generated content is hosted, no ads, no purchases, no gambling, no
 violence. The app is a development tool for adults, and the questionnaire answers follow from

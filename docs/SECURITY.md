@@ -16,7 +16,7 @@ What each route protects, what it does not, and where the secrets live. The desi
 - The attach socket used by desk clients is a separate Unix socket, mode 0600, with the peer uid
   checked.
 
-## The radio route
+## The radios
 
 - **A record is a Noise message inside a MeshCore `RAW_CUSTOM` packet**, addressed to the peer
   radio's public key: `Noise_IKpsk2_25519_ChaChaPoly_SHA256` over `snow`

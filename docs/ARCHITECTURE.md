@@ -324,7 +324,7 @@ by the host radio, by the app before it retunes, and by every budget below.
 | macOS daemon | not supported yet |
 | Windows | not supported, not planned |
 | Android client | done, verified on a device |
-| iOS client | not in development, and would be tailnet only (the radio route is the Android Bluetooth client). Needs a macOS host for the xcframework |
+| iOS client | not in development, and would be tailnet only (the radios attach over Android's Bluetooth). Needs a macOS host for the xcframework |
 | LoRa route, Android plus host | built and run on real radios, multi-hop recovery not implemented |
 
 ## 11. Bringing up the two radios
@@ -372,7 +372,7 @@ its `Attach` arrives, the host counts records sent, and the phone retries until 
 up. Multi-hop in both directions is not implemented, and a link that never comes up across
 a relay is this, not a broken pairing.
 
-Without `LDMUX_MESH_SERIAL` this host has no radio route; nothing else about the daemon
+Without `LDMUX_MESH_SERIAL` this desktop has no radios; nothing else about the daemon
 changes.
 
 ## 12. Build and test
