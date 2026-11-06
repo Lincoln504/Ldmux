@@ -241,6 +241,8 @@ what closed it.
 | 15.32 | Deleting the gateway removed the three integration tests that drove the L3 path through it, leaving the handshake and the record path covered only by unit tests | FIXED — an in-crate test drives `session()` over a fake `Carrier`: handshake, one record each way, asserted on the runtime's inbound queue and the phone's session |
 | 15.33 | The keeper's SIGPIPE test waited for the string `SigIgn:` and then parsed a line that had not arrived, so it failed under load | FIXED — `peek_until` waits for a complete line, and the launcher tests name their own stub terminal instead of a real emulator (a real one opened a window and waited for ever) |
 
+| 15.34 | A second daemon given only `LDMUX_STATE_DIR` (a test, a scratch instance) inherited the deployment's persist directory, read the real PSK and grabbed the host radio out from under the daemon that owns it | FIXED — no `LDMUX_PERSIST_DIR` plus a `LDMUX_STATE_DIR` means `<state>/persist`; the deployed unit sets the persist directory explicitly, so a scratch run keeps its own credentials |
+
 ## 16. The tailnet route, audited separately (2026-11-06)
 
 The radio route got most of the attention in this pass; this is the same audit for the

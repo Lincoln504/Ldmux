@@ -90,11 +90,21 @@ fn ensure_private_dir_named(dir: &std::path::Path, uid: u32, what: &str) -> Resu
 /// `resolve_` wrapper reads the process environment.
 pub fn persist_dir_from(
     persist_dir: Option<&str>,
+    state_dir: Option<&str>,
     xdg_state_home: Option<&str>,
     home: Option<&str>,
 ) -> String {
     if let Some(p) = non_empty(persist_dir) {
         return p.trim_end_matches('/').to_string();
+    }
+    // **A daemon given its own state directory gets its own credentials.** A scratch daemon
+    // (a test, a second instance) sets `LDMUX_STATE_DIR` and nothing else, and inheriting the
+    // real persist directory made it adopt the live machine's token, mesh PSK and radio key —
+    // measured 2026-11-06: two scratch runs grabbed the deployed host radio out from under the
+    // daemon that owns it. The deployed unit sets `LDMUX_PERSIST_DIR` explicitly, so this only
+    // ever applies to a run that is already not the deployment.
+    if let Some(st) = non_empty(state_dir) {
+        return format!("{}/persist", st.trim_end_matches('/'));
     }
     if let Some(s) = non_empty(xdg_state_home) {
         return format!("{}/ldmux", s.trim_end_matches('/'));
@@ -112,6 +122,7 @@ pub fn persist_dir_from(
 pub fn try_resolve_persist_dir() -> Result<String, String> {
     let dir = persist_dir_from(
         env_var("LDMUX_PERSIST_DIR").as_deref(),
+        env_var("LDMUX_STATE_DIR").as_deref(),
         env_var("XDG_STATE_HOME").as_deref(),
         env_var("HOME").as_deref(),
     );
@@ -247,21 +258,30 @@ mod tests {
     #[test]
     fn the_persist_dir_is_not_the_runtime_dir() {
         assert_eq!(
-            persist_dir_from(Some("/p"), Some("/s"), Some("/h")),
+            persist_dir_from(Some("/p"), None, Some("/s"), Some("/h")),
             "/p"
         );
-        assert_eq!(persist_dir_from(Some("/p/"), None, Some("/h")), "/p");
         assert_eq!(
-            persist_dir_from(None, Some("/s/"), Some("/h")),
+            persist_dir_from(Some("/p/"), None, None, Some("/h")),
+            "/p"
+        );
+        // A state directory of its own means credentials of its own: a scratch daemon must not
+        // read the deployment's token, PSK or radio key.
+        assert_eq!(
+            persist_dir_from(None, Some("/tmp/scratch"), Some("/s"), Some("/h")),
+            "/tmp/scratch/persist"
+        );
+        assert_eq!(
+            persist_dir_from(None, None, Some("/s/"), Some("/h")),
             "/s/ldmux"
         );
         assert_eq!(
-            persist_dir_from(None, None, Some("/h")),
+            persist_dir_from(None, None, None, Some("/h")),
             "/h/.local/state/ldmux"
         );
         // Empty is unset, exactly as for the state dir.
         assert_eq!(
-            persist_dir_from(Some(""), Some("/s"), Some("/h")),
+            persist_dir_from(Some(""), None, Some("/s"), Some("/h")),
             "/s/ldmux"
         );
     }
