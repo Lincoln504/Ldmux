@@ -1459,7 +1459,7 @@ mod tests {
     /// for the next tick to add one.
     #[test]
     fn a_line_number_change_is_sent_once_and_then_remembered() {
-        let mut d = Differ::for_attach(STREAM_LINE_VERSION, "abcd-1".into());
+        let mut d = Differ::for_attach(STREAM_LINE_VERSION, "abcd-1");
         let first = screen(&["$", ""], 10);
         assert!(!d.update(&first).is_empty(), "the first screen goes out");
         assert!(d.up_to_date(&first), "and is recorded");
