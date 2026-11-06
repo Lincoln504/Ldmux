@@ -22,10 +22,20 @@ async fn main() {
     let mut socket = std::env::var("LDMUX_KEEPER_SOCKET").unwrap_or_default();
     if socket.is_empty() {
         let mut args = std::env::args().skip(1);
-        if let Some(p) = args.next() {
-            socket = p;
-        } else {
-            socket = ldmux_protocol::paths::resolve_state_dir() + "/keeper.sock";
+        match args.next() {
+            Some(p) if !p.starts_with('-') => socket = p,
+            Some(other) => {
+                // A flag here is a caller mistake (`--socket /path` is not a spelling this takes),
+                // and treating it as a path created a socket literally named `--socket` in the
+                // caller's working directory — measured 2026-11-05: one sat in `crates/daemon/`
+                // until it broke a flake evaluation of the tree.
+                eprintln!("ldmux-keeper: unknown argument {other:?}");
+                eprintln!("usage: ldmux-keeper <socket-path>   (or $LDMUX_KEEPER_SOCKET)");
+                std::process::exit(2);
+            }
+            None => {
+                socket = ldmux_protocol::paths::resolve_state_dir() + "/keeper.sock";
+            }
         }
     }
     let socket = PathBuf::from(socket);

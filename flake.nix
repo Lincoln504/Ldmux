@@ -92,9 +92,13 @@
       # so `crates/protocol/build.rs` would answer `unknown`; passing it here is what lets the
       # installed daemon, CLI and desk windows say which build each one is (RELEASE-AUDIT 14.2).
       buildId =
-        if self ? shortRev then
-          (if self ? dirtyShortRev then self.dirtyShortRev else self.shortRev)
+        if self ? shortRev && !(self ? dirtyRev) then self.shortRev
+        else if self ? dirtyShortRev then self.dirtyShortRev
         else if self ? rev then builtins.substring 0 8 self.rev
+        # A dirty root flake carries no revision at all (only `lastModified`), and "unknown" on a
+        # local build hides the one fact worth having: that it is not a committed tree. Say so,
+        # with the mtime, so two dirty builds can still be told apart.
+        else if self ? lastModified then "dirty-${builtins.substring 0 8 (toString self.lastModified)}"
         else "unknown";
 
       ldmuxFor = pkgs:
