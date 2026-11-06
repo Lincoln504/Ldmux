@@ -293,17 +293,26 @@ internal fun AppContent(
     // **A mark can become a banner, if the operator asked for one.** Off by default: the square
     // beside the row is the product, and a banner is the second way of being told. Only the tailnet
     // route can reach a phone that is away, so the radio route never posts one.
+    // **The title is read at post time, not at capture time.** The callback is installed once per
+    // configuration, so a list captured in this effect would be the one from the day the setting
+    // was changed: a shell created since then would show its id instead of its name.
+    val currentSessions by rememberUpdatedState(sessions)
     DisposableEffect(client, config.notifyMarks, config.notifySound, config.route) {
-        client.notifyMark = notify@{ id, mark ->
+        client.notifyMark = notify@{ id, mark, note ->
             if (!config.notifyMarks || config.route != MeshRoute.Tailnet) return@notify
-            val title = sessions.firstOrNull { it.id == id }?.title?.ifEmpty { null } ?: id.take(8)
-            val body = when (mark) {
-                ShellMark.Done -> "finished its turn"
-                ShellMark.Attention -> "needs attention"
+            val title = currentSessions.firstOrNull { it.id == id }?.title?.ifEmpty { null }
+                ?: id.take(8)
+            // The operator's own line wins over the generic sentence: `ldmux buzz --note "tests
+            // failed"` says more than "needs attention", and it is the caller's words.
+            val body = note.ifBlank {
+                when (mark) {
+                    ShellMark.Done -> "finished its turn"
+                    ShellMark.Attention -> "needs attention"
+                }
             }
             BackgroundSession.postMark(id, title, body, config.notifySound)
         }
-        onDispose { client.notifyMark = { _, _ -> } }
+        onDispose { client.notifyMark = { _, _, _ -> } }
     }
 
     // **A tapped mark opens its shell.** The notification named one, and the app is the only part

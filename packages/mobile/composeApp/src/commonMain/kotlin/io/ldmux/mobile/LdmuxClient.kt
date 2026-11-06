@@ -262,8 +262,10 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private val _marks = MutableStateFlow<Map<String, ShellMark>>(emptyMap())
     val marks: StateFlow<Map<String, ShellMark>> = _marks.asStateFlow()
 
-    /** Post an Android notification for a mark, when the operator asked for them. */
-    var notifyMark: (String, ShellMark) -> Unit = { _, _ -> }
+    /// Post an Android notification for a mark, when the operator asked for them.
+    ///
+    /// The note is the sender's own line (`ldmux buzz --note`), empty when it said none.
+    var notifyMark: (String, ShellMark, String) -> Unit = { _, _, _ -> }
 
     /**
      * A shell has been opened, so its mark has been read.
@@ -675,7 +677,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 val entry = m?.let { parseMark(it) }
                 if (entry != null) {
                     _marks.value = _marks.value + (entry.first to entry.second)
-                    notifyMark(entry.first, entry.second)
+                    notifyMark(entry.first, entry.second, m.text("note"))
                 }
             }
             "marks" -> {
