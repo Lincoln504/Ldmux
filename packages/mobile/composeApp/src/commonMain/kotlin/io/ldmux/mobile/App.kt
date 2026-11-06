@@ -22,6 +22,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Modifier
 
 /**
  * The app, inside one theme.
@@ -71,7 +74,7 @@ fun App() {
             // is answered by the launcher's own list, and the shells that were open are let go
             // (they live in the keeper; re-opening one is a single attach).
             val leaveSettings: () -> Unit = { showSettings = false }
-            if (showSettings) {
+            val settingsScreen: @Composable () -> Unit = {
                 SettingsScreen(
                     current = config,
                     onBack = leaveSettings,
@@ -87,15 +90,33 @@ fun App() {
                         )
                     } else null,
                 )
-            } else if (mesh != null) {
-                MeshTerminalScreen(
-                    mesh, config,
-                    onOpenSettings = { showSettings = true },
-                    // The radio's own tuple, saved when the link reads it, so "public channel" is a
-                    // reading and not the cautious default. `connectionKey` excludes this field, so
-                    // saving does not rebuild the connection.
-                    onRadioClassified = { public -> store.update(store.config.value.copy(meshPublicChannel = public)) },
-                )
+            }
+            // **Settings is a layer over the mesh screen, not a replacement for it.**
+            //
+            // It used to replace the whole subtree, which disposed `MeshTerminalScreen` and with it
+            // the mesh session: every visit to Settings ended that session, so coming back began a
+            // fresh Noise handshake over the radio. On a LoRa link that is minutes, and when the
+            // first records are lost it is the 8/16/32-second retry ladder before the connection
+            // gives up and rebuilds — which is exactly the "handshaking for ages" that pressing
+            // refresh cured, because refresh rebuilt the connection outright.
+            //
+            // Over the tailnet the same disposal was invisible: a WebSocket handshake is instant.
+            // The tailnet route keeps the old shape, because its link is cheap to rebuild and
+            // Settings is where its route is chosen. The radio route keeps its session.
+            if (mesh != null) {
+                Box(Modifier.fillMaxSize()) {
+                    MeshTerminalScreen(
+                        mesh, config,
+                        onOpenSettings = { showSettings = true },
+                        // The radio's own tuple, saved when the link reads it, so "public channel" is a
+                        // reading and not the cautious default. `connectionKey` excludes this field, so
+                        // saving does not rebuild the connection.
+                        onRadioClassified = { public -> store.update(store.config.value.copy(meshPublicChannel = public)) },
+                    )
+                    if (showSettings) settingsScreen()
+                }
+            } else if (showSettings) {
+                settingsScreen()
             } else {
                 AppContent(config, store, onOpenSettings = { showSettings = true })
             }

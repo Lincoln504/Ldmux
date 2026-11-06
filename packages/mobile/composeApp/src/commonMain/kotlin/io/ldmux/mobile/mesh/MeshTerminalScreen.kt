@@ -76,6 +76,8 @@ import io.ldmux.mobile.IconPopOut
 import io.ldmux.mobile.NewShellModal
 import io.ldmux.mobile.RadiusMedium
 import io.ldmux.mobile.Surface
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * How long a sync waits for the host's answer before the screen stops waiting and says so.
@@ -85,6 +87,27 @@ import io.ldmux.mobile.Surface
  * exists for. Longer than this and a person is sitting on a screen that looks live and is not.
  */
 internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
+
+/**
+ * How long the measured grid must stop moving before it is sent to the host.
+ *
+ * Long enough to outlast the keyboard animation (about 200 ms on the devices measured) and short
+ * enough that a rotation does not feel delayed. The cost of not waiting is a spurious `Resize`
+ * record — which in manual-sync mode is a sync the user paid for — and a shell that starts at the
+ * keyboard-down height and is then fitted to the real one.
+ */
+internal const val GRID_SETTLE_MS = 250L
+
+/**
+ * How long the first fit waits for the keyboard to appear before sending the size it has.
+ *
+ * The keyboard is opened by the app when a terminal appears, and it is an animation plus an IME
+ * start: on the device measured it arrived about half a second after the shell did. While it is on
+ * its way the surface's grid is the keyboard-DOWN one, and sending it costs a record and starts
+ * the shell's program at the wrong height. This bound exists so a keyboard that never appears
+ * (a hardware keyboard, a refused IME) cannot leave the host at the old size for ever.
+ */
+internal const val IME_WAIT_MS = 2_000L
 
 /**
  * How long a link may be down before this route leaves the held screen for the shell list.
@@ -284,7 +307,18 @@ fun MeshTerminalScreen(
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
     val source = remember(conn) { MeshTerminalSource(handle) }
-    DisposableEffect(source) { onDispose { source.close() } }
+    DisposableEffect(source) {
+        onDispose { source.close() }
+    }
+    // **Held text does not outlive the screen.** The batcher keeps what the user typed in plain
+    // heap memory until it is sent, which in manual-sync mode can be minutes. Leaving the app
+    // backgrounded it there, and an Android recents thumbnail or a heap dump would show a password
+    // that was never sent. The keys are encrypted at rest; the text waiting to be typed into a
+    // shell should not survive the screen at all.
+    DisposableEffect(source) {
+        val remove = AppLifecycle.onBackground { source.scrub() }
+        onDispose { remove() }
+    }
     val pump = remember(conn) { MeshInputPump(batcher, { out ->
         when (out) {
             is MeshOut.Text -> conn.driver.input(out.bytes)
@@ -667,8 +701,49 @@ fun MeshTerminalScreen(
                     // The host fits its pty to what the surface measures (`Resize`, profile version
                     // 3), so the font is the user's own and a line is never wider than the screen.
                     DisposableEffect(source, conn) {
-                        source.onGrid = { c, r -> scope.launch { conn.driver.setGrid(c, r) } }
-                        onDispose { source.onGrid = null }
+                        var pending: Job? = null
+                        // **The grid is sent once it has settled, not on every layout pass.**
+                        // Opening a shell animates the keyboard in, and the surface reports a grid
+                        // per frame, so the first reports were the keyboard-DOWN size: the host
+                        // fitted its pty to a pane the user was not looking at, the shell's program
+                        // drew at that height, and a second `Resize` arrived a moment later to undo
+                        // it. Two records where one is correct — and in manual-sync mode a record is
+                        // a sync the user paid for, on a link that allows about 58 records an hour.
+                        // Waiting for the measurement to stop moving picks the keyboard-UP size,
+                        // which is the size the shell actually starts at.
+                        // **The first fit waits for the keyboard, then for the size to settle.**
+                        // A debounce alone was not enough: the IME is requested by the app and
+                        // takes a moment to appear, so there was a quiet gap in which the
+                        // keyboard-DOWN size looked settled, and it was sent (measured on the
+                        // device: `46x32` at t+0, then `46x19` 500 ms later when the keyboard
+                        // finished opening). So while the keyboard is meant to be up and is not
+                        // yet on screen, nothing is sent: the layout pass that arrives once it is
+                        // up carries the real grid. `keyboardWanted` is the user's own choice, and
+                        // [IME_WAIT_MS] bounds the wait so a keyboard that never appears cannot
+                        // leave the host at the pty's old size for ever.
+                        val opened = TimeSource.Monotonic.markNow()
+                        source.onGrid = { c, r ->
+                            pending?.cancel()
+                            pending = scope.launch {
+                                // Bounded, and it always ends in a fit. Returning early instead
+                                // meant the keyboard never arriving (or arriving without another
+                                // layout pass) left the host at the pty's old size for ever —
+                                // measured on the device as no `mesh fit` line at all after a shell
+                                // opened. Waiting is a delay, not a decision.
+                                val left = IME_WAIT_MS - opened.elapsedNow().inWholeMilliseconds
+                                if (left > 0 && keyboardWanted && !imeUp) {
+                                    withTimeoutOrNull(left) {
+                                        snapshotFlow { imeUp }.first { it }
+                                    }
+                                }
+                                delay(GRID_SETTLE_MS)
+                                conn.driver.setGrid(c, r)
+                            }
+                        }
+                        onDispose {
+                            pending?.cancel()
+                            source.onGrid = null
+                        }
                     }
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         TerminalSurfaceFor(

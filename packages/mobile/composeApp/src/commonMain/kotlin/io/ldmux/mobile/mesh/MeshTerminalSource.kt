@@ -168,6 +168,14 @@ class MeshTerminalSource(
     }
 
     /**
+     * Drop everything held and every rendering of it (the screen going away).
+     *
+     * Held text is the one plaintext this app keeps, and in manual-sync mode it can sit for
+     * minutes. Persistence was never the risk (nothing is saved); surviving in the background was.
+     */
+    fun scrub() = input.scrub()
+
+    /**
      * The pump found nothing left to send.
      *
      * If a sync was in flight and the host's answer already arrived during the drain, it was held

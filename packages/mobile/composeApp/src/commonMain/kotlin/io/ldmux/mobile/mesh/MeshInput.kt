@@ -364,6 +364,23 @@ class MeshTerminalHandle(
     var echoText: String by mutableStateOf("")
         private set
 
+    /**
+     * Drop everything held, and every rendering of it.
+     *
+     * **Held text is the one plaintext this app keeps in memory**, and it must not outlive the
+     * moment the user is looking at it. It was never persisted (no `rememberSaveable` anywhere),
+     * but nothing scrubbed it when the app went to the background either, so a password typed in
+     * manual-sync mode and not yet sent stayed in the heap while the app sat in the recents
+     * thumbnail. The pairing keys are encrypted at rest; the text waiting to be typed into a
+     * shell should at least not survive the screen going away.
+     */
+    fun scrub() {
+        batcher.clear()
+        pendingLabel = ""
+        heldSummary = ""
+        echoText = ""
+    }
+
     /** The pump calls this after it sent a piece, so the line under the screen shrinks. */
     fun refreshPending() {
         pendingLabel = readable(batcher.pending)
