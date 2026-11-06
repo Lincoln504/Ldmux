@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ldmux_mesh::carrier::{Bound, Carrier, Event, GatewayCarrier};
+use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event, GatewayCarrier};
 use ldmux_mesh::constants::{CREDIT_WINDOW, RadioState, SendOutcome};
 
 /// The longest this loop will sleep with a session attached. See the comment at the wait.
@@ -725,6 +725,28 @@ async fn link(
     }
 }
 
+/// How many records this poll may hand to the carrier.
+///
+/// The rule differs by who owns the meter, and getting it wrong is not a detail: with
+/// `Budget::Reported` an unknown budget is zero (a gateway that has said nothing has allowed
+/// nothing), and applying that same rule with no gateway at all left a serial host able to send
+/// one probe record a minute and answer nothing - a paired phone retried `attach` for ever while
+/// `ldmux mesh status` read `budget 0 records left this hour` (measured 2026-11-05).
+fn poll_budget(source: Budget, reported: Option<u8>, probe: bool) -> u8 {
+    match source {
+        // The radio's firmware runs the transmitter's duty cycle and refuses what it will not
+        // send, so there is no second meter to apply here.
+        Budget::RadioGoverned => u8::MAX,
+        Budget::Reported => {
+            if probe {
+                1
+            } else {
+                reported.unwrap_or(0)
+            }
+        }
+    }
+}
+
 /// One connected session, from handshake to close.
 ///
 /// Generic over the carriage: the L3 session, the credit window, the budget and the
@@ -941,8 +963,14 @@ async fn session<C: Carrier>(
         let probe = budget == Some(0)
             && h.wants_poll()
             && now.saturating_duration_since(last_status_at) >= BUDGET_PROBE;
+        // **A radio we own is not gated here.** Its firmware runs the transmitter's duty cycle and
+        // refuses a record it will not send; applying the gateway's "unknown means zero" rule on
+        // top of that left a serial host able to send one probe a minute and answer nothing, which
+        // is exactly what a paired phone saw as an endless `attach` (measured 2026-11-05, with
+        // `ldmux mesh status` reporting `budget 0 records left this hour`).
+        let records_left = poll_budget(promise.budget, budget, probe);
         let limits = Limits {
-            records_left: if probe { 1 } else { budget.unwrap_or(0) },
+            records_left,
             l2_slots: CREDIT_WINDOW.saturating_sub(used),
         };
         let t_poll = std::time::Instant::now();
@@ -1257,4 +1285,31 @@ mod tests {
         assert!(err.contains("unreadable"), "{err}");
     }
 
+
+    /// The serial carrier has no gateway, so "unknown means zero" must not apply to it.
+    ///
+    /// This is the exact shape of the reported failure: a paired phone retrying `attach` for ever
+    /// against a host whose status read `budget 0 records left this hour`, because the budget was
+    /// `None` (no gateway to report one) and `None` was treated as spent.
+    #[test]
+    fn a_radio_we_own_is_gated_by_its_firmware_not_by_a_missing_gateway_number() {
+        assert_eq!(poll_budget(Budget::RadioGoverned, None, false), u8::MAX);
+        assert_eq!(poll_budget(Budget::RadioGoverned, Some(0), false), u8::MAX);
+        assert_eq!(poll_budget(Budget::RadioGoverned, Some(7), false), u8::MAX);
+    }
+
+    /// A gateway's budget is its own number, and silence is not permission.
+    #[test]
+    fn a_gateway_that_has_said_nothing_has_allowed_nothing() {
+        assert_eq!(poll_budget(Budget::Reported, None, false), 0);
+        assert_eq!(poll_budget(Budget::Reported, Some(0), false), 0);
+        assert_eq!(poll_budget(Budget::Reported, Some(9), false), 9);
+    }
+
+    /// The probe exists so a spent hour does not need a manual restart, and it is one record.
+    #[test]
+    fn a_spent_gateway_budget_still_allows_the_probe() {
+        assert_eq!(poll_budget(Budget::Reported, Some(0), true), 1);
+        assert_eq!(poll_budget(Budget::Reported, None, true), 1);
+    }
 }

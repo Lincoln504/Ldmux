@@ -9,8 +9,8 @@
     "maxInput": 96,
     "maxKeys": 16,
     "maxLabel": 24,
-    "maxMessage": 133,
-    "maxRowsBody": 130,
+    "maxMessage": 137,
+    "maxRowsBody": 134,
     "maxSegment": 120,
     "maxSelector": 40,
     "maxSessions": 16,
@@ -19,7 +19,7 @@
     "recordMax": 172,
     "recordPayload": 143,
     "unsupportedAllV1": 127,
-    "version": 6
+    "version": 7
   },
   "messages": [
     {
@@ -188,7 +188,8 @@
         "cwd": false,
         "entries": [],
         "kind": "sessions",
-        "last": true
+        "last": true,
+        "origin": false
       }
     },
     {
@@ -199,16 +200,19 @@
           {
             "cwd": "",
             "id": "ab12cd34",
-            "label": "RCNT"
+            "label": "RCNT",
+            "origin": ""
           },
           {
             "cwd": "",
             "id": "ef56",
-            "label": "héllo 漢"
+            "label": "héllo 漢",
+            "origin": ""
           }
         ],
         "kind": "sessions",
-        "last": false
+        "last": false,
+        "origin": false
       }
     },
     {
@@ -219,11 +223,13 @@
           {
             "cwd": "~/Documents/RCNT",
             "id": "ab12cd34",
-            "label": "RCNT"
+            "label": "RCNT",
+            "origin": ""
           }
         ],
         "kind": "sessions",
-        "last": true
+        "last": true,
+        "origin": false
       }
     }
   ],
@@ -236,7 +242,7 @@
           "rows": 3,
           "shell": "",
           "unsupported": 95,
-          "version": 6
+          "version": 7
         },
         {
           "epoch": 1,
@@ -287,7 +293,7 @@
         ],
         "rows": 3
       },
-      "stream": "81060614035f00008208010001000002242083050100020000"
+      "stream": "81060714035f00008208010001000002242083050100020000"
     },
     {
       "messages": [
@@ -408,7 +414,7 @@
           "rows": 3,
           "shell": "",
           "unsupported": 95,
-          "version": 6
+          "version": 7
         },
         {
           "epoch": 4,
@@ -419,14 +425,7 @@
               "append": false,
               "text": "$ ls",
               "y": 0
-            }
-          ]
-        },
-        {
-          "epoch": 4,
-          "full": false,
-          "kind": "rows",
-          "patches": [
+            },
             {
               "append": false,
               "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -488,7 +487,7 @@
         ],
         "rows": 3
       },
-      "stream": "810606ff035f0000820a04000100000424206c73827e040000010078787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878821d04000001010a7878787878787878787802000a68c3a96c6c6f20e6bca283050400020000"
+      "stream": "810607ff035f000082850104000100000424206c73010078787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878821d04000001010a7878787878787878787802000a68c3a96c6c6f20e6bca283050400020000"
     },
     {
       "messages": [
@@ -539,7 +538,7 @@
           "rows": 2,
           "shell": "",
           "unsupported": 95,
-          "version": 6
+          "version": 7
         },
         {
           "epoch": 6,
@@ -593,7 +592,7 @@
         ],
         "rows": 2
       },
-      "stream": "81060628025f0000820f0600010000036f6e6501000374776f83050600020000"
+      "stream": "81060728025f0000820f0600010000036f6e6501000374776f83050600020000"
     }
   ],
   "sessionPages": {
@@ -601,143 +600,164 @@
       {
         "cwd": "~/projects/shell-0",
         "id": "00ffffffffffffffffffffffffffffff",
-        "label": "shell number 0 long label"
+        "label": "shell number 0 long label",
+        "origin": "phone"
       },
       {
         "cwd": "~/projects/shell-1",
         "id": "01ffffffffffffffffffffffffffffff",
-        "label": "shell number 1 long label"
+        "label": "shell number 1 long label",
+        "origin": "phone"
       },
       {
         "cwd": "~/projects/shell-2",
         "id": "02ffffffffffffffffffffffffffffff",
-        "label": "shell number 2 long label"
+        "label": "shell number 2 long label",
+        "origin": "phone"
       },
       {
         "cwd": "~/projects/shell-3",
         "id": "03ffffffffffffffffffffffffffffff",
-        "label": "shell number 3 long label"
+        "label": "shell number 3 long label",
+        "origin": "phone"
       },
       {
         "cwd": "~/projects/shell-4",
         "id": "04ffffffffffffffffffffffffffffff",
-        "label": "shell number 4 long label"
+        "label": "shell number 4 long label",
+        "origin": "phone"
       },
       {
         "cwd": "~/projects/shell-5",
         "id": "05ffffffffffffffffffffffffffffff",
-        "label": "shell number 5 long label"
+        "label": "shell number 5 long label",
+        "origin": "phone"
       },
       {
         "cwd": "~/projects/shell-6",
         "id": "06ffffffffffffffffffffffffffffff",
-        "label": "shell number 6 long label"
+        "label": "shell number 6 long label",
+        "origin": "phone"
       }
     ],
     "pages": [
       {
-        "hex": "854e02203030666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722030206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d30",
+        "hex": "855406203030666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722030206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d300570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-0",
               "id": "00ffffffffffffffffffffffffffffff",
-              "label": "shell number 0 long labe"
+              "label": "shell number 0 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": false
+          "last": false,
+          "origin": true
         }
       },
       {
-        "hex": "854e02203031666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722031206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d31",
+        "hex": "855406203031666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722031206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d310570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-1",
               "id": "01ffffffffffffffffffffffffffffff",
-              "label": "shell number 1 long labe"
+              "label": "shell number 1 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": false
+          "last": false,
+          "origin": true
         }
       },
       {
-        "hex": "854e02203032666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722032206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d32",
+        "hex": "855406203032666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722032206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d320570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-2",
               "id": "02ffffffffffffffffffffffffffffff",
-              "label": "shell number 2 long labe"
+              "label": "shell number 2 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": false
+          "last": false,
+          "origin": true
         }
       },
       {
-        "hex": "854e02203033666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722033206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d33",
+        "hex": "855406203033666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722033206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d330570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-3",
               "id": "03ffffffffffffffffffffffffffffff",
-              "label": "shell number 3 long labe"
+              "label": "shell number 3 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": false
+          "last": false,
+          "origin": true
         }
       },
       {
-        "hex": "854e02203034666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722034206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d34",
+        "hex": "855406203034666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722034206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d340570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-4",
               "id": "04ffffffffffffffffffffffffffffff",
-              "label": "shell number 4 long labe"
+              "label": "shell number 4 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": false
+          "last": false,
+          "origin": true
         }
       },
       {
-        "hex": "854e02203035666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722035206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d35",
+        "hex": "855406203035666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722035206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d350570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-5",
               "id": "05ffffffffffffffffffffffffffffff",
-              "label": "shell number 5 long labe"
+              "label": "shell number 5 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": false
+          "last": false,
+          "origin": true
         }
       },
       {
-        "hex": "854e03203036666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722036206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d36",
+        "hex": "855407203036666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722036206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d360570686f6e65",
         "message": {
           "cwd": true,
           "entries": [
             {
               "cwd": "~/projects/shell-6",
               "id": "06ffffffffffffffffffffffffffffff",
-              "label": "shell number 6 long labe"
+              "label": "shell number 6 long labe",
+              "origin": "phone"
             }
           ],
           "kind": "sessions",
-          "last": true
+          "last": true,
+          "origin": true
         }
       }
     ]

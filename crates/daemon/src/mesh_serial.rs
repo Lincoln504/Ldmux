@@ -30,7 +30,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use ldmux_companion::{ByteLink, Companion, SerialLink, SessionError};
-use ldmux_mesh::carrier::{Bound, Carrier, Event};
+use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
 use ldmux_mesh::frame::MeshError;
 use ldmux_mesh::messages::{SendResult, Status};
@@ -143,6 +143,8 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
     let bound = Bound {
         uplink_record_max: u8::try_from(RECORD_MAX).unwrap_or(172),
         radio_state: RadioState::Connected,
+        // No gateway is in the path: this process owns the radio, and the firmware is the meter.
+        budget: Budget::RadioGoverned,
     };
     Ok((companion, bound, Settings { hash_size, airtime_ms }))
 }

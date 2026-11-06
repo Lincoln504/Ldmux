@@ -34,6 +34,25 @@ pub struct Bound {
     /// The largest record this peer's path allows. Records are sized to it.
     pub uplink_record_max: u8,
     pub radio_state: RadioState,
+    /// Who decides how much may be sent this hour.
+    pub budget: Budget,
+}
+
+/// Where the hourly record budget comes from.
+///
+/// The session loop gates what it sends on a number, and there are two honest sources for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Budget {
+    /// The far end (a gateway) reports how many records are left, and a gateway that has said
+    /// nothing has allowed nothing - so an unknown number means zero.
+    Reported,
+    /// The radio we own governs its own airtime: its firmware runs the transmitter's duty cycle
+    /// and refuses a record it will not send. There is no second meter to apply here.
+    ///
+    /// Reading the absent gateway number as zero is what left a serial host able to send one
+    /// probe record a minute and answer nothing else (measured 2026-11-05: `ldmux mesh status`
+    /// read `budget 0 records left this hour` while a paired phone retried `attach` in a loop).
+    RadioGoverned,
 }
 
 /// What the session loop needs from a carriage.
@@ -76,6 +95,8 @@ impl GatewayCarrier {
         Ok(Bound {
             uplink_record_max: handshake.bind.uplink_record_max,
             radio_state: handshake.hello.radio_state,
+            // A gateway is the one that knows how much airtime it will grant.
+            budget: Budget::Reported,
         })
     }
 
@@ -119,7 +140,7 @@ mod tests {
 
     #[test]
     fn bound_carries_the_two_things_the_loop_needs() {
-        let bound = Bound { uplink_record_max: 172, radio_state: RadioState::Connected };
+        let bound = Bound { uplink_record_max: 172, radio_state: RadioState::Connected, budget: Budget::Reported };
         assert_eq!(bound.uplink_record_max, 172);
         assert_eq!(bound.radio_state, RadioState::Connected);
     }

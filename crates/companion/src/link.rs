@@ -35,9 +35,16 @@ impl SerialLink {
         use nix::fcntl::{OFlag, open};
         use nix::sys::stat::Mode;
 
+        // **O_CLOEXEC is not tidiness here, it is the radio's ownership.** The flock that makes
+        // this process the one owner is held on this descriptor, and an inherited descriptor keeps
+        // the lock after the owner is gone: every shell and every desk window spawned from the
+        // daemon carried `/dev/ttyACM0` across `exec`, so a restarted daemon found the radio
+        // "held by another process" until all of those exited (measured 2026-11-05: an `alacritty`
+        // and an `ldmuxd attach` client were the lock holders, and `ldmux mesh status` reported
+        // `another process holds this radio`, leaving the mesh down with the phone retrying).
         let raw = open(
             path,
-            OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_NONBLOCK,
+            OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
         .map_err(io::Error::from)?;

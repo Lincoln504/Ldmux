@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, RESIZE_VERSION,
-    STREAM_VERSION, Screen, VERSION, closed, session_pages,
+    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, ORIGIN_VERSION,
+    RESIZE_VERSION, SHELL_CONTROL_VERSION, STREAM_VERSION, Screen, VERSION, closed, session_pages,
 };
 
 /// The session as the bridge sees it.
@@ -56,15 +56,15 @@ pub trait Link {
 pub trait Host {
     /// Ids of the running shells. `None` when the host could not be asked: unknown is not empty.
     async fn running(&mut self) -> Option<Vec<String>>;
-    /// `(id, label, cwd)` of the running shells, for the phone's picker. The default has no labels
-    /// and no paths; a host that knows where a shell runs gives the phone the folder, as the
-    /// tailnet launcher does.
-    async fn listing(&mut self) -> Option<Vec<(String, String, String)>> {
+    /// `(id, label, cwd, created_by)` of the running shells, for the phone's picker. The default has
+    /// no labels, no paths and no origin; a host that knows where a shell runs gives the phone the
+    /// folder and who started it, as the tailnet launcher does.
+    async fn listing(&mut self) -> Option<Vec<(String, String, String, String)>> {
         Some(
             self.running()
                 .await?
                 .into_iter()
-                .map(|id| (id, String::new(), String::new()))
+                .map(|id| (id, String::new(), String::new(), String::new()))
                 .collect(),
         )
     }
@@ -88,6 +88,29 @@ pub trait Host {
     async fn claim(&mut self, id: &str) -> Result<bool, String>;
     /// Give the shell back, so a desk window can take it again.
     async fn release(&mut self, id: &str);
+
+    /// Start a shell in `cwd` (empty = the host's default) and answer its id.
+    ///
+    /// This is the verb the mesh route was missing: without it a phone could type into the shells
+    /// the desk had already started and could not start one of its own, which is the whole
+    /// difference between the radio route and the tailnet launcher. The shell is recorded as the
+    /// phone's (`created_by = "phone"`), so it stays the phone's after the app restarts.
+    async fn create(&mut self, cwd: &str, cols: u8, rows: u8) -> Result<String, String> {
+        let _ = (cwd, cols, rows);
+        Err("this host cannot start shells".to_owned())
+    }
+
+    /// End that shell, or let go of it when a desk window holds it (ADR-0010).
+    async fn close(&mut self, id: &str) -> Result<(), String> {
+        let _ = id;
+        Err("this host cannot end shells".to_owned())
+    }
+
+    /// Open that shell in a desk window on the host.
+    async fn make_live(&mut self, id: &str) -> Result<(), String> {
+        let _ = id;
+        Err("this host cannot open desk windows".to_owned())
+    }
 }
 
 impl Link for crate::mesh::MeshRuntime {
@@ -125,6 +148,10 @@ pub struct BridgeStats {
     pub resizes_unchanged: u32,
     pub malformed: u32,
     pub refused_sends: u32,
+    /// Shells the phone started, ended, and put on the desk (version 7).
+    pub created: u32,
+    pub closed: u32,
+    pub made_live: u32,
     /// Listing or liveness questions the host could not answer. Counted, and answered with
     /// **silence**: an empty list is a fact ("no shells are running") and a failed call is not, so
     /// sending one for the other told the phone its shells had all ended (measured 2026-11-03: the
@@ -565,11 +592,77 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // A version-5 phone decodes the version-5 form; only a version-6 phone is given
                 // the folder as well. No attach means no version, and no version means the old
                 // form: a page the phone cannot read is worse than one without a path.
-                let with_cwd = self
-                    .versions
+                let version = self.versions.get(&shell).copied();
+                let with_cwd = version.is_some_and(|v| v >= CWD_VERSION);
+                // The origin rides the same flag-byte mechanism as the path, for the same reason:
+                // a list is answered before any attach has a profile to gate on.
+                let with_origin = version.is_some_and(|v| v >= ORIGIN_VERSION);
+                self.reply(shell, &session_pages(&listing, with_cwd, with_origin));
+            }
+            // ── version 7: the phone starts and ends shells, as the tailnet client does ──
+            Message::Create { version, cwd } => {
+                self.versions.insert(shell, version);
+                if version < SHELL_CONTROL_VERSION {
+                    self.reply(shell, &[Message::Closed { reason: closed::VERSION }]);
+                    return;
+                }
+                // The phone's own grid, when it has said one, so the shell is born the size the
+                // phone will draw rather than 80x24 and reflowed on the first attach.
+                let (cols, rows) = self
+                    .shells
                     .get(&shell)
-                    .is_some_and(|v| *v >= CWD_VERSION);
-                self.reply(shell, &session_pages(&listing, with_cwd));
+                    .and_then(|a| a.geometry)
+                    .unwrap_or((80, 24));
+                match self.host.create(&cwd, cols, rows).await {
+                    Ok(id) => {
+                        self.stats.created += 1;
+                        self.reply(shell, &[Message::Created { id }]);
+                    }
+                    // A host that cannot start one says so; the phone must not sit waiting.
+                    Err(_) => {
+                        self.stats.host_unanswered += 1;
+                        self.reply(shell, &[Message::Closed { reason: closed::UNAVAILABLE }]);
+                    }
+                }
+            }
+            Message::Close { selector } => {
+                let version = self.versions.get(&shell).copied().unwrap_or(0);
+                if version < SHELL_CONTROL_VERSION {
+                    self.reply(shell, &[Message::Closed { reason: closed::VERSION }]);
+                    return;
+                }
+                let Some(id) = self.resolve(shell, &selector).await else {
+                    return;
+                };
+                if self.host.close(&id).await.is_err() {
+                    self.stats.host_unanswered += 1;
+                    return;
+                }
+                self.stats.closed += 1;
+                // The attach that named it is over, and the list the phone shows is now wrong.
+                if let Some(a) = self.shells.remove(&shell) {
+                    self.host.release(&a.session).await;
+                }
+                if let Some(listing) = self.host.listing().await {
+                    let with_cwd = version >= CWD_VERSION;
+                    let with_origin = version >= ORIGIN_VERSION;
+                    self.reply(shell, &session_pages(&listing, with_cwd, with_origin));
+                }
+            }
+            Message::MakeLive { selector } => {
+                let version = self.versions.get(&shell).copied().unwrap_or(0);
+                if version < SHELL_CONTROL_VERSION {
+                    self.reply(shell, &[Message::Closed { reason: closed::VERSION }]);
+                    return;
+                }
+                let Some(id) = self.resolve(shell, &selector).await else {
+                    return;
+                };
+                if self.host.make_live(&id).await.is_ok() {
+                    self.stats.made_live += 1;
+                } else {
+                    self.stats.host_unanswered += 1;
+                }
             }
             Message::Input(bytes) => {
                 let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
@@ -649,6 +742,23 @@ impl<H: Host, L: Link> Bridge<H, L> {
     }
 }
 
+impl<H: Host, L: Link> Bridge<H, L> {
+    /// The session a selector names, or `None` when it names nothing running.
+    ///
+    /// The same rule `Attach` uses: an empty selector means the shell this link is attached to,
+    /// and anything else is an id prefix. Nothing is guessed: a selector that matches no running
+    /// shell answers nothing, because a close aimed at the wrong shell is not recoverable.
+    async fn resolve(&mut self, shell: u8, selector: &str) -> Option<String> {
+        if selector.is_empty() {
+            return self.shells.get(&shell).map(|a| a.session.clone());
+        }
+        let running = self.host.running().await?;
+        running
+            .into_iter()
+            .find(|id| id.starts_with(selector))
+    }
+}
+
 /// The identity the mesh link claims shells under. One mesh link is one viewer: the session
 /// carries one phone key, and a second phone means a new pairing.
 const MESH_DEVICE: &str = "mesh-link";
@@ -678,7 +788,7 @@ impl Host for DaemonHost {
         Some(ids)
     }
 
-    async fn listing(&mut self) -> Option<Vec<(String, String, String)>> {
+    async fn listing(&mut self) -> Option<Vec<(String, String, String, String)>> {
         let v = self
             .0
             .lock()
@@ -698,7 +808,16 @@ impl Host for DaemonHost {
                         // The daemon's `list` already describes the pane's live directory (the
                         // keeper's fact, not the directory the session was created in).
                         let cwd = s.get("cwd").and_then(|x| x.as_str()).unwrap_or("");
-                        Some((id.to_owned(), label.to_owned(), cwd.to_owned()))
+                        // Who started it (`SessionInfo.created_by`): "phone", "desktop", "local".
+                        // The mesh launcher shows the phone's own shells' actions, so it needs the
+                        // same fact the tailnet launcher has always had.
+                        let origin = s.get("createdBy").and_then(|x| x.as_str()).unwrap_or("");
+                        Some((
+                            id.to_owned(),
+                            label.to_owned(),
+                            cwd.to_owned(),
+                            origin.to_owned(),
+                        ))
                     })
                     .collect::<Vec<_>>()
             })
@@ -787,6 +906,54 @@ impl Host for DaemonHost {
                 serde_json::json!({ "id": id, "device": MESH_DEVICE }),
             )
             .await;
+    }
+
+    /// The same `new` the tailnet's WebSocket handler calls, with `createdBy` set to the phone so the
+    /// record says who started it. That field is what the launcher reads to keep a phone-opened
+    /// shell's actions (close, open on the desktop) after the app restarts, instead of letting the
+    /// row pass for a desk shell.
+    async fn create(&mut self, cwd: &str, cols: u8, rows: u8) -> Result<String, String> {
+        let cwd = if cwd.is_empty() { "." } else { cwd };
+        let v = self
+            .0
+            .lock()
+            .await
+            .handle(
+                "new",
+                serde_json::json!({
+                    "kind": "shell",
+                    "cwd": cwd,
+                    "createdBy": "phone",
+                    "cols": cols,
+                    "rows": rows,
+                }),
+            )
+            .await?;
+        v.get("session")
+            .and_then(|s| s.get("id"))
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| "the host did not say which shell it made".to_owned())
+    }
+
+    /// The daemon's `close`: a shell a desk window holds is put down, one nobody holds is ended.
+    /// Destroying a desk shell from a phone is not this app's decision to make (ADR-0010).
+    async fn close(&mut self, id: &str) -> Result<(), String> {
+        self.0
+            .lock()
+            .await
+            .handle("close", serde_json::json!({ "id": id }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn make_live(&mut self, id: &str) -> Result<(), String> {
+        self.0
+            .lock()
+            .await
+            .handle("makeLive", serde_json::json!({ "id": id, "workspace": "" }))
+            .await
+            .map(|_| ())
     }
 }
 
@@ -939,6 +1106,12 @@ mod tests {
         fail_screen: bool,
         /// The host cannot answer a listing or liveness question at all.
         fail_list: bool,
+        /// What `create` was asked for, and what it answers.
+        created: Vec<(String, u8, u8)>,
+        closed: Vec<String>,
+        made_live: Vec<String>,
+        /// When set, `create` fails the way a host with no room would.
+        fail_create: bool,
     }
     #[derive(Clone, Default)]
     struct FakeHost(Arc<Mutex<HostState>>);
@@ -950,7 +1123,7 @@ mod tests {
             }
             Some(s.running.clone())
         }
-        async fn listing(&mut self) -> Option<Vec<(String, String, String)>> {
+        async fn listing(&mut self) -> Option<Vec<(String, String, String, String)>> {
             let s = self.0.lock().unwrap();
             if s.fail_list {
                 return None;
@@ -958,10 +1131,40 @@ mod tests {
             Some(
                 s.running
                     .iter()
-                    .map(|id| (id.clone(), format!("label of {id}"), format!("/work/{id}")))
+                    .map(|id| {
+                        (
+                            id.clone(),
+                            format!("label of {id}"),
+                            format!("/work/{id}"),
+                            "phone".to_string(),
+                        )
+                    })
                     .collect(),
             )
         }
+        async fn create(&mut self, cwd: &str, cols: u8, rows: u8) -> Result<String, String> {
+            let mut s = self.0.lock().unwrap();
+            if s.fail_create {
+                return Err("no room".into());
+            }
+            s.created.push((cwd.to_owned(), cols, rows));
+            let id = format!("new-{}", s.created.len());
+            s.running.push(id.clone());
+            Ok(id)
+        }
+
+        async fn close(&mut self, id: &str) -> Result<(), String> {
+            let mut s = self.0.lock().unwrap();
+            s.closed.push(id.to_owned());
+            s.running.retain(|r| r != id);
+            Ok(())
+        }
+
+        async fn make_live(&mut self, id: &str) -> Result<(), String> {
+            self.0.lock().unwrap().made_live.push(id.to_owned());
+            Ok(())
+        }
+
         async fn screen(&mut self, id: &str) -> Result<Screen, String> {
             let s = self.0.lock().unwrap();
             if s.fail_screen {
@@ -1401,6 +1604,7 @@ mod tests {
                 let Message::Sessions {
                     last,
                     cwd,
+                    origin: _,
                     entries,
                 } = m
                 else {
@@ -1468,6 +1672,7 @@ mod tests {
             let Message::Sessions {
                 last,
                 cwd,
+                origin: _,
                 entries,
             } = &sessions_seen(&link, 4)[0]
             else {
@@ -2017,5 +2222,152 @@ mod tests {
             0,
             "{claimed:?}"
         );
+    }
+
+    /// Every message the host sent on `shell`, decoded in order.
+    fn sent(link: &FakeLink, shell: u8) -> Vec<Message> {
+        let mut d = Decoder::new();
+        let mut out = Vec::new();
+        for (s, bytes) in link.0.lock().unwrap().sent.iter() {
+            if *s == shell {
+                for item in d.push(bytes).unwrap() {
+                    out.push(item.unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    /// **The gap that made the radio route a viewer and the tailnet route a client.** A version-7
+    /// phone asks for a shell, and the host answers with the id it made so the phone can attach to
+    /// exactly that one rather than guessing from a list another client may have changed.
+    #[tokio::test]
+    async fn a_version_7_phone_starts_a_shell_and_is_told_which_one() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            3,
+            &Message::Create {
+                version: SHELL_CONTROL_VERSION,
+                cwd: "~/Documents".into(),
+            },
+        );
+        b.tick().await;
+        assert_eq!(
+            host.0.lock().unwrap().created,
+            [("~/Documents".to_string(), 80, 24)],
+            "the host was asked for a shell in the phone's own directory"
+        );
+        assert!(
+            sent(&link, 3).iter().any(|m| matches!(m, Message::Created { id } if id == "new-1")),
+            "the phone must be told the id it should attach to"
+        );
+    }
+
+    /// A host that speaks version 6 has no `Create`, and saying so is better than waiting: the
+    /// phone reads `Closed { VERSION }` and stops asking.
+    #[tokio::test]
+    async fn a_version_6_phone_is_told_the_host_cannot_start_shells() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: CWD_VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        // The gate is the message's own version field, not the profile's: a phone that speaks
+        // version 6 says so in the command it sends, and a host that answered it would be
+        // starting a shell for a client that cannot read the answer.
+        phone_says(
+            &link,
+            3,
+            &Message::Create {
+                version: CWD_VERSION,
+                cwd: String::new(),
+            },
+        );
+        b.tick().await;
+        assert!(host.0.lock().unwrap().created.is_empty(), "nothing was started");
+        assert!(
+            sent(&link, 3)
+                .iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::VERSION)),
+            "the refusal has to name the version, not be silence"
+        );
+    }
+
+    /// Closing is the tailnet's `close`, not a destroy: the bridge asks the host, and the list the
+    /// phone is looking at is replaced with the one that is now true.
+    #[tokio::test]
+    async fn a_version_7_phone_ends_a_shell_and_gets_the_new_list() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            3,
+            &Message::Close {
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert_eq!(host.0.lock().unwrap().closed, ["abcd-1"]);
+        let pages: Vec<_> = sent(&link, 3)
+            .into_iter()
+            .filter(|m| matches!(m, Message::Sessions { .. }))
+            .collect();
+        assert!(!pages.is_empty(), "the phone must not keep showing a shell that is gone");
+        assert!(
+            host.0.lock().unwrap().claimed.contains(&("release", "abcd-1".to_owned())),
+            "ending the shell gives it back rather than leaving a claim behind"
+        );
+    }
+
+    /// The origin rides the page's flag byte, like the path: a version-6 phone is never sent a
+    /// field it does not decode, and a version-7 phone learns that a shell is its own.
+    #[tokio::test]
+    async fn the_list_says_who_started_each_shell_only_to_a_phone_that_asked() {
+        for (version, expect_origin) in [(VERSION, true), (CWD_VERSION, false)] {
+            let (mut b, _host, link) = setup();
+            phone_says(
+                &link,
+                3,
+                &Message::Attach {
+                    version,
+                    selector: String::new(),
+                },
+            );
+            b.tick().await;
+            phone_says(&link, 3, &Message::List);
+            b.tick().await;
+            let page = sent(&link, 3)
+                .into_iter()
+                .find(|m| matches!(m, Message::Sessions { .. }))
+                .expect("a list must be answered");
+            let Message::Sessions { origin, entries, .. } = page else {
+                unreachable!()
+            };
+            assert_eq!(origin, expect_origin, "version {version}");
+            assert_eq!(entries[0].origin.is_empty(), !expect_origin, "version {version}");
+        }
     }
 }
