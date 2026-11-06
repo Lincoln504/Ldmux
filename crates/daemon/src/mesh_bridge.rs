@@ -95,6 +95,17 @@ pub trait Host {
     /// invisible because the answer was discarded — so the answer is part of the contract now.
     async fn release(&mut self, id: &str) -> bool;
 
+    /// Who holds `id` now, as the daemon's claim table says: `"mesh"`, `"desktop"`, `"phone"`,
+    /// or `""` for nobody. `None` when the host cannot say.
+    ///
+    /// A separate question from [`Self::listing`] because it is asked on the **write path**,
+    /// where a `list` (which asks the keeper about every shell) would put a round trip in front
+    /// of every keystroke. The claim table is in the daemon's memory and answers for nothing.
+    async fn holder(&mut self, id: &str) -> Option<String> {
+        let _ = id;
+        None
+    }
+
     /// Start a shell in `cwd` (empty = the host's default) and answer its id.
     ///
     /// This is the verb the mesh route was missing: without it a phone could type into the shells
@@ -163,6 +174,10 @@ pub struct BridgeStats {
     /// sending one for the other told the phone its shells had all ended (measured 2026-11-03: the
     /// launcher emptied on a drop while every shell was alive).
     pub host_unanswered: u32,
+    /// Writes refused because another device had taken the shell. Counted because it is the
+    /// one visible sign of a takeover from the mesh side: the phone sees `HELD`, the desk sees
+    /// its own claim, and this is what says the rule fired.
+    pub held_writes: u32,
     /// Claims the host refused to give back. A claim that cannot be released keeps the shell held
     /// by a device that is not there, which is the state that stops a desk window reclaiming it.
     pub release_failed: u32,
@@ -564,6 +579,38 @@ impl<H: Host, L: Link> Bridge<H, L> {
         }
     }
 
+    /// Tell the phone a shell it is still attached to is another device's, and let go of it.
+    ///
+    /// **The write path obeys the same rule as the attach path.** A desk window that takes a
+    /// shell displaces the phone by ADR-0010, but `Input` and `Key` used to write straight
+    /// through: the desk believed it owned the shell, the phone kept typing into the same pty,
+    /// and neither was told. `Closed { HELD }` is the vocabulary the attach path already uses,
+    /// and the claim plus the displaced grid are given back exactly as `Detach` gives them back,
+    /// so the desk window that took the shell is not left with a pty fitted to a phone that is
+    /// no longer attached.
+    async fn refuse_held_write(&mut self, shell: u8) {
+        self.stats.held_writes = self.stats.held_writes.saturating_add(1);
+        self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
+        if let Some(a) = self.shells.remove(&shell) {
+            let resized = a.geometry.is_some();
+            self.release(&a.session).await;
+            if let Some((cols, rows)) = a.original.filter(|_| resized) {
+                let _ = self.host.resize(&a.session, cols, rows).await;
+            }
+        }
+        self.decoders.remove(&shell);
+    }
+
+    /// Whether the shell this phone attached to has moved to another device since.
+    async fn displaced(&mut self, session: &str) -> bool {
+        match self.host.holder(session).await {
+            Some(holder) => !holder.is_empty() && holder != "mesh",
+            // Unknown is not "someone else": a host that cannot answer must not cut the phone
+            // off mid-word. The attach path already refused the shell if it was held.
+            None => false,
+        }
+    }
+
     /// `Attach`, with or without the consent that displaces whoever holds the shell.
     async fn attach_with(&mut self, shell: u8, version: u8, selector: &str, takeover: bool) {
                 if !(MIN_VERSION..=VERSION).contains(&version) {
@@ -596,18 +643,6 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     .iter()
                     .filter(|id| selector.is_empty() || id.starts_with(selector))
                     .collect();
-                // A shell another device holds, and this is a plain Attach: ask first.
-                if let Some(held) = matches.first() {
-                    let holder = listing
-                        .as_ref()
-                        .and_then(|rows| rows.iter().find(|r| r.0 == ***held))
-                        .map(|r| r.4.as_str())
-                        .unwrap_or("");
-                    if !takeover && !holder.is_empty() && holder != "mesh" {
-                        self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
-                        return;
-                    }
-                }
                 match matches.as_slice() {
                     [] => {
                         self.reply(
@@ -618,6 +653,20 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         );
                     }
                     [one] => {
+                        // **Ask first, when the shell is another device's and this is not the
+                        // user's consent.** The check lives in this arm because it needs exactly
+                        // one match: run before the match, it read `matches.first()` even for an
+                        // empty selector, so a launch probe could be told `HELD` about a shell
+                        // the phone never named and never reached `AMBIGUOUS`/the listing.
+                        let holder = listing
+                            .as_ref()
+                            .and_then(|rows| rows.iter().find(|r| r.0 == **one))
+                            .map(|r| r.4.as_str())
+                            .unwrap_or("");
+                        if !takeover && !holder.is_empty() && holder != "mesh" {
+                            self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
+                            return;
+                        }
                         if self.host.claim(one).await.is_err() {
                             self.reply(
                                 shell,
@@ -812,6 +861,10 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
                     return;
                 };
+                if self.displaced(&session).await {
+                    self.refuse_held_write(shell).await;
+                    return;
+                }
                 self.stats.inputs += 1;
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.echo = true;
@@ -837,6 +890,10 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     return;
                 }
                 let session = a.session.clone();
+                if self.displaced(&session).await {
+                    self.refuse_held_write(shell).await;
+                    return;
+                }
                 self.stats.keys += 1;
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.echo = true;
@@ -991,6 +1048,22 @@ impl Host for DaemonHost {
             })
             .unwrap_or_default();
         Some(rows)
+    }
+
+    async fn holder(&mut self, id: &str) -> Option<String> {
+        let v = self
+            .0
+            .lock()
+            .await
+            .handle("holder", serde_json::json!({ "id": id }))
+            .await
+            .ok()?;
+        Some(
+            v.get("holder")
+                .and_then(|h| h.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+        )
     }
 
     async fn screen(&mut self, id: &str) -> Result<Screen, String> {
@@ -1348,6 +1421,18 @@ mod tests {
         async fn make_live(&mut self, id: &str) -> Result<(), String> {
             self.0.lock().unwrap().made_live.push(id.to_owned());
             Ok(())
+        }
+
+        async fn holder(&mut self, id: &str) -> Option<String> {
+            Some(
+                self.0
+                    .lock()
+                    .unwrap()
+                    .holders
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
         }
 
         async fn screen(&mut self, id: &str) -> Result<Screen, String> {
@@ -2748,6 +2833,94 @@ mod tests {
             host.0.lock().unwrap().claimed.is_empty(),
             "nothing may be claimed before the user says so: {:?}",
             host.0.lock().unwrap().claimed
+        );
+    }
+
+    /// **The write path obeys the same rule as the attach path.** A desk window that takes the
+    /// shell displaces the phone (ADR-0010), but `Input` and `Key` used to write straight
+    /// through: two devices typed into one pty and neither was told. The phone is now refused in
+    /// the vocabulary it already understands, and the claim is handed back so the desk keeps it.
+    #[tokio::test]
+    async fn a_displaced_phone_stops_writing_and_is_told() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        assert_eq!(
+            *host.0.lock().unwrap().claimed,
+            [("claim", "abcd-1".to_string())]
+        );
+        // The desk takes the shell back: the daemon's claim now names the desktop.
+        host.0
+            .lock()
+            .unwrap()
+            .holders
+            .insert("abcd-1".into(), "desktop".into());
+        phone_says(&link, 3, &Message::Input(b"rm -rf /\n".to_vec()));
+        phone_says(&link, 3, &Message::Key(vec!["Enter".into()]));
+        b.tick().await;
+        assert!(
+            host.0.lock().unwrap().typed.is_empty(),
+            "a keystroke for a shell this phone no longer holds must not reach it: {:?}",
+            host.0.lock().unwrap().typed
+        );
+        assert!(host.0.lock().unwrap().keyed.is_empty());
+        assert!(
+            sent(&link, 3)
+                .iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::HELD)),
+            "the phone must be told it lost the shell, not left typing into a screen"
+        );
+        assert_eq!(b.stats.held_writes, 1);
+        assert!(
+            host.0
+                .lock()
+                .unwrap()
+                .claimed
+                .contains(&("release", "abcd-1".to_string())),
+            "the claim is given back so the desk window keeps what it took"
+        );
+    }
+
+    /// **A held shell must not answer a question about no shell in particular.** With two
+    /// shells running and the first held by the desk, an `Attach` with an empty selector used to
+    /// consult `matches.first()` before the match, so the phone was told `HELD` about a shell it
+    /// never named instead of being told the choice was ambiguous.
+    #[tokio::test]
+    async fn an_unnamed_attach_with_two_shells_is_ambiguous_not_held() {
+        let (mut b, host, link) = setup();
+        {
+            let mut h = host.0.lock().unwrap();
+            h.running.push("abcd-2".into());
+            h.screens.insert("abcd-2".into(), screen(&["$", ""]));
+            h.holders.insert("abcd-1".into(), "desktop".into());
+        }
+        phone_says(
+            &link,
+            2,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        let sent = sent(&link, 2);
+        assert!(
+            sent.iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::AMBIGUOUS)),
+            "the phone must be asked which shell, not told one is held: {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::HELD)),
+            "no shell was named, so no shell can be held against this attach"
         );
     }
 

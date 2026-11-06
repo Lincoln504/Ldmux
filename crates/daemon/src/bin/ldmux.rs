@@ -102,10 +102,10 @@ fn current_dir_or_exit() -> String {
 fn command_help(cmd: &str) -> Option<&'static str> {
     Some(match cmd {
         "ping" => {
-            "ldmux ping\n  Ask the daemon whether it is alive; prints its version info as JSON."
+            "ldmux ping\n  Ask the daemon whether it is alive; prints its protocol version, its build, and its keeper socket as JSON. A daemon too old to know `build` omits it."
         }
         "list" => {
-            "ldmux list\n  List sessions: id, status, kind, cwd, title, keeper (and why a dead one ended)."
+            "ldmux list [--all] [--json]\n  List the live sessions: id, status, kind, cwd, title, keeper. --all includes the shells that ended, with why; --json is unchanged and always carries every record."
         }
         "desktop" => {
             "ldmux desktop [--json]\n  The desktop inventory: window manager, workspaces, windows."
@@ -142,7 +142,7 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening."
         }
         "mesh" => {
-            "ldmux mesh [status] [--json]\n  The mesh link: state, the peer, the record budget left this hour, the radio's own reading, and the tuple the host's radio is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
+            "ldmux mesh [status|preset ...] [--json]\n  The mesh link: state, the peer, the record budget left this hour, the radio's own reading, and the tuple the host's radio is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
         }
         "code" => {
             "ldmux code [--mesh | --mesh-only]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together). --mesh-only carries the mesh keys and nothing of the tailnet: no address, no daemon token, for a phone that will only ever reach this machine by radio."
@@ -205,7 +205,10 @@ fn print_mesh_status(v: &serde_json::Value) {
     if let Some("disabled") = text("state").as_deref() {
         println!("mesh: no link configured on this host");
         println!(
-            "\nset LDMUX_MESH_ADDR, LDMUX_MESH_TOKEN and LDMUX_MESH_PEER in the daemon's environment"
+            "\nset LDMUX_MESH_SERIAL to the host radio's device path (the daemon owns the radio),"
+        );
+        println!(
+            "or LDMUX_MESH_ADDR, LDMUX_MESH_TOKEN and LDMUX_MESH_PEER for a gateway, in the daemon's environment"
         );
         return;
     }
@@ -213,21 +216,36 @@ fn print_mesh_status(v: &serde_json::Value) {
         "state    {}",
         text("state").unwrap_or_else(|| "unknown".to_owned())
     );
-    if let Some(addr) = text("addr") {
-        println!("gateway  {addr}");
+    // A serial host has no address and no peer: the daemon owns the radio, and the pairing's
+    // other end is whichever phone holds the keys. Printing an empty "gateway" line and
+    // `peer 00000000` for that was two facts that do not exist.
+    let serial = text("serial").filter(|s| !s.is_empty());
+    match (serial.as_deref(), text("addr").filter(|a| !a.is_empty())) {
+        (Some(device), _) => println!("serial   {device}"),
+        (None, Some(addr)) => println!("gateway  {addr}"),
+        (None, None) => {}
     }
-    if let Some(peer) = text("peer") {
+    if serial.is_none()
+        && let Some(peer) = text("peer")
+    {
         println!("peer     {peer}");
     }
     // Printed before the radio's own state, because it is the answer to "can I hand a phone
     // a code at all": a code with no host radio sends it to `NeedsPeer`, and scanning the
     // same code again cannot help — the key is not in it.
+    // `host radio`, not `radio`: the link's state line below is also about the radio, and one
+    // label for two facts is how an operator reads the key as the state.
     match text("hostRadio") {
-        Some(radio) => println!("radio    {radio}"),
+        Some(radio) => println!("host radio {radio}"),
         None => {
-            println!("radio    not set — a pairing code cannot be used without it");
+            println!("host radio not set — a pairing code cannot be used without it");
             println!(
-                "         set LDMUX_MESH_SELF (or the gateway's radioKey) and print the code again"
+                "         {} and print the code again",
+                if serial.is_some() {
+                    "open the radio (set LDMUX_MESH_SERIAL) so the daemon can read it"
+                } else {
+                    "set LDMUX_MESH_SELF (or the gateway's radioKey)"
+                }
             );
         }
     }
@@ -247,13 +265,16 @@ fn print_mesh_status(v: &serde_json::Value) {
         );
     }
     match v.get("uplinkRecordMax").and_then(serde_json::Value::as_u64) {
-        Some(capacity) => println!("capacity {capacity} B per record"),
+        // The carrier's record, not the terminal protocol's payload: a `Rows` message holds at
+        // most 143 application bytes inside it, and an operator reading "172" beside a protocol
+        // figure needs the two labelled.
+        Some(capacity) => println!("capacity {capacity} B per carrier record"),
         None => println!("capacity unknown (not bound yet)"),
     }
     match v.get("recordsLeft").and_then(serde_json::Value::as_u64) {
         Some(255) => println!("budget   255 or more records left this hour"),
         Some(left) => println!("budget   {left} records left this hour"),
-        None => println!("budget   unknown (the gateway has not reported it)"),
+        None => println!("budget   unknown (the link has not reported it)"),
     }
     let radio = match v.get("radioState").and_then(serde_json::Value::as_u64) {
         Some(0) => "connected",
@@ -262,7 +283,7 @@ fn print_mesh_status(v: &serde_json::Value) {
         Some(3) => "no contact",
         _ => "unknown",
     };
-    println!("radio    {radio}");
+    println!("link     {radio}");
     let rssi = v.get("rssi").and_then(serde_json::Value::as_i64);
     let battery = v.get("batteryPercent").and_then(serde_json::Value::as_u64);
     let signal = match rssi {
@@ -276,8 +297,9 @@ fn print_mesh_status(v: &serde_json::Value) {
     println!("signal   {signal}, battery {charge}");
     if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
         println!(
-            "airtime  {:.1} s this hour (gateway's own estimate)",
-            tenths as f64 / 10.0
+            "airtime  {:.1} s this hour ({} own estimate)",
+            f64::from(tenths as u32) / 10.0,
+            if serial.is_some() { "the radio's" } else { "the gateway's" }
         );
     }
     if let Some(err) = text("lastError") {
@@ -304,7 +326,9 @@ fn print_mesh_session(v: &serde_json::Value) {
     }
     println!("session  {state}");
     if let Some(key) = text("publicKey") {
-        println!("  gateway key  {key}");
+        // One name for one fact: this is the session's static key, which the phone pins. It
+        // used to say "gateway" on a host that drives its own radio, where there is no gateway.
+        println!("  session key  {key}");
     }
     match text("peerKey") {
         Some(key) => println!("  phone key    {key} (pinned)"),
@@ -339,6 +363,33 @@ fn print_usage() {
     eprintln!(
         "usage: ldmux <ping|list|desktop|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
     );
+    eprintln!("       ldmux --version    which build this is");
+}
+
+/// The `mesh` subcommand: `status` unless a name is given.
+///
+/// A leading flag is a flag, not a subcommand. `ldmux mesh --json` used to be answered with
+/// "unknown subcommand '--json'" even though the usage line documents `ldmux mesh [status]
+/// [--json]`, so the documented form only worked when `status` was spelled out.
+fn mesh_subcommand(rest: &[String]) -> &str {
+    match rest.first().map(String::as_str) {
+        Some(a) if a.starts_with('-') => "status",
+        Some(a) => a,
+        None => "status",
+    }
+}
+
+/// The rows `ldmux list` prints.
+///
+/// **Live rows by default.** The registry keeps every shell that ever ran on this machine, so
+/// the list was a page of `dead` rows over the handful that are running (39 rows, 10 live, on
+/// the machine this was written on); a person reading `ldmux list` saw the dead ones first.
+/// `--all` is the old behaviour, and it is the only way to see why a shell ended.
+fn live_rows(sessions: &[serde_json::Value], all: bool) -> Vec<&serde_json::Value> {
+    sessions
+        .iter()
+        .filter(|s| all || s.get("status").and_then(|t| t.as_str()) != Some("dead"))
+        .collect()
 }
 
 /// The first option no command knows, or None.
@@ -349,6 +400,7 @@ fn print_usage() {
 /// `--dry-run` was in this list in the TS and here, read by no command at all.
 fn reject_unknown_flag(rest: &[String]) -> Option<String> {
     const KNOWN_FLAGS: &[&str] = &[
+        "--all",
         "--cwd",
         "--history",
         "--json",
@@ -441,6 +493,16 @@ async fn main() {
         print_usage();
         std::process::exit(0);
     }
+    // Which build this is. No daemon needed: it is a fact about the binary, and asking it must
+    // work when nothing is running (RELEASE-AUDIT 14.2).
+    if cmd == "--version" || cmd == "-V" || cmd == "version" {
+        println!(
+            "ldmux {} (protocol {})",
+            ldmux_protocol::BUILD_ID,
+            ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION
+        );
+        std::process::exit(0);
+    }
     if rest.iter().any(|a| a == "--help" || a == "-h") {
         match command_help(&cmd) {
             Some(h) => println!("{h}"),
@@ -477,10 +539,19 @@ async fn main() {
                         .and_then(|s| s.as_array())
                         .cloned()
                         .unwrap_or_default();
-                    if sessions.is_empty() {
-                        println!("(no sessions)");
+                    let all = rest.iter().any(|a| a == "--all");
+                    let shown = live_rows(&sessions, all);
+                    if shown.is_empty() {
+                        if sessions.is_empty() {
+                            println!("(no sessions)");
+                        } else {
+                            println!(
+                                "(no live sessions; `ldmux list --all` shows the {} that ended)",
+                                sessions.len()
+                            );
+                        }
                     } else {
-                        for s in &sessions {
+                        for s in &shown {
                             let id = s.get("id").and_then(|t| t.as_str()).unwrap_or("");
                             let status = s.get("status").and_then(|t| t.as_str()).unwrap_or("");
                             let kind = s.get("kind").and_then(|t| t.as_str()).unwrap_or("");
@@ -679,7 +750,7 @@ async fn main() {
             }
         }
         "mesh" => {
-            let sub = rest.first().map(String::as_str).unwrap_or("status");
+            let sub = mesh_subcommand(rest);
             if sub == "preset" {
                 // `ldmux mesh preset <MHz> <kHz> <SF> <CR>`: tune the host's OWN radio.
                 let n: Vec<&str> = rest.iter().skip(1).map(String::as_str).collect();
@@ -1262,6 +1333,39 @@ async fn main() {
             print_usage();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{live_rows, mesh_subcommand};
+    use serde_json::json;
+
+    /// `ldmux mesh --json` is the documented form and must mean `status`.
+    #[test]
+    fn a_flag_selects_the_default_mesh_subcommand() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(mesh_subcommand(&args(&[])), "status");
+        assert_eq!(mesh_subcommand(&args(&["--json"])), "status");
+        assert_eq!(mesh_subcommand(&args(&["status", "--json"])), "status");
+        assert_eq!(mesh_subcommand(&args(&["preset", "910.525"])), "preset");
+    }
+
+    /// Live rows are what `ldmux list` shows; `--all` restores every record.
+    #[test]
+    fn list_shows_live_rows_unless_all_is_asked_for() {
+        let sessions = vec![
+            json!({"id": "a", "status": "running"}),
+            json!({"id": "b", "status": "dead"}),
+            json!({"id": "c", "status": "running"}),
+        ];
+        let ids = |v: Vec<&serde_json::Value>| {
+            v.iter()
+                .map(|s| s["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(live_rows(&sessions, false)), vec!["a", "c"]);
+        assert_eq!(ids(live_rows(&sessions, true)), vec!["a", "b", "c"]);
     }
 }
 

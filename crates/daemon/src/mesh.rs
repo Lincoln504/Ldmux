@@ -265,9 +265,24 @@ impl SessionSetup {
     /// The environment is authoritative. When it is set, the secret is written to
     /// `mesh-psk` (0600) so a daemon restart without its environment keeps the same
     /// pairing. When it is absent, the file supplies the secret.
-    pub fn from_env(state_dir: &Path) -> Result<Option<Self>, String> {
+    ///
+    /// **`persist_dir` is where those files go, and it must outlive a reboot.** The state
+    /// dir is a tmpfs under systemd, so a session key kept there was re-minted on every boot
+    /// and every paired phone's pinned host key stopped matching. `legacy_dir` is the old
+    /// location, consulted once: anything still there is moved over by
+    /// [`crate::mesh_session::adopt_legacy`].
+    pub fn from_env(persist_dir: &Path, legacy_dir: &Path) -> Result<Option<Self>, String> {
         let env = std::env::var("LDMUX_MESH_PSK").ok();
-        Self::from_value(state_dir, env.as_deref())
+        let moved = crate::mesh_session::adopt_legacy(legacy_dir, persist_dir);
+        if !moved.is_empty() {
+            eprintln!(
+                "ldmuxd: moved {} from {} to {}. The state dir does not survive a reboot, so a mesh key kept there was re-minted on every boot",
+                moved.join(", "),
+                legacy_dir.display(),
+                persist_dir.display()
+            );
+        }
+        Self::from_value(persist_dir, env.as_deref())
     }
 
     fn from_value(state_dir: &Path, env: Option<&str>) -> Result<Option<Self>, String> {
@@ -898,9 +913,6 @@ async fn session<C: Carrier>(
             .lock()
             .map(|ex| !ex.outbound.is_empty())
             .unwrap_or(false);
-        if has_outbound {
-            // Fall through to the body without sleeping.
-        } else {
         let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // **Never sleep longer than a tick.** The wake notification is not the only way work
         // arrives here — the bridge hands records over from its own task — and a missed
@@ -908,11 +920,16 @@ async fn session<C: Carrier>(
         // waiting on: measured on the device as ten seconds between the bridge queueing an echo
         // and the loop handing it to the radio. A 50 ms ceiling costs twenty wakeups a second and
         // removes the whole class of "it waits for something it did not need to".
-        let wait = host
-            .as_ref()
-            .and_then(SessionHost::next_deadline)
-            .map_or(MAX_IDLE_WAIT, |d| Duration::from_millis(d.saturating_sub(now_ms)))
-            .min(MAX_IDLE_WAIT);
+        let wait = if has_outbound {
+            // Nothing to wait for: the outbound queue is its own wake reason, so fall through
+            // to the body on the next poll of this select.
+            Duration::ZERO
+        } else {
+            host.as_ref()
+                .and_then(SessionHost::next_deadline)
+                .map_or(MAX_IDLE_WAIT, |d| Duration::from_millis(d.saturating_sub(now_ms)))
+                .min(MAX_IDLE_WAIT)
+        };
         // **A retune is the radio's own, so the link task does it.** The firmware validates the
         // tuple and either retunes (and saves it) or refuses, and the snapshot says which: the
         // host owning its radio is new, and until this existed the host radio could only be
@@ -930,7 +947,15 @@ async fn session<C: Carrier>(
                 }
             }
         }
+        // **The receive side is polled on every pass, never skipped.** This used to skip
+        // `carrier.recv()` whenever the outbound queue was non-empty. Under a steady screen
+        // producer that could skip it on consecutive passes, so `SEND_RESULT`s and inbound
+        // records were delayed, every credit slot stayed full and `last_carrier` went stale —
+        // and at 75 s the link reported "the carriage stopped answering" when the host had
+        // simply stopped listening. `biased` keeps the ordering the queue rule wanted: an
+        // event that is ready is handled before the zero-length sleep falls through to send.
         tokio::select! {
+            biased;
             event = carrier.recv() => {
                 last_carrier = Instant::now();
                 match event? {
@@ -1008,7 +1033,6 @@ async fn session<C: Carrier>(
             }
             () = tokio::time::sleep(wait) => {}
             () = runtime.wake.notified() => {}
-        }
         }
 
         let Some(h) = host.as_mut() else { continue };
@@ -1175,6 +1199,81 @@ mod tests {
 
     const TOKEN: &str = "00112233445566778899aabbccddeeff";
     const PEER: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    /// A carriage that counts how often the loop asks it for the next event.
+    struct PollCountingCarrier {
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Carrier for PollCountingCarrier {
+        async fn send_record(&mut self, _seq: u8, _record: &[u8]) -> Result<(), MeshError> {
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<Event, MeshError> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            // Never resolves: the loop must not need an event to fall through and send.
+            std::future::pending().await
+        }
+    }
+
+    fn test_runtime() -> MeshRuntime {
+        let cfg = MeshConfig {
+            addr: String::new(),
+            token: [0; 16],
+            peer: [0; 32],
+            serial: Some("/dev/null".to_owned()),
+        };
+        MeshRuntime {
+            pairing_keys: None,
+            pairing_files: None,
+            reset_pin: Arc::new(AtomicBool::new(false)),
+            snapshot: Arc::new(Mutex::new(MeshSnapshot::new(&cfg))),
+            exchange: Arc::new(Mutex::new(Exchange::default())),
+            wake: Arc::new(Notify::new()),
+            inbound_wake: Arc::new(Notify::new()),
+            preset_request: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// **The receive side is polled even while a record waits to go out.** The loop used to
+    /// skip `carrier.recv()` whenever the outbound queue was non-empty, so under a steady
+    /// producer a `SEND_RESULT` or an inbound record could wait indefinitely and the link then
+    /// reported "the carriage stopped answering" about a carriage that was fine.
+    #[tokio::test]
+    async fn a_queued_record_does_not_stop_the_carriage_being_polled() {
+        let runtime = test_runtime();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let carrier = PollCountingCarrier {
+            polls: Arc::clone(&polls),
+        };
+        // No `SessionSetup`: nothing is sent, so the queue below stays non-empty for the whole
+        // test — exactly the state in which the receive side used to be skipped.
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                let _ = session(carrier, Bound {
+                    uplink_record_max: 172,
+                    radio_state: RadioState::Connected,
+                    budget: Budget::RadioGoverned,
+                }, &runtime, None, Arc::new(AtomicBool::new(false)))
+                .await;
+            }
+        });
+        runtime
+            .exchange
+            .lock()
+            .unwrap()
+            .outbound
+            .push_back((0, vec![1, 2, 3]));
+        // Wait for the poll count to move rather than sleeping a fixed time.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while polls.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the loop never polled the carriage");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        task.abort();
+    }
 
     #[test]
     fn the_pairing_keys_are_this_daemons_public_key_and_the_configured_secret() {

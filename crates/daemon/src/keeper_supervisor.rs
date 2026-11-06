@@ -196,7 +196,35 @@ impl KeeperSupervisor {
     /// keeper has already made every shell unreachable, and leaving it in place means the daemon
     /// reports a list that never changes and nothing ever recovers. A dead keeper needs none of
     /// this: `keeper_call` respawns it already.
+    ///
+    /// **Under systemd there is no pid to signal.** The keeper is a unit, not this process's
+    /// child, so `last_pid` is 0 and the old body skipped the kill, called `note_answer`, and
+    /// returned `Ok`: the mute detector said "keeper stopped answering; replacing it" and
+    /// replaced nothing, for ever (RELEASE-AUDIT 8.5). In unit mode the cure is the unit's own
+    /// `restart`; a keeper we did spawn ourselves (the detached fallback) is killed by pid.
+    ///
+    /// Success is **an answer**, not a listening socket: a wedged keeper still accepts
+    /// connections, so a connect would certify the process being replaced.
     pub async fn replace_wedged(&self) -> Result<(), String> {
+        if let Some(u) = &self.unit {
+            match self.restart_unit(u).await {
+                Ok(()) => {
+                    if self.wait_until_answering().await {
+                        self.note_answer();
+                        return Ok(());
+                    }
+                    eprintln!(
+                        "ldmuxd: {} was restarted but its keeper still does not answer",
+                        u.name
+                    );
+                }
+                Err(e) => eprintln!("ldmuxd: {e}; replacing the keeper directly"),
+            }
+            // A failed restart usually means the user manager is unreachable, so the unit is not
+            // what is holding the socket either. Stop it if that is possible at all, then fall
+            // through: the pid below is a detached keeper we spawned in an earlier fallback.
+            let _ = self.stop_unit(u).await;
+        }
         let pid = self.last_pid();
         if pid != 0 {
             let p = nix::unistd::Pid::from_raw(pid as i32);
@@ -211,8 +239,45 @@ impl KeeperSupervisor {
             let _ = nix::sys::signal::kill(p, nix::sys::signal::Signal::SIGKILL);
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
+        self.ensure().await?;
+        if !self.wait_until_answering().await {
+            return Err("replaced the keeper but the new one does not answer".into());
+        }
         self.note_answer();
-        self.ensure().await
+        Ok(())
+    }
+
+    /// Did the keeper answer a real call, not merely accept a connection?
+    ///
+    /// One `List` with a short budget: it is the cheapest request the keeper serves, it changes
+    /// nothing, and a keeper that answers it is doing its job. A connect is not evidence - that
+    /// is the whole defect this method exists to work around.
+    pub async fn keeper_answers(&self) -> bool {
+        let sock = self.socket_path.to_string_lossy().into_owned();
+        ldmux_protocol::keeper_call::keeper_call(
+            &sock,
+            &ldmux_protocol::keeper::KeeperMessage::List(ldmux_protocol::keeper::List {}),
+            ldmux_protocol::keeper_call::DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .is_ok()
+    }
+
+    /// Poll `keeper_answers` until it answers or the budget runs out. `false` means the keeper
+    /// on the socket is still wedged.
+    async fn wait_until_answering(&self) -> bool {
+        // Each attempt already carries the keeper call's own timeout; this only bounds how long
+        // we keep trying, and it is a real wait only when the answer is "no".
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if self.keeper_answers().await {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     /// Ensure the keeper is running (auto-spawn if absent).
@@ -278,19 +343,36 @@ impl KeeperSupervisor {
     /// `systemctl --user start <unit>`: idempotent, and returns once the service
     /// process is forked (Type=simple), after which the caller waits on the socket.
     async fn start_unit(&self, u: &KeeperUnit) -> Result<(), String> {
+        self.run_systemctl(u, "start").await
+    }
+
+    /// `systemctl --user restart <unit>`: the only way to replace a keeper this daemon did not
+    /// spawn. `restart` also starts a stopped unit, so it covers "the unit is not running".
+    async fn restart_unit(&self, u: &KeeperUnit) -> Result<(), String> {
+        self.run_systemctl(u, "restart").await
+    }
+
+    /// `systemctl --user stop <unit>`, best effort: used before a direct replacement so the
+    /// unit does not race us for the socket.
+    async fn stop_unit(&self, u: &KeeperUnit) -> Result<(), String> {
+        self.run_systemctl(u, "stop").await
+    }
+
+    /// One `systemctl --user <verb> <unit>`, bounded.
+    async fn run_systemctl(&self, u: &KeeperUnit, verb: &str) -> Result<(), String> {
         let mut cmd = tokio::process::Command::new(&u.systemctl);
-        cmd.args(["--user", "start", &u.name])
+        cmd.args(["--user", verb, &u.name])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let run = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output());
         match run.await {
-            Err(_) => Err(format!("systemctl --user start {} timed out", u.name)),
+            Err(_) => Err(format!("systemctl --user {verb} {} timed out", u.name)),
             Ok(Err(e)) => Err(format!("run {}: {e}", u.systemctl.display())),
             Ok(Ok(o)) if o.status.success() => Ok(()),
             Ok(Ok(o)) => Err(format!(
-                "systemctl --user start {} failed ({}): {}",
+                "systemctl --user {verb} {} failed ({}): {}",
                 u.name,
                 o.status,
                 String::from_utf8_lossy(&o.stderr).trim()
@@ -567,6 +649,104 @@ mod tests {
         assert!(mark.exists(), "the stub systemctl must have run");
         assert!(sup.last_pid() != 0, "the fallback spawned the keeper");
         kill_keeper(&sup).await;
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// A `systemctl` stub whose body can dispatch on `$2` (the verb), spawn a real keeper, and
+    /// record every invocation in `mark`.
+    fn stub_unit(dir: &Path, body: &str) -> PathBuf {
+        stub_systemctl(dir, &dir.join("mark"), body)
+    }
+
+    /// Unit mode: a wedged keeper is replaced by restarting the unit. `last_pid` is 0 here
+    /// (the keeper is not our child), and that used to mean "skip the kill, report success, and
+    /// replace nothing" for ever.
+    #[tokio::test]
+    async fn unit_mode_replaces_a_wedged_keeper_by_restarting_the_unit() {
+        let state_dir = scratch_dir();
+        let pidfile = state_dir.join("pid");
+        let body = format!(
+            "case \"$2\" in\n  restart) kill -9 \"$(cat {pid})\" 2>/dev/null ;;\nesac\n{} {} </dev/null >/dev/null 2>&1 &\necho $! > {pid}",
+            keeper_bin().display(),
+            state_dir.join("keeper.sock").display(),
+            pid = pidfile.display()
+        );
+        let systemctl = stub_unit(&state_dir, &body);
+        let sup =
+            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+                name: "ldmux-keeper.service".into(),
+                systemctl,
+            }));
+        sup.ensure().await.unwrap();
+        assert_eq!(sup.last_pid(), 0, "unit mode: the daemon did not spawn it");
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        signal::kill(Pid::from_raw(pid), signal::Signal::SIGSTOP).unwrap();
+        assert!(sup.is_alive().await, "a stopped keeper still accepts connections");
+
+        sup.replace_wedged().await.unwrap();
+
+        let calls = std::fs::read_to_string(state_dir.join("mark")).unwrap();
+        assert!(
+            calls.contains("--user restart ldmux-keeper.service"),
+            "the unit must be restarted: {calls:?}"
+        );
+        assert!(
+            sup.keeper_answers().await,
+            "the replacement answers a real call, not just a connect"
+        );
+        assert_eq!(sup.last_pid(), 0, "and it is the unit's, not a detached spawn");
+        stop_pidfile(&pidfile);
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    /// A unit whose `restart` fails (no user manager) must not leave the daemon without a
+    /// keeper: the fallback is the same start-or-spawn path `ensure` owns.
+    #[tokio::test]
+    async fn a_failed_unit_restart_still_leaves_a_keeper_that_answers() {
+        let state_dir = scratch_dir();
+        let pidfile = state_dir.join("pid");
+        let body = format!(
+            "case \"$2\" in\n  restart) echo restart refused >&2; exit 5 ;;\n  stop) echo stop refused >&2; exit 5 ;;\nesac\n{} {} </dev/null >/dev/null 2>&1 &\necho $! > {pid}",
+            keeper_bin().display(),
+            state_dir.join("keeper.sock").display(),
+            pid = pidfile.display()
+        );
+        let systemctl = stub_unit(&state_dir, &body);
+        let sup =
+            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+                name: "ldmux-keeper.service".into(),
+                systemctl,
+            }));
+        sup.ensure().await.unwrap();
+        // Dead, not wedged: killed outright, so its socket file is left behind and nothing
+        // listens on it.
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        signal::kill(Pid::from_raw(pid), signal::Signal::SIGKILL).unwrap();
+        for _ in 0..500 {
+            if !sup.is_alive().await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!sup.is_alive().await);
+
+        sup.replace_wedged().await.unwrap();
+
+        let calls = std::fs::read_to_string(state_dir.join("mark")).unwrap();
+        assert!(
+            calls.contains("--user restart ldmux-keeper.service"),
+            "{calls:?}"
+        );
+        assert!(sup.keeper_answers().await, "a new keeper answers");
+        stop_pidfile(&pidfile);
         let _ = std::fs::remove_dir_all(&state_dir);
     }
 

@@ -1,6 +1,6 @@
 # ldmux daemon, as a systemd --user service.
 #
-# The daemon must outlive every session (docs/SPEC.md §4.3): a phone that puts
+# The daemon must outlive every session (docs/ARCHITECTURE.md sections 2 and 5): a phone that puts
 # its phone down, or a laptop that reboots the daemon, must not lose the shells
 # that are running. That requires three things, and none is the default:
 #
@@ -77,9 +77,15 @@ Environment=LDMUX_STATE_DIR=%t/ldmux
 # is unset, or the start fails, it spawns the keeper itself.
 Environment=LDMUX_KEEPER_UNIT=ldmux-keeper.service
 
-# The bearer token the phone is paired with. Not in the state directory: that is
-# a tmpfs, so a token kept there was minted afresh on every boot and every paired
-# phone was locked out. %S is ~/.local/state.
+# Where credentials live. **Not the state directory**: `%t` is `$XDG_RUNTIME_DIR`, a
+# tmpfs, so anything kept there is gone on the next boot. That is right for sockets, the
+# registry cache and ownership claims (rebuildable or per connection) and wrong for a
+# credential: a token or a session key re-minted at boot locks out every phone that was
+# paired with the old one. `%S` is `~/.local/state`.
+#
+# The bearer token the phone is paired with, and the radio route's static key, its pinned
+# phone key and its PSK, all live here.
+Environment=LDMUX_PERSIST_DIR=%S/ldmux
 Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 
 

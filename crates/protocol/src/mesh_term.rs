@@ -1,7 +1,9 @@
 //! The mesh terminal profile: what goes *inside* the L3 session (ADR-0025).
 //!
-//! The mesh link carries about 58 records an hour of 144 payload bytes each (ADR-0025 has the
-//! arithmetic), so a VT byte stream cannot cross it. This module is the alternative: the host
+//! The mesh link carries at most 255 records an hour of 143 application bytes each — the
+//! one-byte budget field's ceiling, which the deployed SF7 tuple reaches well before any legal
+//! limit does (`docs/ARCHITECTURE.md` section 9 has the arithmetic) — so a VT byte stream cannot
+//! cross it. This module is the alternative: the host
 //! sends the screen as **plain text rows**, and after the first full screen only the rows that
 //! changed. Everything here is pure: no I/O, no clock, no terminal crate. The host feeds it a
 //! [`Screen`] it got from the keeper's snapshot; the phone feeds the decoded messages to a

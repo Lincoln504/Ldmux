@@ -223,7 +223,11 @@ impl<L: ByteLink> Companion<L> {
         let mut heard_anything = false;
         self.link.write_all(&framed)?;
         loop {
-            self.pump(POLL_TIMEOUT_MS)?;
+            // Any byte from the radio — a frame, a boot banner, `Saving prefs…` — is the radio
+            // being alive, and the resend below keys on silence.
+            if self.pump(POLL_TIMEOUT_MS)? {
+                heard_anything = true;
+            }
             // Pushes that arrive while we wait for the reply are set aside rather
             // than pushed back into the queue: re-queueing them inside the loop
             // would pop and re-push the same frame forever.
@@ -275,20 +279,27 @@ impl<L: ByteLink> Companion<L> {
     }
 
     /// Read whatever the port has, decode whole frames into `pending`.
-    fn pump(&mut self, poll_timeout_ms: u16) -> Result<(), SessionError> {
+    ///
+    /// Returns whether any bytes arrived at all, **including console text**. A boot banner or
+    /// `Saving prefs…` is the radio being alive, and the resend rule in [`Self::request`] keys on
+    /// silence; counting only push *frames* made the client re-send a mutating command every
+    /// 600 ms while the firmware was still printing its banner.
+    fn pump(&mut self, poll_timeout_ms: u16) -> Result<bool, SessionError> {
         let mut buf = [0u8; 512];
         let mut frames = Vec::new();
         let started = Instant::now();
+        let mut heard = false;
         loop {
             let n = self.link.read(&mut buf)?;
             if n > 0 {
+                heard = true;
                 self.reader.feed(&buf[..n], &mut frames);
                 for frame in frames.drain(..) {
                     self.pending.push_back(frame);
                 }
             }
             if n == 0 || started.elapsed() >= Duration::from_millis(poll_timeout_ms as u64) {
-                return Ok(());
+                return Ok(heard);
             }
         }
     }
@@ -368,6 +379,28 @@ mod tests {
         companion.app_start("ldmux").expect("self info survives a push");
         let push = companion.next_push(Duration::from_millis(50)).unwrap();
         assert_eq!(push.unwrap()[0], codes::LOG_RX_DATA);
+    }
+
+    /// **Console text is the radio being alive.** The resend rule exists for a silent port; a
+    /// boot banner or `Saving prefs…` used to leave `heard_anything` false, so a mutating command
+    /// was written again every 600 ms while the firmware was still printing.
+    #[test]
+    fn console_text_counts_as_hearing_the_radio_and_stops_a_resend() {
+        let mut link = MemoryLink::new();
+        link.push_bytes(b"Saving prefs...\r\n");
+        let mut companion = Companion::new(link);
+        let frame = encode(&[commands::APP_START]).unwrap();
+        // Longer than `RESEND_INTERVAL`: a silent port would be written twice.
+        let _ = companion.request(
+            &[commands::APP_START],
+            codes::SELF_INFO,
+            Duration::from_millis(900),
+        );
+        assert_eq!(
+            companion.link_mut().written,
+            frame,
+            "one write: the banner proved the radio was there"
+        );
     }
 
     #[test]

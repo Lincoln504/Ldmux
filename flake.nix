@@ -8,9 +8,9 @@
   # shared on this machine.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/6cdc7fc76e8bf7fde9fa43a849fcaaa70e230dee";
   # nixpkgs-node: Node 26 only, and Node is a DEV tool (the mobile `.ts` tests and
-  # scripts/measure_latency.ts, via Node's built-in type stripping). The main pin tops
-  # out at nodejs_24; the revision below provides 26.8.2. Nothing in the Rust build, the
-  # checks or the deployed daemon needs it.
+  # scripts/slow-link.ts, via Node's built-in type stripping). The main pin tops out at
+  # nodejs_24; the revision below provides 26.8.2. Nothing in the Rust build, the checks
+  # or the deployed daemon needs it.
   inputs.nixpkgs-node.url = "github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f";
 
   # Not flake inputs, but pinned and fetched by hash from inside the build:

@@ -82,6 +82,9 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
 pub enum CodecError {
     BadHashSize(u8),
     TooManyHops(u8),
+    /// A reply that is not the one the parse expected: the firmware answered, but with
+    /// another command's frame. A framing fault, not a path one.
+    WrongResponse { want: u8, got: u8 },
 }
 
 impl std::fmt::Display for CodecError {
@@ -89,6 +92,9 @@ impl std::fmt::Display for CodecError {
         match self {
             CodecError::BadHashSize(n) => write!(f, "path hash size {n} is not 1..=4"),
             CodecError::TooManyHops(n) => write!(f, "{n} hops exceeds the 6-bit path length"),
+            CodecError::WrongResponse { want, got } => {
+                write!(f, "expected response {want:#04x}, got {got:#04x}")
+            }
         }
     }
 }
@@ -157,8 +163,12 @@ pub struct DeviceInfo {
 
 /// Parse `RESP_SELF_INFO`, stopping at whatever the frame length allows.
 pub fn parse_self_info(payload: &[u8]) -> Result<SelfInfo, CodecError> {
-    if payload.first() != Some(&codes::SELF_INFO) {
-        return Err(CodecError::TooManyHops(payload.len() as u8));
+    match payload.first() {
+        Some(&codes::SELF_INFO) => {}
+        Some(&got) => return Err(CodecError::WrongResponse { want: codes::SELF_INFO, got }),
+        // An empty frame is a truncated reply, and the fields below are parsed as far as the
+        // length allows; there is nothing to parse here.
+        None => return Err(CodecError::WrongResponse { want: codes::SELF_INFO, got: 0 }),
     }
     let mut info = SelfInfo::default();
     let mut rest = &payload[1..];
@@ -273,7 +283,15 @@ mod tests {
 
     #[test]
     fn the_wrong_code_is_not_self_info() {
-        assert!(parse_self_info(&[codes::DEVICE_INFO, 3]).is_err());
+        // A framing fault, named as one: it used to be reported as `TooManyHops`, a path error,
+        // which sent a reader looking at the route when the answer was simply another command's.
+        match parse_self_info(&[codes::DEVICE_INFO, 3]) {
+            Err(CodecError::WrongResponse { want, got }) => {
+                assert_eq!((want, got), (codes::SELF_INFO, codes::DEVICE_INFO));
+            }
+            other => panic!("expected a framing error, got {other:?}"),
+        }
+        assert!(parse_self_info(&[]).is_err());
     }
 
     #[test]

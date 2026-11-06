@@ -11,6 +11,23 @@
 //! See `docs/ARCHITECTURE.md` for the module map
 //! (phase state).
 
+/// The build that produced this binary: `<git short sha>`, `<sha>-dirty`, a name a release
+/// pipeline supplied in `LDMUX_BUILD_ID`, or `unknown` (a nix sandbox has no `.git`).
+///
+/// Every binary in the tree is built from its own checkout and the daemon, the CLI, the keeper
+/// and a desk window share a machine for weeks; without this there is no way to ask which of them
+/// is running what, which is RELEASE-AUDIT 14.2 in one line. Set by `crates/protocol/build.rs`.
+pub const BUILD_ID: &str = env!("LDMUX_BUILD_ID");
+
+/// What a version line says: the wire protocol this build speaks, and the build itself.
+pub fn version_line() -> String {
+    format!(
+        "ldmux {} (protocol {})",
+        BUILD_ID,
+        rpc::DAEMON_PROTOCOL_VERSION
+    )
+}
+
 /// Bounds for a client-requested pane size. The floor keeps a pane usable (a
 /// client that bugs out at 1x1 leaves a shell nobody can read); the ceiling stops a
 /// bad client from asking for a grid whose capture would blow the stream's byte budget.

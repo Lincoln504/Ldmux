@@ -1,6 +1,6 @@
 # The ldmux keeper, as a systemd --user service (docs/adr/0021).
 #
-# The keeper owns every PTY and supervises every shell (docs/SPEC.md §4.3). It is its
+# The keeper owns every PTY and supervises every shell (docs/ARCHITECTURE.md sections 2 and 5). It is its
 # own unit, not a child of the daemon, so what systemd charges to `ldmux.service` is
 # the daemon alone and `systemctl --user status ldmux-keeper` shows the keeper. Each
 # shell it starts is moved into its own transient scope under `ldmux-shells.slice`
@@ -12,7 +12,7 @@
 # shells are in their own scopes, so they are not in this cgroup to be signalled by
 # `control-group`; but the keeper is their parent and the PTY owner, so when it dies
 # the masters close and every shell gets SIGHUP. A keeper restart ends every session
-# (docs/SPEC.md §4.3, `scripts/restart-keeper.sh` says so). A DAEMON restart does not
+# (docs/ARCHITECTURE.md section 2, `scripts/restart-keeper.sh` says so). A DAEMON restart does not
 # touch this unit at all.
 #
 # **This file is a template.** `@BIN_DIR@` is replaced by scripts/install.sh with the

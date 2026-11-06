@@ -21,6 +21,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use ldmux_session::arq::{Delivered, Limits, Stats};
+use ldmux_session::record::RecordError;
 use ldmux_session::handshake::{self, HandshakeError, Keypair, PairingEntry, Responder};
 use ldmux_session::{Inbound, Sealed, Session};
 
@@ -151,6 +152,16 @@ impl SessionHost {
                         self.session = None;
                         self.last_error = Some("the phone closed the session".to_owned());
                     }
+                    // **A duplicate is the repair path, not a fault.** The phone retransmits
+                    // because an acknowledgement was lost, and that retransmission arrives as
+                    // `Duplicate` or `TooOld`. Reporting it as `last_error` made the one
+                    // diagnostic line the operator reads say the link was dropping records every
+                    // time it recovered from a lost ack; the session's own `dropped` counter still
+                    // counts it. A bad tag, a wrong index or a malformed record is a fault and is
+                    // still named.
+                    Err(ldmux_session::SessionError::Record(
+                        RecordError::Duplicate | RecordError::TooOld,
+                    )) => {}
                     Err(e) => self.last_error = Some(format!("record dropped: {e:?}")),
                 }
             }
@@ -413,8 +424,56 @@ impl SessionFiles {
     }
 }
 
+/// The files the mesh route cannot lose: the static key the phone pinned, the pinned phone
+/// key with its replay floor, and the pairing's secret.
+pub const PERSISTED_FILES: [&str; 3] = ["mesh-session.key", "mesh-pairing.json", "mesh-psk"];
+
+/// Move those three from `legacy` (a directory that does not survive a reboot) to
+/// `persist`, and return the names moved.
+///
+/// **Why this exists.** Under systemd the state directory is `%t/ldmux`, a tmpfs, so it is
+/// empty on every boot. The bearer token was moved out of it for that reason
+/// (`deploy/ldmux.service`); the mesh static key was left behind. After a reboot the host
+/// generated a new key, the phone's pinned copy no longer matched, `read_message` failed as
+/// `Crypto`, no second handshake message was sent, the phone burned its three attempts and
+/// landed on `SessionFailed` — and nothing anywhere said the machine had simply rebooted.
+///
+/// Best effort and idempotent: a file already at the destination wins and the legacy copy is
+/// left in place (a copy that reappeared is worth seeing, not deleting). A rename across
+/// filesystems is refused by the kernel with `EXDEV`, so the fallback copies, fsyncs and
+/// unlinks through the same 0600 writer the file was made with.
+pub fn adopt_legacy(legacy: &Path, persist: &Path) -> Vec<String> {
+    let mut moved = Vec::new();
+    if legacy == persist {
+        return moved;
+    }
+    for name in PERSISTED_FILES {
+        let from = legacy.join(name);
+        let to = persist.join(name);
+        if to.exists() || !from.exists() {
+            continue;
+        }
+        if std::fs::rename(&from, &to).is_ok() {
+            moved.push(name.to_string());
+            continue;
+        }
+        // Different filesystems, or the rename was refused: copy through the private writer
+        // and only then drop the old copy.
+        let Ok(bytes) = std::fs::read(&from) else {
+            continue;
+        };
+        if write_private(&to, &bytes).is_err() {
+            continue;
+        }
+        let _ = std::fs::remove_file(&from);
+        moved.push(name.to_string());
+    }
+    moved
+}
+
 impl SessionFiles {
-    /// `psk` comes from the environment; everything else lives in `state_dir`.
+    /// `psk` comes from the environment; everything else lives in `persist_dir`, which must
+    /// survive a reboot (see [`adopt_legacy`] for why).
     pub fn load(state_dir: &Path, psk: [u8; 32]) -> Result<Self, String> {
         let key_path = state_dir.join("mesh-session.key");
         let key = match fs::read(&key_path) {
@@ -585,6 +644,61 @@ mod tests {
     }
 
     #[test]
+    fn a_wiped_runtime_dir_leaves_the_identity_and_the_psk_alone() {
+        // The bug this pins: under systemd the state dir is `%t/ldmux`, a tmpfs, so every boot
+        // emptied it, the static key was re-minted, the phone's pinned host key stopped matching
+        // and the radio route died with no message. The credential files now live in the persist
+        // dir; a runtime dir that vanished must change nothing.
+        let root = std::env::temp_dir().join(format!("ldmux-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let persist = root.join("persist");
+        let runtime = root.join("run");
+        std::fs::create_dir_all(&persist).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+
+        let first = SessionFiles::load(&persist, PSK).unwrap();
+        let public = first.key.public;
+        assert!(persist.join("mesh-session.key").exists());
+        // The runtime dir is emptied, as a reboot does, and the daemon starts again.
+        std::fs::remove_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let moved = adopt_legacy(&runtime, &persist);
+        assert!(moved.is_empty(), "nothing to adopt: {moved:?}");
+        let second = SessionFiles::load(&persist, PSK).unwrap();
+        assert_eq!(second.key.public, public);
+        assert_eq!(second.pairing.psk, PSK);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_files_left_in_a_tmpfs_state_dir_are_adopted_once() {
+        let root = std::env::temp_dir().join(format!("ldmux-adopt2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let persist = root.join("persist");
+        let legacy = root.join("run");
+        std::fs::create_dir_all(&persist).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        // A daemon from before the split: everything is in the runtime dir.
+        let old = SessionFiles::load(&legacy, PSK).unwrap();
+        let public = old.key.public;
+        let mut pairing = old.current_pairing();
+        pairing.pinned = Some([9; 32]);
+        old.persister()(&pairing)
+            .expect("the test's own directory accepts the pairing");
+
+        let moved = adopt_legacy(&legacy, &persist);
+        assert_eq!(moved.len(), 2, "{moved:?}");
+        let adopted = SessionFiles::load(&persist, PSK).unwrap();
+        assert_eq!(adopted.key.public, public, "the phone's pin still matches");
+        assert_eq!(adopted.current_pairing().pinned, Some([9; 32]));
+
+        // Idempotent: a second pass moves nothing.
+        assert!(adopt_legacy(&legacy, &persist).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn when_the_pairing_cannot_be_recorded_the_handshake_is_refused() {
         let (mut h, gw_pub, _) = host(false);
         let phone = Keypair::generate().unwrap();
@@ -673,6 +787,45 @@ mod tests {
     /// answered on the phone's side (twelve hours or 2^16 records) and the phone starts a new
     /// handshake. If this side refused a handshake while a session was live, that timer could
     /// never complete, and a long-lived link would keep its keys for ever.
+    #[test]
+    fn a_retransmitted_record_is_the_repair_path_and_is_not_an_error() {
+        let (mut h, gw_pub, _saved) = host(true);
+        let phone = Keypair::generate().unwrap();
+        let (init, m1) = Initiator::start(&phone, &gw_pub, &PSK, WALL).unwrap();
+        h.on_record(0, WALL, &m1);
+        let reply = h.poll(
+            0,
+            Limits {
+                records_left: 255,
+                l2_slots: 8,
+            },
+        );
+        assert_eq!(reply.len(), 1, "the handshake reply is the only record");
+        let mut sender = Session::new(init.finish(&reply[0]).unwrap(), 172, 0).unwrap();
+        sender.send(3, b"hello").unwrap();
+        let records = sender
+            .poll(
+                0,
+                Limits {
+                    records_left: 255,
+                    l2_slots: 8,
+                },
+            )
+            .unwrap();
+        let first = records.first().expect("one sealed record");
+        h.on_record(1, WALL, first);
+        // The ack was lost, so the phone sends the identical record again.
+        h.on_record(2, WALL, first);
+        assert_eq!(
+            h.last_error, None,
+            "a duplicate is how a lost ack is repaired, not a fault worth naming"
+        );
+        assert_eq!(
+            h.snapshot().dropped, 1,
+            "it is counted, just not reported as the link's last error"
+        );
+    }
+
     #[test]
     fn a_second_handshake_replaces_the_live_session() {
         let (mut h, gw_pub, saved) = host(true);

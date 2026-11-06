@@ -839,7 +839,7 @@ async fn serve_accepted(
         return;
     };
     let path = path_of(&target);
-    let authed = authorized(&headers, &target, &shared.token);
+    let authed = authorized(&headers, &shared.token);
     if !is_ws_upgrade(&headers) {
         // The TS `handleRequest` statuses.
         let (status, body) = plain_response(&path, authed);
@@ -2668,9 +2668,14 @@ fn is_ws_upgrade(headers: &[(String, String)]) -> bool {
     connection.split(',').any(|p| p.trim() == "upgrade") && upgrade
 }
 
-/// Whether the request carries the bearer token (header or `?token=`) —
-/// the TS `authorized`.
-fn authorized(headers: &[(String, String)], target: &str, token: &str) -> bool {
+/// Whether the request carries the bearer token in its `Authorization` header.
+///
+/// **The header is the only place a token is read.** `?token=` used to be accepted too, for a
+/// client that predates the header. No shipped client sends it (the phone and the desk attach
+/// client both use the header), and a bearer credential in a URL reaches places a header does
+/// not: proxy logs, crash reports, shell history. The probe and the upgrade read the same
+/// header, so refusing the query costs nothing a user can observe.
+fn authorized(headers: &[(String, String)], token: &str) -> bool {
     let provided = headers
         .iter()
         .find(|(k, _)| k == "authorization")
@@ -2685,42 +2690,8 @@ fn authorized(headers: &[(String, String)], target: &str, token: &str) -> bool {
             }
         })
         .filter(|s| !s.is_empty())
-        .or_else(|| query_param(target, "token"))
         .unwrap_or_default();
     crate::auth::token_matches(token, &provided)
-}
-
-/// The value of a query parameter in a request target.
-fn query_param(target: &str, name: &str) -> Option<String> {
-    let query = target.split_once('?')?.1;
-    for pair in query.split('&') {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        if k == name {
-            return Some(percent_decode(v));
-        }
-    }
-    None
-}
-
-/// A minimal percent-decoder for the query token.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = (bytes[i + 1] as char).to_digit(16);
-            let lo = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The plain-HTTP status + body for a non-upgrade request (the TS `handleRequest`).
@@ -2783,34 +2754,42 @@ mod tests {
         assert_eq!(m, "GET");
         assert_eq!(path_of(&t), "/ws");
         assert!(is_ws_upgrade(&h));
-        assert!(authorized(&h, &t, "t"));
+        assert!(authorized(&h, "t"));
     }
 
     #[test]
     fn the_bearer_scheme_is_case_insensitive() {
-        let (_, target, headers) = parse_request_head(
+        let (_, _target, headers) = parse_request_head(
             "GET /ws HTTP/1.1\r\nHost: x\r\nAuthorization: bearer abc\r\n\r\n",
         )
         .unwrap();
         assert!(
-            authorized(&headers, &target, "abc"),
+            authorized(&headers, "abc"),
             "RFC 7235 makes the scheme case-insensitive"
         );
-        let (_, target, headers) = parse_request_head(
+        let (_, _target, headers) = parse_request_head(
             "GET /ws HTTP/1.1\r\nHost: x\r\nAuthorization: BEARER abc\r\n\r\n",
         )
         .unwrap();
-        assert!(authorized(&headers, &target, "abc"));
+        assert!(authorized(&headers, "abc"));
     }
 
     #[test]
-    fn authorized_accepts_the_query_token_and_rejects_others() {
-        let (_, target, headers) = parse_request_head(
+    fn a_token_in_the_query_string_is_not_a_credential() {
+        // Removing this path is the point: a URL travels further than a header (proxy logs,
+        // crash reports, history), and nothing shipped still sends one.
+        let (_, _target, headers) = parse_request_head(
             "GET /ws?token=abc HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
         )
         .unwrap();
-        assert!(authorized(&headers, &target, "abc"));
-        assert!(!authorized(&headers, &target, "zzz"));
+        assert!(!authorized(&headers, "abc"));
+        // The header still works, with or without a query string beside it.
+        let (_, _target, headers) = parse_request_head(
+            "GET /ws?token=abc HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .unwrap();
+        assert!(authorized(&headers, "abc"));
+        assert!(!authorized(&headers, "zzz"));
     }
 
     #[test]

@@ -32,6 +32,10 @@ pub mod method {
     pub const KILL: &str = "kill";
     pub const CLOSE: &str = "close";
     pub const RECLAIM: &str = "reclaim";
+    /// Who holds a shell, from the daemon's in-memory claim table:
+    /// `{"holder": "mesh" | "desktop" | "phone" | ""}`. Separate from `list` because the radio's
+    /// write path asks it before every keystroke, and `list` asks the keeper about every shell.
+    pub const HOLDER: &str = "holder";
     pub const FORGET: &str = "forget";
     pub const ADOPT: &str = "adopt";
     pub const DESKTOP: &str = "desktop";
@@ -285,6 +289,41 @@ pub struct PingResult {
     pub pong: bool,
     pub version: u32,
     pub keeper_socket: String,
+    /// The daemon's build (`ldmux_protocol::BUILD_ID`).
+    ///
+    /// **Additive.** An older daemon omits it and this side reads `None`; an older CLI ignores a
+    /// field it does not know, which is the same rule every other wire change here follows. It is
+    /// what lets a client ask "is the daemon I am talking to the build I just installed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+}
+
+#[cfg(test)]
+mod ping_tests {
+    use super::*;
+
+    /// The built-in is additive: a daemon too old to send `build` still parses, with `None`.
+    #[test]
+    fn an_older_ping_answer_without_a_build_still_parses() {
+        let old = r#"{"pong":true,"version":1,"keeperSocket":"/run/user/1000/ldmux/keeper.sock"}"#;
+        let r: PingResult = serde_json::from_str(old).unwrap();
+        assert!(r.pong);
+        assert_eq!(r.build, None);
+    }
+
+    /// And a build that carries one writes it, so the client can ask "what is running".
+    #[test]
+    fn a_ping_answer_carries_the_build_when_there_is_one() {
+        let r = PingResult {
+            pong: true,
+            version: DAEMON_PROTOCOL_VERSION,
+            keeper_socket: "/k".into(),
+            build: Some("abc12345".into()),
+        };
+        let text = serde_json::to_string(&r).unwrap();
+        assert!(text.contains(r#""build":"abc12345""#), "{text}");
+        assert_eq!(serde_json::from_str::<PingResult>(&text).unwrap(), r);
+    }
 }
 
 /// Params for `new`.

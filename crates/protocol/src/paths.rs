@@ -41,36 +41,37 @@ fn non_empty(v: Option<&str>) -> Option<&str> {
 /// this uid, with no group/other access. Used for the `/tmp` fallback, where
 /// another user could have pre-created the path (or planted a symlink).
 fn ensure_private_dir(dir: &std::path::Path, uid: u32) -> Result<(), String> {
+    ensure_private_dir_named(dir, uid, "state dir")
+}
+
+/// As [`ensure_private_dir`], naming the directory in the message: the persist dir and the
+/// state dir fail the same way, and an error that calls the persist dir a state dir sends the
+/// reader looking at the wrong path.
+fn ensure_private_dir_named(dir: &std::path::Path, uid: u32, what: &str) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => {
-            return Err(format!(
-                "cannot create the state dir {}: {e}",
-                dir.display()
-            ));
+            return Err(format!("cannot create the {what} {}: {e}", dir.display()));
         }
     }
     // `symlink_metadata`: a symlink planted at the path is refused, not followed.
     let md = std::fs::symlink_metadata(dir)
-        .map_err(|e| format!("cannot stat the state dir {}: {e}", dir.display()))?;
+        .map_err(|e| format!("cannot stat the {what} {}: {e}", dir.display()))?;
     if !md.is_dir() {
-        return Err(format!(
-            "the state dir {} is not a directory",
-            dir.display()
-        ));
+        return Err(format!("the {what} {} is not a directory", dir.display()));
     }
     if md.uid() != uid {
         return Err(format!(
-            "the state dir {} is owned by uid {}, not {uid}; refusing to use it (set LDMUX_STATE_DIR or XDG_RUNTIME_DIR)",
+            "the {what} {} is owned by uid {}, not {uid}; refusing to use it",
             dir.display(),
             md.uid()
         ));
     }
     if md.mode() & 0o077 != 0 {
         return Err(format!(
-            "the state dir {} has mode {:o}; it must not be accessible to group or others",
+            "the {what} {} has mode {:o}; it must not be accessible to group or others",
             dir.display(),
             md.mode() & 0o777
         ));
@@ -98,6 +99,9 @@ pub fn persist_dir_from(
     if let Some(s) = non_empty(xdg_state_home) {
         return format!("{}/ldmux", s.trim_end_matches('/'));
     }
+    if let Some(h) = non_empty(home) {
+        return format!("{}/.local/state/ldmux", h.trim_end_matches('/'));
+    }
     // No HOME and no XDG_STATE_HOME: the runtime dir is the only writable place we were
     // given. Better a credential that does not survive a reboot than a path we invent.
     let fallback = state_dir_from(None, env_var("XDG_RUNTIME_DIR").as_deref());
@@ -111,7 +115,11 @@ pub fn try_resolve_persist_dir() -> Result<String, String> {
         env_var("XDG_STATE_HOME").as_deref(),
         env_var("HOME").as_deref(),
     );
-    ensure_private_dir(std::path::Path::new(&dir), nix::unistd::getuid().as_raw())?;
+    ensure_private_dir_named(
+        std::path::Path::new(&dir),
+        nix::unistd::getuid().as_raw(),
+        "persist dir",
+    )?;
     Ok(dir)
 }
 

@@ -1721,7 +1721,11 @@ impl LdmuxDaemon {
                     })
                     .unwrap_or(false);
                     if !more {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        // 10 ms while someone is watching, 250 ms while nobody is: a stream
+                        // without subscribers is backlog the keeper keeps and the next attach
+                        // gets in a snapshot, so polling it at the live rate bought nothing and
+                        // cost a keeper round trip per shell for the daemon's whole life.
+                        poll_stream.wait_for_poll();
                     }
                 }
             });
@@ -1874,6 +1878,9 @@ impl LdmuxDaemon {
                 "pong": true,
                 "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,
                 "keeperSocket": self.keeper_socket_path().to_string_lossy(),
+                // Which build answered. The wire is additive: a client that does not know the
+                // field ignores it, and an older daemon omits it (RELEASE-AUDIT 14.2).
+                "build": ldmux_protocol::BUILD_ID,
             })),
             "list" => {
                 // Detect keeper death (plan §6): if the keeper is dead,
@@ -2224,6 +2231,19 @@ impl LdmuxDaemon {
                 Ok(serde_json::json!({
                     "ok": ok,
                     "detail": detail,
+                }))
+            }
+            // **Who holds this shell, answered from memory.** The radio's write path asks
+            // this before every keystroke, so it must not be a `list` (which asks the keeper
+            // about every shell). A claim is a live fact this process already holds.
+            "holder" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(serde_json::json!({
+                    "holder": self
+                        .ownership
+                        .owner(id)
+                        .map(|c| c.device.kind.clone())
+                        .unwrap_or_default(),
                 }))
             }
             // Hand a shell back, so a viewer that was displaced (or a device that has
@@ -4317,12 +4337,18 @@ mod tests {
 
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
 
-        // `ping` returns the keeper socket.
+        // `ping` returns the keeper socket, and the build that answered: without it
+        // nothing can tell whether the daemon is the install that was just deployed.
         let r = d.handle("ping", serde_json::json!({})).await.unwrap();
         assert!(r.get("pong").and_then(|v| v.as_bool()).unwrap_or(false));
         assert_eq!(
             r.get("keeperSocket").and_then(|v| v.as_str()).unwrap_or(""),
             keeper_sock.to_string_lossy(),
+        );
+        assert_eq!(
+            r.get("build").and_then(|v| v.as_str()),
+            Some(ldmux_protocol::BUILD_ID),
+            "ping names the build that answered"
         );
 
         // `new` creates a session.

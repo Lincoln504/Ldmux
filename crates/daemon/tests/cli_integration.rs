@@ -181,9 +181,17 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     let (code, out, err) = run_cli(&["kill", &session_id], &dir_str).await;
     assert_eq!(code, 0, "kill failed: {out} {err}");
 
-    // `list` — should show the session as dead.
+    // `list` — a dead session is hidden by default (the registry keeps every shell that ever
+    // ran, and the list was a page of dead rows over the live handful), and `--all` shows it
+    // with why it ended.
     let (code, out, err) = run_cli(&["list"], &dir_str).await;
     assert_eq!(code, 0, "list failed: {out} {err}");
+    assert!(
+        !out.contains(&session_id),
+        "a dead session must not be listed by default: {out} {err}"
+    );
+    let (code, out, err) = run_cli(&["list", "--all"], &dir_str).await;
+    assert_eq!(code, 0, "list --all failed: {out} {err}");
     assert!(out.contains("dead"), "session not dead: {out} {err}");
 
     // `forget` — forget the dead session.

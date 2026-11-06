@@ -13,6 +13,7 @@
 //! queue); the remote (the phone-facing WS server) and the linger/reconnect
 //! lifecycle are layered on as they are ported.
 
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -97,6 +98,19 @@ pub struct StreamSubscriber {
     pub on_reset: Box<dyn Fn(&str) + Send + Sync>,
 }
 
+/// How often the poll thread asks the keeper while someone is watching.
+pub const WATCHED_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// How often it asks while **nobody** is watching.
+///
+/// The keeper buffers a pane's output and the next subscriber is sent a snapshot that already
+/// contains it, so there is nothing to deliver faster than this. Without the distinction every
+/// shell ever viewed kept a keeper round trip every 10 ms for the daemon's whole life: ten
+/// shells cost 8.4 % of a core in the daemon and 5.6 % in the keeper while idle (measured
+/// 2026-11-06). Invariant 9 says an idle screen costs nothing on the wire; it must cost nothing
+/// on the machine either.
+pub const UNWATCHED_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The stream: one live keeper stream per viewed session, fanned out to any
 /// number of subscribers.
 ///
@@ -127,6 +141,10 @@ pub struct PaneStream {
     gate: Mutex<()>,
     /// The poll-loop stop flag (set by `drop_stream`/`stop`).
     pub(crate) poll_stop: AtomicBool,
+    /// Set when a subscriber arrives, so the poll thread's slow (unwatched) sleep ends at once
+    /// rather than up to a quarter of a second later.
+    woke: Mutex<bool>,
+    woke_cv: Condvar,
 }
 
 /// The keeper connection seam (the test double boundary): one
@@ -213,6 +231,8 @@ impl PaneStream {
             closed: AtomicBool::new(false),
             gate: Mutex::new(()),
             poll_stop: AtomicBool::new(false),
+            woke: Mutex::new(false),
+            woke_cv: Condvar::new(),
         }
     }
 
@@ -278,7 +298,30 @@ impl PaneStream {
             id,
             sub: Arc::new(sub),
         });
+        // A waiting poll thread is on the slow (unwatched) interval; cut it short. The snapshot
+        // that accompanies an attach already covers the backlog, so no output is lost either
+        // way - this only saves the viewer a quarter of a second of silence.
+        *relock(&self.woke) = true;
+        self.woke_cv.notify_all();
         id
+    }
+
+    /// How long the poll thread should sleep before its next pass.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        if self.subscriber_count() == 0 {
+            UNWATCHED_POLL
+        } else {
+            WATCHED_POLL
+        }
+    }
+
+    /// Sleep until the next poll is due, or until a subscriber arrives (whichever is first).
+    pub fn wait_for_poll(&self) {
+        let guard = relock(&self.woke);
+        let _ = self
+            .woke_cv
+            .wait_timeout_while(guard, self.poll_interval(), |woke| !*woke);
+        *relock(&self.woke) = false;
     }
 
     /// The subscribers as they are now, cloned out so a caller can invoke their
@@ -461,7 +504,7 @@ impl PaneStream {
     /// Close the stream (the subscribers are told to resync).
     pub fn close(&self, reason: &str) {
         self.closed.store(true, Ordering::Relaxed);
-        self.poll_stop.store(true, Ordering::Relaxed);
+        self.stop_polling();
         // Take the list out, release the lock, then tell them: `on_reset` takes
         // the connection's lock.
         let subs = std::mem::take(&mut *relock(&self.subs));
@@ -567,6 +610,8 @@ impl PaneStream {
     /// Stop the poll loop (the `drop_stream`/`stop` path).
     pub fn stop_polling(&self) {
         self.poll_stop.store(true, Ordering::Relaxed);
+        *relock(&self.woke) = true;
+        self.woke_cv.notify_all();
     }
 
     /// Whether the stream has been closed (dropped by the daemon). A subscriber
@@ -1157,6 +1202,62 @@ mod tests {
                 other => Err(format!("not handled: {other:?}")),
             }
         }
+    }
+
+    /// A stream nobody is watching is polled slowly, and a subscriber cuts that wait short.
+    ///
+    /// Without this, every shell ever viewed kept a keeper round trip every 10 ms for the
+    /// daemon's whole life (measured: ~0.8 % of a core per idle session on each side). The wake
+    /// is part of the fix: the attach must not wait out the slow interval.
+    #[test]
+    fn an_unwatched_stream_polls_slowly_and_a_subscriber_wakes_it() {
+        let stream = Arc::new(PaneStream::new("s1".into(), Box::new(TestKeeper)));
+        assert_eq!(
+            stream.poll_interval(),
+            UNWATCHED_POLL,
+            "nobody is watching: the keeper is asked at the slow rate"
+        );
+
+        let watcher = Arc::clone(&stream);
+        let start = std::time::Instant::now();
+        let joiner = std::thread::spawn(move || {
+            // Long enough that the waiter is parked, far shorter than the slow interval.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let (_id, _off) = watcher.subscribe(StreamSubscriber {
+                on_output: Box::new(|_| {}),
+                on_reset: Box::new(|_| {}),
+            });
+        });
+        stream.wait_for_poll();
+        let waited = start.elapsed();
+        joiner.join().unwrap();
+
+        assert!(
+            waited < UNWATCHED_POLL,
+            "a subscriber must cut the wait short, waited {waited:?}"
+        );
+        assert_eq!(
+            stream.poll_interval(),
+            WATCHED_POLL,
+            "with a subscriber the live rate applies"
+        );
+    }
+
+    /// Stopping the poll loop wakes a sleeping thread instead of leaving it to the interval.
+    #[test]
+    fn stopping_the_poll_wakes_the_waiter() {
+        let stream = Arc::new(PaneStream::new("s2".into(), Box::new(TestKeeper)));
+        let stopper = Arc::clone(&stream);
+        let joiner = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            stopper.stop_polling();
+        });
+        let start = std::time::Instant::now();
+        stream.wait_for_poll();
+        let waited = start.elapsed();
+        joiner.join().unwrap();
+        assert!(stream.is_poll_stopped());
+        assert!(waited < UNWATCHED_POLL, "waited {waited:?}");
     }
 
     /// The output sink a stream calls: bytes, and text for the model's reply.

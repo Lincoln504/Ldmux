@@ -26,7 +26,9 @@
 //! `docs/RELEASE-AUDIT.md` appendix B, not a limit the firmware enforces. The
 //! firmware has its own governor; this number only keeps LDMUX's meter honest.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ldmux_companion::{ByteLink, Companion, SerialLink, SessionError};
@@ -38,6 +40,16 @@ use tokio::sync::mpsc as async_mpsc;
 
 /// How long the radio thread waits for a command before checking the air.
 const COMMAND_WAIT: Duration = Duration::from_millis(10);
+
+/// How long a dropped carrier waits for the radio thread before leaving it to finish.
+///
+/// The wait exists so the port is closed and its advisory lock released before a reconnect
+/// opens the same device. It is **bounded** because the thread can be inside a write to a
+/// device that stopped draining: the write itself is bounded (`companion::link::WRITE_TIMEOUT`),
+/// and this wait is shorter still, so a wedged radio costs one short pause rather than a hung
+/// supervisor. A thread that outlives the wait closes the port and releases the lock when it
+/// does finish; the descriptor is not inherited (`O_CLOEXEC`), so nothing else keeps it.
+const CLOSE_WAIT: Duration = Duration::from_millis(250);
 
 /// One second of the hour the budget is measured over.
 const HOUR: Duration = Duration::from_secs(3_600);
@@ -64,6 +76,10 @@ pub struct SerialCarrier {
     commands: Option<Sender<Command>>,
     events: async_mpsc::Receiver<Result<Event, MeshError>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Set by `drop`; the radio thread checks it between commands.
+    stop: Arc<AtomicBool>,
+    /// Fires once the radio thread has returned, which is when the port is closed.
+    stopped: Option<Receiver<()>>,
 }
 
 impl SerialCarrier {
@@ -77,15 +93,23 @@ impl SerialCarrier {
 
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = async_mpsc::channel(64);
+        let (stopped_tx, stopped_rx) = channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
         let worker = std::thread::Builder::new()
             .name("ldmux-mesh-serial".to_owned())
-            .spawn(move || serve(companion, settings, command_rx, event_tx))
+            .spawn(move || {
+                serve(companion, settings, command_rx, event_tx, thread_stop);
+                let _ = stopped_tx.send(());
+            })
             .map_err(MeshError::Io)?;
         Ok((
             Self {
                 commands: Some(command_tx),
                 events: event_rx,
                 worker: Some(worker),
+                stop,
+                stopped: Some(stopped_rx),
             },
             bound,
             settings.preset,
@@ -140,14 +164,31 @@ impl Carrier for SerialCarrier {
 
 impl Drop for SerialCarrier {
     fn drop(&mut self) {
-        // Dropping the sender disconnects the channel, which is the thread's cue to
-        // stop; joining it is what guarantees the serial port is closed and its
-        // exclusive lock released before a reconnect tries to open the same device.
-        // The thread's longest wait is one `COMMAND_WAIT`, so this cannot stall.
+        // Dropping the sender disconnects the channel and the flag covers a thread already
+        // inside a command. **Never `join` without a bound**: this runs on the session loop's
+        // teardown path, and a thread parked in a write to a radio that stopped draining used
+        // to hang it — the snapshot then read `ready / established` for ever, the shells froze
+        // and only a daemon restart recovered. The handle is dropped (detached) when the wait
+        // expires; the port closes and the lock releases when the thread does return.
         drop(self.commands.take());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(stopped) = self.stopped.take() {
+            // The wait is bounded, and on the daemon's multi-thread runtime it runs off the
+            // worker (`block_in_place` hands the thread back while it waits). A current-thread
+            // runtime — the tests — takes it inline; 250 ms is short enough for that, and it
+            // keeps the teardown testable without a second runtime.
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                    let _ = tokio::task::block_in_place(|| stopped.recv_timeout(CLOSE_WAIT));
+                }
+                _ => {
+                    let _ = stopped.recv_timeout(CLOSE_WAIT);
+                }
+            }
         }
+        // Dropping the handle detaches rather than joins: a late finish is harmless, and
+        // blocking here is the very thing this teardown must not do.
+        let _ = self.worker.take();
     }
 }
 
@@ -214,10 +255,22 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
 
 /// The radio thread: serve commands and the air until the loop lets go.
 fn serve<L: ByteLink>(
+    companion: Companion<L>,
+    settings: Settings,
+    commands: Receiver<Command>,
+    events: async_mpsc::Sender<Result<Event, MeshError>>,
+    stop: Arc<AtomicBool>,
+) {
+    serve_loop(companion, settings, commands, events, &stop);
+}
+
+/// The radio thread's body, split out so every exit path reaches the `stopped` signal.
+fn serve_loop<L: ByteLink>(
     mut companion: Companion<L>,
     mut settings: Settings,
     commands: Receiver<Command>,
     events: async_mpsc::Sender<Result<Event, MeshError>>,
+    stop: &AtomicBool,
 ) {
     // Recomputed on a retune: a budget is records per hour at *this* tuple's airtime, so a
     // radio moved to a slower spreading factor can spend fewer records than this number said.
@@ -235,6 +288,11 @@ fn serve<L: ByteLink>(
     }
 
     loop {
+        // A dropped carrier may be waiting for this thread; do not sit inside a command
+        // interval after the loop has let go.
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         if window.elapsed() >= HOUR {
             window = Instant::now();
             sent = 0;
@@ -417,6 +475,36 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_carrier_whose_thread_is_slow_does_not_block_the_loop() {
+        // A real radio that keeps the port open and stops draining is not reproducible here,
+        // so the shape is: a thread that has not signalled it stopped. `drop` must return
+        // after the bounded wait, not wait for the thread.
+        let (command_tx, command_rx) = channel();
+        let (_event_tx, event_rx) = async_mpsc::channel(1);
+        let (_stopped_tx, stopped_rx) = channel::<()>();
+        let worker = std::thread::spawn(move || {
+            // Hold the receiver so the sender stays connected, then outlive the wait.
+            std::thread::sleep(Duration::from_millis(400));
+            drop(command_rx);
+        });
+        let carrier = SerialCarrier {
+            commands: Some(command_tx),
+            events: event_rx,
+            worker: Some(worker),
+            stop: Arc::new(AtomicBool::new(false)),
+            stopped: Some(stopped_rx),
+        };
+        let started = Instant::now();
+        drop(carrier);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "drop waited {elapsed:?} on a thread that had not stopped"
+        );
+        assert!(elapsed >= CLOSE_WAIT, "it did give the thread its bounded wait");
+    }
+
+    #[test]
     fn a_direct_raw_packet_yields_its_record() {
         // What `build_raw_direct(1, &[], record)` produces: header, zero-hop path byte.
         let packet = build_raw_direct(1, &[], &[9, 8, 7]).unwrap();
@@ -452,8 +540,9 @@ mod tests {
 
     #[test]
     fn the_budget_comes_from_the_preset_not_a_constant() {
-        // 914.25 MHz / 500 kHz / SF8: about 138 ms for 172 bytes -> about 261 an hour,
-        // which the one-byte wire field reports as its ceiling.
+        // 500 kHz / SF8: about 127 ms for 172 bytes, so a one-percent hour is about 283 records
+        // and the one-byte wire field reports that as its 255 ceiling. The faster deployed tuple
+        // (SF7, 69 ms) would allow 520 and is also capped by the field, not by the policy.
         let fast = budget_per_hour(137.9);
         assert_eq!(fast, u8::MAX);
         // Twice the airtime is half the records, and it fits below the cap.
@@ -499,6 +588,7 @@ mod tests {
                 },
                 command_rx,
                 event_tx,
+                Arc::new(AtomicBool::new(false)),
             );
         });
 
@@ -554,6 +644,7 @@ mod tests {
                 },
                 command_rx,
                 event_tx,
+                Arc::new(AtomicBool::new(false)),
             );
         });
 
@@ -597,6 +688,7 @@ mod tests {
                 },
                 command_rx,
                 event_tx,
+                Arc::new(AtomicBool::new(false)),
             );
         });
         let _ = event_rx.blocking_recv(); // the opening status

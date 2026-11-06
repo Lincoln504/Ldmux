@@ -13,7 +13,9 @@
 //!   client use.
 //! - `LDMUX_REMOTE_HOST` — the tailnet or loopback address (default: `127.0.0.1`).
 //! - `LDMUX_REMOTE_PORT` — the remote port (default: `7623`).
-//! - `LDMUX_TOKEN_FILE` — where the bearer token persists (default: `<state_dir>/token`).
+//! - `LDMUX_PERSIST_DIR` — where credentials persist across a reboot (default:
+//!   `$XDG_STATE_HOME/ldmux`, else `$HOME/.local/state/ldmux`). The state dir is a tmpfs.
+//! - `LDMUX_TOKEN_FILE` — the bearer token's path (default: `<persist_dir>/token`).
 
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_protocol::net::is_tailnet_or_loopback;
@@ -44,9 +46,39 @@ fn keeper_beside(daemon: &Path) -> PathBuf {
 }
 
 fn main() {
+    // **`--version` before any startup work.** It used to fall through into the daemon's own
+    // startup: asking a running daemon what it was printed "already running" and exited on the
+    // lock, and `ldmuxd --version` on a machine with no daemon started one. A question about the
+    // binary must not start the service.
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(|s| s.as_str()) {
+        Some("--version" | "-V" | "version") => {
+            println!(
+                "ldmuxd {} (protocol {})",
+                ldmux_protocol::BUILD_ID,
+                ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION
+            );
+            return;
+        }
+        Some("--help" | "-h") => {
+            println!("usage: ldmuxd [--version]");
+            println!("       ldmuxd attach <session-id> [--readonly]");
+            return;
+        }
+        Some("attach") => {}
+        Some(other) => {
+            // An argument this binary does not know is a usage error, not a daemon start: the
+            // old behaviour turned a typo into a second daemon that exited on the lock, with a
+            // message about "already running" that named neither the typo nor the daemon.
+            eprintln!("ldmuxd: unknown argument {other:?}");
+            eprintln!("usage: ldmuxd [--version]");
+            eprintln!("       ldmuxd attach <session-id> [--readonly]");
+            std::process::exit(2);
+        }
+        None => {}
+    }
     // `ldmuxd attach <session> [--readonly]`: the desk-window entry point
     // (plan §3.9). alacritty runs this, so its stdio is the window's pty.
-    let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("attach") {
         let readonly = args.iter().any(|a| a == "--readonly" || a == "-r");
         let session = args.iter().skip(2).find(|a| !a.starts_with('-')).cloned();
@@ -94,10 +126,26 @@ fn main() {
     // `${XDG_RUNTIME_DIR:-/tmp}/ldmux` — the TS `resolveStateDir`).
     let state_dir = std::path::PathBuf::from(ldmux_protocol::paths::resolve_state_dir());
 
+    // Where credentials live. **Not the state dir**: that is `$XDG_RUNTIME_DIR`, a tmpfs, so
+    // a token or a session key kept there is re-minted on every boot and every paired phone is
+    // locked out. `LDMUX_PERSIST_DIR`, else `$XDG_STATE_HOME/ldmux`, else
+    // `$HOME/.local/state/ldmux`; created 0700 when absent.
+    let persist_dir = match ldmux_protocol::paths::try_resolve_persist_dir() {
+        Ok(d) => std::path::PathBuf::from(d),
+        Err(e) => {
+            eprintln!("ldmuxd: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // The token: read or mint via the project's own `auth` module (64 lowercase
-    // hex, dir 0700, file 0600, legacy adoption). `LDMUX_TOKEN_FILE` moves it
-    // out of the state dir; otherwise it lives at `<state_dir>/token`.
-    let token_path_env = std::env::var("LDMUX_TOKEN_FILE").ok();
+    // hex, dir 0700, file 0600, legacy adoption). It lives in the persist dir, so a
+    // reboot does not re-mint it and lock every paired phone out; `LDMUX_TOKEN_FILE`
+    // still overrides the location, and a token left at `<state_dir>/token` is adopted
+    // and then removed.
+    let token_path_env = std::env::var("LDMUX_TOKEN_FILE")
+        .ok()
+        .or_else(|| Some(persist_dir.join("token").to_string_lossy().into_owned()));
     let token = match ldmux_daemon::auth::load_or_create_token(
         &state_dir.to_string_lossy(),
         token_path_env.as_deref(),
@@ -141,7 +189,8 @@ fn main() {
     // stale or malformed `LDMUX_MESH_PSK` (or a session file the process cannot read) took down
     // every shell and the CLI along with the radio. A person can fix the key; they cannot un-kill
     // the shells it killed on the way out.
-    let mesh_session = match ldmux_daemon::mesh::SessionSetup::from_env(&state_dir) {
+    let mesh_session = match ldmux_daemon::mesh::SessionSetup::from_env(&persist_dir, &state_dir)
+    {
         Ok(setup) => setup,
         Err(e) => {
             eprintln!("ldmuxd: mesh sessions disabled: {e}");
@@ -178,16 +227,22 @@ fn main() {
                 Some(device) => format!("{device} (serial, owned by this daemon)"),
                 None => format!("{} (gateway)", cfg.addr),
             };
-            println!("ldmuxd: mesh link to {endpoint} (peer {})", {
-                let mut shown = String::new();
-                for byte in &cfg.peer[..4] {
-                    shown.push_str(&format!("{byte:02x}"));
+            // The peer only exists on the gateway path; a serial link has no peer to name, and
+            // printing eight zero digits for it read as "the peer is all zeros".
+            match &cfg.serial {
+                Some(_) => println!("ldmuxd: mesh link to {endpoint}"),
+                None => {
+                    let mut shown = String::new();
+                    for byte in &cfg.peer[..4] {
+                        shown.push_str(&format!("{byte:02x}"));
+                    }
+                    println!("ldmuxd: mesh link to {endpoint} (peer {shown})");
                 }
-                shown
-            });
+            }
             if let Some(session) = &mesh_session {
                 println!(
-                    "ldmuxd: mesh session on; gateway key {}",
+                    "ldmuxd: mesh session on; {} key {}",
+                    if cfg.serial.is_some() { "radio" } else { "gateway" },
                     session.public_key_hex()
                 );
             }
@@ -228,7 +283,8 @@ fn main() {
         match d.start(&daemon_ref).await {
             Ok(()) => {
                 println!(
-                    "ldmuxd listening on {} (keeper: {})",
+                    "ldmuxd {} listening on {} (keeper: {})",
+                    ldmux_protocol::BUILD_ID,
                     d.socket_path().display(),
                     d.keeper_socket_path().display(),
                 );
