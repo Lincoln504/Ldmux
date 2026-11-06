@@ -88,12 +88,22 @@
         ];
       };
 
+      # The build's identity, from the flake's own git revision. The sandbox has no `.git`,
+      # so `crates/protocol/build.rs` would answer `unknown`; passing it here is what lets the
+      # installed daemon, CLI and desk windows say which build each one is (RELEASE-AUDIT 14.2).
+      buildId =
+        if self ? shortRev then
+          (if self ? dirtyShortRev then self.dirtyShortRev else self.shortRev)
+        else if self ? rev then builtins.substring 0 8 self.rev
+        else "unknown";
+
       ldmuxFor = pkgs:
         let engine = engineFor pkgs; in
         pkgs.rustPlatform.buildRustPackage {
           pname = "ldmux";
           inherit version cargoLock;
           src = srcFor;
+          LDMUX_BUILD_ID = buildId;
           # vt-sys/build.rs links the engine archive from here.
           LDMUX_VT_LIB_DIR = "${engine.dev}/lib";
           # The tests are a separate check (`checks.<system>.tests`): they need the debug
