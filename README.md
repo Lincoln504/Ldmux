@@ -86,11 +86,13 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   and says when it falls back to a cloud recogniser. Portrait uses the keyboard's own.
 - **Predictive echo** draws a keystroke before the desktop answers while the link is slow, turns
   itself off below the threshold, and never at a password prompt.
-- **Leaving the screen** keeps the link for 45 seconds behind a notification, then detaches the
-  pages and releases the claims while the shell keeps running.
+- **Leaving the screen** keeps the pages for 45 seconds behind a notification, then detaches them and
+  releases their claims while the shell keeps running. On the tailnet the app stays reachable behind
+  that notification while it is paired, so a shell's mark can arrive with no page open; the radio
+  route does not hold a session open for it and delivers the marks on the next attach instead.
 - **Settings**: `link` (transport: `tailnet` or `LoRa radio`), `pairing` (token fingerprint,
   `pair` / `paste` / `unpair`), `diagnostics` (desktop, transport, radio, build, and an in-memory
-  log with `copy` and `show`), `display`.
+  log with `copy` and `show`), `shells` (notifications: off by default, sound on or off), `display`.
 - **Radio setup** is in the app: pick the phone's radio over Bluetooth, choose a preset (region
   presets, the public table, `randomise`, `restore`, or a `custom` `MHz kHz SF CR`), `apply`. The
   desktop's radio row has one `match` that copies the four numbers and nothing else.
