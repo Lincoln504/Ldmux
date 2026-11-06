@@ -118,54 +118,22 @@ data class DesktopWindow(
     val appClass: String,
     val title: String,
     val workspace: String,
-    val pid: Int?,
-)
-
-/**
- * A pi agent session running on the host.
- *
- * [label] is the directory's basename and is what the launcher shows, because
- * "which project is that agent on" is the question a person is actually asking.
- *
- * [sessionId] is resolved from the transcript and is a best effort — pi does not
- * report which session a process is writing to (see the daemon's
- * `assignTranscripts`). [pid] and [cwd] are facts.
- */
-data class DesktopPiSession(
-    val pid: Int,
-    val cwd: String,
-    val sessionId: String?,
-    val startedAt: String?,
-    val windowId: String?,
-    val workspace: String?,
-    val label: String,
-    /** The ldmux shell this pi runs inside, when it runs inside one. */
-    val ldmuxSessionId: String? = null,
 )
 
 /** The outcome of a make-live or close-live request. */
 data class LiveResult(val sessionId: String, val ok: Boolean, val detail: String?)
-
-/**
- * A shell is held by another device (ADR-0010).
- *
- * [holder] is null when nobody holds it — the holder left while we were asking,
- * which is not a failure, just a different sentence.
- */
-data class OwnedNotice(val sessionId: String, val holder: String?)
 
 /** Everything the launcher shows before a terminal. */
 data class DesktopInventory(
     val wm: String,
     val workspaces: List<DesktopWorkspace>,
     val windows: List<DesktopWindow>,
-    val piSessions: List<DesktopPiSession>,
-    /** Set when windows could not be listed; the pi sessions are still real. */
+    /** Set when the window manager could not be enumerated. */
     val detail: String? = null,
 ) {
     /** Is there anything to show at all? */
     val isEmpty: Boolean
-        get() = workspaces.isEmpty() && windows.isEmpty() && piSessions.isEmpty()
+        get() = workspaces.isEmpty() && windows.isEmpty()
 }
 
 /**
@@ -303,22 +271,6 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private val _liveResult = MutableStateFlow<LiveResult?>(null)
     val liveResult: StateFlow<LiveResult?> = _liveResult
 
-    /**
-     * A shell was refused because another device holds it (ADR-0010).
-     *
-     * Held as a value plus a counter rather than as a flow of events: the state
-     * has to survive recomposition, and a dialog that appears only if it happens
-     * to be collected at the right moment is a dialog that silently does not
-     * appear.
-     */
-    private val _owned = MutableStateFlow<OwnedNotice?>(null)
-    val owned: StateFlow<OwnedNotice?> = _owned
-
-    /** The user said take it over, so the notice has been dealt with. */
-    fun clearOwned() {
-        _owned.value = null
-    }
-
     fun clearLiveResult() {
         _liveResult.value = null
     }
@@ -363,17 +315,15 @@ class LdmuxClient(private var config: LdmuxConfig) {
     private var ws: DefaultClientWebSocketSession? = null
 
     /**
-     * Open a new session on the host (FR-10). The list refreshes from the reply.
+     * Open a new shell on the host (FR-10). The list refreshes from the reply.
      *
-     * There is no `command` here on purpose: every shell this client can ask for is
-     * the host's login shell, never a chosen program, so there is
-     * nothing for a caller to pass. `kind = "pi"` is the one exception the daemon
-     * still recognises, and it needs no argv either.
+     * There is no `command` and no `kind` here on purpose: every shell this client can
+     * ask for is the host's login shell, never a chosen program, so there is nothing
+     * for a caller to pass.
      */
-    fun create(kind: String, cwd: String? = null, title: String? = null): Boolean {
+    fun create(cwd: String? = null, title: String? = null): Boolean {
         val msg = buildJsonObject {
             put("type", "new")
-            put("kind", kind)
             if (cwd != null) put("cwd", cwd)
             if (title != null) put("title", title)
         }.toString()
@@ -681,15 +631,9 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 ok = root.flag("ok"),
                 detail = root.optionalText("detail"),
             )
-            "owned" -> {
-                // A shell is held by another device (ADR-0010). Ordinary, not an
-                // error: it is the answer to "open this", and the app answers it
-                // by telling the user who has it and offering to take over.
-                _owned.value = OwnedNotice(
-                    sessionId = root.text("sessionId"),
-                    holder = (root["owner"] as? JsonObject)?.optionalText("name"),
-                )
-            }
+            // `owned` on this socket is ignored on purpose: this client never attaches a
+            // stream, so a takeover cannot reach it. The ownership notice a page must show
+            // comes from the attach path (`AttachClient.onOwned` → `HeldElsewhere`).
             "sessions" -> {
                 _sessions.value = parseSessions(root["sessions"], deviceId)
                 appLog("sessions parsed=${_sessions.value.size} attachable=${_sessions.value.count { it.attachable }}")
@@ -768,19 +712,6 @@ internal fun parseDesktop(o: JsonObject?): DesktopInventory? {
                 appClass = it.text("appClass"),
                 title = it.text("title"),
                 workspace = it.text("workspace"),
-                pid = it.number("pid"),
-            )
-        },
-        piSessions = o.objects("piSessions").map {
-            DesktopPiSession(
-                pid = it.number("pid") ?: 0,
-                cwd = it.text("cwd"),
-                sessionId = it.optionalText("sessionId"),
-                startedAt = it.optionalText("startedAt"),
-                windowId = it.optionalText("windowId"),
-                workspace = it.optionalText("workspace"),
-                label = it.text("label"),
-                ldmuxSessionId = it.optionalText("ldmuxSessionId"),
             )
         },
         detail = o.optionalText("detail"),

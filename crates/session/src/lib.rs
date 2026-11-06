@@ -1,7 +1,7 @@
 //! The L3 session: what runs end to end between the phone and the daemon, on top of the
 //! opaque-record tunnel (`ldmux-mesh`). Nothing here knows a radio, a preset, a path, a
-//! contact or an airtime figure; the only numbers it is given are the record size the
-//! gateway advertised and the count of records the gateway says may still be sent.
+//! contact or an airtime figure; the only numbers it is given are the record size the peer
+//! allows and the count of records the carrier says may still be sent.
 //!
 //! Three layers, each testable without the others:
 //!

@@ -26,12 +26,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// draft's `HELLO`/`resumeToken`, `SESSION_STATE` and `CLOSE` were cut
 /// (see `docs/ARCHITECTURE.md#4-the-wire`), so they are not modelled here: a type nothing can send
 /// or receive is a contract nobody can keep.
+///
+/// **The wire itself is written by `crates/daemon/src/remote.rs`** (raw `serde_json::json!`)
+/// and parsed by the app's own readers. This union is the *test* side of the contract: it
+/// pins the key names and the tag vocabulary, so a rename shows up here before it shows up
+/// as a phone that cannot attach.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Message {
     Caps(Caps),
     Snapshot(Snapshot),
-    Follow(Follow),
     Ping(Ping),
     Pong(Pong),
     Error(Error),
@@ -60,7 +64,6 @@ pub enum Message {
 pub mod m {
     pub const CAPS: &str = "caps";
     pub const SNAPSHOT: &str = "snapshot";
-    pub const FOLLOW: &str = "follow";
     pub const PING: &str = "ping";
     pub const PONG: &str = "pong";
     pub const ERROR: &str = "error";
@@ -137,14 +140,7 @@ pub struct Snapshot {
     pub history: Option<bool>,
 }
 
-/// Client-owned scroll intent. The server never resolves line ids.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Follow {
-    /// Closed set: `"following" | "anchored"`.
-    pub mode: String,
-}
-
+/// A liveness question; `Pong` answers it with the same id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Ping {
@@ -399,7 +395,6 @@ mod tests {
                 wm: "i3".into(),
                 workspaces: vec![],
                 windows: vec![],
-                pi_sessions: vec![],
                 detail: None,
             }),
         });

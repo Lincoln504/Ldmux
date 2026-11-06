@@ -349,6 +349,7 @@ dependencies = [
  "ldmux-mesh",
  "ldmux-protocol",
  "ldmux-session",
+ "ldmux-testkeeper",
  "ldmux-vt-sys",
  "nix",
  "rand",
@@ -405,6 +406,16 @@ version = "0.1.0"
 dependencies = [
  "ldmux-mesh",
  "ldmux-session",
+]
+
+[[package]]
+name = "ldmux-testkeeper"
+version = "0.1.0"
+dependencies = [
+ "ldmux-protocol",
+ "rand",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

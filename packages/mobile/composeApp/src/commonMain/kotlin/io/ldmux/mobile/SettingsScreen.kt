@@ -50,9 +50,8 @@ import io.ldmux.mobile.mesh.pairingNote
  * [onSave] with the whole config, and the caller persists it.
  *
  * There is no link switch on the launcher: this is where the link is chosen, and the launcher
- * then shows the app on that link only. The mesh section is absent where the platform has no
- * mesh route (Apple: tailnet only), which is decided by the caller and by
- * [MeshRouteSection]'s own `meshExists` check rather than guessed here.
+ * then shows the app on that link only. The mesh section is drawn by [MeshRouteSection], which
+ * owns what a mesh route needs and what it would do — nothing about it is decided here.
  */
 @Composable
 internal fun SettingsScreen(
@@ -136,7 +135,7 @@ internal fun SettingsScreen(
             // section from the tailnet one. The route is the first question and pairing is
             // the second, and the two pairings are the same kind of thing.
             Spacer(Modifier.height(8.dp))
-            val groups = settingsGroups(hasMesh = mesh != null)
+            val groups = settingsGroups()
             for (group in groups) {
                 Section(group.title) {
                     when (group) {
@@ -188,7 +187,6 @@ internal fun SettingsScreen(
                                     current = current,
                                     credentialsVersion = credentialsVersion,
                                     readCredentials = mesh.credentials,
-                                    onMeshPairing = mesh.onPairing,
                                     onConfig = mesh.onConfig,
                                     // The same `onSave` the other rows use: the config this screen
                                     // is drawing is recomposed with the new value, so the next row
@@ -219,7 +217,6 @@ internal fun SettingsScreen(
                     Spacer(Modifier.height(SettingsSectionGap))
                 }
             }
-            About()
             Spacer(Modifier.height(SettingsSectionGap))
         }
     }
@@ -241,9 +238,7 @@ internal fun SettingsScreen(
  * The screen's sections, in the order they are read.
  *
  * A named list rather than three `if` branches in the body, so the order is one value
- * that a test can hold and a later edit cannot quietly invert. `link` is absent where the
- * platform has no second route: a choice of one is not a choice, and iOS has only the
- * tailnet.
+ * that a test can hold and a later edit cannot quietly invert.
  */
 internal enum class SettingsGroup(val title: String) {
     /** Which link the app runs on. First, because it decides whether the rest applies. */
@@ -262,17 +257,17 @@ internal enum class SettingsGroup(val title: String) {
     Display("display"),
 }
 
-internal fun settingsGroups(hasMesh: Boolean): List<SettingsGroup> =
-    if (hasMesh) {
-        listOf(
-            SettingsGroup.Link,
-            SettingsGroup.Pairing,
-            SettingsGroup.Diagnostics,
-            SettingsGroup.Display,
-        )
-    } else {
-        listOf(SettingsGroup.Pairing, SettingsGroup.Diagnostics, SettingsGroup.Display)
-    }
+/**
+ * The settings sections, in the order a person meets them: the route, then the pairing, then what
+ * the app can tell you about itself, then display. One list — the radio route exists in this
+ * build, so the "no link row" variant had a branch nothing could reach.
+ */
+internal fun settingsGroups(): List<SettingsGroup> = listOf(
+    SettingsGroup.Link,
+    SettingsGroup.Pairing,
+    SettingsGroup.Diagnostics,
+    SettingsGroup.Display,
+)
 
 /**
  * A titled block: the heading, a rule, then its rows.
@@ -528,8 +523,9 @@ internal fun connectionSummary(
     }
     val pairing = when {
         // The fingerprint, not the token: this row is read over a shoulder and screenshotted
-        // into a support thread. It is the same fingerprint the pairing dialog shows, so it can
-        // be compared against `ldmux code` on the host.
+        // into a support thread. It is the same fingerprint the pairing dialog shows, and it is
+        // the host's token without being usable as it: a reader can see *which* pairing this is,
+        // not authenticate with it.
         config.isPaired && radioPaired -> "token ${tokenFingerprint(config.token)} \u00b7 radio keys"
         config.isPaired -> "token ${tokenFingerprint(config.token)}"
         radioPaired -> "radio keys stored"
@@ -625,33 +621,3 @@ private fun DiagnosticsLog() {
     SettingsNote("copy takes every kept line, not only the ones shown")
 }
 
-/**
- * The footer: which build this is.
- *
- * Centred, because it is not a setting and must not read as one — a row is left-aligned
- * because its label is a thing to scan; this is an aside about the app, and the one line a
- * support question needs. It carried a link to the project site, which answered HTTP 410, so
- * there is no "read more" affordance until there is a page. The version comes from the
- * package, so it cannot drift from what a store listing says. No copyright line: a claim
- * about ownership answers nothing a reader of a settings screen asked, and the licence files
- * are where that question belongs.
- */
-@Composable
-private fun About() {
-    Column(
-        Modifier.fillMaxWidth().padding(top = SettingsSectionGap),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            "ldmux " + appVersionName().ifEmpty { "dev" },
-            color = Dim,
-            fontSize = 11.sp,
-            fontFamily = MonoFont,
-        )
-        // **No link to the project site.** It pointed at `https://ldmux.io`, which answers
-        // HTTP 410 (the domain is parked), so the one "read more" affordance in the app was a
-        // dead end — and a support question cannot be answered by a URL that does not resolve.
-        // When there is a page, it goes here; a version number is the fact a support question
-        // actually needs.
-    }
-}

@@ -103,7 +103,7 @@ async fn attach_client_streams_and_types_against_a_daemon() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;
@@ -196,7 +196,7 @@ async fn attach_client_survives_the_idle_sweep() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;
@@ -329,7 +329,7 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;
@@ -446,7 +446,7 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;
@@ -574,7 +574,7 @@ async fn a_claim_with_nothing_behind_it_does_not_strand_the_window() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;
@@ -709,7 +709,7 @@ async fn a_window_opens_at_the_size_of_the_terminal_it_is_drawn_in() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;

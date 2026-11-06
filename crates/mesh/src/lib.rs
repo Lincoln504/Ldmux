@@ -20,7 +20,7 @@
 
 pub mod carrier;
 pub mod constants;
-pub mod frame;
+pub mod error;
 pub mod messages;
 
 pub use carrier::{Bound, Budget, Carrier, Event};
@@ -28,5 +28,5 @@ pub use constants::{
     CREDIT_WINDOW, RECORD_FLOOR, RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY,
     UNKNOWN_RSSI,
 };
-pub use frame::MeshError;
+pub use error::MeshError;
 pub use messages::{SendResult, Status};

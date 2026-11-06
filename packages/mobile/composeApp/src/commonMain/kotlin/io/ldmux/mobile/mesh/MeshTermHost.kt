@@ -21,24 +21,6 @@ fun readMeshCredentials(keys: MeshSessionKeyStore): Pair<MeshCredentialState, Me
     return state to creds
 }
 
-/**
- * The header's status line, or empty when the view has nothing to report.
- *
- * A header that says "choose a shell" above a list of shells is noise: the screen already says
- * it, and the one line costs a row that the terminal will want. Only a state the user would not
- * otherwise know - securing, waiting, failed, closed - earns the line.
- */
-fun meshHeaderStatus(view: MeshTermView): String = when (view) {
-    // Routine: the body already says what to do.
-    is MeshTermView.Choose, MeshTermView.Idle, MeshTermView.Listing -> ""
-    is MeshTermView.Live -> if (view.resyncing || !view.painted || view.stalled) {
-        meshTermLabel(view)
-    } else {
-        ""
-    }
-    else -> meshTermLabel(view)
-}
-
 fun meshTermLabel(view: MeshTermView): String = when (view) {
     MeshTermView.Idle -> "mesh · not attached"
     is MeshTermView.LinkDown -> meshLinkLabel(view.link)
@@ -79,7 +61,7 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
 fun currentMeshResolution(route: MeshRoute): MeshRouteResolution {
     val (state, _) = readMeshCredentials(meshSessionKeyStore())
     return resolveRoute(
-        route, currentPlatform,
+        route,
         hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
     )
 }
@@ -108,14 +90,13 @@ fun meshScreenPlan(
     config: io.ldmux.mobile.LdmuxConfig,
     keys: MeshSessionKeyStore,
     lib: SessionLib?,
-    platform: MobilePlatform = currentPlatform,
     terminalBuilt: Boolean = MESH_TERMINAL_BUILT,
 ): MeshScreenPlan? {
     if (config.route != MeshRoute.Mesh) return null
     val (state, creds) = readMeshCredentials(keys)
     if (lib == null) return null
     val resolution = resolveRoute(
-        config.route, platform,
+        config.route,
         hasPeer = state.hasPeer, hasSessionKeys = state.hasSessionKeys,
         sessionBuilt = MESH_SESSION_BUILT, terminalBuilt = terminalBuilt,
     )
@@ -123,7 +104,3 @@ fun meshScreenPlan(
         MeshScreenPlan(creds, lib, config.meshRadio)
     } else null
 }
-
-/** One picker line: the label when the host gave one, then the id the choice will send. */
-fun meshShellLine(e: SessionEntry): String =
-    if (e.label.isEmpty()) e.id else "${e.label}  (${e.id.take(8)})"

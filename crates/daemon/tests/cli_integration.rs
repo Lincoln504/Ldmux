@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use ldmux_daemon::daemon::LdmuxDaemon;
-use ldmux_daemon::fake_keeper::FakeKeeper;
+use ldmux_testkeeper::FakeKeeper;
 
 /// A stand-in terminal: a script that stays up for the test and needs no display.
 ///
@@ -185,11 +185,6 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     let (code, out, err) = run_cli(&["capture", &session_id], &dir_str).await;
     assert_eq!(code, 0, "capture failed: {out} {err}");
 
-    // `snapshot` — snapshot the session.
-    let (code, out, err) = run_cli(&["snapshot", &session_id], &dir_str).await;
-    assert_eq!(code, 0, "snapshot failed: {out} {err}");
-    assert!(out.contains("cols"), "no cols in snapshot: {out} {err}");
-
     // `kill` — kill the session.
     let (code, out, err) = run_cli(&["kill", &session_id], &dir_str).await;
     assert_eq!(code, 0, "kill failed: {out} {err}");
@@ -276,7 +271,7 @@ async fn cli_code_and_pair_refuse_a_daemon_a_phone_cannot_reach() {
 /// value-taking helper, which reads the *next* argument, so `--json` as the last
 /// argument never matched and the human format came out instead.
 #[tokio::test]
-async fn cli_desktop_json_is_json() {
+async fn cli_list_json_is_json() {
     let dir = scratch();
     let keeper_sock = dir.join("keeper.sock");
     let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
@@ -290,14 +285,6 @@ async fn cli_desktop_json_is_json() {
     wait_socket(&keeper_sock).await;
 
     ensure_cli_built();
-    // The desk-window spawner runs **in the daemon**, so its environment is this process's, not the
-    // CLI subprocess's. The fake must *stay up*: `window` treats a terminal that exits at once as
-    // one that could not open a window, which is the check that keeps a headless `window` from
-    // creating an invisible shell. `$TERMINAL` names it, because that is the one variable a
-    // terminal choice comes from now.
-    // SAFETY: test setup, before any daemon thread reads the environment.
-    unsafe { std::env::set_var("TERMINAL", fake_terminal(&dir)) };
-
     let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
@@ -306,18 +293,23 @@ async fn cli_desktop_json_is_json() {
         d.start(&arc).await.unwrap();
     }
 
-    let (code, out, err) = run_cli(&["desktop", "--json"], &dir.to_string_lossy()).await;
-    assert_eq!(code, 0, "desktop --json failed: {out} {err}");
+    // `--json` is a contract for whatever reads the CLI, not a debug pretty-print: it
+    // parses, and it names the list.
+    let (code, out, err) = run_cli(&["list", "--json"], &dir.to_string_lossy()).await;
+    assert_eq!(code, 0, "list --json failed: {out} {err}");
     let parsed: serde_json::Value =
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("not JSON ({e}): {out}"));
-    assert!(parsed.get("wm").is_some(), "no wm in {parsed}");
+    assert!(
+        parsed.get("sessions").is_some_and(|s| s.is_array()),
+        "no sessions array in {parsed}"
+    );
 
     // Without the flag it is the human format, which is not JSON.
-    let (code, out, _err) = run_cli(&["desktop"], &dir.to_string_lossy()).await;
+    let (code, out, _err) = run_cli(&["list"], &dir.to_string_lossy()).await;
     assert_eq!(code, 0);
     assert!(
-        out.trim_start().starts_with("wm:"),
-        "human format changed: {out}"
+        serde_json::from_str::<serde_json::Value>(&out).is_err() || out.trim().is_empty(),
+        "the human format must not be JSON: {out}"
     );
 
     drop(fk);

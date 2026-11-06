@@ -52,8 +52,8 @@ action the list always offers.
 ### The desk surface
 
 **A desk window is a terminal you already have.** `ldmux attach <id>` runs the same client a
-desk window runs, in the terminal it is started in; `ldmux shell` and `ldmux run` create a
-session and become its window there. The CLI opens nothing: `ldmux new` creates a shell and
+desk window runs, in the terminal it is started in; `ldmux shell` creates a session and becomes
+its window there. The CLI opens nothing: `ldmux new` creates a shell and
 prints its id so a script can carry on.
 
 The one window the daemon spawns is the one asked for by a device that has no terminal — the

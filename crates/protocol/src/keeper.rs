@@ -26,9 +26,6 @@ pub enum KeeperMessage {
     State(State),
     List(List),
     ListResult(ListResult),
-    ChildInfo(ChildInfo),
-    ChildExited(ChildExited),
-    Close(Close),
     Ack(Ack),
     Error(Error),
 }
@@ -50,8 +47,13 @@ pub struct Spawn {
     pub rows: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// The argv to run instead of the keeper's default login shell (the `pi`
-    /// kind runs `pi`). `command[0]` is the program.
+    /// The argv to run instead of the keeper's login shell. `command[0]` is the program.
+    ///
+    /// **The daemon never sets it** — every session is the user's shell, and the `pi` kind
+    /// that used it is gone. It stays because the keeper's own tests need it: the child
+    /// supervision rules (SIGPIPE at its default, a shell that ignores SIGHUP, a writer that
+    /// blocks, exit codes, zombies) can only be exercised by spawning a specific program, and
+    /// a test that cannot name one cannot test the keeper.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
     /// Extra environment for the child (the `LDMUX_*` spawn env, plan §2.6).
@@ -264,13 +266,8 @@ pub struct SnapshotResult {
 pub struct State {
     pub session_id: String,
     /// The shell's pid — the session's process-group leader, and the pid every
-    /// process inside the pane descends from.
-    ///
-    /// The daemon needs it to answer "is this `pi` running inside an ldmux
-    /// session": it walks the pi's ancestry until it hits a pid in this list. The
-    /// TypeScript got the same fact from tmux's `#{pane_pid}`, and without it the
-    /// phone could only guess by directory and opened a new shell instead of
-    /// going to the running one (the TS comment says exactly that).
+    /// process inside the pane descends from. The daemon reports it and kills by it; the
+    /// window manager and the phone identify a shell by it.
     #[serde(default)]
     pub pid: i32,
     pub cols: u64,
@@ -319,22 +316,6 @@ pub struct State {
 #[serde(rename_all = "camelCase")]
 pub struct List {}
 
-/// Keeper → daemon: the child process info for a session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChildInfo {
-    pub pid: u64,
-}
-
-/// Keeper → daemon: the shell exited. (A keeper crash is the documented single
-/// point of failure, plan R3.)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ChildExited {
-    pub session_id: String,
-    pub code: i64,
-}
-
 /// The answer to `List`: every session the keeper holds, as its state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -381,11 +362,6 @@ pub struct Error {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
-
-/// Close the daemon↔keeper connection (not a session close).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct Close {}
 
 #[cfg(test)]
 mod tests {

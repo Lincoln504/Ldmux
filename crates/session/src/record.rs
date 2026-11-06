@@ -119,7 +119,7 @@ pub struct Opened {
     pub counter: u32,
 }
 
-/// Encrypt one record. `record_limit` is the gateway's advertised size.
+/// Encrypt one record. `record_limit` is the size the host (or the radio) allows for one record.
 pub fn seal(
     transport: &StatelessTransportState,
     index: u8,

@@ -21,7 +21,7 @@ the list was right only by accident.
 ## Decision
 
 1. **`ldmux attach <id>` is the desk client for a terminal you already have.** It runs the
-   attach client in the current terminal and becomes the pane; `ldmux run` is the same for a
+   attach client in the current terminal and becomes the pane; `ldmux shell` is the same for a
    shell that does not exist yet. These are the verbs a person uses on the host.
 2. **A spawned window is for the cases where nobody is sitting at the terminal already**:
    the phone's "send to desktop", and the `Mod+Return` keybinding. Those keep working, and

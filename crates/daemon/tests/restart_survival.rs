@@ -70,7 +70,7 @@ async fn restart_survival_three_sessions_survive_daemon_restart() {
         let rec = arc
             .lock()
             .await
-            .create_session("shell", &cwd, Some(&title), "local")
+            .create_session(&cwd, Some(&title), "local")
             .await
             .unwrap();
         ids.push(rec.id.clone());

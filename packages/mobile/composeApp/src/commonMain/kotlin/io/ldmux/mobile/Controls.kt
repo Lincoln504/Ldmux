@@ -30,6 +30,34 @@ import androidx.compose.ui.unit.sp
  * the radio dialog's `apply` had no disabled state at all, so before the radio answered
  * it was the brightest control on the screen and a tap on it produced silence.
  */
+/**
+ * The second action, deliberately not a filled button.
+ *
+ * Two filled buttons of different widths would read as "one primary, one less
+ * primary", which is exactly right — but two of the *same* fill just reads as a
+ * bar split in half. An outline says "this is the other thing you can do" without
+ * competing for the eye.
+ */
+@Composable
+fun OutlinedBtn(
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .clip(RadiusMedium)
+            .border(1.dp, Edge, RadiusMedium)
+            .heightIn(min = LocalTouch.current.min)
+            .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = LocalTouch.current.pad),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = if (enabled) Fg else Dim, fontSize = 13.sp)
+    }
+}
+
 @Composable
 fun AccentBtn(
     label: String,

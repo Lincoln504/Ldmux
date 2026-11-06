@@ -31,9 +31,10 @@ enum class LinkState {
      */
     Rejected,
     /**
-     * Paired, but the chosen route is not the tailnet and cannot run (iOS, session library
-     * missing, shells over mesh not built, no token). Nothing is opened and nothing falls back to
-     * the tailnet: the user chose mesh, so the reason is shown (`LdmuxConfig.routeProblem`).
+     * Paired, but the chosen route cannot run: the session library is missing, the terminal
+     * profile is not built in, or a credential is missing. Nothing is opened and nothing falls
+     * back to the tailnet: the user chose mesh, so the reason is shown
+     * (`LdmuxConfig.routeProblem`).
      */
     RouteUnavailable,
 }

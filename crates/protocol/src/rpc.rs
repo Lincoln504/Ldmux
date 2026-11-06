@@ -12,14 +12,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One version, two names.
+/// One version, two names, and **one literal**.
 ///
-/// `Caps.protocolVersion` and `PingResult.version` are different fields on the
-/// wire, and two independent `= 1`s meant a future bump could update one and not
-/// the other — so a client got a different answer depending on which one it
-/// happened to check. The number lives in `messages.rs`, beside the messages
-/// that carry it; this is the name the socket contract has always exposed it under.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
+/// `Caps.protocolVersion` and `PingResult.version` are different fields on the wire. Two
+/// independent `= 1`s meant a bump could update one and not the other, so a client got a
+/// different answer depending on which field it happened to read. This is an *alias* of the
+/// number in `messages.rs`; `rpc::tests::the_two_protocol_version_names_are_one_number` holds
+/// them together, and `ldmux --version` and `ldmux ping` report the same value `caps` does.
+pub const DAEMON_PROTOCOL_VERSION: u32 = crate::messages::PROTOCOL_VERSION;
 
 /// The method names of the daemon RPC, as a const set (the wire is a string).
 pub mod method {
@@ -220,32 +220,6 @@ pub struct DesktopWindow {
     pub app_class: String,
     pub title: String,
     pub workspace: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DesktopPiSession {
-    pub pid: i64,
-    pub cwd: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    /// The ldmux session this desk `pi` runs inside, found by walking its
-    /// process ancestry up to an ldmux session's shell. Null when the pi was started in a
-    /// terminal that is not an ldmux session.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ldmux_session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcript: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub window_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-    /// What to show in the menu: the directory's basename.
-    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,30 +229,9 @@ pub struct DesktopInventory {
     pub wm: String,
     pub workspaces: Vec<DesktopWorkspace>,
     pub windows: Vec<DesktopWindow>,
-    pub pi_sessions: Vec<DesktopPiSession>,
-    /// Set when windows could not be listed; pi sessions are still reported.
+    /// Set when the window manager could not be enumerated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-}
-
-/// The pane's state, as the daemon reports it for a `snapshot`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PaneState {
-    pub cursor_x: u64,
-    pub cursor_y: u64,
-    pub alternate_on: bool,
-    pub mouse: bool,
-    /// The running program negotiated SGR mouse reporting (1006).
-    pub mouse_sgr: bool,
-    pub app_cursor: bool,
-    pub bracketed_paste: bool,
-    pub history_size: u64,
-    pub cols: u64,
-    pub rows: u64,
-    pub dead: bool,
-    /// The pane's foreground command name (`pane_current_command`).
-    pub foreground: String,
 }
 
 /// The answer to `ping`.
@@ -311,6 +264,26 @@ mod ping_tests {
         assert_eq!(r.build, None);
     }
 
+    /// **One number under two names.** `Caps.protocolVersion` and `PingResult.version` are
+    /// separate wire fields, and the two Rust constants were separate literals until this
+    /// test existed: a bump to one and not the other told a client two different versions.
+    #[test]
+    fn the_two_protocol_version_names_are_one_number() {
+        assert_eq!(DAEMON_PROTOCOL_VERSION, crate::messages::PROTOCOL_VERSION);
+        let ping = PingResult {
+            pong: true,
+            version: DAEMON_PROTOCOL_VERSION,
+            keeper_socket: "/k".into(),
+            build: None,
+        };
+        assert_eq!(ping.version, crate::messages::PROTOCOL_VERSION);
+        assert!(
+            crate::version_line().ends_with(&format!("(protocol {DAEMON_PROTOCOL_VERSION})")),
+            "the version line must name the same number: {}",
+            crate::version_line()
+        );
+    }
+
     /// And a build that carries one writes it, so the client can ask "what is running".
     #[test]
     fn a_ping_answer_carries_the_build_when_there_is_one() {
@@ -324,34 +297,6 @@ mod ping_tests {
         assert!(text.contains(r#""build":"abc12345""#), "{text}");
         assert_eq!(serde_json::from_str::<PingResult>(&text).unwrap(), r);
     }
-}
-
-/// Params for `new`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct NewParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by: Option<String>,
-    /// Tie the session's life to its clients (destroyed when the last one
-    /// detaches).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ephemeral: Option<bool>,
-}
-
-/// Params for `send`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SendParams {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keys: Option<Vec<String>>,
 }
 
 #[cfg(test)]

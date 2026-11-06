@@ -719,11 +719,9 @@ impl Keeper {
     /// Process one keeper message, returning the answer (or an [`km::Error`]).
     ///
     /// Asynchronous: a `Snapshot` hands the render to the session's emulator
-    /// thread and awaits its reply. The daemon (phase 5) calls it from its
-    /// event loop. The keeper→daemon *pushes* (`ChildExited`) are not request
-    /// methods in this skeleton — the daemon learns a death by
-    /// `State`/`List`/`Read` reporting `dead: true` (the push channel is
-    /// wired in phase 5/6).
+    /// thread and awaits its reply. The daemon calls it from its event loop and
+    /// learns a death by `State`/`List`/`Read` reporting `dead: true`; there is no push
+    /// channel, so every message here is a request with a reply.
     pub async fn handle(&self, msg: &KeeperMessage) -> Result<KeeperMessage, String> {
         self.reap(); // refresh liveness before answering anything
         match msg {
@@ -1008,9 +1006,8 @@ impl Keeper {
                     touched,
                 }))
             }
-            km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
-            // The keeper→daemon pushes (`ChildInfo`, `ChildExited`) and the
-            // request-only shapes are not request methods in this skeleton.
+            // The result shapes (`PeekResult`, `State`, `ListResult`, …) travel keeper →
+            // daemon; a caller sending one is asking for nothing.
             other => Err(format!("not a request: {other:?}")),
         }
     }

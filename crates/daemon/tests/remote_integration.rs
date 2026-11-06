@@ -14,7 +14,7 @@
 //!   `probe()` reads the status to tell a refused token from a machine that is off).
 
 use ldmux_daemon::daemon::LdmuxDaemon;
-use ldmux_daemon::fake_keeper::FakeKeeper;
+use ldmux_testkeeper::FakeKeeper;
 
 fn scratch() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();

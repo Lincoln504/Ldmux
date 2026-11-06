@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use ldmux_daemon::fake_keeper::FakeKeeper;
+use ldmux_testkeeper::FakeKeeper;
 use ldmux_daemon::stream::KeeperConn;
 use ldmux_daemon::stream::PaneStream;
 use ldmux_daemon::stream::StreamSubscriber;

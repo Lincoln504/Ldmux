@@ -25,8 +25,9 @@ class LdmuxClientTest {
         assertTrue(c.created.value.isEmpty())
         c.onMessage("""{"type":"live","sessionId":null,"ok":null,"detail":null}""")
         assertEquals(LiveResult("", false, null), c.liveResult.value)
+        // `owned` is ignored by this client (it attaches no stream) and must stay safe to
+        // receive: an older daemon can still send it.
         c.onMessage("""{"type":"owned","sessionId":null,"owner":null}""")
-        assertEquals(OwnedNotice("", null), c.owned.value)
     }
 
     @Test
@@ -80,7 +81,7 @@ class LdmuxClientTest {
     @Test
     fun `creating a shell with no socket is refused, reported and not pretended`() {
         val c = client()
-        assertFalse(c.create("shell", "/tmp"))
+        assertFalse(c.create("/tmp"))
         assertEquals("offline", c.serverError.value?.code)
         assertEquals(1, c.errorTick.value)
     }

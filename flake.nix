@@ -244,7 +244,6 @@
           # fails the check unless each name below matches exactly ONE test: a rename or
           # a new test sharing a prefix cannot silently widen or void the skip set.
           skips="
-            the_desktop_inventory_links_a_running_pi_to_its_session
             a_window_opens_without_any_window_manager
             the_emulator_has_its_own_process_group
             a_background_job_does_not_survive_the_shell

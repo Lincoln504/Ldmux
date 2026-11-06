@@ -200,20 +200,6 @@ private fun FieldBox(placeholder: String, empty: Boolean, modifier: Modifier = M
 /** One text style for every field, so the fields line up with each other. */
 private val FieldText = TextStyle(color = Fg, fontFamily = MonoFont, fontSize = 13.sp)
 
-/** A labelled field, because "which box is the path" is not a question to ask. */
-@Composable
-private fun LabelledField(
-    label: String,
-    value: String,
-    onValueChange: (String) -> Unit,
-    placeholder: String,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad)) {
-        Text(label, color = Dim, fontSize = 10.sp)
-        Field(value, onValueChange, placeholder)
-    }
-}
-
 /**
  * A new shell, asked for one way: where.
  *

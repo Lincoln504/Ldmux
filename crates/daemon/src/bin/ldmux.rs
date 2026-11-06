@@ -6,31 +6,27 @@
 //!
 //! ## Commands
 //!
-//! - `ping` — liveness check.
-//! - `list` — list sessions.
-//! - `new <shell|pi> <cwd> [--title T]` — create a session.
-//! - `send <id> <text>` — send text.
-//! - `key <id> <Key...>` — send keys.
-//! - `capture <id> [--history]` — capture the screen.
-//! - `snapshot <id>` — snapshot the session.
-//! - `kill <id>` — kill a session.
-//! - `close <id>` — close a session (unless a desktop window holds it).
-//! - `forget <id>` — drop a record without touching the keeper.
-//! - `adopt <keeper-name>` — adopt a keeper session.
-//! - `remote` — the remote endpoint info.
-//! - `code` — the pairing QR code.
-//! - `pair` — the pairing link.
-//! - `desktop` — the desktop inventory.
-//! - `live <id> <workspace>` — make a session live.
-//! - `unlive <id>` — close a live session.
-//! - `clipboard-write on|off` — toggle clipboard write.
-//! - `deskWindow`'s CLI forms: `window [cwd]` — open a new shell in a desk window
-//!   (what `$mod+Return` runs); `run <shell|pi> [cwd]` and
-//!   `shell [--name N] [--cwd DIR] [dir]` — become a desk window *in this
-//!   terminal*, reusing a shell already in that directory unless `--name` asks
-//!   for another.
-//! - `mirror <id> [--workspace N] [--rw] [--terminal T]` — a view of a session's
-//!   screen on the desktop, read-only unless `--rw`.
+//! The shell's own lifecycle, in this terminal:
+//!
+//! - `new [--cwd DIR] [dir]` — create a shell and print its id, attaching to nothing.
+//! - `shell [--name N] [--cwd DIR] [dir]`, `run [cwd]` — become a desk window *in this
+//!   terminal*, reusing a shell already in that directory unless `--name` asks for another.
+//! - `attach <id|prefix> [--readonly]` — an existing shell in this terminal.
+//! - `list [--all] [--json]` — the live sessions.
+//! - `kill <id>`, `close <id>` — end a session; `close` lets go instead when a desk window
+//!   holds it.
+//! - `forget <id>`, `adopt <keeper-name>` — repair: drop a dead record, or take back a keeper
+//!   session the registry lost.
+//!
+//! Driving one from a script: `send <id> <text>`, `key <id> <Key...>`,
+//! `capture <id> [--history]`.
+//!
+//! The host itself: `ping`, `terminal [--explain] [--exec <command…>] | set | clear`
+//! (which emulator a spawned window opens in, and why), `mesh [status|preset]`, `code`,
+//! `pair`, `clipboard-write on|off`.
+//!
+//! There is no verb that opens a window. The one window the daemon opens is the phone's
+//! (`send to desktop`); a person at a keyboard is already in the terminal they want.
 
 use ldmux_protocol::rpc::PingResult;
 use ldmux_protocol::socket::{self as ps, CallError};
@@ -51,7 +47,11 @@ async fn daemon_call<R: serde::Serialize, T: serde::de::DeserializeOwned>(
     method: &str,
     params: &R,
 ) -> Result<T, CallError> {
-    ps::call(sock, method, params, 5000).await
+    // Above the daemon's own worst case (`socket::DEFAULT_TIMEOUT_MS` bounds the keeper call at
+    // 8 s), so a slow-but-successful call is not reported to the user as a timeout. A client
+    // that gives up first turns a success into a failure the user cannot distinguish from a
+    // real one.
+    ps::call(sock, method, params, 15_000).await
 }
 
 /// This machine's name, for the pairing: what the app calls the host it is
@@ -105,22 +105,16 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux ping\n  Ask the daemon whether it is alive; prints its protocol version, its build, and its keeper socket as JSON. A daemon too old to know `build` omits it."
         }
         "list" => {
-            "ldmux list [--all] [--json]\n  List the live sessions: id, status, kind, cwd, title, keeper. --all includes the shells that ended, with why; --json is unchanged and always carries every record."
-        }
-        "desktop" => {
-            "ldmux desktop [--json]\n  The desktop inventory: window manager, workspaces, windows."
+            "ldmux list [--all] [--json]\n  List the live sessions: id, status, cwd, title, keeper. --all includes the shells that ended, with why; --json is unchanged and always carries every record."
         }
         "shell" => {
             "ldmux shell [--name N] [--cwd DIR] [dir]\n  Become a desk window for a shell in this terminal. Reuses the shell already in that directory unless --name asks for another."
-        }
-        "run" => {
-            "ldmux run [shell|pi] [cwd]\n  Create a session and become its desk window in this terminal."
         }
         "attach" => {
             "ldmux attach <id|prefix> [--readonly]\n  Attach to an existing shell in this terminal. The desk client is this terminal: no new window is opened."
         }
         "new" => {
-            "ldmux new [--kind shell|pi] [cwd]\n  Create a session and print its id, without attaching to it or opening anything. Look at it with `ldmux attach <id>`."
+            "ldmux new [cwd]\n  Create a shell and print its id, without attaching to it or opening anything. Look at it with `ldmux attach <id>`."
         }
         "terminal" => {
             "ldmux terminal [--explain] [--exec <command...>]\n  The terminal a desk window opens in, and where the answer came from (--explain). The order: a pin set here, $TERMINAL, xdg-terminal-exec, this desktop session's configured terminal, an emulator already running, the system alternative, then the known list.\n\nldmux terminal set <program>\n  Pin it, for example `ldmux terminal set alacritty`. Kept in $XDG_CONFIG_HOME/ldmux/terminal, which the daemon reads.\n\nldmux terminal clear\n  Forget the pin.\n\nldmux terminal --exec <command...>\n  Run <command> in that terminal (the emulator's own flags applied)."
@@ -130,16 +124,12 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "capture" => {
             "ldmux capture <id> [--history]\n  Print the session's screen (with --history, its scrollback too)."
         }
-        "snapshot" => "ldmux snapshot <id>\n  Print the session's full snapshot as JSON.",
         "kill" => "ldmux kill <id>\n  End a session and its shell.",
         "close" => {
             "ldmux close <id>\n  End a session, unless a desktop window holds it (then let go)."
         }
         "forget" => "ldmux forget <id>\n  Drop a session's record without touching the keeper.",
         "adopt" => "ldmux adopt <keeper-name>\n  Adopt a keeper session the daemon does not know.",
-        "remote" => {
-            "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening."
-        }
         "mesh" => {
             "ldmux mesh [status|preset ...] [--json]\n  The radio route: the device the daemon owns, the records left this hour by the radio's own count, its reading, and the tuple it is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
         }
@@ -346,7 +336,7 @@ fn print_mesh_session(v: &serde_json::Value) {
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|desktop|new|shell|run|attach|terminal|send|key|capture|snapshot|kill|close|forget|adopt|remote|mesh|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|new|shell|attach|terminal|send|key|capture|kill|close|forget|adopt|mesh|code|pair|clipboard-write> [args]"
     );
     eprintln!("       ldmux --version    which build this is");
 }
@@ -382,7 +372,6 @@ fn live_rows(sessions: &[serde_json::Value], all: bool) -> Vec<&serde_json::Valu
 /// Every flag here is one a command actually reads. The list is closed on
 /// purpose: a flag that is accepted and ignored is worse than an unknown one,
 /// because the command runs and does something other than what was asked.
-/// `--dry-run` was in this list in the TS and here, read by no command at all.
 fn reject_unknown_flag(rest: &[String]) -> Option<String> {
     const KNOWN_FLAGS: &[&str] = &[
         "--all",
@@ -393,12 +382,7 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--mesh-only",
         "--name",
         "--explain",
-        "--final",
-        "--id",
-        "--stdin",
-        "--kind",
         "--readonly",
-        "--title",
     ];
     for arg in rest {
         if arg == "--" {
@@ -567,6 +551,12 @@ async fn main() {
                 daemon_call(&sock, "list", &serde_json::json!({})).await;
             match r {
                 Ok(v) => {
+                    // `--json` is a contract: it is JSON whatever the answer is, including no
+                    // sessions at all. The human format is what "no sessions" is for.
+                    if rest.iter().any(|a| a == "--json") {
+                        println!("{}", serde_json::to_string(&v).unwrap());
+                        return;
+                    }
                     let sessions = v
                         .get("sessions")
                         .and_then(|s| s.as_array())
@@ -587,7 +577,6 @@ async fn main() {
                         for s in &shown {
                             let id = s.get("id").and_then(|t| t.as_str()).unwrap_or("");
                             let status = s.get("status").and_then(|t| t.as_str()).unwrap_or("");
-                            let kind = s.get("kind").and_then(|t| t.as_str()).unwrap_or("");
                             let cwd = s.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
                             let title = s.get("title").and_then(|t| t.as_str()).unwrap_or("");
                             let keeper_name =
@@ -613,7 +602,7 @@ async fn main() {
                                 Some(r) if status == "dead" => format!("  ({r}{how})"),
                                 _ => String::new(),
                             };
-                            println!("{id}  {status:7} {kind:5} {cwd}  \"{title}\"  {attach}{why}");
+                            println!("{id}  {status:7} {cwd}  \"{title}\"  {attach}{why}");
                         }
                     }
                 }
@@ -733,18 +722,6 @@ async fn main() {
                 }
             }
         }
-        "snapshot" => {
-            let pos = positional(rest, &[]);
-            let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "snapshot", &serde_json::json!({ "id": id })).await;
-            match r {
-                Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap()),
-                Err(e) => {
-                    die(&e, &sock);
-                }
-            }
-        }
         "kill" => {
             let pos = positional(rest, &[]);
             let id = pos.first().copied().unwrap_or("");
@@ -766,7 +743,10 @@ async fn main() {
                     if ended {
                         println!("closed {id}");
                     } else {
-                        println!("let go of {id} (a desktop window holds it)");
+                        // `ended: false` means a claim exists, and the holder may be the
+                        // phone or the radio link as well as a desk window. Naming a desk
+                        // window here was a guess printed as a fact.
+                        println!("let go of {id} (another device holds it)");
                     }
                 }
                 Err(e) => {
@@ -785,7 +765,11 @@ async fn main() {
                     if removed {
                         println!("forgot {id}");
                     } else {
-                        println!("no such session {id}");
+                        // A no-op is not success: every other verb exits non-zero for an
+                        // unknown id, and a script that forgets a record and gets 0 cannot
+                        // tell "removed" from "was never there".
+                        eprintln!("ldmux: no such session {id}");
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
@@ -796,6 +780,10 @@ async fn main() {
         "adopt" => {
             let pos = positional(rest, &[]);
             let keeper_name = pos.first().copied().unwrap_or("");
+            if keeper_name.is_empty() {
+                eprintln!("usage: ldmux adopt <keeper-name>");
+                std::process::exit(2);
+            }
             let r: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
                 "adopt",
@@ -815,30 +803,6 @@ async fn main() {
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
                     println!("{id}  {keeper_name}");
-                }
-                Err(e) => {
-                    die(&e, &sock);
-                }
-            }
-        }
-        "remote" => {
-            let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "remote_info", &serde_json::json!({})).await;
-            match r {
-                Ok(v) => {
-                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
-                    let listening = v
-                        .get("listening")
-                        .and_then(|t| t.as_bool())
-                        .unwrap_or(false);
-                    if listening {
-                        let host = v.get("hostname").and_then(|t| t.as_str()).unwrap_or("");
-                        let port = v.get("port").and_then(|t| t.as_u64()).unwrap_or(0);
-                        let path = v.get("path").and_then(|t| t.as_str()).unwrap_or("");
-                        println!("\nws://{host}:{port}{path}");
-                    } else {
-                        println!("\nnot listening yet");
-                    }
                 }
                 Err(e) => {
                     die(&e, &sock);
@@ -899,69 +863,6 @@ async fn main() {
                     }
                 }
                 Err(e) => die(&e, &sock),
-            }
-        }
-        "desktop" => {
-            let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "desktop", &serde_json::json!({})).await;
-            match r {
-                Ok(v) => {
-                    if rest.iter().any(|a| a == "--json") {
-                        println!("{}", serde_json::to_string_pretty(&v).unwrap());
-                    } else {
-                        let wm = v.get("wm").and_then(|t| t.as_str()).unwrap_or("unknown");
-                        let detail = v.get("detail").and_then(|t| t.as_str()).unwrap_or("");
-                        if detail.is_empty() {
-                            println!("wm: {wm}");
-                        } else {
-                            println!("wm: {wm}  ({detail})");
-                        }
-                        if let Some(ws) = v.get("workspaces").and_then(|w| w.as_array()) {
-                            for w in ws {
-                                let focused =
-                                    w.get("focused").and_then(|t| t.as_bool()).unwrap_or(false);
-                                let name = w.get("name").and_then(|t| t.as_str()).unwrap_or("");
-                                let count =
-                                    w.get("windowCount").and_then(|t| t.as_u64()).unwrap_or(0);
-                                let marker = if focused { "*" } else { " " };
-                                let plural = if count == 1 { "" } else { "s" };
-                                println!("  {marker} {name:12} {count} window{plural}");
-                            }
-                        }
-                        if let Some(pi) = v.get("piSessions").and_then(|s| s.as_array())
-                            && !pi.is_empty()
-                        {
-                            println!("pi sessions:");
-                            for p in pi {
-                                let label = p.get("label").and_then(|t| t.as_str()).unwrap_or("");
-                                let pid = p.get("pid").and_then(|t| t.as_i64()).unwrap_or(0);
-                                let cwd = p.get("cwd").and_then(|t| t.as_str()).unwrap_or("");
-                                // Absent `workspace` is "no window"; present and
-                                // empty is "a window whose workspace the WM did
-                                // not name" — the two used to print the same
-                                // words, so a pi filling a window read "no
-                                // window", which is the anomaly phrase. And a
-                                // pi linked to an ldmux session says which one:
-                                // a desk window is not in the pi's ancestry, so
-                                // its workspace is often unknown here while the
-                                // session is not.
-                                let ws = p.get("workspace").and_then(|t| t.as_str());
-                                let linked = p.get("ldmuxSessionId").and_then(|t| t.as_str());
-                                let where_str = match (ws, linked) {
-                                    (Some(w), _) if !w.is_empty() => format!("ws {w}"),
-                                    (Some(_), None) => "window".to_string(),
-                                    (Some(_), Some(id)) => format!("session {id}"),
-                                    (None, Some(id)) => format!("session {id}"),
-                                    (None, None) => "no window".to_string(),
-                                };
-                                println!("  {label:18} {where_str:24} pid {pid}  {cwd}");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    die(&e, &sock);
-                }
             }
         }
         "clipboard-write" => {
@@ -1133,14 +1034,13 @@ async fn main() {
             // attach: a caller that wants to look at it runs `ldmux attach <id>` in its own
             // terminal, and a phone picks it up from the list. This is the one creating verb
             // that is useful in a script, because it returns instead of taking the terminal.
-            let pos = positional(rest, &["--kind"]);
-            let kind = flag(rest, "--kind").unwrap_or("shell");
+            let pos = positional(rest, &[]);
             let cwd_default = current_dir_or_exit();
             let cwd: &str = pos.first().copied().unwrap_or(&cwd_default);
             let created: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
                 "new",
-                &serde_json::json!({ "kind": kind, "cwd": cwd, "createdBy": "local" }),
+                &serde_json::json!({ "cwd": cwd, "createdBy": "local" }),
             )
             .await;
             match created {
@@ -1161,10 +1061,9 @@ async fn main() {
                 }
             }
         }
-        "run" | "shell" => {
-            // `run <kind> [cwd]` creates a shell and becomes its desk window in
-            // this terminal. `shell [--name N] [--cwd DIR] [dir]` is the same
-            // for a shell, except that it reuses one already in that directory:
+        "shell" => {
+            // Both create a shell and become its desk window in this terminal.
+            // `shell [--name N] [--cwd DIR] [dir]` reuses one already in that directory:
             // running `ldmux shell` twice in one place is "get me back to it",
             // not "give me a second one". The directory is the identity — a
             // title is not stable, and matching on one made the whole rule dead
@@ -1177,17 +1076,7 @@ async fn main() {
             // report "no window" while it filled one, and closing the terminal
             // would leave the shell running with nothing left to end it.
             let pos = positional(rest, &["--name", "--cwd"]);
-            let (kind, positional_cwd) = if cmd == "run" {
-                (
-                    pos.first().copied().unwrap_or("shell").to_string(),
-                    pos.get(1).copied().map(|s| s.to_string()),
-                )
-            } else {
-                (
-                    "shell".to_string(),
-                    pos.first().copied().map(|s| s.to_string()),
-                )
-            };
+            let positional_cwd = pos.first().copied().map(|s| s.to_string());
             let cwd_default = current_dir_or_exit();
             let want_cwd: String = flag(rest, "--cwd")
                 .map(|s| s.to_string())
@@ -1196,7 +1085,7 @@ async fn main() {
             let name = flag(rest, "--name").map(|s| s.to_string());
 
             let mut reused: Option<String> = None;
-            if cmd == "shell" {
+            {
                 let listed: Result<serde_json::Value, CallError> =
                     daemon_call(&sock, "list", &serde_json::json!({})).await;
                 match listed {
@@ -1244,7 +1133,6 @@ async fn main() {
                         &sock,
                         "new",
                         &serde_json::json!({
-                            "kind": kind,
                             "cwd": want_cwd,
                             "title": name,
                             "createdBy": "local",

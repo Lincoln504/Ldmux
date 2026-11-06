@@ -11,7 +11,7 @@
 //! gone; the seam stayed because it is what keeps the loop testable and the device out of it.
 
 use crate::constants::RadioState;
-use crate::frame::MeshError;
+use crate::error::MeshError;
 use crate::messages::{SendResult, Status};
 
 /// What a carrier reports upward.

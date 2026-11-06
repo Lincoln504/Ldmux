@@ -29,23 +29,13 @@ class SettingsLayoutTest {
                 SettingsGroup.Diagnostics,
                 SettingsGroup.Display,
             ),
-            settingsGroups(hasMesh = true),
-        )
-    }
-
-    @Test
-    fun `a platform with one route has no link section`() {
-        // iOS: the tailnet only. A choice of one is not a choice, and a row that cannot
-        // change anything is worse than an absent row.
-        assertEquals(
-            listOf(SettingsGroup.Pairing, SettingsGroup.Diagnostics, SettingsGroup.Display),
-            settingsGroups(hasMesh = false),
+            settingsGroups(),
         )
     }
 
     @Test
     fun `pairing is one section, so both pairings are the same kind of thing`() {
-        val groups = settingsGroups(hasMesh = true)
+        val groups = settingsGroups()
         assertEquals(1, groups.count { it == SettingsGroup.Pairing })
         // And it is the section both pairings are drawn in: nothing else may claim the
         // title, or the screen grows a second place to pair.
@@ -58,7 +48,7 @@ class SettingsLayoutTest {
         // A pairing raises the question this section answers ("what am I paired with, and is it
         // working?"), and a support question outranks a font size. It is also read-only, so it
         // cannot become a second place to configure a link.
-        val groups = settingsGroups(hasMesh = true)
+        val groups = settingsGroups()
         assertEquals(
             groups.indexOf(SettingsGroup.Pairing) + 1,
             groups.indexOf(SettingsGroup.Diagnostics),

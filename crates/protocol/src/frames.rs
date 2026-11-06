@@ -23,19 +23,17 @@
 /// Frame type values. A const set rather than an `enum`: the wire field is a
 /// bare u8, and unknown values (from a newer peer) must decode, not fail.
 pub mod t {
-    pub const HELLO: u8 = 0x01;
-    pub const CAPS: u8 = 0x02;
+    /// The only type the daemon *sends*: pane output. Everything else on the wire is a
+    /// JSON text message; the frame layer carries bytes.
     pub const OUTPUT: u8 = 0x10;
+    // The four below are **test** vocabulary: `frames.rs`'s own tests encode and decode
+    // them to prove the codec handles a payload-less frame, two frames in one buffer and a
+    // JSON payload. Nothing else in the tree sends any of them, so a new frame type needs a
+    // new constant here — there is no vocabulary waiting to be used by mistake.
+    pub const HELLO: u8 = 0x01;
     pub const INPUT: u8 = 0x11;
-    pub const RESIZE: u8 = 0x12;
-    pub const SNAPSHOT: u8 = 0x13;
-    pub const FOLLOW: u8 = 0x14;
-    pub const SESSION_STATE: u8 = 0x15;
-    pub const SCROLLBACK: u8 = 0x16;
     pub const PING: u8 = 0x30;
-    pub const PONG: u8 = 0x31;
     pub const CLOSE: u8 = 0x40;
-    pub const ERROR: u8 = 0xf0;
 }
 
 /// The canonical frame header: type(1) flags(1) reserved(2) length(4).
@@ -138,26 +136,6 @@ pub fn decode_frames(buf: &[u8]) -> Result<DecodeResult, FrameError> {
 pub fn decode_json<T: serde::de::DeserializeOwned>(frame: &Frame) -> Result<T, FrameError> {
     let text = String::from_utf8(frame.payload.clone()).map_err(|e| FrameError(e.to_string()))?;
     serde_json::from_str(&text).map_err(|e| FrameError(e.to_string()))
-}
-
-/// A frame's type byte as a name (for the CLI and tests).
-pub fn type_name(type_: u8) -> &'static str {
-    match type_ {
-        t::HELLO => "hello",
-        t::CAPS => "caps",
-        t::OUTPUT => "output",
-        t::INPUT => "input",
-        t::RESIZE => "resize",
-        t::SNAPSHOT => "snapshot",
-        t::FOLLOW => "follow",
-        t::SESSION_STATE => "session_state",
-        t::SCROLLBACK => "scrollback",
-        t::PING => "ping",
-        t::PONG => "pong",
-        t::CLOSE => "close",
-        t::ERROR => "error",
-        _ => "unknown",
-    }
 }
 
 #[cfg(test)]

@@ -51,7 +51,7 @@
 > emulator encodes. The "press any key" wording below is the earlier revision.
 
 > **Amendment, 2026-10-05 — a desk window may be the terminal that started it.**
-> `ldmux shell` and `ldmux run` become a desk window *in the terminal they were
+> `ldmux shell` and `ldmux attach` become a desk window *in the terminal they were
 > started from*: the daemon is told `deskWindow {spawn: false, pid}`, so nothing is
 > launched here, and the window is that attach process — recorded in
 > `SessionRecord.livePid` and answered for by the kernel, exactly as the shim's pid

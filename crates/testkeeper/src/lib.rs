@@ -11,9 +11,10 @@
 //! under test cannot tell the difference. The "pane" is an in-memory buffer
 //! (what a test injects via [`FakeKeeper::inject_output`]), not a PTY.
 //!
-//! It is a test utility that lives in the daemon crate so both the unit tests
-//! (`src/*.rs`) and any integration tests can reach it; the name says what it
-//! is.
+//! **A dev-dependency crate, not part of the daemon.** It lived in the daemon's
+//! source tree, which compiled it into every `ldmuxd` binary; moving it here keeps
+//! both the daemon's unit tests and its integration tests on the same double
+//! without a release build carrying a second keeper implementation.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -21,6 +22,14 @@ use std::sync::Mutex;
 use ldmux_protocol::keeper::{
     self as km, Ack, KeeperMessage, ListResult, PeekResult, SnapshotResult, State,
 };
+
+/// Wall-clock milliseconds, as the daemon stamps an activity time.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// One fake session (a pane the fake keeper has spawned).
 ///
@@ -147,7 +156,7 @@ impl FakeKeeper {
                 Some(s) if !s.dead => {
                     s.out.extend(w.data.bytes());
                     // Input is activity (the real keeper's rule).
-                    s.activity = crate::daemon::now_ms();
+                    s.activity = now_ms();
                     Ok(KeeperMessage::Ack(Ack {}))
                 }
                 Some(_) => Err(format!("no live session: {}", w.session_id)),
@@ -245,9 +254,8 @@ impl FakeKeeper {
                     activity,
                 }))
             }
-            km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
-            // The request-only shapes (`ChildInfo`, `ChildExited`, the result
-            // types) are not request methods, exactly as the real keeper's.
+            // The result shapes travel keeper → daemon; a caller sending one is asking
+            // for nothing, exactly as the real keeper answers.
             other => Err(format!("not a request: {other:?}")),
         }
     }
@@ -354,7 +362,7 @@ impl FakeKeeper {
             s.out.extend(data.iter().copied());
             // Output is activity (the real keeper stamps its clock in the reader
             // task, the one place every byte from the master passes).
-            s.activity = crate::daemon::now_ms();
+            s.activity = now_ms();
         }
     }
 

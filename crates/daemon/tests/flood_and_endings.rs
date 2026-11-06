@@ -3,13 +3,12 @@
 //!
 //! - A flood is delivered in full, in bounded chunks, with no resync.
 //! - A client that stops reading is repaired **in place** when it said it can be
-//!   (`hello.features: ["inplaceResync"]`): a fresh `caps`+`snapshot` marked
-//!   `"resync": true` on the same socket. A client that said nothing gets the
-//!   legacy `error`/`resync`, exactly as before.
-//! - A session ending is a `session_ended` message for a client that asked
-//!   (`"sessionEnded"`), with the shell's exit status; the final screen can be
-//!   read by a client that reconnects. A client that said nothing sees today's
-//!   `resync` / `session_dead`.
+//!   (`hello.features: ["inplaceResync"]`): a fresh `caps`+`snapshot` on the same
+//!   socket. A client that said nothing gets the legacy `error`/`resync`, exactly as
+//!   before.
+//! - A session ending is `error`/`resync` with the message `session ended`, for every
+//!   client: there is no separate ending message to understand, and the record in the
+//!   list carries the exit status and how it went.
 
 mod common;
 
@@ -18,7 +17,7 @@ use std::time::Duration;
 use common::rig::{Rig, hello_features};
 use common::wsraw::{Msg, RawWs};
 
-const BOTH: &[&str] = &["inplaceResync", "sessionEnded"];
+const INPLACE: &[&str] = &["inplaceResync"];
 
 /// Read until a message satisfies `pick`, within `secs`.
 ///
@@ -145,7 +144,7 @@ async fn flood_until_backlog_notice(
 #[tokio::test]
 async fn a_flood_is_delivered_whole_in_bounded_frames_without_a_resync() {
     let rig = Rig::start().await;
-    let (mut ws, _) = rig.attach_with(BOTH, false).await;
+    let (mut ws, _) = rig.attach_with(INPLACE, false).await;
     ws.send_json(
         &serde_json::json!({"type":"input","data":"yes | head -c 3000000; echo D_$((6*7))\n"}),
     )
@@ -165,9 +164,7 @@ async fn a_flood_is_delivered_whole_in_bounded_frames_without_a_resync() {
             }
             Some(Msg::Text(t)) => {
                 let v: serde_json::Value = serde_json::from_str(&t).unwrap();
-                if v["type"] == "error" && v["code"] == "resync"
-                    || v["type"] == "snapshot" && v["resync"] == true
-                {
+                if v["type"] == "error" && v["code"] == "resync" {
                     resyncs += 1;
                 }
             }
@@ -191,13 +188,13 @@ async fn a_flood_is_delivered_whole_in_bounded_frames_without_a_resync() {
 #[tokio::test]
 async fn a_client_that_fell_behind_gets_an_in_place_snapshot_not_a_forced_reconnect() {
     let rig = Rig::start().await;
-    let (mut ws, _) = rig.attach_with(BOTH, true).await;
+    let (mut ws, _) = rig.attach_with(INPLACE, true).await;
     let mut legacy = false;
     let snap = flood_until_backlog_notice(&mut ws, "D_48", |v| {
         if v["type"] == "error" && v["code"] == "resync" {
             legacy = true;
         }
-        v["type"] == "snapshot" && v["resync"] == true
+        v["type"] == "snapshot" && v["screen"].is_string()
     })
     .await;
     assert!(
@@ -238,71 +235,47 @@ async fn a_client_that_said_nothing_still_gets_the_legacy_resync() {
     assert!(v["message"].is_string());
 }
 
-/// The ending of a shell, for a client that asked, with how it ended.
+/// **How a shell ended is in the record, for every client.** The live notice is
+/// `error`/`resync` (`session ended`); the list carries the status, the signal and the
+/// kind, which is how the app shows "exit 3" after a reconnect. This is the coverage the
+/// deleted `session_ended` message used to carry, moved onto the surface clients actually
+/// read.
 #[tokio::test]
-async fn a_shell_that_exits_is_a_session_ended_with_its_status() {
-    for (cmd, kind, code, sig) in [
-        ("exit 3\n", "exited", Some(3), None),
-        ("kill -9 $$\n", "exited", None, Some(9)),
-    ] {
+async fn a_shell_that_exits_records_its_status_and_signal_in_the_list() {
+    for (cmd, code, sig) in [("exit 3\n", Some(3), None), ("kill -9 $$\n", None, Some(9))] {
         let rig = Rig::start().await;
-        let (mut ws, _) = rig.attach_with(BOTH, false).await;
+        let (mut ws, _) = rig.attach_with(INPLACE, false).await;
         ws.send_json(&serde_json::json!({"type":"input","data":cmd}))
             .await;
-        let ended = until_json(&mut ws, 30, |v| v["type"] == "session_ended").await;
-        assert_eq!(ended["sessionId"], rig.session.as_str());
-        assert_eq!(ended["kind"], kind, "{ended}");
-        assert_eq!(ended["exitCode"].as_i64(), code, "{ended}");
-        assert_eq!(ended["exitSignal"].as_i64(), sig, "{ended}");
-        assert!(ended["reason"].is_string());
+        let v = until_json(&mut ws, 30, |v| {
+            v["type"] == "error" && v["code"] == "resync"
+        })
+        .await;
+        assert_eq!(v["message"], "session ended");
+
+        let mut old = rig.connect(None).await;
+        hello_features(&mut old, &[]).await;
+        old.send_json(&serde_json::json!({"type":"list"})).await;
+        let list = until_json(&mut old, 10, |v| v["type"] == "sessions").await;
+        let s = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == rig.session.as_str())
+            .expect("the ended session is still listed");
+        assert_eq!(s["status"], "dead");
+        assert_eq!(s["endedKind"], "exited");
+        assert_eq!(s["exitCode"].as_i64(), code, "{s}");
+        assert_eq!(s["exitSignal"].as_i64(), sig, "{s}");
+
+        // A client that attaches to the ended session is refused, naming it.
+        let mut late = rig.connect(None).await;
+        hello_features(&mut late, &[]).await;
+        late.send_json(&serde_json::json!({"type":"attach","sessionId":rig.session}))
+            .await;
+        let e = until_json(&mut late, 10, |v| v["type"] == "error").await;
+        assert_eq!(e["code"], "session_dead");
     }
-}
-
-/// A client that reconnects after the shell ended can still read its last screen.
-#[tokio::test]
-async fn a_reconnecting_client_reads_the_final_screen_then_the_ending() {
-    let rig = Rig::start().await;
-    let (mut ws, _) = rig.attach_with(BOTH, false).await;
-    ws.send_json(&serde_json::json!({"type":"input","data":"echo LAST_WORDS_$((6*7)); exit 7\n"}))
-        .await;
-    until_json(&mut ws, 30, |v| v["type"] == "session_ended").await;
-    drop(ws);
-
-    // Capable client: caps + snapshot (with the last screen) + session_ended.
-    let mut ws = rig.connect(None).await;
-    hello_features(&mut ws, BOTH).await;
-    ws.send_json(&serde_json::json!({"type":"attach","sessionId":rig.session}))
-        .await;
-    let mut out = Vec::new();
-    ws.until_type("caps", &mut out).await;
-    let snap = ws.until_type("snapshot", &mut out).await;
-    assert!(
-        snap["screen"].as_str().unwrap().contains("LAST_WORDS_42"),
-        "{snap}"
-    );
-    let ended = ws.until_type("session_ended", &mut out).await;
-    assert_eq!(ended["exitCode"], 7);
-
-    // A client that said nothing is refused as it always was.
-    let mut old = rig.connect(None).await;
-    hello_features(&mut old, &[]).await;
-    old.send_json(&serde_json::json!({"type":"attach","sessionId":rig.session}))
-        .await;
-    let e = until_json(&mut old, 10, |v| v["type"] == "error").await;
-    assert_eq!(e["code"], "session_dead");
-
-    // The list carries the structured ending.
-    old.send_json(&serde_json::json!({"type":"list"})).await;
-    let list = until_json(&mut old, 10, |v| v["type"] == "sessions").await;
-    let s = list["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == rig.session.as_str())
-        .unwrap();
-    assert_eq!(s["status"], "dead");
-    assert_eq!(s["endedKind"], "exited");
-    assert_eq!(s["exitCode"], 7);
 }
 
 /// A client that did not ask for endings sees the legacy `resync` when its shell ends.

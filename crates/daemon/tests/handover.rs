@@ -124,7 +124,7 @@ async fn handover_size_and_close_does_not_detach() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;
@@ -346,7 +346,7 @@ impl Harness {
             ids.push(
                 arc.lock()
                     .await
-                    .create_session("shell", &cwd, None, "local")
+                    .create_session(&cwd, None, "local")
                     .await
                     .unwrap()
                     .id,
@@ -517,7 +517,7 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
     h.arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap();
     assert!(

@@ -4,7 +4,6 @@ import io.ldmux.mobile.mesh.MeshInputMode
 import io.ldmux.mobile.mesh.MeshRoute
 import io.ldmux.mobile.mesh.MeshRouteProblem
 import io.ldmux.mobile.mesh.MeshRouteResolution
-import io.ldmux.mobile.mesh.currentPlatform
 import io.ldmux.mobile.mesh.resolveRoute
 
 /**
@@ -163,7 +162,7 @@ data class LdmuxConfig(
     ): MeshRouteProblem? {
         // Not gated on [isPaired]: that is the tailnet pairing, and a mesh-only device has none.
         if (route == MeshRoute.Tailnet) return null
-        return (resolveRoute(route, currentPlatform, hasPeer, hasSessionKeys = hasSessionKeys) as? MeshRouteResolution.Unusable)?.problem
+        return (resolveRoute(route, hasPeer, hasSessionKeys = hasSessionKeys) as? MeshRouteResolution.Unusable)?.problem
     }
 
     val panelLeft: Boolean get() = side != "right"

@@ -89,7 +89,11 @@ fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     }
     let mut out = [0u8; 4];
     for (i, p) in parts.iter().enumerate() {
-        if p.is_empty() || p.len() > 1 && p.starts_with('0') {
+        // Decimal digits only: `u32::from_str` also accepts a leading `+`, so
+        // `"100.64.+1.2"` would have been read as a tailnet address while a leading zero
+        // (`"010"`) was already refused. A parser that accepts one non-canonical spelling
+        // and rejects another is a parser whose answers nobody can predict.
+        if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) || p.len() > 1 && p.starts_with('0') {
             return None;
         }
         let n: u32 = p.parse().ok()?;
@@ -200,6 +204,11 @@ mod tests {
             ("host.example.ts.net", AddressKind::Other),
             ("", AddressKind::Other),
             ("not an address", AddressKind::Other),
+            // Non-canonical spellings, refused like a leading zero already was: a `+` is a
+            // sign to `u32::from_str`, not a digit, and an address parser that takes one
+            // spelling of the same number and refuses another has no rule.
+            ("100.64.+1.2", AddressKind::Other),
+            ("100.64.01.2", AddressKind::Other),
         ]);
     }
 

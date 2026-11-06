@@ -66,7 +66,7 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
         let rec = arc
             .lock()
             .await
-            .create_session("shell", &cwd, Some(&title), "local")
+            .create_session(&cwd, Some(&title), "local")
             .await
             .unwrap();
         ids.push(rec.id.clone());
@@ -179,7 +179,7 @@ async fn a_daemon_starts_next_to_a_stale_keeper_socket() {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, Some("after-a-stale-socket"), "local")
+        .create_session(&cwd, Some("after-a-stale-socket"), "local")
         .await
         .unwrap()
         .id;

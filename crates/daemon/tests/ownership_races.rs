@@ -84,7 +84,7 @@ async fn fixture() -> Fixture {
     let id = arc
         .lock()
         .await
-        .create_session("shell", &cwd, None, "local")
+        .create_session(&cwd, None, "local")
         .await
         .unwrap()
         .id;

@@ -59,7 +59,10 @@ internal fun TerminalArea(
     // that is not "no sessions", it is "one is on its way", and saying the wrong
     // one of those is exactly what read as a bug: the launcher had three things
     // on it, one was tapped, and the terminal screen it landed on flatly denied
-    // anything was open.
+    // anything was open. Nothing is said when nothing is on its way: the caller
+    // returns to the launcher then (`AppContent`'s `chosenAlive` effect), so an
+    // empty screen here is a frame, and a sentence naming a control that lives on
+    // another screen is worse than a frame of nothing.
     pendingOpen: Boolean = false,
     /**
      * A page's shell is gone: ended, or unknown to the daemon.
@@ -72,12 +75,14 @@ internal fun TerminalArea(
 ) {
     Box(modifier.background(Bg)) {
         if (pages.isEmpty()) {
-            Text(
-                if (pendingOpen) "Opening a shell…" else "No sessions yet. Tap new shell to start one.",
-                color = Dim,
-                fontSize = 13.sp,
-                modifier = Modifier.align(Alignment.Center).padding(16.dp),
-            )
+            if (pendingOpen) {
+                Text(
+                    "Opening a shell…",
+                    color = Dim,
+                    fontSize = 13.sp,
+                    modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                )
+            }
         } else {
             // **The page is keyed by the shell, not by the slot.** Without a key the
             // pager reuses the composition at an index, so when the session list

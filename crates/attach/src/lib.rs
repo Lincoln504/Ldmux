@@ -10,15 +10,13 @@
 //!
 //! Transport: the daemon's **local attach socket** (`<control>-attach.sock`, a
 //! Unix socket speaking the same WebSocket protocol the phone uses, 0600 and
-//! checked by peer uid), so a window needs no tailnet and no token. Only a daemon
-//! that predates that socket is reached the old way, over the remote endpoint the
-//! `remote_info` control-socket call names. The device identity is the daemon's
-//! desktop device, so `makeLive`'s claim and this attach agree.
+//! checked by peer uid), so a window needs no tailnet and no token. It is the only
+//! way in. The device identity is the daemon's desktop device, so `makeLive`'s
+//! claim and this attach agree.
 
 use futures_util::SinkExt;
 use futures_util::stream::StreamExt;
 use ldmux_protocol::frames::{decode_frames, t as ft};
-use ldmux_protocol::socket;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -148,7 +146,7 @@ const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(120)
 /// One pane row, cut to what this window can show.
 ///
 /// The pane's grid is shared, so it can be wider than the window showing it (another device
-/// resized it, or this window is a read-only mirror that must not resize it). Writing such a
+/// resized it, or this window is a read-only viewer that must not resize it). Writing such a
 /// row verbatim makes the terminal hard-wrap it: eighty-two rows became a hundred and sixty-four
 /// lines, the screen scrolled, and the cursor was then placed on the wrong row. Escape sequences
 /// are copied whole and do not count toward the width, so a styled row is cut, not corrupted.
@@ -206,11 +204,10 @@ const DESKTOP_DEVICE: &str = "desktop";
 ///
 /// `inplaceResync`: when the picture goes stale (output dropped for a slow link, or
 /// more than the daemon will hold arriving while this window attaches to a busy
-/// shell) the daemon sends a fresh `snapshot` marked `resync`, which [`pump`]
-/// already paints like any other. Without it the daemon answers with the legacy
-/// `error`/`resync`, which costs a second attach and used to cost the connection
-/// (the daemon's byte accounting for that notice underflowed and panicked).
-/// `sessionEnded` is deliberately not claimed: this window ends on `session_dead`.
+/// shell) the daemon sends a fresh `snapshot`, which [`pump`] already paints like any
+/// other. Without it the daemon answers with the legacy `error`/`resync`, which costs
+/// a second attach and used to cost the connection (the daemon's byte accounting for
+/// that notice underflowed and panicked).
 const FEATURES: [&str; 1] = ["inplaceResync"];
 
 /// The first `attach` of a connection: the session, this window's size, and what it
@@ -320,7 +317,7 @@ pub fn tty_size_for_test() -> Option<(u64, u64)> {
 /// tty never changed gets no SIGWINCH, so seeing the disagreement in a snapshot is
 /// the only notice it will ever get. Re-asserting once per mismatch (rather than on
 /// every snapshot) bounds it against a device that keeps resizing. A read-only
-/// mirror holds nothing and must never resize.
+/// read-only viewer holds nothing and must never resize.
 fn should_reassert(
     cols: u64,
     rows: u64,
@@ -457,7 +454,7 @@ async fn termination() -> &'static str {
 
 /// Attach this process's terminal to `session_id` and run until the window
 /// closes or the shell ends. `readonly` attaches with no identity, so it holds
-/// nothing (the daemon's read-only mirror path).
+/// nothing (the read-only viewer path).
 ///
 /// The terminal is put in raw mode here, not in the loop, and is restored on every
 /// way out: return, a termination signal, a panic.
@@ -504,39 +501,6 @@ enum Outcome {
     Lost,
 }
 
-/// The daemon's remote endpoint, as the control socket reports it.
-struct RemoteInfo {
-    hostname: String,
-    port: u64,
-    path: String,
-    token: String,
-}
-
-async fn remote_info(daemon_socket: &str) -> Result<RemoteInfo, String> {
-    let info: serde_json::Value =
-        socket::call(daemon_socket, "remote_info", &serde_json::json!({}), 5000)
-            .await
-            .map_err(|e| e.0)?;
-    let hostname = info["hostname"].as_str().unwrap_or("").to_string();
-    let port = info["port"].as_u64().unwrap_or(0);
-    let path = info["path"].as_str().unwrap_or("/ws").to_string();
-    let token = info["token"].as_str().unwrap_or("").to_string();
-    if !info["listening"].as_bool().unwrap_or(false) {
-        return Err(
-            "the daemon's remote is not listening (is Tailscale up? LDMUX_REMOTE_HOST must be an address this machine has; `ldmux remote` shows what the daemon bound)"
-                .to_string(),
-        );
-    }
-    if hostname.is_empty() || port == 0 {
-        return Err("the daemon has no remote address".to_string());
-    }
-    Ok(RemoteInfo {
-        hostname,
-        port,
-        path,
-        token,
-    })
-}
 
 /// 250 ms doubling to 5 s. A daemon restart takes a second or two; a window must
 /// not hammer a socket that is not there, and must reconnect promptly when it is.
@@ -616,46 +580,17 @@ where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    // The way in is the daemon's local attach socket (`<control>-attach.sock`):
-    // the same WebSocket protocol over a Unix socket, so a window needs neither
-    // the tailnet nor the token. Only a daemon that predates the socket (nothing
-    // there, or nothing listening) is reached the old way, over the remote
-    // endpoint `remote_info` names.
+    // **One transport.** The daemon's local attach socket (`<control>-attach.sock`): the
+    // same WebSocket protocol over a Unix socket, 0600 and peer-uid checked, so a desk
+    // window needs neither the tailnet nor the token. There is no second way in.
     let local = ldmux_protocol::paths::attach_socket_path_from(daemon_socket);
-    match tokio::net::UnixStream::connect(&local).await {
-        Ok(stream) => {
-            let (ws, _) = tokio_tungstenite::client_async("ws://ldmux.local/ws", stream)
-                .await
-                .map_err(|e| format!("attach socket {local}: {e}"))?;
-            pump(ws, session_id, readonly, input, output, ping_ms).await
-        }
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            let info = remote_info(daemon_socket).await?;
-            let uri = format!("ws://{}:{}{}", info.hostname, info.port, info.path);
-            let mut req = {
-                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-                uri.clone()
-                    .into_client_request()
-                    .map_err(|e| e.to_string())?
-            };
-            req.headers_mut().insert(
-                "Authorization",
-                format!("Bearer {}", info.token)
-                    .parse()
-                    .map_err(|_| "bad token header".to_string())?,
-            );
-            let (ws, _) = tokio_tungstenite::connect_async(req)
-                .await
-                .map_err(|e| format!("connect {uri}: {e}"))?;
-            pump(ws, session_id, readonly, input, output, ping_ms).await
-        }
-        Err(e) => Err(format!("attach socket {local}: {e}")),
-    }
+    let stream = tokio::net::UnixStream::connect(&local)
+        .await
+        .map_err(|e| format!("attach socket {local}: {e}"))?;
+    let (ws, _) = tokio_tungstenite::client_async("ws://ldmux.local/ws", stream)
+        .await
+        .map_err(|e| format!("attach socket {local}: {e}"))?;
+    pump(ws, session_id, readonly, input, output, ping_ms).await
 }
 
 /// Attach and pump on an established WebSocket until the link or the shell ends.
@@ -706,7 +641,7 @@ where
     ping.tick().await; // the first tick is immediate; the first ping is not
     let mut missed_pongs: u32 = 0;
 
-    // Identify (desktop) and attach. A read-only mirror sends no `hello`, so it
+    // Identify (desktop) and attach. A read-only viewer sends no `hello`, so it
     // holds no claim and cannot type.
     if !readonly {
         send(
@@ -984,7 +919,7 @@ where
                 {
                     cols = c;
                     rows = r;
-                    // A read-only mirror holds no claim and must not resize the shared
+                    // A read-only viewer holds no claim and must not resize the shared
                     // pane: only the device that owns the shell decides its geometry.
                     if !readonly {
                         let _ = send(
@@ -1103,7 +1038,7 @@ mod render_tests {
     /// Another device can resize the shared pane under a window whose own tty did
     /// not change. The window must take its size back once, and not spin doing it.
     /// The window says what it can take, in the first attach (the daemon reads the
-    /// features off an `attach` as well as a `hello`, so a read-only mirror that
+    /// features off an `attach` as well as a `hello`, so a read-only viewer that
     /// sends no `hello` is covered too).
     #[test]
     fn the_first_attach_advertises_in_place_resync() {
@@ -1124,7 +1059,7 @@ mod render_tests {
         // Already re-asserted this size and the answer has not caught up: wait,
         // do not send one resize per snapshot.
         assert!(!should_reassert(158, 82, 48, 17, false, Some((158, 82))));
-        // A read-only mirror holds nothing and must never resize.
+        // A read-only viewer holds nothing and must never resize.
         assert!(!should_reassert(158, 82, 48, 17, true, None));
         // Once in step again, the next mismatch is a new one to answer.
         assert!(should_reassert(158, 82, 48, 17, false, Some((100, 40))));

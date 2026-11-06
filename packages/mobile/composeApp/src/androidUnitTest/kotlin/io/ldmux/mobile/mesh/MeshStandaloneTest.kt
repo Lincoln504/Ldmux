@@ -50,7 +50,7 @@ class MeshStandaloneTest {
         assertEquals(
             MeshRouteResolution.Use(MeshRoute.Mesh),
             resolveRoute(
-                MeshRoute.Mesh, MobilePlatform.Android,
+                MeshRoute.Mesh,
                 hasPeer = true, hasSessionKeys = true,
                 sessionBuilt = true, terminalBuilt = true,
             ),
@@ -58,7 +58,7 @@ class MeshStandaloneTest {
         assertEquals(
             MeshRouteProblem.NeedsPeer,
             (resolveRoute(
-                MeshRoute.Mesh, MobilePlatform.Android,
+                MeshRoute.Mesh,
                 hasPeer = false, hasSessionKeys = true,
                 sessionBuilt = true, terminalBuilt = true,
             ) as MeshRouteResolution.Unusable).problem,
@@ -68,7 +68,7 @@ class MeshStandaloneTest {
     @Test
     fun `missing keys are named before missing radio`() {
         val r = resolveRoute(
-            MeshRoute.Mesh, MobilePlatform.Android,
+            MeshRoute.Mesh,
             hasPeer = false, hasSessionKeys = false,
             sessionBuilt = true, terminalBuilt = true,
         )
@@ -79,7 +79,6 @@ class MeshStandaloneTest {
     fun `the setup view offers the mesh route only when it can run`() {
         val view = meshSetupView(
             MeshCredentialState(hasSessionKeys = true, hasPeer = true),
-            platform = MobilePlatform.Android,
             sessionBuilt = true,
             terminalBuilt = true,
         )
@@ -91,7 +90,6 @@ class MeshStandaloneTest {
     fun `the setup view says which credential is missing`() {
         val view = meshSetupView(
             MeshCredentialState(hasSessionKeys = true, hasPeer = false),
-            platform = MobilePlatform.Android,
             sessionBuilt = true,
             terminalBuilt = true,
         )

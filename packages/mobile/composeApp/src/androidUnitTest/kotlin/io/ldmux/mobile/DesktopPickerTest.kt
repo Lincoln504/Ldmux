@@ -26,7 +26,7 @@ class DesktopPickerTest {
     )
 
     private fun win(workspace: String) =
-        DesktopWindow(id = "0x1", appClass = "x", title = "", workspace = workspace, pid = null)
+        DesktopWindow(id = "0x1", appClass = "x", title = "", workspace = workspace)
 
     @Test
     fun `a focused empty workspace is offered`() {

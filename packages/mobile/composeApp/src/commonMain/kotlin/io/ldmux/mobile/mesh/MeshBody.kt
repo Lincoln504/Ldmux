@@ -91,7 +91,6 @@ fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
         "the pairing code has no host radio key",
         "print a new one: ldmux code --mesh",
     )
-    MeshRouteProblem.NotOnThisPlatform -> MeshBody("the mesh route is not available on this device")
     MeshRouteProblem.SessionNotBuilt -> MeshBody("the session library did not load on this device")
     MeshRouteProblem.TerminalNotBuilt -> MeshBody("the terminal is unavailable on this device")
 }

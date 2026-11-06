@@ -20,16 +20,6 @@ enum class MeshRoute { Tailnet, Mesh }
  */
 enum class MeshInputMode { Live, ManualSync }
 
-/** The platforms the mobile app ships on. iOS is tailnet only: no MeshCore, no gateway. */
-enum class MobilePlatform { Android, Ios }
-
-/**
- * The platform this build runs on. Only `androidTarget` exists in `composeApp/build.gradle.kts`,
- * so [MobilePlatform.Ios] is a spec value with no build variant yet: when an iOS target is
- * added the compiler will demand its `actual` here, which is the point of declaring it.
- */
-expect val currentPlatform: MobilePlatform
-
 /**
  * Whether this build contains the phone's end of the end-to-end session (ADR-0020): `MeshSession`
  * over the Rust library. It does. Whether the library *loaded on this device* is a separate fact,
@@ -43,7 +33,7 @@ const val MESH_SESSION_BUILT: Boolean = true
  * port of the row encoding (`MeshTerm`, held to the Rust encoder's bytes), the attach driver
  * (`MeshTermDriver`), the reduced-terminal screen (`MeshTerminalScreen`) and the key delivery
  * (`ldmux code --mesh`, `MeshEnrollment`) exist and are tested. **True does not mean usable**:
- * [resolveRoute] still reports every missing credential, the library not loading, and iOS, and
+ * [resolveRoute] still reports every missing credential and the library not loading, and
  * nothing is opened for a route that resolves to a problem. The route is chosen in the app header
  * (`availableRoutes`), and Settings carries the BLE radio selector (`MeshRouteSection`,
  * `meshSetupView`). The standalone path has a two-radio hardware run as of 2026-11-02;
@@ -54,11 +44,12 @@ const val MESH_TERMINAL_BUILT: Boolean = true
 /** Whether the native session library loaded on this device. */
 fun sessionLibAvailable(): Boolean = loadSessionLib() != null
 
-/** Routes that exist on [platform]. The mesh option does not exist on iOS at all. */
-fun availableRoutes(platform: MobilePlatform): List<MeshRoute> = when (platform) {
-    MobilePlatform.Android -> listOf(MeshRoute.Tailnet, MeshRoute.Mesh)
-    MobilePlatform.Ios -> listOf(MeshRoute.Tailnet)
-}
+/**
+ * Every route this build can take. One list, because there is one target: `composeApp`
+ * declares only `androidTarget`, so a per-platform answer had a branch nothing could reach.
+ * A second client (`packages/mobile` would need an iOS target first) adds its own answer here.
+ */
+fun availableRoutes(): List<MeshRoute> = listOf(MeshRoute.Tailnet, MeshRoute.Mesh)
 
 /** Parse a persisted route. Unknown text is the tailnet, which is what an old install is. */
 fun meshRouteFromStored(text: String?): MeshRoute =
@@ -66,9 +57,6 @@ fun meshRouteFromStored(text: String?): MeshRoute =
 
 /** Why a chosen route cannot be used. Each is shown; none is papered over with another route. */
 enum class MeshRouteProblem {
-    /** `Mesh` is saved, but this platform has no BLE radio owner (iOS). Fails visibly, never falls back. */
-    NotOnThisPlatform,
-
     /** The session library is not in this build, or did not load on this device. */
     SessionNotBuilt,
 
@@ -94,7 +82,6 @@ sealed interface MeshRouteResolution {
  */
 fun resolveRoute(
     saved: MeshRoute,
-    platform: MobilePlatform,
     hasPeer: Boolean,
     sessionBuilt: Boolean = MESH_SESSION_BUILT && sessionLibAvailable(),
     terminalBuilt: Boolean = MESH_TERMINAL_BUILT,
@@ -102,9 +89,6 @@ fun resolveRoute(
     hasSessionKeys: Boolean = true,
 ): MeshRouteResolution {
     if (saved == MeshRoute.Tailnet) return MeshRouteResolution.Use(MeshRoute.Tailnet)
-    if (MeshRoute.Mesh !in availableRoutes(platform)) {
-        return MeshRouteResolution.Unusable(saved, MeshRouteProblem.NotOnThisPlatform)
-    }
     // Checked before the peer: asking the user to pair a route that cannot work yet is a
     // trap, so the first thing they are told is the real reason.
     if (!sessionBuilt) return MeshRouteResolution.Unusable(saved, MeshRouteProblem.SessionNotBuilt)
@@ -135,7 +119,6 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
 }
 
 fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
-    MeshRouteProblem.NotOnThisPlatform -> "mesh route is not available on this device"
     MeshRouteProblem.SessionNotBuilt -> "mesh · session library unavailable on this device"
     MeshRouteProblem.TerminalNotBuilt -> "mesh · the terminal is unavailable on this device"
     MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a pairing code made with ldmux code --mesh"

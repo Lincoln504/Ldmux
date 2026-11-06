@@ -98,8 +98,8 @@ pub struct MeshKeys {
     /// The host's radio public key, which the phone binds.
     ///
     /// A daemon that owns its radio reads this from `SELF_INFO` and needs no configuration;
-    /// `LDMUX_MESH_SELF` still overrides it for a host that pins a key. Optional because a daemon
-    /// behind a gateway learns nothing about the radio, and a code without it cannot be used.
+    /// `LDMUX_MESH_SELF` still overrides it for a host that pins a key. Optional because a
+    /// daemon that does not own its radio cannot learn it, and a code without it cannot be used.
     pub host_radio: Option<[u8; 32]>,
     /// The tuple the host's radio reports, so the phone can compare and match it.
     pub host_preset: Option<HostPreset>,
@@ -125,13 +125,8 @@ impl std::fmt::Display for PairingError {
 }
 impl std::error::Error for PairingError {}
 
-/// The link for `p`. Errors on a pairing the app would refuse, so the CLI
-/// never shows one.
-pub fn pairing_link(p: &Pairing) -> Result<String, PairingError> {
-    pairing_link_with_mesh(p, None)
-}
-
-/// As [`pairing_link`], with the mesh keys appended when given.
+/// The link for `p`, with the mesh keys appended when given. Errors on a pairing
+/// the app would refuse, so the CLI never shows one.
 pub fn pairing_link_with_mesh(
     p: &Pairing,
     mesh: Option<&MeshKeys>,
@@ -538,7 +533,7 @@ mod tests {
             let token = c["pairing"]["token"].as_str().unwrap().to_string();
             let name = c["pairing"]["name"].as_str().unwrap().to_string();
             let p = Pairing { host, token, name };
-            let link = pairing_link(&p).expect("valid pairing must make a link");
+            let link = pairing_link_with_mesh(&p, None).expect("valid pairing must make a link");
             let got = parse_pairing_link(&link).expect("cli link must parse back");
             assert_eq!(got, p, "round-trip for {link}");
         }
@@ -552,19 +547,19 @@ mod tests {
             token: token.clone(),
             name: "".into(),
         };
-        assert!(pairing_link(&p).is_err(), "LAN host must be refused");
+        assert!(pairing_link_with_mesh(&p, None).is_err(), "LAN host must be refused");
         let p = Pairing {
             host: "100.100.0.1".into(),
             token: token.clone(),
             name: "".into(),
         };
-        assert!(pairing_link(&p).is_err(), "missing :port must be refused");
+        assert!(pairing_link_with_mesh(&p, None).is_err(), "missing :port must be refused");
         let p = Pairing {
             host: "100.100.0.1:7625".into(),
             token: "short".into(),
             name: "".into(),
         };
-        assert!(pairing_link(&p).is_err(), "short token must be refused");
+        assert!(pairing_link_with_mesh(&p, None).is_err(), "short token must be refused");
     }
 
     #[test]
@@ -574,7 +569,7 @@ mod tests {
             token: "f".repeat(64),
             name: "debian".into(),
         };
-        let link = pairing_link(&p).unwrap();
+        let link = pairing_link_with_mesh(&p, None).unwrap();
         // 134 bytes is what a version-6 code holds at level L (41 modules, 25
         // terminal rows with the quiet zone).
         assert!(link.len() <= 134, "link too long: {}", link.len());
@@ -671,7 +666,7 @@ mod tests {
         // Without keys it is byte-for-byte the old link.
         assert_eq!(
             pairing_link_with_mesh(&p, None).unwrap(),
-            pairing_link(&p).unwrap()
+            pairing_link_with_mesh(&p, None).unwrap()
         );
     }
 

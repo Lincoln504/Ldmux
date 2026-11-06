@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use ldmux_companion::{ByteLink, Companion, SerialLink, SessionError};
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
-use ldmux_mesh::frame::MeshError;
+use ldmux_mesh::error::MeshError;
 use ldmux_mesh::messages::{SendResult, Status};
 use tokio::sync::mpsc as async_mpsc;
 

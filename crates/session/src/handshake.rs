@@ -192,7 +192,7 @@ impl Initiator {
     }
 }
 
-/// What the gateway knows about one paired phone.
+/// What the host knows about one paired phone.
 #[derive(Clone, Debug)]
 pub struct PairingEntry {
     pub psk: [u8; 32],
@@ -214,7 +214,7 @@ pub struct Accepted {
     pub timestamp_ms: u64,
 }
 
-/// The gateway's side.
+/// The host's side.
 pub struct Responder {
     pub static_key: Keypair,
     pub window_ms: u64,

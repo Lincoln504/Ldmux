@@ -519,13 +519,6 @@ class MeshTerminalSource(
         return sb.toString()
     }
 
-    /** Write the host's [screen] into the engine, replacing whatever is there. */
-    private fun writeBase(screen: MeshScreen) {
-        val e = engine ?: return
-        val bytes = meshScreenBytes(screen, cols, rows)
-        e.write(bytes, bytes.size)
-    }
-
     /** Draw the live screen, or the history window at [offset] rows above it. */
     private fun paint() {
         echoing = false

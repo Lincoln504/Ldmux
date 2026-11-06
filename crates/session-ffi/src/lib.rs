@@ -288,7 +288,7 @@ pub unsafe extern "C" fn ldmux_initiator_free(hs: *mut *mut LdmuxInitiator) {
     });
 }
 
-/// The gateway's side for one pairing. `pinned` is null or 32 bytes. On success `reply` holds the
+/// The host's side for one pairing. `pinned` is null or 32 bytes. On success `reply` holds the
 /// 50-byte message 2, `remote_static_out` the phone key to pin, `*timestamp_out` the timestamp
 /// to remember, and `*out` the established session.
 #[unsafe(no_mangle)]

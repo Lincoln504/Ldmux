@@ -1,0 +1,19 @@
+[package]
+name = "ldmux-testkeeper"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The in-memory keeper the daemon's tests run against; a dev-dependency, never shipped"
+
+[dependencies]
+ldmux-protocol = { path = "../protocol" }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "sync", "time"] }
+
+[dev-dependencies]
+rand = { version = "0.9", features = ["std"] }
+
+[lints]
+workspace = true

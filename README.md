@@ -60,8 +60,8 @@ for (`send to desktop`), and it uses the terminal you configured: `ldmux termina
 alacritty` pins it, otherwise `$TERMINAL`, `xdg-terminal-exec` and your desktop's own setting
 decide. `ldmux terminal --explain` prints the answer and where it came from.
 
-`ldmux --help` lists every verb (`new`, `shell`, `run`, `attach`, `send`, `key`, `capture`,
-`kill`, `close`, `code`, `pair`, `mesh`, …). `ldmux --version` and `ldmux ping` say which
+`ldmux --help` lists every verb (`new`, `shell`, `attach`, `terminal`, `send`, `key`,
+`capture`, `kill`, `close`, `code`, `pair`, `mesh`, …). `ldmux --version` and `ldmux ping` say which
 build is running. Replacing the keeper ends every shell: `nix run .#restart-keeper` says so
 and asks first.
 

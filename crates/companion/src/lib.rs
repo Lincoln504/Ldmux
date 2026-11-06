@@ -1,12 +1,9 @@
 //! The host's own MeshCore companion radio, over USB serial.
 //!
-//! This crate is the answer to a specific structural problem. The daemon used to
-//! reach the host's radio by dialling a **Dart** gateway on loopback
-//! (`crates/daemon/src/mesh.rs:12`, `127.0.0.1:41731`), so the radio route on the
-//! host needed a second language, a second repository and a hand-configured
-//! process before it could carry a byte. That is a deployment tax on a feature
-//! the product intends to advertise, and it is the reason the radio route worked
-//! on the bench and not for a user.
+//! This crate exists because the daemon used to reach the host's radio through a
+//! separate **Dart** gateway process on loopback, so the radio route needed a second
+//! language, a second repository and a hand-configured process before it could carry a
+//! byte. That gateway is gone: the daemon now opens the serial port itself.
 //!
 //! Here instead: the daemon opens the serial port itself, speaks the companion
 //! protocol, and owns the radio. No gateway, no socket, no token, no state file,

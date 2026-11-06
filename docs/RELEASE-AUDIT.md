@@ -176,7 +176,7 @@ Audited 2026-11-05. The picture is better than expected: almost everything is bo
 |---|---|---|
 | 12.1 | Two devices hold one shell | OK — ADR-0010, consented takeover |
 | 12.2 | A dead window holds a shell forever | OK — `RECONNECT_GRACE_MS` bounds it |
-| 12.3 | `mirror --rw` on a free shell takes the claim unrecorded, so a second live window can displace it | OPEN — desktop audit |
+| 12.3 | `mirror --rw` on a free shell takes the claim unrecorded, so a second live window can displace it | MOOT — `ldmux mirror` is gone; the read-only view is `ldmux attach <id> --readonly`, which sends no `hello` and takes no claim |
 | 12.4 | Closing a desk window kills a shell the phone is typing into | FIXED 2026-10 |
 
 ## 13. Observability
@@ -263,6 +263,35 @@ the medium, and the only thing worth changing is one measurable inefficiency.**
 | Resync | `inplaceResync` when the client advertises it, full snapshot otherwise; epoch ordering keeps a stale frame from landing after a newer screen |
 | Reconnect | Shared backoff with full jitter, capped at 256 s; `Rejected` is terminal until re-pair |
 | **Open** | A **watched** session still asks the keeper 100 times a second (`WATCHED_POLL`), one socket call each. Measured now with nine desk windows open and no tailnet client: **82 ticks / 10 s in the daemon (8.2 % of a core) and 47 in the keeper (4.7 %)**. The unwatched case is fixed (4 Hz). The real fix is an additive `Peek { wait_ms }` long-poll in the keeper so a poll blocks on data instead of asking, but it has to be arranged so a 500 ms wait cannot delay an attach's snapshot (the daemon holds the stream gate across a poll, and a snapshot drains the same tail), which is a keeper-protocol change with terminal correctness at stake. Costed, not done |
+
+## 17. The surface pass (2026-11-06)
+
+An audit of what the software *offers*, not of whether it works: features nothing reaches, verbs
+that duplicate a call, and a test double shipped in the binary. Deleted, not hidden.
+
+| # | Finding | Status |
+|---|---|---|
+| 17.1 | The desktop inventory scanned `~/.pi/agent/sessions`, paired `pi` processes with transcripts by ancestry and linked them to sessions (~450 lines, one `xprop` per window). The phone parsed `piSessions` and never rendered it: the picker uses workspaces and windows only | DELETED end to end — host scan, `xprop` pid enrichment, the protocol type, the app model, nine tests |
+| 17.2 | The session `kind` was a parameter nothing honoured (`new(kind)` forced `"shell"`, with a comment saying so), and the CLI advertised `new --kind shell|pi` and `run <shell|pi>` | DELETED — the parameter is gone from the RPC, the CLI and the Kotlin client; the record still says `"shell"` |
+| 17.3 | `ldmux desktop`, `ldmux snapshot` and `ldmux remote` printed JSON a human does not read, duplicating RPCs the app and the attach client already call | DELETED — the RPCs stay; `capture` covers the human case |
+| 17.4 | The desk client still fell back to the tailnet WebSocket and bearer token for "a daemon that predates the attach socket" — a second transport nobody can reach | DELETED — one transport, the 0600 peer-uid-checked Unix socket |
+| 17.5 | The 656-line in-memory test keeper was `pub mod` and therefore compiled into `ldmuxd` | MOVED to `crates/testkeeper`, a dev-dependency; `strings` on the release binary finds none of it |
+| 17.6 | `crates/mesh/src/frame.rs` held only the error type, after the frame codec went with the gateway | RENAMED to `error.rs` |
+| 17.7 | The `follow` message was handled as an explicit no-op ("client-owned scroll") and no client sends it | DELETED — the variant, its struct, the frame type and the handler |
+| 17.8 | `ldmux list --json` printed the human empty-state line when there were no sessions, so a JSON reader got prose | FIXED — `--json` always prints JSON |
+
+Net: −1,910 lines / +161 across 33 files, with the Rust gate (48 binaries), clippy and the Kotlin
+suite (574 cases) green.
+| 17.9 | `ldmux run` was `ldmux shell` with the directory-reuse turned off, and `shell --name` already forces a second shell | DELETED — one verb for "become the window here" |
+| 17.10 | `ldmux close` printed "a desktop window holds it" for **any** claim, including the phone and the radio link | FIXED — "another device holds it", which is what the daemon actually reports |
+| 17.11 | `ldmux forget` exited 0 when it forgot nothing, so a script could not tell a no-op from a success | FIXED — exits 1 with the reason |
+| 17.12 | The CLI's daemon deadline (5 s) was shorter than the daemon's own keeper deadline (8 s), so a slow-but-successful call was reported as a timeout | FIXED — 15 s, above the daemon's worst case |
+| 17.13 | Four flags were accepted and ignored (`--final`, `--id`, `--stdin`, `--title`); an ignored flag is worse than an unknown one | DELETED |
+| 17.14 | No bound on live shells: a loop of `new` allocated PTYs until the keeper hit its descriptor limit, with a late and unexplained failure | FIXED — `LDMUX_MAX_SESSIONS` (default 64) refused at `new` with a sentence naming the limit and the cure |
+| 17.15 | `ldmux list` printed a `kind` column that is always `shell` | FIXED — dropped from the row, still in `--json` |
+| 17.16 | `ldmux adopt ""` answered "no such session: ldmux-" (a name the user never typed) | FIXED — usage error before the call |
+| 17.17 | `nix flake check` still listed `the_desktop_inventory_links_a_running_pi_to_its_session` in its skip guard, and that test was deleted: the guard requires exactly one match, so CI's first step would go red | FIXED |
+| 17.18 | The keeper unit hard-coded `%t/ldmux/keeper.sock` while the daemon derives `<LDMUX_STATE_DIR>/keeper.sock`, so an overridden state directory gave the daemon a socket nobody bound and it spawned a second keeper | FIXED — the keeper resolves the socket through the same `paths` resolver, and the unit passes no path |
 
 ## How to use this
 

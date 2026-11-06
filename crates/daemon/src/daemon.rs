@@ -4,7 +4,7 @@
 //! registry (the persisted table), and the ownership (who holds which shell).
 //! Everything session-related is a keeper call over the socket — a `List`
 //! for the live set, a `Read` for liveness, a `State` for the pane facts — so
-//! the daemon under test runs against a [fake_keeper](crate::fake_keeper), not
+//! the daemon under test runs against a [fake_keeper](ldmux_testkeeper), not
 //! a live keeper (plan §3.5).
 //!
 //! This module is the CORE of the loop (the `keeper_call` helper +
@@ -603,7 +603,7 @@ impl LdmuxDaemon {
     /// Talk to the keeper: one request line → one response line.
     ///
     /// The same client protocol as the WS connection, minus auth (plan §3.5) —
-    /// the [fake_keeper](crate::fake_keeper) answers it in tests, the real
+    /// the [fake_keeper](ldmux_testkeeper) answers it in tests, the real
     /// keeper in production. A keeper `Error` answer is a failure.
     ///
     /// Keeper-death detection (plan §6): a call that could not **connect** is
@@ -763,7 +763,7 @@ impl LdmuxDaemon {
             };
             // How the shell went, from the keeper's `waitpid`: written before the
             // ending is noted, so everything that reads the record (the list, the
-            // `session_ended` a watching client is sent) already has it.
+            // `session ended` notice a watching client is sent) already has it.
             if let Some(st) = states.iter().find(|s| s.session_id == name)
                 && let Some(mut r) = self.registry.get(id).cloned()
             {
@@ -1431,16 +1431,14 @@ impl LdmuxDaemon {
         self.lock.release();
     }
 
-    /// Create a new session (the TS `handleNew`).
     /// Create a session in the default grid (80x24), for callers that have no window of their own.
     pub async fn create_session(
         &mut self,
-        kind: &str,
         cwd: &str,
         title: Option<&str>,
         created_by: &str,
     ) -> Result<SessionRecord, String> {
-        self.create_session_at(kind, cwd, title, created_by, 80, 24)
+        self.create_session_at(cwd, title, created_by, 80, 24)
             .await
     }
 
@@ -1453,7 +1451,6 @@ impl LdmuxDaemon {
     /// window, a phone - knows its own grid, so it says so.
     pub async fn create_session_at(
         &mut self,
-        kind: &str,
         cwd: &str,
         title: Option<&str>,
         created_by: &str,
@@ -1462,12 +1459,27 @@ impl LdmuxDaemon {
     ) -> Result<SessionRecord, String> {
         let cols = cols.clamp(1, 1000);
         let rows = rows.clamp(1, 1000);
-        // There is no session kind. A session is a shell; whatever the user runs inside
-        // it, `pi` included, is theirs, and the daemon spawns nothing by name. The field
-        // is still read so an older client is not refused, and it is ignored: this used
-        // to be a closed set of "shell" | "pi" with a `pi` spawn behind it, which put a
-        // Pi-shaped hole in a shell app (dropped 2026-11-05).
-        let _requested_kind = kind;
+        // **A shell costs a PTY, an emulator and up to 40 MiB of scrollback**, and nothing
+        // stopped a loop of `new` (a script, or a phone with a bug) from allocating until the
+        // keeper hit its file-descriptor limit: the failure then arrived late, as an `openpty`
+        // error with no explanation. The cap is refused here, before the keeper is asked, with
+        // a sentence that names the limit and how to change it.
+        let live = self
+            .registry
+            .list()
+            .iter()
+            .filter(|r| r.status == "running")
+            .count();
+        let max = max_sessions();
+        if live >= max {
+            return Err(format!(
+                "{live} shells are already running, which is the limit (LDMUX_MAX_SESSIONS, now {max}); end one with `ldmux kill <id>` before starting another"
+            ));
+        }
+        // **There is no session kind.** A session is a shell; whatever the user runs
+        // inside it is theirs, and the daemon spawns nothing by name. The record still
+        // carries `kind` because the registry and the list have always called a session a
+        // shell, and a row is typed by it.
         let kind = "shell".to_string();
         let cwd = crate::cwd::resolve_cwd(Some(cwd))?;
         if !std::path::Path::new(&cwd).is_dir() {
@@ -1734,27 +1746,6 @@ impl LdmuxDaemon {
         self.streams.get(keeper_name).unwrap()
     }
 
-    /// The last screen of a session whose shell has ended, while the keeper still
-    /// holds it (see `DEAD_KEEP`): what a reconnecting client is shown before it
-    /// is told the ending. `None` once the keeper has let go of it.
-    pub async fn final_screen(
-        &mut self,
-        keeper_name: &str,
-    ) -> Option<ldmux_protocol::keeper::SnapshotResult> {
-        if keeper_name.is_empty() {
-            return None;
-        }
-        let req = KeeperMessage::Snapshot(km::Snapshot {
-            session_id: keeper_name.to_string(),
-            history_lines: None,
-            drain_output: false,
-        });
-        match self.keeper_call(&req).await {
-            Ok(KeeperMessage::SnapshotResult(sr)) => Some(sr),
-            _ => None,
-        }
-    }
-
     /// Get a stream by session id (the `streams` map lookup, without creating).
     pub fn get_stream(&mut self, keeper_name: &str) -> Option<&std::sync::Arc<PaneStream>> {
         self.streams.get(keeper_name)
@@ -1900,10 +1891,6 @@ impl LdmuxDaemon {
                 Ok(serde_json::json!({ "sessions": sessions }))
             }
             "new" => {
-                let kind = params
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("shell");
                 let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
                 let title = params.get("title").and_then(|v| v.as_str());
                 let created_by = params
@@ -1921,7 +1908,7 @@ impl LdmuxDaemon {
                     .and_then(|v| v.as_u64())
                     .map_or(24, |v| v.clamp(1, 1000) as u16);
                 let record = self
-                    .create_session_at(kind, cwd, title, created_by, cols, rows)
+                    .create_session_at(cwd, title, created_by, cols, rows)
                     .await?;
                 Ok(serde_json::json!({ "session": record }))
             }
@@ -2545,56 +2532,9 @@ impl LdmuxDaemon {
         self.live_windows.keys().cloned().collect()
     }
 
-    /// Read the desktop inventory (the TS `desktopInventory`).
+    /// Read the desktop inventory: the workspaces and windows on this machine.
     pub async fn desktop_inventory(&mut self) -> ldmux_protocol::rpc::DesktopInventory {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let mut inv = crate::desktop_inventory::read_desktop(&home).await;
-        // What the machine shows and what ldmux knows are two different things,
-        // and a client needs the second: a desk window's terminal is not in its
-        // pi's ancestry (the pi runs in the keeper's pty, the window is a separate
-        // alacritty running `ldmuxd attach`), so the inventory on its own reports
-        // a pi filling a window as having none. The session's shell pid is in that
-        // ancestry, which is how the TypeScript linked the two with tmux's
-        // `#{pane_pid}`, and a client that has the link goes to the running shell
-        // instead of guessing by directory and opening a new one
-        // (`origin/main:packages/daemon/src/daemon.ts:1096-1106`).
-        if let Ok(ldmux_protocol::keeper::KeeperMessage::ListResult(res)) = self
-            .keeper_call(&km::KeeperMessage::List(km::List {}))
-            .await
-        {
-            let by_shell_pid = self.session_ids_by_shell_pid(&res.sessions);
-            crate::desktop_inventory::link_pi_sessions(&mut inv, &by_shell_pid);
-        }
-        inv
-    }
-
-    /// The keeper's sessions, keyed by the shell pid it reports, valued by the
-    /// session id the daemon knows them by. `pid <= 0` is dropped: a pid that is
-    /// not a pid would match a lookup by luck.
-    fn session_ids_by_shell_pid(
-        &self,
-        states: &[ldmux_protocol::keeper::State],
-    ) -> std::collections::HashMap<i32, String> {
-        let mut map = std::collections::HashMap::new();
-        if states.is_empty() {
-            return map;
-        }
-        let by_keeper_name: std::collections::HashMap<String, String> = self
-            .registry
-            .list()
-            .into_iter()
-            .filter(|r| !r.keeper_name.is_empty())
-            .map(|r| (r.keeper_name, r.id))
-            .collect();
-        for st in states {
-            if st.pid <= 0 {
-                continue;
-            }
-            if let Some(id) = by_keeper_name.get(&st.session_id) {
-                map.insert(st.pid, id.clone());
-            }
-        }
-        map
+        crate::desktop_inventory::read_desktop().await
     }
 
     /// Claim a session for a device (the TS `claimSession`, ADR-0010).
@@ -2981,10 +2921,31 @@ pub(crate) fn utf8_locale_env(get: impl Fn(&str) -> Option<String>) -> Vec<(Stri
     env
 }
 
+/// The most shells this daemon will run at once: `LDMUX_MAX_SESSIONS`, else 64.
+///
+/// A bound rather than a preference: every shell is a PTY, a terminal emulator and up to
+/// 40 MiB of scrollback, and the keeper's failure at the file-descriptor limit is late and
+/// unexplained. Both the CLI and the phone go through `create_session`, so one check covers
+/// both, and a malformed value falls back to the default rather than refusing to start.
+fn max_sessions() -> usize {
+    max_sessions_from(std::env::var("LDMUX_MAX_SESSIONS").ok().as_deref())
+}
+
+/// The parse behind [`max_sessions`], pure so it is testable without touching the process
+/// environment (which the tests share).
+fn max_sessions_from(value: Option<&str>) -> usize {
+    const DEFAULT: usize = 64;
+    match value.and_then(|v| v.trim().parse::<usize>().ok()) {
+        // Zero would forbid every shell, which is never what a mistyped value means.
+        Some(n) if n > 0 => n,
+        _ => DEFAULT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake_keeper::FakeKeeper;
+    use ldmux_testkeeper::FakeKeeper;
     use ldmux_protocol::keeper::{Kill, Spawn};
     use ldmux_protocol::rpc::SessionRecord;
 
@@ -3226,7 +3187,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         assert_eq!(record.kind, "shell");
@@ -3273,7 +3234,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id = record.id.clone();
@@ -3357,7 +3318,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id = record.id.clone();
@@ -3367,7 +3328,7 @@ mod tests {
         assert_eq!(d.registry().get(&id).unwrap().status, "dead");
         // Create another, claim it, and close: it is let go, not killed.
         let record2 = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id2 = record2.id.clone();
@@ -3409,7 +3370,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id = record.id.clone();
@@ -3442,7 +3403,7 @@ mod tests {
 
         // A shell nobody holds still ends with its window.
         let record2 = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id2 = record2.id.clone();
@@ -3485,7 +3446,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
 
@@ -3510,112 +3471,6 @@ mod tests {
             Some(crate::daemon::HISTORY_CAPTURE_LINES),
             "`--history` asks for the plan's cap"
         );
-        drop(fk);
-    }
-
-    /// The `desktop` RPC links a running pi to the ldmux session it runs inside.
-    ///
-    /// The inventory cannot do this by itself: a desk window's terminal is not in
-    /// the pi's ancestry (the pi runs in the keeper's pty, the window is a
-    /// separate `alacritty` running `ldmuxd attach`), so a pi filling a window
-    /// reports no window at all. The keeper's shell pid *is* in that ancestry —
-    /// the same fact the TypeScript got from tmux's `#{pane_pid}` — and in the
-    /// port `ldmuxSessionId` was hard-coded `None`, so every client that asked
-    /// was told the pi was not in ldmux and guessed by directory instead
-    /// (`origin/main:packages/daemon/src/daemon.ts:1106`).
-    #[tokio::test]
-    async fn the_desktop_inventory_links_a_running_pi_to_its_session() {
-        let dir = scratch();
-        let keeper_sock = dir.join("keeper.sock");
-        let fk = std::sync::Arc::new(FakeKeeper::new(keeper_sock.clone()));
-        let fk_serve = fk.clone();
-        let fk_sock = keeper_sock.clone();
-        tokio::spawn(async move {
-            FakeKeeper::serve(&fk_serve, fk_sock.as_path())
-                .await
-                .unwrap();
-        });
-        wait_socket(&keeper_sock).await;
-
-        // A process whose `comm` is `pi`, under a shell whose parent is this test
-        // process: `pi` → `sh` → the test process. `/bin/sleep` copied to a file
-        // named `pi` is what makes the inventory's scan find it.
-        let bin = dir.join("pi");
-        std::fs::copy("/bin/sleep", &bin).unwrap();
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("{} 30; :", bin.display()))
-            .spawn()
-            .unwrap();
-        let pi_pid = {
-            let mut found = 0i64;
-            for _ in 0..200 {
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for e in entries.flatten() {
-                        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i64>().ok())
-                        else {
-                            continue;
-                        };
-                        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                            && comm.trim() == "pi"
-                        {
-                            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                                .unwrap_or_default();
-                            // Only the one under our own sh: its ppid is a child of
-                            // this test process.
-                            if std::fs::read_to_string(format!("/proc/{pid}/status"))
-                                .map(|st| st.contains(&format!("PPid:\t{}", child.id())))
-                                .unwrap_or(false)
-                            {
-                                found = pid;
-                                let _ = stat;
-                            }
-                        }
-                    }
-                }
-                if found > 0 {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            assert!(found > 0, "the spawned pi process");
-            found
-        };
-
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
-        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
-        let rec = d
-            .create_session("shell", &cwd, None, "local")
-            .await
-            .unwrap();
-        // The keeper reports the *shell's* pid, and it is the spawned `sh` — the `pi`'s own
-        // parent — not this test binary.
-        //
-        // `std::process::id()` was the obvious stand-in and it made this test flaky under the
-        // parallel suite: every test in the binary shares that pid, so several sessions claimed
-        // the same shell and the inventory could attribute the `pi` to another test's session
-        // (measured 2026-11-05: one failure in five full-suite runs, always this test, never
-        // alone). A pid nobody else has removes the ambiguity rather than papering over it.
-        fk.set_pid(&rec.keeper_name, child.id() as i32);
-
-        let inv = d.handle("desktop", serde_json::json!({})).await.unwrap();
-        let sessions = inv
-            .get("piSessions")
-            .and_then(|s| s.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let mine = sessions
-            .iter()
-            .find(|p| p.get("pid").and_then(|x| x.as_i64()) == Some(pi_pid))
-            .unwrap_or_else(|| panic!("the spawned pi in {sessions:?}"));
-        assert_eq!(
-            mine.get("ldmuxSessionId").and_then(|x| x.as_str()),
-            Some(rec.id.as_str()),
-            "the pi's ancestry leads to the session's shell: {mine}"
-        );
-
-        let _ = child.kill();
-        let _ = child.wait();
         drop(fk);
     }
 
@@ -3644,11 +3499,11 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let killed = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let closed = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
 
@@ -3685,7 +3540,7 @@ mod tests {
         assert_eq!(info.ended_reason.as_deref(), Some("killed from the test"));
         // A running session has no reason to give.
         let live = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let listed = d.describe_sessions().await;
@@ -3718,7 +3573,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let exited = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         // The pane stays, marked dead: the shell exited.
@@ -3916,8 +3771,8 @@ mod tests {
         .is_ok()
     }
 
-    /// How a shell ended is recorded (status or signal, and the kind), and its pane
-    /// stays in the keeper for the keep window so the last screen can be read.
+    /// How a shell ended is recorded (status or signal, and the kind), and its pane is
+    /// released after the keep window rather than held for ever.
     #[tokio::test]
     async fn an_ended_shell_records_how_it_ended_and_its_pane_outlives_the_ending() {
         let dir = scratch();
@@ -3963,21 +3818,15 @@ mod tests {
             Some("the keeper no longer has it")
         );
 
-        // The pane is still there, and its last screen is readable.
+        // The pane is still there during the keep window.
         assert!(keeper_has(&keeper_sock, "ldmux-a").await);
-        let screen = d
-            .final_screen("ldmux-a")
-            .await
-            .expect("the final screen is kept");
-        assert_eq!(screen.text, "the last screen");
-        // Past the keep window it is released.
+        // Past it, the pane is released.
         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
         d.reconcile().await.unwrap();
         assert!(
             !keeper_has(&keeper_sock, "ldmux-a").await,
             "released after the keep window"
         );
-        assert!(d.final_screen("ldmux-a").await.is_none());
     }
 
     /// Claims survive a daemon restart: held for their device for the restore
@@ -4080,7 +3929,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id = record.id.clone();
@@ -4119,7 +3968,7 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         // The create is itself news: a client must hear about a new shell.
@@ -4157,15 +4006,15 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let a = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let b = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let c = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         // Killed in an order that makes the *death* times the reverse of the
@@ -4210,7 +4059,7 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let before = d
@@ -4267,7 +4116,7 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         d.stream_for(&rec.keeper_name);
@@ -4304,7 +4153,7 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         d.stream_for(&rec.keeper_name);
@@ -4447,7 +4296,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let keeper_name = record.keeper_name.clone();
@@ -4496,7 +4345,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let record = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let id = record.id.clone();
@@ -4786,7 +4635,7 @@ mod tests {
         d.live_window_grace_ms = 0;
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
 
@@ -4851,7 +4700,7 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
         let res = d
@@ -4887,7 +4736,7 @@ mod tests {
         let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
-            .create_session("shell", &cwd, None, "local")
+            .create_session(&cwd, None, "local")
             .await
             .unwrap();
 
@@ -4992,5 +4841,22 @@ mod tests {
         assert!(process_alive(std::process::id() as i32));
         assert!(!process_alive(0));
         assert!(!process_alive(999_999_999));
+    }
+}
+
+#[cfg(test)]
+mod session_cap_tests {
+    use super::max_sessions_from;
+
+    #[test]
+    fn the_shell_limit_is_read_conservatively() {
+        assert_eq!(max_sessions_from(None), 64);
+        assert_eq!(max_sessions_from(Some("8")), 8);
+        assert_eq!(max_sessions_from(Some(" 12 ")), 12);
+        // A value that would forbid every shell is not what a typo means.
+        assert_eq!(max_sessions_from(Some("0")), 64);
+        assert_eq!(max_sessions_from(Some("-1")), 64);
+        assert_eq!(max_sessions_from(Some("lots")), 64);
+        assert_eq!(max_sessions_from(Some("")), 64);
     }
 }

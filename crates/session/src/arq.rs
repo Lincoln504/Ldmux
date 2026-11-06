@@ -33,7 +33,7 @@
 //!   the window is at most [`MAX_WINDOW`] (the L2 `CREDIT_WINDOW`), far below half the space.
 //! - `ack` is cumulative: "I have everything before this". Every outgoing record carries it.
 //! - **Budget.** [`Arq::poll`] takes `records_left` and returns at most that many records.
-//!   Every record the gateway transmits counts: first sends, retransmissions, pure acks and
+//!   Every record the host transmits counts: first sends, retransmissions, pure acks and
 //!   close. When the budget is zero nothing is emitted and [`Stats::budget_stalls`] rises.
 //! - **Retransmission** is one record at a time (the oldest unacknowledged), on a timeout that
 //!   doubles with each attempt up to a cap. After `max_attempts` the session is
@@ -113,7 +113,7 @@ pub struct Config {
 
 impl Config {
     /// Defaults are judgement calls (ADR-0020 says as much of its own); revisit with
-    /// measurements. `max_payload` must come from the record limit the gateway advertised.
+    /// measurements. `max_payload` must come from the record limit the peer advertised.
     #[must_use]
     pub fn for_payload(max_payload: usize) -> Self {
         // Tuned for **interactive typing on a link we own**, measured 2026-10-30. The old
@@ -228,7 +228,7 @@ pub struct Delivered {
 /// What the caller allows this poll to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// The gateway's `recordsLeftThisHour`. Never exceeded.
+    /// The radio's `recordsLeftThisHour`, as the carrier reported it. Never exceeded.
     pub records_left: u8,
     /// Free L2 slots: `CREDIT_WINDOW` minus records still awaiting `SEND_RESULT`.
     pub l2_slots: u8,

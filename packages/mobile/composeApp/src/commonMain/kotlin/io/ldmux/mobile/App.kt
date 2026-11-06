@@ -2,9 +2,7 @@ package io.ldmux.mobile
 
 import androidx.compose.material3.MaterialTheme
 import io.ldmux.mobile.mesh.MeshRouteActions
-import io.ldmux.mobile.mesh.applyMeshPairingScan
 import io.ldmux.mobile.mesh.availableRoutes
-import io.ldmux.mobile.mesh.currentPlatform
 import io.ldmux.mobile.mesh.MeshEnrollment
 import io.ldmux.mobile.mesh.MeshRoute
 import io.ldmux.mobile.mesh.MeshTerminalScreen
@@ -81,10 +79,9 @@ fun App() {
                     onSave = { store.update(it) },
                     onPaired = { p -> store.pair(p) },
                     onUnpair = { store.unpair() },
-                    mesh = if (MeshRoute.Mesh in availableRoutes(currentPlatform)) {
+                    mesh = if (MeshRoute.Mesh in availableRoutes()) {
                         MeshRouteActions(
                             credentials = { readMeshCredentials(meshSessionKeyStore()).first },
-                            onPairing = { text -> applyMeshPairingScan(text, store).also { credentialsVersion++ } },
                             onConfig = { store.update(it) },
                             onUnpair = { store.unpairMesh(); credentialsVersion++ },
                         )

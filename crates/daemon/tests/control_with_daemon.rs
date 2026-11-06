@@ -1,5 +1,5 @@
 use ldmux_daemon::daemon::LdmuxDaemon;
-use ldmux_daemon::fake_keeper::FakeKeeper;
+use ldmux_testkeeper::FakeKeeper;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]

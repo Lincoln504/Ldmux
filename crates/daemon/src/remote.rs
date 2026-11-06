@@ -307,11 +307,9 @@ enum Out {
     /// The pane's picture on this connection is stale (output was dropped for a
     /// slow link, or the keeper lost some): a client that advertised
     /// `inplaceResync` gets a fresh snapshot on this socket; any other gets the
-    /// legacy `error`/`resync`, and reconnects.
+    /// legacy `error`/`resync`, and reconnects. A session that has **ended** travels the
+    /// same way, with the message `session ended`; there is no separate ending message.
     Resync(String),
-    /// The session is over: tell the client what ended it (`session_ended`) if it
-    /// advertised `sessionEnded`, else the legacy `resync`.
-    Ended,
     /// Close the connection (the sweep, or `stop`).
     Close,
 }
@@ -320,12 +318,9 @@ enum Out {
 /// A client that says nothing gets exactly the messages it always got.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct Features {
-    /// "inplaceResync": a stale picture is repaired with a fresh `caps`+`snapshot`
-    /// (the snapshot carries `"resync": true`) on the same socket.
+    /// "inplaceResync": a stale picture is repaired with a fresh `caps`+`snapshot` on
+    /// the same socket.
     inplace_resync: bool,
-    /// "sessionEnded": the end of a session is a `session_ended` message, and a
-    /// recently ended session can be attached to for its final screen.
-    session_ended: bool,
 }
 
 impl Features {
@@ -334,7 +329,6 @@ impl Features {
         let has = |n: &str| list.iter().any(|x| x.as_str() == Some(n));
         Some(Features {
             inplace_resync: has("inplaceResync"),
-            session_ended: has("sessionEnded"),
         })
     }
 }
@@ -342,12 +336,11 @@ impl Features {
 /// Which snapshot a connection is being sent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SnapKind {
-    /// The visible screen (attach, resize).
+    /// The visible screen: an attach, a resize, or the repair of a stale picture. A
+    /// client paints all three the same way, so they are one kind.
     Screen,
     /// A scrollback page (`history: true`).
     History,
-    /// A repair of a stale picture (`resync: true`).
-    Resync,
 }
 
 /// The connection's mutable state, shared between the reader task and the
@@ -1044,13 +1037,6 @@ async fn connection_loop(
                             conn.send_error("resync", &reason);
                         }
                     }
-                    Some(Out::Ended) => {
-                        if relock(&conn.inner).features.session_ended {
-                            tokio::spawn(send_session_ended(conn.clone(), shared.clone()));
-                        } else {
-                            conn.send_error("resync", crate::stream::RESET_SESSION_ENDED);
-                        }
-                    }
                     Some(Out::Output(b)) => {
                         // Leading edge: output that arrives after a quiet spell goes
                         // out now (a keystroke's echo must not wait for the batch
@@ -1353,9 +1339,8 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             conn.send_json(&serde_json::json!({"type":"desktop","inventory":inv}));
         }
         "new" => {
-            // A session is a shell (2026-11-05). The client's `kind` is accepted and
-            // ignored rather than refused, so an older build still works.
-            let kind = "shell";
+            // A session is a shell. A client that still sends `kind` is not refused; the
+            // field is simply not read.
             let cwd = v.get("cwd").and_then(|x| x.as_str());
             let title = v.get("title").and_then(|x| x.as_str());
             // Who opened it: what the client says, else who the client is.
@@ -1385,7 +1370,7 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
             let record = {
                 let mut d = shared.daemon.lock().await;
                 let fallback = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                d.create_session(kind, cwd.unwrap_or(&fallback), title, &origin)
+                d.create_session(cwd.unwrap_or(&fallback), title, &origin)
                     .await
             };
             match record {
@@ -1698,9 +1683,6 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 conn.send_error("bad_key", &e);
             }
         }
-        "follow" => {
-            // Client-owned scroll (ADR-0004): a no-op.
-        }
         "scrollback" => {
             // The keeper is asked for exactly this many rows of history: clamp it
             // to what a client can page through, not whatever a message says.
@@ -1811,7 +1793,9 @@ async fn deferred_scrollback(conn: Arc<ConnShared>) {
 /// Repair a stale picture on the same socket: wait until the link has drained
 /// (so the snapshot is not queued behind what it replaces, and a slow link is
 /// not handed a new burst every time it falls behind), then send a fresh
-/// `caps`+`snapshot` pair marked `"resync": true`.
+/// `caps`+`snapshot` pair. The client paints a snapshot the same way whether it
+/// arrived for an attach or a repair; the `resync` marker this used to carry had no
+/// reader on either client.
 async fn resync_in_place(conn: Arc<ConnShared>) {
     {
         let mut inner = relock(&conn.inner);
@@ -1843,7 +1827,7 @@ async fn resync_in_place(conn: Arc<ConnShared>) {
     };
     if let (Some(stream), Some(sid)) = (stream, sid)
         && let Err(e) =
-            snapshot_and_go_live(&conn, &stream, sub, None, gen_id, &sid, SnapKind::Resync).await
+            snapshot_and_go_live(&conn, &stream, sub, None, gen_id, &sid, SnapKind::Screen).await
     {
         conn.send_error("resync_failed", &e);
         // `resyncing` is still set, and while it is `queue_output` drops every byte
@@ -1854,32 +1838,6 @@ async fn resync_in_place(conn: Arc<ConnShared>) {
         let _ = conn.tx.send(Out::Close);
     }
     done(&conn);
-}
-
-/// The `session_ended` message: what ended the session and how.
-fn ended_message(r: &SessionRecord) -> serde_json::Value {
-    serde_json::json!({
-        "type": "session_ended",
-        "sessionId": r.id,
-        "kind": r.ended_kind.clone().unwrap_or_else(|| "ended".into()),
-        "reason": r.ended_reason,
-        "exitCode": r.exit_code,
-        "exitSignal": r.exit_signal,
-    })
-}
-
-/// Tell a client its session is over, then let go of it.
-async fn send_session_ended(conn: Arc<ConnShared>, shared: Arc<Shared>) {
-    let Some(sid) = relock(&conn.inner).session_id.clone() else {
-        return;
-    };
-    let record = shared.daemon.lock().await.get_session(&sid);
-    match record {
-        Some(r) => conn.send_json(&ended_message(&r)),
-        None => conn
-            .send_json(&serde_json::json!({"type":"session_ended","sessionId":sid,"kind":"ended"})),
-    }
-    stop_viewing(&conn, &shared).await;
 }
 
 /// The `attach` handler: claim, subscribe, snapshot, CAPS + SNAPSHOT, flush.
@@ -1912,27 +1870,15 @@ async fn attach(
             return;
         }
         if record.status != "running" {
-            // A client that understands endings is given the final screen while the
-            // keeper still holds it, then the ending; any other is refused as it
-            // always was.
-            let wants_end = relock(&conn.inner).features.session_ended;
-            let last = if wants_end {
-                d.final_screen(&record.keeper_name).await
-            } else {
-                None
-            };
+            // A session that has ended is refused, naming the ending and its reason. The
+            // watcher of a session learns that it ended from `error`/`resync` (`session
+            // ended`), which every client already handles — there is no separate ending
+            // message to understand.
             drop(d);
-            match last {
-                Some(snap) => {
-                    send_state(conn, &session_id, &snap, 0, SnapKind::Screen);
-                    conn.send_json(&ended_message(&record));
-                }
-                None if wants_end => conn.send_json(&ended_message(&record)),
-                None => conn.send_error(
-                    "session_dead",
-                    &format!("session is {}: {session_id}", record.status),
-                ),
-            }
+            conn.send_error(
+                "session_dead",
+                &format!("session is {}: {session_id}", record.status),
+            );
             return;
         }
         let device = relock(&conn.inner).device.clone();
@@ -2058,9 +2004,6 @@ async fn attach(
                     return;
                 }
                 match reason {
-                    crate::stream::RESET_SESSION_ENDED => {
-                        let _ = conn2.tx.send(Out::Ended);
-                    }
                     // The keeper dropped output: the picture is stale. Output is
                     // held back until the repaint (once, however often it is said).
                     crate::stream::RESET_LOST => {
@@ -2343,7 +2286,6 @@ fn send_state(
     });
     match kind {
         SnapKind::History => snapshot["history"] = serde_json::Value::Bool(true),
-        SnapKind::Resync => snapshot["resync"] = serde_json::Value::Bool(true),
         SnapKind::Screen => {}
     }
     conn.send_json(&snapshot);
@@ -2884,7 +2826,7 @@ mod tests {
             match m {
                 Out::Output(b) => output += b.len(),
                 Out::Resync(_) => resyncs += 1,
-                Out::Json(_) | Out::Ended => panic!("only a resync is expected"),
+                Out::Json(_) => panic!("only a resync is expected"),
                 Out::Close => panic!("no close"),
             }
         }
@@ -3216,7 +3158,7 @@ mod tests {
             match m {
                 Out::Json(j) => queued += j.len(),
                 Out::Close => closes += 1,
-                Out::Output(_) | Out::Resync(_) | Out::Ended => panic!("no output"),
+                Out::Output(_) | Out::Resync(_) => panic!("no output"),
             }
         }
         assert!(queued <= MAX_QUEUED_JSON_BYTES, "queued {queued}");

@@ -96,8 +96,8 @@ consolidated into them at `731970f` and is readable at `c3d7c56`.
 - **Ownership claims persist** in `<state>/claims.json` (60 s restore grace); the state
   directory and the token file must be owned by the daemon's uid.
 - **Wire changes are additive.** New messages and fields are gated by `features` in
-  `hello`/`attach` (`inplaceResync`, `sessionEnded`); a client that says nothing gets
-  what it always got. A new keeper field must work against a running old keeper (the
+  `hello`/`attach` (`inplaceResync`); a client that says nothing gets what it always
+  got. A new keeper field must work against a running old keeper (the
   keeper outlives the daemon and is replaced only by ending every shell).
 - **A window is spawned only when nobody is at a terminal.** `ldmux attach` runs the desk
   client in the terminal you already have; the phone's send-to-desktop is the only spawn,

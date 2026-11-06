@@ -6,7 +6,6 @@ import io.ldmux.mobile.mesh.MeshRouteResolution
 import io.ldmux.mobile.mesh.PairingNote
 import io.ldmux.mobile.mesh.availableRoutes
 import io.ldmux.mobile.mesh.currentMeshResolution
-import io.ldmux.mobile.mesh.currentPlatform
 import io.ldmux.mobile.mesh.meshSessionKeyStore
 import io.ldmux.mobile.mesh.pairingNote
 import io.ldmux.mobile.mesh.readMeshCredentials
@@ -122,7 +121,7 @@ internal fun AppContent(
     var pairNote by remember { mutableStateOf<PairingNote?>(null) }
     var pairProblem by remember { mutableStateOf<String?>(null) }
     var pasteOpen by remember { mutableStateOf(false) }
-    val meshPresent = MeshRoute.Mesh in availableRoutes(currentPlatform)
+    val meshPresent = MeshRoute.Mesh in availableRoutes()
     val acceptPairing: (Pairing) -> Unit = { p ->
         val outcome = store.pair(p)
         pairNote = pairingNote(
@@ -830,7 +829,7 @@ internal fun AppContent(
                 // what ◀ ▶ walk, so opening a second shell left one page and the
                 // arrows with nowhere to go. Creating a shell is not a reason to let
                 // go of the others.
-                if (client.create("shell", path.ifBlank { null })) {
+                if (client.create(path.ifBlank { null })) {
                     pendingOpens = 1
                     showLauncher = false
                 }

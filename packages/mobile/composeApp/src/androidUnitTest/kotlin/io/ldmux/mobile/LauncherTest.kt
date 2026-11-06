@@ -94,57 +94,54 @@ class LauncherTest {
 
     @Test
     fun `a full inventory round-trips`() {
+        // `piSessions` is what a daemon older than this build sends. It is gone from the
+        // contract, and a field nobody reads must not make the inventory unreadable.
         val inv = parse(
             """
             {"wm":"i3",
              "workspaces":[{"name":"1","index":1,"focused":false,"visible":false,"windowCount":2}],
-             "windows":[{"id":"0x4600005","appClass":"Alacritty","title":"π","workspace":"1","pid":9707}],
-             "piSessions":[{"pid":100,"cwd":"/home/u","sessionId":"01a0","startedAt":"2026-09-15T00:00:00Z",
-                            "transcript":"/t.jsonl","windowId":"0x4600005","workspace":"1","label":"ldeen"}]}
+             "windows":[{"id":"0x4600005","appClass":"Alacritty","title":"π","workspace":"1"}],
+             "piSessions":[{"pid":100,"cwd":"/home/u","label":"ldeen"}]}
             """.trimIndent(),
         )!!
         assertEquals("i3", inv.wm)
         assertEquals(2, inv.workspaces[0].windowCount)
         assertEquals(true, inv.workspaces[0].index == 1)
-        assertEquals(9707, inv.windows[0].pid)
-        assertEquals("ldeen", inv.piSessions[0].label)
-        assertEquals("0x4600005", inv.piSessions[0].windowId)
+        assertEquals("Alacritty", inv.windows[0].appClass)
+        assertEquals("1", inv.windows[0].workspace)
     }
 
     @Test
     fun `null-valued fields read as absent rather than throwing`() {
-        // The daemon sends null for values it could not resolve (no window, no
-        // workspace, no session id). `jsonPrimitive` throws on those; this must not.
+        // The daemon sends null for values it could not resolve (no index on a named
+        // workspace, no workspace on a window). `jsonPrimitive` throws on those; this
+        // must not.
         val inv = parse(
             """
-            {"wm":"ewmh","workspaces":[],"windows":[],
-             "piSessions":[{"pid":1,"cwd":"/x","sessionId":null,"startedAt":null,
-                            "transcript":null,"windowId":null,"workspace":null,"label":"x"}]}
+            {"wm":"ewmh",
+             "workspaces":[{"name":"web","index":null,"focused":false,"visible":true,"windowCount":1}],
+             "windows":[{"id":"0x1","appClass":"firefox","title":"t","workspace":null}]}
             """.trimIndent(),
         )!!
-        assertEquals(1, inv.piSessions.size)
-        assertNull(inv.piSessions[0].workspace)
-        assertNull(inv.piSessions[0].sessionId)
-        assertNull(inv.piSessions[0].windowId)
+        assertNull(inv.workspaces[0].index)
+        assertEquals("", inv.windows[0].workspace)
     }
 
     @Test
-    fun `a daemon that cannot enumerate windows still reports its pi sessions`() {
+    fun `a daemon that cannot enumerate windows says why`() {
         val inv = parse(
             """{"wm":"unknown","detail":"no window manager could be enumerated",
-                "workspaces":[],"windows":[],
-                "piSessions":[{"pid":1,"cwd":"/x","label":"x"}]}""".trimIndent(),
+                "workspaces":[],"windows":[]}""".trimIndent(),
         )!!
         assertEquals("unknown", inv.wm)
         assertTrue(inv.windows.isEmpty())
-        assertEquals(1, inv.piSessions.size)
         assertEquals("no window manager could be enumerated", inv.detail)
     }
 
     @Test
     fun `an unknown field from a newer daemon is ignored`() {
         val inv = parse(
-            """{"wm":"i3","somethingNew":{"a":1},"workspaces":[],"windows":[],"piSessions":[]}""".trimIndent(),
+            """{"wm":"i3","somethingNew":{"a":1},"workspaces":[],"windows":[]}""".trimIndent(),
         )!!
         assertEquals("i3", inv.wm)
         assertTrue(inv.isEmpty)

@@ -47,4 +47,8 @@ RuntimeDirectoryPreserve=yes
 Environment=LDMUX_STATE_DIR=%t/ldmux
 Environment=LDMUX_TOKEN_FILE=%S/ldmux/token
 EnvironmentFile=-%h/.config/ldmux/env
-ExecStart=@BIN_DIR@/ldmux-keeper %t/ldmux/keeper.sock
+# No socket argument: the keeper resolves it exactly as the daemon does
+# (`$LDMUX_STATE_DIR/keeper.sock`, ADR: one resolver for every path). A hard-coded
+# `%t/ldmux/keeper.sock` here meant an overridden LDMUX_STATE_DIR gave the daemon a socket
+# nobody bound, and it spawned a second keeper.
+ExecStart=@BIN_DIR@/ldmux-keeper

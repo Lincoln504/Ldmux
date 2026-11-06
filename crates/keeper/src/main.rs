@@ -6,7 +6,11 @@
 //! otherwise it is an ordinary detached process. `LDMUX_NO_SCOPE=1` disables
 //! the scopes.
 //!
-//! The socket path: `$LDMUX_KEEPER_SOCKET` or the first CLI arg.
+//! The socket path: `$LDMUX_KEEPER_SOCKET`, else the first CLI arg, else the same resolver the
+//! daemon uses (`<LDMUX_STATE_DIR>/keeper.sock`). The fallback is what keeps the two ends
+//! together when `LDMUX_STATE_DIR` is overridden: the unit used to pass a hard-coded
+//! `%t/ldmux/keeper.sock`, so a daemon on another state directory waited for a socket the
+//! keeper never bound and spawned a second keeper.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,12 +22,10 @@ async fn main() {
     let mut socket = std::env::var("LDMUX_KEEPER_SOCKET").unwrap_or_default();
     if socket.is_empty() {
         let mut args = std::env::args().skip(1);
-        match args.next() {
-            Some(p) => socket = p,
-            None => {
-                eprintln!("usage: ldmux-keeper <socket-path>");
-                std::process::exit(2);
-            }
+        if let Some(p) = args.next() {
+            socket = p;
+        } else {
+            socket = ldmux_protocol::paths::resolve_state_dir() + "/keeper.sock";
         }
     }
     let socket = PathBuf::from(socket);

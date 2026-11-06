@@ -1,31 +1,23 @@
-//! Desktop inventory: what is on this machine's desktop, and which of it is a pi
-//! session.
+//! Desktop inventory: the workspaces on this machine and the windows on them.
 //!
-//! Port of `packages/daemon/src/desktop-inventory.ts` (671 lines). The launcher is
-//! a menu of *places to go*: the desktop workspaces, the windows in them, and
-//! the pi agent sessions running inside those windows.
+//! What the phone's "send to desktop" picker chooses between
+//! (`LdmuxClient.kt` `DesktopPickerModal`): a workspace, with the titles of the
+//! windows already there so "the one with the editor" is recognisable. The shape is
+//! the shared wire contract (`DesktopInventory`, `DesktopWindow`,
+//! `DesktopWorkspace`), defined once in the protocol package.
 //!
-//! The shape is the shared wire contract (`DesktopInventory`, `DesktopPiSession`,
-//! `DesktopWindow`, `DesktopWorkspace`), defined once in the protocol package.
+//! Window managers are probed in order, and the first that answers wins: i3 and
+//! sway share one tree shape and one walker, niri and hyprland answer JSON, and
+//! EWMH (`xprop`) is the fallback and the reason GNOME/KDE/XFCE on X11 work at all.
 //!
-//! Window managers are probed in order, and the first that answers wins. The i3
-//! and sway trees share one shape, so they share one walker. EWMH (`xprop`) is
-//! the fallback and the reason GNOME/KDE/XFCE on X11 work at all.
-//!
-//! A pi process cannot be asked what session it is (it rewrites its own `comm`),
-//! so the session is found the way pi itself lays it out:
-//! `~/.pi/agent/sessions/--<cwd with / → ->--`, newest transcript first. A window
-//! is linked to a pi session by *process ancestry*: walk the pi process's
-//! parents until one of them is the pid the WM reports for a window.
-//!
-//! Everything that parses is pure and testable. Only `read_desktop()` and
-//! `scan_pi_sessions()` touch the machine.
+//! Everything that parses is pure and testable. Only `read_desktop()` touches the
+//! machine.
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use ldmux_protocol::rpc::{DesktopInventory, DesktopPiSession, DesktopWindow, DesktopWorkspace};
+use ldmux_protocol::rpc::{DesktopInventory, DesktopWindow, DesktopWorkspace};
 
 // ── window-manager trees: i3 and sway ───────────────────────────────────────
 
@@ -39,8 +31,6 @@ struct I3LikeNode {
     name: Option<String>,
     #[serde(default)]
     window: Option<u64>,
-    #[serde(default)]
-    pid: Option<u64>,
     #[serde(default)]
     app_id: Option<String>,
     #[serde(default)]
@@ -116,7 +106,6 @@ pub fn walk_i3_tree(root: &serde_json::Value) -> (Vec<DesktopWorkspace>, Vec<Des
                 app_class: class_of(node),
                 title: title_of(node),
                 workspace: ws.to_string(),
-                pid: node.pid.map(|p| p as i64),
             });
             *counts.entry(ws.to_string()).or_insert(0) += 1;
         }
@@ -199,7 +188,6 @@ pub fn parse_niri(
                 .get("workspace_id")
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
-            pid: w.get("pid").and_then(|v| v.as_u64()).map(|v| v as i64),
         })
         .collect();
 
@@ -264,7 +252,6 @@ pub fn parse_hyprland(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            pid: w.get("pid").and_then(|v| v.as_u64()).map(|v| v as i64),
         })
         .collect();
 
@@ -353,9 +340,6 @@ pub fn parse_ewmh_window(id: &str, stdout: &str) -> Option<DesktopWindow> {
         })
         .unwrap_or_default();
 
-    let pid_str = line("_NET_WM_PID");
-    let pid: Option<i64> = pid_str.parse().ok();
-
     let desktop = line("_NET_WM_DESKTOP");
     if title.is_empty() && app_class.is_empty() {
         return None;
@@ -370,176 +354,7 @@ pub fn parse_ewmh_window(id: &str, stdout: &str) -> Option<DesktopWindow> {
         } else {
             desktop
         },
-        pid,
     })
-}
-
-// ── pi sessions ─────────────────────────────────────────────────────────────
-
-/// Where pi keeps the transcripts for a directory.
-///
-/// `--home-ldeen-Documents-ponydeck--`: a leading and trailing `--` around the
-/// path with every `/` turned into `-`. Encoded exactly as pi does it.
-///
-/// The leading (and any trailing) separator is *dropped* rather than turned
-/// into a dash, so the `--` delimiters are the only thing outside the path
-/// components.
-pub fn encode_pi_session_dir(cwd: &str) -> String {
-    let trimmed = cwd.trim_matches('/');
-    let inner = trimmed.replace('/', "-");
-    format!("--{}--", inner)
-}
-
-/// Read the `{"type":"session",...}` header pi writes as a transcript's first
-/// line.
-pub fn parse_pi_session_head(text: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let first_line = text.lines().next().unwrap_or("");
-    let obj: Result<serde_json::Value, _> = serde_json::from_str(first_line);
-    let obj = match obj {
-        Ok(v) if v.get("type").and_then(|t| t.as_str()) == Some("session") => v,
-        _ => {
-            return (None, None, None);
-        }
-    };
-    let id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let cwd = obj
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let started_at = obj
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    (id, cwd, started_at)
-}
-
-/// Parse the ppid out of `/proc/<pid>/stat`. The comm may contain spaces and
-/// parens.
-pub fn ppid_from_stat(stat: &str) -> Option<u32> {
-    let close = stat.rfind(')')?;
-    let rest = &stat[close + 1..];
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    // field 0 is the state char (S/R/D/...), field 1 is the ppid.
-    let ppid = fields.get(1)?.parse::<u32>().ok()?;
-    Some(ppid)
-}
-
-/// `/proc/<pid>/stat` field 22: start time in clock ticks since boot.
-pub fn start_ticks_from_stat(stat: &str) -> u64 {
-    let close = match stat.rfind(')') {
-        Some(i) => i,
-        None => return 0,
-    };
-    let rest = &stat[close + 1..];
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    fields
-        .get(19)
-        .and_then(|f| f.parse::<u64>().ok())
-        .unwrap_or(0)
-}
-
-/// A pi process's start time and cwd, as read from /proc.
-#[derive(Debug, Clone)]
-pub struct PiProc {
-    pub pid: i64,
-    pub cwd: String,
-    /// Process start, in clock ticks since boot.
-    pub start_ticks: u64,
-    pub ancestors: Vec<u32>,
-}
-
-/// Walk a process's parents, and say which of them is a window-manager window.
-///
-/// This is how a pi process is tied to the window it runs in: the window's
-/// pid is an *ancestor* of pi, so the walk meets the window part-way up.
-pub fn attribute_windows(
-    chains: &[(i64, Vec<u32>)],
-    windows: &[DesktopWindow],
-) -> HashMap<i64, DesktopWindow> {
-    let by_pid: HashMap<i64, &DesktopWindow> = windows
-        .iter()
-        .filter(|w| w.pid.is_some())
-        .map(|w| (w.pid.unwrap(), w))
-        .collect();
-
-    let mut found = HashMap::new();
-    for &(pid, ref ancestors) in chains {
-        for &ancestor in ancestors {
-            if let Some(&window) = by_pid.get(&(ancestor as i64)) {
-                found.insert(pid, window.clone());
-                break;
-            }
-        }
-    }
-    found
-}
-
-/// Pair each pi process with the transcript it is writing.
-///
-/// Both sides are sorted newest-first and zipped, per directory. This cannot
-/// be proof — two pi processes in one directory started at the same moment are
-/// indistinguishable from outside — but it is right whenever the sessions were
-/// opened at different times, and it always yields *distinct* sessions rather
-/// than showing the same transcript three times.
-pub fn assign_transcripts(
-    procs: &[PiProc],
-    transcripts_by_cwd: &HashMap<String, Vec<String>>,
-) -> HashMap<i64, Option<String>> {
-    let mut out = HashMap::new();
-    let by_cwd: HashMap<&str, Vec<&PiProc>> = procs.iter().fold(HashMap::new(), |mut acc, p| {
-        acc.entry(p.cwd.as_str()).or_default().push(p);
-        acc
-    });
-
-    for (cwd, group) in &by_cwd {
-        let mut fresh: Vec<&PiProc> = group.to_vec();
-        fresh.sort_by_key(|p| std::cmp::Reverse(p.start_ticks));
-        let files = transcripts_by_cwd
-            .get(*cwd)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        for (i, p) in fresh.iter().enumerate() {
-            out.insert(p.pid, files.get(i).cloned());
-        }
-    }
-    out
-}
-
-/// Build a `PiSession` from a proc + transcript + window.
-fn build_pi_session(
-    proc: &PiProc,
-    transcript: Option<&str>,
-    window: Option<&DesktopWindow>,
-) -> DesktopPiSession {
-    let (session_id, head_cwd, started_at) = transcript
-        .map(parse_pi_session_head)
-        .unwrap_or((None, None, None));
-
-    let dir = if proc.cwd.is_empty() {
-        head_cwd.unwrap_or_default()
-    } else {
-        proc.cwd.clone()
-    };
-
-    DesktopPiSession {
-        pid: proc.pid,
-        cwd: dir,
-        session_id,
-        ldmux_session_id: None,
-        started_at,
-        transcript: transcript.map(|s| s.to_string()),
-        window_id: window.map(|w| w.id.clone()),
-        workspace: window.map(|w| w.workspace.clone()),
-        label: proc
-            .cwd
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "pi".to_string()),
-    }
 }
 
 // ── the probe result ────────────────────────────────────────────────────────
@@ -599,51 +414,6 @@ async fn probe_i3_like(env: &Env, binary: &str, wm: &str) -> Option<ProbeResult>
     })
 }
 
-/// Fill in window pids the WM did not report.
-///
-/// i3 sets `pid` on Wayland windows only; on X11 every window comes back with
-/// `null`, which would leave every pi session unattributed. `_NET_WM_PID` is
-/// the EWMH property that answers it.
-async fn enrich_window_pids(env: &Env, windows: &mut [DesktopWindow]) {
-    let missing: Vec<usize> = windows
-        .iter()
-        .enumerate()
-        .filter(|(_, w)| w.pid.is_none())
-        .map(|(i, _)| i)
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    let handles: Vec<_> = missing
-        .into_iter()
-        .map(|i| {
-            let id = windows[i].id.clone();
-            let env = env.clone();
-            tokio::spawn(async move {
-                let out = exec::run(
-                    argv(&["xprop", "-id", &id, "_NET_WM_PID"]),
-                    exec_opts(2000, &env),
-                )
-                .await;
-                if out.code != 0 {
-                    return None;
-                }
-                let pid: i64 = out
-                    .out
-                    .split('=')
-                    .nth(1)
-                    .and_then(|s| s.trim().parse().ok())?;
-                Some(pid)
-            })
-        })
-        .collect();
-    for (i, h) in handles.into_iter().enumerate() {
-        if let Ok(Some(pid)) = h.await {
-            windows[i].pid = Some(pid);
-        }
-    }
-}
-
 /// Probe EWMH: the standard every X11 desktop implements.
 async fn probe_ewmh(env: &Env) -> Option<ProbeResult> {
     let list = exec::run(
@@ -668,7 +438,6 @@ async fn probe_ewmh(env: &Env) -> Option<ProbeResult> {
                     "_NET_WM_NAME",
                     "WM_NAME",
                     "_NET_WM_DESKTOP",
-                    "_NET_WM_PID",
                 ]),
                 exec_opts(3000, env),
             )
@@ -726,14 +495,6 @@ async fn probe_ewmh(env: &Env) -> Option<ProbeResult> {
         windows,
         detail: None,
     })
-}
-
-/// Ask each window manager in turn. The order is "most specific first": a WM
-/// with a real tree gives workspace nesting, EWMH only gives flat desktops.
-pub async fn probe_window_manager() -> ProbeResult {
-    let env = crate::desktop::session_env().await;
-    let env = &env;
-    probe_in(env).await
 }
 
 async fn probe_in(env: &Env) -> ProbeResult {
@@ -814,222 +575,17 @@ async fn probe_in(env: &Env) -> ProbeResult {
     }
 }
 
-// ── pi session scanning ─────────────────────────────────────────────────────
-
-/// Pids whose `comm` is exactly `pi`.
-pub fn scan_pi_pids(proc_root: &str) -> Vec<i64> {
-    let mut pids = Vec::new();
-    let entries = match std::fs::read_dir(proc_root) {
-        Ok(entries) => entries,
-        Err(_) => return pids,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let comm_path = std::path::Path::new(proc_root).join(&name).join("comm");
-        match std::fs::read_to_string(&comm_path) {
-            Ok(content) => {
-                if content.trim() == "pi" {
-                    pids.push(name.parse::<i64>().unwrap_or(0));
-                }
-            }
-            Err(_) => {
-                // the process exited between readdir and read: expected
-            }
-        }
-    }
-    pids
-}
-
-/// Walk a process's parents (up to `max_depth`).
-pub fn ancestry(pid: u32, proc_root: &str, max_depth: usize) -> Vec<u32> {
-    let mut out = Vec::new();
-    let mut current = pid;
-    for _ in 0..max_depth {
-        let stat_path = std::path::Path::new(proc_root)
-            .join(current.to_string())
-            .join("stat");
-        let stat = match std::fs::read_to_string(&stat_path) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        let ppid = match ppid_from_stat(&stat) {
-            Some(p) if p > 1 => p,
-            _ => break,
-        };
-        out.push(ppid);
-        current = ppid;
-    }
-    out
-}
-
-/// Read `/proc/<pid>/cwd` (following the symlink).
-pub fn read_cwd(pid: i64, proc_root: &str) -> String {
-    let path = std::path::Path::new(proc_root)
-        .join(pid.to_string())
-        .join("cwd");
-    std::fs::read_link(&path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default()
-}
-
-/// Read `/proc/<pid>/stat` field 22: start time in clock ticks since boot.
-fn read_start_ticks(pid: i64, proc_root: &str) -> u64 {
-    let path = std::path::Path::new(proc_root)
-        .join(pid.to_string())
-        .join("stat");
-    match std::fs::read_to_string(&path) {
-        Ok(stat) => start_ticks_from_stat(&stat),
-        Err(_) => 0,
-    }
-}
-
-/// Read the first `bytes` of a file without reading the whole thing.
-pub fn read_file_head(path: &str, bytes: usize) -> String {
-    use std::io::Read;
-    let mut f = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return String::new(),
-    };
-    let mut buf = vec![0u8; bytes];
-    let mut total = 0;
-    while total < bytes {
-        match f.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(k) => total += k,
-            Err(_) => break,
-        }
-    }
-    String::from_utf8_lossy(&buf[..total]).to_string()
-}
-
-/// One directory's transcripts, newest first.
-pub fn list_transcripts(dir: &str) -> Vec<String> {
-    let names: Vec<String> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
-            .map(|e| e.path().to_string_lossy().to_string())
-            .collect(),
-        Err(_) => return vec![],
-    };
-
-    let mut stamped: Vec<(String, std::time::SystemTime)> = Vec::new();
-    for path in names {
-        if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
-            stamped.push((path, mtime));
-        }
-    }
-    stamped.sort_by_key(|b| std::cmp::Reverse(b.1)); // descending by mtime
-    stamped.into_iter().map(|(p, _)| p).collect()
-}
-
-/// The newest transcript for one directory, or null when there is none.
-pub fn newest_transcript(dir: &str) -> Option<String> {
-    list_transcripts(dir).into_iter().next()
-}
-
-/// Every running pi process, with the session it is writing to.
-pub fn scan_pi_sessions(
-    home: &str,
-    proc_root: &str,
-    windows: &[DesktopWindow],
-) -> Vec<DesktopPiSession> {
-    let procs: Vec<PiProc> = scan_pi_pids(proc_root)
-        .into_iter()
-        .filter_map(|pid| {
-            let cwd = read_cwd(pid, proc_root);
-            if cwd.is_empty() {
-                return None;
-            }
-            Some(PiProc {
-                pid,
-                cwd,
-                start_ticks: read_start_ticks(pid, proc_root),
-                ancestors: ancestry(pid as u32, proc_root, 24),
-            })
-        })
-        .collect();
-
-    let sessions_root = std::path::Path::new(home)
-        .join(".pi")
-        .join("agent")
-        .join("sessions");
-    let cwd_set: std::collections::HashSet<String> = procs.iter().map(|p| p.cwd.clone()).collect();
-    let transcripts: HashMap<String, Vec<String>> = cwd_set
-        .iter()
-        .map(|cwd| {
-            let dir = sessions_root.join(encode_pi_session_dir(cwd));
-            (
-                cwd.clone(),
-                list_transcripts(dir.to_string_lossy().as_ref()),
-            )
-        })
-        .collect();
-
-    let assigned = assign_transcripts(&procs, &transcripts);
-    let attributed = attribute_windows(
-        &procs
-            .iter()
-            .map(|p| (p.pid, p.ancestors.clone()))
-            .collect::<Vec<_>>(),
-        windows,
-    );
-
-    procs
-        .into_iter()
-        .map(|p| {
-            let transcript = assigned.get(&p.pid).and_then(|o| o.as_deref());
-            let window = attributed.get(&p.pid);
-            build_pi_session(&p, transcript, window)
-        })
-        .collect()
-}
-
-/// Fill in which ldmux session each running pi runs inside, by walking the pi's
-/// ancestry to the session's shell pid.
-///
-/// The inventory can see a pi and cannot see that it is *in ldmux*: a desk
-/// window's terminal is not in the pi's ancestry — the pi runs in the keeper's
-/// pty, whose parent is the daemon, while the window is a separate `alacritty`
-/// running `ldmuxd attach` — so the window attribution finds nothing and the pi
-/// reads as "no window" while its shell fills one. The session's shell pid *is*
-/// in its ancestry, which is exactly what the TypeScript used (tmux's
-/// `#{pane_pid}`; `origin/main:packages/daemon/src/daemon.ts:1096-1106`), and
-/// without it the phone could only guess by directory — and a guess that missed
-/// opened a new shell instead of the running one.
-///
-/// `by_shell_pid` maps a session's shell pid to its session id.
-pub fn link_pi_sessions(inv: &mut DesktopInventory, by_shell_pid: &HashMap<i32, String>) {
-    if by_shell_pid.is_empty() {
-        return;
-    }
-    for pi in inv.pi_sessions.iter_mut() {
-        // The pi itself is never a session's shell (that is the pane's `bash`),
-        // so the parents are the whole chain, exactly as the TS's `ancestorIn`
-        // walked it after its first lookup.
-        pi.ldmux_session_id = ancestry(pi.pid as u32, "/proc", 64)
-            .into_iter()
-            .find_map(|p| by_shell_pid.get(&(p as i32)).cloned());
-    }
-}
-
 // ── the one call the RPC makes ─────────────────────────────────────────────
 
-/// Read the full desktop inventory: probe the WM, enrich pids, scan pi
-/// sessions.
-pub async fn read_desktop(home: &str) -> DesktopInventory {
+/// Read the desktop inventory: ask the window manager what is on screen.
+#[must_use]
+pub async fn read_desktop() -> DesktopInventory {
     let env = crate::desktop::session_env().await;
-    let mut probe = probe_in(&env).await;
-    enrich_window_pids(&env, &mut probe.windows).await;
-    let pi_sessions = scan_pi_sessions(home, "/proc", &probe.windows);
+    let probe = probe_in(&env).await;
     DesktopInventory {
         wm: probe.wm,
         workspaces: probe.workspaces,
         windows: probe.windows,
-        pi_sessions,
         detail: probe.detail,
     }
 }
@@ -1083,7 +639,6 @@ mod tests {
         assert_eq!(windows[0].id, "0x4d2");
         assert_eq!(windows[0].app_class, "Alacritty");
         assert_eq!(windows[0].workspace, "1");
-        assert_eq!(windows[0].pid, Some(456));
         assert_eq!(windows[1].app_class, "firefox");
         assert_eq!(windows[1].workspace, "2");
         assert_eq!(windows[2].id, "0x3e7");
@@ -1135,7 +690,6 @@ mod tests {
         assert!(workspaces[0].focused);
         assert_eq!(workspaces[0].window_count, 1);
         assert_eq!(windows[0].id, "100");
-        assert_eq!(windows[0].pid, Some(123));
         assert_eq!(windows[0].workspace, "0");
     }
 
@@ -1156,7 +710,6 @@ mod tests {
         assert!(workspaces[0].visible);
         assert!(!workspaces[1].visible);
         assert_eq!(windows[0].id, "500");
-        assert_eq!(windows[0].pid, Some(999));
     }
 
     #[test]
@@ -1167,219 +720,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_ewmh_window_extracts_title_class_pid() {
+    fn parse_ewmh_window_extracts_title_class_and_desktop() {
         // xprop output format: KEY(TYPE) = "value"
         let stdout = "\
 WM_CLASS(STRING) = \"term\", \"Alacritty\"\n\
 _NET_WM_NAME(UTF-8 String) = \"Terminal\"\n\
-_NET_WM_PID(CARDINAL) = 12345\n\
 _NET_WM_DESKTOP(CARDINAL) = 0\n";
         let w = parse_ewmh_window("0x100001", stdout).unwrap();
         assert_eq!(w.title, "Terminal");
         assert_eq!(w.app_class, "Alacritty");
-        assert_eq!(w.pid, Some(12345));
         assert_eq!(w.workspace, "0");
-    }
-
-    #[test]
-    fn encode_pi_session_dir_encodes_cwd() {
-        assert_eq!(
-            encode_pi_session_dir("/home/ldeen/Documents/ponydeck"),
-            "--home-ldeen-Documents-ponydeck--"
-        );
-        assert_eq!(encode_pi_session_dir("/home/ldeen"), "--home-ldeen--");
-        // Leading/trailing slashes are dropped, not turned into dashes.
-        assert_eq!(encode_pi_session_dir("/home/"), "--home--");
-    }
-
-    #[test]
-    fn parse_pi_session_head_reads_the_header() {
-        let text = "{\"type\":\"session\",\"id\":\"abc123\",\"cwd\":\"/home/test\",\"timestamp\":\"2026-01-01T00:00:00Z\"}\n{...}\n";
-        let (id, cwd, started) = parse_pi_session_head(text);
-        assert_eq!(id, Some("abc123".into()));
-        assert_eq!(cwd, Some("/home/test".into()));
-        assert_eq!(started, Some("2026-01-01T00:00:00Z".into()));
-    }
-
-    #[test]
-    fn parse_pi_session_head_rejects_non_session() {
-        let text = "{\"type\":\"message\",\"id\":\"abc\"}\n";
-        let (id, cwd, started) = parse_pi_session_head(text);
-        assert_eq!(id, None);
-        assert_eq!(cwd, None);
-        assert_eq!(started, None);
-    }
-
-    #[test]
-    fn ppid_from_stat_parses_the_ppid() {
-        // The comm may contain spaces and parens.
-        let stat = "(pi) S 1234 1234 1234 0 -1 4194304 0 0 0 0 0 100 200 0 0 1 0 12345 123456789 0";
-        let ppid = ppid_from_stat(stat).unwrap();
-        assert_eq!(ppid, 1234);
-    }
-
-    #[test]
-    fn start_ticks_from_stat_parses_field_22() {
-        let stat = "(pi) S 1234 1234 1234 0 -1 4194304 0 0 0 0 0 100 200 0 0 1 0 12345 987654321 0 0 0 0 0 0 0 0 0 0 0 0";
-        let ticks = start_ticks_from_stat(stat);
-        assert_eq!(ticks, 987654321);
-    }
-
-    #[test]
-    fn attribute_windows_finds_the_ancestor_window() {
-        let windows = vec![DesktopWindow {
-            id: "0x100001".into(),
-            app_class: "Alacritty".into(),
-            title: "test".into(),
-            workspace: "1".into(),
-            pid: Some(111),
-        }];
-        // pi (pid 999) → bash (444) → alacritty (111) → i3 (55)
-        let chains = vec![(999i64, vec![444, 111, 55])];
-        let attributed = attribute_windows(&chains, &windows);
-        assert_eq!(attributed.get(&999).unwrap().id, "0x100001");
-    }
-
-    #[test]
-    fn assign_transcripts_pairs_newest_proc_with_newest_transcript() {
-        let procs = vec![
-            PiProc {
-                pid: 100,
-                cwd: "/home/a".into(),
-                start_ticks: 1000,
-                ancestors: vec![],
-            },
-            PiProc {
-                pid: 200,
-                cwd: "/home/a".into(),
-                start_ticks: 2000,
-                ancestors: vec![],
-            },
-        ];
-        // Transcripts are sorted newest-first (as `listTranscripts` returns them).
-        let transcripts: HashMap<String, Vec<String>> = [(
-            "/home/a".to_string(),
-            vec![
-                "/home/a/t2.jsonl".to_string(), // newest
-                "/home/a/t1.jsonl".to_string(), // older
-            ],
-        )]
-        .into_iter()
-        .collect();
-        let assigned = assign_transcripts(&procs, &transcripts);
-        // Newest proc (200, ticks 2000) gets newest transcript (t2).
-        assert_eq!(assigned.get(&200), Some(&Some("/home/a/t2.jsonl".into())));
-        // Older proc (100, ticks 1000) gets older transcript (t1).
-        assert_eq!(assigned.get(&100), Some(&Some("/home/a/t1.jsonl".into())));
-    }
-
-    /// The walk finds the session by a *real* process chain, which is the whole
-    /// mechanism: spawn a child of a child and give the grandparent's pid to a
-    /// session, exactly as the keeper reports its shell's pid.
-    #[test]
-    fn a_pi_is_linked_to_the_session_its_ancestry_runs_in() {
-        // `sh -c "sleep 30; :"`: a single command would be *exec'd* by the shell
-        // (no child at all), so the trailing no-op keeps the sh around as the
-        // parent of the sleep. The sh's own parent is this test process.
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("sleep 30; :")
-            .spawn()
-            .expect("spawn sh");
-        let sh_pid = child.id() as i32;
-        // The grandchild: a sleep that is a child of the sh.
-        let grandchild = {
-            let mut found = None;
-            for _ in 0..200 {
-                if let Ok(entries) = std::fs::read_dir("/proc") {
-                    for e in entries.flatten() {
-                        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok())
-                        else {
-                            continue;
-                        };
-                        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                            continue;
-                        };
-                        if ppid_from_stat(&stat) == Some(sh_pid as u32)
-                            && let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                            && comm.trim() == "sleep"
-                        {
-                            found = Some(pid);
-                        }
-                    }
-                }
-                if found.is_some() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            found.expect("the sh's sleep child")
-        };
-
-        let mut inv = DesktopInventory {
-            wm: "test".into(),
-            workspaces: Vec::new(),
-            windows: Vec::new(),
-            pi_sessions: vec![DesktopPiSession {
-                pid: grandchild as i64,
-                cwd: "/tmp".into(),
-                session_id: None,
-                ldmux_session_id: None,
-                started_at: None,
-                transcript: None,
-                window_id: None,
-                workspace: None,
-                label: "sleep".into(),
-            }],
-            detail: None,
-        };
-        let mut by_shell_pid = HashMap::new();
-        // The keeper reports the *shell's* pid; here the sh stands in for it.
-        by_shell_pid.insert(sh_pid, "abc123".to_string());
-        link_pi_sessions(&mut inv, &by_shell_pid);
-        assert_eq!(
-            inv.pi_sessions[0].ldmux_session_id.as_deref(),
-            Some("abc123")
-        );
-
-        // A pid whose chain holds no session is left alone, and an empty map
-        // costs nothing.
-        by_shell_pid.clear();
-        by_shell_pid.insert(2_000_000_000, "nope".to_string());
-        link_pi_sessions(&mut inv, &by_shell_pid);
-        assert_eq!(inv.pi_sessions[0].ldmux_session_id, None);
-        // The test process's own pid is an ancestor too: a map with it links as
-        // well, which is what makes the walk start at the pi and go up.
-        by_shell_pid.clear();
-        by_shell_pid.insert(std::process::id() as i32, "me".to_string());
-        link_pi_sessions(&mut inv, &by_shell_pid);
-        assert_eq!(inv.pi_sessions[0].ldmux_session_id.as_deref(), Some("me"));
-
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-
-    #[test]
-    fn build_pi_session_builds_the_session() {
-        let proc = PiProc {
-            pid: 42,
-            cwd: "/home/test/proj".into(),
-            start_ticks: 100,
-            ancestors: vec![1, 2],
-        };
-        let transcript = "/home/.pi/agent/sessions/--home-test-proj--/t.jsonl";
-        let window = Some(DesktopWindow {
-            id: "0x100001".into(),
-            app_class: "Alacritty".into(),
-            title: "test".into(),
-            workspace: "1".into(),
-            pid: Some(111),
-        });
-        let session = build_pi_session(&proc, Some(transcript), window.as_ref());
-        assert_eq!(session.pid, 42);
-        assert_eq!(session.cwd, "/home/test/proj");
-        assert_eq!(session.window_id, Some("0x100001".into()));
-        assert_eq!(session.workspace, Some("1".into()));
-        assert_eq!(session.label, "proj");
     }
 }

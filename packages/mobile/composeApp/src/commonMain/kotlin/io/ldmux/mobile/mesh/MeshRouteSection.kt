@@ -63,8 +63,6 @@ internal fun MeshRouteSection(
     credentialsVersion: Int = 0,
     /** Read secure storage now. Called again after every action, because the config alone may not change. */
     readCredentials: () -> MeshCredentialState,
-    /** Apply a scanned ldmux code to the mesh route ([applyMeshPairingScan]). */
-    onMeshPairing: (String) -> MeshPairingScan,
     /** Persist a changed config now (route, radio) without closing Settings. */
     onConfig: (LdmuxConfig) -> Unit,
     /** The radio's channel is shared (a public tuple) or not. Persisted beside the pairing. */
@@ -74,7 +72,6 @@ internal fun MeshRouteSection(
 ) {
     var credentials by remember(credentialsVersion) { mutableStateOf(readCredentials()) }
     val view = meshSetupView(credentials)
-    if (!view.meshExists) return // iOS: there is no mesh route to configure
 
     var showPicker by remember { mutableStateOf(false) }
     var showPreset by remember { mutableStateOf(false) }
@@ -209,7 +206,6 @@ internal fun MeshRouteSection(
 class MeshRouteActions(
     /** Read secure storage, never throwing (a broken Keystore reads as "nothing stored"). */
     val credentials: () -> MeshCredentialState,
-    val onPairing: (String) -> MeshPairingScan,
     val onConfig: (LdmuxConfig) -> Unit,
     val onUnpair: () -> Unit,
 )

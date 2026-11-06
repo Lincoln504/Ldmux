@@ -1,0 +1,170 @@
+{
+  "//": "The community public-preset table the app transmits on, value-for-value. Source: MeshMore's Regions.kt (a port of lib/meshcore/region_presets.dart), the community-curated set mirrored from the canonical MeshCore companion preset table. A second copy of a table of legal operating points is a second copy that can transmit where it should not, so this file and PublicPresets in Radio.kt are compared by PublicPresetsTest.",
+  "presets": [
+    {
+      "id": "us_canada",
+      "label": "USA / Canada",
+      "region": "UsCanada",
+      "frequencyMhz": 910.525,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 7,
+      "codingRate": 5,
+      "txPowerDbm": 22,
+      "pathHashSize": 1
+    },
+    {
+      "id": "us_arizona",
+      "label": "USA — Arizona",
+      "region": "UsCanada",
+      "frequencyMhz": 908.205,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 10,
+      "codingRate": 5,
+      "txPowerDbm": 20,
+      "pathHashSize": 1
+    },
+    {
+      "id": "jp_arib_t108",
+      "label": "Japan (ARIB T108)",
+      "region": null,
+      "frequencyMhz": 923.2,
+      "bandwidthKhz": 125.0,
+      "spreadingFactor": 10,
+      "codingRate": 5,
+      "txPowerDbm": 13,
+      "pathHashSize": 1
+    },
+    {
+      "id": "jp_meshcore",
+      "label": "Japan (MeshCore)",
+      "region": null,
+      "frequencyMhz": 920.8,
+      "bandwidthKhz": 125.0,
+      "spreadingFactor": 12,
+      "codingRate": 8,
+      "txPowerDbm": 13,
+      "pathHashSize": 1
+    },
+    {
+      "id": "eu_uk_long",
+      "label": "EU / UK long",
+      "region": "EuUk",
+      "frequencyMhz": 869.525,
+      "bandwidthKhz": 250.0,
+      "spreadingFactor": 11,
+      "codingRate": 5,
+      "txPowerDbm": 14,
+      "pathHashSize": 1
+    },
+    {
+      "id": "eu_uk_medium",
+      "label": "EU / UK medium",
+      "region": "EuUk",
+      "frequencyMhz": 869.525,
+      "bandwidthKhz": 250.0,
+      "spreadingFactor": 10,
+      "codingRate": 5,
+      "txPowerDbm": 14,
+      "pathHashSize": 1
+    },
+    {
+      "id": "eu_uk_narrow",
+      "label": "EU / UK narrow",
+      "region": "EuUk",
+      "frequencyMhz": 869.618,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 8,
+      "codingRate": 5,
+      "txPowerDbm": 14,
+      "pathHashSize": 1
+    },
+    {
+      "id": "ch",
+      "label": "Switzerland",
+      "region": "EuUk",
+      "frequencyMhz": 869.618,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 8,
+      "codingRate": 5,
+      "txPowerDbm": 14,
+      "pathHashSize": 1
+    },
+    {
+      "id": "cz",
+      "label": "Czech Republic",
+      "region": "EuUk",
+      "frequencyMhz": 869.432,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 7,
+      "codingRate": 5,
+      "txPowerDbm": 14,
+      "pathHashSize": 1
+    },
+    {
+      "id": "pt_869",
+      "label": "Portugal 869",
+      "region": "EuUk",
+      "frequencyMhz": 869.618,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 7,
+      "codingRate": 5,
+      "txPowerDbm": 14,
+      "pathHashSize": 1
+    },
+    {
+      "id": "au_default",
+      "label": "Australia",
+      "region": "Australia",
+      "frequencyMhz": 915.8,
+      "bandwidthKhz": 250.0,
+      "spreadingFactor": 10,
+      "codingRate": 5,
+      "txPowerDbm": 20,
+      "pathHashSize": 1
+    },
+    {
+      "id": "au_narrow",
+      "label": "Australia narrow",
+      "region": "Australia",
+      "frequencyMhz": 916.575,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 7,
+      "codingRate": 5,
+      "txPowerDbm": 20,
+      "pathHashSize": 1
+    },
+    {
+      "id": "au_sa_wa_qld",
+      "label": "Australia SA/WA/QLD",
+      "region": "Australia",
+      "frequencyMhz": 923.125,
+      "bandwidthKhz": 62.5,
+      "spreadingFactor": 8,
+      "codingRate": 5,
+      "txPowerDbm": 20,
+      "pathHashSize": 1
+    },
+    {
+      "id": "nz_default",
+      "label": "New Zealand",
+      "region": "NewZealand",
+      "frequencyMhz": 917.375,
+      "bandwidthKhz": 250.0,
+      "spreadingFactor": 11,
+      "codingRate": 5,
+      "txPowerDbm": 20,
+      "pathHashSize": 1
+    },
+    {
+      "id": "vn",
+      "label": "Vietnam",
+      "region": null,
+      "frequencyMhz": 920.25,
+      "bandwidthKhz": 250.0,
+      "spreadingFactor": 11,
+      "codingRate": 5,
+      "txPowerDbm": 20,
+      "pathHashSize": 1
+    }
+  ]
+}

@@ -33,6 +33,9 @@ rand = { version = "0.9", features = ["std"] }
 # The §3.11 parity harness (tests/parity.rs) drives the engine and the render
 # format directly, so it needs `ldmux-vt-sys` from the test crate.
 ldmux-vt-sys = { path = "../vt-sys" }
+# The in-memory keeper: unit tests and integration tests both run the daemon against it.
+# A dev-dependency, so the shipped `ldmuxd` does not carry a second keeper implementation.
+ldmux-testkeeper = { path = "../testkeeper" }
 
 [lints]
 workspace = true

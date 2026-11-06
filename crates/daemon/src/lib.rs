@@ -31,7 +31,6 @@ pub mod daemon_lock;
 pub mod desktop;
 pub mod desktop_inventory;
 pub mod exec;
-pub mod fake_keeper;
 pub mod keeper_supervisor;
 pub mod mesh;
 pub mod mesh_bridge;

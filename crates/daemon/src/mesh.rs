@@ -64,7 +64,7 @@ const CARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 /// attempts over about a minute); this is the backstop for a carriage that stops delivering
 /// *anything*, including the answers the ladder is waiting for.
 const CARRIER_SILENCE: Duration = Duration::from_secs(75);
-use ldmux_mesh::frame::MeshError;
+use ldmux_mesh::error::MeshError;
 use ldmux_session::arq::Limits;
 use tokio::sync::Notify;
 
