@@ -137,8 +137,7 @@ adb reverse tcp:7629 tcp:7629
   closes the sockets, releases its claims, stops the service and the wake lock (which
   also has a 10-minute timeout as a backstop) and lands on the launcher. The release is
   an explicit call from the platform lifecycle (`AppLifecycle.set` ->
-  `BackgroundRelease`), not a Compose effect, so it does not depend on a frame clock
-  (iOS answers a grace of 0 and releases synchronously).
+  `BackgroundRelease`), not a Compose effect, so it does not depend on a frame clock.
 - **Scroll fidelity across reconnects.** A snapshot rebuilds the engine only while the
   view follows live output; while the user is reading history it is replayed into the
   existing engine (`planSnapshot`), so the anchor and scrollback survive.
