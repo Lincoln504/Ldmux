@@ -323,6 +323,7 @@ suite (574 cases) green.
 | 17.47 | The mark in the README sat side by side | it stacks now: `ld` above, the 180-degree copy reading `pl` beneath |
 | 17.48 | The landscape screenshot shared one row with three portrait ones at 24 % width, so a 2400 x 1080 picture rendered smaller than the phones it was meant to show | FIXED — the three portraits take 30 % each, the landscape sits on its own centred line at 62 % |
 | 17.49 | The modes table described the tailnet transport with "a WebSocket to the daemon, bearer token, tailnet or loopback only" — four clauses for one word, and the token and the binding are the security page's business | FIXED — the cell says "a WebSocket" |
+| 17.50 | The two marks were stacked; they are a wordmark and read as one line | FIXED — side by side on a 1100 x 512 canvas, 588 px apart, centred as one image |
 
 ## How to use this
 
