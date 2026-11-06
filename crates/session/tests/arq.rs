@@ -662,3 +662,28 @@ fn a_refusal_for_an_unknown_sequence_does_nothing() {
     // The real slot is still due at its own interval, not immediately.
     assert_eq!(a.poll(10, PLENTY).len(), 0);
 }
+
+/// **The bytes on the wire are subtracted as they are delivered.**
+///
+/// The daemon used to count its own `send` calls and reset only when the queue was *completely*
+/// empty. On a link that always has something in flight that never happens, so the count climbed
+/// until it hit the ceiling and every send was refused with "the outbound queue is full" while the
+/// session was healthy — a frozen screen with no error the user could act on. The count belongs to
+/// the queue that holds the bytes, and it has to fall as acks arrive.
+#[test]
+fn queued_bytes_fall_as_records_are_delivered() {
+    let (mut a, mut b) = (Arq::new(cfg()), Arq::new(cfg()));
+    a.send(1, b"0123456789abcdefghijKLM").unwrap(); // 23 bytes, 3 chunks
+    assert_eq!(a.queued_bytes(), 23, "queued before anything is sent");
+    let out = a.poll(0, PLENTY);
+    assert_eq!(a.queued_bytes(), 23, "still held while in flight");
+    for o in &out {
+        b.on_incoming(0, &inc(o));
+    }
+    let ack = b.poll(100, PLENTY);
+    for m in &ack {
+        a.on_incoming(100, &inc(m));
+    }
+    assert_eq!(a.queued_bytes(), 0, "delivered bytes are no longer held");
+    assert_eq!(a.pending(), 0);
+}

@@ -136,16 +136,21 @@ fn main() {
         }
     };
 
+    // **A bad mesh setting disables the mesh, it does not stop the daemon.** This was the last
+    // `exit(1)` on the startup path, and it is the same class the link half was fixed for: one
+    // stale or malformed `LDMUX_MESH_PSK` (or a session file the process cannot read) took down
+    // every shell and the CLI along with the radio. A person can fix the key; they cannot un-kill
+    // the shells it killed on the way out.
     let mesh_session = match ldmux_daemon::mesh::SessionSetup::from_env(&state_dir) {
         Ok(setup) => setup,
         Err(e) => {
-            eprintln!("ldmuxd: {e}");
-            std::process::exit(1);
+            eprintln!("ldmuxd: mesh sessions disabled: {e}");
+            None
         }
     };
-    // The same rule as above, expressed once more for the session half: a mesh session with
-    // no link to carry it is useless, not fatal. Together these two `exit(1)` calls are what
-    // made one stale `LDMUX_MESH_PSK` stop the daemon, every shell and the CLI.
+    // The same rule once more for the session half: a mesh session with no link to carry it is
+    // useless, not fatal. Both halves used to `exit(1)` here, which is how one stale
+    // `LDMUX_MESH_PSK` stopped the daemon, every shell and the CLI.
     let mut mesh_session = mesh_session;
     if mesh_session.is_some() && mesh_cfg.is_none() {
         eprintln!(

@@ -3458,9 +3458,15 @@ mod tests {
             .create_session("shell", &cwd, None, "local")
             .await
             .unwrap();
-        // The keeper reports the *shell's* pid; standing in for it with this test
-        // process's pid makes the spawned pi a descendant of "the shell".
-        fk.set_pid(&rec.keeper_name, std::process::id() as i32);
+        // The keeper reports the *shell's* pid, and it is the spawned `sh` — the `pi`'s own
+        // parent — not this test binary.
+        //
+        // `std::process::id()` was the obvious stand-in and it made this test flaky under the
+        // parallel suite: every test in the binary shares that pid, so several sessions claimed
+        // the same shell and the inventory could attribute the `pi` to another test's session
+        // (measured 2026-11-05: one failure in five full-suite runs, always this test, never
+        // alone). A pid nobody else has removes the ambiguity rather than papering over it.
+        fk.set_pid(&rec.keeper_name, child.id() as i32);
 
         let inv = d.handle("desktop", serde_json::json!({})).await.unwrap();
         let sessions = inv

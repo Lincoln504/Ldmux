@@ -101,7 +101,6 @@ pub struct SessionHost {
     refused: u32,
     handshakes: u32,
     last_error: Option<String>,
-    queued_bytes: usize,
 }
 
 impl SessionHost {
@@ -124,7 +123,6 @@ impl SessionHost {
             refused: 0,
             handshakes: 0,
             last_error: None,
-            queued_bytes: 0,
         }
     }
 
@@ -236,11 +234,12 @@ impl SessionHost {
         let Some(session) = self.session.as_mut() else {
             return Err("no session is established".to_owned());
         };
-        if self.queued_bytes + bytes.len() > OUTBOUND_MAX_BYTES {
+        // Measured from the queue that actually holds the bytes, not from a counter of our own
+        // that only reset when the queue was completely empty.
+        if session.arq().queued_bytes() + bytes.len() > OUTBOUND_MAX_BYTES {
             return Err("the outbound queue is full".to_owned());
         }
         session.send(shell, bytes).map_err(|e| format!("{e:?}"))?;
-        self.queued_bytes += bytes.len();
         Ok(())
     }
 
@@ -291,7 +290,7 @@ impl SessionHost {
                     Ok(records) => out.extend(records),
                     Err(e) => self.last_error = Some(format!("seal failed: {e:?}")),
                 }
-                self.queued_bytes = session_pending_bytes(session, self.queued_bytes);
+
             }
             if let Some(failure) = session.arq().failure() {
                 self.last_error = Some(match failure {
@@ -304,7 +303,6 @@ impl SessionHost {
                     ),
                 });
                 self.session = None;
-                self.queued_bytes = 0;
             }
         }
         out
@@ -362,16 +360,6 @@ impl SessionHost {
             budget_stalls: stats.budget_stalls,
             last_error: self.last_error.clone(),
         }
-    }
-}
-
-/// The byte count still queued is not tracked per chunk by the ARQ, so once it has nothing
-/// pending the counter resets; otherwise it keeps its (conservative, over-) estimate.
-fn session_pending_bytes(session: &Session, current: usize) -> usize {
-    if session.arq().pending() == 0 {
-        0
-    } else {
-        current
     }
 }
 

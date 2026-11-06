@@ -356,6 +356,20 @@ impl Arq {
         self.queue.len() + self.inflight.len()
     }
 
+    /// The application bytes this queue is still holding, queued and in flight.
+    ///
+    /// **The only honest number for "how much is outstanding".** A caller that counted its own
+    /// `send` calls and only reset when the queue was empty never subtracted what had been
+    /// delivered: on a link that always has something in flight the count climbed until it hit a
+    /// ceiling, and from then on every send was refused with "the outbound queue is full" while the
+    /// session was perfectly healthy — the screen simply froze with no error the user could act on
+    /// (audited 2026-11-05). The bytes live here, so the arithmetic belongs here.
+    #[must_use]
+    pub fn queued_bytes(&self) -> usize {
+        self.queue.iter().map(|(_, b)| b.len()).sum::<usize>()
+            + self.inflight.iter().map(|s| s.payload.len()).sum::<usize>()
+    }
+
     /// Queue bytes for `shell`. Split into records of at most `max_payload` bytes; all or
     /// nothing, so a refused call leaves the queue as it was.
     pub fn send(&mut self, shell: u8, bytes: &[u8]) -> Result<(), QueueError> {
