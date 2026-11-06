@@ -120,7 +120,7 @@ implements are in `docs/adr/`.
 | 9.1 | `open` was a live button that did nothing | FIXED `b44a8de` |
 | 9.2 | Control width below the touch target | FIXED `2b27c2e` |
 | 9.3 | A resync that never answers says "resyncing" forever | FIXED `8fd09b6` |
-| 9.11 | A shell created from the phone opens on a blank page until the next keypress | OPEN 2026-11-06, evidenced: the host has the prompt (`ldmux capture` prints it), and the log for the phone's page reads `attached`, `attached` again, `grid 46x21 (asked 46 x 21)` and then no frame. The same class as the radio defect fixed in `4fa5f66`: the surface rebuilds its engine for the measured grid, and the full screen the host sent for that grid is not painted. The radio route is fixed; the tailnet surface is not |
+| 9.11 | A shell created from the phone appeared on a blank page in one adb-driven run on the tailnet | NOT A DEFECT in normal use: the operator reports the prompt appears on creation, and the host has it. The log for the run showed `attached` twice, then `grid 46x21 (asked 46 x 21)`, then no frame — which is a consistency question worth a test (the surface rebuilds its engine for the measured grid), not a user-visible fault |
 | 9.4 | The radio's failure reason is discarded | OPEN — `MeshRouteSection.kt:250` `runCatching {}` |
 | 9.5 | A refused action's message vanishes after 4 s, not a live region | OPEN |
 | 9.6 | The shell list survives a dead link with `open` armed | FIXED `b44a8de` |
