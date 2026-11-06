@@ -139,6 +139,7 @@ actual fun TerminalSurfaceFor(
     active: Boolean,
     modifier: Modifier,
     keyboardRequest: Int,
+    scrollGestures: Boolean,
 ) {
     val controller = source
     val sessionId = key
@@ -626,7 +627,8 @@ actual fun TerminalSurfaceFor(
                         },
                     )
                 }
-                .pointerInput(controller) {
+                .pointerInput(controller, scrollGestures) {
+                    if (!scrollGestures) return@pointerInput
                     var carry = 0f
                     // Tracks the raw pointer motion of the drag in flight so that,
                     // if the finger is still moving when it lifts, the release

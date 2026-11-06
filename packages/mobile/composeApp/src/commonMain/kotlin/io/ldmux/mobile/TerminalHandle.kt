@@ -343,4 +343,14 @@ expect fun TerminalSurfaceFor(
     active: Boolean,
     modifier: Modifier,
     keyboardRequest: Int = 0,
+    /**
+     * Whether a drag scrolls the view.
+     *
+     * True on the tailnet, where the surface holds the whole screen locally and a swipe with
+     * momentum is how a phone reads a terminal. False on the radio: the host sends a few dozen
+     * screens of history at most, every scroll is a record on a shared channel, and a momentum
+     * fling spends airtime on scrolling nobody asked for. There the scroll pad's buttons are the
+     * only way to move, which is also the only way to know what a scroll costs.
+     */
+    scrollGestures: Boolean = true,
 )

@@ -672,6 +672,8 @@ fun MeshTerminalScreen(
                     typing = false,
                     active = false,
                     modifier = Modifier.weight(1f).fillMaxWidth(),
+                    // Buttons, not a swipe: see the parameter's note.
+                    scrollGestures = false,
                 )
             }
         } else if ((terminalLive || view is MeshTermView.HeldBy) && !showList) {
@@ -803,6 +805,11 @@ fun MeshTerminalScreen(
                             active = true,
                             modifier = Modifier.fillMaxSize(),
                             keyboardRequest = keyboardRequest,
+                            // **No swipe and no momentum on the radio.** The scroll pad's three
+                            // buttons are the only way to move: every scroll here costs a record on
+                            // a shared channel, and a fling would spend airtime on scrolling nobody
+                            // asked for. The tailnet keeps the swipe, where the screen is local.
+                            scrollGestures = false,
                         )
                         }
                         // A wait is not a black screen: with nothing drawn yet this says what is awaited, with
