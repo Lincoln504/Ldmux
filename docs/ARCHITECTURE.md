@@ -53,9 +53,11 @@ action the list always offers.
 
 - L1, the radios. A MeshCore companion radio on each end. The presets must match:
   frequency, bandwidth, spreading factor and coding rate.
-- L2, the carriage. A frame with an `MG` header, a type, flags and a length, carrying
-  one record. `crates/mesh` is the client side for the gateway, and
-  `crates/companion` plus `crates/daemon/src/mesh_serial.rs` is the direct side.
+- L2, the carriage. The daemon owns the host's radio over USB serial and speaks the
+  MeshCore companion protocol (`crates/companion`, driven by
+  `crates/daemon/src/mesh_serial.rs`); the phone owns its own radio over Bluetooth LE.
+  `crates/mesh` is the vocabulary both sides of the session loop share — the carrier
+  seam, the record limits and the radio state — and holds no radio knowledge.
 - L3, the session. A Noise session with an ARQ, one record in flight at a time,
   acknowledgements, retransmission and a replay window. `crates/session`.
 - L4, the terminal. `MeshTerm`: profiles, rows, commits, keys, resizes, and the shell
@@ -208,7 +210,7 @@ ADR-0010 is the decision. The practice:
 | the daemon restarts | the phone's session ends and its retry ladder rebuilds it. A shell the phone created survives on the host |
 | the phone takes a shell the desk has | the desk is told and stops, the pane is fitted to the phone, and when the phone lets go the pane is put back to the size it displaced |
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
-| a budget is spent | with a gateway, the host stops sending data but always sends acks, handshakes and heartbeats. With a serial radio the firmware is the meter, so nothing is gated at this layer and acks are ordinary records |
+| the radio's airtime allowance runs out | the firmware is the meter: it refuses a record it will not send, the refusal is handed back to the retry ladder so it does not count as a lost attempt, and the link says what happened in `last_error` |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
 
 ## 9. Airtime
@@ -231,9 +233,10 @@ by the host radio, by the app before it retunes, and by every budget below.
   preference: the app turns it on and says so.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
-- The host does not gate the radio's airtime when it owns the radio. The firmware
-  runs the transmitter's duty cycle, and the host applies a second meter only when a
-  gateway reports a budget.
+- The host does not gate the radio's airtime. It owns the radio, and the firmware runs the
+  transmitter's duty cycle: a record it will not send is refused, and that refusal costs no
+  airtime. The host publishes the radio's own count of what is left this hour
+  (`ldmux mesh status`), which is information, not a gate.
 
 ## 10. Platforms
 
@@ -262,13 +265,15 @@ cannot use a radio the host is holding.
    environment, one `usb` build for the host and one `ble` build for the phone.
 2. Name the host's device with `LDMUX_MESH_SERIAL`, for example
    `/dev/serial/by-id/usb-Espressif_...-if00`. The daemon opens it, reads the tuple
-   the radio reports, and drives it. No gateway process runs.
+   the radio reports, and drives it. Nothing else runs between the daemon and the link,
+   and the phone drives its own radio over Bluetooth LE.
 3. The host radio's public key needs no configuration: the daemon reads it from
    `SELF_INFO` when it opens the radio, and a code made by a daemon that owns its
    radio carries it. `LDMUX_MESH_SELF` still overrides it, for a host that pins a
    key. A code with no key cannot be used, and re-scanning it cannot help.
-4. Generate the session PSK once into the state directory, or set
-   `LDMUX_MESH_PSK`.
+4. Generate the session PSK once (`openssl rand -hex 32`), or set `LDMUX_MESH_PSK`: the
+   daemon stores it in the persist directory (`mesh-psk`, 0600) and keeps it across
+   restarts.
 5. **The two radios must be on the same tuple** (frequency, bandwidth, spreading
    factor, coding rate). The host's is read from the radio it drives: `ldmux mesh
    status` prints it (`preset 910.525 MHz  500.0 kHz  SF7  CR5`) and `ldmux mesh
@@ -291,9 +296,8 @@ its `Attach` arrives, the host counts records sent, and the phone retries until 
 up. Multi-hop in both directions is not implemented, and a link that never comes up across
 a relay is this, not a broken pairing.
 
-If `LDMUX_MESH_SERIAL` is unset, the older path applies: the daemon dials a loopback
-gateway named by `LDMUX_MESH_ADDR` and learns nothing about presets, paths or
-contacts.
+Without `LDMUX_MESH_SERIAL` this host has no radio route; nothing else about the daemon
+changes.
 
 ## 12. Build and test
 

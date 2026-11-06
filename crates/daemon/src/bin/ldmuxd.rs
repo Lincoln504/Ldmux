@@ -168,9 +168,8 @@ fn main() {
     let daemon = LdmuxDaemon::new(state_dir.clone(), keeper_bin)
         .with_socket_path(socket_path.clone())
         .with_remote(remote_host.clone(), remote_port, token);
-    // The MeshMore link, if this machine has a gateway. Started before the
-    // runtime is built would be wrong (it needs a reactor), so it is installed
-    // inside `block_on` below.
+    // The radio route, if this machine has a radio. It is installed inside `block_on` below,
+    // because starting it needs a reactor.
     // A misconfigured mesh link must not take the daemon with it. `exit(1)` here meant one
     // stale variable in an environment file — `LDMUX_MESH_PSK` left behind when the rest of
     // the link was removed — stopped the daemon, every shell, the tailnet listener and the
@@ -203,9 +202,8 @@ fn main() {
     let mut mesh_session = mesh_session;
     if mesh_session.is_some() && mesh_cfg.is_none() {
         eprintln!(
-            "ldmuxd: mesh link disabled: LDMUX_MESH_PSK is set but the link is not \
-             (LDMUX_MESH_SERIAL, or LDMUX_MESH_ADDR, _TOKEN, _PEER). Remove the key or \
-             name the link; the daemon runs either way."
+            "ldmuxd: mesh link disabled: LDMUX_MESH_PSK is set but LDMUX_MESH_SERIAL is not. \
+             Remove the key or name the device; the daemon runs either way."
         );
         mesh_session = None;
     }
@@ -220,29 +218,16 @@ fn main() {
     let daemon_ref = daemon_arc.clone();
     rt.block_on(async move {
         if let Some(cfg) = mesh_cfg {
-            // Name the carrier that is actually in use. A serial link has no address, so
-            // this printed "mesh link to  (peer 00000000)" — two empty fields where the one
-            // fact worth logging was which radio the daemon had taken over.
-            let endpoint = match &cfg.serial {
-                Some(device) => format!("{device} (serial, owned by this daemon)"),
-                None => format!("{} (gateway)", cfg.addr),
-            };
-            // The peer only exists on the gateway path; a serial link has no peer to name, and
-            // printing eight zero digits for it read as "the peer is all zeros".
-            match &cfg.serial {
-                Some(_) => println!("ldmuxd: mesh link to {endpoint}"),
-                None => {
-                    let mut shown = String::new();
-                    for byte in &cfg.peer[..4] {
-                        shown.push_str(&format!("{byte:02x}"));
-                    }
-                    println!("ldmuxd: mesh link to {endpoint} (peer {shown})");
-                }
-            }
+            // The one fact worth logging: which radio the daemon has taken over. There is no
+            // address and no peer to name — the pairing's other end is whichever phone holds the
+            // keys — and printing empty fields for them read as a fault.
+            println!(
+                "ldmuxd: mesh link to {} (serial, owned by this daemon)",
+                cfg.serial
+            );
             if let Some(session) = &mesh_session {
                 println!(
-                    "ldmuxd: mesh session on; {} key {}",
-                    if cfg.serial.is_some() { "radio" } else { "gateway" },
+                    "ldmuxd: mesh session on; radio key {}",
                     session.public_key_hex()
                 );
             }

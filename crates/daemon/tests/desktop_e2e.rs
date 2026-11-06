@@ -94,16 +94,47 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
             "I3SOCK",
             "HYPRLAND_INSTANCE_SIGNATURE",
             "NIRI_SOCKET",
-            "LDMUX_TERMINAL",
             "TERMINAL",
         ] {
             std::env::remove_var(v);
         }
-        // xterm keeps a window up for 30 s; `{cmd}` follows as $0 and its args.
-        std::env::set_var(
-            "LDMUX_TERMINAL_CMD",
-            "xterm -class {class} -e /bin/sh -c 'sleep 30' {cmd}",
+        // The terminal is the standard variable, and it is named `xterm` so the
+        // daemon's template for xterm applies: `-class {class}` is what the i3
+        // adapter finds the window by. The script ignores the arguments the daemon
+        // appends (including the attach command, which has no daemon here) and runs
+        // the real xterm with a class of its own and a window that stays up.
+        let bin = scratch.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let term = bin.join("xterm");
+        // The real xterm by absolute path: the stub is named `xterm` and sits first
+        // on PATH, so a bare name inside it would exec itself.
+        let real = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| std::path::Path::new(d).join("xterm"))
+            .find(|p| p.is_file())
+            .expect("xterm was found on PATH above");
+        std::fs::write(
+            &term,
+            format!(
+                "#!/bin/sh\nexec {} -class ldmux-live-e2e1 -e /bin/sh -c 'sleep 30'\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &term,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
         );
+        std::env::set_var("PATH", path);
+        std::env::set_var("TERMINAL", "xterm");
     }
 
     guard.0.push(

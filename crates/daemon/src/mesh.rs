@@ -1,34 +1,29 @@
 //! The daemon's mesh link.
 //!
-//! Two carriages, one loop. With `LDMUX_MESH_SERIAL` set the daemon owns the radio
-//! itself over USB serial (`crate::mesh_serial`, on `crates/companion`): no
-//! gateway process, no socket, no token. Without it the daemon dials a MeshMore
-//! gateway on loopback and speaks the L2 contract, exactly as before. Both arrive
-//! at [`Carrier`], and everything above it — the L3 session, the budget, the retry
-//! ladder — is written once.
+//! One carriage: with `LDMUX_MESH_SERIAL` set the daemon owns the host's MeshCore radio over USB
+//! serial (`crate::mesh_serial`, on `crates/companion`), reads the tuple the radio reports, and
+//! drives it. No gateway process, no loopback socket, no pairing token. A host without the
+//! variable has no radio route, and that is a normal configuration, not an error.
 //!
-//! The daemon still learns nothing about presets, paths or contacts when it uses
-//! the gateway; when it owns the radio it reads the preset the radio reports, and
-//! nothing else.
+//! Everything above the carriage — the L3 session, the credit window, the retry ladder, the
+//! bridge — is written once ([`Carrier`]).
 //!
-//! Configuration comes from the environment, because it is per-machine and
-//! belongs beside the other deployment settings:
+//! Configuration comes from the environment, because it is per-machine and belongs beside the
+//! other deployment settings:
 //!
 //! ```text
-//! LDMUX_MESH_SERIAL /dev/serial/by-id/...  own the radio (no gateway needed)
-//! LDMUX_MESH_ADDR   127.0.0.1:41731        gateway address
-//! LDMUX_MESH_TOKEN  1e96a66d...           pairing token, 32 hex chars
-//! LDMUX_MESH_PEER   aa11bb22...           the peer's public key, 64 hex chars
+//! LDMUX_MESH_SERIAL /dev/serial/by-id/...  own this radio (the only mesh setting that turns
+//!                                          the link on)
+//! LDMUX_MESH_PSK    <64 hex>               the pairing's pre-shared key, which turns on the L3
+//!                                          session; persisted to mesh-psk (0600) in the persist
+//!                                          directory, so a later start without the environment
+//!                                          still speaks the same pairing
+//! LDMUX_MESH_SELF   <64 hex>               optional: pin this host's radio public key instead of
+//!                                          reading it from the radio at open
 //! ```
 //!
-//! A fourth, optional, `LDMUX_MESH_PSK` (64 hex characters, the pairing's pre-shared key)
-//! turns on the L3 session ([`crate::mesh_session`]). It is persisted to `mesh-psk` (0600) in the
-//! state directory, so a later start without the environment still speaks the same pairing;
-//! without either source, downlink records are dropped with a visible `last_error`.
-//!
-//! All three of the first group or none. A partial configuration is a startup error rather than a
-//! silent no-op: a daemon that looks configured and is not is worse than one
-//! that refuses to guess.
+//! A malformed value disables the mesh link with a printed reason and leaves the daemon, the
+//! shells and the tailnet listener running: one feature's typo must not stop the product.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -36,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event, GatewayCarrier};
+use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{CREDIT_WINDOW, RadioState, SendOutcome};
 
 /// The longest this loop will sleep with a session attached. See the comment at the wait.
@@ -52,33 +47,22 @@ const MAX_IDLE_WAIT: Duration = Duration::from_millis(50);
 /// recover it.
 const AWAITING_DEADLINE: Duration = Duration::from_secs(10);
 
-/// How long a budget of zero may block new records before one is sent to test it.
+/// How long opening the radio, or writing one record to it, may take.
 ///
-/// `STATUS` arrives with every send result, so a live link keeps its budget current. The gap is
-/// the idle case: a budget that reached zero just before the hour rolled over stays zero, nothing
-/// is sent, no send result arrives, and so no fresh `STATUS` ever comes — the link would stay
-/// silent until something reconnected. A refusal costs no airtime (the radio's governor refuses
-/// before transmitting), and it brings a `STATUS` with the real number, so one probe a minute is
-/// the cheapest way out of that dead end.
-const BUDGET_PROBE: Duration = Duration::from_secs(60);
-
-/// How long the loopback socket may take to connect, handshake, or accept one frame.
-///
-/// The gateway is on the same machine, so seconds are already generous. Before this, a gateway
-/// that accepted the socket and then went quiet — a wedged process, a serial port that stopped
-/// draining — left the daemon waiting in `recv` forever: no error, no backoff, no reconnect, and a
-/// `mesh.status` that said "handshaking" for the life of the process.
-const GATEWAY_TIMEOUT: Duration = Duration::from_secs(10);
+/// The port is local, so seconds are already generous. Without a bound, a radio that accepted the
+/// port and then stopped draining left the daemon waiting forever: no error, no backoff, no
+/// reconnect, and a `mesh.status` that said "handshaking" for the life of the process.
+const CARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the carriage may carry nothing at all while a record is outstanding.
 ///
-/// **A gateway that stops answering is not a gateway that has nothing to say.** The steady-state
-/// receive had no bound: connect, bind and send were each wrapped in [`GATEWAY_TIMEOUT`], but once
-/// the session was up this loop would sit on a socket that never spoke again, with the status
-/// reading `established` and the phone's screen frozen — indefinitely, because nothing in this
-/// loop ever concluded anything from silence. The ARQ's own ladder is the first line (it fails a
-/// record after five attempts over about a minute); this is the backstop for a carriage that stops
-/// delivering *anything*, including the answers the ladder is waiting for.
+/// **A radio that stops answering is not a radio with nothing to say.** The steady-state receive
+/// had no bound: opening and writing were wrapped in [`CARRIER_TIMEOUT`], but once the session was
+/// up this loop would sit on a port that never spoke again, with the status reading `established`
+/// and the phone's screen frozen — indefinitely, because nothing in this loop ever concluded
+/// anything from silence. The ARQ's own ladder is the first line (it fails a record after five
+/// attempts over about a minute); this is the backstop for a carriage that stops delivering
+/// *anything*, including the answers the ladder is waiting for.
 const CARRIER_SILENCE: Duration = Duration::from_secs(75);
 use ldmux_mesh::frame::MeshError;
 use ldmux_session::arq::Limits;
@@ -86,171 +70,62 @@ use tokio::sync::Notify;
 
 use crate::mesh_session::{INBOUND_MAX, SessionFiles, SessionHost, SessionSnapshot};
 
-/// The three settings that turn the link on.
+/// What turns the radio route on: the serial device the daemon owns.
+///
+/// One setting, because one process owns the radio. There is no address to dial and no token to
+/// present: the daemon opens the port, identifies the radio with `SELF_INFO`, and drives it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MeshConfig {
-    pub addr: String,
-    pub token: [u8; 16],
-    pub peer: [u8; 32],
-    /// A serial device the daemon drives itself, instead of dialling a gateway.
-    ///
-    /// This is what removes the gateway process from the deployment: with a device
-    /// set, the daemon owns the radio through `crates/companion`. When it is set the
-    /// three gateway settings are not needed and are not used — a device is chosen
-    /// deliberately, never by a partial configuration.
-    pub serial: Option<String>,
+    /// The device the daemon owns, e.g. a `/dev/serial/by-id/…` path. Never empty.
+    pub serial: String,
 }
 
 impl MeshConfig {
     /// Reads the configuration from a set of `(key, value)` pairs.
     ///
-    /// Separated from [`Self::from_env`] so a test can exercise the "all three
-    /// or none" rule without touching the process environment.
+    /// Separated from [`Self::from_env`] so a test can exercise the rule without touching the
+    /// process environment. `Ok(None)` is "no radio route on this host", which is the normal case
+    /// for a daemon that is only reachable over the tailnet.
     pub fn from_pairs<'a, I>(pairs: I) -> Result<Option<Self>, String>
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
-        let mut addr: Option<String> = None;
         let mut serial: Option<String> = None;
-        let mut token: Option<String> = None;
-        let mut peer: Option<String> = None;
         for (key, value) in pairs {
-            match key {
-                "LDMUX_MESH_ADDR" => addr = Some(value.to_owned()),
-                "LDMUX_MESH_TOKEN" => token = Some(value.to_owned()),
-                "LDMUX_MESH_PEER" => peer = Some(value.to_owned()),
-                "LDMUX_MESH_SERIAL" => serial = Some(value.to_owned()),
-                _ => {}
+            if key == "LDMUX_MESH_SERIAL" {
+                serial = Some(value.to_owned());
             }
         }
-        // A serial device is a complete configuration on its own: the daemon owns the
-        // radio, so there is no address to dial, no token to present and no peer to
-        // bind. The gateway fields are filled with values that are never read, and
-        // `serial` is what the supervisor dispatches on.
-        if let Some(device) = serial {
-            if device.trim().is_empty() {
-                return Err("LDMUX_MESH_SERIAL is empty".to_owned());
+        match serial {
+            None => Ok(None),
+            Some(device) if device.trim().is_empty() => {
+                Err("LDMUX_MESH_SERIAL is empty".to_owned())
             }
-            return Ok(Some(Self {
-                addr: addr.unwrap_or_default(),
-                token: token
-                    .map(|t| parse_hex::<16>(&t, "LDMUX_MESH_TOKEN"))
-                    .transpose()?
-                    .unwrap_or([0u8; 16]),
-                peer: peer
-                    .map(|p| parse_hex::<32>(&p, "LDMUX_MESH_PEER"))
-                    .transpose()?
-                    .unwrap_or([0u8; 32]),
-                serial: Some(device.trim().to_owned()),
-            }));
-        }
-        match (addr, token, peer) {
-            (None, None, None) => Ok(None),
-            (Some(addr), Some(token), Some(peer)) => {
-                let token = parse_hex::<16>(&token, "LDMUX_MESH_TOKEN")?;
-                let peer = parse_hex::<32>(&peer, "LDMUX_MESH_PEER")?;
-                if addr.trim().is_empty() {
-                    return Err("LDMUX_MESH_ADDR is empty".to_owned());
-                }
-                Ok(Some(Self {
-                    addr: addr.trim().to_owned(),
-                    token,
-                    peer,
-                    serial: None,
-                }))
-            }
-            _ => Err(
-                "set all of LDMUX_MESH_ADDR, LDMUX_MESH_TOKEN and LDMUX_MESH_PEER, or none"
-                    .to_owned(),
-            ),
+            Some(device) => Ok(Some(Self {
+                serial: device.trim().to_owned(),
+            })),
         }
     }
 
     /// The process environment's configuration.
-    ///
-    /// `LDMUX_MESH_STATE` names the host gateway's state file, which already holds the
-    /// loopback address, the pairing token and both radio public keys. Explicit variables
-    /// win key by key, so an operator can move the port without rewriting anything, and the
-    /// file is read only when a value is missing.
     pub fn from_env() -> Result<Option<Self>, String> {
-        let vars: Vec<(String, String)> =
-            ["LDMUX_MESH_ADDR", "LDMUX_MESH_TOKEN", "LDMUX_MESH_PEER", "LDMUX_MESH_SERIAL"]
-                .iter()
-                .filter_map(|key| {
-                    std::env::var(key)
-                        .ok()
-                        .map(|value| ((*key).to_owned(), value))
-                })
-                .collect();
-        let explicit: Vec<(&str, &str)> =
-            vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        if explicit.len() == 3 {
-            return Self::from_pairs(explicit);
-        }
-        let Some(path) = std::env::var("LDMUX_MESH_STATE").ok().filter(|p| !p.trim().is_empty())
-        else {
-            return Self::from_pairs(explicit);
-        };
-        let file = Self::from_state_file(std::path::Path::new(&path))?;
-        let mut merged: Vec<(String, String)> = Vec::new();
-        if let Some(f) = &file {
-            merged.push(("LDMUX_MESH_ADDR".to_owned(), f.addr.clone()));
-            merged.push((
-                "LDMUX_MESH_TOKEN".to_owned(),
-                f.token.iter().map(|b| format!("{b:02x}")).collect(),
-            ));
-            merged.push((
-                "LDMUX_MESH_PEER".to_owned(),
-                f.peer.iter().map(|b| format!("{b:02x}")).collect(),
-            ));
-        }
-        for (key, value) in &vars {
-            if let Some(slot) = merged.iter_mut().find(|(k, _)| k == key) {
-                slot.1 = value.clone();
-            } else {
-                merged.push((key.clone(), value.clone()));
-            }
-        }
-        let pairs: Vec<(&str, &str)> =
-            merged.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let device = std::env::var("LDMUX_MESH_SERIAL").ok();
+        let pairs: Vec<(&str, &str)> = device
+            .as_deref()
+            .map(|d| vec![("LDMUX_MESH_SERIAL", d)])
+            .unwrap_or_default();
         Self::from_pairs(pairs)
     }
 
-    /// Configuration from a host gateway's state file (`meshmore_gateway --state`).
+    /// This host's radio public key when the operator pins one.
     ///
-    /// The gateway knows its own address, its token and the radio public keys; the daemon
-    /// must not learn anything else about the radio, and this file carries nothing else.
-    /// `Ok(None)` when the file exists but names no gateway yet.
-    pub fn from_state_file(path: &std::path::Path) -> Result<Option<Self>, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("LDMUX_MESH_STATE {} is unreadable: {e}", path.display()))?;
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("LDMUX_MESH_STATE {} is not JSON: {e}", path.display()))?;
-        let get = |key: &str| json.get(key).and_then(serde_json::Value::as_str);
-        let (Some(addr), Some(token), Some(peer)) =
-            (get("gatewayAddr"), get("pairingToken"), get("peerKey"))
-        else {
-            return Ok(None);
-        };
-        Self::from_pairs([
-            ("LDMUX_MESH_ADDR", addr),
-            ("LDMUX_MESH_TOKEN", token),
-            ("LDMUX_MESH_PEER", peer),
-        ])
-    }
-
-    /// This radio's public key from the same state file, when `LDMUX_MESH_SELF` is unset.
+    /// Optional: a daemon that owns its radio reads the key from `SELF_INFO` at open. The variable
+    /// exists for a host that wants the key frozen — a radio swapped under a kept pairing is then
+    /// a link that does not come up rather than a silent re-pin.
     #[must_use]
     pub fn self_key_from_env() -> Option<[u8; 32]> {
-        if let Ok(text) = std::env::var("LDMUX_MESH_SELF")
-            && let Ok(key) = parse_hex::<32>(&text, "LDMUX_MESH_SELF")
-        {
-            return Some(key);
-        }
-        let path = std::env::var("LDMUX_MESH_STATE").ok()?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-        parse_hex::<32>(json.get("radioKey")?.as_str()?, "radioKey").ok()
+        let text = std::env::var("LDMUX_MESH_SELF").ok()?;
+        parse_hex::<32>(&text, "LDMUX_MESH_SELF").ok()
     }
 }
 
@@ -314,7 +189,7 @@ impl SessionSetup {
         })
     }
 
-    /// The gateway's public key, hex: what a phone must be given to pair.
+    /// The session's public key, hex: what a phone must be given to pair.
     #[must_use]
     pub fn public_key_hex(&self) -> String {
         hex(&self.files.key.public)
@@ -372,24 +247,21 @@ pub struct MeshSnapshot {
     /// The host radio's own public key, read from `SELF_INFO` when the radio was identified.
     pub own_radio_key: Option<[u8; 32]>,
     /// The tuple the host's own radio reported: `(frequency in kHz, bandwidth in Hz, SF, CR)`.
-    /// `None` for a gateway, which does not say, and before the radio has been identified.
+    /// `None` before the radio has been identified.
     pub radio_preset: Option<(u32, u32, u8, u8)>,
-    pub addr: String,
-    /// The serial device the daemon drives itself, when it owns the radio.
+    /// The serial device the daemon drives, `None` when this host has no radio route.
     pub serial: Option<String>,
-    /// The peer's public key, hex.
-    pub peer: String,
-    /// The largest record this peer's path allows, from `BIND_OK`.
+    /// The largest record this peer's path allows, reported by the carrier at open.
     pub uplink_record_max: Option<u8>,
-    /// Records of the current size left in this hour's airtime budget, from
-    /// `STATUS`. `None` until the gateway sends the sixth byte.
+    /// Records of the current size left in this hour's airtime budget, from a status report.
+    /// `None` until the radio has reported one.
     pub records_left: Option<u8>,
     pub radio_state: Option<RadioState>,
     /// `-128` is the contract's "no reading".
     pub rssi: i8,
     /// `0xFF` is the contract's "not reported".
     pub battery_percent: u8,
-    /// The gateway's own transmit airtime this hour, in 0.1 s units.
+    /// The radio's own transmit airtime this hour, in 0.1 s units.
     pub tx_airtime_tenths: u16,
     /// The last failure, if the link is down or recovering.
     pub last_error: Option<String>,
@@ -409,9 +281,7 @@ impl MeshSnapshot {
             state: "connecting",
             own_radio_key: None,
             radio_preset: None,
-            addr: cfg.addr.clone(),
-            serial: cfg.serial.clone(),
-            peer: hex(&cfg.peer),
+            serial: Some(cfg.serial.clone()),
             uplink_record_max: None,
             records_left: None,
             radio_state: None,
@@ -429,14 +299,12 @@ impl MeshSnapshot {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "state": self.state,
-            "addr": self.addr,
             "serial": self.serial,
-            "peer": self.peer,
             "uplinkRecordMax": self.uplink_record_max,
             "recordsLeft": self.records_left,
             "radioState": self.radio_state.map(|s| s.code()),
-            // The tuple the host's own radio reported (or was retuned to). Absent for a gateway,
-            // which does not say, and before the radio has been identified.
+            // The tuple the host's own radio reported (or was retuned to). Absent before the
+            // radio has been identified.
             "radioPreset": self
                 .radio_preset
                 .map(|(f, b, sf, cr)| vec![u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)]),
@@ -638,8 +506,7 @@ impl MeshRuntime {
     pub fn disabled_json() -> serde_json::Value {
         serde_json::json!({
             "state": "disabled",
-            "addr": serde_json::Value::Null,
-            "peer": serde_json::Value::Null,
+            "serial": serde_json::Value::Null,
             "uplinkRecordMax": serde_json::Value::Null,
             "recordsLeft": serde_json::Value::Null,
             "radioState": serde_json::Value::Null,
@@ -717,15 +584,15 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
             s.state = "connecting";
             s.last_error = None;
         });
-        // Whether this attempt ever completed a handshake. Only a handshake says the gateway is
-        // healthy, and only then does the backoff go back to its floor: before this, one outage
+        // Whether this attempt ever completed the open. Only that says the radio is healthy, and
+        // only then does the backoff go back to its floor: before this, one outage
         // left every later reconnect waiting the full 30 s cap for the life of the process.
         let bound = Arc::new(AtomicBool::new(false));
         match link(&cfg, &runtime, setup.as_mut(), Arc::clone(&bound)).await {
             Ok(()) => {
                 set(&snapshot, |s| {
                     s.state = "down";
-                    s.last_error = Some("the gateway closed the connection".to_owned());
+                    s.last_error = Some("the link closed".to_owned());
                 });
             }
             Err(e) => {
@@ -748,9 +615,9 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
             backoff = Duration::from_secs(1);
         }
         tokio::time::sleep(backoff).await;
-        // Capped: a radio that is off for an hour should not be dialled every
-        // second, and a gateway that comes back is noticed on the next 1 s attempt because the
-        // reset above ran for this connection.
+        // Capped: a radio that is off for an hour should not be reopened every second, and one
+        // that comes back is noticed on the next 1 s attempt because the reset above ran for this
+        // connection.
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -767,79 +634,48 @@ fn now_unix_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Connect whatever carries this link and run the session on it.
+/// Open the radio and run the session on it.
 ///
-/// A serial device means the daemon owns the radio (`crate::mesh_serial`); without
-/// one it dials the gateway exactly as before. Everything below this function is
-/// the same for both, which is the point of the [`Carrier`] seam.
+/// One carrier, and it is the one that ships: the daemon opens the serial device, reads the tuple
+/// the radio reports, publishes it (the phone must match it), and hands the carrier to the loop.
 async fn link(
     cfg: &MeshConfig,
     runtime: &MeshRuntime,
     setup: Option<&mut SessionSetup>,
     bound: Arc<AtomicBool>,
 ) -> Result<(), MeshError> {
-    match cfg.serial.clone() {
-        Some(device) => {
-            set(&runtime.snapshot, |s| s.state = "handshaking");
-            let opened = tokio::time::timeout(
-                GATEWAY_TIMEOUT,
-                crate::mesh_serial::SerialCarrier::open(&device),
-            )
-            .await
-            .map_err(|_| MeshError::Timeout("serial open"))??;
-            let (carrier, promise, preset) = opened;
-            // **The host's own tuple, said out loud.** Read from the radio at open and published
-            // here, because two radios on different tuples cannot hear each other and the phone
-            // could only ever compare against a number the host never gave it.
-            set(&runtime.snapshot, |s| {
-                s.own_radio_key = Some(preset.public_key);
-                s.radio_preset = Some((
-                    (preset.freq_mhz * 1000.0).round() as u32,
-                    (preset.bw_khz * 1000.0).round() as u32,
-                    preset.sf,
-                    preset.cr,
-                ));
-            });
-            session(carrier, promise, runtime, setup, bound).await
-        }
-        None => {
-            set(&runtime.snapshot, |s| s.state = "handshaking");
-            let mut carrier = tokio::time::timeout(
-                GATEWAY_TIMEOUT,
-                GatewayCarrier::open(&cfg.addr),
-            )
-            .await
-            .map_err(|_| MeshError::Timeout("gateway connect"))??;
-            let promise = tokio::time::timeout(
-                GATEWAY_TIMEOUT,
-                carrier.bind(&cfg.token, &cfg.peer),
-            )
-            .await
-            .map_err(|_| MeshError::Timeout("gateway handshake"))??;
-            session(carrier, promise, runtime, setup, bound).await
-        }
-    }
+    set(&runtime.snapshot, |s| s.state = "handshaking");
+    let opened = tokio::time::timeout(
+        CARRIER_TIMEOUT,
+        crate::mesh_serial::SerialCarrier::open(&cfg.serial),
+    )
+    .await
+    .map_err(|_| MeshError::Timeout("the radio did not open"))??;
+    let (carrier, promise, preset) = opened;
+    // **The host's own tuple, said out loud.** Read from the radio at open and published here,
+    // because two radios on different tuples cannot hear each other and the phone could only ever
+    // compare against a number the host never gave it.
+    set(&runtime.snapshot, |s| {
+        s.own_radio_key = Some(preset.public_key);
+        s.radio_preset = Some((
+            (preset.freq_mhz * 1000.0).round() as u32,
+            (preset.bw_khz * 1000.0).round() as u32,
+            preset.sf,
+            preset.cr,
+        ));
+    });
+    session(carrier, promise, runtime, setup, bound).await
 }
 
 /// How many records this poll may hand to the carrier.
 ///
-/// The rule differs by who owns the meter, and getting it wrong is not a detail: with
-/// `Budget::Reported` an unknown budget is zero (a gateway that has said nothing has allowed
-/// nothing), and applying that same rule with no gateway at all left a serial host able to send
-/// one probe record a minute and answer nothing - a paired phone retried `attach` for ever while
-/// `ldmux mesh status` read `budget 0 records left this hour` (measured 2026-11-05).
-fn poll_budget(source: Budget, reported: Option<u8>, probe: bool) -> u8 {
+/// The radio we own is the meter: its firmware runs the transmitter's duty cycle and refuses a
+/// record it will not send, so there is no second number to apply here. The rule is a function of
+/// the carriage's own declaration rather than a constant so that a carriage which does meter has
+/// somewhere to say so.
+fn poll_budget(source: Budget) -> u8 {
     match source {
-        // The radio's firmware runs the transmitter's duty cycle and refuses what it will not
-        // send, so there is no second meter to apply here.
         Budget::RadioGoverned => u8::MAX,
-        Budget::Reported => {
-            if probe {
-                1
-            } else {
-                reported.unwrap_or(0)
-            }
-        }
     }
 }
 
@@ -878,7 +714,6 @@ async fn session<C: Carrier>(
     // origin, so `drained … ms` and `reply queued at …` differed by a constant that read as
     // latency — 76 748 ms on one run. Anything two probes are compared against comes from here.
     let started = runtime_start();
-    let mut budget: Option<u8> = None;
     // When this carriage last delivered anything, in either direction.
     let mut last_carrier = Instant::now();
     // One entry per record written and not yet answered, keyed by its L2 sequence number.
@@ -890,7 +725,6 @@ async fn session<C: Carrier>(
     // refusal be handed back to the right slot. A queued handshake reply has no ARQ slot (`None`).
     let mut awaiting: VecDeque<(u8, Instant, Option<u16>)> = VecDeque::new();
     let mut seq: u8 = 0;
-    let mut last_status_at = Instant::now();
 
     loop {
         if runtime.reset_pin.swap(false, Ordering::SeqCst)
@@ -960,15 +794,13 @@ async fn session<C: Carrier>(
                 last_carrier = Instant::now();
                 match event? {
                     Event::Status(status) => {
-                        last_status_at = Instant::now();
-                        if status.ops_left_this_hour.is_some() {
-                            budget = status.ops_left_this_hour;
-                        }
                         set(snapshot, |s| {
                             s.radio_state = Some(status.radio_state);
                             s.rssi = status.rssi;
                             s.battery_percent = status.battery_percent;
                             s.tx_airtime_tenths = status.tx_airtime_tenths_this_hour;
+                            // The radio's own count of what is left this hour. Published, not
+                            // enforced: the firmware is the meter.
                             if status.ops_left_this_hour.is_some() {
                                 s.records_left = status.ops_left_this_hour;
                             }
@@ -1084,22 +916,11 @@ async fn session<C: Carrier>(
             }
         }
 
-        // The budget is the gateway's own number. Unknown means zero: a gateway that has not
-        // said how much airtime is left has not allowed anything.
-        //
-        // A zero that has blocked us for a minute is tested, because a zero is a number from the
-        // last `STATUS` and the hour may have rolled over while the link was idle. See
-        // [`BUDGET_PROBE`]: the probe is refused without airtime if the budget really is spent.
+        // **Who meters the airtime is the carriage's declaration, not a missing number.** The
+        // radio we own runs its own duty cycle in firmware and refuses what it will not send, so
+        // this loop does not gate on a figure it would have to invent.
         let used = u8::try_from(awaiting.len()).unwrap_or(u8::MAX);
-        let probe = budget == Some(0)
-            && h.wants_poll()
-            && now.saturating_duration_since(last_status_at) >= BUDGET_PROBE;
-        // **A radio we own is not gated here.** Its firmware runs the transmitter's duty cycle and
-        // refuses a record it will not send; applying the gateway's "unknown means zero" rule on
-        // top of that left a serial host able to send one probe a minute and answer nothing, which
-        // is exactly what a paired phone saw as an endless `attach` (measured 2026-11-05, with
-        // `ldmux mesh status` reporting `budget 0 records left this hour`).
-        let records_left = poll_budget(promise.budget, budget, probe);
+        let records_left = poll_budget(promise.budget);
         let limits = Limits {
             records_left,
             l2_slots: CREDIT_WINDOW.saturating_sub(used),
@@ -1113,7 +934,7 @@ async fn session<C: Carrier>(
         }
         if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && queued_n > 0 {
             eprintln!(
-                "ldmuxd: mesh timing: queued {} -> polled {} at {now_ms} ms (awaiting {used}, budget {budget:?}, l2_slots {})",
+                "ldmuxd: mesh timing: queued {} -> polled {} at {now_ms} ms (awaiting {used}, l2_slots {})",
                 queued_n,
                 polled.len(),
                 CREDIT_WINDOW.saturating_sub(used),
@@ -1123,17 +944,15 @@ async fn session<C: Carrier>(
         let pending_now = h.snapshot().pending;
         for record in polled {
             let t_write = std::time::Instant::now();
-            tokio::time::timeout(GATEWAY_TIMEOUT, carrier.send_record(seq, &record.bytes))
+            tokio::time::timeout(CARRIER_TIMEOUT, carrier.send_record(seq, &record.bytes))
                 .await
-                .map_err(|_| MeshError::Timeout("gateway write"))??;
+                .map_err(|_| MeshError::Timeout("the write to the radio"))??;
             let took = t_write.elapsed().as_millis();
             if std::env::var_os("LDMUX_MESH_TIMING").is_some_and(|v| v == "1") && took > 50 {
                 eprintln!("ldmuxd: mesh timing: socket write took {took} ms");
             }
             awaiting.push_back((seq, Instant::now(), record.seq));
             seq = seq.wrapping_add(1);
-            budget = budget.map(|b| b.saturating_sub(1));
-            set(snapshot, |s| s.records_left = budget);
         }
         // **Drain what is sendable before sleeping.** The loop used to send one poll's worth and
         // then wait for the ARQ's next deadline, so a screen update of six records could take
@@ -1197,9 +1016,6 @@ pub(crate) fn runtime_start() -> Instant {
 mod tests {
     use super::*;
 
-    const TOKEN: &str = "00112233445566778899aabbccddeeff";
-    const PEER: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-
     /// A carriage that counts how often the loop asks it for the next event.
     struct PollCountingCarrier {
         polls: Arc<std::sync::atomic::AtomicUsize>,
@@ -1219,10 +1035,7 @@ mod tests {
 
     fn test_runtime() -> MeshRuntime {
         let cfg = MeshConfig {
-            addr: String::new(),
-            token: [0; 16],
-            peer: [0; 32],
-            serial: Some("/dev/null".to_owned()),
+            serial: "/dev/null".to_owned(),
         };
         MeshRuntime {
             pairing_keys: None,
@@ -1324,82 +1137,19 @@ mod tests {
     }
 
     #[test]
-    fn a_serial_device_is_a_complete_configuration_on_its_own() {
-        // The point of the serial carrier: no address to dial, no token, no peer to
-        // bind. This is what lets a host own its radio with nothing else running.
+    fn a_serial_device_is_the_whole_configuration() {
+        // One setting, because one process owns the radio: no address to dial, no token to
+        // present, no peer to bind.
         let cfg = MeshConfig::from_pairs([("LDMUX_MESH_SERIAL", "/dev/ttyACM0")])
-            .expect("a device alone is enough")
-            .expect("a device is a configuration");
-        assert_eq!(cfg.serial.as_deref(), Some("/dev/ttyACM0"));
-        assert!(cfg.addr.is_empty(), "no gateway address was given");
-        assert_eq!(cfg.token, [0u8; 16], "no token was given");
+            .expect("a device is the configuration")
+            .expect("some");
+        assert_eq!(cfg.serial, "/dev/ttyACM0");
     }
 
     #[test]
     fn an_empty_serial_device_is_refused_rather_than_ignored() {
         let e = MeshConfig::from_pairs([("LDMUX_MESH_SERIAL", "  ")]).unwrap_err();
         assert!(e.contains("LDMUX_MESH_SERIAL"), "{e}");
-    }
-
-    #[test]
-    fn a_serial_device_wins_over_the_gateway_settings() {
-        let cfg = MeshConfig::from_pairs([
-            ("LDMUX_MESH_SERIAL", "/dev/ttyUSB0"),
-            ("LDMUX_MESH_ADDR", "127.0.0.1:41731"),
-            ("LDMUX_MESH_TOKEN", "00112233445566778899aabbccddeeff"),
-            ("LDMUX_MESH_PEER", PEER),
-        ])
-        .unwrap()
-        .unwrap();
-        assert_eq!(cfg.serial.as_deref(), Some("/dev/ttyUSB0"));
-        // The gateway fields are still parsed, so nothing is silently half-read.
-        assert_eq!(cfg.token[0], 0x00);
-        assert_eq!(cfg.peer[31], 0x1f);
-    }
-
-    #[test]
-    fn all_three_parse() {
-        let cfg = MeshConfig::from_pairs(vec![
-            ("LDMUX_MESH_ADDR", "127.0.0.1:41731"),
-            ("LDMUX_MESH_TOKEN", TOKEN),
-            ("LDMUX_MESH_PEER", PEER),
-        ])
-        .expect("valid")
-        .expect("some");
-        assert_eq!(cfg.addr, "127.0.0.1:41731");
-        assert_eq!(cfg.token[0], 0x00);
-        assert_eq!(cfg.token[15], 0xff);
-        assert_eq!(cfg.peer[31], 0x1f);
-    }
-
-    #[test]
-    fn a_partial_configuration_is_an_error() {
-        let err = MeshConfig::from_pairs(vec![
-            ("LDMUX_MESH_ADDR", "127.0.0.1:41731"),
-            ("LDMUX_MESH_TOKEN", TOKEN),
-        ])
-        .expect_err("partial");
-        assert!(err.contains("or none"), "{err}");
-    }
-
-    #[test]
-    fn a_bad_token_is_refused() {
-        assert!(
-            MeshConfig::from_pairs(vec![
-                ("LDMUX_MESH_ADDR", "127.0.0.1:41731"),
-                ("LDMUX_MESH_TOKEN", "abcd"),
-                ("LDMUX_MESH_PEER", PEER),
-            ])
-            .is_err()
-        );
-        assert!(
-            MeshConfig::from_pairs(vec![
-                ("LDMUX_MESH_ADDR", "127.0.0.1:41731"),
-                ("LDMUX_MESH_TOKEN", &"z".repeat(32)),
-                ("LDMUX_MESH_PEER", PEER),
-            ])
-            .is_err()
-        );
     }
 
     #[test]
@@ -1417,18 +1167,13 @@ mod tests {
     #[test]
     fn a_snapshot_serialises_every_field_the_cli_prints() {
         let cfg = MeshConfig {
-            addr: "127.0.0.1:41731".to_owned(),
-            token: [0; 16],
-            peer: [0xAB; 32],
-            serial: None,
+            serial: "/dev/ttyACM0".to_owned(),
         };
         let snapshot = MeshSnapshot::new(&cfg);
         let json = snapshot.to_json();
         for key in [
             "state",
-            "addr",
             "serial",
-            "peer",
             "uplinkRecordMax",
             "recordsLeft",
             "radioState",
@@ -1440,82 +1185,20 @@ mod tests {
         ] {
             assert!(json.get(key).is_some(), "missing {key}");
         }
+        assert_eq!(json["serial"], "/dev/ttyACM0");
         // Not status: whether this host knows its own radio decides whether a pairing code
         // it prints can be used at all, so `mesh status` answers it beside the link.
         assert_eq!(json["hostRadio"], serde_json::Value::Null);
-        assert_eq!(json["peer"], "ab".repeat(32));
     }
 
-    fn state_file(dir: &str, body: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(dir);
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        let file = path.join("gateway.json");
-        std::fs::write(&file, body).unwrap();
-        file
-    }
-
-    #[test]
-    fn a_gateway_state_file_supplies_address_token_and_peer() {
-        // The host gateway resolves the peer radio by name and publishes both keys, so the
-        // daemon never needs a 64-hex copy. The file carries nothing about radio parameters.
-        let file = state_file(
-            "ldmux-mesh-state-ok",
-            &format!(
-                r#"{{"gatewayAddr":"127.0.0.1:41731","pairingToken":"{TOKEN}","peerKey":"{PEER}","radioKey":"{PEER}"}}"#
-            ),
-        );
-        let cfg = MeshConfig::from_state_file(&file).unwrap().expect("configured");
-        assert_eq!(cfg.addr, "127.0.0.1:41731");
-        assert_eq!(cfg.token[15], 0xff);
-        assert_eq!(cfg.peer[31], 0x1f);
-    }
-
-    #[test]
-    fn a_state_file_without_a_resolved_peer_configures_nothing() {
-        // `--peer-name` unresolved writes a null peerKey. A daemon that guessed a peer would
-        // send records into the wrong path, so absence is "not configured", not "any peer".
-        let file = state_file(
-            "ldmux-mesh-state-nopeer",
-            &format!(r#"{{"gatewayAddr":"127.0.0.1:41731","pairingToken":"{TOKEN}","peerKey":null}}"#),
-        );
-        assert!(MeshConfig::from_state_file(&file).unwrap().is_none());
-    }
-
-    #[test]
-    fn an_unreadable_state_file_names_itself() {
-        let path = std::env::temp_dir().join("ldmux-mesh-state-missing.json");
-        let _ = std::fs::remove_file(&path);
-        let err = MeshConfig::from_state_file(&path).unwrap_err();
-        assert!(err.contains("LDMUX_MESH_STATE"), "{err}");
-        assert!(err.contains("unreadable"), "{err}");
-    }
-
-
-    /// The serial carrier has no gateway, so "unknown means zero" must not apply to it.
+    /// **The radio is the meter.** Its firmware runs the transmitter's duty cycle and refuses a
+    /// record it will not send, so the loop does not gate on a number the carrier never reported.
     ///
-    /// This is the exact shape of the reported failure: a paired phone retrying `attach` for ever
-    /// against a host whose status read `budget 0 records left this hour`, because the budget was
-    /// `None` (no gateway to report one) and `None` was treated as spent.
+    /// This is the exact shape of the reported failure: a paired phone retried `attach` for ever
+    /// against a host whose status read `budget 0 records left this hour`, because a missing budget
+    /// was read as "nothing may be sent" — and the serial carrier has nothing to report one.
     #[test]
-    fn a_radio_we_own_is_gated_by_its_firmware_not_by_a_missing_gateway_number() {
-        assert_eq!(poll_budget(Budget::RadioGoverned, None, false), u8::MAX);
-        assert_eq!(poll_budget(Budget::RadioGoverned, Some(0), false), u8::MAX);
-        assert_eq!(poll_budget(Budget::RadioGoverned, Some(7), false), u8::MAX);
-    }
-
-    /// A gateway's budget is its own number, and silence is not permission.
-    #[test]
-    fn a_gateway_that_has_said_nothing_has_allowed_nothing() {
-        assert_eq!(poll_budget(Budget::Reported, None, false), 0);
-        assert_eq!(poll_budget(Budget::Reported, Some(0), false), 0);
-        assert_eq!(poll_budget(Budget::Reported, Some(9), false), 9);
-    }
-
-    /// The probe exists so a spent hour does not need a manual restart, and it is one record.
-    #[test]
-    fn a_spent_gateway_budget_still_allows_the_probe() {
-        assert_eq!(poll_budget(Budget::Reported, Some(0), true), 1);
-        assert_eq!(poll_budget(Budget::Reported, None, true), 1);
+    fn the_radio_owns_the_meter() {
+        assert_eq!(poll_budget(Budget::RadioGoverned), u8::MAX);
     }
 }

@@ -3,10 +3,18 @@
 //! Port of the pure functions from `packages/daemon/src/desktop.ts`.
 //!
 //! **Opening a window needs no window manager.** The daemon spawns a terminal emulator
-//! directly (detached, own process group, absolute path, the session environment).
-//! Placing it on a workspace is an optional adapter (i3, sway, hyprland) that
-//! degrades to "opened, not placed". The terminal is chosen from
-//! `LDMUX_TERMINAL_CMD`, `LDMUX_TERMINAL`, `$TERMINAL`, then known emulators on `PATH`.
+//! directly (detached, own process group, own systemd scope, absolute path, the session
+//! environment). Placing it on a workspace is an optional adapter (i3, sway, hyprland)
+//! that degrades to "opened, not placed".
+//!
+//! **The terminal is the user's own, found by convention, not by a ldmux knob.** The
+//! order is `$TERMINAL`, then `xdg-terminal-exec` when the desktop provides it (it reads
+//! the user's terminal configuration, so it *is* the configured default), then this
+//! desktop's configured terminal (GNOME's gsettings, KDE's `kdeglobals`, XFCE's xfconf
+//! and `helpers.rc`), then an emulator already running in this session (ten alacritty
+//! windows open means alacritty is the terminal here, whatever a config file says), then
+//! the known emulators on `PATH`. An emulator that needs unusual flags is a wrapper
+//! script and `$TERMINAL` points at it.
 //!
 //! **There is no terminal-multiplexer mirror.** `ldmux mirror <id>` runs `ldmuxd attach <id> --readonly` —
 //! the same protocol client as a desk window, told not to take a claim.
@@ -35,15 +43,6 @@ pub fn live_window_class(session_id: &str) -> String {
     window_class("ldmux-live-", session_id)
 }
 
-/// The i3 window class for a session's mirror window.
-///
-/// Per session, not one shared `ldmux-mirror`: placement moves a window by
-/// class, so two mirrors of two shells would otherwise be indistinguishable and
-/// the second one could move the first.
-pub fn mirror_window_class(session_id: &str) -> String {
-    window_class("ldmux-mirror-", session_id)
-}
-
 fn window_class(prefix: &str, session_id: &str) -> String {
     let safe: String = session_id
         .chars()
@@ -52,9 +51,6 @@ fn window_class(prefix: &str, session_id: &str) -> String {
         .collect();
     format!("{prefix}{safe}")
 }
-
-/// The workspace `ldmux mirror` opens on when none is named (the TS constant).
-pub const DEFAULT_MIRROR_WORKSPACE: u32 = 10;
 
 /// An i3 workspace target, or None when the name could be i3 syntax.
 ///
@@ -173,8 +169,13 @@ const SPECS: &[Spec] = &[
 /// nearly all of them share.
 const GENERIC_ARGS: &[&str] = &["-e", "{cmd}"];
 
-/// The order autodetection tries, after `$LDMUX_TERMINAL` and `$TERMINAL`: the
-/// real emulators first, the wrappers last (they are the least predictable).
+/// The last resort: the known emulators, real ones first.
+///
+/// `x-terminal-emulator` is **last** and not first: on Debian it is an
+/// `update-alternatives` symlink (it resolves to `xfce4-terminal.wrapper` on this
+/// machine), it cannot name its window class, and it hides which program actually
+/// opens. `xdg-terminal-exec` is not here at all — it is tried before any of these,
+/// because when it is installed it *is* the configured terminal.
 const AUTODETECT: &[&str] = &[
     "alacritty",
     "kitty",
@@ -185,8 +186,16 @@ const AUTODETECT: &[&str] = &[
     "xfce4-terminal",
     "xterm",
     "x-terminal-emulator",
-    "xdg-terminal-exec",
 ];
+
+/// The XDG terminal convention's launcher. When a desktop ships it, it reads the
+/// user's own configuration and every application that opens a terminal goes
+/// through it, so it is the configured default by definition.
+const XDG_TERMINAL_EXEC: &str = "xdg-terminal-exec";
+
+/// How long a configuration probe may take. A user manager that cannot answer in
+/// this has no answer, and opening a window must not wait for it.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn spec_for(program: &str) -> Option<&'static Spec> {
     let base = std::path::Path::new(program).file_name()?.to_str()?;
@@ -220,141 +229,283 @@ fn which(name: &str) -> Option<String> {
     which_in(name, &std::env::var("PATH").unwrap_or_default())
 }
 
-/// Split a command line into words: whitespace separates, single and double
-/// quotes group, a backslash escapes outside single quotes. No expansion of any
-/// kind — this is the whole of the "shell" `LDMUX_TERMINAL_CMD` gets.
-pub fn split_words(s: &str) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut have = false;
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                have = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => cur.push(c),
-                        None => return Err("unterminated ' quote".to_string()),
-                    }
-                }
-            }
-            '"' => {
-                have = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(c) => cur.push(c),
-                            None => return Err("unterminated \" quote".to_string()),
-                        },
-                        Some(c) => cur.push(c),
-                        None => return Err("unterminated \" quote".to_string()),
-                    }
-                }
-            }
-            '\\' => {
-                have = true;
-                if let Some(c) = chars.next() {
-                    cur.push(c);
-                }
-            }
-            c if c.is_whitespace() => {
-                if have {
-                    out.push(std::mem::take(&mut cur));
-                    have = false;
-                }
-            }
-            c => {
-                have = true;
-                cur.push(c);
-            }
-        }
-    }
-    if have {
-        out.push(cur);
-    }
-    Ok(out)
+/// The first word of a command line: `$TERMINAL` may carry flags, and only the
+/// program is used (`TERMINAL="alacritty --some-flag"` names alacritty).
+fn first_word(s: &str) -> Option<&str> {
+    s.split_whitespace().next()
 }
 
-/// `LDMUX_TERMINAL_CMD`, parsed: a free-form command line with `{cmd}` where the
-/// attach command goes and optionally `{class}`. The program is resolved to an
-/// absolute path. A line with no `{cmd}` gets one appended, so
-/// `LDMUX_TERMINAL_CMD="mytty --flag"` means `mytty --flag <attach command>`.
-fn custom_template() -> Option<Vec<String>> {
-    let raw = std::env::var("LDMUX_TERMINAL_CMD").ok()?;
-    parse_custom(&raw, &std::env::var("PATH").unwrap_or_default())
-}
-
-fn parse_custom(raw: &str, path: &str) -> Option<Vec<String>> {
-    let mut words = split_words(raw).ok()?;
-    if words.is_empty() {
-        return None;
-    }
-    if let Some(abs) = which_in(&words[0], path) {
-        words[0] = abs;
-    }
-    if !words.iter().any(|w| w.contains("{cmd}")) {
-        words.push("{cmd}".to_string());
-    }
-    Some(words)
-}
-
-/// The terminal a window opens in: an absolute path when one can be found, else
-/// whatever was asked for (so `terminal_problem` can name it), else "".
+/// The terminal a window opens in: an absolute path, or "" when nothing was found.
 ///
-/// Order: `$LDMUX_TERMINAL_CMD`, `$LDMUX_TERMINAL`, `$TERMINAL`, then the known
-/// emulators on `PATH`.
+/// The order is the one in the module comment. Every step is skipped silently when
+/// it does not resolve: a stale `$TERMINAL`, a desktop with no configured terminal,
+/// and a probe whose tool is not installed are all ordinary, and none of them is a
+/// reason to refuse to open a window in something that does exist.
 pub fn terminal() -> String {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let xdg = which_in(XDG_TERMINAL_EXEC, &path);
+    // The probes and the /proc scan only run when the cheap answers failed, and
+    // each is resolved once per process: `window_state` asks this question on every
+    // poll, and a 250 ms probe per poll would be a stall in a loop. `$TERMINAL` and
+    // the launcher stay live (two PATH lookups), so an explicit choice still applies
+    // without a restart; the desktop's configuration and the running session do not
+    // change under a daemon in any way worth re-reading.
+    let configured = if xdg.is_none() {
+        cached_configured()
+    } else {
+        None
+    };
+    // **Both are needed to answer.** The session's emulators outrank the desktop's
+    // configured terminal (a settings key is often a distribution alternative while the
+    // person works in something else), so `running` cannot be skipped just because the
+    // configured probe answered — that is the bug that made this machine resolve to
+    // `x-terminal-emulator` with ten alacritty windows open.
+    let running = if xdg.is_none() {
+        cached_running()
+    } else {
+        Vec::new()
+    };
     resolve_terminal(
-        custom_template()
-            .as_deref()
-            .and_then(|c| c.first().map(|s| s.as_str())),
-        std::env::var("LDMUX_TERMINAL").ok().as_deref(),
         std::env::var("TERMINAL").ok().as_deref(),
-        &std::env::var("PATH").unwrap_or_default(),
+        xdg.as_deref(),
+        configured,
+        &running,
+        &path,
     )
 }
 
-/// The rule behind [terminal], pure so it is testable without mutating the
-/// process environment (which tests share).
+/// The rule behind [`terminal`], pure so every step is testable without mutating
+/// the process environment (which tests share) or owning a desktop.
 fn resolve_terminal(
-    custom: Option<&str>,
-    ldmux: Option<&str>,
     term: Option<&str>,
+    xdg_terminal_exec: Option<&str>,
+    configured: Option<&str>,
+    running: &[String],
     path: &str,
 ) -> String {
-    let clean = |v: Option<&str>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    // Asked for by name: honoured even when it cannot be found, so the refusal
-    // names what was asked for rather than silently using something else.
-    if let Some(explicit) = clean(custom).or_else(|| clean(ldmux)) {
-        return which_in(&explicit, path).unwrap_or(explicit);
+    let resolved = |value: &str| {
+        first_word(value).and_then(|w| which_in(w.trim_matches('\''), path))
+    };
+    // 1. The standard variable every other tool already sets.
+    if let Some(t) = term.filter(|v| !v.trim().is_empty()).and_then(resolved) {
+        return t;
     }
-    // `$TERMINAL` is a convention other tools set; a stale one is skipped.
-    if let Some(t) = clean(term) {
-        let first = t.split_whitespace().next().unwrap_or("").to_string();
-        if let Some(abs) = which_in(&first, path) {
-            return abs;
-        }
+    // 2. The XDG launcher, when the desktop provides one.
+    if let Some(x) = xdg_terminal_exec
+        && let Some(abs) = which_in(x, path)
+    {
+        return abs;
     }
+    // 3. **An emulator the user is running right now**, most frequent first.
+    //
+    // This sits above the desktop's configured terminal on purpose. A desktop setting is
+    // often a distribution alternative (`gsettings` answers `x-terminal-emulator`, which on
+    // Debian resolves to `xfce4-terminal.wrapper`) while the person is actually working in
+    // something else — measured on this machine 2026-11-06: ten alacritty windows open, and
+    // the configured setting named xfce4-terminal. A window that opens in a terminal the user
+    // is not using is the defect this whole chain exists to remove, so "what they are using"
+    // outranks "what a settings key says".
+    if let Some(t) = running.iter().find_map(|n| which_in(n, path)) {
+        return t;
+    }
+    // 4. This desktop's configured terminal.
+    if let Some(t) = configured.filter(|v| !v.trim().is_empty()).and_then(resolved) {
+        return t;
+    }
+    // 5. The known names.
     AUTODETECT
         .iter()
         .find_map(|n| which_in(n, path))
         .unwrap_or_default()
 }
 
+/// Run one configuration probe, bounded by [`PROBE_TIMEOUT`], with no output on
+/// failure: a missing tool, a desktop that does not answer, and a tool that hangs
+/// are all "this machine has no answer here".
+fn run_probe(program: &str, args: &[&str]) -> Option<String> {
+    let exe = which(program)?;
+    let mut child = std::process::Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut out = String::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    use std::io::Read as _;
+                    let _ = pipe.read_to_string(&mut out);
+                }
+                return Some(out);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => {
+                // A probe that will not answer is killed, not waited for.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// [`configured_terminal`], resolved once: see [`terminal`] for why.
+fn cached_configured() -> Option<&'static str> {
+    static CONFIGURED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CONFIGURED
+        .get_or_init(configured_terminal)
+        .as_deref()
+}
+
+/// [`running_emulators`], resolved once: see [`terminal`] for why.
+fn cached_running() -> Vec<String> {
+    static RUNNING: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    RUNNING.get_or_init(running_emulators).clone()
+}
+
+/// The desktop's configured terminal, if this machine names one.
+///
+/// Only probes that name a **program** are read. KDE's `TerminalService` names a
+/// `.desktop` file whose `Exec` would have to be parsed to be usable, and guessing
+/// wrong here opens a different terminal than the one configured — the failure
+/// this whole order exists to avoid — so it is left alone.
+fn configured_terminal() -> Option<String> {
+    if let Some(out) = run_probe(
+        "gsettings",
+        &[
+            "get",
+            "org.gnome.desktop.default-applications.terminal",
+            "exec",
+        ],
+    ) && let Some(v) = parse_quoted_probe(&out)
+    {
+        return Some(v);
+    }
+    for tool in ["kreadconfig6", "kreadconfig5"] {
+        if let Some(out) = run_probe(
+            tool,
+            &[
+                "--file",
+                "kdeglobals",
+                "--group",
+                "General",
+                "--key",
+                "TerminalApplication",
+            ],
+        ) && let Some(v) = parse_word_probe(&out)
+        {
+            return Some(v);
+        }
+    }
+    if let Some(out) = run_probe(
+        "xfconf-query",
+        &["-c", "xfce4-session", "-p", "/general/TerminalEmulator"],
+    ) && let Some(v) = parse_word_probe(&out)
+    {
+        return Some(v);
+    }
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    let text = std::fs::read_to_string(format!("{home}/.config/xfce4/helpers.rc")).ok()?;
+    parse_helpers_rc(&text)
+}
+
+/// `gsettings get` prints a quoted value (`'alacritty'`); an empty setting prints
+/// `''`. Anything else — an error message, a missing schema — is not an answer.
+fn parse_quoted_probe(out: &str) -> Option<String> {
+    let t = out.trim();
+    let inner = t.strip_prefix('\'')?.strip_suffix('\'')?;
+    let inner = inner.trim();
+    (!inner.is_empty()).then(|| inner.to_string())
+}
+
+/// A probe that prints one word (`alacritty`, `/usr/bin/kitty`) on success and an
+/// error sentence on failure: only a single token is taken as an answer.
+fn parse_word_probe(out: &str) -> Option<String> {
+    let t = out.trim();
+    if t.is_empty() || t.contains(' ') && t.contains("Property") {
+        return None;
+    }
+    let first = t.split_whitespace().next()?;
+    // xfconf-query answers errors in prose too; a path or a program name never
+    // contains ':' at the start or ends in a full stop.
+    if first.ends_with('.') || first.starts_with(':') {
+        return None;
+    }
+    Some(first.to_string())
+}
+
+/// XFCE's own helpers file: one `Key=Value` per line, `TerminalEmulator=` being the
+/// configured terminal.
+fn parse_helpers_rc(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix("TerminalEmulator=") else {
+            continue;
+        };
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Emulator process names running for this uid, most frequent first.
+///
+/// The heuristic that makes a bare window manager (/i3, no desktop session, no
+/// configured default) open the terminal the user is actually using: ten alacritty
+/// windows open is a stronger statement of intent than any config file.
+fn running_emulators() -> Vec<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = nix::unistd::getuid().as_raw();
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // Another user's emulator is not this user's terminal.
+        if std::fs::metadata(entry.path()).is_ok_and(|m| m.uid() != uid) {
+            continue;
+        }
+        let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
+            continue;
+        };
+        let comm = comm.trim();
+        if AUTODETECT.contains(&comm) {
+            *counts.entry(comm.to_string()).or_default() += 1;
+        }
+    }
+    let mut v: Vec<(String, usize)> = counts.into_iter().collect();
+    // Most frequent first; ties broken by name so the answer is stable.
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v.into_iter().map(|(n, _)| n).collect()
+}
+
 /// Why `terminal` cannot be launched, or None when it looks runnable.
 ///
 /// A spawn that fails is reported, but one that succeeds and dies in the same
-/// instant (a mistyped `--terminal`, an `LDMUX_TERMINAL` that is not installed)
-/// is a window that never appears with nothing said — the failure this project
-/// has paid for twice. A PATH lookup up front names the cause.
+/// instant (a `$TERMINAL` naming something that is not a terminal) is a window
+/// that never appears with nothing said — the failure this project has paid for
+/// twice. A PATH lookup up front names the cause.
 pub fn terminal_problem(terminal: &str) -> Option<String> {
     let t = terminal.trim();
     if t.is_empty() {
         return Some(format!(
-            "no terminal emulator found (looked for {}); install one, or set LDMUX_TERMINAL to its path, or LDMUX_TERMINAL_CMD to a full command line containing {{cmd}}",
+            "no terminal emulator found (looked for {}, and at $TERMINAL, xdg-terminal-exec and this desktop's configured terminal); install one, or point $TERMINAL at the program you use — a wrapper script if it needs flags",
             AUTODETECT.join(", ")
         ));
     }
@@ -377,22 +528,14 @@ pub fn terminal_problem(terminal: &str) -> Option<String> {
     }
 }
 
-/// Expand a command template. `{cmd}` alone in a word becomes the attach command
-/// as separate arguments; inside a longer word it becomes the attach command
-/// shell-quoted into one string (for `sh -c "…{cmd}"`); `{class}` is substituted
-/// anywhere.
+/// Expand a template: `{cmd}` as a whole word becomes the attach command's
+/// arguments, and `{class}` is substituted anywhere. No shell is involved, so no
+/// quoting is needed; every template in [`SPECS`] keeps `{cmd}` as its own word.
 fn expand(template: &[String], class: &str, attach: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for w in template {
         if w == "{cmd}" {
             out.extend(attach.iter().cloned());
-        } else if w.contains("{cmd}") {
-            let joined = attach
-                .iter()
-                .map(|a| shell_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push(w.replace("{cmd}", &joined).replace("{class}", class));
         } else {
             out.push(w.replace("{class}", class));
         }
@@ -400,23 +543,26 @@ fn expand(template: &[String], class: &str, attach: &[String]) -> Vec<String> {
     out
 }
 
+/// The argv that runs `command` inside `program`, with the emulator's own template applied.
+///
+/// **The one place that knows how each emulator is told to run something**, exposed so a
+/// caller can exec it itself instead of asking the daemon to open a window: the keybinding
+/// wrapper does exactly that, and it used to carry a second, drifting copy of this knowledge
+/// in shell. No shell is involved; every element reaches `execve` as written here.
+#[must_use]
+pub fn exec_argv(program: &str, class: &str, command: &[String]) -> Vec<String> {
+    build_argv(program, class, command)
+}
+
 /// The whole argv for one window: the program, then its template expanded. No
 /// shell is involved: each element reaches `execve` as it is written here.
-fn build_argv(
-    program: &str,
-    class: &str,
-    attach: &[String],
-    custom: Option<&[String]>,
-) -> Vec<String> {
-    let template: Vec<String> = match custom {
-        Some(c) if c.first().map(|s| s.as_str()) == Some(program) => c[1..].to_vec(),
-        _ => spec_for(program)
-            .map(|s| s.args)
-            .unwrap_or(GENERIC_ARGS)
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    };
+fn build_argv(program: &str, class: &str, attach: &[String]) -> Vec<String> {
+    let template: Vec<String> = spec_for(program)
+        .map(|s| s.args)
+        .unwrap_or(GENERIC_ARGS)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let mut argv = vec![program.to_string()];
     argv.extend(expand(&template, class, attach));
     argv
@@ -424,19 +570,11 @@ fn build_argv(
 
 /// Can a window manager find this terminal's windows by class?
 fn terminal_has_class(program: &str) -> bool {
-    if let Some(c) = custom_template()
-        && c.first().map(|s| s.as_str()) == Some(program)
-    {
-        return c.iter().any(|w| w.contains("{class}"));
-    }
     spec_for(program).map(|s| s.class).unwrap_or(false)
 }
 
 fn terminal_is_foreground(program: &str) -> bool {
-    match custom_template() {
-        Some(c) if c.first().map(|s| s.as_str()) == Some(program) => true,
-        _ => spec_for(program).map(|s| s.foreground).unwrap_or(true),
-    }
+    spec_for(program).map(|s| s.foreground).unwrap_or(true)
 }
 
 /// The desk window's argv: the terminal running the attach client (plan §3.9).
@@ -447,44 +585,9 @@ fn terminal_is_foreground(program: &str) -> bool {
 /// the launching environment's `PATH`.
 pub fn live_argv(session_id: &str, terminal: &str) -> Vec<String> {
     let attach = vec![attach_bin(), "attach".to_string(), session_id.to_string()];
-    build_argv(
-        terminal,
-        &live_window_class(session_id),
-        &attach,
-        custom_template().as_deref(),
-    )
+    build_argv(terminal, &live_window_class(session_id), &attach)
 }
 
-/// The mirror's argv: the same terminal and the same attach client, with no
-/// identity unless asked for one, so it holds nothing and cannot type.
-///
-/// One definition of how a window is launched, so the mirror cannot drift from the
-/// desk window (it did: the CLI built this argv itself, with its own class name
-/// and its own idea of where the attach client is).
-pub fn mirror_argv(session_id: &str, terminal: &str, read_only: bool) -> Vec<String> {
-    let mut attach = vec![attach_bin(), "attach".to_string(), session_id.to_string()];
-    if read_only {
-        attach.push("--readonly".to_string());
-    }
-    build_argv(
-        terminal,
-        &mirror_window_class(session_id),
-        &attach,
-        custom_template().as_deref(),
-    )
-}
-
-/// The absolute path to the attach client (`ldmuxd`).
-///
-/// **Absolute, not `ldmuxd`.** A window is launched from an environment that
-/// need not have `~/.local/bin` on `PATH` — the same failure that once made every
-/// `$mod+Return` fall back to a bare shell (`node: not found`) and then again put
-/// a window up that closed the instant it opened.
-///
-/// Resolution order: this executable when it *is* `ldmuxd` (the daemon's own
-/// case), then a `ldmuxd` beside it (the install layout puts all three binaries
-/// in `~/.local/bin`), then `$HOME/.local/bin/ldmuxd`. The last resort is this
-/// executable's own path, which is absolute — never a bare name.
 pub fn attach_bin() -> String {
     if let Ok(exe) = std::env::current_exe() {
         if exe.file_name().and_then(|n| n.to_str()) == Some("ldmuxd")
@@ -914,13 +1017,9 @@ fn kill_tracked(class: &str) -> bool {
 /// opened before this daemon started). The window manager answers an unmatched
 /// criterion with success too, so this says "asked", not "was open".
 pub async fn close_live(session_id: &str) -> Result<bool, String> {
-    // Live and mirror windows are different classes, and only the live one used to be
-    // addressed: a mirror opened by `ldmux mirror` could not be closed by the daemon at all,
-    // and its tracked entry was never removed. Close both.
-    let classes = [
-        live_window_class(session_id),
-        crate::desktop::mirror_window_class(session_id),
-    ];
+    // One class: a desk window. A read-only view is `ldmux attach <id> --readonly` in a
+    // terminal you already have, so there is no second class a window could hide under.
+    let classes = [live_window_class(session_id)];
     let killed = classes.iter().any(|c| kill_tracked(c));
     let (env, wm) = context().await;
     let mut asked = false;
@@ -1005,14 +1104,57 @@ pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, 
 /// Open a session's mirror window: the same machinery with a different argv and
 /// class, read-only unless `ldmux mirror --rw` asked otherwise (read-only is not
 /// a joke: a mirror that holds the shell would take it from whoever is typing).
-pub async fn open_mirror(
-    session_id: &str,
-    workspace: &str,
-    read_only: bool,
-    terminal: &str,
-) -> Result<LiveResult, String> {
-    let argv = mirror_argv(session_id, terminal, read_only);
-    open_window(&argv, &mirror_window_class(session_id), workspace).await
+/// The user manager this daemon can ask for a transient scope, if any.
+///
+/// `LDMUX_NO_SCOPE=1` turns it off, and a container or a session without a user bus has no
+/// answer — in both cases a window still has to open, so this is `Option`, not an error.
+fn window_scope() -> Option<crate::scope::ScopeEnv> {
+    if std::env::var("LDMUX_NO_SCOPE").is_ok_and(|v| v == "1") {
+        return None;
+    }
+    crate::scope::ScopeEnv::detect()
+}
+
+/// A pipe the child blocks on until its scope is in place: (read end, write end).
+///
+/// `CLOEXEC` on both, so a window that reaches `exec` cannot leak either into the emulator's
+/// children; the child closes the write end itself in `pre_exec`, which is what makes the
+/// parent's death release it.
+fn go_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0i32; 2];
+    // SAFETY: `fds` is a two-element array the kernel fills; the call cannot fail in a way
+    // that leaves it uninitialised on success.
+    let rc = unsafe { nix::libc::pipe2(fds.as_mut_ptr(), nix::libc::O_CLOEXEC) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created and are owned by this process.
+    unsafe { Ok((std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1]))) }
+}
+
+/// The parent's end of the go-pipe. Releasing it lets the child `exec`; dropping it without a
+/// release does the same, because the child's read returns 0 when every write end is closed.
+///
+/// That is why this is a guard and not a bare `write`: an early return, a `spawn` failure or a
+/// panic must not leave a window hanging before `exec`.
+struct GoPipe(Option<std::os::fd::OwnedFd>);
+
+impl GoPipe {
+    fn release(&mut self) {
+        if let Some(fd) = self.0.take() {
+            use std::io::Write as _;
+            let mut file = std::fs::File::from(fd);
+            // One byte is the signal; the child ignores its value.
+            let _ = file.write_all(&[1u8]);
+        }
+    }
+}
+
+impl Drop for GoPipe {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 async fn open_window(argv: &[String], class: &str, workspace: &str) -> Result<LiveResult, String> {
@@ -1070,9 +1212,68 @@ async fn open_window_in(
         .stderr(std::process::Stdio::null())
         .process_group(0)
         .kill_on_drop(false);
+    // **The window can start only after it has been charged to its own scope.**
+    // A terminal emulator forks the attach client immediately, and a child forked
+    // before the move lands in the daemon's cgroup — the attribution this exists to
+    // fix. The child blocks on this pipe until the move is visible (or the request
+    // failed), exactly as a kept shell does (`crates/keeper/src/lib.rs`). The guard
+    // releases it on every path, including an early return or a panic, so a daemon
+    // that dies mid-request cannot leave a window hanging before `exec`.
+    let scope = window_scope();
+    let mut go: Option<GoPipe> = None;
+    if scope.is_some() {
+        match go_pipe() {
+            Ok((read, write)) => {
+                let (r, w) = (
+                    std::os::fd::AsRawFd::as_raw_fd(&read),
+                    std::os::fd::AsRawFd::as_raw_fd(&write),
+                );
+                // SAFETY: the child may only call async-signal-safe functions before
+                // `exec`; `close` and `read` are, and both descriptors are open in
+                // this process. Closing the write end in the child is what makes the
+                // parent's death release it (a read of a pipe whose every write end
+                // is closed returns 0).
+                unsafe {
+                    cmd.pre_exec(move || {
+                        nix::libc::close(w);
+                        let mut buf = [0u8; 1];
+                        loop {
+                            // Raw errno, not `io::Error`: the child may not allocate
+                            // between fork and exec (the keeper makes the same choice).
+                            let n = nix::libc::read(r, buf.as_mut_ptr().cast(), 1);
+                            if n >= 0 || *nix::libc::__errno_location() != nix::libc::EINTR {
+                                break;
+                            }
+                        }
+                        nix::libc::close(r);
+                        Ok(())
+                    });
+                }
+                go = Some(GoPipe(Some(write)));
+                // The parent only writes; this copy of the read end is not needed.
+                drop(read);
+            }
+            Err(e) => eprintln!("ldmuxd: window not scoped (no pipe): {e}"),
+        }
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start {}: {e}", argv[0]))?;
+    if let (Some(scope), Some(pid)) = (scope, child.id()) {
+        let scope = scope.clone();
+        let class = class.to_string();
+        // Off the runtime: `busctl` is a process, and the window must not pay for
+        // a user manager that is slow to answer. A failure is logged and the window
+        // runs unscoped — which is what happened to every window before this.
+        match tokio::task::spawn_blocking(move || crate::scope::enter(&scope, &class, pid)).await {
+            Ok(Ok(_name)) => {}
+            Ok(Err(e)) => eprintln!("ldmuxd: window not scoped: {e}"),
+            Err(e) => eprintln!("ldmuxd: window scope request failed: {e}"),
+        }
+    }
+    if let Some(g) = go.as_mut() {
+        g.release();
+    }
     // A foreground emulator that is already gone has failed to open its window
     // (no such display, a bad flag): say so rather than report a window.
     let foreground = terminal_is_foreground(&argv[0]);
@@ -1220,21 +1421,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_safe_string() {
-        assert_eq!(shell_quote("hello"), "hello");
-        assert_eq!(shell_quote("path/to/file"), "path/to/file");
-    }
-
-    #[test]
-    fn shell_quote_unsafe_string() {
-        let q = shell_quote("hello world");
-        assert!(q.starts_with('\''));
-        assert!(q.ends_with('\''));
-        let q2 = shell_quote("it's");
-        assert!(q2.contains("'\\''"));
-    }
-
-    #[test]
     fn live_window_class_sanitizes() {
         assert_eq!(live_window_class("abc123"), "ldmux-live-abc123");
         assert_eq!(live_window_class("abc-123"), "ldmux-live-abc-123");
@@ -1289,35 +1475,6 @@ mod tests {
         );
     }
 
-    /// The mirror is the same window machinery with no identity: same terminal,
-    /// same attach client, `--readonly` so it holds nothing and cannot type.
-    #[test]
-    fn mirror_argv_runs_the_attach_client_read_only() {
-        let args = mirror_argv("abc123", "alacritty", true);
-        assert_eq!(
-            args,
-            vec![
-                "alacritty",
-                "--class",
-                "ldmux-mirror-abc123",
-                "-e",
-                &attach_bin(),
-                "attach",
-                "abc123",
-                "--readonly",
-            ]
-        );
-        assert!(
-            args[4].starts_with('/'),
-            "the attach binary must be absolute: {}",
-            args[4]
-        );
-        // `--rw` is the same window without the read-only promise.
-        let rw = mirror_argv("abc123", "foot", false);
-        assert_eq!(rw[0], "foot");
-        assert!(!rw.contains(&"--readonly".to_string()), "{rw:?}");
-    }
-
     /// A terminal the window manager cannot run is refused before it is asked
     /// to: `i3-msg exec` reports success for a command it merely queued.
     #[test]
@@ -1333,17 +1490,6 @@ mod tests {
         assert!(terminal_problem("/bin/sh").is_none());
         // A bare name is looked for on PATH.
         assert!(terminal_problem("sh").is_none(), "PATH must be searched");
-    }
-
-    /// Two mirrors of two shells are two different windows: placement moves a
-    /// window by class, so one shared name would let the second mirror move the
-    /// first.
-    #[test]
-    fn a_mirror_window_class_names_its_own_session() {
-        assert_eq!(mirror_window_class("abc123"), "ldmux-mirror-abc123");
-        assert_ne!(mirror_window_class("a"), mirror_window_class("b"));
-        // Same sanitising as the live class: the class goes into an i3 criterion.
-        assert_eq!(mirror_window_class("a\"b c"), "ldmux-mirror-abc");
     }
 
     #[test]
@@ -1424,20 +1570,17 @@ mod tests {
 
     /// A comma or semicolon in a path must stay inside one argv element: nothing
     /// re-parses it (i3's `exec` splits on both), and the quoting used for
-    /// `{cmd}` inside a word keeps it one shell word.
+    /// The attach command reaches `execve` as separate arguments, byte for byte.
+    /// Nothing in a path or a session id is re-parsed, because no shell is involved.
     #[test]
     fn nothing_in_the_argv_can_be_split_or_injected() {
         let attach = strs(&["/home/u/a,b;c d/ldmuxd", "attach", "s1"]);
-        let argv = build_argv("/usr/bin/alacritty", "ldmux-live-s1", &attach, None);
+        let argv = build_argv("/usr/bin/alacritty", "ldmux-live-s1", &attach);
         assert_eq!(
             argv[4], "/home/u/a,b;c d/ldmuxd",
             "one element, byte for byte: {argv:?}"
         );
-        let tmpl = strs(&["/bin/sh", "-c", "exec {cmd}"]);
-        let argv = build_argv("/bin/sh", "c", &attach, Some(&tmpl));
-        assert_eq!(argv[2], "exec '/home/u/a,b;c d/ldmuxd' attach s1");
-        assert_eq!(shell_quote("a,b"), "'a,b'");
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(argv[5..], attach[1..]);
     }
 
     /// Each emulator's template puts the class and the command where that
@@ -1446,12 +1589,7 @@ mod tests {
     fn every_known_terminal_has_a_template_with_the_command() {
         let attach = strs(&["/x/ldmuxd", "attach", "s1"]);
         for spec in SPECS {
-            let argv = build_argv(
-                &format!("/usr/bin/{}", spec.name),
-                "ldmux-live-s1",
-                &attach,
-                None,
-            );
+            let argv = build_argv(&format!("/usr/bin/{}", spec.name), "ldmux-live-s1", &attach);
             assert!(
                 argv.ends_with(&attach),
                 "{}: the attach command must come last: {argv:?}",
@@ -1464,39 +1602,19 @@ mod tests {
                 spec.name
             );
         }
-        let kitty = build_argv("/usr/bin/kitty", "C", &attach, None);
+        let kitty = build_argv("/usr/bin/kitty", "C", &attach);
         assert_eq!(kitty[..3], strs(&["/usr/bin/kitty", "--class", "C"])[..]);
-        let foot = build_argv("/usr/bin/foot", "C", &attach, None);
+        let foot = build_argv("/usr/bin/foot", "C", &attach);
         assert_eq!(foot[1], "--app-id");
         // An emulator the table has never heard of gets the common `-e`.
-        let other = build_argv("/opt/weird-term", "C", &attach, None);
+        let other = build_argv("/opt/weird-term", "C", &attach);
         assert_eq!(other[..2], strs(&["/opt/weird-term", "-e"])[..]);
     }
 
-    #[test]
-    fn a_free_form_command_gets_the_attach_command_and_class() {
-        assert_eq!(
-            split_words(r#"mytty --title 'a b' "c d" e\ f"#).unwrap(),
-            strs(&["mytty", "--title", "a b", "c d", "e f"])
-        );
-        assert!(split_words("a 'b").is_err());
-        let t = parse_custom("/bin/sh --name {class}", "").unwrap();
-        assert_eq!(
-            t,
-            strs(&["/bin/sh", "--name", "{class}", "{cmd}"]),
-            "{{cmd}} is appended when absent"
-        );
-        let attach = strs(&["/x/ldmuxd", "attach", "s1"]);
-        let argv = build_argv("/bin/sh", "K", &attach, Some(&t));
-        assert_eq!(
-            argv,
-            strs(&["/bin/sh", "--name", "K", "/x/ldmuxd", "attach", "s1"])
-        );
-    }
-
-    /// `$LDMUX_TERMINAL_CMD` > `$LDMUX_TERMINAL` > `$TERMINAL` > the known names,
-    /// resolved to absolute paths; a stale `$TERMINAL` is skipped, an explicit
-    /// `LDMUX_TERMINAL` that is missing is kept so the refusal names it.
+    /// `$TERMINAL` > `xdg-terminal-exec` > the desktop's configured terminal > an
+    /// emulator already running > the known names, each resolved to an absolute
+    /// path. Every step falls through silently when it does not resolve: a stale
+    /// `$TERMINAL` is common and must not stop a window opening.
     #[test]
     fn terminal_selection_order() {
         let dir = std::env::temp_dir().join(format!(
@@ -1506,38 +1624,130 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        for n in ["xterm", "kitty", "mine"] {
+        for n in ["xterm", "kitty", "mine", "xdg-terminal-exec", "foot"] {
             let f = dir.join(n);
             std::fs::write(&f, "#!/bin/sh\n").unwrap();
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let path = dir.to_string_lossy().into_owned();
         let at = |n: &str| dir.join(n).to_string_lossy().into_owned();
+        let none: [String; 0] = [];
+        // `terminal()` resolves xdg-terminal-exec before the desktop probes, so the
+        // pure rule takes it as an argument; passing it is what selects it.
         assert_eq!(
-            resolve_terminal(None, None, None, &path),
-            at("kitty"),
-            "known order: kitty before xterm"
+            resolve_terminal(None, Some(&at("xdg-terminal-exec")), Some("xterm"), &none, &path),
+            at("xdg-terminal-exec"),
+            "the XDG launcher beats the desktop's config"
         );
         assert_eq!(
-            resolve_terminal(None, None, Some("xterm -x"), &path),
+            resolve_terminal(None, None, Some("xterm"), &none, &path),
             at("xterm"),
-            "$TERMINAL, first word"
+            "the desktop's configured terminal"
         );
         assert_eq!(
-            resolve_terminal(None, Some("mine"), Some("xterm"), &path),
-            at("mine")
+            resolve_terminal(None, None, None, &["foot".to_string()], &path),
+            at("foot"),
+            "an emulator already running"
+        );
+        let xdg_here = at("xdg-terminal-exec");
+        assert_eq!(
+            resolve_terminal(None, Some(&xdg_here), None, &none, &path),
+            xdg_here
         );
         assert_eq!(
-            resolve_terminal(Some("mine"), Some("xterm"), None, &path),
-            at("mine")
+            resolve_terminal(Some("kitty -f"), None, Some("xterm"), &none, &path),
+            at("kitty"),
+            "$TERMINAL wins, first word only"
         );
         assert_eq!(
-            resolve_terminal(None, None, Some("not-installed"), &path),
-            at("kitty")
+            resolve_terminal(None, Some("/not/here"), Some("xterm"), &none, &path),
+            at("xterm"),
+            "an xdg-terminal-exec that is not installed is skipped"
         );
-        assert_eq!(resolve_terminal(None, Some("nope"), None, &path), "nope");
-        assert_eq!(resolve_terminal(None, None, None, ""), "");
-        assert!(terminal_problem("").unwrap().contains("LDMUX_TERMINAL_CMD"));
+        assert_eq!(
+            resolve_terminal(None, Some("/not/here"), None, &none, &path),
+            at("kitty"),
+            "and the chain continues past it"
+        );
+        assert_eq!(
+            resolve_terminal(None, None, Some("not-installed"), &["foot".to_string()], &path),
+            at("foot"),
+            "a configured name that is missing falls through"
+        );
+        assert_eq!(
+            resolve_terminal(None, None, None, &[], &path),
+            at("kitty"),
+            "the known order, kitty before xterm"
+        );
+        assert_eq!(resolve_terminal(None, None, None, &none, ""), "");
+        assert!(terminal_problem("").unwrap().contains("$TERMINAL"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The parse of each probe's output, as the tools actually print it.
+    #[test]
+    fn desktop_probe_output_is_read_conservatively() {
+        // gsettings quotes its value, and an unset one is the empty string.
+        assert_eq!(parse_quoted_probe("'alacritty'\n").as_deref(), Some("alacritty"));
+        assert_eq!(
+            parse_quoted_probe("'x-terminal-emulator'\n").as_deref(),
+            Some("x-terminal-emulator")
+        );
+        assert_eq!(parse_quoted_probe("''\n"), None);
+        assert_eq!(parse_quoted_probe("No such schema “x”"), None);
+        // kreadconfig prints the bare value; xfconf-query prints either a path or prose.
+        assert_eq!(parse_word_probe("alacritty\n").as_deref(), Some("alacritty"));
+        assert_eq!(
+            parse_word_probe("/usr/bin/kitty\n").as_deref(),
+            Some("/usr/bin/kitty")
+        );
+        assert_eq!(
+            parse_word_probe("Property \"/general/TerminalEmulator\" does not exist on channel \"xfce4-session\".\n"),
+            None
+        );
+        assert_eq!(parse_word_probe(""), None);
+        // XFCE's helpers file is one Key=Value per line.
+        assert_eq!(
+            parse_helpers_rc("WebBrowser=firefox\nTerminalEmulator=xfce4-terminal\n").as_deref(),
+            Some("xfce4-terminal")
+        );
+        assert_eq!(parse_helpers_rc("WebBrowser=firefox\n"), None);
+        assert_eq!(parse_helpers_rc("TerminalEmulator=\n"), None);
+    }
+
+    /// An emulator already running is a stronger statement of intent than a config
+    /// file: this is what makes a bare i3 session open the terminal in use.
+    #[test]
+    fn a_running_emulator_wins_over_the_static_list() {
+        let dir = std::env::temp_dir().join(format!(
+            "ldmux-term-run-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for n in ["alacritty", "xterm"] {
+            let f = dir.join(n);
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = dir.to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_terminal(None, None, None, &["xterm".to_string()], &path),
+            format!("{path}/xterm"),
+        );
+        // Most frequent first is the caller's contract; a name that does not
+        // resolve is skipped rather than returned.
+        assert_eq!(
+            resolve_terminal(
+                None,
+                None,
+                None,
+                &["not-a-term".to_string(), "xterm".to_string()],
+                &path
+            ),
+            format!("{path}/xterm"),
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

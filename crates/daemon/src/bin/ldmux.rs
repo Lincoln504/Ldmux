@@ -116,8 +116,14 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "run" => {
             "ldmux run [shell|pi] [cwd]\n  Create a session and become its desk window in this terminal."
         }
-        "window" => {
-            "ldmux window [cwd]\n  Create a shell and open it in a new desk window (the terminal is chosen by LDMUX_TERMINAL_CMD, LDMUX_TERMINAL, $TERMINAL, then known emulators)."
+        "attach" => {
+            "ldmux attach <id|prefix> [--readonly]\n  Attach to an existing shell in this terminal. The desk client is this terminal: no new window is opened."
+        }
+        "new" => {
+            "ldmux new [--kind shell|pi] [cwd]\n  Create a session and print its id, without attaching to it or opening anything. Look at it with `ldmux attach <id>`."
+        }
+        "terminal" => {
+            "ldmux terminal [--exec <command...>]\n  Print the terminal emulator a desk window opens in — `$TERMINAL`, then xdg-terminal-exec, then your desktop's own setting, then an emulator already running. With --exec, run <command> in it instead of printing (the emulator's own flags applied). Non-zero with the reason when there is no terminal."
         }
         "send" => "ldmux send <id> <text...>\n  Type text into a session.",
         "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
@@ -131,18 +137,11 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         }
         "forget" => "ldmux forget <id>\n  Drop a session's record without touching the keeper.",
         "adopt" => "ldmux adopt <keeper-name>\n  Adopt a keeper session the daemon does not know.",
-        "mirror" => {
-            "ldmux mirror <id> [--workspace N] [--rw] [--terminal T]\n  A read-only view of a session in a new window (--rw lets it type). Placement on a workspace needs an i3/sway/hyprland adapter; without one the window opens where it opens."
-        }
-        "live" => {
-            "ldmux live <id> [workspace]\n  Open a session in a desk window, optionally placed on a workspace."
-        }
-        "unlive" => "ldmux unlive <id>\n  Close a session's desk window.",
         "remote" => {
             "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening."
         }
         "mesh" => {
-            "ldmux mesh [status|preset ...] [--json]\n  The mesh link: state, the peer, the record budget left this hour, the radio's own reading, and the tuple the host's radio is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
+            "ldmux mesh [status|preset ...] [--json]\n  The radio route: the device the daemon owns, the records left this hour by the radio's own count, its reading, and the tuple it is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
         }
         "code" => {
             "ldmux code [--mesh | --mesh-only]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together). --mesh-only carries the mesh keys and nothing of the tailnet: no address, no daemon token, for a phone that will only ever reach this machine by radio."
@@ -203,32 +202,23 @@ fn mesh_keys_from_json(v: &serde_json::Value) -> Option<ldmux_protocol::pairing:
 fn print_mesh_status(v: &serde_json::Value) {
     let text = |key: &str| v.get(key).and_then(|t| t.as_str()).map(str::to_owned);
     if let Some("disabled") = text("state").as_deref() {
-        println!("mesh: no link configured on this host");
+        println!("mesh: no radio route on this host");
         println!(
             "\nset LDMUX_MESH_SERIAL to the host radio's device path (the daemon owns the radio),"
         );
-        println!(
-            "or LDMUX_MESH_ADDR, LDMUX_MESH_TOKEN and LDMUX_MESH_PEER for a gateway, in the daemon's environment"
-        );
+        println!("and LDMUX_MESH_PSK to the pairing's secret, in the daemon's environment");
         return;
     }
     println!(
         "state    {}",
         text("state").unwrap_or_else(|| "unknown".to_owned())
     );
-    // A serial host has no address and no peer: the daemon owns the radio, and the pairing's
-    // other end is whichever phone holds the keys. Printing an empty "gateway" line and
-    // `peer 00000000` for that was two facts that do not exist.
+    // The device the daemon owns. There is no address and no peer: the pairing's other end is
+    // whichever phone holds the keys. Printing an empty `gateway` line and `peer 00000000` for
+    // that was two facts that do not exist.
     let serial = text("serial").filter(|s| !s.is_empty());
-    match (serial.as_deref(), text("addr").filter(|a| !a.is_empty())) {
-        (Some(device), _) => println!("serial   {device}"),
-        (None, Some(addr)) => println!("gateway  {addr}"),
-        (None, None) => {}
-    }
-    if serial.is_none()
-        && let Some(peer) = text("peer")
-    {
-        println!("peer     {peer}");
+    if let Some(device) = &serial {
+        println!("serial   {device}");
     }
     // Printed before the radio's own state, because it is the answer to "can I hand a phone
     // a code at all": a code with no host radio sends it to `NeedsPeer`, and scanning the
@@ -239,14 +229,8 @@ fn print_mesh_status(v: &serde_json::Value) {
         Some(radio) => println!("host radio {radio}"),
         None => {
             println!("host radio not set — a pairing code cannot be used without it");
-            println!(
-                "         {} and print the code again",
-                if serial.is_some() {
-                    "open the radio (set LDMUX_MESH_SERIAL) so the daemon can read it"
-                } else {
-                    "set LDMUX_MESH_SELF (or the gateway's radioKey)"
-                }
-            );
+            println!("         open the radio (set LDMUX_MESH_SERIAL) so the daemon can read it,");
+            println!("         or set LDMUX_MESH_SELF to pin its key, then print the code again");
         }
     }
     // **The tuple the host's radio is on, because the phone's must match it.** Two radios on
@@ -271,10 +255,13 @@ fn print_mesh_status(v: &serde_json::Value) {
         Some(capacity) => println!("capacity {capacity} B per carrier record"),
         None => println!("capacity unknown (not bound yet)"),
     }
+    // **Not a limit this host enforces.** The radio's firmware runs the transmitter's duty cycle,
+    // and what it reports is its own count: printing it as a budget read like a gate the daemon
+    // was applying, which it is not.
     match v.get("recordsLeft").and_then(serde_json::Value::as_u64) {
-        Some(255) => println!("budget   255 or more records left this hour"),
-        Some(left) => println!("budget   {left} records left this hour"),
-        None => println!("budget   unknown (the link has not reported it)"),
+        Some(255) => println!("records  up to 255 left this hour (the field's ceiling)"),
+        Some(left) => println!("records  {left} left this hour, by the radio's own count"),
+        None => println!("records  not reported yet"),
     }
     let radio = match v.get("radioState").and_then(serde_json::Value::as_u64) {
         Some(0) => "connected",
@@ -297,9 +284,8 @@ fn print_mesh_status(v: &serde_json::Value) {
     println!("signal   {signal}, battery {charge}");
     if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
         println!(
-            "airtime  {:.1} s this hour ({} own estimate)",
-            f64::from(tenths as u32) / 10.0,
-            if serial.is_some() { "the radio's" } else { "the gateway's" }
+            "airtime  {:.1} s this hour (the radio's own estimate)",
+            f64::from(tenths as u32) / 10.0
         );
     }
     if let Some(err) = text("lastError") {
@@ -326,8 +312,7 @@ fn print_mesh_session(v: &serde_json::Value) {
     }
     println!("session  {state}");
     if let Some(key) = text("publicKey") {
-        // One name for one fact: this is the session's static key, which the phone pins. It
-        // used to say "gateway" on a host that drives its own radio, where there is no gateway.
+        // One name for one fact: this is the session's static key, which the phone pins.
         println!("  session key  {key}");
     }
     match text("peerKey") {
@@ -361,7 +346,7 @@ fn print_mesh_session(v: &serde_json::Value) {
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|desktop|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|desktop|new|shell|run|attach|terminal|send|key|capture|snapshot|kill|close|forget|adopt|remote|mesh|code|pair|clipboard-write> [args]"
     );
     eprintln!("       ldmux --version    which build this is");
 }
@@ -407,13 +392,12 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--mesh",
         "--mesh-only",
         "--name",
-        "--rw",
         "--final",
         "--id",
         "--stdin",
-        "--terminal",
+        "--kind",
+        "--readonly",
         "--title",
-        "--workspace",
     ];
     for arg in rest {
         if arg == "--" {
@@ -467,6 +451,51 @@ fn positional<'a>(args: &'a [String], skip: &[&str]) -> Vec<&'a str> {
     out
 }
 
+/// Run the attach client in this terminal and make its process the session's window.
+///
+/// The client is the window, so it starts first and its pid is what the daemon records. An
+/// absolute binary: a bare `ldmuxd` is whatever `PATH` happens to hold. This is the one path
+/// both `run`/`shell` and `attach` take, so the two cannot disagree about what "a window" is.
+async fn attach_here(sock: &str, id: &str, readonly: bool) -> ! {
+    let mut argv = vec!["attach".to_string(), id.to_string()];
+    if readonly {
+        argv.push("--readonly".to_string());
+    }
+    let mut child = match std::process::Command::new(ldmux_daemon::desktop::attach_bin())
+        .args(&argv)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ldmux: could not start the attach client: {e}");
+            std::process::exit(1);
+        }
+    };
+    let reg: Result<serde_json::Value, CallError> = daemon_call(
+        sock,
+        "deskWindow",
+        &serde_json::json!({ "id": id, "spawn": false, "pid": child.id() as i32 }),
+    )
+    .await;
+    let registered = matches!(&reg, Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false));
+    if !registered {
+        let _ = child.kill();
+        let _ = child.wait();
+        match reg {
+            Ok(v) => eprintln!(
+                "ldmux: {}",
+                v.get("detail")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("could not make a desk window")
+            ),
+            Err(e) => eprintln!("ldmux: {e}"),
+        }
+        std::process::exit(1);
+    }
+    let status = child.wait();
+    std::process::exit(status.ok().and_then(|s| s.code()).unwrap_or(1));
+}
+
 #[tokio::main]
 async fn main() {
     // Rust ignores SIGPIPE, so `ldmux list | head -1` made println! panic on EPIPE.
@@ -510,7 +539,10 @@ async fn main() {
         }
         std::process::exit(0);
     }
-    if let Some(bad) = reject_unknown_flag(rest) {
+    // `terminal --exec <command…>` hands the rest of the line to another program, which has
+    // its own flags; scanning them here would reject `--exec sh -c …`.
+    let exec_passthrough = cmd == "terminal" && rest.iter().any(|a| a == "--exec");
+    if let Some(bad) = (!exec_passthrough).then(|| reject_unknown_flag(rest)).flatten() {
         eprintln!("ldmux {cmd}: unknown option {bad}");
         print_usage();
         std::process::exit(2);
@@ -586,6 +618,35 @@ async fn main() {
                 }
                 Err(e) => {
                     die(&e, &sock);
+                }
+            }
+        }
+        "terminal" => {
+            // **One resolver, asked by anything that needs a terminal.** The keybinding
+            // wrapper carried its own copy of the chain in shell, so a change to the rules
+            // had to be made twice and the two drifted. This answers with the program, or
+            // replaces this process with `<program> -e <command>` — the emulator's own
+            // template applied, which is the part a shell cannot know.
+            let t = ldmux_daemon::desktop::terminal();
+            if let Some(why) = ldmux_daemon::desktop::terminal_problem(&t) {
+                eprintln!("ldmux: {why}");
+                std::process::exit(1);
+            }
+            match rest.iter().position(|a| a == "--exec") {
+                None => println!("{t}"),
+                Some(at) => {
+                    let command: Vec<String> = rest.iter().skip(at + 1).cloned().collect();
+                    if command.is_empty() {
+                        eprintln!("usage: ldmux terminal [--exec <command...>]");
+                        std::process::exit(2);
+                    }
+                    // No class: nothing has to find this window later, and inventing one
+                    // would only make an emulator set a class nobody asked for.
+                    let argv = ldmux_daemon::desktop::exec_argv(&t, "", &command);
+                    use std::os::unix::process::CommandExt as _;
+                    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+                    eprintln!("ldmux: could not run {}: {err}", argv[0]);
+                    std::process::exit(1);
                 }
             }
         }
@@ -868,53 +929,6 @@ async fn main() {
                 }
             }
         }
-        "live" => {
-            let pos = positional(rest, &[]);
-            let id = pos.first().copied().unwrap_or("");
-            let workspace = pos.get(1).copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "makeLive",
-                &serde_json::json!({ "id": id, "workspace": workspace }),
-            )
-            .await;
-            match r {
-                Ok(v) => {
-                    let ok = v.get("ok").and_then(|t| t.as_bool()).unwrap_or(false);
-                    let detail = v.get("detail").and_then(|t| t.as_str()).unwrap_or("failed");
-                    if ok {
-                        println!("on the desktop ({workspace})");
-                    } else {
-                        println!("could not: {detail}");
-                        std::process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    die(&e, &sock);
-                }
-            }
-        }
-        "unlive" => {
-            let pos = positional(rest, &[]);
-            let id = pos.first().copied().unwrap_or("");
-            let r: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "closeLive", &serde_json::json!({ "id": id })).await;
-            match r {
-                Ok(v) => {
-                    let ok = v.get("ok").and_then(|t| t.as_bool()).unwrap_or(false);
-                    let detail = v.get("detail").and_then(|t| t.as_str()).unwrap_or("failed");
-                    if ok {
-                        println!("closed");
-                    } else {
-                        println!("could not: {detail}");
-                        std::process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    die(&e, &sock);
-                }
-            }
-        }
         "clipboard-write" => {
             let pos = positional(rest, &[]);
             let arg = pos.first().copied();
@@ -988,7 +1002,8 @@ async fn main() {
                 if v.get("hostRadio").and_then(|x| x.as_str()).is_none() {
                     eprintln!(
                         "ldmux: warning: this host's radio key is not set, so the phone cannot use \
-                         this code; set LDMUX_MESH_SELF (or the gateway's radioKey) and print it again"
+                         this code; open the radio (LDMUX_MESH_SERIAL) so the daemon reads its key, \
+                         or set LDMUX_MESH_SELF, and print it again"
                     );
                 }
                 if cmd == "code" {
@@ -1078,46 +1093,33 @@ async fn main() {
                 }
             }
         }
-        "window" => {
-            // Create a shell, then make it a desk window here (the daemon opens
-            // the window with the attach client and claims it to the desktop).
-            let pos = positional(rest, &[]);
+        "new" => {
+            // **Create a shell and say what it is; do not open anything.** No window, no
+            // attach: a caller that wants to look at it runs `ldmux attach <id>` in its own
+            // terminal, and a phone picks it up from the list. This is the one creating verb
+            // that is useful in a script, because it returns instead of taking the terminal.
+            let pos = positional(rest, &["--kind"]);
+            let kind = flag(rest, "--kind").unwrap_or("shell");
             let cwd_default = current_dir_or_exit();
             let cwd: &str = pos.first().copied().unwrap_or(&cwd_default);
             let created: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
                 "new",
-                &serde_json::json!({ "kind": "shell", "cwd": cwd, "createdBy": "local" }),
+                &serde_json::json!({ "kind": kind, "cwd": cwd, "createdBy": "local" }),
             )
             .await;
-            let id = match created {
-                Ok(v) => v
-                    .get("session")
-                    .and_then(|s| s.get("id"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                Err(e) => {
-                    die(&e, &sock);
-                }
-            };
-            let res: Result<serde_json::Value, CallError> =
-                daemon_call(&sock, "deskWindow", &serde_json::json!({ "id": id })).await;
-            match res {
-                // Print the id on the way out. Every other creating command says what it
-                // made, and this one did not: a window appeared and the only way to capture,
-                // kill or forget the shell behind it was to go looking in `ldmux list`.
-                Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) => {
-                    println!("{id}");
-                }
+            match created {
                 Ok(v) => {
-                    eprintln!(
-                        "ldmux: {}",
-                        v.get("detail")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("could not make a desk window")
-                    );
-                    std::process::exit(1);
+                    let id = v
+                        .get("session")
+                        .and_then(|s| s.get("id"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    if id.is_empty() {
+                        eprintln!("ldmux: the daemon created nothing: {v}");
+                        std::process::exit(1);
+                    }
+                    println!("{id}");
                 }
                 Err(e) => {
                     die(&e, &sock);
@@ -1228,105 +1230,73 @@ async fn main() {
                 }
             };
 
-            // The attach client is the window, so it starts first and its pid is
-            // what the daemon records. An absolute binary: a bare `ldmuxd` is
-            // whatever `PATH` happens to hold.
-            let mut child = match std::process::Command::new(ldmux_daemon::desktop::attach_bin())
-                .args(["attach", &id])
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("ldmux: could not start the attach client: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let reg: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "deskWindow",
-                &serde_json::json!({ "id": id, "spawn": false, "pid": child.id() as i32 }),
-            )
-            .await;
-            let registered =
-                matches!(&reg, Ok(v) if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false));
-            if !registered {
-                let _ = child.kill();
-                let _ = child.wait();
-                match reg {
-                    Ok(v) => eprintln!(
-                        "ldmux: {}",
-                        v.get("detail")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("could not make a desk window")
-                    ),
-                    Err(e) => eprintln!("ldmux: {e}"),
-                }
-                std::process::exit(1);
-            }
-            let status = child.wait();
-            std::process::exit(status.ok().and_then(|s| s.code()).unwrap_or(1));
+            attach_here(&sock, &id, false).await;
         }
-        "mirror" => {
-            // A view of a shell's screen on a chosen workspace, in a chosen
-            // terminal, read-only unless `--rw`. The argv comes from the desktop
-            // seam, the one place that knows how a window is launched, and the
-            // placement is the same exec-then-move the desk window uses — the TS
-            // mirror ran `workspace number N` first, which dragged the user to
-            // workspace 10.
-            let pos = positional(rest, &["--workspace", "--terminal"]);
-            let id = pos.first().copied().unwrap_or("");
+        "attach" => {
+            // **The desk client for a terminal you already have.** The daemon can open a
+            // window for you (`ldmux window`, and the phone's send-to-desktop), but a person
+            // at a prompt is already in the terminal they want: this runs the attach client
+            // in it, with no emulator and no spawn. The selector is a session id or a unique
+            // prefix, the same shape every other verb takes.
+            let readonly = rest.iter().any(|a| a == "--readonly");
+            let pos: Vec<&str> = rest
+                .iter()
+                .map(std::string::String::as_str)
+                .filter(|a| !a.starts_with("--"))
+                .collect();
+            let Some(sel) = pos.first().copied().filter(|s| !s.is_empty()) else {
+                eprintln!("usage: ldmux attach <id|prefix> [--readonly]");
+                std::process::exit(2);
+            };
             let listed: Result<serde_json::Value, CallError> =
                 daemon_call(&sock, "list", &serde_json::json!({})).await;
-            let keeper = match listed {
-                Ok(v) => v
-                    .get("sessions")
-                    .and_then(|s| s.as_array())
-                    .and_then(|a| {
-                        a.iter()
-                            .find(|s| s.get("id").and_then(|t| t.as_str()) == Some(id))
-                    })
-                    .and_then(|s| s.get("keeperName"))
-                    .and_then(|t| t.as_str())
-                    .filter(|k| !k.is_empty())
-                    .map(|k| k.to_string()),
+            let v = match listed {
+                Ok(v) => v,
                 Err(e) => {
                     die(&e, &sock);
                 }
             };
-            let Some(keeper) = keeper else {
-                eprintln!("ldmux: no terminal-backed session {id}");
-                std::process::exit(1);
+            let empty = Vec::new();
+            let rows = v
+                .get("sessions")
+                .and_then(|s| s.as_array())
+                .unwrap_or(&empty);
+            let alive = |s: &serde_json::Value| {
+                s.get("status").and_then(|t| t.as_str()) != Some("dead")
+                    && s.get("keeperName")
+                        .and_then(|t| t.as_str())
+                        .map(|k| !k.is_empty())
+                        .unwrap_or(false)
             };
-            let workspace = flag(rest, "--workspace")
-                .map(|w| w.to_string())
-                .unwrap_or_else(|| ldmux_daemon::desktop::DEFAULT_MIRROR_WORKSPACE.to_string());
-            let terminal_name = flag(rest, "--terminal")
-                .map(|t| t.to_string())
-                .unwrap_or_else(ldmux_daemon::desktop::terminal);
-            // `i3-msg exec` says success for a command it merely queued, so a
-            // mistyped terminal would otherwise be a window that dies in the same
-            // instant, with nothing said.
-            if let Some(problem) = ldmux_daemon::desktop::terminal_problem(&terminal_name) {
-                eprintln!("ldmux: {problem}");
-                std::process::exit(1);
-            }
-            let read_only = !rest.iter().any(|a| a == "--rw");
-            match ldmux_daemon::desktop::open_mirror(id, &workspace, read_only, &terminal_name)
-                .await
-            {
-                Ok(lr) if lr.ok => println!("mirror of {keeper} on workspace {workspace}"),
-                Ok(lr) => {
-                    eprintln!(
-                        "ldmux: mirror not opened ({})",
-                        lr.detail.unwrap_or_else(|| "failed".to_string())
-                    );
-                    std::process::exit(1);
+            let ids: Vec<&str> = rows
+                .iter()
+                .filter(|s| alive(s))
+                .filter_map(|s| s.get("id").and_then(|t| t.as_str()))
+                .collect();
+            let id = match ids.iter().find(|i| **i == sel) {
+                Some(exact) => (*exact).to_string(),
+                None => {
+                    let matches: Vec<&&str> = ids.iter().filter(|i| i.starts_with(sel)).collect();
+                    match matches.as_slice() {
+                        [one] => (**one).to_string(),
+                        [] => {
+                            eprintln!("ldmux: no live session matches {sel:?}");
+                            std::process::exit(1);
+                        }
+                        _ => {
+                            let mut names: Vec<&str> = matches.iter().map(|m| **m).collect();
+                            names.sort_unstable();
+                            eprintln!(
+                                "ldmux: {sel:?} matches {} sessions: {}",
+                                names.len(),
+                                names.join(", ")
+                            );
+                            std::process::exit(2);
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("ldmux: mirror not opened ({e})");
-                    std::process::exit(1);
-                }
-            }
+            };
+            attach_here(&sock, &id, readonly).await;
         }
         _ => {
             eprintln!("ldmux: unknown command {cmd}");

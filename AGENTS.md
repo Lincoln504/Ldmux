@@ -99,9 +99,12 @@ consolidated into them at `731970f` and is readable at `c3d7c56`.
   `hello`/`attach` (`inplaceResync`, `sessionEnded`); a client that says nothing gets
   what it always got. A new keeper field must work against a running old keeper (the
   keeper outlives the daemon and is replaced only by ending every shell).
-- **Windows are launched by the daemon, not the window manager.** The daemon spawns the
-  terminal emulator directly (template table, `LDMUX_TERMINAL_CMD` with `{cmd}`/`{class}`);
-  i3/sway/hyprland placement is an optional adapter.
+- **A window is spawned only when nobody is at a terminal.** `ldmux attach` runs the desk
+  client in the terminal you already have; `ldmux window` (and the phone's send-to-desktop)
+  spawns one, in the terminal you configured — `$TERMINAL`, then `xdg-terminal-exec`, then the
+  desktop's own setting, then an emulator already running, then the known list. `ldmux
+  terminal` prints that answer and the wrapper asks it rather than copying the chain. There are
+  no `LDMUX_TERMINAL*` variables. i3/sway/hyprland placement is an optional adapter.
 - **The unit reads an optional `~/.config/ldmux/env`** (`LDMUX_REMOTE_HOST`,
   `LDMUX_REMOTE_PORT`); nothing machine-specific goes in `deploy/ldmux.service`.
 - **A fresh clone builds with nix alone.** `nix develop` builds libghostty-vt from the

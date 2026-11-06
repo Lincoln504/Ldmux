@@ -44,5 +44,6 @@ pub mod qr;
 pub mod registry;
 pub mod remote;
 pub mod sanitize;
+pub mod scope;
 pub mod stream;
 pub mod ws;

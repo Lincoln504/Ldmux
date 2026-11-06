@@ -1677,6 +1677,20 @@ fn has_cursor_report(haystack: &str) -> bool {
 }
 
 async fn peek_for(socket: &str, id: &str, needle: &str) -> String {
+    peek_until(socket, id, |text| text.contains(needle)).await
+}
+
+/// Peek `id` until `done` accepts the accumulated text, then return it.
+///
+/// A needle alone is not enough for output that arrives in pieces: `peek_for`
+/// answered "SigIgn:" the moment the first fragment landed, and the caller then
+/// parsed a line with no value in it. A predicate lets a caller wait for the
+/// *complete* line it is about to parse.
+async fn peek_until(
+    socket: &str,
+    id: &str,
+    done: impl Fn(&str) -> bool,
+) -> String {
     let mut seen = Vec::new();
     for _ in 0..1200 {
         if let Ok(KeeperMessage::PeekResult(pr)) = keeper_call(
@@ -1688,7 +1702,7 @@ async fn peek_for(socket: &str, id: &str, needle: &str) -> String {
         {
             seen.extend_from_slice(&pr.data);
         }
-        if String::from_utf8_lossy(&seen).contains(needle) {
+        if done(&String::from_utf8_lossy(&seen)) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -1816,10 +1830,19 @@ async fn a_child_starts_with_sigpipe_at_its_default() {
     )
     .await
     .unwrap();
-    let text = peek_for(&s, "sp", "SigIgn:").await;
+    // Wait for a *complete* line: the mask is hex digits after the label, and a peek that
+    // returns only "SigIgn:" is a fragment of the same line, not an answer.
+    let complete = |text: &str| {
+        text.lines().any(|l| {
+            l.strip_prefix("SigIgn:")
+                .map(|v| !v.trim().is_empty() && v.trim().chars().all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or(false)
+        })
+    };
+    let text = peek_until(&s, "sp", complete).await;
     let line = text
         .lines()
-        .find(|l| l.contains("SigIgn:"))
+        .find(|l| l.starts_with("SigIgn:"))
         .unwrap_or_else(|| panic!("no SigIgn in {text:?}"));
     let child = u64::from_str_radix(line.split_whitespace().nth(1).unwrap().trim(), 16).unwrap();
     assert_eq!(

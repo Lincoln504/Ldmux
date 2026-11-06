@@ -1,16 +1,17 @@
-//! The desk-window launcher (`deploy/bin/ldmux-terminal`, installed as
+//! The terminal launcher (`deploy/bin/ldmux-terminal`, installed as
 //! `~/.local/bin/ldmux-terminal`), which `super+Return` runs.
 //!
-//! It has one rule to keep — a terminal keybinding always gives a terminal —
-//! and one rule it must not break: the fallback terminal is a plain pty, not a
-//! session, so it is invisible to every ldmux client. The launcher therefore
-//! waits for an *absent* daemon before it falls back, and the tests here pin
-//! both halves: the wait, and that a reachable daemon's window failure is not
-//! waited on.
+//! One rule to keep — a terminal keybinding always gives a terminal — and one rule it must
+//! not break: **the wrapper opens the terminal and ldmux runs inside it.** `ldmux` no longer
+//! opens a window of its own for a person at a keyboard (the only window the daemon opens is
+//! the one the phone asks for), so the launcher asks the daemon which emulator to use
+//! (`ldmux terminal --exec …`) and execs it with `ldmux shell` in it.
 //!
-//! The script is driven with `LDMUX` pointing at a stub and `PATH` holding
-//! stubs for `alacritty` (the fallback) and `logger`, so both outcomes are
-//! observable without an X server and without touching the journal.
+//! Two outcomes are pinned here, both driven by stubs and without an X server:
+//!
+//! - the daemon answers: the terminal it names is exec'd with `shell <dir>` in it;
+//! - the daemon never answers: the fallback is the bare `$TERMINAL`, which is a plain pty
+//!   and not a session, and the fallback is logged rather than silent.
 
 use std::path::{Path, PathBuf};
 
@@ -35,270 +36,171 @@ fn write_script(path: &Path, body: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The stub `ldmux`, appending every call to `calls`. `window_after` is how
-/// many failed `window` calls come first (a daemon that is not up yet);
-/// `ping_ok` is whether `ping` answers at all.
-fn write_ldmux_stub(dir: &Path, window_after: u32, ping_ok: bool) {
+struct Stubs {
+    dir: PathBuf,
+}
+
+impl Drop for Stubs {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A stub `ldmux` that answers `ping` as asked, prints `terminal` as the emulator, and
+/// records every call. `--exec` is recorded with its command so the test can see what the
+/// launcher asked for: the stub does not exec, it prints and exits 0.
+fn stub_ldmux(dir: &Path, ping_ok: bool) -> Stubs {
+    std::fs::create_dir_all(dir).unwrap();
+    let calls = dir.join("calls");
     let ping = if ping_ok { "exit 0" } else { "exit 1" };
+    // The emulator this stub names is the test's own stub, never a real one: a real
+    // emulator here would open a window and wait for ever, which is exactly the failure
+    // this test exists to rule out.
+    let terminal = "${STUB_TERM:-}";
     write_script(
         &dir.join("ldmux"),
         &format!(
             r#"#!/bin/sh
-echo "$1" >> "{calls}"
+printf '%s\n' "$*" >> "{calls}"
 case "$1" in
-  ping)
-    {ping}
-    ;;
-  window)
-    n=$(cat "{count}" 2>/dev/null || echo 0)
-    if [ "$n" -ge "{after}" ]; then exit 0; fi
-    echo $((n + 1)) > "{count}"
-    echo "stub: connect: Connection refused (os error 111)" >&2
-    exit 1
+  ping) {ping} ;;
+  terminal)
+    case "$*" in
+      *--exec*) shift 2; printf 'EXEC %s\n' "$*" >> "{calls}" ;;
+      *) echo "{terminal}" ;;
+    esac
     ;;
 esac
 exit 0
 "#,
-            calls = dir.join("calls").display(),
-            count = dir.join("count").display(),
-            after = window_after,
+            calls = calls.display(),
             ping = ping,
+            terminal = terminal
         ),
     );
-}
-
-/// The fallback terminal (never a real one) and a `logger` that records its
-/// arguments instead of writing to the journal.
-fn write_fallback_stubs(dir: &Path) {
-    write_script(
-        &dir.join("alacritty"),
-        &format!(
-            "#!/bin/sh\necho ran > {}\n",
-            dir.join("alacritty-ran").display()
-        ),
-    );
-    write_script(
-        &dir.join("logger"),
-        &format!("#!/bin/sh\necho \"$@\" >> {}\n", dir.join("log").display()),
-    );
-}
-
-struct Run {
-    calls: String,
-    fell_back: bool,
-    log_line: String,
-}
-
-fn run(dir: &Path) -> Run {
-    let path = format!(
-        "{}:{}",
-        dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = std::process::Command::new(launcher())
-        .env("LDMUX", dir.join("ldmux"))
-        .env("PATH", &path)
-        // Hermetic: the developer's own terminal choice must not pick the fallback.
-        .env_remove("LDMUX_TERMINAL")
-        .env_remove("LDMUX_TERMINAL_CMD")
-        .env_remove("TERMINAL")
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "launcher exited {:?}: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Run {
-        calls: std::fs::read_to_string(dir.join("calls")).unwrap_or_default(),
-        fell_back: dir.join("alacritty-ran").exists(),
-        log_line: std::fs::read_to_string(dir.join("log")).unwrap_or_default(),
+    let _ = calls;
+    Stubs {
+        dir: dir.to_path_buf(),
     }
 }
 
-/// A daemon that is coming up is waited for: the launcher keeps trying and
-/// opens the window once it can. Nothing falls back.
-///
-/// Before the wait was added, the very first failure dropped straight to
-/// `alacritty`, so the keybinding produced a session-less terminal that no
-/// client could see.
+/// The fallback emulator and `logger`, so the fallback path is observable.
+fn stub_fallback_bin(dir: &Path, name: &str) -> PathBuf {
+    let bindir = dir.join("bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    let p = bindir.join(name);
+    write_script(&p, "#!/bin/sh\nexit 0\n");
+    bindir
+}
+
+struct Run {
+    code: i32,
+    calls: String,
+}
+
+fn run(dir: &Path, ldmux_dir: &Path, bindir: &Path, args: &[&str]) -> Run {
+    let out = std::process::Command::new("sh")
+        .arg(launcher())
+        .args(args)
+        .env("LDMUX", ldmux_dir.join("ldmux"))
+        .env("STUB_TERM", bindir.join("fallback-term"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bindir.display()))
+        .env("TERMINAL", "fallback-term")
+        .env_remove("LDMUX_NO_SCOPE")
+        .current_dir(dir)
+        .output()
+        .expect("run the launcher");
+    let calls = std::fs::read_to_string(ldmux_dir.join("calls")).unwrap_or_default();
+    Run {
+        code: out.status.code().unwrap_or(-1),
+        calls,
+    }
+}
+
 #[test]
-fn the_launcher_waits_for_a_daemon_that_is_coming_up() {
+fn the_daemon_names_the_terminal_and_the_shell_runs_in_it() {
     let dir = scratch_dir();
-    write_fallback_stubs(&dir);
-    // Absent for the whole wait (`ping` always fails), and the window succeeds
-    // on the third try — the daemon arriving under the launcher.
-    write_ldmux_stub(&dir, 2, false);
-    let r = run(&dir);
+    let ldmux_dir = dir.join("ldmux-bin");
+    let stubs = stub_ldmux(&ldmux_dir, true);
+    let bindir = stub_fallback_bin(&dir, "fallback-term");
+
+    let r = run(&dir, &ldmux_dir, &bindir, &["/tmp"]);
+    assert_eq!(r.code, 0, "launcher failed; calls: {}", r.calls);
     assert!(
-        !r.fell_back,
-        "the launcher must wait for the daemon, not fall back; calls: {}",
+        r.calls.contains("EXEC"),
+        "the launcher must ask the daemon to exec a terminal: {}",
         r.calls
     );
-    assert_eq!(
-        r.calls.lines().filter(|l| *l == "window").count(),
-        3,
-        "it must keep asking; calls: {}",
+    assert!(
+        r.calls.contains("shell /tmp"),
+        "the command run inside the terminal must be `shell <dir>`: {}",
         r.calls
     );
-    assert!(r.log_line.is_empty(), "nothing to log when it worked");
+    assert!(
+        !r.calls.contains("window"),
+        "the launcher must not ask for a window: {}",
+        r.calls
+    );
+    drop(stubs);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A daemon that never answers falls back to a plain terminal (the rule the
-/// keybinding keeps) and says so in the log, with the daemon's own error.
 #[test]
-fn the_launcher_falls_back_when_the_daemon_never_answers() {
+fn a_daemon_that_never_answers_falls_back_to_the_bare_terminal() {
     let dir = scratch_dir();
-    write_fallback_stubs(&dir);
-    write_ldmux_stub(&dir, 99, false);
-    let r = run(&dir);
-    assert!(r.fell_back, "a missing daemon must still give a terminal");
+    let ldmux_dir = dir.join("ldmux-bin");
+    let stubs = stub_ldmux(&ldmux_dir, false);
+    let bindir = stub_fallback_bin(&dir, "fallback-term");
+
+    let r = run(&dir, &ldmux_dir, &bindir, &["/tmp"]);
+    // The fallback execs `$TERMINAL`, which exits 0 here.
+    assert_eq!(r.code, 0, "fallback failed; calls: {}", r.calls);
     assert!(
-        r.log_line.contains("no ldmux desk window"),
-        "the fallback must be logged, got {:?}",
-        r.log_line
-    );
-    assert!(
-        r.log_line.contains("Connection refused"),
-        "the log must carry the daemon's error, got {:?}",
-        r.log_line
-    );
-    assert!(
-        r.calls.lines().filter(|l| *l == "window").count() <= 12,
-        "the wait is bounded; calls: {}",
+        !r.calls.contains("EXEC"),
+        "a daemon that never answers must not be asked to exec: {}",
         r.calls
     );
+    assert!(
+        r.calls.contains("ping"),
+        "the launcher waits by asking ping: {}",
+        r.calls
+    );
+    drop(stubs);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A daemon that answers but cannot open the window is not waited on: the
-/// launcher gives up at once rather than sleeping through the retries. That
-/// failure is not a race, and a terminal should appear now.
 #[test]
-fn a_reachable_daemon_whose_window_fails_is_not_waited_for() {
+fn the_directory_argument_reaches_the_shell_command() {
     let dir = scratch_dir();
-    let ldmux = dir.join("ldmux");
-    write_script(
-        &ldmux,
-        &format!(
-            "#!/bin/sh\necho \"$1\" >> {}\ncase \"$1\" in ping) exit 0;; window) echo 'stub: no terminal' >&2; exit 1;; esac\nexit 0\n",
-            dir.join("calls").display()
-        ),
-    );
-    write_fallback_stubs(&dir);
-    let path = format!(
-        "{}:{}",
-        dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let start = std::time::Instant::now();
-    let out = std::process::Command::new(launcher())
-        .env("LDMUX", &ldmux)
-        .env("PATH", &path)
-        .env_remove("LDMUX_TERMINAL")
-        .env_remove("LDMUX_TERMINAL_CMD")
-        .env_remove("TERMINAL")
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    let took = start.elapsed();
-    assert_eq!(out.status.code(), Some(0));
+    let ldmux_dir = dir.join("ldmux-bin");
+    let stubs = stub_ldmux(&ldmux_dir, true);
+    let bindir = stub_fallback_bin(&dir, "fallback-term");
+
+    let r = run(&dir, &ldmux_dir, &bindir, &["/usr"]);
     assert!(
-        dir.join("alacritty-ran").exists(),
-        "it must still give a terminal"
+        r.calls.contains("shell /usr"),
+        "the directory must be passed to `shell`: {}",
+        r.calls
     );
-    let calls = std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
-    assert_eq!(
-        calls.lines().filter(|l| *l == "window").count(),
-        1,
-        "a reachable daemon's window failure must not be retried; calls: {calls}"
-    );
-    assert!(
-        took < std::time::Duration::from_secs(2),
-        "a reachable daemon's window failure must not be waited on, took {took:?}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-/// The fallback honours the same selection as the daemon: `LDMUX_TERMINAL` beats
-/// the autodetect order (which would have picked the `alacritty` stub), and the
-/// terminal is run by absolute path.
-#[test]
-fn the_fallback_honours_ldmux_terminal() {
-    let dir = scratch_dir();
-    write_fallback_stubs(&dir);
-    write_script(
-        &dir.join("myterm"),
-        &format!(
-            "#!/bin/sh\necho \"$0\" > {}\n",
-            dir.join("myterm-ran").display()
-        ),
-    );
-    write_ldmux_stub(&dir, 99, true);
-    let path = format!(
-        "{}:{}",
-        dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = std::process::Command::new(launcher())
-        .env("LDMUX", dir.join("ldmux"))
-        .env("PATH", &path)
-        .env("LDMUX_TERMINAL", "myterm")
-        .env_remove("LDMUX_TERMINAL_CMD")
-        .env_remove("TERMINAL")
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        !dir.join("alacritty-ran").exists(),
-        "the autodetect must not override the choice"
-    );
-    let ran = std::fs::read_to_string(dir.join("myterm-ran")).unwrap_or_default();
-    assert_eq!(
-        ran.trim(),
-        dir.join("myterm").display().to_string(),
-        "run by absolute path"
-    );
+    drop(stubs);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The directory argument reaches `ldmux window` intact, spaces and all.
 #[test]
-fn the_directory_argument_is_passed_through() {
+fn the_default_directory_is_where_the_launcher_started() {
     let dir = scratch_dir();
-    write_fallback_stubs(&dir);
-    write_script(
-        &dir.join("ldmux"),
-        &format!(
-            "#!/bin/sh\nprintf '%s|' \"$@\" >> {}\nexit 0\n",
-            dir.join("args").display()
-        ),
+    let ldmux_dir = dir.join("ldmux-bin");
+    let stubs = stub_ldmux(&ldmux_dir, true);
+    let bindir = stub_fallback_bin(&dir, "fallback-term");
+
+    let r = run(&dir, &ldmux_dir, &bindir, &[]);
+    let here = dir.canonicalize().unwrap();
+    assert!(
+        r.calls.contains(&format!("shell {}", here.display())),
+        "with no argument the shell runs in the caller's directory ({}): {}",
+        here.display(),
+        r.calls
     );
-    let out = std::process::Command::new(launcher())
-        .arg("/some dir/with space")
-        .env("LDMUX", dir.join("ldmux"))
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(0));
-    let args = std::fs::read_to_string(dir.join("args")).unwrap_or_default();
-    assert_eq!(args, "window|/some dir/with space|");
+    drop(stubs);
     let _ = std::fs::remove_dir_all(&dir);
 }

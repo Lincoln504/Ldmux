@@ -67,9 +67,9 @@ struct Stubs {
 impl Stubs {
     fn restore(self) {
         set_env("PATH", self.old_path);
-        unset_env("LDMUX_TERMINAL");
+        unset_env("TERMINAL");
         if let Some(t) = self.old_terminal {
-            set_env("LDMUX_TERMINAL", t);
+            set_env("TERMINAL", t);
         }
         unset_env("DISPLAY");
         if let Some(d) = self.old_display {
@@ -82,7 +82,7 @@ impl Stubs {
 ///
 /// The terminal is not decoration. `makeLive` asks `desktop::open_window` to open
 /// the window, and that refuses a terminal it cannot run — a wrong
-/// `LDMUX_TERMINAL` is a window that dies as it opens.
+/// `$TERMINAL` is a window that dies as it opens.
 /// A test that stubs only `i3-msg` therefore passes or fails on whether the
 /// *developer's* box happens to have the emulator installed, which is not
 /// something a test should be measuring.
@@ -114,10 +114,10 @@ fn install_stubs(dir: &std::path::Path) -> Stubs {
     // window manager. Teardown kills it, so nothing outlives the test.
     write("alacritty", "#!/bin/sh\nsleep 600\n");
     let old_path = std::env::var("PATH").unwrap_or_default();
-    let old_terminal = std::env::var("LDMUX_TERMINAL").ok();
+    let old_terminal = std::env::var("TERMINAL").ok();
     let old_display = std::env::var("DISPLAY").ok();
     set_env("PATH", format!("{}:{}", stub_dir.display(), old_path));
-    set_env("LDMUX_TERMINAL", "alacritty");
+    set_env("TERMINAL", "alacritty");
     set_env("DISPLAY", ":0");
     Stubs {
         old_path,
