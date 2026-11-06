@@ -104,6 +104,9 @@ class MeshTerminalSource(
     /** A sync is out and its answer has not arrived. */
     val awaitingSync: Boolean get() = hold.awaiting
 
+    /** A screen the hold is keeping back, waiting for something to release it. */
+    val heldScreenWaiting: Boolean get() = pendingScreen != null
+
     /** The deadline passed and the bar should say so. Cleared by the answer or by the next press. */
     val answerOverdue: Boolean get() = hold.reported
 

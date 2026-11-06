@@ -760,7 +760,18 @@ class MeshTermDriver(
     suspend fun closeShell(id: String): Boolean = lock.withLock {
         if (session == null || terminalView != null) return@withLock false
         if (id.isEmpty()) return@withLock false
-        queue(TermMessage.Close(id)); pump(); publish()
+        // **The row goes now, because the user's act was the event.** Waiting for the host's
+        // refreshed list left the ✕ looking inert: the shell did end on the host and the row
+        // stayed, so the only way to see the result was to refresh. The row is dropped here and a
+        // list is asked for in the same breath, so what replaces it is the host's answer rather
+        // than this guess.
+        val left = _shells.value.entries.filterNot { it.id == id }
+        if (attachedId == id) attachedId = null
+        _shells.value = MeshShells(left, attachedId)
+        queue(TermMessage.Close(id))
+        queue(TermMessage.ListRequest)
+        listingForHeader = true; pages = ArrayList()
+        pump(); publish()
         true
     }
 

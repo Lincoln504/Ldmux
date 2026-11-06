@@ -101,6 +101,14 @@ internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
 internal const val GRID_SETTLE_MS = 250L
 
 /**
+ * How long a newly opened shell waits before its held screen is drawn without asking.
+ *
+ * Long enough for the host's first screen to arrive over the radio, short enough that the user
+ * does not press `show` first. See the effect: opening a shell is the request to see it.
+ */
+internal const val AUTO_SHOW_AFTER_OPEN_MS = 1_500L
+
+/**
  * How long the first fit waits for the keyboard to appear before sending the size it has.
  *
  * The keyboard is opened by the app when a terminal appears, and it is an animation plus an IME
@@ -298,6 +306,7 @@ fun MeshTerminalScreen(
     // resumes exactly as reliably as one the user picked.
     LaunchedEffect(shells.current) { shells.current?.let { resumeShell = it } }
 
+
     val origin = remember { TimeSource.Monotonic.markNow() }
     val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
     // **The input queue belongs to the connection, the picture does not.** Carrying a batcher across a
@@ -309,6 +318,16 @@ fun MeshTerminalScreen(
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
     val source = remember(conn) { MeshTerminalSource(handle) }
+    // **A shell that was just opened shows itself.** In manual-sync mode the view is frozen by
+    // design, and opening a shell is the user saying they want to see it. Its first screen was
+    // held if the mode was mid-send or already waiting, and nothing released it, so the page sat
+    // empty until `show` was pressed. A short wait is enough for the screen to arrive.
+    LaunchedEffect(shells.current, config.meshHoldsInput) {
+        if (!config.meshHoldsInput || shells.current == null) return@LaunchedEffect
+        delay(AUTO_SHOW_AFTER_OPEN_MS)
+        if (source.heldScreenWaiting) source.pullHeld()
+    }
+
     DisposableEffect(source) {
         onDispose { source.close() }
     }
