@@ -38,7 +38,7 @@ tailnet, or a pair of LoRa radios when there is no internet and no network at al
 
 | Mode | Carried by | Notes |
 |---|---|---|
-| tailnet | a WebSocket to the daemon, bearer token, tailnet or loopback only | instant handshake, scrolling with momentum |
+| tailnet | a WebSocket | instant handshake, scrolling with momentum |
 | LoRa live | the two radios | keystrokes leave as typed |
 | LoRa batch | the two radios | typing leaves as one batch on `sync`, forced on a public channel |
 
