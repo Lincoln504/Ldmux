@@ -172,18 +172,29 @@ pub fn parse_self_info(payload: &[u8]) -> Result<SelfInfo, CodecError> {
             head
         }};
     }
+    // The same bytes as a fixed-size array: `take!` has already proved the length, so this cannot
+    // fail, and it does not need an `unwrap` to say so. A truncated SELF_INFO from older firmware
+    // ends the parse at the first missing field, which is what the `return Ok(info)` above is for.
+    macro_rules! take_array {
+        ($n:expr) => {{
+            let head = take!($n);
+            let mut out = [0u8; $n];
+            out.copy_from_slice(head);
+            out
+        }};
+    }
     info.adv_type = take!(1)[0];
     info.tx_power = take!(1)[0];
     info.max_tx_power = take!(1)[0];
-    info.public_key.copy_from_slice(take!(32));
-    info.adv_lat = i32::from_le_bytes(take!(4).try_into().unwrap()) as f64 / 1e6;
-    info.adv_lon = i32::from_le_bytes(take!(4).try_into().unwrap()) as f64 / 1e6;
+    info.public_key = take_array!(32);
+    info.adv_lat = i32::from_le_bytes(take_array!(4)) as f64 / 1e6;
+    info.adv_lon = i32::from_le_bytes(take_array!(4)) as f64 / 1e6;
     let _multi_acks = take!(1)[0];
     info.adv_loc_policy = take!(1)[0];
     let _telemetry = take!(1)[0];
     let _manual = take!(1)[0];
-    info.radio_freq_mhz = u32::from_le_bytes(take!(4).try_into().unwrap()) as f64 / 1000.0;
-    info.radio_bw_khz = u32::from_le_bytes(take!(4).try_into().unwrap()) as f64 / 1000.0;
+    info.radio_freq_mhz = u32::from_le_bytes(take_array!(4)) as f64 / 1000.0;
+    info.radio_bw_khz = u32::from_le_bytes(take_array!(4)) as f64 / 1000.0;
     info.radio_sf = take!(1)[0];
     info.radio_cr = take!(1)[0];
     info.name = String::from_utf8_lossy(rest).trim_end_matches('\0').to_string();
@@ -202,7 +213,7 @@ pub fn parse_device_info(payload: &[u8]) -> Option<DeviceInfo> {
     if info.protocol_version >= 3 && rest.len() >= 1 + 1 + 4 + 12 + 40 + 20 {
         info.max_contacts = Some(rest[0] as u16 * 2); // firmware stores half
         info.max_channels = Some(rest[1]);
-        info.ble_pin = Some(u32::from_le_bytes(rest[2..6].try_into().unwrap()));
+        info.ble_pin = Some(u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]));
         info.firmware_build = text(&rest[6..18]);
         info.manufacturer = text(&rest[18..58]);
         info.firmware_version = text(&rest[58..78]);

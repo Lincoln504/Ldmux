@@ -119,6 +119,14 @@ fn valid_bits(v: &str) -> bool {
     v.parse::<u8>().is_ok_and(|b| (8..=15).contains(&b))
 }
 
+/// Exactly `N` bytes at `at`, or `None` when the buffer does not hold that many.
+///
+/// The length check and the slice are one operation, so a caller cannot read past the end and a
+/// future edit to one cannot drift from the other.
+fn fixed<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
+    b.get(at..at.checked_add(N)?)?.try_into().ok()
+}
+
 /// A WebSocket-level failure, with the close code the peer is owed.
 #[derive(Debug)]
 pub struct WsError {
@@ -253,10 +261,13 @@ impl<R: AsyncRead + Unpin> WsReader<R> {
                     (u16::from_be_bytes([b[2], b[3]]) as u64, 4usize)
                 }
                 127 => {
-                    if b.len() < 10 {
+                    // The length check and the slice are one operation, so neither can drift from
+                    // the other: this used to be a `len()` guard followed by `try_into().unwrap()`,
+                    // which is the shape that becomes a panic the day the guard is edited.
+                    let Some(n) = fixed::<8>(b, 2) else {
                         return Ok(None);
-                    }
-                    (u64::from_be_bytes(b[2..10].try_into().unwrap()), 10usize)
+                    };
+                    (u64::from_be_bytes(n), 10usize)
                 }
                 n => (n as u64, 2usize),
             };
@@ -268,7 +279,9 @@ impl<R: AsyncRead + Unpin> WsReader<R> {
             if b.len() < hdr + 4 + len {
                 return Ok(None);
             }
-            let mask: [u8; 4] = b[hdr..hdr + 4].try_into().unwrap();
+            let Some(mask) = fixed::<4>(b, hdr) else {
+                return Ok(None);
+            };
             let mut payload = b[hdr + 4..hdr + 4 + len].to_vec();
             for (i, byte) in payload.iter_mut().enumerate() {
                 *byte ^= mask[i & 3];
