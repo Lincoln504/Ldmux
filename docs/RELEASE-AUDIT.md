@@ -24,6 +24,7 @@ implements are in `docs/adr/`.
 | 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | OPEN by decision: CI runs the Rust gate on every branch, and the Android artifact is built locally |
 | 1.8 | R8 is off; a release carries unused code | OK for 0.1, decide later |
 | 1.9 | The native session library is rebuilt by a Gradle task, so a stale `.so` is possible | OK — `buildSessionAndroid` runs before packaging |
+| 1.10 | The bundle shipped `armeabi-v7a` and `x86` splits from a dependency while our own libraries are 64-bit only, so a 32-bit device installs and dies with `UnsatisfiedLinkError` | FIXED 2026-11-06: `ndk { abiFilters }` declares `arm64-v8a` and `x86_64`, and `bundleRelease` now opens the produced bundle and refuses any other ABI or any missing library. The old guard read `jniLibs`, which cannot see what a dependency merged |
 
 ## 2. Install, upgrade, first run
 
@@ -32,7 +33,7 @@ implements are in `docs/adr/`.
 | 2.1 | Fresh install shows a blank screen under `unpaired`, reads as broken | FIXED `b44a8de` |
 | 2.2 | The package id changed, so the previous install is a different app | FIXED by instruction — uninstall `dev.ldmux.mobile` first |
 | 2.3 | The app on the phone is a 14 September build, so every fix since is invisible | FIXED — needs one install |
-| 2.4 | Upgrading loses the pairing (token in app data) | OPEN — no migration path; document it |
+| 2.4 | Upgrading loses the pairing (token in app data) | OPEN by design — the package id changed for 0.1 (`dev.ldmux.mobile` → `io.ldmux.mobile`), so the previous install is a different app and nothing migrates. Pairing again is one scan, and the listing and first-run notice say so |
 | 2.5 | A reviewer with no host, no tailnet and no radio cannot get past first run | OPEN by design — the listing must say what it needs |
 | 2.6 | Backup restores a token onto another device | OK — `allowBackup=false`, rules exclude everything |
 
