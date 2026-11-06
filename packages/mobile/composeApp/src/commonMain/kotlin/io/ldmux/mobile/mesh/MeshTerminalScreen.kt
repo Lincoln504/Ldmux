@@ -97,6 +97,17 @@ import io.ldmux.mobile.NoticeLine
 internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
 
 /**
+ * How often the launcher asks the host for its shells while the link is still coming up, and how
+ * long between asks.
+ *
+ * The request needs a session, so the first one can arrive before there is anything to ask on. Two
+ * minutes of retries covers a radio handshake on a slow tuple; a link that is down for longer is a
+ * state the screen already draws, with the reason and the refresh square.
+ */
+internal const val LAUNCHER_TRIES = 300
+internal const val LAUNCHER_RETRY_MS = 400L
+
+/**
  * How long the measured grid must stop moving before it is sent to the host.
  *
  * Long enough to outlast the keyboard animation (about 200 ms on the devices measured) and short
@@ -617,16 +628,20 @@ fun MeshTerminalScreen(
     // because the screen had come from the other direction and the one-shot list flag had already
     // been spent. `launcher` also lets go of any attached shell, which is what gives a desk window
     // its pty back.
-    LaunchedEffect(showList, AppLifecycle.foreground) {
+    LaunchedEffect(showList, AppLifecycle.foreground, view) {
         if (!showList || !AppLifecycle.foreground) return@LaunchedEffect
         // **The link may still be coming up, and `launcher` needs a session.** Asking once, as the
         // screen appears, was a race the session lost as often as it won: the request went nowhere
         // and the rows that did appear came from a pushed list, which carries no marks (measured on
         // the device, 2026-11-06 — a shell with a `done` mark showed none). It keeps asking until
         // the driver has a session to ask on.
-        while (showList && AppLifecycle.foreground) {
-            if (conn.driver.launcher()) break
-            delay(400)
+        // Bounded: a link that never comes up is a state the screen already draws (the reason and
+        // the refresh square), and asking a driver with no session for two minutes of retries would
+        // be a poll nobody reads. Coming back to the foreground, or the view changing, starts it
+        // again.
+        repeat(LAUNCHER_TRIES) {
+            if (conn.driver.launcher()) return@LaunchedEffect
+            delay(LAUNCHER_RETRY_MS)
         }
     }
     // **Opening a shell draws its first screen, once.** In batch mode the view is frozen, so a

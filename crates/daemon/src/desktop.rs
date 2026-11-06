@@ -726,13 +726,33 @@ pub fn terminal_problem(terminal: &str) -> Option<String> {
 /// arguments, and `{class}` is substituted anywhere. No shell is involved, so no
 /// quoting is needed; every template in [`SPECS`] keeps `{cmd}` as its own word.
 fn expand(template: &[String], class: &str, attach: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for w in template {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < template.len() {
+        let w = &template[i];
         if w == "{cmd}" {
             out.extend(attach.iter().cloned());
-        } else {
-            out.push(w.replace("{class}", class));
+            i += 1;
+            continue;
         }
+        // **A window with no name gets no class flag at all.** `ldmux terminal --exec` runs the
+        // operator's own terminal and has no window id to name, so the class is empty; passing
+        // `--class ""` set an empty class, which the window manager cannot match and which showed up
+        // in `ps` as `alacritty --class  -e …` (measured 2026-11-06). A template names the flag and
+        // its value as two elements (`--class`, `{class}`), so both go together; one that wrote the
+        // value inline (`--class={class}`) is dropped as a single element.
+        if class.is_empty() {
+            if template.get(i + 1).is_some_and(|next| next.contains("{class}")) {
+                i += 2;
+                continue;
+            }
+            if w.contains("{class}") {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(w.replace("{class}", class));
+        i += 1;
     }
     out
 }
@@ -1610,6 +1630,43 @@ async fn place_with(
         "the window manager did not answer"
     };
     (false, None, Some(format!("opened, not placed: {why}")))
+}
+
+#[cfg(test)]
+mod expand_tests {
+    use super::*;
+
+    fn argv(program: &str, class: &str) -> Vec<String> {
+        build_argv(program, class, &["ldmux".to_string(), "shell".to_string()])
+    }
+
+    /// A window with a name gets its class, as it always did.
+    #[test]
+    fn a_named_window_keeps_its_class() {
+        assert_eq!(
+            argv("alacritty", "ldmux-live-ab12"),
+            vec!["alacritty", "--class", "ldmux-live-ab12", "-e", "ldmux", "shell"]
+        );
+    }
+
+    /// **A window with no name gets no class flag.** `ldmux terminal --exec` runs the operator's own
+    /// terminal and has nothing to name; `--class ""` set an empty class, which the window manager
+    /// could not match (`alacritty --class  -e …` in `ps`, measured 2026-11-06).
+    #[test]
+    fn an_unnamed_window_drops_the_class_flag_and_its_value() {
+        assert_eq!(
+            argv("alacritty", ""),
+            vec!["alacritty", "-e", "ldmux", "shell"],
+            "the flag and its value go together"
+        );
+        // The same shape in another template: wezterm puts the class after two other flags.
+        assert_eq!(
+            argv("wezterm", ""),
+            vec!["wezterm", "start", "--always-new-process", "--", "ldmux", "shell"]
+        );
+        // ...and kitty, which has nothing else.
+        assert_eq!(argv("kitty", ""), vec!["kitty", "ldmux", "shell"]);
+    }
 }
 
 #[cfg(test)]

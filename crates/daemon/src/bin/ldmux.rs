@@ -724,11 +724,24 @@ async fn main() {
                 &serde_json::json!({ "session": session, "kind": kind, "note": note }),
             )
             .await;
-            // **Silence is the contract.** A buzz is a convenience at the end of a turn, and an
-            // agent that treats a failed buzz as a failed turn is worse than one that says nothing.
-            if let Err(e) = r {
-                eprintln!("ldmux buzz: {e}");
-                std::process::exit(1);
+            // **Refused is refused.** The daemon answers `{"ok": false, "detail": "..."}` for a shell
+            // that does not exist and for a repeat inside the coalescing window, and reading only
+            // `Err` here made a typo'd id exit 0 in silence — the one case a script cannot see.
+            // An agent still ignores the exit code: a failed buzz is not a failed turn.
+            match r {
+                Ok(v) if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) => {}
+                Ok(v) => {
+                    let detail = v
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("the daemon refused it");
+                    eprintln!("ldmux buzz: {detail}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("ldmux buzz: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         "send" => {
