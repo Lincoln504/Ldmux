@@ -219,7 +219,9 @@ fn serve<L: ByteLink>(
     commands: Receiver<Command>,
     events: async_mpsc::Sender<Result<Event, MeshError>>,
 ) {
-    let budget = budget_per_hour(settings.airtime_ms);
+    // Recomputed on a retune: a budget is records per hour at *this* tuple's airtime, so a
+    // radio moved to a slower spreading factor can spend fewer records than this number said.
+    let mut budget = budget_per_hour(settings.airtime_ms);
     let mut window = Instant::now();
     let mut sent: u32 = 0;
 
@@ -290,6 +292,9 @@ fn serve<L: ByteLink>(
                         settings.preset.cr,
                         RECORD_MAX,
                     );
+                    // The report was computed from the old airtime, so it kept saying the old
+                    // tuple's allowance while the meter below it measured the new one.
+                    budget = budget_per_hour(settings.airtime_ms);
                 }
                 let _ = reply.send(result);
                 let _ = events.blocking_send(Ok(Event::Status(status(

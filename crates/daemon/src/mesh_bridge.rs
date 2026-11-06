@@ -309,6 +309,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
                 record.clear();
             };
+        let mut packed: usize = 0;
         for m in messages {
             let Ok(bytes) = m.encode() else {
                 ok = false;
@@ -333,10 +334,16 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 }
             }
             record.extend_from_slice(&bytes);
-            self.stats.messages_sent += 1;
+            packed += 1;
         }
         if ok {
+            // **Counted after the send, not before it.** The flush can fail (a full queue, a link
+            // that says no), and a counter incremented as messages were packed reported messages
+            // that never left — the one number a user would read as "the phone got it".
             flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
+            if ok {
+                self.stats.messages_sent = self.stats.messages_sent.saturating_add(packed as u32);
+            }
             if timing() {
                 eprintln!("ldmuxd: mesh timing: reply queued at {:?}", stamp());
             }
@@ -726,14 +733,36 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 let Some(id) = self.resolve(shell, &selector).await else {
                     return;
                 };
+                // **A shell another device holds is not this phone's to end.** The tailnet route
+                // refuses the same press (`remote.rs`, `not_holder`) and offers a takeover; the
+                // radio route called the daemon's bare `close`, which has no holder rule, so the
+                // same button that was refused over the network destroyed a shell a desk window was
+                // working in. Two routes doing one thing is the whole point of having two routes.
+                let holder = self
+                    .host
+                    .listing()
+                    .await
+                    .and_then(|rows| rows.into_iter().find(|r| r.0 == id).map(|r| r.4))
+                    .unwrap_or_default();
+                if !holder.is_empty() && holder != "mesh" {
+                    self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
+                    return;
+                }
                 if self.host.close(&id).await.is_err() {
                     self.stats.host_unanswered += 1;
                     return;
                 }
                 self.stats.closed += 1;
-                // The attach that named it is over, and the list the phone shows is now wrong.
-                if let Some(a) = self.shells.remove(&shell) {
-                    self.host.release(&a.session).await;
+                // The list the phone shows is now wrong. **Release only the attach that named
+                // this shell**: `shells` is keyed by channel, so removing it unconditionally
+                // detached whatever else that channel was attached to and released *its* claim,
+                // leaving a live attachment with no owner.
+                if let Some(a) = self.shells.get(&shell)
+                    && a.session == id
+                {
+                    let session = a.session.clone();
+                    self.shells.remove(&shell);
+                    self.host.release(&session).await;
                 }
                 if let Some(listing) = self.host.listing().await {
                     let with_cwd = version >= CWD_VERSION;
@@ -2465,6 +2494,77 @@ mod tests {
         assert!(
             host.0.lock().unwrap().claimed.contains(&("release", "abcd-1".to_owned())),
             "ending the shell gives it back rather than leaving a claim behind"
+        );
+    }
+
+    /// **A shell a desk window holds is not ended from the phone.** The tailnet route refuses this
+    /// exact press (`not_holder`) and offers a takeover; the radio route called the daemon's bare
+    /// `close`, which has no holder rule, so the same button destroyed a shell a desk window was
+    /// working in. Two routes are supposed to do one thing.
+    #[tokio::test]
+    async fn closing_a_shell_another_device_holds_is_refused() {
+        let (mut b, host, link) = setup();
+        host.0
+            .lock()
+            .unwrap()
+            .holders
+            .insert("abcd-1".into(), "desktop".into());
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            3,
+            &Message::Close {
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            host.0.lock().unwrap().closed.is_empty(),
+            "a shell the desk holds must not be ended from the phone"
+        );
+        assert!(
+            sent(&link, 3)
+                .iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::HELD)),
+            "the phone must be told it is held, not left guessing"
+        );
+    }
+
+    /// **Closing one shell must not detach another.** `shells` is keyed by channel, so the close
+    /// handler that removed the channel's attach unconditionally released whatever session that
+    /// channel happened to be attached to — a shell the user still had open, left with no claim.
+    #[tokio::test]
+    async fn closing_another_shell_leaves_the_attached_one_claimed() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            3,
+            &Message::Close {
+                selector: "abcd-2".into(),
+            },
+        );
+        b.tick().await;
+        let claimed = host.0.lock().unwrap().claimed.clone();
+        assert!(
+            !claimed.contains(&("release", "abcd-1".to_owned())),
+            "the shell still attached on this channel must keep its claim: {claimed:?}"
         );
     }
 

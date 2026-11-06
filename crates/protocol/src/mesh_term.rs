@@ -148,8 +148,9 @@ pub const MAX_INPUT: usize = 96;
 /// Most bytes of a shell label in a `Sessions` entry (cut at a character boundary by the host).
 pub const MAX_LABEL: usize = 24;
 /// Most bytes of a shell's working directory in a `Sessions` entry (cut at a character boundary
-/// by the host). One entry's worst case is `1 + 40 + 1 + 24 + 1 + 60 = 127` bytes, under
-/// [`MAX_ROWS_BODY`]'s 130, so an entry always fits one record however long its path is.
+/// by the host). One entry's worst case, with the version-8 bytes, is
+/// `2 + 40 (id) + 24 (label) + 61 (cwd) + 1 (origin) + 1 (owner) = 129` bytes, under
+/// [`MAX_ROWS_BODY`]'s 134, so an entry always fits one record however long its path is.
 pub const MAX_CWD: usize = 60;
 /// Most shells a host lists. A host with more lists the first this many and says nothing else:
 /// a picker of more than this is not usable at one record a minute anyway.

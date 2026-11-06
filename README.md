@@ -23,8 +23,9 @@ over a Unix socket. There is no tmux and no second session layer.
 | LoRa live | two MeshCore radios | keystrokes leave as you type |
 | LoRa batch | the same radios | typing is collected and leaves as one batch when you send it, which is forced on a public channel |
 
-Only one phone talks to one desktop at a time. Whichever device holds a shell owns it,
-and a second device that wants it is told so and offers to take it back.
+Exclusivity is per shell, not per link. Whichever device holds a shell owns it, and a
+second device that wants it is told so and offers to take it back; a device may hold many
+shells, and the host accepts up to 64 connections.
 
 <p align="center">
   <img src="docs/media/02-terminal.png" width="47%" alt="a shell on the phone, over the tailnet">
@@ -61,7 +62,7 @@ ldmux window ~                    # a shell in a desk window on the machine's ow
 ```
 
 `ldmux window` prints the session id. `ldmux --help` lists every verb, including
-`new`, `send`, `key`, `capture`, `live`, `mirror`, `kill` and `close`.
+`shell`, `run`, `send`, `key`, `capture`, `live`, `mirror`, `kill` and `close`.
 
 Replacing the keeper ends every shell it holds. `nix run .#restart-keeper` says so and
 asks first, and the daemon and the CLI restart without touching a shell.
@@ -80,9 +81,11 @@ ldmux code --mesh-only            # mesh keys only: no address, no token
 as the token and the secret together.
 
 For the radio route both radios have to be on the same frequency, bandwidth, spreading
-factor and coding rate, and the same channel key. The host prints its radio's operating
-point when it starts, `ldmux mesh status` reports what it is doing now, and the phone's
-radio panel can read a radio, adopt a public preset, or be given a tuple by hand.
+factor and coding rate. No MeshCore channel key is involved: ldmux's records are direct
+packets addressed to the peer's radio key, sealed by the session, so the channel preset is
+a frequency to share and not a secret to match. `ldmux mesh status` prints the tuple the
+host's radio is actually on, `ldmux mesh preset <MHz> <kHz> <SF> <CR>` sets it, and the
+phone's radio panel can read a radio, adopt a public preset, or be given a tuple by hand.
 `docs/ARCHITECTURE.md` section 11 is the whole procedure for the host side.
 
 ## Build and test
