@@ -105,6 +105,15 @@ android {
             ?: gitCommitCount()
             ?: 1
         versionName = System.getenv("LDMUX_VERSION_NAME") ?: "0.1.0"
+        // **The ABIs this app ships, declared.** `libldmux_session.so` and
+        // `libldmux_terminal.so` are built for 64-bit only. Without this, a dependency that ships
+        // 32-bit code (`androidx.graphics.path` does) puts `armeabi-v7a` and `x86` in the bundle,
+        // Play offers that split to a 32-bit device, and the app installs, starts, and dies with
+        // `UnsatisfiedLinkError` on the first session. Measured in the 0.1.0 bundle: four ABI
+        // directories, our two libraries in two of them.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     packaging {
@@ -199,6 +208,37 @@ tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.co
                     "Run scripts/android.sh release or bundle, which builds both; " +
                     "scripts/build-libghostty-vt.sh produces the terminal engine.",
             )
+        }
+    }
+}
+
+// **The bundle that was produced, inspected.** The check above reads `jniLibs`, which cannot know
+// what Gradle merged from dependencies; this one opens the artifact and refuses any ABI outside the
+// declared list, and any listed ABI without both libraries. A packaging rule that is only asserted
+// against its own input is an assumption about the output.
+tasks.matching { it.name == "bundleRelease" }.configureEach {
+    doLast {
+        val aab = file("build/outputs/bundle/release/composeApp-release.aab")
+        if (!aab.isFile) return@doLast
+        java.util.zip.ZipFile(aab).use { zip ->
+            val shipped = zip.entries().asSequence()
+                .map { it.name }
+                .filter { it.startsWith("base/lib/") && it.endsWith(".so") }
+                .map { it.removePrefix("base/lib/").substringBefore('/') }
+                .distinct()
+                .toList()
+            val extra = shipped.filter { it !in abiDirs }
+            if (extra.isNotEmpty()) {
+                throw GradleException(
+                    "the bundle ships ABIs that the app has no libraries for: ${extra.joinToString(", ")}. " +
+                        "Declare the shipped ABIs in `ndk { abiFilters }`.",
+                )
+            }
+            val missing = abiDirs.flatMap { abi -> requiredNativeLibs.map { "$abi/$it" } }
+                .filter { path -> zip.getEntry("base/lib/$path") == null }
+            if (missing.isNotEmpty()) {
+                throw GradleException("the bundle is missing: ${missing.joinToString(", ")}")
+            }
         }
     }
 }
