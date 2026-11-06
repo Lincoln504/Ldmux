@@ -130,8 +130,9 @@ This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECOR
 | 9.9 | No scroll affordance on settings | OPEN |
 | 9.10 | Text size needs 21 taps | OPEN |
 | 9.11 | `AppHeader` always reads `ldmux` | OK — a convention, not a defect |
-| 9.15 | A shell created headlessly from the CLI is drawn with the amber `no window` anomaly, which says something went wrong when nothing did | OPEN — the label is accurate (verified against the X window list) but the framing is wrong; telling "never had a window" from "lost one" needs a `had_window` fact the daemon does not keep |
+| 9.15 | A shell created headlessly from the CLI was drawn with the amber `no window` anomaly, which says something went wrong when nothing did | FIXED `c57f99a` — the daemon keeps `hadWindow`, backfilled at registry load; the label fires only for a window that went away. Verified on the device: no row says it any more, and the seven windowed sessions report `hadWindow=true` |
 | 9.16 | A shell created from the phone must show a phone icon, offer send-to-desktop, and be the only kind the phone may close | OK — verified on the device: the row carries `opened on this phone`, `send to desktop` and `close shell`; `+ shell` creates one end to end |
+| 9.17 | The scroll pad's page size and the read-then-type behaviour must hold in all three modes | FIXED in both routes (`aca7220`); verified on the device for tailnet only, since the mesh route needs a paired radio. The mesh route's history is local, so a page turn repaints without a round trip and needs no refresh |
 
 ## 10. Security and privacy
 
