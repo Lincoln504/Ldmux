@@ -100,8 +100,8 @@ consolidated into them at `731970f` and is readable at `c3d7c56`.
   what it always got. A new keeper field must work against a running old keeper (the
   keeper outlives the daemon and is replaced only by ending every shell).
 - **A window is spawned only when nobody is at a terminal.** `ldmux attach` runs the desk
-  client in the terminal you already have; `ldmux window` (and the phone's send-to-desktop)
-  spawns one, in the terminal you configured — `$TERMINAL`, then `xdg-terminal-exec`, then the
+  client in the terminal you already have; the phone's send-to-desktop is the only spawn,
+  in the terminal you configured — `$TERMINAL`, then `xdg-terminal-exec`, then the
   desktop's own setting, then an emulator already running, then the known list. `ldmux
   terminal` prints that answer and the wrapper asks it rather than copying the chain. There are
   no `LDMUX_TERMINAL*` variables. i3/sway/hyprland placement is an optional adapter.

@@ -34,7 +34,8 @@
 # (i3: `exec --no-startup-id systemctl --user import-environment …`; sway and
 # hyprland: `exec`/`exec-once`; GNOME and KDE do it themselves.) The daemon asks
 # the user manager for them when it has none of its own, so no restart is needed
-# after the import. Without them `ldmux window` says there is no graphical session.
+# after the import. Without them a desk window cannot be opened, and the reason is
+# `no graphical session`.
 #
 # **This file is a template.** `@BIN_DIR@` is replaced by scripts/install.sh with the
 # absolute path of `~/.local/state/ldmux/current/bin`, a stable link to the installed

@@ -2155,7 +2155,7 @@ impl LdmuxDaemon {
                 // releasing the claim anyway left the window on screen and untracked: nothing
                 // would end its shell when it later closed, and another device could claim the
                 // pane while it was still displayed. Keep the record, keep the claim, and say
-                // why it failed so `ldmux unlive` reports it.
+                // why it failed so the caller that closes it can report it.
                 if let Err(e) = result {
                     return Ok(serde_json::json!({ "ok": false, "detail": e }));
                 }

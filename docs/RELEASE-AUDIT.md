@@ -371,21 +371,15 @@ None of these are defects. Each is a decision that changes what ships.
 - Multi-hop is one direction only: the phone looks up a route, the host always sends zero-hop,
   so a phone one relay away attaches and never hears a reply (`ARCHITECTURE.md` section 11 says
   so now). Implementing the host-side lookup is a feature, not a fix.
-- The host publishes an airtime budget it does not enforce (`Budget::RadioGoverned` returns
-  `u8::MAX`), on the argument that the firmware runs the duty cycle. That argument is not
-  evidenced in this tree, and `ldmux mesh status` still prints a number as if it were a limit.
-  Either enforce it or stop printing it.
-- Desk windows are spawned into `ldmux.service`'s cgroup: the unit's memory figure is 20x the
-  daemon's real footprint, every restart floods the journal with "Found left-over process …
-  unclean termination", and `stop` leaves the windows behind. The keeper already has the
-  transient-scope code to mirror.
-- The loopback gateway transport still exists (`LDMUX_MESH_ADDR`/`TOKEN`/`PEER`,
-  `crates/mesh/src/client.rs`, `GatewayCarrier`). Nothing ships it and its vocabulary leaks into
-  status output and docs; deleting it is the next cleanup.
-- The notification uses a framework drawable, so on Android 12+ the status bar shows a system
-  glyph rather than the app's mark.
-- Settings has no connection or diagnostics section: no address, state, token fingerprint,
-  last error, or a way to read the app log. The pieces exist; the surface does not.
+- **Airtime on the host is neither enforced nor observable as a limit.** `Budget::RadioGoverned`
+  returns `u8::MAX`, so the session loop never gates a record, on the argument that the radio's
+  firmware runs the transmitter duty cycle. That argument is not evidenced in this tree.
+  `ldmux mesh status` no longer presents the radio's count as a gate ("up to 255 left this
+  hour (the field's ceiling)"), which is honest but leaves the duty cycle unattributed: either
+  the firmware meters (say so, with evidence) or the host must.
+- A spawned window is scoped, but its **workspace placement** (i3/sway/hyprland) is only
+  exercised by `desktop_e2e`; nothing asks for a workspace from a phone today, so the adapter
+  is carried, not used.
 - Font scale, RTL, dark mode and split screen are still unverified (3.6).
 - R8 is off, so a release carries unused code (1.8), and CI still does not build the Android
   artifact (1.7).

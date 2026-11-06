@@ -63,7 +63,7 @@ case "$bin_dir" in
     for b in ldmuxd ldmux ldmux-keeper; do
       cp "$bin_dir/$b" "$rel/bin/.$b.new" && chmod 755 "$rel/bin/.$b.new" && mv "$rel/bin/.$b.new" "$rel/bin/$b"
     done
-    # The desk-window launcher (a keybinding runs it; it calls `ldmux window`). In a nix
+    # The terminal launcher (a keybinding runs it; it opens your emulator and runs `ldmux shell`). In a nix
     # package it is already in bin/.
     install -m 755 "$deploy/bin/ldmux-terminal" "$rel/bin/ldmux-terminal"
     ln -sfn "$rel" "$state/current.new" && mv -T "$state/current.new" "$state/current"

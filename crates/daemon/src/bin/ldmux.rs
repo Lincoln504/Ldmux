@@ -1233,10 +1233,10 @@ async fn main() {
             attach_here(&sock, &id, false).await;
         }
         "attach" => {
-            // **The desk client for a terminal you already have.** The daemon can open a
-            // window for you (`ldmux window`, and the phone's send-to-desktop), but a person
-            // at a prompt is already in the terminal they want: this runs the attach client
-            // in it, with no emulator and no spawn. The selector is a session id or a unique
+            // **The desk client for a terminal you already have.** The daemon opens a
+            // window only for the phone (`send to desktop`); a person at a prompt is already
+            // in the terminal they want, so this runs the attach client in it, with no
+            // emulator and no spawn. The selector is a session id or a unique
             // prefix, the same shape every other verb takes.
             let readonly = rest.iter().any(|a| a == "--readonly");
             let pos: Vec<&str> = rest

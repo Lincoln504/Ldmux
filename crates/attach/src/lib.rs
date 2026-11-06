@@ -393,7 +393,7 @@ impl Terminal {
         if !is_tty(0) || !is_tty(1) {
             return Err(
                 "stdin/stdout is not a terminal; ldmux attach must run in one (use `ldmux shell` \
-                 in a terminal, or `ldmux window` to open a desk window)"
+                 in a terminal, or `ldmux new` to create a shell without attaching)"
                     .to_string(),
             );
         }

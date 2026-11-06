@@ -16,8 +16,9 @@
 //! the known emulators on `PATH`. An emulator that needs unusual flags is a wrapper
 //! script and `$TERMINAL` points at it.
 //!
-//! **There is no terminal-multiplexer mirror.** `ldmux mirror <id>` runs `ldmuxd attach <id> --readonly` —
-//! the same protocol client as a desk window, told not to take a claim.
+//! **There is no terminal-multiplexer mirror.** A read-only view is `ldmux attach <id> --readonly`
+//! — the same protocol client as a desk window, told not to take a claim — run in the terminal
+//! the reader already has.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -1101,9 +1102,10 @@ pub async fn open_live(session_id: &str, workspace: &str) -> Result<LiveResult, 
     open_window(&argv, &live_window_class(session_id), workspace).await
 }
 
-/// Open a session's mirror window: the same machinery with a different argv and
-/// class, read-only unless `ldmux mirror --rw` asked otherwise (read-only is not
-/// a joke: a mirror that holds the shell would take it from whoever is typing).
+/// Open a session's read-only window: the same machinery with a different argv and class.
+/// Read-only is not a joke: a viewer that holds the shell would take it from whoever is
+/// typing, and the CLI never opens this one — `ldmux attach <id> --readonly` is the same
+/// client in a terminal you already have.
 /// The user manager this daemon can ask for a transient scope, if any.
 ///
 /// `LDMUX_NO_SCOPE=1` turns it off, and a container or a session without a user bus has no

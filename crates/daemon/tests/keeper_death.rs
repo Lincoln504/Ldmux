@@ -120,7 +120,7 @@ async fn keeper_death_three_sessions_die_and_daemon_respawns() {
 /// A daemon started beside a **stale keeper socket** must come up.
 ///
 /// The stale file is what a killed keeper leaves behind, and the terminal
-/// keybinding at login is what makes it matter: `ldmux window` either gets a
+/// keybinding at login is what makes it matter: opening a window either gets a
 /// session or `ldmux-terminal` falls back to a plain shell with no session at
 /// all, invisible to the phone.
 ///

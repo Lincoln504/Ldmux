@@ -124,7 +124,7 @@ fn busctl_args(env: &ScopeEnv, name: &str, pid: u32) -> Vec<String> {
         s("inactive-or-failed"),
         s("Description"),
         s("s"),
-        format!("ldmux window {name}"),
+        format!("ldmux desk window {name}"),
         s("0"),
     ]
 }
