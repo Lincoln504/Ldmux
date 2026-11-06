@@ -580,13 +580,17 @@ fun MeshTerminalScreen(
     }
     // Leaving the terminal is the user's decision, so it is also the one that cancels the resume: a
     // rebuild after this must land on the list, not drag them back into a shell they left.
-    // **A keyboard transition re-asserts the fit.** The surface measures its own height, and the
+    // **A keyboard or mode transition re-asserts the fit.** Batch mode's bar sits above the keys
+    // and takes two rows of height away from the terminal; entering the mode resized the visible
+    // area without the host being told, so the pty stayed two rows too tall and the shell's first
+    // line was clipped off the top (reported 2026-11-06, batch mode only — the mode with a bar).
+    // The same re-assert covers the keyboard, whose inset can land after the first measurement. The surface measures its own height, and the
     // height changes when the keyboard opens; but the first measurement after a transition can land
     // before the inset does, and if no further layout pass follows, the host keeps a pty taller than
     // the screen — reported 2026-11-06 as the prompt pushed above the visible top while the keyboard
     // was up. Re-asking is free when the host already agrees (the driver compares the reported grid
     // against the wanted one), and costs one record when it does not.
-    LaunchedEffect(imeUp) {
+    LaunchedEffect(imeUp, config.meshHoldsInput) {
         delay(GRID_SETTLE_MS)
         val g = lastGrid ?: return@LaunchedEffect
         conn.driver.setGrid(g.first, g.second)

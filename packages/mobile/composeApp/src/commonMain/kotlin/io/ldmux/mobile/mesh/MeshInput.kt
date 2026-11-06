@@ -197,8 +197,17 @@ class MeshInputBatcher(
         const val IDLE_MS = 100L
         /** The longest a byte waits, however steadily the user types. */
         const val MAX_HOLD_MS = 200L
-        /** More than this unsent is refused rather than queued for an hour. */
-        const val CAPACITY = 1_024
+        /**
+         * The most text that may wait unsent.
+         *
+         * **This is a memory bound, not an airtime one.** A `Input` message carries at most 96 bytes
+         * and the pump splits a longer paste across records by itself, so a long command was never
+         * one packet — the old 1 KB cap refused a paste that could be sent perfectly well, and told
+         * the user "input refused: the held text is at its limit" for a limit that existed only to
+         * keep the queue small. The cost that matters is records, and the bar states it in records
+         * before the press (`about N records`), which is the honest place to see it.
+         */
+        const val CAPACITY = 65_536
         private const val CR: Byte = 0x0D
         private const val ETX: Byte = 0x03
     }
