@@ -241,32 +241,75 @@ fun regionOfPreset(preset: RadioPreset): RadioRegion {
  *   869.525 and 869.618 public centres.
  * - Australia/New Zealand: 125 kHz inside 915-928 MHz.
  */
-fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPreset = when (region) {
-    RadioRegion.UsCanada -> RadioPreset(
-        frequencyMhz = 902.25 + 0.5 * random.nextInt(0, 51),
-        bandwidthKhz = 500.0,
-        spreadingFactor = if (random.nextBoolean()) 7 else 8,
-        codingRate = 5,
-        txPowerDbm = 22,
-        pathHashSize = 1,
-    )
-    RadioRegion.EuUk -> RadioPreset(
-        frequencyMhz = listOf(869.475, 869.4875, 869.5625, 869.575).random(random),
-        bandwidthKhz = 125.0,
-        spreadingFactor = if (random.nextBoolean()) 8 else 9,
-        codingRate = 5,
-        txPowerDbm = 22,
-        pathHashSize = 1,
-    )
-    RadioRegion.Australia, RadioRegion.NewZealand -> RadioPreset(
-        frequencyMhz = 915.5 + 0.25 * random.nextInt(0, 49),
-        bandwidthKhz = 125.0,
-        spreadingFactor = if (random.nextBoolean()) 9 else 10,
-        codingRate = 5,
-        txPowerDbm = 22,
+fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPreset {
+    val env = envelopeOf(region)
+    // The band edges are the *occupied* edges: a 500 kHz signal centred on 902.25 occupies
+    // 902.0-902.5, so the centre never comes closer than half a bandwidth to either limit. That
+    // arithmetic lives here rather than in the numbers, because it is the whole reason the
+    // generated tuples are legal.
+    val half = env.bandwidthKhz / 2000.0
+    val steps = ((env.freqMaxMhz - half) - (env.freqMinMhz + half)) / env.freqStepMhz
+    val n = steps.toInt().coerceAtLeast(0)
+    val freq = if (n <= 0) {
+        env.freqMinMhz + half
+    } else {
+        (env.freqMinMhz + half) + env.freqStepMhz * random.nextInt(0, n + 1)
+    }
+    return RadioPreset(
+        frequencyMhz = ("%.4f".format(freq)).toDouble(),
+        bandwidthKhz = env.bandwidthKhz,
+        spreadingFactor = env.spreadingFactors.random(random),
+        codingRate = env.codingRate,
+        txPowerDbm = env.txPowerDbm,
         pathHashSize = 1,
     )
 }
+
+/**
+ * The legal envelope of a region, as the one source the randomiser draws from.
+ *
+ * Every field is a limit rather than a preference, and each has a reason:
+ *
+ * - **USA / Canada** — 902-928 MHz is the FCC's 15.247 band; a 500 kHz channel meets the
+ *   bandwidth floor the power argument depends on, and 22 dBm conducted is far under the 30 dBm
+ *   the band allows. The centre stays 250 kHz from each edge because the *occupied* width is
+ *   what has to fit.
+ * - **EU / UK** — the non-specific SRD band is 869.4-869.65 MHz at 500 mW ERP with a **10 %
+ *   duty cycle**, which is a legal requirement rather than a courtesy. Hence 14 dBm in the
+ *   public rows and [requiresDutyCycle] true: the meter must not default to off there. The
+ *   private centre is 125 kHz wide inside that 250 kHz window, away from the public 869.525 and
+ *   869.618 centres.
+ * - **Australia / New Zealand** — 915-928 MHz, 1 W EIRP, so 22 dBm is legal; 125 kHz keeps a
+ *   private channel out of the public AU rows' 250 kHz.
+ *
+ * Power is part of the envelope, not a constant beside it: a radio left at 22 dBm in Japan or at
+ * 27 in the EU is transmitting outside its limit whatever the frequency says.
+ */
+internal data class RadioEnvelope(
+    val freqMinMhz: Double,
+    val freqMaxMhz: Double,
+    val freqStepMhz: Double,
+    val bandwidthKhz: Double,
+    val spreadingFactors: List<Int>,
+    val codingRate: Int,
+    val txPowerDbm: Int,
+    /** The band's regulator requires a duty cycle, so the meter should not default to off. */
+    val requiresDutyCycle: Boolean,
+)
+
+internal fun envelopeOf(region: RadioRegion): RadioEnvelope = when (region) {
+    // 902.0-928.0 at 500 kHz, centres 902.25..927.25 in half-megahertz steps.
+    RadioRegion.UsCanada -> RadioEnvelope(902.0, 928.0, 0.5, 500.0, listOf(7, 8), 5, 22, false)
+    // 869.4-869.65 at 125 kHz: centres 869.4625..869.5875.
+    RadioRegion.EuUk -> RadioEnvelope(869.4, 869.65, 0.0125, 125.0, listOf(8, 9), 5, 14, true)
+    // 915.0-928.0 at 125 kHz.
+    RadioRegion.Australia -> RadioEnvelope(915.0, 928.0, 0.25, 125.0, listOf(9, 10), 5, 22, false)
+    RadioRegion.NewZealand -> RadioEnvelope(915.0, 928.0, 0.25, 125.0, listOf(9, 10), 5, 22, false)
+}
+
+/** Does the band [preset] sits in require a duty cycle by law? */
+fun dutyCycleRequired(preset: RadioPreset): Boolean =
+    preset.frequencyMhz in 869.4..869.65
 
 /** Whether data records are metered against the 36 s/hour courtesy budget. */
 enum class RadioBudgetMode { Metered, Open }

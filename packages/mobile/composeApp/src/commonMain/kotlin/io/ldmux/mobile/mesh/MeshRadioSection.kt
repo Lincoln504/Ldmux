@@ -233,6 +233,14 @@ internal fun RadioPresetPanel(
         selected = p
     }
 
+    // Applying a tuple that lands in a duty-cycle band switches the meter on. Transmitting there
+    // without it is outside the band's conditions, and a setting that permits that by default is
+    // a setting that ships a radio operating illegally.
+    fun chooseWithBudget(p: RadioPreset) {
+        choose(p)
+        if (dutyCycleRequired(p) && openAirtime) onBudget(RadioBudgetMode.Metered)
+    }
+
     fun applyNow(p: RadioPreset) {
         val l = link ?: return
         busy = true
@@ -285,7 +293,7 @@ internal fun RadioPresetPanel(
                         for (r in RadioRegion.entries) {
                             OptionButton(r.label, selected = region == r) {
                                 region = r
-                                choose(privatePreset(r, Random(seed)))
+                                chooseWithBudget(privatePreset(r, Random(seed)))
                             }
                         }
                     }
@@ -353,22 +361,10 @@ internal fun RadioPresetPanel(
                     ) {
                         for (c in PublicPresets) {
                             OptionButton(c.label, selected = c.preset == selected) {
-                                choose(c.preset)
+                                chooseWithBudget(c.preset)
                                 region = c.region ?: region
                             }
                         }
-                    }
-                }
-                // `budget`, not `airtime`: airtime is the quantity, and the choice is whether
-                // LDMUX applies the 36 s/hour meter of its own accord.
-                SettingsChoice("budget") {
-                    OptionButton("metered", selected = !openAirtime) {
-                        onBudget(RadioBudgetMode.Metered)
-                        link?.setBudgetMode(RadioBudgetMode.Metered)
-                    }
-                    OptionButton("unlimited", selected = openAirtime) {
-                        onBudget(RadioBudgetMode.Open)
-                        link?.setBudgetMode(RadioBudgetMode.Open)
                     }
                 }
                 NoticeLine(note)

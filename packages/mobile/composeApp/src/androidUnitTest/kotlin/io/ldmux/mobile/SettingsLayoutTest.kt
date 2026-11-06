@@ -3,6 +3,8 @@ package io.ldmux.mobile
 import io.ldmux.mobile.mesh.MeshRoute
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * The settings screen's shape, as values rather than as a body of composables.
@@ -48,13 +50,14 @@ class SettingsLayoutTest {
 
     @Test
     fun `each route's consequence names the thing the row says`() {
-        // The row's options are `tailnet` and `radio`; the line under them must not
-        // reintroduce the word `lora`, which names a modulation nobody chose.
+        // The row's options are `tailnet` and `LoRa radio`, and the consequence line has to
+        // name the same thing: "radio" alone could be Bluetooth, and the phone's own voice.
+        // The row's options are `tailnet` and `LoRa radio`, and the line under them has to
+        // name the same thing. "radio" alone could be Bluetooth, and a line that says one noun
+        // under buttons that say another is how the two drift apart.
         assertEquals("over Tailscale", routeConsequence(MeshRoute.Tailnet))
-        assertEquals("the phone's radio", routeConsequence(MeshRoute.Mesh))
-        for (r in MeshRoute.entries) {
-            val line = routeConsequence(r)
-            assertEquals(false, line.contains("lora", ignoreCase = true), "route $r says lora")
-        }
+        assertEquals("the phone's LoRa radio", routeConsequence(MeshRoute.Mesh))
+        assertTrue(routeConsequence(MeshRoute.Mesh).contains("LoRa radio"))
+        assertFalse(routeConsequence(MeshRoute.Tailnet).contains("LoRa"))
     }
 }

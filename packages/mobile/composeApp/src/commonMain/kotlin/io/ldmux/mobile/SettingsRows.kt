@@ -1,6 +1,10 @@
 package io.ldmux.mobile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -140,6 +144,47 @@ internal fun SettingsChoice(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             content = content,
         )
+    }
+}
+
+/**
+ * A setting that is simply on or off.
+ *
+ * The whole row is the target, not the box: a 16 dp tick is the smallest thing on the screen, and
+ * a settings row that only responds within it is a control that misses. The box itself is drawn
+ * the way the launcher draws its own, so a tick means one thing in this app.
+ */
+@Composable
+internal fun SettingsToggle(
+    label: String,
+    checked: Boolean,
+    summary: String? = null,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .toggleable(value = checked, role = Role.Checkbox, onValueChange = onChange)
+            .padding(vertical = SettingsRowPad),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Fg, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!summary.isNullOrEmpty()) {
+                Spacer(Modifier.height(2.dp))
+                Text(summary, color = Dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Box(
+            Modifier
+                .size(LocalTouch.current.check)
+                .clip(RadiusSmall)
+                .background(if (checked) Accent else Color.Transparent)
+                .border(1.5.dp, if (checked) Chosen else Dim, RadiusSmall),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (checked) IconCheck(Bg, box = LocalTouch.current.check - 6.dp)
+        }
     }
 }
 

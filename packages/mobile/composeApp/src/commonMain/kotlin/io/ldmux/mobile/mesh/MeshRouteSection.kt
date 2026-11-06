@@ -31,6 +31,7 @@ import io.ldmux.mobile.ScanResult
 import io.ldmux.mobile.SettingsChoice
 import io.ldmux.mobile.SettingsNote
 import io.ldmux.mobile.SettingsRow
+import io.ldmux.mobile.SettingsToggle
 import io.ldmux.mobile.SettingsValue
 import kotlinx.coroutines.flow.MutableStateFlow
 import io.ldmux.mobile.Warn
@@ -180,6 +181,8 @@ internal fun MeshRouteSection(
             // remembered.
             MeshRadioFacts(
                 address = current.meshRadio,
+                openAirtime = current.meshOpenAirtime,
+                onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
                 onOpenPreset = { showPreset = !showPreset; showPicker = false },
             )
             if (showPreset) {
@@ -246,7 +249,12 @@ class MeshRouteActions(
  * where records are sent, not here.
  */
 @Composable
-private fun MeshRadioFacts(address: String, onOpenPreset: () -> Unit) {
+private fun MeshRadioFacts(
+    address: String,
+    openAirtime: Boolean,
+    onBudget: (RadioBudgetMode) -> Unit,
+    onOpenPreset: () -> Unit,
+) {
     var link by remember(address) { mutableStateOf<RadioLink?>(null) }
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
     val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
@@ -296,9 +304,26 @@ private fun MeshRadioFacts(address: String, onOpenPreset: () -> Unit) {
             Text("preset", color = Accent, fontSize = 12.sp, maxLines = 1)
         }
     }
-    SettingsRow("airtime") {
-        SettingsValue(airtimeLine(status), Modifier.weight(1f), maxLines = 2)
-    }
+    // **The limit and its readout, together, on the page.** The meter existed only inside the
+    // preset panel, next to the tuple it does not belong to, and the airtime it spends was a
+    // separate row in the facts above with no control near it. One setting and one line: the
+    // box says whether the meter is applied, and the line says what it has spent — which is the
+    // question a reader asks the moment they see the box.
+    val mustMeter = preset?.let { dutyCycleRequired(it) } == true
+    SettingsToggle(
+        "airtime limit",
+        checked = !openAirtime,
+        summary = when {
+            // Not a preference in this band: 869.4-869.65 MHz carries a 10 % duty cycle as a
+            // condition of use, so the meter being off here is not a setting a reader should be
+            // able to leave without being told.
+            mustMeter && openAirtime -> "off — this band requires a 10 % duty cycle"
+            openAirtime -> "off: no hourly limit"
+            else -> "on: 36 s per hour"
+        },
+        onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
+    )
+    SettingsNote(airtimeLine(status))
 }
 
 /**
