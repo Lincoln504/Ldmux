@@ -148,15 +148,30 @@ internal fun RadioPresetPanel(
     onClassified: (Boolean) -> Unit,
     onUnset: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * The tuple the desktop's radio reported in the pairing code, when there was one.
+     *
+     * **Two radios have to be on the same channel, and only one of them is in this dialog.** Moving
+     * this one away from the desktop's leaves the link down until the desktop is moved to match —
+     * over the radio there is no way to ask it, because the request would have to travel over the
+     * channel it is being moved off. So the dialog says what will break before the press, instead of
+     * leaving the operator with a link that silently stopped.
+     */
+    hostTuple: RadioPreset? = null,
 ) {
     val scope = rememberCoroutineScope()
     var link by remember(address) { mutableStateOf<RadioLink?>(null) }
     var note by remember { mutableStateOf<Notice?>(null) }
     var confirmUnset by remember { mutableStateOf(false) }
+    // A press that moves this radio off the desktop's channel asks once, because undoing it needs
+    // the desktop.
+    var confirmBreak by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var region by remember { mutableStateOf(RadioRegion.UsCanada) }
     var seed by remember { mutableStateOf(0) }
     var selected by remember { mutableStateOf(privatePreset(RadioRegion.UsCanada, Random(0))) }
+    // A confirmation belongs to the tuple it was asked about: picking another one asks again.
+    LaunchedEffect(selected) { confirmBreak = false }
     var original by remember { mutableStateOf<RadioPreset?>(null) }
     var seeded by remember { mutableStateOf(false) }
     var showPublic by remember { mutableStateOf(false) }
@@ -397,6 +412,20 @@ internal fun RadioPresetPanel(
                         }
                     }
                 }
+                // The cost of the press, where the press is. It names the cure as well as the
+                // break: the desktop's own command, and this radio's `match` row once the desktop
+                // has moved.
+                if (hostTuple != null && !sameTuple(selected, hostTuple)) {
+                    Text(
+                        "the desktop's radio is on " + channelLine(hostTuple) +
+                            ". Applying this leaves the link down until the desktop is moved to it " +
+                            "(`ldmux mesh preset` there), or move this radio back and press match " +
+                            "on the radio page.",
+                        color = Warn,
+                        fontSize = 11.sp,
+                        fontFamily = MonoFont,
+                    )
+                }
                 NoticeLine(note)
             }
         // The row is left-aligned in three parts: the destructive action on its own, then
@@ -416,12 +445,24 @@ internal fun RadioPresetPanel(
             // A custom tuple that does not parse must not leave "apply" live: it would commit the
             // previous selection, which is not what the text says.
             val customOk = !custom || customText.isBlank() || typed != null
+            // What this press costs, before it is made: the desktop is on another channel.
+            val breaksLink = hostTuple != null && !sameTuple(selected, hostTuple)
             val canApply = link != null && !busy && seeded && state == MeshLinkState.Bound && customOk
             AccentBtn(
-                label = if (busy) "applying…" else "apply",
+                label = when {
+                    busy -> "applying…"
+                    breaksLink && !confirmBreak -> "apply anyway?"
+                    else -> "apply"
+                },
                 modifier = Modifier.weight(1f),
                 enabled = canApply,
-            ) { applyNow(selected) }
+            ) {
+                if (breaksLink && !confirmBreak) {
+                    confirmBreak = true
+                } else {
+                    applyNow(selected)
+                }
+            }
         }
     }
 }

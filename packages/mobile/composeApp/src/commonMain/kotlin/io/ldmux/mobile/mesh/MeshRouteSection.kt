@@ -163,6 +163,9 @@ internal fun MeshRouteSection(
                                 showPreset = false
                             },
                             onDismiss = { showPreset = false },
+                            // What the desktop's radio said when this phone was paired: the one fact
+                            // that turns "apply" into a link-down without the operator knowing.
+                            hostTuple = parseHostPreset(current.meshHostPreset),
                         )
                     }
                     // **`input` before `airtime limit`.** The mode decides what the meter is
