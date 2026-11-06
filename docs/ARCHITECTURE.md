@@ -251,15 +251,18 @@ cannot use a radio the host is holding.
 4. Generate the session PSK once into the state directory, or set
    `LDMUX_MESH_PSK`.
 5. **The two radios must be on the same tuple** (frequency, bandwidth, spreading
-   factor, coding rate). Read the host's with `ldmux mesh status`, which prints
-   `preset 910.525 MHz  62.5 kHz  SF7  CR5`. Set the host's with
-   `ldmux mesh preset <MHz> <kHz> <SF> <CR>`, which the firmware validates and
-   refuses if the numbers are outside its range. Set the phone's in the app under
-   Settings, `phone's radio`, `edit`: adopt a public preset or take a tuple by hand.
-   A mismatch is silent on the air — two radios on different tuples simply cannot
-   hear each other, and the only symptom is a link that never comes up.
-6. Pair the phone with `ldmux code --mesh`, which carries the session keys, the
-   host radio key and the tailnet address and token in one code.
+   factor, coding rate). The host's is read from the radio it drives: `ldmux mesh
+   status` prints it (`preset 910.525 MHz  500.0 kHz  SF7  CR5`) and `ldmux mesh
+   preset <MHz> <kHz> <SF> <CR>` sets it, validated by the firmware. The phone's is
+   set in the app under Settings, `phone's radio`, `edit`.
+6. Pair the phone with `ldmux code --mesh`. The code carries the session keys, the
+   host radio key, the tailnet address and token, **and the tuple the host's radio
+   is on**. So the app can compare the two radios itself: when they differ, the radio
+   panel shows a `desktop's radio` row with the host's tuple and one press to
+   `match` it. Matching compares only the four numbers the firmware validates —
+   power and path width are local choices. Getting this wrong without the code was
+   silent: two radios on different tuples simply cannot hear each other, and the
+   only symptom is a link that never comes up.
 
 If `LDMUX_MESH_SERIAL` is unset, the older path applies: the daemon dials a loopback
 gateway named by `LDMUX_MESH_ADDR` and learns nothing about presets, paths or
