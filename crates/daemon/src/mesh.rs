@@ -69,6 +69,17 @@ const BUDGET_PROBE: Duration = Duration::from_secs(60);
 /// draining — left the daemon waiting in `recv` forever: no error, no backoff, no reconnect, and a
 /// `mesh.status` that said "handshaking" for the life of the process.
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the carriage may carry nothing at all while a record is outstanding.
+///
+/// **A gateway that stops answering is not a gateway that has nothing to say.** The steady-state
+/// receive had no bound: connect, bind and send were each wrapped in [`GATEWAY_TIMEOUT`], but once
+/// the session was up this loop would sit on a socket that never spoke again, with the status
+/// reading `established` and the phone's screen frozen — indefinitely, because nothing in this
+/// loop ever concluded anything from silence. The ARQ's own ladder is the first line (it fails a
+/// record after five attempts over about a minute); this is the backstop for a carriage that stops
+/// delivering *anything*, including the answers the ladder is waiting for.
+const CARRIER_SILENCE: Duration = Duration::from_secs(75);
 use ldmux_mesh::frame::MeshError;
 use ldmux_session::arq::Limits;
 use tokio::sync::Notify;
@@ -783,6 +794,8 @@ async fn session<C: Carrier>(
     // latency — 76 748 ms on one run. Anything two probes are compared against comes from here.
     let started = runtime_start();
     let mut budget: Option<u8> = None;
+    // When this carriage last delivered anything, in either direction.
+    let mut last_carrier = Instant::now();
     // One entry per record written and not yet answered, keyed by its L2 sequence number.
     // `SEND_RESULT` echoes that number, so an answer can be matched to its record: a late answer
     // for an expired slot must not decrement a live one. Bounded by `CREDIT_WINDOW`.
@@ -832,6 +845,7 @@ async fn session<C: Carrier>(
             .min(MAX_IDLE_WAIT);
         tokio::select! {
             event = carrier.recv() => {
+                last_carrier = Instant::now();
                 match event? {
                     Event::Status(status) => {
                         last_status_at = Instant::now();
@@ -912,6 +926,12 @@ async fn session<C: Carrier>(
 
         let Some(h) = host.as_mut() else { continue };
         let now_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // **Silence with something outstanding is the end of this connection.** Nothing else
+        // concludes anything from it: see [`CARRIER_SILENCE`]. Returning here is what lets
+        // `supervise` build a new one, which is the only cure for a dead carriage.
+        if h.snapshot().pending > 0 && last_carrier.elapsed() >= CARRIER_SILENCE {
+            return Err(MeshError::Timeout("the carriage stopped answering"));
+        }
 
         // **Credit that was never answered expires.** A `SEND_RESULT` that never arrives used to
         // hold its slot forever, so a handful of lost answers closed the window permanently.

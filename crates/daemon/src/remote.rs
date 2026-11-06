@@ -138,7 +138,10 @@ type DaemonArc = Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>;
 
 /// Messages that change what is in a shell, and so are only the holder's to
 /// send (the TS `WRITES`).
-const WRITES: [&str; 3] = ["input", "key", "mouseclick"];
+/// `resize` is one of these, not a read: a pty's size is shared by every viewer, so a read-only
+/// mirror that resized would reflow the shell out from under whoever holds it. It used to be
+/// neither gated nor identity-checked, which let exactly that happen.
+const WRITES: [&str; 4] = ["input", "key", "mouseclick", "resize"];
 
 /// Messages that create, end or hand out shells; they need a `hello`.
 const MUTATES: [&str; 5] = ["new", "kill", "close", "makelive", "closelive"];
@@ -2672,7 +2675,10 @@ fn authorized(headers: &[(String, String)], target: &str, token: &str) -> bool {
         .iter()
         .find(|(k, _)| k == "authorization")
         .map(|(_, v)| {
-            if let Some(rest) = v.strip_prefix("Bearer ") {
+            // **The auth scheme is case-insensitive** (RFC 7235 §2.1), so `bearer <token>` is a
+            // legal header and used to be answered 401 by a client that spelled it that way.
+            let (scheme, rest) = v.trim().split_once(' ').unwrap_or((v.trim(), ""));
+            if scheme.eq_ignore_ascii_case("bearer") {
                 rest.trim().to_string()
             } else {
                 String::new()
@@ -2778,6 +2784,23 @@ mod tests {
         assert_eq!(path_of(&t), "/ws");
         assert!(is_ws_upgrade(&h));
         assert!(authorized(&h, &t, "t"));
+    }
+
+    #[test]
+    fn the_bearer_scheme_is_case_insensitive() {
+        let (_, target, headers) = parse_request_head(
+            "GET /ws HTTP/1.1\r\nHost: x\r\nAuthorization: bearer abc\r\n\r\n",
+        )
+        .unwrap();
+        assert!(
+            authorized(&headers, &target, "abc"),
+            "RFC 7235 makes the scheme case-insensitive"
+        );
+        let (_, target, headers) = parse_request_head(
+            "GET /ws HTTP/1.1\r\nHost: x\r\nAuthorization: BEARER abc\r\n\r\n",
+        )
+        .unwrap();
+        assert!(authorized(&headers, &target, "abc"));
     }
 
     #[test]
