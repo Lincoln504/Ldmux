@@ -321,7 +321,15 @@ internal fun AppContent(
     val markedShell by ShellInbox.shell.collectAsState()
     LaunchedEffect(markedShell, sessions, connected) {
         val id = markedShell ?: return@LaunchedEffect
-        if (sessions.none { it.id == id }) return@LaunchedEffect
+        if (!connected) return@LaunchedEffect
+        if (sessions.none { it.id == id }) {
+            // The shell ended between the notification and the tap, or the list has not arrived yet.
+            // An empty list is the second case, so only a list that names something clears the
+            // request: an inbox that named a dead shell would sit there and open the next shell that
+            // reused the id.
+            if (sessions.isNotEmpty()) ShellInbox.clear()
+            return@LaunchedEffect
+        }
         pageOrder = addToOrder(pageOrder, listOf(id))
         gotoSessionId = id
         showLauncher = false

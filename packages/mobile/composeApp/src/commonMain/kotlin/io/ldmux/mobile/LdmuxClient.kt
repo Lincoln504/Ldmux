@@ -689,7 +689,11 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 // **A mark dies with its shell.** The table the host sends is bounded by shells that
                 // exist, and a list that no longer names one means its mark can never be drawn again
                 // — keeping it would be a row-shaped ghost if the id were ever reused.
-                if (_marks.value.isNotEmpty()) {
+                // Only against a list that names something: the table can arrive before the first
+                // answer on a fresh connection, and an empty list would then wipe marks that are
+                // still true. A prune is a correction, never a reset — the next marks message sets
+                // the whole map.
+                if (_marks.value.isNotEmpty() && _sessions.value.isNotEmpty()) {
                     val live = _sessions.value.map { it.id }.toSet()
                     _marks.value = _marks.value.filterKeys { it in live }
                 }
