@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/media/app-icon-pair.png" width="272" alt="the ldmux mark twice: `ld`, and the same mark flipped vertically, which reads `pl`">
+  <img src="docs/media/app-icon-pair.png" width="272" alt="the ldmux mark twice: `ld`, and the same mark turned upside down and sideways, which reads `pl`">
 </p>
 
 # ldmux
