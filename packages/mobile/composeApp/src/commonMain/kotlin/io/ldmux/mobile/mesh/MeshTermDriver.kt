@@ -711,21 +711,44 @@ class MeshTermDriver(
     }
 
     /**
-     * Choose one of the shells the host listed. Only an id from the host's own list is accepted:
-     * anything else returns false and sends nothing, so a stale picker cannot attach a guess.
+     * Open `id`: the one way a shell becomes the page on screen.
+     *
+     * **There used to be two, chosen by the screen guessing at the driver's state** (`choose` from
+     * the first list, `selectShell` once a shell was open). The guess was wrong exactly where it
+     * mattered: a launcher opened from a live shell releases that shell first (`openList`), so the
+     * screen was no longer `Choose`, the tap took the `selectShell` path, which refuses when no
+     * shell is attached — and `open` with three shells ticked did nothing at all, with no word to
+     * the user. One entry point asks the driver what it has instead of the screen guessing.
+     *
+     * Only an id from the host's own list is accepted, so a stale picker cannot attach a guess.
      */
-    suspend fun choose(id: String): Boolean = lock.withLock {
-        if (session == null || terminalView != null || pick != Pick.Choosing) return@withLock false
-        if (choices.none { it.id == id }) return@withLock false
+    suspend fun open(id: String): Boolean = lock.withLock {
+        if (session == null || terminalView != null) return@withLock false
+        if (id.isEmpty() || id == attachedId) return@withLock false
+        val known = choices.any { it.id == id } || _shells.value.entries.any { it.id == id }
+        if (!known) return@withLock false
         pick = Pick.Attached
+        listHoldsNothing = false
+        // A different shell's rows are never drawn under this one's name, and the surface is
+        // dropped here rather than waiting for the first screen: an attach on a radio takes
+        // seconds, and the old shell's rows on screen for those seconds are a lie.
+        if (id != attachedId) {
+            mirror = RowMirror()
+            held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
+        }
         attachedId = id
         attempted = id
-        listHoldsNothing = false
         publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
         true
     }
+
+    /**
+     * Choose one of the shells the host listed. Kept as the name the first list's tap uses; it is
+     * [open] now, because the two paths disagreed about what `open` means.
+     */
+    suspend fun choose(id: String): Boolean = open(id)
 
     /**
      * Take a shell another device holds: the answer to [MeshTermView.HeldBy] (version 8).
@@ -751,6 +774,36 @@ class MeshTermDriver(
      * the answer is information for the header, and moving is [selectShell]. Costs one record up and
      * one or more down, so callers use it once on arriving and when the user asks, not on a timer.
      */
+    /**
+     * Show the launcher: let go of whatever was attached, then ask the host what it has.
+     *
+     * **One entry point, because the two old ones each refused in a state the user was in.**
+     * `listShells` refuses unless a shell is attached; `refresh` refuses unless nothing is; and the
+     * screen came to the list from both directions — from a live shell (`openList`) and from a blank
+     * homepage after Android's back button. Whichever refused, the list stayed empty and the screen
+     * stayed blank until the user pressed refresh, which happened to take the other path. Coming to
+     * the launcher is one act, so it is one method.
+     */
+    suspend fun launcher() = lock.withLock {
+        if (session == null || terminalView != null) return@withLock
+        // Letting go is what gives a desk window its pty back, so it happens before the list is
+        // asked for; `Detach` is queued, not awaited, and the host answers with the list either
+        // way (`listHoldsNothing` keeps a one-shell answer from attaching straight back).
+        //
+        // **Attached is a state, not an id.** An empty-selector attach takes the host's one shell
+        // without learning its id, and gating the `Detach` on the id meant that shell was never
+        // released: the desk window stayed locked out and the pty stayed at the phone's width for
+        // as long as the phone was on the list.
+        if (attachedId != null || pick == Pick.Attached) queue(TermMessage.Detach)
+        attachedId = null
+        listHoldsNothing = true
+        pick = Pick.Listing
+        pages = ArrayList()
+        listingForHeader = true
+        queue(TermMessage.ListRequest)
+        pump(); publish()
+    }
+
     suspend fun listShells() = lock.withLock {
         if (session == null || terminalView != null || pick != Pick.Attached) return@withLock
         // **A list already in flight is not asked for again.** The screen asks whenever it is
@@ -768,19 +821,7 @@ class MeshTermDriver(
      * or spend a record to stay where it is. The old screen is dropped at once (the view says the
      * host has not described the terminal yet) rather than painting one shell's rows under another's name.
      */
-    suspend fun selectShell(id: String): Boolean = lock.withLock {
-        if (session == null || terminalView != null || pick != Pick.Attached) return@withLock false
-        if (_shells.value.entries.none { it.id == id } || id == attachedId) return@withLock false
-        mirror = RowMirror()
-        held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
-        attachedId = id
-        attempted = id
-        listHoldsNothing = false
-        publishShells()
-        queue(TermMessage.Attach(MeshTerm.VERSION, id))
-        pump(); publish()
-        true
-    }
+    suspend fun selectShell(id: String): Boolean = open(id)
 
     /**
      * Ask the host to start a shell, and attach to the one it makes (version 7).
@@ -863,7 +904,7 @@ class MeshTermDriver(
      */
     suspend fun releaseShell() = lock.withLock {
         if (session == null || terminalView != null) return@withLock
-        if (attachedId == null) return@withLock
+        if (attachedId == null && pick != Pick.Attached) return@withLock
         queue(TermMessage.Detach); pump()
         // The list is about to arrive; it must not take the shell straight back.
         listHoldsNothing = true

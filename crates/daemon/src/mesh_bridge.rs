@@ -86,7 +86,13 @@ pub trait Host {
     /// cursor in the wrong place and a resize that does not take. Claiming is what ADR-0010
     /// says a second viewer does, and it is also what makes the window stop: a displaced
     /// window is sent `owned`, not a snapshot, so it stops resizing.
-    async fn claim(&mut self, id: &str) -> Result<bool, String>;
+    /// Claim a shell for the radio link, or learn who holds it.
+    ///
+    /// **The host decides, not this bridge.** Whether a holder is "in use" (and may refuse) or
+    /// merely holds an idle window (and is displaced) is a rule of the claim table, and a second
+    /// copy of it here would drift from it — the drift being exactly the bug where nine idle desk
+    /// windows refused every attach.
+    async fn claim(&mut self, id: &str, takeover: bool) -> Result<ClaimOutcome, String>;
     /// Give the shell back, so a desk window can take it again.
     /// Give the shell back to nobody.
     ///
@@ -686,28 +692,27 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         );
                     }
                     [one] => {
-                        // **Ask first, when the shell is another device's and this is not the
-                        // user's consent.** The check lives in this arm because it needs exactly
-                        // one match: run before the match, it read `matches.first()` even for an
-                        // empty selector, so a launch probe could be told `HELD` about a shell
-                        // the phone never named and never reached `AMBIGUOUS`/the listing.
-                        let holder = listing
-                            .as_ref()
-                            .and_then(|rows| rows.iter().find(|r| r.0 == **one))
-                            .map(|r| r.4.as_str())
-                            .unwrap_or("");
-                        if !takeover && !holder.is_empty() && holder != "mesh" {
-                            self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
-                            return;
-                        }
-                        if self.host.claim(one).await.is_err() {
-                            self.reply(
-                                shell,
-                                &[Message::Closed {
-                                    reason: closed::UNAVAILABLE,
-                                }],
-                            );
-                            return;
+                        // **The host decides whether the holder is in use.** A shell a desk window
+                        // has open but nobody has typed into is displaced here, silently, and that
+                        // window is told and stops: the refusal with `take it back` is for the case
+                        // the rule exists for, somebody typing at the desk right now. The check
+                        // used to live here as "the holder is not the mesh link", which refused the
+                        // phone for every desk window left open on the machine.
+                        match self.host.claim(one, takeover).await {
+                            Ok(ClaimOutcome::Claimed) => {}
+                            Ok(ClaimOutcome::Held { .. }) => {
+                                self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
+                                return;
+                            }
+                            Err(_) => {
+                                self.reply(
+                                    shell,
+                                    &[Message::Closed {
+                                        reason: closed::UNAVAILABLE,
+                                    }],
+                                );
+                                return;
+                            }
                         }
                         // **A re-attach replaces the claim; it must also release the old one.**
                         // A phone that attaches twice on one channel number (a reconnect that
@@ -1019,6 +1024,15 @@ impl<H: Host, L: Link> Bridge<H, L> {
 /// carries one phone key, and a second phone means a new pairing.
 const MESH_DEVICE: &str = "mesh-link";
 
+/// What the host said about a claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// The shell is this link's now. Whoever held it was idle, or was displaced by consent.
+    Claimed,
+    /// An in-use holder refuses, and the user is offered `take it back`.
+    Held { holder: String },
+}
+
 /// The daemon as a [`Host`]: every call is an RPC the control socket already serves.
 pub struct DaemonHost(pub Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>);
 
@@ -1160,20 +1174,31 @@ impl Host for DaemonHost {
             .map(|_| ())
     }
 
-    async fn claim(&mut self, id: &str) -> Result<bool, String> {
+    async fn claim(&mut self, id: &str, takeover: bool) -> Result<ClaimOutcome, String> {
         let v = self
             .0
             .lock()
             .await
             .handle(
-                "reclaim",
+                "claim",
                 serde_json::json!({
                     "id": id,
                     "device": { "id": MESH_DEVICE, "name": "the mesh link", "kind": "mesh" },
+                    "takeover": takeover,
                 }),
             )
             .await?;
-        Ok(v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false))
+        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            Ok(ClaimOutcome::Claimed)
+        } else {
+            Ok(ClaimOutcome::Held {
+                holder: v
+                    .get("holder")
+                    .and_then(|h| h.as_str())
+                    .unwrap_or("")
+                    .to_owned(),
+            })
+        }
     }
 
     async fn release(&mut self, id: &str) -> bool {
@@ -1415,6 +1440,8 @@ mod tests {
         fail_create: bool,
         /// Who holds a shell, as `owner.kind` would say it: `desktop`, `phone`, or absent.
         holders: HashMap<String, String>,
+        /// Shells whose holder has typed recently: what a claim refuses over.
+        engaged: std::collections::HashSet<String>,
     }
     #[derive(Clone, Default)]
     struct FakeHost(Arc<Mutex<HostState>>);
@@ -1504,13 +1531,21 @@ mod tests {
                 .push((id.to_owned(), names.to_vec()));
             Ok(())
         }
-        async fn claim(&mut self, id: &str) -> Result<bool, String> {
-            self.0
-                .lock()
-                .unwrap()
-                .claimed
-                .push(("claim", id.to_owned()));
-            Ok(true)
+        /// The double holds a shell the way the daemon does: an *engaged* holder refuses, an idle
+        /// one is displaced, and the shell is the link's afterwards.
+        async fn claim(&mut self, id: &str, takeover: bool) -> Result<ClaimOutcome, String> {
+            let mut s = self.0.lock().unwrap();
+            s.claimed.push(("claim", id.to_owned()));
+            let holder = s.holders.get(id).cloned().unwrap_or_default();
+            if holder.is_empty() || holder == "mesh" {
+                s.holders.insert(id.to_owned(), "mesh".into());
+                return Ok(ClaimOutcome::Claimed);
+            }
+            if !takeover && s.engaged.contains(id) {
+                return Ok(ClaimOutcome::Held { holder });
+            }
+            s.holders.insert(id.to_owned(), "mesh".into());
+            Ok(ClaimOutcome::Claimed)
         }
         async fn release(&mut self, id: &str) -> bool {
             let mut s = self.0.lock().unwrap();
@@ -2743,11 +2778,11 @@ mod tests {
     #[tokio::test]
     async fn closing_a_shell_another_device_holds_is_refused() {
         let (mut b, host, link) = setup();
-        host.0
-            .lock()
-            .unwrap()
-            .holders
-            .insert("abcd-1".into(), "desktop".into());
+        {
+            let mut h = host.0.lock().unwrap();
+            h.holders.insert("abcd-1".into(), "desktop".into());
+            h.engaged.insert("abcd-1".into());
+        }
         phone_says(
             &link,
             3,
@@ -2900,17 +2935,16 @@ mod tests {
         );
     }
 
-    /// **A shell a desk window is watching is refused, not stolen.** The phone is told
-    /// `Closed { HELD }` and nothing is claimed, so the desk window keeps the shell and the phone
-    /// can show the same choice the tailnet route shows: open it on the desktop, or take it back.
+    /// **A shell somebody is typing in at the desk is refused, not stolen.** The phone is told
+    /// `Closed { HELD }`, so it can offer `take it back`; the desk window keeps the shell.
     #[tokio::test]
-    async fn an_attach_on_a_shell_the_desk_holds_asks_first() {
+    async fn an_attach_on_a_shell_the_desk_is_using_asks_first() {
         let (mut b, host, link) = setup();
-        host.0
-            .lock()
-            .unwrap()
-            .holders
-            .insert("abcd-1".into(), "desktop".into());
+        {
+            let mut h = host.0.lock().unwrap();
+            h.holders.insert("abcd-1".into(), "desktop".into());
+            h.engaged.insert("abcd-1".into());
+        }
         phone_says(
             &link,
             1,
@@ -2927,9 +2961,43 @@ mod tests {
             "the refusal has to name the holder, not be silence"
         );
         assert!(
-            host.0.lock().unwrap().claimed.is_empty(),
-            "nothing may be claimed before the user says so: {:?}",
-            host.0.lock().unwrap().claimed
+            host.0.lock().unwrap().holders.get("abcd-1").map(String::as_str) == Some("desktop"),
+            "an in-use holder keeps the shell: {:?}",
+            host.0.lock().unwrap().holders
+        );
+    }
+
+    /// **An idle desk window does not hold a shell.** Nine windows left open on this machine made
+    /// every phone attach a `take it back` dialog for a shell nobody had typed into in hours. The
+    /// claim is displaced instead, which is how a takeover already works: the window is told and
+    /// stops, and the operator can press `r` there to take it back.
+    #[tokio::test]
+    async fn an_attach_on_a_shell_the_desk_left_open_is_taken_silently() {
+        let (mut b, host, link) = setup();
+        host.0
+            .lock()
+            .unwrap()
+            .holders
+            .insert("abcd-1".into(), "desktop".into());
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            !sent(&link, 1)
+                .iter()
+                .any(|m| matches!(m, Message::Closed { reason } if *reason == closed::HELD)),
+            "an idle window is not a refusal"
+        );
+        assert_eq!(
+            host.0.lock().unwrap().holders.get("abcd-1").map(String::as_str),
+            Some("mesh"),
+            "the phone holds it now"
         );
     }
 
@@ -3025,11 +3093,13 @@ mod tests {
     #[tokio::test]
     async fn a_takeover_takes_the_shell_the_desk_held() {
         let (mut b, host, link) = setup();
-        host.0
-            .lock()
-            .unwrap()
-            .holders
-            .insert("abcd-1".into(), "desktop".into());
+        {
+            let mut h = host.0.lock().unwrap();
+            h.holders.insert("abcd-1".into(), "desktop".into());
+            // Somebody is typing at the desk, so the attach is refused and the takeover is the
+            // only thing that can claim it.
+            h.engaged.insert("abcd-1".into());
+        }
         phone_says(
             &link,
             1,
@@ -3047,9 +3117,17 @@ mod tests {
             },
         );
         b.tick().await;
+        // Two asks, one grant: the attach was refused because the desk is in use, and the
+        // takeover is the ask that claims it. Recording both is what shows the refusal happened
+        // at the claim table rather than being decided here.
         assert_eq!(
             *host.0.lock().unwrap().claimed,
-            [("claim", "abcd-1".to_string())],
+            [("claim", "abcd-1".to_string()), ("claim", "abcd-1".to_string())],
+            "the attach asks and is refused, the takeover asks and succeeds"
+        );
+        assert_eq!(
+            host.0.lock().unwrap().holders.get("abcd-1").map(String::as_str),
+            Some("mesh"),
             "the takeover is what claims it"
         );
         assert!(

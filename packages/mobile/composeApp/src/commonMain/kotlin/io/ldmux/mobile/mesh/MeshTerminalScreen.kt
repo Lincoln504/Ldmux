@@ -607,12 +607,15 @@ fun MeshTerminalScreen(
     }
 
     val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
-    // **The list asks for the host's shells when it is shown over a live link.** After a rebuild
-    // the screen lands here with nothing listed yet, and the list is the only thing that can say
-    // what the host has now. `listShells` is idempotent while a list is in flight, so this costs
-    // one record rather than one per frame.
-    LaunchedEffect(showList, terminalLive, shells.entries.size) {
-        if (showList && terminalLive && shells.entries.isEmpty()) conn.driver.listShells()
+    // **Landing on the launcher always asks the host again.** One `ListRequest` on entering the
+    // screen and on returning to the app while it is shown, and the rows are the host's answer
+    // rather than a picture from before. Without this, a homepage reached with Android's back
+    // button drew nothing at all until refresh was pressed (measured on the device, 2026-11-06),
+    // because the screen had come from the other direction and the one-shot list flag had already
+    // been spent. `launcher` also lets go of any attached shell, which is what gives a desk window
+    // its pty back.
+    LaunchedEffect(showList, AppLifecycle.foreground) {
+        if (showList && AppLifecycle.foreground) conn.driver.launcher()
     }
     // **Opening a shell draws its first screen, once.** In batch mode the view is frozen, so a
     // shell that was just opened sat blank while the bar counted screens behind it: opening a shell
@@ -666,26 +669,23 @@ fun MeshTerminalScreen(
         val g = lastGrid ?: return@LaunchedEffect
         conn.driver.setGrid(g.first, g.second)
     }
+    // Coming to the launcher is one act: the effect above asks the host (and lets go of the shell
+    // it was in). Nothing is sent from here, so there is one path and one place to look when it
+    // does not answer.
     val openList = {
         chosen = emptyList(); showList = true; resumeShell = ""
-        scope.launch {
-            // Ask for the list first, then let the shell go: the host restores the pty the phone
-            // displaced and a desk window can take the shell back, which is what the tailnet
-            // launcher does when a page closes. The session stays, so re-opening costs no handshake.
-            conn.driver.listShells()
-            conn.driver.releaseShell()
-        }
         Unit
     }
-    // The list's one action. The first ticked shell is page 1, as on the tailnet; the host takes one
-    // `Attach` for it (`choose` on the first list, `selectShell` from a list opened over a live shell,
-    // which spends nothing when it is the shell already attached).
+    // The list's one action. The first ticked shell becomes the page on screen, and the rest are
+    // pages the header's arrows walk. The driver is asked to `open` it whatever the screen was
+    // showing: choosing between `choose` and `selectShell` from here meant that a launcher opened
+    // over a live shell (which has released that shell) took the path that refuses when nothing is
+    // attached, so `open` with three shells ticked did nothing and said nothing.
     val openChosen: (List<SessionEntry>) -> Unit = { picked ->
         pageOrder = picked.map { it.id }
         showList = false
         val first = picked.first().id
-        val choosing = view is MeshTermView.Choose
-        scope.launch { if (choosing) conn.driver.choose(first) else conn.driver.selectShell(first) }
+        scope.launch { conn.driver.open(first) }
     }
     // **A refusal the user did not ask for is not a page.** A resumed shell (or the launch attach)
     // can be refused while nothing was opened, and drawing the takeover there put it on the first
@@ -795,8 +795,15 @@ fun MeshTerminalScreen(
                     color = Dim, fontSize = 11.sp, fontFamily = MonoFont,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
-                val keep = heldScreen
-                LaunchedEffect(source, keep, shells.current) { if (keep != null) source.show(keep, shells.current) }
+                // **A new session does not inherit a dead one's picture.** While the handshake is
+                // running there is no shell on screen at all: the rows below the line belonged to a
+                // session that no longer exists, and drawing them made the pause look like a live
+                // terminal that had stopped responding. A link that merely dropped keeps its
+                // picture, because that pane is still the same session, waiting to be resumed.
+                val keep = heldScreen.takeIf { view is MeshTermView.LinkDown }
+                LaunchedEffect(source, keep, shells.current) {
+                    if (keep != null) source.show(keep, shells.current) else source.clear()
+                }
                 TerminalSurfaceFor(
                     source = source,
                     key = resumeShell,

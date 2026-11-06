@@ -1233,8 +1233,17 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                 return;
             };
             let holds = {
-                let d = shared.daemon.lock().await;
-                d.holds(&session, &device.id)
+                let mut d = shared.daemon.lock().await;
+                let holds = d.holds(&session, &device.id);
+                // **Typing is what makes a claim count as in use.** A claim is otherwise a lock
+                // held for as long as a window is open, and nine idle desk windows refused every
+                // phone attach until the operator pressed `take it back` on each. `resize` is a
+                // write but not a sign of presence: every viewer resizes on reconnect, including
+                // the one the phone just displaced.
+                if holds && mtype != "resize" {
+                    d.touch_claim(&session, &device.id);
+                }
+                holds
             };
             if !holds {
                 conn.send_error("not_holder", "this device does not hold that shell");

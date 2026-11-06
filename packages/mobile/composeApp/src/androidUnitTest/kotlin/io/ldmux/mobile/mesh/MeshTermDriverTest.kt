@@ -248,9 +248,32 @@ class MeshTermDriverTest {
         assertEquals(2, sess.messages().size)
         assertEquals(true, d.choose("bb22"))
         assertEquals(TermMessage.Attach(MeshTerm.VERSION, "bb22"), sess.messages().last())
-        assertEquals(false, d.choose("aa11"), "a second choice after attaching is refused")
+        // **Switching shells is the pager's job and it is one `Attach`.** This used to be refused
+        // (a second `choose` was not a thing), which is why a page tap over the radio went nowhere
+        // and every page showed the first shell's rows.
+        assertEquals(true, d.choose("aa11"), "another listed shell is one Attach")
+        assertEquals(TermMessage.Attach(MeshTerm.VERSION, "aa11"), sess.messages().last())
         deliver(d, profile, rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
         assertIs<MeshTermView.Live>(d.view.value)
+    }
+
+    @Test
+    fun `opening a shell from the launcher works after the shell it was in was released`() = runBlocking<Unit> {
+        // The launcher is reached from a live shell, which releases it first (`launcher`). The
+        // screen was deciding between two driver methods on the strength of a view state, and the
+        // one it picked refuses when nothing is attached, so `open` with three shells ticked did
+        // nothing at all.
+        val d = driver(); live(d)
+        d.listShells()
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        d.launcher()
+        assertEquals(null, d.shells.value.current, "the launcher holds nothing")
+        assertTrue(sess.messages().contains(TermMessage.Detach))
+        assertTrue(sess.messages().contains(TermMessage.ListRequest))
+        val before = sess.messages().size
+        assertEquals(true, d.open("bb22"))
+        assertEquals(TermMessage.Attach(MeshTerm.VERSION, "bb22"), sess.messages().last())
+        assertEquals(before + 1, sess.messages().size)
     }
 
     @Test

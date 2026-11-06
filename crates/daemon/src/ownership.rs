@@ -29,12 +29,37 @@ use ldmux_protocol::rpc::DeviceInfo as Device;
 /// is documented here, not enforced): `Device::kind`.
 pub type DeviceKind = String;
 
+/// How long a claim counts as *in use* after its device last typed.
+///
+/// **A claim is a lock, and a lock nobody is holding is a lockout.** Nine desk windows open on this
+/// machine hold nine shells for ever, so a phone opening any of them was refused and had to press
+/// `take it back` — for a window the operator had not touched in hours and was not looking at. What
+/// the refusal is for is *someone is using this right now*: a desk window that typed a moment ago
+/// is somebody's, and one that has been silent while the operator is across the room is nobody's.
+///
+/// Ninety seconds is longer than any pause inside a working session (reading a diff, waiting for a
+/// build) and far shorter than "I left this open this morning".
+pub const ENGAGED_MS: i64 = 90_000;
+
 /// A claim: a device looking at a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
     pub device: Device,
     /// Epoch ms, for "open on Pixel since 14:02".
     pub since: i64,
+    /// Epoch ms of the last input this device sent to this shell.
+    ///
+    /// Set when the claim is taken and refreshed on every write, so "held" and "in use" stop being
+    /// the same question: see [`ENGAGED_MS`].
+    pub active_at: i64,
+}
+
+impl Claim {
+    /// Whether the holder is using the shell now, rather than having left it open.
+    #[must_use]
+    pub fn engaged(&self, now: i64) -> bool {
+        now.saturating_sub(self.active_at) <= ENGAGED_MS
+    }
 }
 
 /// The answer to a claim.
@@ -121,6 +146,9 @@ impl Ownership {
                 let refreshed = Claim {
                     device: device.clone(),
                     since: e.since,
+                    // A re-claim is the device saying it is here: a window reattaching after a
+                    // daemon restart is in use, not a stale lock.
+                    active_at: now,
                 };
                 self.claims
                     .insert(session_id.to_string(), refreshed.clone());
@@ -129,7 +157,11 @@ impl Ownership {
                     previous: None,
                 };
             }
-            if !takeover {
+            // **A holder that is not in use does not hold it.** The claim moves to the asking
+            // device and the old one is reported as displaced, which is how a takeover already
+            // works — so the desk window is told and stops, and the operator gets `press r` to take
+            // it back. Only an engaged holder refuses, and then the user is asked to consent.
+            if !takeover && e.engaged(now) {
                 return ClaimResult::HeldBy {
                     device: e.device.clone(),
                 };
@@ -138,6 +170,7 @@ impl Ownership {
             let claim = Claim {
                 device: device.clone(),
                 since: now,
+                active_at: now,
             };
             self.claims.insert(session_id.to_string(), claim.clone());
             self.index(session_id, &device.id);
@@ -150,12 +183,29 @@ impl Ownership {
         let claim = Claim {
             device: device.clone(),
             since: now,
+            active_at: now,
         };
         self.claims.insert(session_id.to_string(), claim.clone());
         self.index(session_id, &device.id);
         ClaimResult::Acquired {
             claim,
             previous: None,
+        }
+    }
+
+    /// Note that a device sent input to a session it holds.
+    ///
+    /// A write is the only proof of use this daemon has: a window scrolled, or one merely on
+    /// screen, is not the operator being there, and treating it as use is what refused the phone's
+    /// attach for hours. Returns whether the device was actually the holder, so a displaced
+    /// viewer's keystroke does not keep a claim alive that it does not have.
+    pub fn touch(&mut self, session_id: &str, device_id: &str, now: i64) -> bool {
+        match self.claims.get_mut(session_id) {
+            Some(c) if c.device.id == device_id => {
+                c.active_at = now;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -297,13 +347,45 @@ mod tests {
 
     #[test]
     fn a_second_device_is_refused_and_told_who_holds_it() {
+        // Within the engagement window the holder is *using* the shell, so the asker is refused.
         let mut o = Ownership::new();
-        o.claim("s1", phone(), false, None);
-        match o.claim("s1", desktop(), false, None) {
+        o.claim("s1", phone(), false, Some(1000));
+        match o.claim("s1", desktop(), false, Some(1000 + ENGAGED_MS)) {
             ClaimResult::HeldBy { device } => assert_eq!(device.name, "Pixel 8"),
             _ => panic!("expected heldBy"),
         }
         assert_eq!(o.owner("s1").unwrap().device.id, "pixel-8"); // unchanged
+    }
+
+    /// **An idle holder is displaced, not asked.** This is the rule that stopped every phone
+    /// attach on this machine being a `take it back` dialog: nine desk windows left open held nine
+    /// shells for ever. The displaced device is reported, so it is told like any takeover.
+    #[test]
+    fn a_holder_that_has_not_typed_recently_is_displaced_silently() {
+        let mut o = Ownership::new();
+        o.claim("s1", desktop(), false, Some(1000));
+        match o.claim("s1", phone(), false, Some(1000 + ENGAGED_MS + 1)) {
+            ClaimResult::Acquired { previous, .. } => {
+                assert!(matches!(previous, Some(p) if p.id == "desktop:debian"));
+            }
+            _ => panic!("an idle claim must not refuse"),
+        }
+        assert_eq!(o.owner("s1").unwrap().device.id, "pixel-8");
+    }
+
+    /// Typing is what keeps a claim engaged, and only the holder's typing counts: a displaced
+    /// viewer whose keystroke is refused must not keep a claim alive that it no longer has.
+    #[test]
+    fn typing_refreshes_the_engagement_clock_for_the_holder_only() {
+        let mut o = Ownership::new();
+        o.claim("s1", desktop(), false, Some(1000));
+        assert!(o.touch("s1", "desktop:debian", 1000 + ENGAGED_MS));
+        match o.claim("s1", phone(), false, Some(1000 + ENGAGED_MS + 1)) {
+            ClaimResult::HeldBy { device } => assert_eq!(device.id, "desktop:debian"),
+            _ => panic!("a holder that typed is in use"),
+        }
+        // The phone holds nothing, so its keystroke changes nothing.
+        assert!(!o.touch("s1", "pixel-8", 9999 + ENGAGED_MS));
     }
 
     #[test]

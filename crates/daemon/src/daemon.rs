@@ -2262,6 +2262,34 @@ impl LdmuxDaemon {
                     "ok": matches!(result, crate::ownership::ClaimResult::Acquired { .. }),
                 }))
             }
+            // **Claim, refusing only a holder that is in use.** The radio route asks this instead
+            // of deciding for itself: the engagement rule lives in the claim table, and two
+            // copies of it would drift. A drifting copy is exactly how nine idle desk windows
+            // came to refuse every phone attach.
+            "claim" => {
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let device: ldmux_protocol::rpc::DeviceInfo = params
+                    .get("device")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .ok_or_else(|| "no device given".to_string())?;
+                let takeover = params.get("takeover").and_then(|v| v.as_bool()).unwrap_or(false);
+                let result = self.claim(id, &device, takeover);
+                match result {
+                    crate::ownership::ClaimResult::Acquired { previous, .. } => {
+                        if device.kind == "mesh" {
+                            self.set_mesh_watched(id, true);
+                        }
+                        Ok(serde_json::json!({
+                            "ok": true,
+                            "displaced": previous.map(|d| d.kind),
+                        }))
+                    }
+                    crate::ownership::ClaimResult::HeldBy { device: holder } => {
+                        Ok(serde_json::json!({ "ok": false, "holder": holder.kind }))
+                    }
+                }
+            }
             // ── Remote info ──
             "remote_info" => Ok(serde_json::json!({
                 "hostname": self.remote_cfg.as_ref()
@@ -2572,6 +2600,7 @@ impl LdmuxDaemon {
                     "sessionId": sid,
                     "device": {"id": c.device.id, "name": c.device.name, "kind": c.device.kind},
                     "since": c.since,
+                    "activeAt": c.active_at,
                 })
             })
             .collect();
@@ -2646,6 +2675,11 @@ impl LdmuxDaemon {
                         kind: kind.into(),
                     },
                     since: r["since"].as_i64().unwrap_or(0),
+                    // A restored claim counts from its last recorded input; a file written
+                    // before this field existed falls back to `since`, which makes an old claim
+                    // idle rather than engaged, and that is the safe direction: the phone attaches
+                    // instead of being refused.
+                    active_at: r["activeAt"].as_i64().unwrap_or_else(|| r["since"].as_i64().unwrap_or(0)),
                 },
             );
             self.restored.insert(sid.to_string(), deadline);
@@ -2693,6 +2727,17 @@ impl LdmuxDaemon {
     /// connection went away belongs to its device for the reconnect grace.
     /// Called by the attach path, which is the one place a claim is made on
     /// behalf of a live connection.
+    /// Note that a device typed into a shell it holds.
+    ///
+    /// The claim's engagement clock (see [`crate::ownership::ENGAGED_MS`]) is what separates "a
+    /// window is open on this" from "somebody is using this". Only input moves it: a viewer that
+    /// scrolls or sits in front of the screen is not proof of presence, and treating it as proof
+    /// is what left a phone refused for every desk window on the machine.
+    pub fn touch_claim(&mut self, session_id: &str, device_id: &str) -> bool {
+        self.ownership
+            .touch(session_id, device_id, now_ms() as i64)
+    }
+
     pub fn mark_backed(&mut self, session_id: &str, device_id: &str) {
         self.ever_backed
             .insert((session_id.to_string(), device_id.to_string()));
