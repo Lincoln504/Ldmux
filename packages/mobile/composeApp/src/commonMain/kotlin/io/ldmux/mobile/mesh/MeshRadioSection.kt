@@ -418,6 +418,22 @@ internal fun sameTuple(a: RadioPreset, b: RadioPreset): Boolean =
 internal fun presetLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"
 
+/**
+ * The channel [p] names, keeping **this** radio's transmit power and path-hash width.
+ *
+ * A tuple that came from another machine says which frequency, bandwidth, spreading factor and
+ * coding rate to meet on. It says nothing about power or path width, which are local choices: the
+ * host's own code carries the host's limits, and adopting them would put a phone in Europe on
+ * 22 dBm, past the 14 dBm its band allows, and re-stamp its packets with a path width the operator
+ * did not choose. Comparing and applying both take only the four channel fields for that reason.
+ */
+internal fun RadioPreset.channelOf(local: RadioPreset): RadioPreset =
+    copy(txPowerDbm = local.txPowerDbm, pathHashSize = local.pathHashSize)
+
+/** The channel as one line: the four numbers that have to match, and nothing local. */
+internal fun channelLine(p: RadioPreset): String =
+    "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}"
+
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {
     RadioScanProblem.PermissionDenied -> "Bluetooth permission is off. Grant it, then scan again."
     RadioScanProblem.BluetoothOff -> "Bluetooth is off."

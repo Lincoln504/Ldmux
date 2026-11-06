@@ -4,12 +4,14 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import io.ldmux.mobile.mesh.RadioPreset
 import kotlin.test.assertTrue
 
 /**
@@ -25,6 +27,25 @@ class PairingMeshTest {
     }
 
     private fun unhex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+
+    /** The keys a fixture entry stands for, `hostPreset` included: `[freq_khz, bw_hz, sf, cr]`. */
+    private fun wantMaterial(m: JsonObject): MeshKeyMaterial {
+        val mp = m["hostPreset"]?.jsonArray
+        return MeshKeyMaterial(
+            unhex(m["hostKey"]!!.jsonPrimitive.content),
+            unhex(m["psk"]!!.jsonPrimitive.content),
+            m["hostRadio"]?.jsonPrimitive?.content?.let(::unhex),
+            mp?.let {
+                RadioPreset(
+                    frequencyMhz = it[0].jsonPrimitive.int / 1000.0,
+                    bandwidthKhz = it[1].jsonPrimitive.int / 1000.0,
+                    spreadingFactor = it[2].jsonPrimitive.int,
+                    codingRate = it[3].jsonPrimitive.int,
+                    txPowerDbm = 22,
+                )
+            },
+        )
+    }
 
     @Test
     fun `every valid link parses to its pairing and its keys`() {
@@ -42,15 +63,7 @@ class PairingMeshTest {
             if (m == null || m.toString() == "null") {
                 assertNull(p.mesh)
             } else {
-                val mo = m.jsonObject
-                assertEquals(
-                    MeshKeyMaterial(
-                        unhex(mo["hostKey"]!!.jsonPrimitive.content),
-                        unhex(mo["psk"]!!.jsonPrimitive.content),
-                        mo["hostRadio"]?.jsonPrimitive?.content?.let(::unhex),
-                    ),
-                    p.mesh,
-                )
+                assertEquals(wantMaterial(m.jsonObject), p.mesh)
             }
         }
     }
@@ -77,14 +90,7 @@ class PairingMeshTest {
             assertTrue(p.isMeshOnly)
             assertEquals("", p.host); assertEquals("", p.token)
             assertEquals(o["name"]!!.jsonPrimitive.content, p.name)
-            val mo = o["mesh"]!!.jsonObject
-            assertEquals(
-                MeshKeyMaterial(
-                    unhex(mo["hostKey"]!!.jsonPrimitive.content), unhex(mo["psk"]!!.jsonPrimitive.content),
-                    mo["hostRadio"]?.jsonPrimitive?.content?.let(::unhex),
-                ),
-                p.mesh,
-            )
+            assertEquals(wantMaterial(o["mesh"]!!.jsonObject), p.mesh)
             // The tailnet reader must not take it for a tailnet pairing.
             assertNull(parsePairingLink(link))
         }

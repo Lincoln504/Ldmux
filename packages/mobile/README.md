@@ -1,13 +1,20 @@
 # ldmux mobile (KMP + Compose Multiplatform)
 
-The native Android client. Landscape-only, minimal chrome, with the terminal
-rendered **natively**: `libghostty-vt` (the Ghostty terminal core) behind a
-Kotlin seam, painted by a Compose `Canvas`. No WebView, no WASM (ADR-0007).
+**Build notes for this package, not the design.** The authoritative documents are
+`docs/ARCHITECTURE.md` (design, wire, invariants, security) and `docs/RELEASE-AUDIT.md`
+(open work, aspect by aspect); where this file and those disagree, they win. The
+measurements and postmortems below are kept because they are the record of *why* the
+code looks the way it does.
 
-This is the app `docs/SPEC.md` calls for (§4.2, §7). It is the only client: the
-daemon-served browser client (`packages/web`) was deleted, because two renderers
-meant two copies of the snapshot and mode-sequence logic. This package is
-the native app with its own engine.
+The native Android client. Minimal chrome, with the terminal rendered **natively**:
+`libghostty-vt` (the Ghostty terminal core) behind a Kotlin seam, painted by a Compose
+`Canvas`. No WebView, no WASM (ADR-0007).
+
+Orientation follows the screen (ADR-0011, amended 2026-09-27): the launcher and the
+dialogs opened from it hold portrait, the shell view follows the device.
+
+This is the only client: the daemon-served browser client (`packages/web`) was deleted,
+because two renderers meant two copies of the snapshot and mode-sequence logic.
 
 ## Stack
 
@@ -303,9 +310,9 @@ pointed.
       synthesized SGR click for a mouse-aware program, relative cursor motion for
       a plain shell.
 - [ ] Selection polish: auto-scroll while dragging past an edge, a selection surviving
-      new output, double-tap for a word (`docs/archive/STATE.md` §5.1).
-- [ ] `planTap` corrections for tap-to-cursor (`docs/archive/STATE.md` §5.2).
-- [ ] Clipboard-write policy verified end to end on the device (`docs/archive/STATE.md` §5.3).
+      new output, double-tap for a word (the old ledger, with the measurements, is readable at git commit `c3d7c56`).
+- [ ] `planTap` corrections for tap-to-cursor (the old ledger is readable at git commit `c3d7c56`).
+- [ ] Clipboard-write policy verified end to end on the device (the old ledger is readable at git commit `c3d7c56`).
 - [x] Foreground service for a *bounded* background window (see "Backgrounding and the
       network" below). The heartbeat does not survive Doze indefinitely, by design.
 - [ ] iOS (needs a macOS host for the xcframework).
@@ -315,7 +322,7 @@ with no control involved; closing the keyboard leaves the screen in portrait; th
 keyboard returns by rotating through portrait; typing reaches the pane in **both**
 shapes; a long-press drag selects past the cell it started on; dragging a handle moves
 its own end and leaves the other; the pane resizes per shape and the grid draws 1:1 in
-the terminal's own colours. See `docs/archive/STATE.md` §4 for the full ledger.
+the terminal's own colours. The old ledger is readable at git commit `c3d7c56`; the current state is `docs/RELEASE-AUDIT.md`.
 
 ## Known issues
 

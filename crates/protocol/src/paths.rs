@@ -78,6 +78,49 @@ fn ensure_private_dir(dir: &std::path::Path, uid: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// `LDMUX_PERSIST_DIR`, else `$XDG_STATE_HOME/ldmux`, else `$HOME/.local/state/ldmux`.
+///
+/// **The state dir is a tmpfs and the persist dir is not.** `$XDG_RUNTIME_DIR` is wiped
+/// on every boot, which is right for what is rebuildable or per connection (sockets, the
+/// registry cache, ownership claims) and wrong for a credential: a token or a session key
+/// kept there is silently re-minted and every paired phone is locked out. Those live here.
+///
+/// The pure core takes the environment as arguments so tests never race on it; the
+/// `resolve_` wrapper reads the process environment.
+pub fn persist_dir_from(
+    persist_dir: Option<&str>,
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+) -> String {
+    if let Some(p) = non_empty(persist_dir) {
+        return p.trim_end_matches('/').to_string();
+    }
+    if let Some(s) = non_empty(xdg_state_home) {
+        return format!("{}/ldmux", s.trim_end_matches('/'));
+    }
+    // No HOME and no XDG_STATE_HOME: the runtime dir is the only writable place we were
+    // given. Better a credential that does not survive a reboot than a path we invent.
+    let fallback = state_dir_from(None, env_var("XDG_RUNTIME_DIR").as_deref());
+    format!("{fallback}/persist")
+}
+
+/// The resolved persist dir, creating it 0700 and verifying it is ours when absent.
+pub fn try_resolve_persist_dir() -> Result<String, String> {
+    let dir = persist_dir_from(
+        env_var("LDMUX_PERSIST_DIR").as_deref(),
+        env_var("XDG_STATE_HOME").as_deref(),
+        env_var("HOME").as_deref(),
+    );
+    ensure_private_dir(std::path::Path::new(&dir), nix::unistd::getuid().as_raw())?;
+    Ok(dir)
+}
+
+/// The resolved persist dir, from the process environment. An unusable directory is
+/// reported and ends the process: every caller is about to write a credential.
+pub fn resolve_persist_dir() -> String {
+    try_resolve_persist_dir().unwrap_or_else(|e| exit_with(&e))
+}
+
 /// The resolved state dir, from the process environment, or why it cannot be
 /// used. When the per-uid `/tmp` fallback is in play the directory is created
 /// and its owner and mode are verified.
@@ -191,6 +234,28 @@ mod tests {
         assert_eq!(state_dir_for_uid(Some(""), Some(""), 7), "/tmp/ldmux-7");
         assert_eq!(state_dir_for_uid(None, Some(""), 7), "/tmp/ldmux-7");
         assert_eq!(socket_path_from(Some(""), "/s"), "/s/ldmuxd.sock");
+    }
+
+    #[test]
+    fn the_persist_dir_is_not_the_runtime_dir() {
+        assert_eq!(
+            persist_dir_from(Some("/p"), Some("/s"), Some("/h")),
+            "/p"
+        );
+        assert_eq!(persist_dir_from(Some("/p/"), None, Some("/h")), "/p");
+        assert_eq!(
+            persist_dir_from(None, Some("/s/"), Some("/h")),
+            "/s/ldmux"
+        );
+        assert_eq!(
+            persist_dir_from(None, None, Some("/h")),
+            "/h/.local/state/ldmux"
+        );
+        // Empty is unset, exactly as for the state dir.
+        assert_eq!(
+            persist_dir_from(Some(""), Some("/s"), Some("/h")),
+            "/s/ldmux"
+        );
     }
 
     #[test]

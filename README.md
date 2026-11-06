@@ -28,8 +28,10 @@ second device that wants it is told so and offers to take it back; a device may 
 shells, and the host accepts up to 64 connections.
 
 <p align="center">
-  <img src="docs/media/02-terminal.png" width="47%" alt="a shell on the phone, over the tailnet">
-  <img src="docs/media/01-launcher-row.png" width="47%" alt="a shell started from the phone: send to desktop, close">
+  <img src="docs/media/01-launcher.png" width="24%" alt="the launcher: new shell, a shell started from the phone, the host's shells">
+  <img src="docs/media/02-tailnet.png" width="24%" alt="a shell over the tailnet, running commands">
+  <img src="docs/media/03-batch.png" width="24%" alt="the same shell over the radio in batch mode, with its sync control">
+  <img src="docs/media/04-landscape.png" width="24%" alt="landscape: the key panel beside the terminal">
 </p>
 
 The phone opens shells as well as using them: a shell started from the app is marked on

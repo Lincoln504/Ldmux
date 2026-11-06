@@ -2,15 +2,15 @@
 
 ldmux is a remote terminal system: a daemon + CLI + native mobile client,
 reachable over Tailscale or — from the Android client — over LoRa with MeshCore
-radios (`docs/MESH-STANDALONE.md`). The daemon owns the PTYs. A **keeper** process
+radios (`docs/ARCHITECTURE.md` section 11). The daemon owns the PTYs. A **keeper** process
 allocates them and supervises the shells, running one **libghostty-vt** terminal
 emulator per session — the same engine the mobile client renders with, so the
 snapshot and the client share one cell model.
 
 The implementation is **Rust**, in `crates/`. The keeper is the
-session layer (there is no terminal multiplexer), and the TypeScript tree that preceded it was deleted at D4 (the
-history of that tree is in git; `docs/archive/RUST-PORT-PLAN.md` and
-`docs/archive/RUST-PORT-LOG.md` are the record of the port).
+session layer (there is no terminal multiplexer), and the TypeScript tree that preceded it was deleted at D4
+(the history of that tree is in git; the port's plan and log were two of the
+documents consolidated away at `731970f`, and are readable at `c3d7c56`).
 
 | crate | contents |
 |---|---|
@@ -26,10 +26,11 @@ history of that tree is in git; `docs/archive/RUST-PORT-PLAN.md` and
 `packages/mobile` is the KMP/Compose client and the JNI shim; it is not part of
 the port and is kept.
 
-`docs/SPEC.md` is the authoritative design. `docs/adr/` is the decision record.
-`docs/STATE.md` is the current position and `docs/PLATFORMS.md` the support matrix.
-`docs/archive/RUST-PORT-PLAN.md` (the keeper topology, the snapshot-parity gate)
-and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the port.
+`docs/ARCHITECTURE.md` is the authoritative design: layers, wire, invariants,
+security, failure modes, platform support. `docs/adr/` is the decision record.
+`docs/RELEASE-AUDIT.md` is the open work, aspect by aspect, and the store material.
+Those are the whole documentation set (`docs/media` holds the README's images); anything else in `docs/` was
+consolidated into them at `731970f` and is readable at `c3d7c56`.
 
 ## Status
 
@@ -41,7 +42,7 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
   pattern).
 - `scripts/test-parallel.py` is the gate (it runs the same binaries `cargo test
   --workspace` does, one process per binary, in a pool). The exact commands are in
-  the README's Development section; open items are in `docs/STATE.md`.
+  the README's Development section; open items are in `docs/RELEASE-AUDIT.md`.
 
 ## Rules
 
@@ -70,9 +71,9 @@ and `docs/archive/RUST-PORT-LOG.md` (findings) are historical records of the por
   load-bearing. Linger is load-bearing either way. A shell that cannot get a scope must
   still start (`LDMUX_NO_SCOPE=1` turns scopes off). See the unit headers.
 - **Pin cross-component contracts with e2e tests in the same commit.**
-- Keep the design honest: update `docs/SPEC.md` (and add ADRs under
-  `docs/adr/`) when decisions change, and grep the docs tree plus README/AGENTS
-  for the old wording in the same commit.
+- Keep the design honest: update `docs/ARCHITECTURE.md` and `docs/RELEASE-AUDIT.md`
+  (and add ADRs under `docs/adr/`) when decisions change, and grep the docs tree plus
+  README/AGENTS for the old wording in the same commit.
 
 ## Conventions
 

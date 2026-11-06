@@ -280,16 +280,27 @@ private fun MeshRadioFacts(
     // **The desktop's radio, when it is on something else.** One row, one press: the alternative was
     // comparing two screens by eye and guessing which of five numbers was wrong.
     val mine = preset
+    var matchProblem by remember(address) { mutableStateOf<String?>(null) }
     if (hostPreset != null && mine != null && !sameTuple(mine, hostPreset)) {
         SettingsRow("desktop's radio") {
-            SettingsValue(presetLine(hostPreset), Modifier.weight(1f), color = Dim, maxLines = 2)
+            // Only the four numbers that have to match. The row used to print the host's power and
+            // path width too, which are not part of the channel and are not applied.
+            SettingsValue(channelLine(hostPreset), Modifier.weight(1f), color = Dim, maxLines = 2)
             MiniTextButton(onClick = {
                 val l = link ?: return@MiniTextButton
-                scope.launch { runCatching { l.applyPreset(hostPreset) } }
+                matchProblem = null
+                scope.launch {
+                    // Only the channel: this radio keeps its own power and path width.
+                    val ok = runCatching { l.applyPreset(hostPreset.channelOf(mine)) }.getOrElse { false }
+                    // A refused write used to vanish: the row stayed on screen with no sentence,
+                    // which reads as the press having done nothing.
+                    matchProblem = if (ok) null else "this radio did not take the desktop's tuple. It is still on the one above."
+                }
             }) {
                 Text("match", color = Accent, fontSize = 12.sp, maxLines = 1)
             }
         }
+        matchProblem?.let { SettingsNote(it, color = Warn) }
     }
     // **The limit and its readout, together, on the page.** The meter existed only inside the
     // preset panel, next to the tuple it does not belong to, and the airtime it spends was a

@@ -11,7 +11,7 @@
       "mesh": null
     },
     {
-      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf&mp=910525,62500,7,5",
       "pairing": {
         "host": "100.100.0.1:7625",
         "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -19,7 +19,13 @@
       },
       "mesh": {
         "hostKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+        "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "hostPreset": [
+          910525,
+          62500,
+          7,
+          5
+        ]
       }
     },
     {
@@ -46,6 +52,19 @@
         "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
         "hostRadio": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
       }
+    },
+    {
+      "link": "ldmux://pair?v=1&host=100.100.0.1:7625&token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&name=debian&mv=1&mk=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&psk=a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf&mp=910525,62500,7",
+      "pairing": {
+        "host": "100.100.0.1:7625",
+        "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "name": "debian"
+      },
+      "mesh": {
+        "hostKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+      },
+      "//": "a malformed preset is one optional sentence, not a reason to refuse the keys"
     }
   ],
   "invalid": [

@@ -598,6 +598,25 @@ mod tests {
         out
     }
 
+    /// The keys a fixture entry stands for. `hostPreset` is `[freq_khz, bw_hz, sf, cr]`, and an
+    /// entry without it stands for a code that carried no preset (or one the parser ignored).
+    fn want_keys(m: &serde_json::Map<String, serde_json::Value>) -> MeshKeys {
+        MeshKeys {
+            host_key: unhex32(m["hostKey"].as_str().unwrap()),
+            psk: unhex32(m["psk"].as_str().unwrap()),
+            host_radio: m.get("hostRadio").and_then(|r| r.as_str()).map(unhex32),
+            host_preset: m.get("hostPreset").and_then(|p| {
+                let n = p.as_array()?;
+                Some(HostPreset {
+                    freq_khz: u32::try_from(n.first()?.as_u64()?).ok()?,
+                    bw_hz: u32::try_from(n.get(1)?.as_u64()?).ok()?,
+                    sf: u8::try_from(n.get(2)?.as_u64()?).ok()?,
+                    cr: u8::try_from(n.get(3)?.as_u64()?).ok()?,
+                })
+            }),
+        }
+    }
+
     #[test]
     fn mesh_fixture_valid_links_parse_to_their_pairing_and_keys() {
         let f = mesh_fixture();
@@ -608,11 +627,7 @@ mod tests {
             assert_eq!(p.host, c["pairing"]["host"].as_str().unwrap());
             assert_eq!(p.token, c["pairing"]["token"].as_str().unwrap());
             assert_eq!(p.name, c["pairing"]["name"].as_str().unwrap());
-            let want = c["mesh"].as_object().map(|m| MeshKeys {
-                host_key: unhex32(m["hostKey"].as_str().unwrap()),
-                psk: unhex32(m["psk"].as_str().unwrap()),
-                host_radio: m.get("hostRadio").and_then(|r| r.as_str()).map(unhex32),
-            });
+            let want = c["mesh"].as_object().map(want_keys);
             assert_eq!(mesh, want, "{}", c["link"]);
             // The plain parser agrees on the pairing and never sees the keys.
             assert_eq!(parse_pairing_link(c["link"].as_str().unwrap()), Some(p));
@@ -638,10 +653,12 @@ mod tests {
             token: c["pairing"]["token"].as_str().unwrap().into(),
             name: c["pairing"]["name"].as_str().unwrap().into(),
         };
+        // Every key field the fixture entry carries, so the serialiser writes the link it holds.
         let keys = MeshKeys {
             host_key: unhex32(c["mesh"]["hostKey"].as_str().unwrap()),
             psk: unhex32(c["mesh"]["psk"].as_str().unwrap()),
-            host_radio: None,
+            host_radio: c["mesh"].get("hostRadio").and_then(|r| r.as_str()).map(unhex32),
+            host_preset: c["mesh"].as_object().and_then(|m| want_keys(m).host_preset),
         };
         let link = pairing_link_with_mesh(&p, Some(&keys)).unwrap();
         // The fixture's own link is the canonical serialisation.
@@ -706,6 +723,12 @@ mod tests {
             host_key: [7; 32],
             psk: [9; 32],
             host_radio: Some([3; 32]),
+            host_preset: Some(HostPreset {
+                freq_khz: 910_525,
+                bw_hz: 62_500,
+                sf: 7,
+                cr: 5,
+            }),
         };
         let shown = format!("{k:?}");
         assert!(!shown.contains('7') && !shown.contains('9'), "{shown}");

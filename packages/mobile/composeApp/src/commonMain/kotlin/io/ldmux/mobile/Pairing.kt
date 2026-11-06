@@ -60,9 +60,13 @@ class MeshKeyMaterial(
 
     override fun equals(other: Any?) =
         other is MeshKeyMaterial && hostKey.contentEquals(other.hostKey) && psk.contentEquals(other.psk) &&
-            (hostRadio?.contentEquals(other.hostRadio) ?: (other.hostRadio == null))
+            (hostRadio?.contentEquals(other.hostRadio) ?: (other.hostRadio == null)) &&
+            hostPreset == other.hostPreset
 
-    override fun hashCode() = 31 * (31 * hostKey.contentHashCode() + psk.contentHashCode()) + (hostRadio?.contentHashCode() ?: 0)
+    // The tuple is part of the value: two links that name different operating points are not the
+    // same key material, even though the secrets are identical.
+    override fun hashCode() = 31 * (31 * (31 * hostKey.contentHashCode() + psk.contentHashCode()) +
+        (hostRadio?.contentHashCode() ?: 0)) + (hostPreset?.hashCode() ?: 0)
     override fun toString() = "MeshKeyMaterial(..)"
 }
 
