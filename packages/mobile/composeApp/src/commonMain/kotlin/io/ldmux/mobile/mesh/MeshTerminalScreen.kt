@@ -103,14 +103,6 @@ internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
 internal const val GRID_SETTLE_MS = 250L
 
 /**
- * How long a newly opened shell waits before its held screen is drawn without asking.
- *
- * Long enough for the host's first screen to arrive over the radio, short enough that the user
- * does not press `show` first. See the effect: opening a shell is the request to see it.
- */
-internal const val AUTO_SHOW_AFTER_OPEN_MS = 1_500L
-
-/**
  * How long the first fit waits for the keyboard to appear before sending the size it has.
  *
  * The keyboard is opened by the app when a terminal appears, and it is an animation plus an IME
@@ -320,15 +312,13 @@ fun MeshTerminalScreen(
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
     val source = remember(conn) { MeshTerminalSource(handle) }
-    // **A shell that was just opened shows itself.** In manual-sync mode the view is frozen by
-    // design, and opening a shell is the user saying they want to see it. Its first screen was
-    // held if the mode was mid-send or already waiting, and nothing released it, so the page sat
-    // empty until `show` was pressed. A short wait is enough for the screen to arrive.
-    LaunchedEffect(shells.current, config.meshHoldsInput) {
-        if (!config.meshHoldsInput || shells.current == null) return@LaunchedEffect
-        delay(AUTO_SHOW_AFTER_OPEN_MS)
-        if (source.heldScreenWaiting) source.pullHeld()
-    }
+    // **A shell that was just opened shows itself, without a timer.** This used to be a 1.5 s
+    // `LaunchedEffect` that pulled the held screen, and it was a workaround: the real cause was
+    // that the hold judged "has anything been painted" over the source's whole life, so a new
+    // shell's first screen was held as if it were the second. On a public channel a full screen
+    // takes longer than 1.5 s, so the timer fired on nothing and the page stayed blank anyway.
+    // `MeshTerminalSource.show` now knows which shell it is drawing and treats the first screen of
+    // a new one as first, so opening a shell paints with no timer and no button.
 
     DisposableEffect(source) {
         onDispose { source.close() }
@@ -672,7 +662,7 @@ fun MeshTerminalScreen(
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
                 val keep = heldScreen
-                LaunchedEffect(source, keep) { if (keep != null) source.show(keep) }
+                LaunchedEffect(source, keep, shells.current) { if (keep != null) source.show(keep, shells.current) }
                 TerminalSurfaceFor(
                     source = source,
                     key = resumeShell,
@@ -736,8 +726,8 @@ fun MeshTerminalScreen(
                     // thing the tailnet's surface does — and the switch clears in the shell effect
                     // below, where "the shell changed" is actually known.
                     val toShow = meshScreenToShow(view)
-                    LaunchedEffect(source, toShow) {
-                        if (toShow != null) source.show(toShow)
+                    LaunchedEffect(source, toShow, shells.current) {
+                        if (toShow != null) source.show(toShow, shells.current)
                     }
                     val drawn by source.frame.collectAsState()
                     // The host fits its pty to what the surface measures (`Resize`, profile version

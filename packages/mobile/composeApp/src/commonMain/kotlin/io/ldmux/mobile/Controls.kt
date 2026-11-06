@@ -180,6 +180,15 @@ internal fun MiniTextButton(
     onClick: () -> Unit,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    /**
+     * Whether this draws as a button.
+     *
+     * True for a verb on a row (`change`, `scan`, `unpair`, `edit`), because a bare accent label
+     * beside another label reads as text. False for the one action that is a *link* rather than a
+     * control, `ldmux.io` in the settings footer: a website address with a control's outline
+     * claims the weight of a setting.
+     */
+    bordered: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
     TextButton(
@@ -198,8 +207,13 @@ internal fun MiniTextButton(
         modifier = modifier
             .height(LocalTouch.current.min)
             .widthIn(min = LocalTouch.current.min)
-            .clip(RadiusMedium)
-            .border(1.dp, Line, RadiusMedium),
+            .then(
+                if (bordered) {
+                    Modifier.clip(RadiusMedium).border(1.dp, Line, RadiusMedium)
+                } else {
+                    Modifier
+                },
+            ),
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
         content = content,
     )

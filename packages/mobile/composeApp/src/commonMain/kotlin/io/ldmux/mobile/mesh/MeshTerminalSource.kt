@@ -16,6 +16,7 @@ import io.ldmux.mobile.term.TerminalEngine
 import io.ldmux.mobile.term.TerminalFrame
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import io.ldmux.mobile.appLog
 
 /**
  * What the shared terminal surface draws on the mesh route.
@@ -50,6 +51,23 @@ class MeshTerminalSource(
     private var cols = 0
     private var rows = 0
     private var last: MeshScreen? = null
+
+    /**
+     * The shell the drawn screen belongs to.
+     *
+     * **This, not a UI effect, is what makes a newly opened shell paint.** The hold draws a screen
+     * only when nothing has been painted yet (`acceptScreen(painted = last != null)`), which was
+     * judged over the source's whole life: a previous shell's last screen left `last` set, the new
+     * shell's first screen was therefore "not the first", and the hold kept it. The screen effect
+     * that cleared the source was a separate `LaunchedEffect` keyed on the attached id, so whether
+     * it ran before the new shell's first commit depended on effect ordering — and on a public
+     * channel, where the first full screen takes seconds, the bar sat at "view 2 behind" over a
+     * blank page until a refresh.
+     *
+     * A screen from a different shell than the last one drawn is the first screen of that shell,
+     * by definition, and is treated as one.
+     */
+    private var drawnShell: String? = null
 
     /**
      * Rows that have left the live screen, oldest first.
@@ -273,13 +291,31 @@ class MeshTerminalSource(
      * A grid that changes size (the host re-described its terminal) is a new engine: the old one's
      * cells are the wrong shape, and a selection into them would mean nothing.
      */
-    fun show(screen: MeshScreen) {
+    fun show(screen: MeshScreen, shell: String? = null) {
         if (screen.cols <= 0 || screen.lines.isEmpty()) return
+        // One shell's rows are never drawn under another's name, and a new shell starts unpainted.
+        if (shell != null && shell != drawnShell) {
+            forgetScreen()
+            drawnShell = shell
+        }
         // The hold decides whether this screen may be drawn. While frozen the newest screen is
         // kept rather than drawn, so a sync shows the shell as it is now and not a replay of what
         // was typed. Nothing else about the link changes: the driver keeps polling and the
         // session keeps its acks, because a frozen view is a view and not a dead link.
-        if (!hold.acceptScreen(painted = last != null)) {
+        // **"Painted" means painted into the engine in front of the user, not "at some point".**
+        // A grid change (the host fitting the pty to the keyboard) builds a new engine and blanks
+        // the surface, so the screen that follows has nothing behind it — yet `last` was still set
+        // from the previous engine, the hold called it "not the first screen", and the page stayed
+        // empty until a sync. Measured 2026-11-06: the first screen drew at 80x24, the fit
+        // re-described the terminal as 46x19, and every screen after that was held.
+        val rebuilt = engine == null || screen.cols != cols || screen.lines.size != rows
+        val accept = hold.acceptScreen(painted = last != null && !rebuilt)
+        // Which shell a screen belongs to, and whether the hold took it, is the one fact that
+        // decides whether a freshly opened shell paints. Logged at the decision, because the two
+        // plausible causes (a stale `painted`, a shell id that never changed) look identical from
+        // the outside — both produce a blank page and a bar counting held screens.
+        appLog("mesh show shell=$shell drawn=$drawnShell painted=${last != null} held=${!accept}")
+        if (!accept) {
             // **A screen held is a screen not noted, and that loses scrollback.** The rows that
             // left while the view was frozen are the same rows the host numbered, so they are
             // history whether or not the screen was drawn: a build log watched through a freeze
@@ -458,6 +494,12 @@ class MeshTerminalSource(
      * drawn under another's name.
      */
     fun clear() {
+        forgetScreen()
+        drawnShell = null
+    }
+
+    /** Drop the engine, the drawn screen and everything that belonged to it. */
+    private fun forgetScreen() {
         engine?.close()
         engine = null
         last = null

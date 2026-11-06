@@ -64,4 +64,23 @@ class MeshTerminalSourceTest {
         assertNull(s.frame.value)
         assertFalse(s.hasSelection)
     }
+
+    /// **A newly opened shell paints its first screen, in batch mode, with no timer and no tap.**
+    ///
+    /// The hold draws a screen only when nothing has been painted; it used to judge that over the
+    /// source's whole life, so a previous shell's last screen made the next shell's first screen
+    /// "not the first" and it was held. On a public channel the first full screen takes longer than
+    /// the 1.5 s timer that was papering over this, so the page stayed blank until a refresh.
+    @Test
+    fun `the first screen of a newly opened shell is drawn, not held`() {
+        val (s, _, _) = source()
+        s.setPublicChannel(true)
+        s.show(MeshScreen(listOf("shell A"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
+        // The frozen view holds the second screen of the shell already on screen.
+        s.show(MeshScreen(listOf("shell A again"), 0, 0, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
+        assertTrue(s.heldScreenWaiting, "a frozen view holds the shell it is already showing")
+        // A different shell is a new screen, and it is the first screen of that shell.
+        s.show(MeshScreen(listOf("shell B"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "bb22")
+        assertFalse(s.heldScreenWaiting, "the new shell must not inherit the old one's hold")
+    }
 }

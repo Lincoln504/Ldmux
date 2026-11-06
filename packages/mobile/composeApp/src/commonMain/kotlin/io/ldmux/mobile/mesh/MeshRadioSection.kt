@@ -285,7 +285,7 @@ internal fun RadioPresetPanel(
                 // Wrapped, not one row: the region names are wider than a phone's panel, and a
                 // row that overflows loses the last one — the same bug the portrait key bar was
                 // rebuilt to avoid.
-                SettingsChoice("region", summary = "a private band inside the region's rules") {
+                SettingsChoice("private channel", summary = "a random tuple inside the region's rules") {
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -354,7 +354,7 @@ internal fun RadioPresetPanel(
                     // operating points, and the one a user needs is often the one for where they
                     // are going rather than where they are. Each shows its tuple underneath, so
                     // two regions that share a frequency are still distinguishable.
-                    SettingsRow("public presets", summary = "tap one to adopt its tuple")
+                    SettingsRow("public presets", summary = "the community table: join one of these")
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),

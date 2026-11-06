@@ -78,7 +78,9 @@ internal fun MeshRouteSection(
         // it, summarises its state, and carries the two verbs.
         val missing = MeshCredential.entries.filter { it !in view.present }
         SettingsRow(
-            "LoRa pairing",
+            // The pairing is with the DESKTOP, over the radio. Naming it after the radio made it
+            // read as "pair with a Bluetooth device", which is the row below this one.
+            "LoRa desktop",
             summary = when {
                 // Three words beat a list: when nothing is stored the answer to "am I paired"
                 // is "not paired", and which particular key is missing is a detail the scanner
@@ -139,7 +141,8 @@ internal fun MeshRouteSection(
         // something a person recognises, and the address is kept because that is what BLE needs
         // after a reboot.
         SettingsRow(
-            "LoRa radio",
+            // Which radio THIS PHONE drives. The host's radio is on the host's own USB.
+            "phone's radio",
             // **The channel belongs here, not in a row of its own.** It is derived from the
             // preset the panel writes — nothing on this page can change it — so a separate
             // `channel` row said the same thing twice and made the page look like it had two
@@ -199,28 +202,37 @@ internal fun MeshRouteSection(
                             onDismiss = { showPreset = false },
                         )
                     }
+                    // **`input` before `airtime limit`.** The mode decides what the meter is
+                    // measuring (batch holds text, live does not), so the reader meets the mode
+                    // first. It is drawn here rather than after the facts block because the facts
+                    // block ends with the airtime row.
+                    SettingsInline("input") {
+                        OptionButton(
+                            "live",
+                            selected = !current.meshHoldsInput,
+                            enabled = !current.meshPublicChannel,
+                        ) {
+                            if (current.meshInputMode != MeshInputMode.Live) {
+                                onInputMode(MeshInputMode.Live)
+                            }
+                        }
+                        OptionButton("batch", selected = current.meshHoldsInput) {
+                            if (current.meshInputMode != MeshInputMode.ManualSync) {
+                                onInputMode(MeshInputMode.ManualSync)
+                            }
+                        }
+                    }
+                    if (current.meshPublicChannel) {
+                        // **What batching is for, not what a keystroke is.** The old note said every keystroke on a
+                        // public channel is a broadcast, which is exactly what batch mode prevents: the
+                        // keystrokes are collected and leave together. The reason the mode is forced is
+                        // that a shared channel is somebody else's airtime, so the app reduces how many
+                        // transmissions it spends.
+                        SettingsNote("a public channel forces batch: keystrokes and feedback are batched to reduce broadcasts")
+                    }
                 },
             )
 
-            // The mode is a property of the link, so it is set where the link is set. `live` is
-            // unavailable on a public channel and is drawn dim rather than removed.
-            SettingsInline("input") {
-                OptionButton(
-                    "live",
-                    selected = !current.meshHoldsInput,
-                    enabled = !current.meshPublicChannel,
-                ) {
-                    if (current.meshInputMode != MeshInputMode.Live) onInputMode(MeshInputMode.Live)
-                }
-                OptionButton("batch", selected = current.meshHoldsInput) {
-                    if (current.meshInputMode != MeshInputMode.ManualSync) {
-                        onInputMode(MeshInputMode.ManualSync)
-                    }
-                }
-            }
-            if (current.meshPublicChannel) {
-                SettingsNote("a public channel forces batch: every keystroke there is a broadcast")
-            }
         }
 
         note?.let { SettingsNote(it, color = Danger) }

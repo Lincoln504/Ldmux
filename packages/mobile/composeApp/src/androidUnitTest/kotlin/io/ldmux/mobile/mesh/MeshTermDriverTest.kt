@@ -203,6 +203,29 @@ class MeshTermDriverTest {
 
     // ── choosing a shell ───────────────────────────────────────────────────────────────
 
+
+    /// **The ✕ updates the list the screen draws, not only the shell state.**
+    ///
+    /// When the view is `Choose` its rows come from `choices`, so dropping the shell from the
+    /// driver's own list left the row on screen: closing a phone-opened shell appeared to do
+    /// nothing at all until a refresh replaced the view. Reported twice, fixed in the wrong place
+    /// twice, and this is the level it lives at.
+    @Test
+    fun `closing a shell removes its row from the list on screen`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        assertEquals(MeshTermView.Choose(listOf(ent("aa11"), ent("bb22"))), d.view.value)
+        d.closeShell("aa11")
+        assertEquals(
+            MeshTermView.Choose(listOf(ent("bb22"))),
+            d.view.value,
+            "the closed shell must be gone from the view the screen draws",
+        )
+        // And closing the last one is not an empty list, it is "no shells".
+        d.closeShell("bb22")
+        assertEquals(MeshTermView.NoShells, d.view.value)
+    }
+
     private fun ent(id: String, label: String = "") = SessionEntry(id, label)
     private suspend fun probed(d: MeshTermDriver) { d.start(); d.onRecord(byteArrayOf(2)) }
 

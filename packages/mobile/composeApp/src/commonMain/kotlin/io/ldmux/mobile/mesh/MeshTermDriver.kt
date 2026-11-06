@@ -768,6 +768,11 @@ class MeshTermDriver(
         val left = _shells.value.entries.filterNot { it.id == id }
         if (attachedId == id) attachedId = null
         _shells.value = MeshShells(left, attachedId)
+        // **The list the screen draws is `choices`, not `_shells`.** When the view is `Choose` the
+        // rows come from this list, so updating only the shell state left the row on screen and the
+        // ✕ looked inert — twice fixed in the wrong place for exactly this reason.
+        choices = left
+        if (left.isEmpty()) pick = Pick.None
         queue(TermMessage.Close(id))
         queue(TermMessage.ListRequest)
         listingForHeader = true; pages = ArrayList()
@@ -966,6 +971,15 @@ class MeshTermDriver(
                     attachedId = m.id
                     publishShells()
                     queue(TermMessage.Attach(MeshTerm.VERSION, m.id))
+                    // **And ask for the list, because the row set on the phone is now wrong.**
+                    // The host answers `Created` with the id and nothing else, so the shell this
+                    // phone just started was absent from its own list until a manual refresh: the
+                    // row, its `close` action and its "opened on this phone" mark were all missing,
+                    // which reads as "create did nothing" and, later, as a ✕ that cannot be found
+                    // to press. One record, once, after the shell exists.
+                    listingForHeader = true
+                    pages = ArrayList()
+                    queue(TermMessage.ListRequest)
                 }
             }
             // Phone→host messages from a host are not ours to act on.
@@ -1024,6 +1038,11 @@ class MeshTermDriver(
             // The shell this link was on may be the one that just ended.
             if (attachedId != null && all.none { it.id == attachedId }) attachedId = null
             _shells.value = MeshShells(all, attachedId)
+            // Same rule as `closeShell`: `Choose` draws its own list.
+            if (pick == Pick.Choosing) {
+                choices = all
+                if (all.isEmpty()) pick = Pick.None
+            }
             publish()
             return
         }

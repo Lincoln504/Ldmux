@@ -367,7 +367,7 @@ private fun About() {
             fontFamily = MonoFont,
         )
         Spacer(Modifier.height(2.dp))
-        MiniTextButton(onClick = { openUrl("https://ldmux.io") }) {
+        MiniTextButton(onClick = { openUrl("https://ldmux.io") }, bordered = false) {
             Text("ldmux.io", color = Accent, fontSize = 12.sp)
         }
     }
