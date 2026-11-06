@@ -103,7 +103,12 @@ internal fun SettingsScreen(
                     when (group) {
                         SettingsGroup.Link -> LinkChoice(current, onSave)
                         SettingsGroup.Pairing -> {
-                            PairingRow(current, onPaired, onUnpair, meshPresent = mesh != null)
+                            // **One pairing row, because there is one pairing.** A scanned code
+                            // carries the daemon's address and token *and* the radio's keys, and
+                            // `ConfigStore.pair` has always applied whichever halves it holds. Two
+                            // rows were two buttons over that one operation, and a person had to
+                            // guess which one to scan under.
+                            PairingRow(current, onPaired, onUnpair, mesh = mesh)
                             // The radio, its preset and its credentials are one block, and it is
                             // the same block the dialog had: it decides nothing itself.
                             if (mesh != null) {
@@ -121,7 +126,6 @@ internal fun SettingsScreen(
                                     onInputMode = { mode ->
                                         onSave(current.copy(meshInputMode = mode))
                                     },
-                                    onUnpairMesh = mesh.onUnpair,
                                 )
                             }
                         }
@@ -303,15 +307,27 @@ private fun PairingRow(
     current: LdmuxConfig,
     onPaired: (Pairing) -> Unit,
     onUnpair: () -> Unit,
-    /** Whether a mesh pairing could exist here, which decides if the warning applies. */
-    meshPresent: Boolean,
+    /** The radio route, when this install has one: its keys arrive in the same code. */
+    mesh: MeshRouteActions?,
 ) {
+    val meshPresent = mesh != null
+    // What the code stored for the radio, read from secure storage rather than remembered here.
+    var radioPaired by remember(mesh, current.connectionKey) {
+        mutableStateOf(mesh?.credentials()?.complete == true)
+    }
     var problem by remember { mutableStateOf<String?>(null) }
     var confirmUnpair by remember(current.connectionKey) { mutableStateOf(false) }
     Column {
         SettingsRow(
-            "tailnet",
-            summary = if (current.isPaired) current.pairedName else "unpaired",
+            // The pairing is with the desktop, and it arrives as one code whatever it carries.
+            "pairing",
+            summary = when {
+                current.isPaired && !meshPresent -> current.pairedName
+                current.isPaired && radioPaired -> "${current.pairedName} · radio"
+                current.isPaired -> "${current.pairedName} · radio not paired"
+                radioPaired -> "radio only"
+                else -> "unpaired"
+            },
             trailing = {
             if (current.isPaired) {
                 MiniTextButton(onClick = {
@@ -324,7 +340,10 @@ private fun PairingRow(
                     problem = null
                     CodeScanner.scan { result ->
                         when (val o = scanOutcome(result)) {
-                            is PairOutcome.Paired -> onPaired(o.pairing)
+                            is PairOutcome.Paired -> {
+                                onPaired(o.pairing)
+                                radioPaired = mesh?.credentials()?.complete == true
+                            }
                             is PairOutcome.Problem -> problem = o.text
                             PairOutcome.Nothing -> Unit
                         }

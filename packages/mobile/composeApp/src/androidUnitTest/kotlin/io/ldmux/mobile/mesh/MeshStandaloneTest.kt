@@ -131,12 +131,12 @@ class MeshStandaloneTest {
 
     @Test
     fun `the preset is one tuple with a path-hash width`() {
-        assertEquals(910.525, RadioPreset.LDMUX_PRIVATE.frequencyMhz)
-        assertEquals(500.0, RadioPreset.LDMUX_PRIVATE.bandwidthKhz)
-        assertEquals(7, RadioPreset.LDMUX_PRIVATE.spreadingFactor)
-        assertEquals(5, RadioPreset.LDMUX_PRIVATE.codingRate)
-        assertEquals(22, RadioPreset.LDMUX_PRIVATE.txPowerDbm)
-        assertEquals(1, RadioPreset.LDMUX_PRIVATE.pathHashSize)
+        assertEquals(910.525, RadioPreset.BENCH.frequencyMhz)
+        assertEquals(500.0, RadioPreset.BENCH.bandwidthKhz)
+        assertEquals(7, RadioPreset.BENCH.spreadingFactor)
+        assertEquals(5, RadioPreset.BENCH.codingRate)
+        assertEquals(22, RadioPreset.BENCH.txPowerDbm)
+        assertEquals(1, RadioPreset.BENCH.pathHashSize)
         assertEquals(3, RadioPreset.CANADA.pathHashSize)
         assertEquals(1, RadioPreset.USA.pathHashSize)
     }
@@ -168,7 +168,7 @@ class MeshStandaloneTest {
 
     @Test
     fun `the preset dialog infers the region from the applied tuple`() {
-        assertEquals(RadioRegion.UsCanada, regionOfPreset(RadioPreset.LDMUX_PRIVATE))
+        assertEquals(RadioRegion.UsCanada, regionOfPreset(RadioPreset.BENCH))
         assertEquals(RadioRegion.UsCanada, regionOfPreset(RadioPreset.USA))
         assertEquals(RadioRegion.EuUk, regionOfPreset(publicPresets(RadioRegion.EuUk)[0].preset))
         assertEquals(RadioRegion.Australia, regionOfPreset(privatePreset(RadioRegion.Australia, Random(0))))
@@ -189,7 +189,7 @@ class MeshStandaloneTest {
 
     @Test
     fun `airtime is positive and a wider channel costs less`() {
-        val wide = RadioPreset.LDMUX_PRIVATE
+        val wide = RadioPreset.BENCH
         val narrow = RadioPreset.USA
         val wideMs = RadioAirtime.timeOnAirMs(wide, 172)
         val narrowMs = RadioAirtime.timeOnAirMs(narrow, 172)
@@ -207,7 +207,7 @@ class MeshStandaloneTest {
         assertTrue(isPublicChannel(RadioPreset.USA.copy(txPowerDbm = 14, pathHashSize = 2)))
         // The LDMUX private tuple is the public centre at a *different bandwidth*, which is a
         // different channel: 500 kHz and 62.5 kHz do not hear each other.
-        assertFalse(isPublicChannel(RadioPreset.LDMUX_PRIVATE))
+        assertFalse(isPublicChannel(RadioPreset.BENCH))
         assertFalse(isPublicChannel(RadioPreset.USA.copy(bandwidthKhz = 250.0)))
         assertFalse(isPublicChannel(RadioPreset.USA.copy(spreadingFactor = 9)))
         assertFalse(isPublicChannel(RadioPreset.USA.copy(codingRate = 7)))

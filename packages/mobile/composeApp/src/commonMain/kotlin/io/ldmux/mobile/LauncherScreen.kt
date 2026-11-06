@@ -168,7 +168,7 @@ fun LauncherScreen(
                     ChoiceRow(
                         // The folder is always shown, because it is what tells two
                         // shells of the same kind apart. The process is the name.
-                        title = e.label,
+                        title = shellRowTitle(e.label, e.cwd),
                         mobileShell = e.openedByPhone,
                         subtitle = rowSubtitle(e.cwd, e.state),
                         stateWarn = e.state == NO_WINDOW_STATE,
@@ -410,6 +410,22 @@ internal fun OpenBar(label: String, enabled: Boolean, onOpen: () -> Unit) {
     ) {
         Text(label, color = if (enabled) Fg else Dim, fontSize = 14.sp)
     }
+}
+
+/**
+ * What a row is called.
+ *
+ * A shell the host has no name for must not be introduced by its id: the id is an attach selector,
+ * twelve hex characters nobody recognises, and the operator asked for the folder instead. The label
+ * the host sends is the name; failing that, the folder the shell is in; failing that, the plain word
+ * `shell`. One rule, so the tailnet launcher and the radio route cannot disagree about it.
+ */
+internal fun shellRowTitle(label: String, cwd: String): String {
+    if (label.isNotBlank()) return label
+    val folder = cwd.trimEnd('/').substringAfterLast('/')
+    if (folder.isNotBlank() && folder != "~") return folder
+    if (cwd.trim() == "~" || cwd.trim() == "/") return cwd.trim()
+    return "shell"
 }
 
 /**

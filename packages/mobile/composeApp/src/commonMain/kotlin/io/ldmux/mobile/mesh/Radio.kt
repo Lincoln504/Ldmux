@@ -64,7 +64,7 @@ data class RadioPreset(
 ) {
     companion object {
         /** The bench preset: 910.525 MHz, 500 kHz, SF7, CR5, 22 dBm, 1-byte paths. */
-        val LDMUX_PRIVATE = RadioPreset(
+        val BENCH = RadioPreset(
             frequencyMhz = 910.525,
             bandwidthKhz = 500.0,
             spreadingFactor = 7,

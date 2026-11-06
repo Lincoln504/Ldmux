@@ -59,82 +59,21 @@ internal fun MeshRouteSection(
     onRadioChannel: (Boolean) -> Unit,
     /** How typing leaves the phone: live, or held until sync. Persisted beside the pairing. */
     onInputMode: (MeshInputMode) -> Unit,
-    onUnpairMesh: () -> Unit,
 ) {
     var credentials by remember { mutableStateOf(readCredentials()) }
     val view = meshSetupView(credentials)
     if (!view.meshExists) return // iOS: there is no mesh route to configure
 
-    var note by remember { mutableStateOf<String?>(null) }
-    var confirmForget by remember(current.connectionKey) { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
     var showPreset by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxWidth()) {
-        // **The pairing is a row, not a pile of notes.** It used to be three bare lines under
-        // `tailnet` — `✗ session keys`, `✗ host radio key`, `mesh · scan a pairing code…` — with
-        // the action in a separate row called `code`, so the state and the thing that fixes it
-        // were two unrelated statements and neither said what it was about. One row now names
-        // it, summarises its state, and carries the two verbs.
-        val missing = MeshCredential.entries.filter { it !in view.present }
-        SettingsRow(
-            // The pairing is with the DESKTOP, over the radio. Naming it after the radio made it
-            // read as "pair with a Bluetooth device", which is the row below this one.
-            "LoRa desktop",
-            summary = when {
-                // Three words beat a list: when nothing is stored the answer to "am I paired"
-                // is "not paired", and which particular key is missing is a detail the scanner
-                // fixes in one action anyway.
-                missing.size == MeshCredential.entries.size -> "not paired"
-                missing.isNotEmpty() -> missing.joinToString(", ") { meshCredentialName(it) } + " missing"
-                else -> "paired"
-            },
-            trailing = {
-                // One verb, one target: the ldmux code carries the session keys and the host
-                // radio key.
-                MiniTextButton(onClick = {
-                    note = null
-                    CodeScanner.scan { r ->
-                        note = when (r) {
-                            is ScanResult.Code -> {
-                                val o = onMeshPairing(r.text)
-                                credentials = readCredentials()
-                                when (o) {
-                                    is MeshPairingScan.Enrolled -> null
-                                    is MeshPairingScan.Refused -> meshPairingLine(o.problem)
-                                }
-                            }
-                            ScanResult.Cancelled -> null
-                            ScanResult.Unavailable -> "scanner unavailable"
-                        }
-                    }
-                }) { Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1) }
-                if (view.present.isNotEmpty()) {
-                    MiniTextButton(onClick = {
-                        if (confirmForget) {
-                            onUnpairMesh()
-                            credentials = readCredentials()
-                        } else {
-                            confirmForget = true
-                        }
-                    }) {
-                        // `unpair`, the word the tailnet row uses, because it is the same act on
-                        // the other pairing. It also drops the chosen radio and the saved route,
-                        // which is why it asks first and says so.
-                        Text(
-                            if (confirmForget) "unpair?" else "unpair",
-                            color = if (confirmForget) Danger else Dim,
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
-            },
-        )
+        // **The pairing is not here any more.** It is one row in the `pairing` section, because a
+        // scanned code carries the tailnet's address and token and this route's keys together and
+        // `ConfigStore.pair` applies whichever halves it holds. This route's own row asked the same
+        // question twice and left the reader guessing which one to scan under.
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
             SettingsNote(meshProblemLabel(it.problem))
-        }
-        if (confirmForget) {
-            SettingsNote("this forgets the keys, the LoRa radio and the saved route")
         }
 
         // The radio is the one new physical fact. Its name is shown because a MAC address is not
@@ -235,7 +174,6 @@ internal fun MeshRouteSection(
 
         }
 
-        note?.let { SettingsNote(it, color = Danger) }
     }
 
 }

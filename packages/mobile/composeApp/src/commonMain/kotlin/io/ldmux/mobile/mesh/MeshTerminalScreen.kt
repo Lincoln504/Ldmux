@@ -22,6 +22,7 @@ import io.ldmux.mobile.voice.VoiceState
 import io.ldmux.mobile.voice.VoiceBanner
 import io.ldmux.mobile.voice.Dictation
 import io.ldmux.mobile.NewShellRow
+import io.ldmux.mobile.shellRowTitle
 import io.ldmux.mobile.SidePanel
 import io.ldmux.mobile.BackToLauncher
 import io.ldmux.mobile.AppLifecycle
@@ -1014,7 +1015,7 @@ private fun MeshShellList(
                     // The folder is the row's second line, as on the tailnet launcher: it is what
                     // tells two shells of the same kind apart. The id is still the attach
                     // selector, it is just no longer the thing a person reads.
-                    title = e.label.ifEmpty { e.id },
+                    title = shellRowTitle(e.label, e.cwd),
                     subtitle = meshRowSubtitle(e),
                     chosen = e.id in chosen,
                     ordinal = picked.indexOfFirst { it.id == e.id }.takeIf { it >= 0 }?.plus(1),

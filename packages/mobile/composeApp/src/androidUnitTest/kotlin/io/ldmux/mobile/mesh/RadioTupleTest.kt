@@ -11,7 +11,7 @@ import kotlin.test.assertNull
  * screen they came from is how a frequency ends up in the bandwidth field.
  */
 class RadioTupleTest {
-    private val base = RadioPreset.LDMUX_PRIVATE
+    private val base = RadioPreset.BENCH
 
     @Test
     fun `the radio's own line, spaces and units, parses`() {

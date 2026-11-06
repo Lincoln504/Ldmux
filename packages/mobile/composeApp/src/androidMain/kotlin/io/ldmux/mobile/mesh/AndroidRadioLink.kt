@@ -448,7 +448,7 @@ class AndroidRadioLink(
     }
 
     private fun currentPreset(): RadioPreset {
-        val s = selfInfo.value ?: return RadioPreset.LDMUX_PRIVATE
+        val s = selfInfo.value ?: return RadioPreset.BENCH
         return RadioPreset(
             frequencyMhz = s.frequencyMhz,
             bandwidthKhz = s.bandwidthKhz,

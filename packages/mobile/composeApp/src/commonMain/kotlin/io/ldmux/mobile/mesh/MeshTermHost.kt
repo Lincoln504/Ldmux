@@ -48,7 +48,10 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     MeshTermView.Handshaking -> "mesh · securing the link"
     MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
     MeshTermView.Listing -> "mesh · asking the host which shells are running"
-    is MeshTermView.HeldBy -> "mesh · open on the desktop"
+    // **The state, not an action.** `open on the desktop` was the label for the button that takes
+    // the shell back, printed where the header names where the shell *is*. The overlay under it
+    // already says `in use on X`; the header said something else about the same fact.
+    is MeshTermView.HeldBy -> "mesh · in use elsewhere"
     is MeshTermView.Choose -> "mesh · choose a shell"
     MeshTermView.NoShells -> "mesh · the host is running no shell"
     is MeshTermView.Live -> when {

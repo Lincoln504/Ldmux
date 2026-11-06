@@ -35,15 +35,17 @@ sealed interface PairOutcome {
 }
 
 fun scanOutcome(result: ScanResult): PairOutcome = when (result) {
-    is ScanResult.Code -> parsePairingLink(result.text)?.let { PairOutcome.Paired(it) }
-        // A real ldmux code, but for the mesh route: say where it goes instead of calling it junk.
-        ?: if (parseScannedPairing(result.text)?.isMeshOnly == true) PairOutcome.Problem(MESH_ONLY_CODE) else PairOutcome.Problem(NOT_A_CODE)
+    // **Any ldmux code.** There is one pairing store and one code: a code that carries only the
+    // radio keys is still a pairing, and `ConfigStore.pair` applies whichever halves it holds. The
+    // old split made the user choose a row before scanning, and refused a code that was perfectly
+    // good under the other row.
+    is ScanResult.Code -> parseScannedPairing(result.text)?.let { PairOutcome.Paired(it) }
+        ?: PairOutcome.Problem(NOT_A_CODE)
     ScanResult.Cancelled -> PairOutcome.Nothing
     ScanResult.Unavailable -> PairOutcome.Problem("scanner unavailable")
 }
 
 internal const val NOT_A_CODE = "not an ldmux code"
-internal const val MESH_ONLY_CODE = "mesh-only code: scan it under mesh route"
 
 /**
  * Pairing links opened from outside the app: the system camera, a message, a
