@@ -521,7 +521,13 @@ fun MeshTerminalScreen(
     // rebuild after this must land on the list, not drag them back into a shell they left.
     val openList = {
         chosen = emptyList(); showList = true; resumeShell = ""
-        scope.launch { conn.driver.listShells() }
+        scope.launch {
+            // Ask for the list first, then let the shell go: the host restores the pty the phone
+            // displaced and a desk window can take the shell back, which is what the tailnet
+            // launcher does when a page closes. The session stays, so re-opening costs no handshake.
+            conn.driver.listShells()
+            conn.driver.releaseShell()
+        }
         Unit
     }
     // The list's one action. The first ticked shell is page 1, as on the tailnet; the host takes one
@@ -722,7 +728,13 @@ fun MeshTerminalScreen(
                         // [IME_WAIT_MS] bounds the wait so a keyboard that never appears cannot
                         // leave the host at the pty's old size for ever.
                         val opened = TimeSource.Monotonic.markNow()
-                        source.onGrid = { c, r ->
+                        source.onGrid = grid@{ c, r ->
+                            // **Leaving is not a resize.** The list shrinks the layout, the surface
+                            // reports the smaller grid, and the pending job then sent a `Resize`
+                            // for a shell this screen had just let go of — which the host applied
+                            // before the detach and never restored, leaving the desk shell at the
+                            // phone's list height (measured 2026-11-05: 46x35 after returning home).
+                            if (showList) return@grid
                             pending?.cancel()
                             pending = scope.launch {
                                 // Bounded, and it always ends in a fit. Returning early instead

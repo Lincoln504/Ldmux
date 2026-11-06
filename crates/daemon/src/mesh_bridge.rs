@@ -180,6 +180,15 @@ struct Attached {
     /// The user typed into this shell and the echo has not been read yet. Input echo never
     /// waits for the pacing: the keystroke is what the user is looking for.
     echo: bool,
+    /// **The grid this phone displaced, put back when it lets go.**
+    ///
+    /// A phone that attaches takes the shell and fits the pty to its own screen, which is right —
+    /// the shell follows the viewer. What was missing is the other half: when the phone leaves, the
+    /// pty stayed at the phone's width, so a desk window 158 columns wide was left drawing a 46
+    /// column shell and the reader's own shell looked broken (reported 2026-11-05, after a phone
+    /// attached to `meshmore-sns` and detached). The bridge records the size the host had before
+    /// the first `Resize` and restores it on detach.
+    original: Option<(u8, u8)>,
 }
 
 impl Attached {
@@ -428,6 +437,14 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     continue;
                 }
             };
+            // Before this phone has fitted anything, the pty's size is whatever the desk left it
+            // at: that is the size to put back. Recorded once, and only before our own `Resize`
+            // has been applied, so a later screen cannot overwrite it with the phone's grid.
+            if let Some(a) = self.shells.get_mut(&shell) {
+                if a.original.is_none() && a.geometry.is_none() {
+                    a.original = Some((screen.cols, screen.rows));
+                }
+            }
             if self.shells.get(&shell).is_some_and(|a| a.differ.up_to_date(&screen)) {
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.changed_last_tick = false;
@@ -490,12 +507,23 @@ impl<H: Host, L: Link> Bridge<H, L> {
     /// surely as `Detach` does, and a claim left behind would lock a desk window out of a
     /// shell nobody is watching.
     async fn drop_all(&mut self) {
-        let ids: Vec<String> = self.shells.values().map(|a| a.session.clone()).collect();
+        let held: Vec<(String, Option<(u8, u8)>, bool)> = self
+            .shells
+            .values()
+            .map(|a| (a.session.clone(), a.original, a.geometry.is_some()))
+            .collect();
         self.shells.clear();
         self.decoders.clear();
         self.versions.clear();
-        for id in ids {
-            self.host.release(&id).await;
+        for (id, _, _) in &held {
+            self.host.release(id).await;
+        }
+        for (id, original, resized) in &held {
+            if *resized {
+                if let Some((cols, rows)) = original {
+                    let _ = self.host.resize(id, *cols, *rows).await;
+                }
+            }
         }
     }
 
@@ -556,6 +584,18 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         {
                             self.host.release(&old.session).await;
                         }
+                        // **The size to put back is read here, before the phone can fit.**
+                        // Recorded on the first tick instead, it was already the phone's grid when
+                        // the phone's `Resize` won the race, so the restore either put back the
+                        // phone's own size or (when the fit had set `geometry`) was skipped
+                        // entirely — measured 2026-11-05: a desk shell left at 46x35 after the
+                        // phone returned to its list.
+                        let original = self
+                            .host
+                            .screen(one)
+                            .await
+                            .ok()
+                            .map(|s| (s.cols, s.rows));
                         self.shells.insert(
                             shell,
                             Attached {
@@ -568,6 +608,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 last_push: None,
                                 changed_last_tick: false,
                                 echo: false,
+                                original,
                             },
                         );
                     }
@@ -734,6 +775,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             Message::Detach => {
                 if let Some(a) = self.shells.remove(&shell) {
                     self.host.release(&a.session).await;
+                    self.restore_grid(&a).await;
                 }
             }
             // Host-to-phone messages arriving from the phone are ignored.
@@ -756,6 +798,21 @@ impl<H: Host, L: Link> Bridge<H, L> {
         running
             .into_iter()
             .find(|id| id.starts_with(selector))
+    }
+}
+
+impl<H: Host, L: Link> Bridge<H, L> {
+    /// Put the shell's pty back where the phone found it, when the phone leaves.
+    ///
+    /// Only after a fit of ours: a shell the phone merely looked at must not be resized on the way
+    /// out, and a call that changes nothing is still a keeper round trip.
+    async fn restore_grid(&mut self, attached: &Attached) {
+        if attached.geometry.is_none() {
+            return;
+        }
+        if let Some((cols, rows)) = attached.original {
+            let _ = self.host.resize(&attached.session, cols, rows).await;
+        }
     }
 }
 
@@ -901,10 +958,11 @@ impl Host for DaemonHost {
             .0
             .lock()
             .await
-            .handle(
-                "release",
-                serde_json::json!({ "id": id, "device": MESH_DEVICE }),
-            )
+            // A bare device id, not the device object `reclaim` takes: the daemon's `release`
+            // reads `device` as a string, so the object the bridge used to send parsed as `""` and
+            // every release returned `{"ok":false}` — the phone let go and the claim was kept for
+            // ever, which is why the desk window never got its shell (and its size) back.
+            .handle("release", serde_json::json!({ "id": id, "device": MESH_DEVICE }))
             .await;
     }
 
@@ -2369,5 +2427,69 @@ mod tests {
             assert_eq!(origin, expect_origin, "version {version}");
             assert_eq!(entries[0].origin.is_empty(), !expect_origin, "version {version}");
         }
+    }
+
+    /// **A phone that lets go puts the pty back.** Taking the shell is right — the shell follows the
+    /// viewer — but leaving it at the phone's width left a 158-column desk window drawing a 46-column
+    /// shell, which reads as the reader's own shell being broken (reported 2026-11-05 after a phone
+    /// attached to `meshmore-sns` and detached). The bridge records the size the host had before the
+    /// first fit and restores it on detach.
+    #[tokio::test]
+    async fn a_detach_restores_the_grid_the_phone_displaced() {
+        let (mut b, host, link) = setup();
+        let original = {
+            let s = host.0.lock().unwrap();
+            let screen = s.screens.get("abcd-1").cloned().expect("the fixture screen");
+            (screen.cols, screen.rows)
+        };
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        // The phone fits its own pane.
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 19 });
+        b.tick().await;
+        assert!(
+            host.0.lock().unwrap().resized.contains(&("abcd-1".to_string(), 46, 19)),
+            "the phone's fit reached the host: {:?}",
+            host.0.lock().unwrap().resized
+        );
+        // It leaves.
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+        let resized = host.0.lock().unwrap().resized.clone();
+        assert_eq!(
+            resized.last(),
+            Some(&("abcd-1".to_string(), original.0, original.1)),
+            "the detach must put the pty back where it was: {resized:?}"
+        );
+    }
+
+    /// A shell the phone only looked at is not resized on the way out: no fit of ours, nothing to
+    /// undo, and a keeper round trip that changes nothing is still a round trip.
+    #[tokio::test]
+    async fn a_detach_after_only_looking_does_not_resize() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+        assert!(
+            host.0.lock().unwrap().resized.is_empty(),
+            "nothing was fitted, so nothing is restored: {:?}",
+            host.0.lock().unwrap().resized
+        );
     }
 }

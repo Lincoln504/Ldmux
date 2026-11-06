@@ -258,6 +258,19 @@ class MeshTermDriver(
      * this a dead radio looked like a frozen screen.
      */
     private var lastInboundAt = 0L
+
+    /**
+     * When this link last *carried* anything, in either direction.
+     *
+     * The silence rule used to measure from [lastInboundAt] alone, and on an idle shell that is
+     * arbitrarily old: a link that has been quiet for a minute has no inbound record to point at,
+     * so the moment anything was queued — opening a shell from the list, a keystroke after a pause,
+     * coming back to a shell — the very next tick saw `pending > 0` and an inbound age of minutes
+     * and declared the session dead **before the record had been sent**. The screen went straight
+     * to "the link dropped", the connection was torn down, and pressing refresh (which rebuilds it)
+     * was the only cure. That is the recurring report, and this is the mechanism.
+     */
+    private var lastCarriedAt = 0L
     private var session: SessionPort? = null
     /** When a dead session is tried again, and how long to wait after the next failure. */
     private var recoverAt = 0L
@@ -435,6 +448,7 @@ class MeshTermDriver(
             Received.PeerClosed -> { terminalView = MeshTermView.HostClosed(null) }
             is Received.Data -> {
                 lastInboundAt = clock()
+                lastCarriedAt = clock()
                 recoverDelayMs = FIRST_RECOVERY_MS
                 for (c in r.chunks) if (c.shell == SHELL) feedStream(c.bytes)
             }
@@ -458,7 +472,12 @@ class MeshTermDriver(
             // the ARQ's own retry ladder (2 s, then doubling, five attempts), so a record that
             // reaches this point has been given up on rather than merely delayed. The terminal
             // would otherwise sit frozen on the last screen with the typing going nowhere.
-            if (terminalView == null && h.pending > 0 && clock() - lastInboundAt > SILENCE_FAILURE_MS) {
+            // Measured from the last record either direction carried, not from the last one that
+            // arrived: silence is only evidence of a dead peer when something has been sent into
+            // it and not answered.
+            if (terminalView == null && h.pending > 0 &&
+                clock() - maxOf(lastInboundAt, lastCarriedAt) > SILENCE_FAILURE_MS
+            ) {
                 failed(MeshLinkState.SessionFailed)
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
@@ -713,6 +732,24 @@ class MeshTermDriver(
         if (session != null && terminalView == null) { requestResync(); pump(); publish() }
     }
 
+    /**
+     * Let the shell go while keeping the session.
+     *
+     * The tailnet launcher lets a shell go when its page closes, and the host then gives the shell
+     * back to whoever held it. The mesh route kept the attach while its list was on screen, so a
+     * desk window stayed locked out and its pty stayed at the phone's width after the user had
+     * stopped looking at it. A `Detach` releases the shell and the host restores the grid the phone
+     * displaced; the session itself stays, which is what keeps the next open free of a handshake.
+     */
+    suspend fun releaseShell() = lock.withLock {
+        if (session == null || terminalView != null) return@withLock
+        if (attachedId == null) return@withLock
+        queue(TermMessage.Detach); pump()
+        attachedId = null
+        mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
+        publishShells(); publish()
+    }
+
     /** Leave: tell the host, close the session once everything is acknowledged, free the native handle. */
     suspend fun detach() = lock.withLock {
         val s = session
@@ -939,6 +976,7 @@ class MeshTermDriver(
         }
         for (r in records) {
             if (!transmit(r)) break
+            lastCarriedAt = clock()
         }
     }
 

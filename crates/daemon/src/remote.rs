@@ -2487,12 +2487,34 @@ async fn sweep_once(shared: &Arc<Shared>) {
         let map = relock(&shared.conns);
         map.values().cloned().collect()
     };
+    // **Who holds what, once per sweep.** Read before any connection is examined so no
+    // connection lock is held while the daemon's is taken (the reverse order is used elsewhere).
+    let held: Vec<(String, SessionOwner)> = {
+        let d = shared.daemon.lock().await;
+        d.ownership()
+            .export()
+            .into_iter()
+            .map(|(id, claim)| {
+                (
+                    id,
+                    SessionOwner {
+                        id: claim.device.id.clone(),
+                        name: claim.device.name.clone(),
+                        kind: claim.device.kind.clone(),
+                        since: claim.since.max(0) as u64,
+                    },
+                )
+            })
+            .collect()
+    };
     for c in conns {
-        let (idle, disposed) = {
+        let (idle, disposed, viewing, device) = {
             let inner = relock(&c.inner);
             (
                 now.saturating_duration_since(inner.last_seen),
                 inner.disposed,
+                inner.session_id.clone(),
+                inner.device.as_ref().map(|d| d.id.clone()),
             )
         };
         if disposed {
@@ -2500,6 +2522,45 @@ async fn sweep_once(shared: &Arc<Shared>) {
         }
         if idle.as_millis() as u64 > shared.idle_ms {
             let _ = c.tx.send(Out::Close);
+            continue;
+        }
+        // **A connection watching a shell another device holds is displaced — whoever claimed it.**
+        //
+        // The claim handlers in this file tell the displaced window themselves, but a claim can
+        // also arrive without touching them: the mesh bridge claims through the daemon's `reclaim`
+        // verb for a phone over the radio, and the CLI does the same. Those claims left the desk
+        // window painting live, resizing the pty under the phone's grid and showing no notice, so
+        // the shell looked taken with no way back (reported 2026-11-05). The sweep is the one place
+        // that sees every connection and the ownership table together, so it is where this belongs:
+        // one rule, every claim source.
+        let Some(session_id) = viewing else { continue };
+        let Some((_, holder)) = held.iter().find(|(id, _)| *id == session_id) else {
+            continue;
+        };
+        if device.as_deref() == Some(holder.id.as_str()) {
+            continue;
+        }
+        c.send_json(&serde_json::json!({
+            "type": "owned",
+            "sessionId": session_id,
+            "owner": holder,
+        }));
+        // Cut it off, exactly as the claim path does: a displaced window that kept its stream kept
+        // painting the phone's screen at the phone's size.
+        let (keeper_name, unsub) = {
+            let mut inner = relock(&c.inner);
+            let unsub = inner.unsubscribe.take();
+            inner.stream = None;
+            inner.session_id = None;
+            inner.live = false;
+            (inner.record.as_ref().map(|r| r.keeper_name.clone()), unsub)
+        };
+        if let Some(unsub) = unsub {
+            unsub();
+        }
+        if let Some(keeper_name) = keeper_name {
+            let mut d = shared.daemon.lock().await;
+            d.release_stream_if_idle(&keeper_name);
         }
     }
 }
