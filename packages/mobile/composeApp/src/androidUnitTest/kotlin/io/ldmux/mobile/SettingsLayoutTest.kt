@@ -23,7 +23,12 @@ class SettingsLayoutTest {
     @Test
     fun `the link comes first, because it decides whether the rest applies`() {
         assertEquals(
-            listOf(SettingsGroup.Link, SettingsGroup.Pairing, SettingsGroup.Display),
+            listOf(
+                SettingsGroup.Link,
+                SettingsGroup.Pairing,
+                SettingsGroup.Diagnostics,
+                SettingsGroup.Display,
+            ),
             settingsGroups(hasMesh = true),
         )
     }
@@ -33,7 +38,7 @@ class SettingsLayoutTest {
         // iOS: the tailnet only. A choice of one is not a choice, and a row that cannot
         // change anything is worse than an absent row.
         assertEquals(
-            listOf(SettingsGroup.Pairing, SettingsGroup.Display),
+            listOf(SettingsGroup.Pairing, SettingsGroup.Diagnostics, SettingsGroup.Display),
             settingsGroups(hasMesh = false),
         )
     }
@@ -45,7 +50,21 @@ class SettingsLayoutTest {
         // And it is the section both pairings are drawn in: nothing else may claim the
         // title, or the screen grows a second place to pair.
         assertEquals("pairing", SettingsGroup.Pairing.title)
-        assertEquals(listOf("link", "pairing", "display"), groups.map { it.title })
+        assertEquals(listOf("link", "pairing", "diagnostics", "display"), groups.map { it.title })
+    }
+
+    @Test
+    fun `diagnostics sits after pairing and before display`() {
+        // A pairing raises the question this section answers ("what am I paired with, and is it
+        // working?"), and a support question outranks a font size. It is also read-only, so it
+        // cannot become a second place to configure a link.
+        val groups = settingsGroups(hasMesh = true)
+        assertEquals(
+            groups.indexOf(SettingsGroup.Pairing) + 1,
+            groups.indexOf(SettingsGroup.Diagnostics),
+        )
+        assertTrue(groups.indexOf(SettingsGroup.Diagnostics) < groups.indexOf(SettingsGroup.Display))
+        assertEquals("diagnostics", SettingsGroup.Diagnostics.title)
     }
 
     @Test

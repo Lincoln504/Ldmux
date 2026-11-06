@@ -182,7 +182,9 @@ class LdmuxService : Service() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("ldmux")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            // The app's own mark. A framework drawable read as a system upload glyph on
+            // Android 12+, which says nothing about which app is holding the connection.
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Disconnect", stop).build())
             .setOngoing(true)

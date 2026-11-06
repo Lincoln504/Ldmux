@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The notification's small icon: `ld`, the same two letters as the launcher mark.
+
+  It used to be `android.R.drawable.stat_sys_upload_done`, so on Android 12+ the status
+  bar showed a generic upload glyph for a terminal session — one more system icon among
+  system icons, and nothing that said which app was holding the connection.
+
+  **Monochrome on purpose.** A notification small icon is drawn as an alpha mask and
+  tinted by the system, so colour here is either discarded or printed as a solid block
+  on some OEM skins. White fill, transparent background, 24 dp viewport, and no detail
+  under two units: at 24 dp a stroke thinner than 2 vanishes.
+
+  The letterforms are the launcher's geometry reduced to what survives at this size: two
+  stems on one baseline with the `d`'s counter open enough to read as a letter rather
+  than a bar. The launcher icon's chamfers and exact stroke weights are noise at 24 px
+  and are not reproduced.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- `l`: one stem, ascender to baseline. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6,4h2v16h-2z" />
+
+    <!-- `d`: stem plus a closed bowl with a two-unit counter. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M16,4h2v16h-2z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M10,10h6v10h-6zM12,12h2v6h-2z" />
+</vector>

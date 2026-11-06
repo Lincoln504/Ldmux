@@ -22,6 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,6 +33,7 @@ import io.ldmux.mobile.mesh.MeshRouteActions
 import io.ldmux.mobile.mesh.MeshRouteSection
 import io.ldmux.mobile.mesh.PairingNote
 import io.ldmux.mobile.mesh.canUnpair
+import io.ldmux.mobile.mesh.meshProblemLabel
 import io.ldmux.mobile.mesh.pairingNote
 
 /**
@@ -199,6 +202,7 @@ internal fun SettingsScreen(
                                 )
                             }
                         }
+                        SettingsGroup.Diagnostics -> Diagnostics(current, radioPaired)
                         SettingsGroup.Display -> {
                             PanelSide(current, onSave)
                             ControlSize(current, onSave)
@@ -246,12 +250,29 @@ internal enum class SettingsGroup(val title: String) {
     Link("link"),
     /** Both pairings — the tailnet's and the radio's — under one heading. */
     Pairing("pairing"),
+    /**
+     * What this install is paired with, and the lines it has said.
+     *
+     * After `pairing` because it answers the question a pairing raises ("what did I pair, and
+     * is it working?"), and before `display` because a support question outranks a font size.
+     * Read-only: nothing here changes a pairing or a link, so it cannot become a second place
+     * to configure one.
+     */
+    Diagnostics("diagnostics"),
     Display("display"),
 }
 
 internal fun settingsGroups(hasMesh: Boolean): List<SettingsGroup> =
-    if (hasMesh) listOf(SettingsGroup.Link, SettingsGroup.Pairing, SettingsGroup.Display)
-    else listOf(SettingsGroup.Pairing, SettingsGroup.Display)
+    if (hasMesh) {
+        listOf(
+            SettingsGroup.Link,
+            SettingsGroup.Pairing,
+            SettingsGroup.Diagnostics,
+            SettingsGroup.Display,
+        )
+    } else {
+        listOf(SettingsGroup.Pairing, SettingsGroup.Diagnostics, SettingsGroup.Display)
+    }
 
 /**
  * A titled block: the heading, a rule, then its rows.
@@ -469,13 +490,151 @@ private fun PairingRow(
 }
 
 /**
+ * What this install is paired with and how it is reached, as values rather than as a body
+ * of composables.
+ *
+ * Pure so the truth is testable: every string here comes from the config and from secure
+ * storage, and the failure this row exists to prevent is a value that looks authoritative
+ * and is not. Nothing is read from the network. `routeProblem` is the same question the
+ * launcher asks, with the credentials the caller has already read, so this section cannot
+ * disagree with the launcher about why a route cannot run.
+ */
+internal data class ConnectionSummary(
+    /** `address:port`, `radio only`, or `not paired`. */
+    val host: String,
+    /** The chosen route in the app's own words. */
+    val route: String,
+    /** The credential that identifies the pairing, by fingerprint — never the secret. */
+    val pairing: String,
+    /** Which radio this install chose, or that none is chosen. */
+    val radio: String,
+    /** Why the chosen route cannot run, when it cannot. */
+    val problem: String?,
+)
+
+internal fun connectionSummary(
+    config: LdmuxConfig,
+    radioPaired: Boolean,
+    radioName: String = config.meshRadioName,
+    radioAddress: String = config.meshRadio,
+): ConnectionSummary {
+    val host = when {
+        config.isPaired -> config.host
+        // A mesh-only pairing has no daemon address and is not "unpaired": the radio route has
+        // its own credentials, and saying "not paired" would send the user looking for a token
+        // they do not need.
+        radioPaired -> "radio only"
+        else -> "not paired"
+    }
+    val pairing = when {
+        // The fingerprint, not the token: this row is read over a shoulder and screenshotted
+        // into a support thread. It is the same fingerprint the pairing dialog shows, so it can
+        // be compared against `ldmux code` on the host.
+        config.isPaired && radioPaired -> "token ${tokenFingerprint(config.token)} \u00b7 radio keys"
+        config.isPaired -> "token ${tokenFingerprint(config.token)}"
+        radioPaired -> "radio keys stored"
+        else -> "none"
+    }
+    val radio = when {
+        radioName.isNotEmpty() -> radioName
+        radioAddress.isNotEmpty() -> radioAddress
+        else -> "none chosen"
+    }
+    return ConnectionSummary(
+        host = host,
+        route = when (config.route) {
+            MeshRoute.Tailnet -> "tailnet"
+            MeshRoute.Mesh -> "LoRa radio"
+        },
+        pairing = pairing,
+        radio = radio,
+        // `radioPaired` means the Keystore holds both halves (the session keys and the host's
+        // radio key), which is exactly what the resolver asks about.
+        problem = config.routeProblem(hasPeer = radioPaired, hasSessionKeys = radioPaired)
+            ?.let { meshProblemLabel(it) },
+    )
+}
+
+/** How many log lines the panel shows. The buffer keeps more, and `copy` takes all of it. */
+internal const val DIAGNOSTIC_LINES = 40
+
+/**
+ * What this install is paired with, what it is using, and what it has said.
+ *
+ * **Read-only on purpose.** A reconnect button here would duplicate the launcher's refresh, and
+ * the two would disagree the first time either changed. The one action is `copy`, because the
+ * reader's next step is a support thread and the lines are the evidence.
+ */
+@Composable
+private fun Diagnostics(current: LdmuxConfig, radioPaired: Boolean) {
+    val summary = connectionSummary(current, radioPaired)
+    SettingsRow("host") { SettingsValue(summary.host, Modifier.weight(1f)) }
+    SettingsRow("route") { SettingsValue(summary.route, Modifier.weight(1f)) }
+    // The problem is a fact about the route, so it sits under the route row: a note under
+    // `host` would read as "this machine is broken" rather than "this route cannot run".
+    summary.problem?.let { SettingsNote(it, color = Warn) }
+    SettingsRow("pairing") { SettingsValue(summary.pairing, Modifier.weight(1f)) }
+    SettingsRow("radio") { SettingsValue(summary.radio, Modifier.weight(1f)) }
+    // The build, because it is the first thing a support thread asks and the footer is the only
+    // other place it appears. An empty log plus no version is a section with nothing to say.
+    SettingsRow("build") {
+        SettingsValue(appVersionName().ifEmpty { "dev" }, Modifier.weight(1f))
+    }
+    DiagnosticsLog()
+}
+
+@Composable
+private fun DiagnosticsLog() {
+    var open by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val lines = AppLogBuffer.snapshot()
+    // **`copy` lives on the header row, not under the text.** The block is up to
+    // [DIAGNOSTIC_LINES] monospace lines; a button beneath it is a screen and a half of scrolling
+    // away, which is the one moment a reader is trying to send the log somewhere.
+    SettingsInline("app log") {
+        // "0 kept" reads as a bug to someone who just watched something fail. The buffer starts
+        // empty with the process and never touches disk, so that is what it says.
+        Text(
+            if (lines.isEmpty()) "none since launch" else "${lines.size} kept",
+            color = Dim,
+            fontSize = 11.sp,
+            fontFamily = MonoFont,
+        )
+        if (lines.isNotEmpty()) {
+            MiniTextButton(onClick = { clipboard.setText(AnnotatedString(lines.joinToString("\n"))) }) {
+                Text("copy", color = Accent, fontSize = 12.sp)
+            }
+        }
+        MiniTextButton(onClick = { open = !open }) {
+            Text(if (open) "hide" else "show", color = Accent, fontSize = 12.sp)
+        }
+    }
+    if (!open) return
+    val shown = logTail(lines, DIAGNOSTIC_LINES)
+    if (shown.isEmpty()) {
+        SettingsNote("nothing yet. The log lives in memory and starts empty each launch")
+        return
+    }
+    Text(
+        shown.joinToString("\n"),
+        color = Muted,
+        fontSize = 10.sp,
+        fontFamily = MonoFont,
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+    )
+    SettingsNote("copy takes every kept line, not only the ones shown")
+}
+
+/**
  * The footer: which build this is.
  *
  * Centred, because it is not a setting and must not read as one — a row is left-aligned
  * because its label is a thing to scan; this is an aside about the app, and the one line a
- * support question needs. It carried a link to the project site, which answered HTTP 410. The version comes from the package, so it cannot drift from what a
- * store listing says. No copyright line: a claim about ownership answers nothing a reader of
- * a settings screen asked, and the licence files are where that question belongs.
+ * support question needs. It carried a link to the project site, which answered HTTP 410, so
+ * there is no "read more" affordance until there is a page. The version comes from the
+ * package, so it cannot drift from what a store listing says. No copyright line: a claim
+ * about ownership answers nothing a reader of a settings screen asked, and the licence files
+ * are where that question belongs.
  */
 @Composable
 private fun About() {
