@@ -337,6 +337,19 @@ class MeshTerminalSource(
      * The honest answer to "sync" when nothing is waiting: there is nothing to send, so the only
      * thing a button can do is show what the shell last said. False when no screen is held.
      */
+    /**
+     * Forget the screens the hold kept back, without drawing them.
+     *
+     * The held screen is the answer to something that happened on **this page**: a sync waiting
+     * for its answer, or a shell's output piling up while the view was frozen. Leaving the page
+     * ends the question, so returning to it must not resume a count of "view N behind" from a
+     * visit that is over — the same rule as the typing that went with it.
+     */
+    fun discardHeldScreens() {
+        pendingScreen = null
+        hold.drewHeld()
+    }
+
     fun pullHeld(): Boolean {
         val held = pendingScreen ?: return false
         pendingScreen = null

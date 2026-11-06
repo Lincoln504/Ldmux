@@ -532,6 +532,20 @@ fun MeshTerminalScreen(
     LaunchedEffect(showList, terminalLive, shells.entries.size) {
         if (showList && terminalLive && shells.entries.isEmpty()) conn.driver.listShells()
     }
+    // **Entering the list ends whatever was typed for the shell that was on screen.** One rule, on
+    // the one thing every way in has in common: the buffer is text for a shell, meaningless from the
+    // list, and keeping it forced the list to display a shell's private buffer (reported
+    // 2026-11-06: the launcher said "held: 16 characters and 16 keys" after leaving a shell).
+    LaunchedEffect(showList) {
+        if (!showList) return@LaunchedEffect
+        // Both directions. What was typed for the shell goes, and so do the screens the hold kept
+        // back: they were the answer to a sync on a page the user has now left.
+        if (handle.hasPending) handle.discardHeld()
+        source.discardHeldScreens()
+        // And what the page was saying about them: a notice about this shell's buffer must not
+        // greet the next shell the user opens.
+        syncNotice = null
+    }
     // Leaving the terminal is the user's decision, so it is also the one that cancels the resume: a
     // rebuild after this must land on the list, not drag them back into a shell they left.
     val openList = {
@@ -917,19 +931,11 @@ fun MeshTerminalScreen(
                     // is true of every shell in the list, so it belongs beside the route, not above
                     // each list; what the hour has left is the radio's own measurement and the
                     // daemon reports it (`ldmux mesh status`).
-                    // **Held text is counted, waiting text is quoted.** In public-channel mode the
-                    // buffer can sit there for minutes, and a literal rendering of it would keep a
-                    // password on screen long after it was typed. The count says everything the
-                    // list needs to say. Outside the mode the buffer drains in a moment, so the
-                    // literal is still the useful one — it is what will leave next.
-                    if (handle.pendingLabel.isNotEmpty()) {
-                        val line = if (source.publicChannel) {
-                            "held: ${handle.heldSummary}"
-                        } else {
-                            "waiting to send: ${handle.pendingLabel}"
-                        }
-                        Text(line, color = Dim, fontSize = 11.sp, fontFamily = MonoFont)
-                    }
+                    // **Nothing here about held text.** What a shell has buffered is that shell's
+                    // typing, not the link's state: it belongs to the page it was typed on, and
+                    // leaving that page drops it (`openList`). Printing a count on the launcher put
+                    // a shell's private buffer on the screen where it could not be acted on, and
+                    // made the list's own state depend on which page was visited last.
                 }
                 if (listed != null) {
                     // A list with nothing in it is a sentence, not an empty rectangle above `open`.

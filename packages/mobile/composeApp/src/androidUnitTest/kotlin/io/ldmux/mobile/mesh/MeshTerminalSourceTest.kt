@@ -83,4 +83,20 @@ class MeshTerminalSourceTest {
         s.show(MeshScreen(listOf("shell B"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "bb22")
         assertFalse(s.heldScreenWaiting, "the new shell must not inherit the old one's hold")
     }
+
+    /// **Leaving the page drops the screens the hold kept back.** They are the answer to a sync made
+    /// on that page; returning to it must not resume a count of "view N behind" from a visit that is
+    /// over, for the same reason the typing that caused it is dropped.
+    @Test
+    fun `discarding held screens clears the count and the pending screen`() {
+        val (s, _, _) = source()
+        s.setPublicChannel(true)
+        s.show(MeshScreen(listOf("first"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
+        s.show(MeshScreen(listOf("held"), 0, 0, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
+        assertTrue(s.heldScreenWaiting, "the frozen view holds the second screen")
+        assertTrue(s.heldUpdates >= 1)
+        s.discardHeldScreens()
+        assertFalse(s.heldScreenWaiting, "nothing is waiting once the page is left")
+        assertEquals(0, s.heldUpdates, "and the bar has nothing to count")
+    }
 }
