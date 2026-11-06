@@ -618,7 +618,16 @@ fun MeshTerminalScreen(
     // been spent. `launcher` also lets go of any attached shell, which is what gives a desk window
     // its pty back.
     LaunchedEffect(showList, AppLifecycle.foreground) {
-        if (showList && AppLifecycle.foreground) conn.driver.launcher()
+        if (!showList || !AppLifecycle.foreground) return@LaunchedEffect
+        // **The link may still be coming up, and `launcher` needs a session.** Asking once, as the
+        // screen appears, was a race the session lost as often as it won: the request went nowhere
+        // and the rows that did appear came from a pushed list, which carries no marks (measured on
+        // the device, 2026-11-06 — a shell with a `done` mark showed none). It keeps asking until
+        // the driver has a session to ask on.
+        while (showList && AppLifecycle.foreground) {
+            if (conn.driver.launcher()) break
+            delay(400)
+        }
     }
     // **Opening a shell draws its first screen, once.** In batch mode the view is frozen, so a
     // shell that was just opened sat blank while the bar counted screens behind it: opening a shell

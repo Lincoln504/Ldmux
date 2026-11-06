@@ -146,9 +146,13 @@ impl Ownership {
                 let refreshed = Claim {
                     device: device.clone(),
                     since: e.since,
-                    // A re-claim is the device saying it is here: a window reattaching after a
-                    // daemon restart is in use, not a stale lock.
-                    active_at: now,
+                    // **A re-claim is not a keystroke.** Refreshing this here made every desk
+                    // window look in use for another ninety seconds after a daemon restart — the
+                    // clients all re-claim at once — so a phone opening any of them was refused
+                    // during exactly the window in which nobody had typed anything. Use is proven by
+                    // input (`touch`), and a claim that has just been taken for a *new* window is
+                    // engaged because the claim below sets `now`.
+                    active_at: e.active_at,
                 };
                 self.claims
                     .insert(session_id.to_string(), refreshed.clone());
@@ -360,6 +364,22 @@ mod tests {
     /// **An idle holder is displaced, not asked.** This is the rule that stopped every phone
     /// attach on this machine being a `take it back` dialog: nine desk windows left open held nine
     /// shells for ever. The displaced device is reported, so it is told like any takeover.
+    /// **A re-claim does not refresh the engagement clock.** Every desk window re-claims when the
+    /// daemon restarts; if that counted as use, a phone opening any of them was refused for the next
+    /// ninety seconds over shells nobody had typed into (measured on the device, 2026-11-06).
+    #[test]
+    fn a_re_claim_does_not_make_an_idle_holder_look_in_use() {
+        let mut o = Ownership::new();
+        o.claim("s1", desktop(), false, Some(1_000));
+        // The same device asks again much later, as a reconnect after a restart would.
+        o.claim("s1", desktop(), false, Some(1_000 + ENGAGED_MS + 60_000));
+        assert_eq!(o.owner("s1").unwrap().active_at, 1_000, "use is proven by input");
+        match o.claim("s1", phone(), false, Some(1_000 + ENGAGED_MS + 60_001)) {
+            ClaimResult::Acquired { .. } => {}
+            _ => panic!("an idle claim must not refuse"),
+        }
+    }
+
     #[test]
     fn a_holder_that_has_not_typed_recently_is_displaced_silently() {
         let mut o = Ownership::new();

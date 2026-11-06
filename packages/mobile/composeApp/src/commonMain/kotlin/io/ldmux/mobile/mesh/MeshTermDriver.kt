@@ -797,8 +797,8 @@ class MeshTermDriver(
      * stayed blank until the user pressed refresh, which happened to take the other path. Coming to
      * the launcher is one act, so it is one method.
      */
-    suspend fun launcher() = lock.withLock {
-        if (session == null || terminalView != null) return@withLock
+    suspend fun launcher(): Boolean = lock.withLock {
+        if (session == null || terminalView != null) return@withLock false
         // Letting go is what gives a desk window its pty back, so it happens before the list is
         // asked for; `Detach` is queued, not awaited, and the host answers with the list either
         // way (`listHoldsNothing` keeps a one-shell answer from attaching straight back).
@@ -815,6 +815,7 @@ class MeshTermDriver(
         listingForHeader = true
         queue(TermMessage.ListRequest)
         pump(); publish()
+        true
     }
 
     suspend fun listShells() = lock.withLock {
