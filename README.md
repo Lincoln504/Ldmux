@@ -5,7 +5,7 @@
 # Ldmux
 
 A remote terminal: shells run on a Linux desktop and are used from a phone. Two transports — the
-tailnet, or a pair of LoRa radios when there is no internet and no network at all.
+tailnet, or a pair of LoRa radios when there is no internet at all.
 
 ## What it does
 

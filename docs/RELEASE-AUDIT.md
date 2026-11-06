@@ -319,12 +319,13 @@ suite (574 cases) green.
 | 17.43 | `docs/ARCHITECTURE.md` §8 and §9 still said the firmware was the airtime meter, and §4 did not list the `Commit` idle flag | FIXED — the budget section describes the host's countdown and its per-record charge, the failure row says what the host now does, and the flag vocabulary is written down |
 | 17.44 | The README carried the security model inline, described things in the second person, and led with prose instead of features | RESTRUCTURED — features first in the operator's words, security moved to `docs/SECURITY.md`, and every sentence impersonal |
 | 17.45 | The mark in the README was a single icon with the launcher's full corner radius | the pair now: tighter radius, `ld` and its vertical mirror which reads `pl`, centred together (`docs/media/README.md` says how to rebuild them) |
-| 17.46 | The README said "radio route", which names a transport nothing can hold; the offline mode is two physical radios, and the description never said they are optional or that one travels with the phone | REVISED — "the radios" throughout, a bullet stating two MeshCore radios are needed and optional, and the description says "no internet and no network" |
+| 17.46 | The README said "radio route", which names a transport nothing can hold; the offline mode is two physical radios, and the description never said they are optional or that one travels with the phone | REVISED — "the radios" throughout, a bullet stating two MeshCore radios are needed and optional, and the description says "no internet" |
 | 17.47 | The mark in the README sat side by side | it stacks now: `ld` above, the 180-degree copy reading `pl` beneath |
 | 17.48 | The landscape screenshot shared one row with three portrait ones at 24 % width, so a 2400 x 1080 picture rendered smaller than the phones it was meant to show | FIXED — the three portraits take 30 % each, the landscape sits on its own centred line at 62 % |
 | 17.49 | The modes table described the tailnet transport with "a WebSocket to the daemon, bearer token, tailnet or loopback only" — four clauses for one word, and the token and the binding are the security page's business | FIXED — the cell says "a WebSocket" |
 | 17.50 | The two marks were stacked; they are a wordmark and read as one line | FIXED — side by side on a 1100 x 512 canvas, 588 px apart, centred as one image |
 | 17.51 | The README title read `ldmux` while the repository is `Ldmux`; the two titles are the only places the name is capitalised | FIXED — `# Ldmux`, with every command, binary and file name still lowercase |
+| 17.52 | The description said "no internet and no network at all", which contradicts the project: MeshCore is a network | FIXED — "when there is no internet at all" |
 
 ## How to use this
 
@@ -397,7 +398,7 @@ putting the phone down, losing the network or restarting the app leaves the shel
 scrollback intact. It is a terminal, so `vim`, `ssh`, `top` and anything else your shell can run
 work, with the alternate screen, mouse reporting, bracketed paste and scrollback intact. It is
 reachable over your own tailnet, which needs no server of ours because there is no server of
-ours, or over a LoRa radio when there is no network at all. The same shell can be on the phone
+ours, or over LoRa radios when there is no internet at all. The same shell can be on the phone
 and in a desk window at once. Nothing is collected. What you need is a Linux machine with a
 systemd user session and the daemon installed, Tailscale for the network route, and two
 MeshCore companion radios for the offline mode.
