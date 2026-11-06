@@ -121,7 +121,7 @@ The tailnet route:
 - JSON control messages and binary output frames, `permessage-deflate` when offered
 - one attach per connection, ownership checked before any write
 
-Mesh terminal protocol, version 8:
+Mesh terminal protocol, version 9:
 
 | tag | direction | message |
 |---|---|---|
@@ -142,11 +142,16 @@ Mesh terminal protocol, version 8:
 | 0x84 | host to phone | `Closed` reason |
 | 0x85 | host to phone | `Sessions` pages with flags for cwd, origin and holder |
 | 0x86 | host to phone | `Created` id |
+| 0x87 | host to phone | `Marks` shell id and kind, paged to fit a message |
 
-Version 7 added shell control. Version 8 added the holder and the takeover. A
-`sessions` entry carries who started the shell and who holds it now, each as one
-byte from a fixed vocabulary, because two length-prefixed words made the worst case
-one byte wider than a record has to carry.
+Version 7 added shell control. Version 8 added the holder and the takeover. Version 9 added the
+mark table: one entry per marked shell, paged because a message's body is capped at 134 bytes and a
+dozen marks overflow one, and sent with the `Sessions` answer and with an `Attach` rather than
+pushed, because the radio cannot reach a phone that is not connected.
+
+A `sessions` entry carries who started the shell and who holds it now, each as one byte from a
+fixed vocabulary, because two length-prefixed words made the worst case one byte wider than a record
+has to carry.
 
 `Commit.flags`: bit 0 alternate screen, bit 1 the shell has exited, bit 2 **idle** — the pane has
 stopped changing and this commit carries no rows. The idle bit is additive (unknown bits are

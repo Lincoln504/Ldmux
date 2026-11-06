@@ -347,14 +347,22 @@ actual object BackgroundSession {
             .setOnlyAlertOnce(false)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .build()
-        runCatching { nm.notify(MARK_ID_BASE + (shellId.hashCode() and 0x0fff), n) }
-            .onFailure { Log.w(TAG, "notify mark", it) }
+        // **The whole hash, not twelve bits of it.** Masked to 4096 buckets, two marked shells
+        // collided about once in a hundred pairs and one notification silently replaced the other;
+        // the id is an int and one shell's line has no reason to share it with another's.
+        runCatching { nm.notify(markId(shellId), n) }.onFailure { Log.w(TAG, "notify mark", it) }
     }
 
     actual fun clearMark(shellId: String) {
         val ctx = AndroidApp.context
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-        runCatching { nm.cancel(MARK_ID_BASE + (shellId.hashCode() and 0x0fff)) }
+        runCatching { nm.cancel(markId(shellId)) }
+    }
+
+    /// One notification per shell, in a range of its own: the service owns id 1.
+    private fun markId(shellId: String): Int {
+        val h = shellId.hashCode() and 0x7fff_ffff
+        return if (h == Int.MAX_VALUE) MARK_ID_BASE else MARK_ID_BASE + h
     }
 
     private fun ensureMarkChannels(nm: NotificationManager) {

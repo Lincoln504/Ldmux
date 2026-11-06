@@ -622,23 +622,25 @@ fun MeshTerminalScreen(
 
     val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
     // **Landing on the launcher always asks the host again.** One `ListRequest` on entering the
-    // screen and on returning to the app while it is shown, and the rows are the host's answer
-    // rather than a picture from before. Without this, a homepage reached with Android's back
-    // button drew nothing at all until refresh was pressed (measured on the device, 2026-11-06),
-    // because the screen had come from the other direction and the one-shot list flag had already
-    // been spent. `launcher` also lets go of any attached shell, which is what gives a desk window
-    // its pty back.
-    LaunchedEffect(showList, AppLifecycle.foreground, view) {
+    // screen, on returning to the app while it is shown, and when the link is rebuilt; the rows are
+    // the host's answer rather than a picture from before. Without it a homepage reached with
+    // Android's back button drew nothing until refresh was pressed (measured on the device,
+    // 2026-11-06), because the screen had come from the other direction and the one-shot list flag
+    // had already been spent. `launcher` also lets go of any attached shell, which is what gives a
+    // desk window its pty back.
+    //
+    // **It asks until there is a session to ask on.** `launcher` needs one, and the first ask can
+    // beat the handshake: the request then went nowhere and the rows that appeared came from a
+    // pushed list, which carries no marks (same day: a shell with a `done` mark showed none). The
+    // retry is bounded, because a link that never comes up is a state this screen already draws,
+    // with its reason and the refresh square.
+    //
+    // **Keyed on the attempt, not on the view.** The view carries the screen and changes on every
+    // commit: keyed on it, a launcher shown over a live shell would send a `ListRequest` per screen
+    // update, which on the radio is a record each time. The attempt moves when the link is rebuilt,
+    // which is the change that actually invalidates the list.
+    LaunchedEffect(showList, AppLifecycle.foreground, attemptNo) {
         if (!showList || !AppLifecycle.foreground) return@LaunchedEffect
-        // **The link may still be coming up, and `launcher` needs a session.** Asking once, as the
-        // screen appears, was a race the session lost as often as it won: the request went nowhere
-        // and the rows that did appear came from a pushed list, which carries no marks (measured on
-        // the device, 2026-11-06 — a shell with a `done` mark showed none). It keeps asking until
-        // the driver has a session to ask on.
-        // Bounded: a link that never comes up is a state the screen already draws (the reason and
-        // the refresh square), and asking a driver with no session for two minutes of retries would
-        // be a poll nobody reads. Coming back to the foreground, or the view changing, starts it
-        // again.
         repeat(LAUNCHER_TRIES) {
             if (conn.driver.launcher()) return@LaunchedEffect
             delay(LAUNCHER_RETRY_MS)
