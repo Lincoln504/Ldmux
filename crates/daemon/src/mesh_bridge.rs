@@ -831,6 +831,31 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     shell,
                     &session_pages(&listing, with_cwd, with_origin, with_owner),
                 );
+                // **The marks ride with the list.** The launcher is the one screen that shows every
+                // shell, so it is the one screen that needs the table — and it lists without
+                // attaching, which is why sending the table only on an attach left every row
+                // unmarked until a shell was opened (measured on the device, 2026-11-06).
+                //
+                // A phone below the marks version is not sent it; one that has not attached yet has
+                // said no version at all, and that is the launcher's case. It gets the table anyway:
+                // an unknown tag is skipped by every phone this app has ever shipped, and a version
+                // the host has not learned yet is not worth another round trip. The table costs one
+                // record, and only when there is something to say.
+                let marks_version_ok = self.versions.get(&shell).is_none_or(|v| *v >= MARKS_VERSION);
+                if marks_version_ok {
+                    let marks = self.host.marks().await;
+                    if !marks.is_empty() {
+                        self.reply(
+                            shell,
+                            &[Message::Marks {
+                                entries: marks
+                                    .into_iter()
+                                    .map(|(id, kind)| MarkEntry { id, kind })
+                                    .collect(),
+                            }],
+                        );
+                    }
+                }
             }
             // ── version 7: the phone starts and ends shells, as the tailnet client does ──
             Message::Create { version, cwd } => {
@@ -1922,6 +1947,25 @@ mod tests {
             phone_view(&link, 1).lines,
             ["A", "B"],
             "converged after the reset"
+        );
+    }
+
+    /// **The launcher needs the table too.** It lists without attaching, so a table sent only with
+    /// the attach left every row unmarked until a shell was opened (measured on the device,
+    /// 2026-11-06).
+    #[tokio::test]
+    async fn a_list_answer_carries_the_marks_table() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().marks = vec![("abcd-1".into(), 0)];
+        phone_says(&link, 1, &Message::List);
+        b.tick().await;
+        assert!(
+            sent(&link, 1).iter().any(|m| matches!(
+                m,
+                Message::Marks { entries } if entries.len() == 1 && entries[0].id == "abcd-1"
+            )),
+            "the table rides with the list: {:?}",
+            sent(&link, 1)
         );
     }
 
