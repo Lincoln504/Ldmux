@@ -1289,6 +1289,13 @@ impl Differ {
             snapshot.cursor_y = screen.cursor_y;
             snapshot.alternate = screen.alternate;
             snapshot.dead = screen.dead;
+            // **And the line number, which the `Commit` carries.** It was left out of the record,
+            // so once the pane's first line differed from what the phone held, `up_to_date` was
+            // false for ever and the host sent a `Commit` on every tick — measured 2026-11-06 as
+            // "view 1 behind, 2 behind, 3 behind…" climbing about once a second on an idle shell,
+            // with `show` clearing the count and it climbing again. A `Commit` that says the line
+            // number has to be recorded as having said it.
+            snapshot.first_line = screen.first_line;
         }
         out.extend(packed.into_iter().take(take));
         if commit {
@@ -1441,6 +1448,34 @@ mod tests {
             first_line: 0,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    /// **A commit that says the line number must be recorded as having said it.**
+    ///
+    /// The record of what the phone holds left `first_line` out, so once the pane's top line moved
+    /// (a scroll, a resize, history appearing) the differ believed the phone was out of date for
+    /// ever and sent a `Commit` on every tick. Measured 2026-11-06 on an idle shell: the phone's bar
+    /// counted "view 1 behind, 2 behind, 3 behind" about once a second, and `show` cleared it only
+    /// for the next tick to add one.
+    #[test]
+    fn a_line_number_change_is_sent_once_and_then_remembered() {
+        let mut d = Differ::for_attach(STREAM_LINE_VERSION, "abcd-1".into());
+        let first = screen(&["$", ""], 10);
+        assert!(!d.update(&first).is_empty(), "the first screen goes out");
+        assert!(d.up_to_date(&first), "and is recorded");
+        // The same text, but the pane now says its top row is line 7.
+        let mut scrolled = first.clone();
+        scrolled.first_line = 7;
+        let sent = d.update(&scrolled);
+        assert!(!sent.is_empty(), "the new line number has to reach the phone");
+        assert!(
+            d.up_to_date(&scrolled),
+            "and must not be asked for again on the next tick"
+        );
+        assert!(
+            d.update(&scrolled).is_empty(),
+            "an unchanged screen produces no messages at all"
+        );
     }
 
     /// A phone on version 5 is told the absolute line at the top of the screen, which is the one
