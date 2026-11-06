@@ -168,7 +168,7 @@ struct Settings {
 
 /// The four numbers that decide whether two radios can hear each other.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct RadioPreset {
+pub struct RadioPreset {
     pub freq_mhz: f64,
     pub bw_khz: f64,
     pub sf: u8,

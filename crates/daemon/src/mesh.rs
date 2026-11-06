@@ -454,6 +454,12 @@ struct Exchange {
     dropped_inbound: u64,
 }
 
+/// A retune asked for: frequency in kHz, bandwidth in Hz, spreading factor, coding rate.
+///
+/// The same four numbers the radio reports and the same four the command carries, so a request and
+/// a report are comparable without conversion.
+pub type Retune = (u32, u32, u8, u8);
+
 /// The running link, shared with the RPC handler.
 #[derive(Clone)]
 pub struct MeshRuntime {
@@ -472,12 +478,12 @@ pub struct MeshRuntime {
     /// wake for the other's traffic — and would let a permit meant for one be consumed by the
     /// other, which is a lost wakeup in the direction that did not get it.
     pub(crate) inbound_wake: Arc<Notify>,
-    /// A retune the CLI or the bridge asked for, waiting for the link task to apply it.
+    /// A retune asked for, waiting for the link task to apply it.
     ///
     /// The radio belongs to the link task, which owns the carrier, so every other caller can only
     /// leave a request. It is applied on the loop's next pass and the snapshot then says whether
     /// the firmware took it.
-    preset_request: Arc<Mutex<Option<(u32, u32, u8, u8)>>>,
+    preset_request: Arc<Mutex<Option<Retune>>>,
 }
 
 static GLOBAL: OnceLock<MeshRuntime> = OnceLock::new();
@@ -496,7 +502,7 @@ impl MeshRuntime {
     }
 
     /// The pending retune, if any. Taken once, by the link task.
-    fn take_preset(&self) -> Option<(u32, u32, u8, u8)> {
+    fn take_preset(&self) -> Option<Retune> {
         self.preset_request.lock().ok().and_then(|mut slot| slot.take())
     }
 
