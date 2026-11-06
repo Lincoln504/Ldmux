@@ -119,6 +119,9 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "terminal" => {
             "ldmux terminal [--explain] [--exec <command...>]\n  The terminal a desk window opens in, and where the answer came from (--explain). The order: a pin set here, $TERMINAL, xdg-terminal-exec, this desktop session's configured terminal, an emulator already running, the system alternative, then the known list.\n\nldmux terminal set <program>\n  Pin it, for example `ldmux terminal set alacritty`. Kept in $XDG_CONFIG_HOME/ldmux/terminal, which the daemon reads.\n\nldmux terminal clear\n  Forget the pin.\n\nldmux terminal --exec <command...>\n  Run <command> in that terminal (the emulator's own flags applied)."
         }
+        "buzz" => {
+            "ldmux buzz [--kind attention|done] [--note <text>] [--session <id>]\n  Mark a shell in the phone's list: `done` when an agent finished a turn, `attention` when it needs a look. Run inside a shell and the shell names itself ($LDMUX_SESSION_ID); from outside, pass --session. Silent on failure, never retried: it is a notification, not a control."
+        }
         "send" => "ldmux send <id> <text...>\n  Type text into a session.",
         "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
         "capture" => {
@@ -383,6 +386,9 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--name",
         "--explain",
         "--readonly",
+        "--kind",
+        "--note",
+        "--session",
     ];
     for arg in rest {
         if arg == "--" {
@@ -409,6 +415,25 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 }
 
 /// Extract positional args (skipping `--flag` pairs and `--`).
+/// The value of `--name value` or `--name=value`, or `None`.
+///
+/// `buzz` takes three optional flags with arguments, and reading them here keeps the argument
+/// parser in one place instead of three ad-hoc scans.
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if let Some(v) = a.strip_prefix(name).and_then(|r| r.strip_prefix('=')) {
+            return Some(v);
+        }
+        if a == name {
+            return args.get(i + 1).map(String::as_str);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn positional<'a>(args: &'a [String], skip: &[&str]) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut end_of_options = false;
@@ -672,6 +697,38 @@ async fn main() {
                     eprintln!("ldmux: could not run {}: {err}", argv[0]);
                     std::process::exit(1);
                 }
+            }
+        }
+        "buzz" => {
+            // **The shell names itself.** Every child of a shell gets `LDMUX_SESSION_ID`
+            // (`session_spawn_env`), so the common caller — an agent at the end of a turn — needs no
+            // argument and cannot buzz the wrong shell by copying one. `--session` is for a process
+            // outside a shell (a harness manager, a script on the host).
+            let session = flag_value(rest, "--session")
+                .map(str::to_owned)
+                .or_else(|| std::env::var("LDMUX_SESSION_ID").ok())
+                .filter(|v| !v.is_empty());
+            let Some(session) = session else {
+                eprintln!("ldmux buzz: run this inside an ldmux shell, or pass --session <id>");
+                std::process::exit(2);
+            };
+            let kind = flag_value(rest, "--kind").unwrap_or("done");
+            if kind != "done" && kind != "attention" {
+                eprintln!("ldmux buzz: --kind is `done` or `attention`");
+                std::process::exit(2);
+            }
+            let note = flag_value(rest, "--note").unwrap_or("");
+            let r: Result<serde_json::Value, CallError> = daemon_call(
+                &sock,
+                method::BUZZ,
+                &serde_json::json!({ "session": session, "kind": kind, "note": note }),
+            )
+            .await;
+            // **Silence is the contract.** A buzz is a convenience at the end of a turn, and an
+            // agent that treats a failed buzz as a failed turn is worse than one that says nothing.
+            if let Err(e) = r {
+                eprintln!("ldmux buzz: {e}");
+                std::process::exit(1);
             }
         }
         "send" => {

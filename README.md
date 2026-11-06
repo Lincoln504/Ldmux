@@ -98,7 +98,8 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   when only screens do; held text is dropped when leaving the page.
 - **Limits**: 64 live shells (`LDMUX_MAX_SESSIONS`), 10 000 lines or 40 MiB of scrollback each.
 - **Android 9 or newer**, `arm64-v8a` or `x86_64`, Tailscale signed in for the tailnet. There is
-  no iOS client: the radios attach over Android's Bluetooth.
+  no iOS client yet. One is planned, and it will be tailnet only, because the radio route's
+  MeshCore library is Java for Android and would have to be written again for iOS.
 
 `scripts/android.sh install` builds and installs over adb; there is no store listing.
 

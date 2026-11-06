@@ -53,6 +53,14 @@ class MeshTermCodecTest {
                     TermPatch(p["y"]!!.jsonPrimitive.int, p["append"]!!.jsonPrimitive.boolean, p["text"]!!.jsonPrimitive.content)
                 },
             )
+            "marks" -> TermMessage.Marks(
+                o["entries"]!!.jsonArray.map {
+                    MarkEntry(
+                        it.jsonObject["id"]!!.jsonPrimitive.content,
+                        it.jsonObject["kind"]!!.jsonPrimitive.int,
+                    )
+                },
+            )
             "commit" -> TermMessage.Commit(i("epoch"), i("cursorX"), i("cursorY"), i("flags"))
             "closed" -> TermMessage.Closed(i("reason"))
             "list" -> TermMessage.ListRequest

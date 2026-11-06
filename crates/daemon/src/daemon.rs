@@ -350,6 +350,16 @@ pub struct LdmuxDaemon {
     /// longer existed. The mutator marks the state it changed; whoever owns the
     /// clients pushes it.
     sessions_dirty: bool,
+    /// The newest mark per shell: what the phone's list shows beside a row.
+    ///
+    /// **A mark is not a notification and not a write.** It is one word about a shell — `done`,
+    /// `attention` — with an optional line the operator wrote. The app draws it beside the row and
+    /// clears it when that shell is opened; a device that was away gets the table on connect, which
+    /// is the whole delivery model (a phone cannot be pushed to while it is not connected, and the
+    /// radio route has no internet at all).
+    ///
+    /// The table itself is [`crate::buzz::Marks`], which owns the coalescing, the TTL and the cap.
+    buzz: crate::buzz::Marks,
     /// Since when each claim has had no connection behind it, by session id
     /// (the device that holds it is part of the value, so a claim that moves
     /// starts its wait again). See [`LdmuxDaemon::release_unbacked_claims`].
@@ -479,6 +489,7 @@ impl LdmuxDaemon {
             streams: HashMap::new(),
             control_handle: None,
             sessions_dirty: false,
+            buzz: crate::buzz::Marks::new(),
             unbacked_since: HashMap::new(),
             mesh_watched: std::collections::HashSet::new(),
             ever_backed: std::collections::HashSet::new(),
@@ -1353,8 +1364,14 @@ impl LdmuxDaemon {
                         let (changed, shared) = LdmuxDaemon::maintain_shared(&arc)
                             .await
                             .unwrap_or((false, None));
-                        if changed && let Some(shared) = shared {
-                            crate::remote::broadcast_sessions(&shared).await;
+                        if let Some(shared) = shared {
+                            // Marks first: a buzz is the newest news, and a client that receives
+                            // the list afterwards learns who holds each shell with the mark
+                            // already applied.
+                            crate::remote::broadcast_buzzes(&shared).await;
+                            if changed {
+                                crate::remote::broadcast_sessions(&shared).await;
+                            }
                         }
                     });
                     pass.await;
@@ -2220,6 +2237,10 @@ impl LdmuxDaemon {
                     "detail": detail,
                 }))
             }
+            // The marks a device should draw beside its rows: one per shell, newest state only.
+            "marks" => Ok(serde_json::json!({
+                "marks": self.mark_snapshot().iter().map(crate::buzz::Mark::to_json).collect::<Vec<_>>(),
+            })),
             // **Who holds this shell, answered from memory.** The radio's write path asks
             // this before every keystroke, so it must not be a `list` (which asks the keeper
             // about every shell). A claim is a live fact this process already holds.
@@ -2261,6 +2282,59 @@ impl LdmuxDaemon {
                 Ok(serde_json::json!({
                     "ok": matches!(result, crate::ownership::ClaimResult::Acquired { .. }),
                 }))
+            }
+            // **One word about a shell, for the phone's list.** Not a write: no claim, no pty, no
+            // output. The shell names itself (`$LDMUX_SESSION_ID`), so an agent at the end of a
+            // turn needs no argument and cannot mark the wrong shell.
+            "buzz" => {
+                let session = params
+                    .get("session")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind_word = params
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("done");
+                let note = params.get("note").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(kind) = crate::buzz::Kind::parse(kind_word) else {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": crate::buzz::Refused::BadKind.sentence(),
+                    }));
+                };
+                // **Only a shell that exists.** An unknown id is refused rather than recorded: a
+                // mark for a shell nobody has is a notification about nothing, and it would hold a
+                // slot in a bounded table.
+                let running = self
+                    .registry
+                    .get(&session)
+                    .is_some_and(|r| r.status == "running");
+                if !running {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": crate::buzz::Refused::UnknownSession.sentence(),
+                    }));
+                }
+                let now = now_ms();
+                match self.buzz.mark(&session, kind, note, now) {
+                    Ok(mark) => {
+                        // The maintenance tick is what notices and pushes this; nothing waits on it
+                        // here, so the CLI's call returns whether or not a device is connected.
+                        self.sessions_dirty = true;
+                        Ok(serde_json::json!({
+                            "ok": true,
+                            "session": mark.session,
+                            "kind": mark.kind.as_str(),
+                            "note": mark.note,
+                            "at": mark.at,
+                        }))
+                    }
+                    Err(refused) => Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": refused.sentence(),
+                    })),
+                }
             }
             // **Claim, refusing only a holder that is in use.** The radio route asks this instead
             // of deciding for itself: the engagement rule lives in the claim table, and two
@@ -2712,6 +2786,12 @@ impl LdmuxDaemon {
         {
             self.ever_backed.remove(&(session_id.to_string(), previous));
         }
+        // **Opening a shell is reading its mark.** The mark tells the operator a shell wants a
+        // look; once that shell is in front of them it has been read. Here, in the claim itself, so
+        // the tailnet attach and the radio attach both get it without either remembering to.
+        if matches!(r, crate::ownership::ClaimResult::Acquired { .. }) {
+            self.buzz.clear(session_id);
+        }
         // Who holds a shell is on the wire (`owner`), so a claim is a change.
         self.sessions_dirty = true;
         self.restored.remove(session_id);
@@ -2845,6 +2925,30 @@ impl LdmuxDaemon {
     /// radio, where the "connection" is the L2 link and the bridge is the only one who knows.
     /// Without this the phone's claim was freed within the grace, a desk window reclaimed the
     /// shell, and ownership oscillated under the user: the shell looked taken and then not.
+    /// The marks a device should see when it connects, and the queue for live delivery.
+    ///
+    /// Two readers, because they answer different questions: a connection that has just said hello
+    /// gets [`Self::mark_snapshot`] (what is true now), and the broadcaster gets
+    /// [`Self::take_buzzes`] (what happened since the last push).
+    #[must_use]
+    pub fn mark_snapshot(&self) -> Vec<crate::buzz::Mark> {
+        self.buzz.snapshot(now_ms())
+    }
+
+    pub fn take_buzzes(&mut self) -> Vec<crate::buzz::Mark> {
+        self.buzz.drain_out()
+    }
+
+    /// The operator opened the shell, so its mark has been read.
+    pub fn clear_mark(&mut self, session_id: &str) {
+        self.buzz.clear(session_id);
+    }
+
+    /// Drop expired marks. Called from the maintenance tick, which is the daemon's clock.
+    pub fn prune_marks(&mut self) {
+        self.buzz.prune(now_ms());
+    }
+
     pub fn set_mesh_watched(&mut self, session_id: &str, watched: bool) {
         let changed = if watched {
             self.mesh_watched.insert(session_id.to_string())

@@ -50,4 +50,19 @@ expect object BackgroundSession {
 
     /** Stop watching — the app is going away. */
     fun stopWatchingNetwork()
+
+    /**
+     * Post a mark about a shell, or nothing when the operator has not asked for notifications.
+     *
+     * **Off by default.** The mark in the shell list is the product; a banner is a second, optional
+     * way of being told, and a terminal that buzzes without being asked to is a terminal that gets
+     * uninstalled. Tapping it opens that shell (the app adds it as a page, or switches to it).
+     *
+     * [sound] picks the sounding channel or the silent one: a channel's importance cannot be
+     * changed after it exists, so honouring a sound toggle on Android 8+ requires two channels.
+     */
+    fun postMark(shellId: String, title: String, body: String, sound: Boolean)
+
+    /** Withdraw a shell's mark: it has been opened, so it has been read. */
+    fun clearMark(shellId: String)
 }

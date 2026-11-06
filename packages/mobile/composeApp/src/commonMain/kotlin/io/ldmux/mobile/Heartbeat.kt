@@ -18,6 +18,16 @@ package io.ldmux.mobile
  */
 internal const val CLIENT_PING_INTERVAL_MS = 4_000L
 
+/// How often the **presence** connection says something: the launcher's own socket, which is kept
+/// open while the phone is paired so a mark can arrive while no shell page is.
+///
+/// **A minute, not four seconds.** The interactive cadence exists because a page's picture is a
+/// live stream and a dead socket must be noticed inside a second or two. The presence connection
+/// carries nothing but a word about a shell, so one beat a minute is enough for the daemon's idle
+/// window and it spends a fifteenth of the wakeups — which is the whole difference between a
+/// background link that can stay up for hours and one that drains the battery.
+internal const val PRESENCE_PING_INTERVAL_MS = 60_000L
+
 /**
  * Unanswered pings before a socket is declared dead, for both sockets alike: the
  * OS only reports a broken link when it notices, and on a sleeping radio or a NAT

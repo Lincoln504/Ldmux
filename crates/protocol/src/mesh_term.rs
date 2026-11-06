@@ -70,7 +70,7 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 8;
+pub const VERSION: u8 = 9;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
@@ -125,6 +125,15 @@ pub const OWNER_VERSION: u8 = 8;
 /// of passing for a desk shell. Carried as a flag bit in each page for the same reason `cwd` is —
 /// a list is answered before the first successful attach, so there is no profile version to gate on.
 pub const ORIGIN_VERSION: u8 = 7;
+
+/// The version whose host sends the [`Message::Marks`] table (version 9).
+///
+/// The radio has no way to reach a phone that is not connected, and keeping a session established
+/// just to be reachable would cost about twelve records an hour of a budget that is a few hundred —
+/// so the host sends the table when the phone attaches instead of pushing. A version-8 phone is
+/// never sent the tag, and a version-9 phone against a version-8 host simply never sees one, which
+/// the app must treat as "no marks" rather than as a broken link.
+pub const MARKS_VERSION: u8 = 9;
 
 /// Most key names in one `Key` message.
 pub const MAX_KEYS: usize = 16;
@@ -344,6 +353,16 @@ pub enum Message {
         owner: bool,
         entries: Vec<SessionEntry>,
     },
+    /// The marks that are true right now: one per shell, `kind` 0 = done, 1 = attention.
+    ///
+    /// **The radio route replays, it does not push.** There is no way to reach a phone that is not
+    /// connected, and keeping a radio session up to be reachable costs airtime for something the
+    /// list already says, so the host sends this table when the phone attaches and the app draws it
+    /// beside the rows. Version 9 and later only; the note a `ldmux buzz` may carry is not sent,
+    /// because the radio's budget is records and a row label is enough.
+    Marks {
+        entries: Vec<MarkEntry>,
+    },
     /// Phone asks the host to start a shell in `cwd` (empty = the host's default directory).
     /// Version 7 and later only.
     Create {
@@ -373,6 +392,14 @@ pub enum Message {
     },
 }
 
+/// One row of [`Message::Marks`]: a shell and the word about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkEntry {
+    pub id: String,
+    /// 0 = done (an agent finished a turn), 1 = attention (it wants a look).
+    pub kind: u8,
+}
+
 const T_LIST: u8 = 0x05;
 const T_KEY: u8 = 0x06;
 const T_RESIZE: u8 = 0x07;
@@ -390,6 +417,8 @@ const T_PROFILE: u8 = 0x81;
 const T_ROWS: u8 = 0x82;
 const T_COMMIT: u8 = 0x83;
 const T_CLOSED: u8 = 0x84;
+/// The marks table (version 9). Host to phone only.
+const T_MARKS: u8 = 0x87;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
@@ -556,6 +585,20 @@ impl Message {
                 body.push(id.len() as u8);
                 body.extend_from_slice(id.as_bytes());
                 T_CREATED
+            }
+            Self::Marks { entries } => {
+                for e in entries {
+                    if e.id.len() > MAX_SELECTOR {
+                        return Err(EncodeError::TooLong);
+                    }
+                    body.push(e.kind);
+                    body.push(e.id.len() as u8);
+                    body.extend_from_slice(e.id.as_bytes());
+                }
+                if body.len() > MAX_ROWS_BODY {
+                    return Err(EncodeError::TooLong);
+                }
+                T_MARKS
             }
             Self::Sessions {
                 last,
@@ -753,6 +796,24 @@ impl Message {
                         .map_err(|_| bad.clone())?
                         .to_owned(),
                 }
+            }
+            T_MARKS => {
+                let mut rest = body;
+                let mut entries = Vec::new();
+                while !rest.is_empty() {
+                    let (&kind, tail) = rest.split_first().ok_or(bad.clone())?;
+                    let (&n, tail) = tail.split_first().ok_or(bad.clone())?;
+                    let n = usize::from(n);
+                    if n > MAX_SELECTOR || tail.len() < n {
+                        return Err(bad.clone());
+                    }
+                    let id = std::str::from_utf8(&tail[..n])
+                        .map_err(|_| bad.clone())?
+                        .to_owned();
+                    rest = &tail[n..];
+                    entries.push(MarkEntry { id, kind });
+                }
+                Message::Marks { entries }
             }
             T_SESSIONS => {
                 let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
@@ -2665,6 +2726,9 @@ mod tests {
             Message::Sessions { last, cwd, origin, owner, entries } => json!({
                 "kind":"sessions","last":last,"cwd":cwd,"origin":origin,"owner":owner,
                 "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd,"origin":e.origin,"owner":e.owner})).collect::<Vec<_>>()}),
+            Message::Marks { entries } => json!({
+                "kind":"marks",
+                "entries": entries.iter().map(|e| json!({"id":e.id,"kind":e.kind})).collect::<Vec<_>>()}),
             Message::Create { version, cwd } => json!({"kind":"create","version":version,"cwd":cwd}),
             Message::Close { selector } => json!({"kind":"close","selector":selector}),
             Message::MakeLive { selector } => json!({"kind":"make_live","selector":selector}),
@@ -2684,6 +2748,19 @@ mod tests {
                 version: 1,
                 selector: String::new(),
             },
+            Message::Marks {
+                entries: vec![
+                    MarkEntry {
+                        id: "ab12".into(),
+                        kind: 0,
+                    },
+                    MarkEntry {
+                        id: "cd34".into(),
+                        kind: 1,
+                    },
+                ],
+            },
+            Message::Marks { entries: vec![] },
             Message::Input(b"\x03".to_vec()),
             Message::Input(b"ls -la\r".to_vec()),
             Message::Resync,

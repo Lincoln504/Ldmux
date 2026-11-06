@@ -12,6 +12,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -207,6 +208,15 @@ actual object BackgroundSession {
     private var running = false
     private var lastText = ""
 
+    /** The intent extra a mark's notification carries: the shell it is about. */
+    const val SHELL_EXTRA = "ldmux.shell"
+
+    private const val MARK_CHANNEL_SOUND = "ldmux.mark"
+    private const val MARK_CHANNEL_SILENT = "ldmux.mark.silent"
+
+    /// Marks get their own id range, apart from the service's single id 1.
+    private const val MARK_ID_BASE = 2_000
+
     /**
      * The service stopped itself (the notification's Disconnect). Without this
      * `running` stayed true and an identical [setActive] call was then ignored, so
@@ -294,6 +304,84 @@ actual object BackgroundSession {
                 cb,
             )
         }.onFailure { Log.w(TAG, "registerNetworkCallback", it) }
+    }
+
+    /**
+     * A shell's mark, as a notification, when the operator asked for notifications.
+     *
+     * **Two channels, because a channel's importance is immutable.** The service's own channel is
+     * `IMPORTANCE_LOW` and can never be made to sound, and a sound toggle must be honourable on any
+     * Android 8+ install, so the sounding and the silent form are separate channels chosen at post
+     * time.
+     *
+     * One notification per shell: the id is the shell's hash, so a shell that finishes twice
+     * updates its own line instead of stacking. `setOnlyAlertOnce(false)` keeps the sound for a
+     * genuinely new mark, which is the only thing this notification is for.
+     */
+    actual fun postMark(shellId: String, title: String, body: String, sound: Boolean) {
+        val ctx = AndroidApp.context
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            // Nothing to post into: the permission is the user's, and the row mark still works.
+            return
+        }
+        ensureMarkChannels(nm)
+        val channel = if (sound) MARK_CHANNEL_SOUND else MARK_CHANNEL_SILENT
+        val open = PendingIntent.getActivity(
+            ctx,
+            shellId.hashCode(),
+            Intent(ctx, MainActivity::class.java)
+                .putExtra(SHELL_EXTRA, shellId)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val n = Notification.Builder(ctx, channel)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(false)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .build()
+        runCatching { nm.notify(MARK_ID_BASE + (shellId.hashCode() and 0x0fff), n) }
+            .onFailure { Log.w(TAG, "notify mark", it) }
+    }
+
+    actual fun clearMark(shellId: String) {
+        val ctx = AndroidApp.context
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        runCatching { nm.cancel(MARK_ID_BASE + (shellId.hashCode() and 0x0fff)) }
+    }
+
+    private fun ensureMarkChannels(nm: NotificationManager) {
+        if (nm.getNotificationChannel(MARK_CHANNEL_SOUND) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    MARK_CHANNEL_SOUND,
+                    "Shell finished",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = "A shell finished a turn or needs attention"
+                    setShowBadge(true)
+                },
+            )
+        }
+        if (nm.getNotificationChannel(MARK_CHANNEL_SILENT) == null) {
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    MARK_CHANNEL_SILENT,
+                    "Shell finished (silent)",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "A shell finished a turn, without a sound"
+                    setShowBadge(true)
+                },
+            )
+        }
     }
 
     actual fun stopWatchingNetwork() {

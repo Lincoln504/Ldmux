@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MIN_VERSION, Message, ORIGIN_VERSION,
-    OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, STREAM_VERSION, Screen, VERSION, closed,
-    session_pages,
+    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MARKS_VERSION, MIN_VERSION, MarkEntry,
+    Message, ORIGIN_VERSION, OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, STREAM_VERSION,
+    Screen, VERSION, closed, session_pages,
 };
 
 /// The session as the bridge sees it.
@@ -100,6 +100,14 @@ pub trait Host {
     /// left every claim in place for ever (a device object where a string was expected), and it was
     /// invisible because the answer was discarded — so the answer is part of the contract now.
     async fn release(&mut self, id: &str) -> bool;
+
+    /// The marks the phone should draw beside its rows: `(shell id, kind)`.
+    ///
+    /// Read once per attach, because that is the radio route's whole delivery model: the host
+    /// cannot reach a phone that is not there, and the table it sends is what the phone missed.
+    async fn marks(&mut self) -> Vec<(String, u8)> {
+        Vec::new()
+    }
 
     /// Who holds `id` now, as the daemon's claim table says: `"mesh"`, `"desktop"`, `"phone"`,
     /// or `""` for nobody. `None` when the host cannot say.
@@ -745,8 +753,8 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 // Answered in the version asked for, naming the shell the host
                                 // chose, so a phone that sent an empty selector learns which.
                                 differ: Differ::for_attach(version, one),
-            answer_owed: false,
-            idle_sent: false,
+                                answer_owed: false,
+                                idle_sent: false,
                                 version,
                                 geometry: None,
                                 last_push: None,
@@ -755,6 +763,24 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 original,
                             },
                         );
+                        // **What this phone missed, sent once.** The marks that are true now go
+                        // with the attach, because the radio cannot reach a phone that is not
+                        // connected and this is the only moment delivery is possible. A phone on a
+                        // version below [MARKS_VERSION] is not sent the tag at all.
+                        if version >= MARKS_VERSION {
+                            let marks = self.host.marks().await;
+                            if !marks.is_empty() {
+                                self.reply(
+                                    shell,
+                                    &[Message::Marks {
+                                        entries: marks
+                                            .into_iter()
+                                            .map(|(id, kind)| MarkEntry { id, kind })
+                                            .collect(),
+                                    }],
+                                );
+                            }
+                        }
                     }
                     _ => {
                         self.reply(
@@ -1103,6 +1129,31 @@ impl Host for DaemonHost {
         Some(rows)
     }
 
+    async fn marks(&mut self) -> Vec<(String, u8)> {
+        let v = self
+            .0
+            .lock()
+            .await
+            .handle("marks", serde_json::json!({}))
+            .await;
+        let Ok(v) = v else { return Vec::new() };
+        v.get("marks")
+            .and_then(|m| m.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| {
+                        let id = m.get("session").and_then(|x| x.as_str())?.to_owned();
+                        let kind = match m.get("kind").and_then(|x| x.as_str()) {
+                            Some("attention") => 1,
+                            _ => 0,
+                        };
+                        Some((id, kind))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     async fn holder(&mut self, id: &str) -> Option<String> {
         let v = self
             .0
@@ -1442,6 +1493,8 @@ mod tests {
         holders: HashMap<String, String>,
         /// Shells whose holder has typed recently: what a claim refuses over.
         engaged: std::collections::HashSet<String>,
+        /// The marks table the host would send on attach.
+        marks: Vec<(String, u8)>,
     }
     #[derive(Clone, Default)]
     struct FakeHost(Arc<Mutex<HostState>>);
@@ -1472,6 +1525,9 @@ mod tests {
                     })
                     .collect(),
             )
+        }
+        async fn marks(&mut self) -> Vec<(String, u8)> {
+            self.0.lock().unwrap().marks.clone()
         }
         async fn create(&mut self, cwd: &str, cols: u8, rows: u8) -> Result<String, String> {
             let mut s = self.0.lock().unwrap();
@@ -1869,6 +1925,55 @@ mod tests {
         );
     }
 
+    /// **The marks a phone missed go out with the attach.** The radio cannot reach a phone that is
+    /// not connected, so this is the only moment delivery is possible; a phone on a version below
+    /// `MARKS_VERSION` is not sent the tag at all.
+    #[tokio::test]
+    async fn an_attach_carries_the_marks_table() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().marks = vec![("abcd-1".into(), 1), ("zz99".into(), 0)];
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            sent(&link, 1).iter().any(|m| matches!(
+                m,
+                Message::Marks { entries }
+                    if entries.len() == 2 && entries[0].id == "abcd-1" && entries[0].kind == 1
+            )),
+            "the table goes with the attach: {:?}",
+            sent(&link, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_phone_below_the_marks_version_is_not_sent_the_table() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().marks = vec![("abcd-1".into(), 1)];
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: MARKS_VERSION - 1,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            !sent(&link, 1)
+                .iter()
+                .any(|m| matches!(m, Message::Marks { .. })),
+            "an older phone is not spent a record on: {:?}",
+            sent(&link, 1)
+        );
+    }
+
     #[tokio::test]
     async fn selectors_are_exact_about_not_found_and_ambiguous() {
         let (mut b, host, link) = setup();
@@ -1901,7 +2006,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: 9,
+                version: VERSION + 1,
                 selector: String::new(),
             },
         );

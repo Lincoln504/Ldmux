@@ -366,6 +366,16 @@ class MeshTermDriver(
      */
     val shells: StateFlow<MeshShells> = _shells.asStateFlow()
 
+    /**
+     * The marks the host sent with the attach: which shells finished, which want a look.
+     *
+     * The radio route replays rather than pushes (`MeshTerm.Marks`, version 9): the table is what the
+     * phone missed while it was away, and it is drawn beside the launcher's rows. Opening a shell
+     * removes its mark, because opening it is reading it.
+     */
+    private val _marks = MutableStateFlow<Map<String, ShellMark>>(emptyMap())
+    val marks: StateFlow<Map<String, ShellMark>> = _marks.asStateFlow()
+
     /** Records that failed a session check (tag, replay, decode). Evidence of noise or an attacker, not a failure. */
     var rejectedRecords = 0
         private set
@@ -738,6 +748,9 @@ class MeshTermDriver(
         }
         attachedId = id
         attempted = id
+        // Opening a shell reads its mark: the row must stop saying "done" about the shell that is
+        // now in front of the operator.
+        if (_marks.value.containsKey(id)) _marks.value = _marks.value - id
         publishShells()
         queue(TermMessage.Attach(MeshTerm.VERSION, id))
         pump(); publish()
@@ -1046,6 +1059,11 @@ class MeshTermDriver(
                 }
                 m.reason == MeshTerm.Closed.EXITED -> backToList()
                 else -> terminalView = MeshTermView.HostClosed(m.reason)
+            }
+            is TermMessage.Marks -> {
+                _marks.value = m.entries.mapNotNull { e ->
+                    ShellMark.of(e.kind)?.let { e.id to it }
+                }.toMap()
             }
             is TermMessage.Sessions -> onSessions(m)
             // **The host has started a shell for us.** Attach to exactly that id: the list is not

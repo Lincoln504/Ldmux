@@ -319,6 +319,9 @@ fun MeshTerminalScreen(
     val attemptNo by conn.driver.attempt.collectAsState()
     LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
     val shells by conn.driver.shells.collectAsState()
+    // The marks the host replayed with this attach: drawn beside the rows, gone once the shell is
+    // opened. An empty map is "nothing to say", which is what a host below version 9 always means.
+    val marks by conn.driver.marks.collectAsState()
     // Learned from the driver, not from the tap: a shell the host chose for us (the one-shell attach)
     // resumes exactly as reliably as one the user picked.
     LaunchedEffect(shells.current) { shells.current?.let { resumeShell = it } }
@@ -1089,6 +1092,7 @@ fun MeshTerminalScreen(
                     MeshShellList(
                         entries = listed,
                         current = if (terminalLive) shells.current else null,
+                        marks = marks,
                         chosen = chosen,
                         onToggle = { id -> chosen = if (id in chosen) chosen - id else chosen + id },
                         onOpen = openChosen,
@@ -1181,6 +1185,8 @@ private fun LinkDownExtra(view: MeshTermView) {
 private fun MeshShellList(
     entries: List<SessionEntry>,
     current: String?,
+    /** Marks by shell id, from the host's table (version 9). Nothing means nothing was said. */
+    marks: Map<String, ShellMark>,
     chosen: List<String>,
     onToggle: (String) -> Unit,
     onOpen: (List<SessionEntry>) -> Unit,
@@ -1217,6 +1223,7 @@ private fun MeshShellList(
                     // be ended or moved from the phone. The host enforces it too — `close` on a desk
                     // shell puts it down rather than destroying it — so the row and the host agree.
                     mobileShell = e.openedByPhone,
+                    mark = marks[e.id],
                     onKill = if (e.openedByPhone) ({ onClose(e.id) }) else null,
                 ) {
                     if (e.openedByPhone) {

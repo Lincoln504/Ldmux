@@ -208,7 +208,7 @@ const DESKTOP_DEVICE: &str = "desktop";
 /// other. Without it the daemon answers with the legacy `error`/`resync`, which costs
 /// a second attach and used to cost the connection (the daemon's byte accounting for
 /// that notice underflowed and panicked).
-const FEATURES: [&str; 1] = ["inplaceResync"];
+const FEATURES: [&str; 2] = ["inplaceResync", "buzz"];
 
 /// The first `attach` of a connection: the session, this window's size, and what it
 /// understands.
@@ -683,6 +683,21 @@ where
                             Err(_) => continue,
                         };
                         match v["type"].as_str() {
+                            // **A shell's mark rings this terminal's bell.** The desk is where the
+                            // work is, so a banner would repeat what is already on screen; one
+                            // BEL byte lets whatever emulator the operator actually uses make the
+                            // noise they configured, with no notification daemon and no second
+                            // protocol. Only for the shell this window is showing, so ten open
+                            // windows do not ring ten times for one finished turn.
+                            Some("buzz") => {
+                                let about = v["mark"]["session"].as_str().unwrap_or("");
+                                if about == session_id {
+                                    // `std::io::Write`, spelled out: this file's `Write` is
+                                    // tokio's, and the bell is a synchronous byte to a terminal.
+                                    let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
+                                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                                }
+                            }
                             Some("snapshot") => {
                                 detached = false;
                                 let snap = Snapshot::from_json(&v);
@@ -1047,7 +1062,7 @@ mod render_tests {
         assert_eq!(m["sessionId"], "abc");
         assert_eq!(m["cols"], 158);
         assert_eq!(m["rows"], 82);
-        assert_eq!(m["features"], serde_json::json!(["inplaceResync"]));
+        assert_eq!(m["features"], serde_json::json!(["inplaceResync", "buzz"]));
     }
 
     #[test]

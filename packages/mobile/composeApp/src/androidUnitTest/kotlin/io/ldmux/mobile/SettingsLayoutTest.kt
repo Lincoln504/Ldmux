@@ -27,6 +27,7 @@ class SettingsLayoutTest {
                 SettingsGroup.Link,
                 SettingsGroup.Pairing,
                 SettingsGroup.Diagnostics,
+                SettingsGroup.Shells,
                 SettingsGroup.Display,
             ),
             settingsGroups(),
@@ -40,7 +41,7 @@ class SettingsLayoutTest {
         // And it is the section both pairings are drawn in: nothing else may claim the
         // title, or the screen grows a second place to pair.
         assertEquals("pairing", SettingsGroup.Pairing.title)
-        assertEquals(listOf("link", "pairing", "diagnostics", "display"), groups.map { it.title })
+        assertEquals(listOf("link", "pairing", "diagnostics", "shells", "display"), groups.map { it.title })
     }
 
     @Test

@@ -72,6 +72,27 @@ object PairingInbox {
     }
 }
 
+/**
+ * The shell a mark's notification was about, handed from the activity to the UI.
+ *
+ * The same shape as [PairingInbox] and for the same reason: the tap arrives outside the
+ * composition, and the screen that can act on it (open a shell as a page, or switch to it) is the
+ * one that reads this.
+ */
+object ShellInbox {
+    private val _shell = MutableStateFlow<String?>(null)
+    val shell: StateFlow<String?> = _shell
+
+    fun offer(shellId: String) {
+        if (shellId.isNotEmpty()) _shell.value = shellId
+    }
+
+    /** Taken, so the next tap is a new event. */
+    fun clear() {
+        _shell.value = null
+    }
+}
+
 /** What to do with a link from [PairingInbox]. Pure, so the rule is testable. */
 sealed interface InboundPairing {
     data object Invalid : InboundPairing

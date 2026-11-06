@@ -209,6 +209,15 @@ impl Drained {
 const WS_BACKLOG_BYTES: usize = 64 * 1024;
 /// Silence that means the other end has gone.
 const WS_IDLE_MS: u64 = 20_000;
+
+/// The idle window for a **presence** connection: one that asked for `buzz` and carries no stream.
+///
+/// A page pings every four seconds because its picture is live and a dead socket must be noticed at
+/// once. The phone's presence connection — the one that exists so a finished turn can reach it while
+/// no shell page is open — says something once a minute, so the page window would reap it nineteen
+/// seconds in and the phone would reconnect for ever. Two and a half beats is the same tolerance a
+/// page gets.
+const PRESENCE_IDLE_MS: u64 = 150_000;
 /// How long a closed socket's claims wait for the same device to come back.
 ///
 /// **Not the unbacked-claim grace.** That one answers "how long may a claim
@@ -321,6 +330,10 @@ struct Features {
     /// "inplaceResync": a stale picture is repaired with a fresh `caps`+`snapshot` on
     /// the same socket.
     inplace_resync: bool,
+    /// "buzz": this client understands the mark pushes, so it is sent a `marks` table on hello and
+    /// a `buzz` for each new mark. A client that says nothing receives neither, which is the
+    /// additive rule the whole wire follows.
+    buzz: bool,
 }
 
 impl Features {
@@ -329,6 +342,7 @@ impl Features {
         let has = |n: &str| list.iter().any(|x| x.as_str() == Some(n));
         Some(Features {
             inplace_resync: has("inplaceResync"),
+            buzz: has("buzz"),
         })
     }
 }
@@ -1332,6 +1346,12 @@ async fn handle_message(text: &str, conn: &Arc<ConnShared>, shared: &Arc<Shared>
                     }
                 }
             }
+            // **The table a device missed.** A phone that has just identified itself is handed the
+            // marks that are true now, which is how a buzz made while it was away reaches it. Sent
+            // only to a client that asked for buzzes, so an old client sees nothing new.
+            if relock(&conn.inner).features.buzz {
+                send_marks(conn, shared).await;
+            }
         }
         "list" => {
             let sessions = {
@@ -1899,6 +1919,8 @@ async fn attach(
                     // device's to keep while it reconnects
                     // (`RECONNECT_GRACE_MS`), not a window's unbacked claim.
                     d.mark_backed(&session_id, &device.id);
+                    // The mark for this shell is cleared by the claim itself, so both routes get
+                    // one rule instead of two.
                     displaced = previous;
                 }
                 crate::ownership::ClaimResult::HeldBy { device: holder } => {
@@ -2241,6 +2263,49 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
 
 /// Send the session list to one connection.
 /// Push the session list to every connected client.
+/// Push the marks made since the last tick to every client that asked for them.
+///
+/// Separate from [`broadcast_sessions`] because a mark is not a session fact (it is not in the
+/// session list at all) and because draining the queue is only correct for the connections that can
+/// read it: one client without the feature must not consume the others' news.
+pub(crate) async fn broadcast_buzzes(shared: &Arc<Shared>) {
+    let marks = {
+        let mut d = shared.daemon.lock().await;
+        d.prune_marks();
+        d.take_buzzes()
+    };
+    if marks.is_empty() {
+        return;
+    }
+    let conns: Vec<Arc<ConnShared>> = {
+        let map = relock(&shared.conns);
+        map.values().cloned().collect()
+    };
+    for c in conns {
+        if !relock(&c.inner).features.buzz {
+            continue;
+        }
+        for mark in &marks {
+            c.send_json(&serde_json::json!({"type":"buzz", "mark": mark.to_json()}));
+        }
+    }
+}
+
+/// The whole mark table, sent to a client that has just said `hello` and asked for buzzes.
+///
+/// This is the delivery model in one function: a phone that was away for an hour is handed what is
+/// true now rather than a replayed stream, and the app draws it beside the rows.
+async fn send_marks(conn: &Arc<ConnShared>, shared: &Arc<Shared>) {
+    let marks = {
+        let d = shared.daemon.lock().await;
+        d.mark_snapshot()
+    };
+    conn.send_json(&serde_json::json!({
+        "type": "marks",
+        "marks": marks.iter().map(crate::buzz::Mark::to_json).collect::<Vec<_>>(),
+    }));
+}
+
 pub(crate) async fn broadcast_sessions(shared: &Arc<Shared>) {
     let sessions = {
         let mut d = shared.daemon.lock().await;
@@ -2453,7 +2518,15 @@ async fn sweep_once(shared: &Arc<Shared>) {
         if disposed {
             continue;
         }
-        if idle.as_millis() as u64 > shared.idle_ms {
+        // **A presence connection is not held to a page's cadence.** It asked for `buzz` and no
+        // stream, so it is the phone's background link: one beat a minute, and an idle window that
+        // fits it. Everything else keeps the four-second rule its picture needs.
+        let window = if relock(&c.inner).features.buzz {
+            PRESENCE_IDLE_MS
+        } else {
+            shared.idle_ms
+        };
+        if idle.as_millis() as u64 > window {
             let _ = c.tx.send(Out::Close);
         }
     }

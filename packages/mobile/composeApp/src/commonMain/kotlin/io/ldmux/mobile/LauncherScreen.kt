@@ -36,6 +36,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import io.ldmux.mobile.mesh.ShellMark
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -74,6 +76,13 @@ fun LauncherScreen(
     liveResult: LiveResult?,
     onDismissLiveResult: () -> Unit,
     onSettings: () -> Unit,
+    /**
+     * The marks on shells, by session id: what each one last said about itself.
+     *
+     * Drawn beside the name, cleared by opening the shell. Empty is the normal state and reads as
+     * "nothing to say", which is also what a daemon that predates the marks means.
+     */
+    marks: Map<String, ShellMark> = emptyMap(),
     /**
      * The link's own line, when it has something to say (a wait, a failure). Null while it is
      * healthy and while it is unpaired, which say it elsewhere or not at all.
@@ -173,6 +182,7 @@ fun LauncherScreen(
                         // The page this row becomes, 1-based, in the same numbering
                         // the pager's header shows.
                         ordinal = ordinalIn(entries, chosen, e.key),
+                        mark = marks[e.sessionId],
                         onClick = { chosen = toggle(chosen, e.key) },
                         // Closing is the launcher's alone, and it is offered only
                         // for a shell this phone started: a shell opened at the
@@ -479,6 +489,14 @@ internal fun ChoiceRow(
     inUse: Boolean = false,
     /** The page this row becomes when opened (1-based), when it is chosen. */
     ordinal: Int? = null,
+    /**
+     * What the shell last said about itself: an agent finished a turn, or it wants a look.
+     *
+     * A small square beside the name rather than a notification: the list is the one screen that
+     * shows every shell at once, so it is where "which of these are done" belongs. It is cleared by
+     * opening the shell, which is the acknowledgement.
+     */
+    mark: ShellMark? = null,
     trailing: @Composable () -> Unit = {},
 ) {
     // How much of the row's own width the overlaid controls take: a control is its
@@ -588,6 +606,10 @@ internal fun ChoiceRow(
                     modifier = Modifier.weight(1f, fill = false),
                 )
             }
+            if (mark != null) {
+                Spacer(Modifier.width(7.dp))
+                ShellMarkSquare(mark)
+            }
         }
     }
     // The controls, over the row's own right end. `matchParentSize` keeps them out
@@ -625,3 +647,28 @@ internal fun ordinalIn(entries: List<LauncherEntry>, chosen: List<String>, key: 
 }
 
 
+/**
+ * The mark beside a shell's name: a small square, one per shell, two meanings.
+ *
+ * **Deliberately a square and not a notification.** The operator's ask was a list of squares on the
+ * rows rather than a stream of banners: a terminal that buzzes is a terminal that gets uninstalled,
+ * and the launcher already answers "what is running" in one glance. `done` reads as calm (the work
+ * finished), `attention` as the interface's own amber (the shell is waiting on a person).
+ *
+ * Colour alone would be a message a screen reader cannot hear and a colour-blind reader cannot
+ * separate, so each mark carries its own description.
+ */
+@Composable
+internal fun ShellMarkSquare(mark: ShellMark, size: Dp = 9.dp) {
+    val (colour, description) = when (mark) {
+        ShellMark.Done -> Accent to "finished its turn"
+        ShellMark.Attention -> Warn to "needs attention"
+    }
+    Box(
+        Modifier
+            .size(size)
+            .clip(RadiusSmall)
+            .background(colour)
+            .semantics { contentDescription = description },
+    )
+}

@@ -328,7 +328,7 @@ by the host radio, by the app before it retunes, and by every budget below.
 | macOS daemon | not supported yet |
 | Windows | not supported, not planned |
 | Android client | done, verified on a device |
-| iOS client | not in development, and would be tailnet only (the radios attach over Android's Bluetooth). Needs a macOS host for the xcframework |
+| iOS client | planned, and tailnet only: the radio route's MeshCore library is Java for Android and would have to be written again for iOS. Needs a macOS host for the xcframework |
 | LoRa route, Android plus host | built and run on real radios, multi-hop recovery not implemented |
 
 ## 11. Bringing up the two radios

@@ -201,6 +201,7 @@ internal fun SettingsScreen(
                             }
                         }
                         SettingsGroup.Diagnostics -> Diagnostics(current, radioPaired)
+                        SettingsGroup.Shells -> Notifications(current, onSave)
                         SettingsGroup.Display -> {
                             PanelSide(current, onSave)
                             ControlSize(current, onSave)
@@ -254,6 +255,13 @@ internal enum class SettingsGroup(val title: String) {
      * to configure one.
      */
     Diagnostics("diagnostics"),
+    /**
+     * How the app tells you a shell needs you.
+     *
+     * Its own section because it is the only thing here that reaches outside the app: the marks on
+     * the shell list are always on, and these rows are the optional banner on top of them.
+     */
+    Shells("shells"),
     Display("display"),
 }
 
@@ -266,6 +274,7 @@ internal fun settingsGroups(): List<SettingsGroup> = listOf(
     SettingsGroup.Link,
     SettingsGroup.Pairing,
     SettingsGroup.Diagnostics,
+    SettingsGroup.Shells,
     SettingsGroup.Display,
 )
 
@@ -351,6 +360,40 @@ private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
     // here changes nothing on this screen. Saying so is the difference between "the app ignored
     // me" and "turn the phone".
     SettingsNote("the key panel's side, in landscape")
+}
+
+/**
+ * Shell marks: the list is always marked, and these decide whether a banner joins it.
+ *
+ * **The row mark is not optional**, because it is the product: a finished turn is a square beside
+ * the shell's name, cleared by opening it. A notification is the second, optional way of being
+ * told, and it exists only on the tailnet route — the radio cannot be reached while the phone is
+ * away, so a banner there would be a promise the link cannot keep.
+ */
+@Composable
+private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
+    SettingRow("notifications") {
+        OptionButton("off", selected = !current.notifyMarks) {
+            if (current.notifyMarks) onSave(current.copy(notifyMarks = false))
+        }
+        OptionButton("on", selected = current.notifyMarks) {
+            if (!current.notifyMarks) onSave(current.copy(notifyMarks = true))
+        }
+    }
+    SettingsNote(
+        "a banner when a shell finishes a turn or needs attention; the square beside the row " +
+            "appears either way, and the tailnet route is the one that can reach a pocketed phone",
+    )
+    if (current.notifyMarks) {
+        SettingRow("sound") {
+            OptionButton("silent", selected = !current.notifySound) {
+                if (current.notifySound) onSave(current.copy(notifySound = false))
+            }
+            OptionButton("sound", selected = current.notifySound) {
+                if (!current.notifySound) onSave(current.copy(notifySound = true))
+            }
+        }
+    }
 }
 
 @Composable

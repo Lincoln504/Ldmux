@@ -4,6 +4,7 @@ import io.ldmux.mobile.mesh.MeshEnrollOutcome
 import io.ldmux.mobile.mesh.MeshRoute
 import io.ldmux.mobile.mesh.MeshRouteResolution
 import io.ldmux.mobile.mesh.PairingNote
+import io.ldmux.mobile.mesh.ShellMark
 import io.ldmux.mobile.mesh.availableRoutes
 import io.ldmux.mobile.mesh.currentMeshResolution
 import io.ldmux.mobile.mesh.meshSessionKeyStore
@@ -103,6 +104,8 @@ internal fun AppContent(
         onDispose { client.stop() }
     }
     val sessions by client.sessions.collectAsState()
+    // What each shell last said about itself: drawn beside the rows, cleared by opening one.
+    val marks by client.marks.collectAsState()
     val desktop by client.desktop.collectAsState()
     val connected by client.connected.collectAsState()
     val link by client.link.collectAsState()
@@ -287,11 +290,55 @@ internal fun AppContent(
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     var keyboardRequest by remember { mutableStateOf(0) }
 
+    // **A mark can become a banner, if the operator asked for one.** Off by default: the square
+    // beside the row is the product, and a banner is the second way of being told. Only the tailnet
+    // route can reach a phone that is away, so the radio route never posts one.
+    DisposableEffect(client, config.notifyMarks, config.notifySound, config.route) {
+        client.notifyMark = notify@{ id, mark ->
+            if (!config.notifyMarks || config.route != MeshRoute.Tailnet) return@notify
+            val title = sessions.firstOrNull { it.id == id }?.title?.ifEmpty { null } ?: id.take(8)
+            val body = when (mark) {
+                ShellMark.Done -> "finished its turn"
+                ShellMark.Attention -> "needs attention"
+            }
+            BackgroundSession.postMark(id, title, body, config.notifySound)
+        }
+        onDispose { client.notifyMark = { _, _ -> } }
+    }
+
+    // **A tapped mark opens its shell.** The notification named one, and the app is the only part
+    // that knows whether it is already a page: if it is, switch to it; if not, it becomes another
+    // page and the header's count is the "+N" the operator asked for. Consumed once.
+    val markedShell by ShellInbox.shell.collectAsState()
+    LaunchedEffect(markedShell, sessions, connected) {
+        val id = markedShell ?: return@LaunchedEffect
+        if (sessions.none { it.id == id }) return@LaunchedEffect
+        pageOrder = addToOrder(pageOrder, listOf(id))
+        gotoSessionId = id
+        showLauncher = false
+        client.clearMark(id)
+        ShellInbox.clear()
+    }
+
     val terminalOpen = !showLauncher && pages.isNotEmpty()
-    LaunchedEffect(terminalOpen, pages.size) {
+    // **The phone stays reachable while it is paired.** The launcher's socket is the presence
+    // connection: it is what a mark arrives on while no shell page is open, and it is why the
+    // foreground service outlives the last page on this route. Without this the platform freezes
+    // the process 45 s after the last page closes and a finished turn reaches the phone only the
+    // next time the app is opened — which is exactly the case the operator asked for (a phone in a
+    // pocket, a long build).
+    //
+    // The radio route does not do this: staying reachable there means keeping a radio session and a
+    // BLE link alive, and the marks are replayed on the next attach instead.
+    val reachable = config.route == MeshRoute.Tailnet && link != LinkState.Unpaired
+    LaunchedEffect(terminalOpen, pages.size, reachable) {
         BackgroundSession.setActive(
-            terminalOpen,
-            if (pages.size == 1) "1 shell open" else "${pages.size} shells open",
+            terminalOpen || reachable,
+            when {
+                pages.size == 1 -> "1 shell open"
+                pages.isNotEmpty() -> "${pages.size} shells open"
+                else -> "reachable for shell marks"
+            },
         )
     }
     // **Leaving the screen lets go of everything, after a grace window.**
@@ -775,6 +822,7 @@ internal fun AppContent(
                 }
             } else null,
             sessions = sessions,
+            marks = marks,
             desktop = desktop,
             desktopLoading = desktopLoading,
             onRefresh = {
@@ -796,6 +844,11 @@ internal fun AppContent(
                 // order they were ticked — page 1 is the first row ticked, which is
                 // the number the row's badge showed.
                 pageOrder = picked.map { it.sessionId }
+                // **Opening a shell reads its mark**, on this screen as on the radio's list. The
+                // daemon clears its own copy when the claim is taken; this drops it from the list
+                // at the same moment so the row cannot keep saying "done" about the shell the
+                // operator is looking at.
+                picked.forEach { client.clearMark(it.sessionId) }
                 // **...and the pager starts on page 1.** The pager and the shell it
                 // last showed outlive a visit to the launcher (both are declared
                 // above the launcher/terminal switch), so without this the pager

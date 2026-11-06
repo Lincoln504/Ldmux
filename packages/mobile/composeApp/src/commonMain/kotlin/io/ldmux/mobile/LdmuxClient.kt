@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
@@ -24,6 +25,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import io.ldmux.mobile.mesh.ShellMark
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -249,6 +251,32 @@ class LdmuxClient(private var config: LdmuxConfig) {
      * was something new, while the value it read had already been replaced.
      */
     private val _created = MutableStateFlow<List<String>>(emptyList())
+
+    /**
+     * The marks on shells, by session id: `done` or `attention`.
+     *
+     * A state of the list rather than a stream of banners — the launcher is the one screen that
+     * shows every shell, so it is where "which of these are waiting" belongs. A device that was
+     * away is handed the whole table when it says hello, which is how the marks it missed arrive.
+     */
+    private val _marks = MutableStateFlow<Map<String, ShellMark>>(emptyMap())
+    val marks: StateFlow<Map<String, ShellMark>> = _marks.asStateFlow()
+
+    /** Post an Android notification for a mark, when the operator asked for them. */
+    var notifyMark: (String, ShellMark) -> Unit = { _, _ -> }
+
+    /**
+     * A shell has been opened, so its mark has been read.
+     *
+     * The daemon clears its own copy when the claim is taken; this drops it from the list at the same
+     * moment so the row cannot keep saying "done" about the shell in front of the operator, and the
+     * notification for it goes with it.
+     */
+    fun clearMark(shellId: String) {
+        if (!_marks.value.containsKey(shellId)) return
+        _marks.value = _marks.value - shellId
+        BackgroundSession.clearMark(shellId)
+    }
     val created: StateFlow<List<String>> = _created
 
     /** Bumped for every creation, so two in a row are both seen. */
@@ -485,7 +513,10 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     // claims are dropped when the connection ends — so a client
                     // that never says who it is holds nothing, and exclusivity
                     // silently stops applying to it.
-                    send(Frame.Text(helloMessage(config)))
+                    // **The launcher asks for the marks too.** It is the presence connection, so it
+                    // is the one that is still there when an agent finishes; the page's own client
+                    // asks as well because opening a shell clears its mark.
+                    send(Frame.Text(helloMessage(config, listOf(FEATURE_BUZZ))))
                     send(Frame.Text("""{"type":"list"}"""))
                     // Say something, periodically. The daemon reaps a connection
                     // that has said nothing for a minute — that is how a phone which
@@ -503,7 +534,9 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     missed.reset()
                     val beat = launch {
                         while (isActive) {
-                            delay(CLIENT_PING_INTERVAL_MS)
+                            // The launcher is the presence connection: a minute apart, because
+                            // nothing it carries is live.
+                            delay(PRESENCE_PING_INTERVAL_MS)
                             if (missed.beat()) {
                                 appLog("launcher link silent; reporting unreachable")
                                 // Reported, then the socket is dropped. Reporting alone left the
@@ -634,6 +667,21 @@ class LdmuxClient(private var config: LdmuxConfig) {
             // `owned` on this socket is ignored on purpose: this client never attaches a
             // stream, so a takeover cannot reach it. The ownership notice a page must show
             // comes from the attach path (`AttachClient.onOwned` → `HeldElsewhere`).
+            // **A mark on a shell.** One word about a shell the operator may not be looking at, so
+            // it is a state on the list rather than a banner. `type: "marks"` is the whole table a
+            // device is handed when it says hello, which is how the ones it missed arrive.
+            "buzz" -> {
+                val m = root["mark"] as? JsonObject
+                val entry = m?.let { parseMark(it) }
+                if (entry != null) {
+                    _marks.value = _marks.value + (entry.first to entry.second)
+                    notifyMark(entry.first, entry.second)
+                }
+            }
+            "marks" -> {
+                val rows = root["marks"] as? JsonArray
+                if (rows != null) _marks.value = rows.mapNotNull { parseMark(it as? JsonObject) }.toMap()
+            }
             "sessions" -> {
                 _sessions.value = parseSessions(root["sessions"], deviceId)
                 appLog("sessions parsed=${_sessions.value.size} attachable=${_sessions.value.count { it.attachable }}")
@@ -660,6 +708,25 @@ class LdmuxClient(private var config: LdmuxConfig) {
  * daemon's real payload instead of only against what the daemon was believed to
  * send.
  */
+/**
+ * One mark from the wire: `{"session":"ab12","kind":"done"|"attention",...}`.
+ *
+ * A kind this app does not know reads as nothing rather than as a crash: the daemon may grow a third
+ * one, and a list that stops drawing because of a word it has not learned is worse than a list
+ * without that word.
+ */
+internal fun parseMark(o: JsonObject?): Pair<String, ShellMark>? {
+    if (o == null) return null
+    val id = o.text("session")
+    if (id.isEmpty()) return null
+    val mark = when (o.text("kind")) {
+        "done" -> ShellMark.Done
+        "attention" -> ShellMark.Attention
+        else -> return null
+    }
+    return id to mark
+}
+
 internal fun parseSessions(element: JsonElement?, deviceId: String): List<Session> {
     val arr = element as? JsonArray ?: return emptyList()
     return arr.mapNotNull { entry ->

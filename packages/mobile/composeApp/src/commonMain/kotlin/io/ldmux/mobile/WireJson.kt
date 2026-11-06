@@ -88,6 +88,15 @@ internal fun helloMessage(config: LdmuxConfig, features: List<String> = emptyLis
 internal val PAGE_FEATURES: List<String> = listOf("inplaceResync")
 
 /**
+ * What a client that wants the shell marks says in `hello.features`.
+ *
+ * A client that says nothing receives nothing new: the marks are an addition to the wire, not a
+ * change to it. The presence client asks for this, and so does a page, because a page clears its
+ * shell's mark by being opened and must therefore know the table.
+ */
+internal const val FEATURE_BUZZ = "buzz"
+
+/**
  * The daemon's HTTP status for a plain `GET /ws`, or null when nothing answered.
  * Bounded, because a machine that is not there does not say so quickly. Shared so a
  * terminal page can tell a refused token from a machine that is off, the same way

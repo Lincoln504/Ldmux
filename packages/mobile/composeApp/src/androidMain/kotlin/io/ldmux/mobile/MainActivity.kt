@@ -34,7 +34,10 @@ class MainActivity : ComponentActivity() {
         )
         // A cold start from a pairing link: held in the inbox until the UI reads it.
         // Not on a restore — the link was already handled by the instance that saw it.
-        if (savedInstanceState == null) offerPairingLink(intent)
+        if (savedInstanceState == null) {
+            offerPairingLink(intent)
+            offerMarkedShell(intent)
+        }
         setContent { App() }
     }
 
@@ -43,6 +46,20 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         offerPairingLink(intent)
+        offerMarkedShell(intent)
+    }
+
+    /**
+     * A mark's notification was tapped: the shell it named is what the app must show.
+     *
+     * Offered rather than acted on here: the UI is the only thing that knows whether that shell is
+     * already a page (switch to it) or not (add it as one). The extra is cleared so a rotation does
+     * not re-open it.
+     */
+    private fun offerMarkedShell(intent: Intent?) {
+        val shell = intent?.getStringExtra(BackgroundSession.SHELL_EXTRA) ?: return
+        intent.removeExtra(BackgroundSession.SHELL_EXTRA)
+        ShellInbox.offer(shell)
     }
 
     private fun offerPairingLink(intent: Intent?) {

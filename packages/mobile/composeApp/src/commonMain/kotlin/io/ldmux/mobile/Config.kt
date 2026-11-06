@@ -117,6 +117,17 @@ data class LdmuxConfig(
      * reads as "unknown" and shows nothing.
      */
     val meshHostPreset: String = "",
+    /**
+     * Post a shell's mark as an Android notification, over the tailnet route.
+     *
+     * **Off by default, and never on the radio route.** The mark in the shell list is the product;
+     * a banner is a second way of being told and a terminal that buzzes without being asked for is
+     * a terminal that gets uninstalled. The radio route cannot honour this without keeping a radio
+     * session alive to receive it, which costs airtime for something the list already says.
+     */
+    val notifyMarks: Boolean = false,
+    /** Whether a mark's notification makes a sound. Picks the sounding channel or the silent one. */
+    val notifySound: Boolean = true,
 ) {
 
     /**

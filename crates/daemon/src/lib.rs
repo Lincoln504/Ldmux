@@ -23,6 +23,7 @@
 //! See `docs/ARCHITECTURE.md` for the design of record.
 
 pub mod auth;
+pub mod buzz;
 pub mod clipboard_policy;
 pub mod control_socket;
 pub mod cwd;

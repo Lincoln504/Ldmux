@@ -24,7 +24,7 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send.
      */
-    const val VERSION = 8
+    const val VERSION = 9
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -150,6 +150,12 @@ object MeshTerm {
     internal const val T_CREATED = 0x86
     internal const val T_TAKEOVER = 0x0b
     internal const val T_SESSIONS = 0x85
+
+    /** The marks table (host to phone, version 9). */
+    internal const val T_MARKS = 0x87
+
+    /** The first version whose host sends [TermMessage.Marks]. */
+    const val MARKS_VERSION = 9
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
     internal const val T_COMMIT = 0x83
@@ -160,6 +166,29 @@ object MeshTerm {
  * One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector, [cwd] is where
  * the shell is (version 6; empty from a version-5 host, which does not send the field at all).
  */
+/**
+ * One row of [TermMessage.Marks]: a shell and the word about it.
+ *
+ * [kind] is [MeshTerm.DONE] when an agent finished a turn and [MeshTerm.ATTENTION] when a shell
+ * wants a look. The note a tailnet buzz may carry is not sent over the radio, where the budget is
+ * records and a row label is enough.
+ */
+data class MarkEntry(val id: String, val kind: Int)
+
+/** The two marks, as the app draws them. */
+enum class ShellMark(val wire: Int) {
+    /** An agent finished a turn. */
+    Done(0),
+
+    /** The shell wants a look: a question, an error, a prompt waiting. */
+    Attention(1),
+    ;
+
+    companion object {
+        fun of(wire: Int): ShellMark? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
 data class SessionEntry(
     val id: String,
     val label: String,
@@ -258,6 +287,16 @@ sealed interface TermMessage {
         val origin: Boolean = false,
         val owner: Boolean = false,
     ) : TermMessage
+
+    /**
+     * Host to phone: the marks that are true now, one per shell (version 9).
+     *
+     * The radio route replays rather than pushes: the host cannot reach a phone that is not
+     * connected, and keeping a session up just to be reachable would cost airtime for something the
+     * list already says. Sent on attach, drawn beside the rows, forgotten when the shell is opened.
+     * A host below version 9 never sends it, which reads as "no marks".
+     */
+    data class Marks(val entries: List<MarkEntry>) : TermMessage
 
     /** Phone asks to attach to a shell somebody else holds, displacing them (version 8). */
     data class Takeover(val selector: String) : TermMessage
@@ -414,6 +453,15 @@ fun TermMessage.encode(): ByteArray {
             if (i.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("id too long")
             body.add(i.size.toByte()); i.forEach { body.add(it) }
             MeshTerm.T_CREATED
+        }
+        is TermMessage.Marks -> {
+            for (e in entries) {
+                val i = e.id.encodeToByteArray()
+                if (i.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("mark id too long")
+                body.add(u8(e.kind, "kind"))
+                body.add(i.size.toByte()); i.forEach { body.add(it) }
+            }
+            MeshTerm.T_MARKS
         }
         is TermMessage.Sessions -> {
             body.add(
@@ -612,6 +660,20 @@ class TermDecoder {
                 if (n > MeshTerm.MAX_SELECTOR || body.size - 1 != n) return Parsed.Bad
                 val id = utf8(body.copyOfRange(1, body.size)) ?: return Parsed.Bad
                 ok(TermMessage.Created(id))
+            }
+            MeshTerm.T_MARKS -> {
+                val entries = ArrayList<MarkEntry>()
+                var p = 0
+                while (p < body.size) {
+                    if (body.size - p < 2) return Parsed.Bad
+                    val kind = b(body, p)
+                    val n = b(body, p + 1)
+                    if (n > MeshTerm.MAX_SELECTOR || body.size - (p + 2) < n) return Parsed.Bad
+                    val id = utf8(body.copyOfRange(p + 2, p + 2 + n)) ?: return Parsed.Bad
+                    entries += MarkEntry(id, kind)
+                    p += 2 + n
+                }
+                ok(TermMessage.Marks(entries))
             }
             MeshTerm.T_SESSIONS -> {
                 if (body.isEmpty()) return Parsed.Bad

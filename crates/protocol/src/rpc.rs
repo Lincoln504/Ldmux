@@ -55,6 +55,12 @@ pub mod method {
     pub const MESH_STATUS: &str = "mesh.status";
     pub const MESH_PAIRING: &str = "mesh.pairing";
     pub const MESH_PRESET: &str = "mesh.preset";
+    /// Ring the phone about a shell: `{"session", "kind": "attention" | "done", "note"}`.
+    ///
+    /// A **mark in the app's shell list**, not a write: it touches no claim, no pty and no output.
+    /// The shell names itself, so a process inside one sends it with no argument at all
+    /// (`$LDMUX_SESSION_ID`, set by `session_spawn_env`).
+    pub const BUZZ: &str = "buzz";
 }
 
 /// A device identity, so two devices can be told apart in a message about a
