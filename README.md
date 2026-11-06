@@ -26,6 +26,26 @@ over a Unix socket. There is no tmux and no second session layer.
 Only one phone talks to one desktop at a time. Whichever device holds a shell owns it,
 and a second device that wants it is told so and offers to take it back.
 
+<p align="center">
+  <img src="docs/media/02-terminal.png" width="30%" alt="a shell on the phone, over the tailnet">
+  <img src="docs/media/03-selection.png" width="30%" alt="selecting text in the terminal">
+  <img src="docs/media/01-launcher-row.png" width="33%" alt="a shell started from the phone: send to desktop, close">
+</p>
+
+The phone opens shells as well as using them: a shell started from the app is marked on
+its row, can be sent to a desk window on the host, and can be closed from the phone. The
+row on the right is one of those.
+
+**What each mode is for.** The tailnet is the fast one and the one to use when a network
+is there: a WebSocket, a local terminal emulator, and scrolling with momentum like any
+other terminal app. The radio modes exist for when there is no network at all. `live`
+sends each keystroke as you type, which is what you want for a quick command on a link
+you trust. `batch` collects your typing and sends it when you press `sync`, so a long
+command costs one transmission instead of forty; it is forced on a public channel, where
+the airtime is shared and every keystroke would otherwise be a broadcast. On the radio the
+view moves by the scroll pad's buttons only — a scroll there is a transmission, and a fling
+would spend airtime on movement nobody asked for.
+
 ## Getting it running on the host
 
 Needs Linux x86_64, systemd (user units), and nix for the binaries.
