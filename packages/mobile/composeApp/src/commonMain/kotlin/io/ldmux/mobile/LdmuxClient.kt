@@ -686,6 +686,13 @@ class LdmuxClient(private var config: LdmuxConfig) {
             }
             "sessions" -> {
                 _sessions.value = parseSessions(root["sessions"], deviceId)
+                // **A mark dies with its shell.** The table the host sends is bounded by shells that
+                // exist, and a list that no longer names one means its mark can never be drawn again
+                // — keeping it would be a row-shaped ghost if the id were ever reused.
+                if (_marks.value.isNotEmpty()) {
+                    val live = _sessions.value.map { it.id }.toSet()
+                    _marks.value = _marks.value.filterKeys { it in live }
+                }
                 appLog("sessions parsed=${_sessions.value.size} attachable=${_sessions.value.count { it.attachable }}")
             }
         }

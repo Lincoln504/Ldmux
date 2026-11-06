@@ -340,6 +340,8 @@ suite (574 cases) green.
 | 17.64 | `ldmux terminal --exec` passed `--class ""`, so a person's own window appeared as `alacritty --class  -e …` with a class the window manager cannot match | FIXED — an empty class drops the flag and its value together, with tests for alacritty, wezterm and kitty |
 | 17.65 | The mesh launcher's retry loop (`launcher()` until a session exists) was unbounded, so a link that never came up asked every 400 ms for ever | FIXED — bounded to two minutes, keyed on the view so a change starts it again |
 | 17.66 | `mesh_keys` failed under the test pool about once a day (302 s): its two key tests read the *viewer's* stream, and the takeover the test performs tells the displaced viewer to stop, so the stream was empty whenever the takeover won the race it is allowed to win | FIXED, as a test — they wait on the pane (`capture`), which is the fact they are about |
+| 17.67 | A mark's `--note` never reached the banner (the app built the body from the kind) and the banner's title read a session list captured when the setting was installed, so a shell created later showed its id | FIXED — the note wins when present, and the title is read at post time |
+| 17.68 | A mark for a shell that had ended stayed in the app's map for ever, and would have been drawn on a row if a session id were ever reused | FIXED — the map is pruned against each session list |
 
 ## How to use this
 

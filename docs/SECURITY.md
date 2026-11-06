@@ -53,6 +53,17 @@ What each route protects, what it does not, and where the secrets live. The desi
 - **The host pins the phone's static key** on the first accepted handshake, and the handshake
   timestamp is bounded to a 5 minute window against a stored floor.
 
+## Marks (`ldmux buzz`)
+
+- **Local only.** The verb speaks the control socket (peer uid), so only a process on the host can
+  make one; there is no wire path that lets a phone mark a shell.
+- **No shell content.** A mark is a kind (`done` or `attention`), a session id, and at most 80 bytes
+  the operator wrote, with control bytes stripped and whitespace collapsed before it is stored: a
+  notification title is a place an escape sequence can lie.
+- **Only a running shell**, and a repeat inside five seconds for the same shell is refused, so a
+  loop cannot turn the phone into a bell. The table is bounded (64 shells, 10 minutes) and lives in
+  memory only, so a restart forgets every mark.
+
 ## Grants and defaults
 
 - **Clipboard writes are refused by default.** A program's copy is captured by the app, and the
