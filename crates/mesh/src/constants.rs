@@ -1,4 +1,4 @@
-//! Wire constants. The authority is `docs/MESH-GATEWAY.md`; this file is the
+//! Wire constants. The authority is `docs/ARCHITECTURE.md#4-the-wire`; this file is the
 //! transcription, and the Dart package `meshcore_gateway` is the reference
 //! implementation of it.
 

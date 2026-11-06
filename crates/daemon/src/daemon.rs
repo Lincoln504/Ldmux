@@ -1812,6 +1812,64 @@ impl LdmuxDaemon {
             // The keys a phone needs for the mesh route (QR link `mv=1&mk=…&psk=…`). The control
             // socket is the user's own, as for `remote_info`'s bearer token.
             "mesh.pairing" => crate::mesh::pairing_json(),
+            // **Tune the host's own radio.** The CLI is the only caller, over the owner's control
+            // socket, and the answer is not "requested": it waits for the firmware's verdict so a
+            // refused tuple is a failure the caller can see rather than a silent no-op.
+            "mesh.preset" => {
+                let freq_mhz = params.get("freqMhz").and_then(|v| v.as_f64());
+                let bw_khz = params.get("bwKhz").and_then(|v| v.as_f64());
+                let sf = params.get("sf").and_then(|v| v.as_u64());
+                let cr = params.get("cr").and_then(|v| v.as_u64());
+                let (Some(freq_mhz), Some(bw_khz), Some(sf), Some(cr)) = (freq_mhz, bw_khz, sf, cr)
+                else {
+                    return Err("bad_preset: needs freqMhz, bwKhz, sf and cr".to_string());
+                };
+                let want = (
+                    (freq_mhz * 1000.0).round() as u32,
+                    (bw_khz * 1000.0).round() as u32,
+                    sf as u8,
+                    cr as u8,
+                );
+                let Some(runtime) = crate::mesh::MeshRuntime::global() else {
+                    return Err("mesh is disabled: no radio is configured".to_string());
+                };
+                if !runtime.request_preset(want.0, want.1, want.2, want.3) {
+                    return Err("the mesh link is not accepting requests".to_string());
+                }
+                // Wait for the link task to have applied it, or for the radio to refuse.
+                // Inside the CLI's `daemon_call` timeout (5 s), or the caller gives up before the
+                // answer exists — which is exactly how the first version of this failed.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3_500);
+                loop {
+                    let v = crate::mesh::status_json();
+                    let applied = v
+                        .get("radioPreset")
+                        .and_then(|p| p.as_array())
+                        .map(|p| {
+                            p.len() == 4
+                                && p[0].as_u64() == Some(u64::from(want.0))
+                                && p[1].as_u64() == Some(u64::from(want.1))
+                                && p[2].as_u64() == Some(u64::from(want.2))
+                                && p[3].as_u64() == Some(u64::from(want.3))
+                        })
+                        .unwrap_or(false);
+                    if applied {
+                        return Ok(serde_json::json!({ "ok": true, "radioPreset": v["radioPreset"] }));
+                    }
+                    if let Some(e) = v.get("lastError").and_then(|e| e.as_str())
+                        && !e.is_empty()
+                    {
+                        return Ok(serde_json::json!({ "ok": false, "detail": e }));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "detail": "the radio did not confirm the change in time",
+                        }));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+            }
             "ping" => Ok(serde_json::json!({
                 "pong": true,
                 "version": ldmux_protocol::rpc::DAEMON_PROTOCOL_VERSION,

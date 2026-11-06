@@ -1,5 +1,4 @@
-//! The ldmux attach client: the desktop-window client (plan §3.9; "plan" in
-//! these comments is `docs/archive/RUST-PORT-PLAN.md`).
+//! The ldmux attach client: the desktop-window client.
 //!
 //! In production it is `alacritty -e ldmuxd attach <id>`. Its stdio **is**
 //! alacritty's pty (it opens no pty pair of its own — a nested one would double

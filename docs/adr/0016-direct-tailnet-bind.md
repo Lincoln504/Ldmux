@@ -4,7 +4,7 @@
 
 - **Date:** 2026-09-27
 - **Supersedes:** ADR-0005 (loopback bind + `tailscale serve`)
-- **Related:** ADR-0017 (QR pairing), `docs/REMOTE.md`, `deploy/ldmux.service`
+- **Related:** ADR-0017 (QR pairing), `docs/ARCHITECTURE.md#4-the-wire`, `deploy/ldmux.service`
 
 ## Context
 

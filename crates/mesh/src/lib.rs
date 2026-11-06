@@ -1,6 +1,6 @@
 //! The L2 MeshMore gateway contract.
 //!
-//! This crate is the daemon's side of the tunnel that `docs/MESH-GATEWAY.md`
+//! This crate is the daemon's side of the tunnel that `docs/ARCHITECTURE.md#3-layers`
 //! describes. It owns two things and nothing else:
 //!
 //!   * the frame format ([`frame`], [`messages`]), frozen byte for byte; and

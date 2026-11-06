@@ -2,7 +2,7 @@
 
 **Status:** Superseded by [ADR-0018](0018-session-layer.md) (2026-10-04). Kept as the record of the survey.
 
-> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > Superseded by ADR-0018, which is the decision that replaced it.
 >
@@ -11,7 +11,7 @@
 
 - **Date:** 2026-09-19
 - **Supersedes:** nothing
-- **Related:** ADR-0001 (transport), ADR-0003 (session lifecycle), `docs/archive/TMUX-DEPENDENCY.md`
+- **Related:** ADR-0001 (transport), ADR-0003 (session lifecycle),
 
 ## Context
 
@@ -30,8 +30,7 @@ found and why it is **not** being built.
 ## The investigation
 
 Six systems that solve this problem were examined: **dtach**, **abduco**, **mosh**,
-**Zellij**, **VS Code's pty host**, and **WezTerm's mux server**. Full detail in
-`docs/archive/TMUX-DEPENDENCY.md` §9.
+**Zellij**, **VS Code's pty host**, and **WezTerm's mux server**. Full detail in §9.
 
 **Every one of them uses the same shape**: a long-lived supervisor process owns the PTY
 master file descriptors, and clients attach over a Unix socket and reattach after a
@@ -76,7 +75,7 @@ to five times and loses the sessions each time. WezTerm has no persistence at al
    wrote would either hold sessions only in memory (crash = loss, like all six) or
    introduce a persistence mechanism that is its own project.
 
-4. **The transport question is separable and cheaper.** `docs/archive/TMUX-DEPENDENCY.md` §8
+4. **The transport question is separable and cheaper.** §8
    measured `pipe-pane` and found it byte-verbatim, lossless and bounded, so the
    maintainability argument that motivated "build our own" can be answered by replacing
    *control mode* with a pipe — 595 lines deleted — without touching PTY ownership at all.
@@ -94,7 +93,7 @@ Stated so the decision can be falsified rather than merely believed:
 
 ## Consequences
 
-- The dependency is accepted deliberately, not by accident. `docs/archive/TMUX-DEPENDENCY.md` §4
+- The dependency is accepted deliberately, not by accident. §4
   records what it costs and what has already been paid for it.
 - The keeper design is documented but **not planned**, and no work is scheduled from it.
   A future implementer has the six-system survey and the detach-buffering table, which is

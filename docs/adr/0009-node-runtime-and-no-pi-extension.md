@@ -47,7 +47,7 @@ extension and everything that existed only to serve it.**
   Node's; only the matcher vocabulary is local, and it is deliberately small
   enough to read in one sitting.
 - **One production dependency: `ws`.** Node has a WebSocket *client* but no
-  server, and the remote transport (`docs/REMOTE.md`) is a server. `ws` is the
+  server, and the remote transport (`docs/ARCHITECTURE.md#4-the-wire`) is a server. `ws` is the
   reference implementation; hand-rolling RFC 6455 would have traded a dependency
   for a protocol-implementation risk in the one place where a mistake is a
   security bug.

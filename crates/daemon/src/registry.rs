@@ -7,7 +7,7 @@
 //! - `reconcile` marks vanished terminal-backed sessions dead and reports
 //!   orphans.
 //!
-//! JSON (not SQLite) for the single-user v1 — see docs/SPEC.md §5.3. Types
+//! JSON (not SQLite) for the single-user v1, as `docs/ARCHITECTURE.md#1-components` says. Types
 //! come from the protocol crate, so the daemon, CLI, and (post-port) every
 //! consumer share one contract.
 //!

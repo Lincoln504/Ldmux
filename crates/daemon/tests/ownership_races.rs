@@ -37,7 +37,7 @@ async fn send(ws: &mut Ws, msg: serde_json::Value) {
 async fn first_of(ws: &mut Ws, types: &[&str]) -> Option<serde_json::Value> {
     // Six seconds, not 1.5: this is a correctness wait, not a latency budget. Two attaches
     // that arrive together are resolved under the daemon-wide lock, and that lock is still
-    // held across keeper round trips (defect 5 in `docs/separation/02-DEFECTS-LDMUX.md`), so
+    // held across keeper round trips (defect 5, `docs/RELEASE-AUDIT.md`), so
     // the loser's `owned` frame can arrive seconds after the winner's `caps`. With a 1.5 s
     // window this failed two runs in three and passed with six seconds five times in five,
     // which measures the latency rather than the invariant the test is named for. When the

@@ -2,7 +2,7 @@
 
 **Status:** Superseded by [ADR-0018](0018-session-layer.md) (2026-10-04). Kept as history.
 
-> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > The replacement: one framed binary protocol the project owns (ADR-0016 for the
 > remote half), with the keeper speaking it over a Unix socket. Control mode's
@@ -36,7 +36,7 @@ Scratch tmux server `-L ldmux-probe`, `x 100x30`, `window-size manual`:
 | Live `%output` over a pipe | `%output %0 echo …\015\012`, ANSI preserved. |
 | `refresh-client -f pause-after=2` | Client lists as `control-mode,pause-after=2`; output switches to `%extended-output %0 <age_ms> : <data>`. |
 | `window-size manual` | Control client reports `80x`, window stays `100x30` — **no reflow**. |
-| Real **Node 1.3.9** `Node.spawn([... "-C","attach"], {stdin:"pipe",stdout:"pipe"})` | **Works end to end**; parsed `%extended-output`; correct bytes. |
+| Real **Node 1.3.9** `Node.spawn([.. "-C","attach"], {stdin:"pipe",stdout:"pipe"})` | **Works end to end**; parsed `%extended-output`; correct bytes. |
 | Burst (`seq 1 30000`) via Node | ~383 KB in ~255 ms (≈1.5 MB/s), 184 `%extended-output` frames, no stalls; ~0 tmux CPU idle. |
 | `capture-pane -p -e` cost | ~3.1 ms/call (spawn overhead dominates). |
 

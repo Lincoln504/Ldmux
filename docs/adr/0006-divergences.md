@@ -2,7 +2,7 @@
 
 Status: Accepted (§2 superseded by [ADR-0018](0018-session-layer.md))
 
-> Amended (2026-10-04, D4). The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> Amended (2026-10-04, D4). The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > §2 in particular is inverted. It said ldmux would not own a PTY layer and
 > would keep tmux's grid. The port does own both: `crates/keeper` allocates the
@@ -78,6 +78,6 @@ must be revised. The divergence is intentional today, not an oversight.
 
 - Reviews that expect a REST API, a SQLite store, an exclusive lock, or a second
   renderer will find none of them by design. The shipped surface is in
-  `docs/SPEC.md` §5.4, and the reasoning is here.
+  `docs/ARCHITECTURE.md` §5.4, and the reasoning is here.
 - Any change that adds a second session layer, a second wire format, or a second
   tailnet node requires a superseding ADR.

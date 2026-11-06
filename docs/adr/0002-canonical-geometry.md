@@ -2,7 +2,7 @@
 
 **Status:** Superseded by [ADR-0018](0018-session-layer.md) (2026-10-04); the keeper is now the canonical geometry. Kept as history.
 
-> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Superseded (2026-10-04, D4).** The tmux session layer this ADR decided on is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > The keeper is now the canonical geometry: a claim hands the size to the device
 > that holds the shell, and `protocol::clamp_pane_size` bounds it.
@@ -26,7 +26,7 @@ one mobile with an exclusive lock, precisely to avoid geometry fights.
   pinch); it **never** resizes the tmux pane and never calls `refresh-client -C`.
 - There is no resize message at all: the client scales the canonical grid in
   CSS and sends no geometry (the v0.1 `RESIZE` message was cut — see
-  `docs/SPEC.md` §6.2).
+  `docs/ARCHITECTURE.md` §6.2).
 - Independent per-client sizes are only available via **grouped sessions**
   (`new-session -t`), which is a separate, explicitly non-synced mode; out of scope.
 

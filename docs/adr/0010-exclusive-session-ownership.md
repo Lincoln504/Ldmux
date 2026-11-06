@@ -2,7 +2,7 @@
 
 **Status:** Accepted; supersedes ADR-0006 §1; implemented in `crates/daemon/src/ownership.rs`
 
-> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > The rule is unchanged and still implemented (`crates/daemon/src/ownership.rs`).
 > One sentence in it is now false — the note at line 116 about the *tmux* pane

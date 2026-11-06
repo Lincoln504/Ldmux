@@ -59,7 +59,7 @@ class TerminalController(
     /**
      * The repaint cadence, which follows the measured round trip. A phone should
      * not paint faster than the link can answer, and it should slow down rather
-     * than queue up when the link is bad (docs/PREDICTIVE-ECHO.md, phase 3).
+     * than queue up when the link is bad.
      */
     private val pacing = FramePacing()
 
@@ -496,8 +496,8 @@ class TerminalController(
      * delays *input*, which is the one thing that must stay responsive. The
      * first frame after an idle moment paints immediately (so an echoed
      * keystroke is not delayed); anything arriving inside the window is
-     * coalesced into the next one. `dooboxes` calls the adaptive version of
-     * this an MVP requirement for exactly this reason (see docs/PREDICTIVE-ECHO.md).
+     * coalesced into the next one. The adaptive version of this is an MVP
+     * requirement for exactly this reason.
      */
     private fun scheduleRender() {
         // The window is the link's, not a constant: half a round trip is the

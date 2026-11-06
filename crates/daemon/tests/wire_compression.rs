@@ -7,7 +7,7 @@
 //!    what it can (`*_no_context_takeover`, `client_max_window_bits`) and declines
 //!    what it cannot (`server_max_window_bits` under 15). An existing client that
 //!    sends no `Sec-WebSocket-Extensions` sees today's bytes exactly.
-//! 2. **The gain.** The workloads of `docs/WIRE-COST.md`, byte-counted on the wire
+//! 2. **The gain.** The workloads of `docs/ARCHITECTURE.md#9-airtime`, byte-counted on the wire
 //!    with and without the extension. The floors are well under what is measured,
 //!    so they catch the extension silently turning off or the dictionary being
 //!    reset per message, not noise. Run with `--nocapture` for the table.

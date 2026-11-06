@@ -10,9 +10,7 @@
 //! process (a library) and to run as a binary.
 //!
 //! New (no TS source of record): the keeper does not exist in the TS tree.
-//! The design of record is `docs/archive/RUST-PORT-PLAN.md` §3.2/§3.3/§3.5
-//! ("plan" in the comments of this crate means that file); the current state is
-//! `docs/SPEC.md` and `docs/STATE.md`.
+//! The design of record is `docs/ARCHITECTURE.md`, sections 1, 3 and 8.
 
 mod emulator;
 pub mod scope;
@@ -1131,7 +1129,7 @@ impl Keeper {
         // global `ChildReaper` would reap the child before our raw `waitpid` in
         // `reap()` could, so a natural shell exit was never reported dead
         // (only a `Kill` set it). See the 2026-09-28 finding in
-        // docs/archive/RUST-PORT-LOG.md.
+        // see `docs/ARCHITECTURE.md#8-failure-modes`.
         let slave_in = slave.try_clone()?;
         let slave_out = slave.try_clone()?;
         let slave_err = slave.try_clone()?;

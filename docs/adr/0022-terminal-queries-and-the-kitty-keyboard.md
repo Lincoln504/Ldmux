@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-10-24).
 
 - **Date:** 2026-10-24
-- **Related:** ADR-0001 (the sanitizer), ADR-0013 (key names), `docs/SPEC.md` §5,
+- **Related:** ADR-0001 (the sanitizer), ADR-0013 (key names), `docs/ARCHITECTURE.md` §5,
   `crates/keeper/src/emulator.rs`, `crates/daemon/src/stream.rs`,
   `packages/mobile/composeApp/src/commonMain/kotlin/dev/ldmux/mobile/Modifiers.kt`
 

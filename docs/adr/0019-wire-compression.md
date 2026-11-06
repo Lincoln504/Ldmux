@@ -5,7 +5,7 @@
 ## Context
 
 The TypeScript daemon negotiated `permessage-deflate` (RFC 7692) on the remote
-socket and `docs/WIRE-COST.md` measured 14.8x on terminal output with it. The Rust
+socket and `docs/ARCHITECTURE.md#9-airtime` measured 14.8x on terminal output with it. The Rust
 daemon dropped that silently: tungstenite has no deflate, so the phone's client
 (OkHttp, which offers the extension on every connection) has been getting raw
 bytes since the port. The cost is real on a phone link: `ls -laR` is ~420 KB of
@@ -95,7 +95,7 @@ shell's real output is KB/s, so 3. Under a `yes` flood the compressor does 200 M
 against a keeper that produces less than that through its emulator, and the 1.3 ms
 worst message is bounded work per message on the blocking pool.
 
-**The threshold** (mean wire size of consecutive 16..1024-byte fragments of `ls`
+**The threshold** (mean wire size of consecutive 16.1024-byte fragments of `ls`
 output, as a fraction of plain; same script, `threshold_report`): in a *warm* stream
 compression wins at every size on repetitive text (0.52 at 16 B, 0.18 at 1 KB), but
 the first message after a reconnect has an empty dictionary: **cold** it is 1.05 at
@@ -161,6 +161,6 @@ already below any phone RTT, so the interval was not changed.
   negotiation, an inflation bomb), the existing client tests (all tungstenite
   clients, unchanged and passing), and the independent-client run above.
 - A compressor holds a few hundred KB of state per connection (64 connections at most; not measured precisely).
-- The wire contract for existing clients is unchanged. `docs/WIRE-COST.md`'s
-  provenance note and `docs/REMOTE.md` should say the Rust daemon negotiates
+- The wire contract for existing clients is unchanged. `docs/ARCHITECTURE.md#9-airtime`'s
+  provenance note and `docs/ARCHITECTURE.md#4-the-wire` should say the Rust daemon negotiates
   permessage-deflate again, with the table above in place of the TypeScript numbers.

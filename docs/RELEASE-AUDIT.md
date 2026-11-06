@@ -8,8 +8,8 @@ not a checklist of virtues. Status is one of:
 - **OK** — checked and found correct, with what was checked.
 - **UNKNOWN** — plausible, not yet investigated. Every UNKNOWN is a to-do.
 
-This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECORD.md`,
-`docs/MOBILE-UX-AUDIT.md`, `docs/separation/02-DEFECTS-LDMUX.md`, `docs/DESKTOP-RESIZE.md`.
+This is the map. The design it audits is `docs/ARCHITECTURE.md`, and the decisions it
+implements are in `docs/adr/`.
 
 ## 1. Build and release
 
@@ -20,8 +20,8 @@ This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECOR
 | 1.3 | No path produces a bundle | FIXED `b44a8de` |
 | 1.4 | An unsigned release builds silently and is rejected at upload | FIXED — the task now fails instead |
 | 1.5 | `applicationId` asserts a domain the project does not own | FIXED `4639f0c` (`io.ldmux.mobile`) |
-| 1.6 | The bundle has never actually been built, so "it will build" is an assumption | **UNKNOWN** — needs one run with a throwaway keystore |
-| 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | OPEN |
+| 1.6 | The bundle has never actually been built, so "it will build" is an assumption | FIXED 2026-11-05: a signed AAB was produced with a throwaway 4096-bit key, with the licence texts inside it, and the key was then deleted. The real upload key is the operator's to supply |
+| 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | OPEN by decision: CI runs the Rust gate on every branch, and the Android artifact is built locally |
 | 1.8 | R8 is off; a release carries unused code | OK for 0.1, decide later |
 | 1.9 | The native session library is rebuilt by a Gradle task, so a stale `.so` is possible | OK — `buildSessionAndroid` runs before packaging |
 
@@ -79,7 +79,7 @@ This is the map. The evidence lives in the audits it cites: `docs/STATE-OF-RECOR
 | 6.5 | Preset mismatch between the two ends | OPEN — the decision in `05-RADIO-TUPLE.md` |
 | 6.6 | L3 handshake retried with fresh keys, bounded at 3 tries | OK |
 | 6.7 | Radio unplugged mid-session | OK — transport state drives the loop |
-| 6.8 | Public channel forces manual sync | OK — ADR-0026 |
+| 6.8 | Public channel forces batch mode | OK — ADR-0026 |
 | 6.9 | Multi-hop paths unimplemented; a relayed peer is unreachable | OPEN — named, not hidden |
 
 ## 7. The session and terminal data path
@@ -200,3 +200,103 @@ Audited 2026-11-05. The picture is better than expected: almost everything is bo
 Work top-down by status: **OPEN** and **UNKNOWN** are the release's actual to-do list. A
 section with every row FIXED or OK is done and should not be re-litigated without new
 evidence.
+
+## Appendix A: store submission
+
+Identity is `io.ldmux.mobile`, settled when the project took `ldmux.io`. Play does not verify
+the domain, but the id can never change after the first upload, so the reverse-domain id follows
+the domain the project owns. Namespace, manifest and applicationId agree.
+
+What the console needs that does not exist yet: a hosted privacy policy URL (the project owns
+`ldmux.io`, so `https://ldmux.io/privacy` is the natural home), a feature graphic at 1024 by
+500, phone screenshots, and a 512 by 512 icon. The launcher icon in `res/` is an in-app icon,
+not a store asset.
+
+### Privacy policy text
+
+> ldmux collects nothing.
+>
+> The app connects only to a machine you name yourself: your own computer, reached over a
+> private tailnet or over a radio link. There is no account, no sign-in, and no server run by
+> the developer.
+>
+> - No analytics, no crash reporting, no telemetry. The app contains no such SDK, so there is
+>   nothing to report and nothing to opt out of.
+> - No data leaves your device except to your own machine. What you type is sent to the host
+>   you paired with. It is not sent anywhere else.
+> - The pairing token is stored on the device and excluded from backup, so the system cannot
+>   move it off the phone.
+> - The camera is not used. Pairing scans a QR code through Google's Play services code
+>   scanner, which decodes on the device and sends nothing to the developer.
+> - Speech is optional and separate. Dictation uses Android's own speech recogniser, and if the
+>   device's recogniser is cloud-based, audio may go to that provider. That is the device's
+>   setting, not something this app controls, and the app says so when it happens.
+
+### Data safety form
+
+| Question | Answer | Why |
+|---|---|---|
+| Does the app collect or share user data | No | no analytics, no crash reporting, no account, no developer server |
+| Is data encrypted in transit | Not applicable | the only traffic is to a host the user chose, and the developer is not a party to it |
+| Can users request deletion | Not applicable | the developer holds nothing |
+
+The answer is defensible because it is true of the code: an audit of the dependency list finds
+no analytics or crash SDK.
+
+### Permission justifications
+
+| Permission | Declaration |
+|---|---|
+| `BLUETOOTH_SCAN` with `neverForLocation` | finds the phone's own MeshCore radio, never used to derive location, so no location access is requested on Android 12 or later |
+| `BLUETOOTH_CONNECT` | connects to that radio |
+| `BLUETOOTH`, `BLUETOOTH_ADMIN`, `ACCESS_FINE_LOCATION` at `maxSdkVersion=30` | the same radio on Android 8.0 to 11, where a scan requires location permission |
+| `RECORD_AUDIO` | dictation, turning speech into text at the prompt, requested when the microphone is first used |
+| `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` | keeps a connection alive for a 45 second grace after the user switches away, so a quick switch does not drop the open shell |
+| `POST_NOTIFICATIONS` | the service's own notification, and denial is not fatal |
+| `WAKE_LOCK` | partial, bounded, released with the service |
+| `INTERNET`, `ACCESS_NETWORK_STATE` | the connection to the host |
+
+### Listing copy
+
+Short description: a terminal for a shell on your own Linux machine, over tailnet or radio.
+
+Full description: ldmux is a terminal for a shell that runs on a Linux machine you own, not on
+the phone. The shell lives on the host in a keeper process that outlives every client, so
+putting the phone down, losing the network or restarting the app leaves the shell and its
+scrollback intact. It is a terminal, so `vim`, `ssh`, `top` and anything else your shell can run
+work, with the alternate screen, mouse reporting, bracketed paste and scrollback intact. It is
+reachable over your own tailnet, which needs no server of ours because there is no server of
+ours, or over a LoRa radio when there is no network at all. The same shell can be on the phone
+and in a desk window at once. Nothing is collected. What you need is a Linux machine with a
+systemd user session and the daemon installed, Tailscale for the network route, and two
+MeshCore companion radios for the radio route.
+
+Content rating: no user-generated content is hosted, no ads, no purchases, no gambling, no
+violence. The app is a development tool for adults, and the questionnaire answers follow from
+that.
+
+## Appendix B: open decisions
+
+None of these are defects. Each is a decision that changes what ships.
+
+1. The radio tuple the app compiles in. The default is 910.525 MHz, 500 kHz, SF7, CR5, and the
+   host radio here runs 914.25, 500, SF8, CR5, so a fresh install cannot reach this host without
+   the user setting the tuple by hand. The options are: make the compiled default match the
+   deployment, make the deployment match the default, ship no default and adopt what the radio
+   reports, or adopt the public MeshCore preset at 910.525 and 62.5 kHz, which costs about nine
+   times the airtime. The recommendation on record is to adopt what the radio reports and treat
+   the physical tuple as a deployment choice.
+2. Whether the host radio is a shipped feature. The daemon owns it when `LDMUX_MESH_SERIAL` is
+   set, and nothing installs or provisions it, so today the route works for an operator who
+   reads `docs/ARCHITECTURE.md` section 11 and not for a new user.
+3. The upload keystore and the store assets, which are the operator's to supply.
+
+## Appendix C: known unfinished
+
+- A desk window displaced by a mesh claim is not covered by a test. The daemon sends the notice
+  and the same message is proven for a WebSocket claim, but the mesh variant has no test.
+- A shell created from a phone is recorded with `createdBy` set to `phone`, and rows keep their
+  actions across an app restart because of it. There is no test that asserts that round trip.
+- Dictation depends on the device's speech recogniser, which may be cloud-based. The app says
+  so, and nothing here can change it.
+- Multi-hop path recovery on the radio route is not implemented.

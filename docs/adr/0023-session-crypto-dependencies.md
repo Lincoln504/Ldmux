@@ -3,13 +3,13 @@
 **Status:** Accepted (2026-10-28). Implements the dependency decision ADR-0020 deferred
 ("`snow` is not on the AGENTS.md dependency allowlist: adding it needs a decision then").
 
-- **Related:** ADR-0025 (what runs inside the session), ADR-0020 (mesh link security), `docs/MESH-GATEWAY.md`, `docs/STATE.md`
+- **Related:** ADR-0025 (what runs inside the session), ADR-0020 (mesh link security), `docs/ARCHITECTURE.md#4-the-wire`, `docs/RELEASE-AUDIT.md`
 - **Scope:** `crates/session` only. Nothing else in the workspace depends on these crates.
 
 ## Context
 
 ADR-0020 specifies `Noise_IKpsk2_25519_ChaChaPoly_SHA256`. The project rule is not to hand-roll
-cryptography, and `docs/STATE.md` listed the choice of a Noise implementation as the first
+cryptography, and `docs/RELEASE-AUDIT.md` listed the choice of a Noise implementation as the first
 missing piece of the L3 session. Facts checked on 2026-10-28:
 
 - No Noise or curve crate was vendored (`ls ~/.cargo/registry/cache` held neither `snow` nor any
@@ -41,7 +41,7 @@ Add, to `crates/session` only:
 **Not `ring`.** ADR-0020 chose SHA-256 because "snow's ring resolver offers SHA-256/512 but not
 BLAKE2". That reasoning is stale: snow's own default resolver offers `HashChoice::SHA256`
 (`src/resolvers/default.rs`). The suite stays `SHA256` as decided, but the resolver is the
-RustCrypto one, not ring. snow's `std` feature turns `ring` on (`std = [..., "ring/std", ...]`),
+RustCrypto one, not ring. snow's `std` feature turns `ring` on (`std = [.., "ring/std",..]`),
 which would add a C/assembly build and the Windows import crates; leaving `std` off avoids that,
 and the resulting tree has no `ring` (`cargo tree -p ldmux-session | grep -c ring` is 0).
 
@@ -76,7 +76,7 @@ and `subtle` carry it. Both are permissive; neither was previously in the lockfi
   mobile client has no Noise implementation, and no maintained KMP `commonMain` handshake library
   exists (surveyed 2026-10-28). The options are a Kotlin implementation of the same suite, JNI
   over this crate, or a different suite; each is a product-level decision. Until one is taken,
-  `MESH_SESSION_BUILT` in `packages/mobile/.../mesh/MeshRoute.kt` stays `false` and the route
+  `MESH_SESSION_BUILT` in `packages/mobile/../mesh/MeshRoute.kt` stays `false` and the route
   reports itself unfinished.
 
   **Update 2026-10-28: taken.** The architecture already fixed it (one implementation of the
@@ -107,7 +107,7 @@ and `subtle` carry it. Both are permissive; neither was previously in the lockfi
 ## Review, 2026-11-03
 
 The choice and the code were audited against the Noise Protocol Framework specification and RFC
-8439; `docs/MESH-CRYPTO.md` is the record. The pattern stands: `IKpsk2` with the pairing PSK is the
+8439; `docs/ARCHITECTURE.md#7-security` is the record. The pattern stands: `IKpsk2` with the pairing PSK is the
 right shape for a pinned two-node link, `NNpsk0`-style admission would be the alternative if
 enrolment ever moved onto the wire, and `KK` is rejected because it loses the initiator's ephemeral
 and with it any pretence of forward secrecy from the phone's side.

@@ -8,12 +8,12 @@ and the daemon's `mesh.status`, verified against a real radio on 2026-10-28.
 
 - **Date:** 2026-10-06
 - **Related:** ADR-0017 (QR pairing), ADR-0016 (direct tailnet bind), ADR-0010
-  (exclusive ownership), ADR-0019 (wire compression; referenced only), `docs/MESH-TRANSPORT.md`
+  (exclusive ownership), ADR-0019 (wire compression; referenced only), `docs/ARCHITECTURE.md#3-layers`
 - **Scope:** MeshCore is the target. Meshtastic is out of scope here.
 
 ## Context
 
-`docs/MESH-TRANSPORT.md` investigates a terminal over MeshCore. Its earlier text said the
+`docs/ARCHITECTURE.md#3-layers` investigates a terminal over MeshCore. Its earlier text said the
 mesh profile shares "the entire security model" with the WebSocket path. That is false
 over radio. The WebSocket path is plain `ws://` inside the tailnet (ADR-0016): WireGuard
 supplies confidentiality, integrity and peer authentication, and the bearer token only
@@ -310,7 +310,7 @@ the standard capacity table recalled from memory, **unverified**. The tailnet ho
 restriction in ADR-0017 does not apply to mesh pairing. As ADR-0017 notes for the token,
 anyone who photographs the code holds the PSK.
 
-**Update 2026-10-29: the sentence "the tailnet host restriction does not apply to mesh pairing" is now true of the implementation, and was not before.** Every link carried the daemon's tailnet address and bearer token, and a link without them was refused, so a phone that never reaches the tailnet was handed a token that grants full shell control and cannot use it, and `isPaired` (the tailnet pairing) still gated the mesh route. `ldmux code|pair --mesh-only` now makes `ldmux://pair?v=1&name=...&mv=1&mk=...&psk=...[&mr=...]` with no `host` and no `token`; the parser takes a link with neither only when it carries a complete set of mesh keys, and refuses one with `host` or `token` alone. The tailnet reader refuses a mesh-only link, so it cannot be mistaken for a tailnet pairing. On the phone, the mesh route no longer requires `isPaired`.
+**Update 2026-10-29: the sentence "the tailnet host restriction does not apply to mesh pairing" is now true of the implementation, and was not before.** Every link carried the daemon's tailnet address and bearer token, and a link without them was refused, so a phone that never reaches the tailnet was handed a token that grants full shell control and cannot use it, and `isPaired` (the tailnet pairing) still gated the mesh route. `ldmux code|pair --mesh-only` now makes `ldmux://pair?v=1&name=..&mv=1&mk=..&psk=..[&mr=..]` with no `host` and no `token`; the parser takes a link with neither only when it carries a complete set of mesh keys, and refuses one with `host` or `token` alone. The tailnet reader refuses a mesh-only link, so it cannot be mistaken for a tailnet pairing. On the phone, the mesh route no longer requires `isPaired`.
 
 **Attacker outcomes.**
 
@@ -426,7 +426,7 @@ evidence.
   table but did not send an uplink record.
 - **ANSWERED: "whether a failed open leaves the counter untouched".** `snow`'s
   `StatelessTransportState` takes the nonce as an argument and holds no counter, so a failed
-  open cannot disturb one (`src/stateless_transportstate.rs`, `read_message(&self, nonce, ...)`).
+  open cannot disturb one (`src/stateless_transportstate.rs`, `read_message(&self, nonce,..)`).
 - **STALE: the ring reasoning in section 2.** "SHA-256 rather than BLAKE2s because snow's ring
   resolver offers SHA-256/512 but not BLAKE2" is true of the ring resolver, but snow's default
   RustCrypto resolver offers SHA256 and is what ADR-0023 uses. The suite is unchanged.

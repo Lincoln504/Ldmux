@@ -64,7 +64,7 @@ pub(crate) const MAX_SCROLLBACK_LINES: usize = 10_000;
 /// The line cap alone retains nothing more than the C API's own default, because
 /// its byte budget binds first (measured: ~1 MB, ~995 rows of 12,000 lines, and
 /// 913 rows of 1,500 even with the line cap raised). The TypeScript's equivalent
-/// history was "10,000 lines, ~40 MB/pane" (`docs/SPEC.md`, tmux `history-limit`),
+/// history was "10,000 lines, ~40 MB/pane" (tmux `history-limit`),
 /// so this is the same history at the same order of cost — and it only fills up
 /// on a session that has actually printed that much.
 pub(crate) const MAX_SCROLLBACK_BYTES: usize = 40 * 1024 * 1024;

@@ -2,7 +2,7 @@
 
 **Status:** Accepted; implemented on Android (`SelectionHandles.kt`, `SystemSelectionHandles.kt`, `SelectionHandlesTest.kt`); iOS not started
 
-> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > The selection format and the two-point handles are unchanged (they are the
 > client's, not the session layer's). Only its `capture-pane` provenance changed.

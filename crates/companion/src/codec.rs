@@ -29,6 +29,14 @@ pub mod codes {
 /// Command codes this crate sends.
 pub mod commands {
     pub const APP_START: u8 = 0x01;
+    /// Tune the radio: `freq u32 LE` (kHz), `bw u32 LE` (Hz), `sf u8`, `cr u8`. The firmware
+    /// validates every one of them and answers `OK` or `ERR_CODE_ILLEGAL_ARG`
+    /// (`MyMesh.cpp:1386-1420`), then saves the prefs and retunes the driver.
+    ///
+    /// The host owns a radio of its own, and until this existed nothing in ldmux could tell it
+    /// what to tune to: the user had to configure it with a different tool while the phone
+    /// configured its own from the app. There is no reason for that asymmetry.
+    pub const SET_RADIO_PARAMS: u8 = 0x0B;
     pub const SYNC_NEXT_MESSAGE: u8 = 0x0A;
     pub const DEVICE_QUERY: u8 = 0x16;
     pub const SEND_RAW_DATA: u8 = 0x41;
@@ -104,25 +112,32 @@ pub struct SelfInfo {
     pub name: String,
 }
 
+/// Time on air for a payload, in milliseconds, from a tuple.
+///
+/// The firmware's own formula, with the 32-symbol preamble used below SF8. **One copy**, because
+/// two callers need it: the radio reporting its own tuple, and a retune computing what the new
+/// tuple will cost before the radio has been asked. A budget computed from a constant rather than
+/// from this is a budget for a radio nobody has.
+pub fn time_on_air_ms(bw_khz: f64, sf: u8, cr: u8, payload_len: usize) -> f64 {
+    let bw_hz = bw_khz * 1000.0;
+    if bw_hz <= 0.0 || sf == 0 {
+        return 0.0;
+    }
+    let sf_f = f64::from(sf);
+    let cr_f = f64::from(cr).max(1.0);
+    // Header is explicit in MeshCore; CRC on. Preamble 32 symbols below SF8.
+    let preamble = if sf < 8 { 8.0 } else { 16.0 };
+    let symbol_ms = (2f64.powf(sf_f)) / bw_hz * 1000.0;
+    let numerator = 8.0 * payload_len as f64 - 4.0 * sf_f + 28.0 + 16.0;
+    let denominator = 4.0 * (sf_f - 2.0 * 0.0);
+    let payload_symbols = 8.0 + (numerator / denominator).ceil().max(0.0) * cr_f;
+    (preamble + 4.25 + payload_symbols) * symbol_ms
+}
+
 impl SelfInfo {
-    /// Time on air for a payload, in milliseconds, from the tuple the radio
-    /// reports. The firmware's own formula, with the 32-symbol preamble used
-    /// below SF8; a budget computed from a constant rather than from this is a
-    /// budget for a radio nobody has.
+    /// Time on air for a payload under the tuple this radio reports.
     pub fn time_on_air_ms(&self, payload_len: usize) -> f64 {
-        let bw_hz = self.radio_bw_khz * 1000.0;
-        if bw_hz <= 0.0 || self.radio_sf == 0 {
-            return 0.0;
-        }
-        let sf = self.radio_sf as f64;
-        let cr = (self.radio_cr as f64).max(1.0);
-        // Header is explicit in MeshCore; CRC on. Preamble 32 symbols below SF8.
-        let preamble = if self.radio_sf < 8 { 8.0 } else { 16.0 };
-        let symbol_ms = (2f64.powf(sf)) / bw_hz * 1000.0;
-        let numerator = 8.0 * payload_len as f64 - 4.0 * sf + 28.0 + 16.0;
-        let denominator = 4.0 * (sf - 2.0 * 0.0);
-        let payload_symbols = 8.0 + (numerator / denominator).ceil().max(0.0) * cr;
-        (preamble + 4.25 + payload_symbols) * symbol_ms
+        time_on_air_ms(self.radio_bw_khz, self.radio_sf, self.radio_cr, payload_len)
     }
 }
 

@@ -158,7 +158,7 @@ internal fun decodeOutputFrame(data: ByteArray): ByteArray? {
  *
  * Control is JSON text frames; terminal output arrives as binary frames with an
  * 8-byte big-endian header (type=0x10 Output, then a u32 length) followed by the
- * payload bytes. See `crates/protocol` and `docs/SPEC.md` §6.
+ * payload bytes. See `crates/protocol` and `docs/ARCHITECTURE.md#4-the-wire`.
  */
 class AttachClient(private val config: LdmuxConfig, private val sessionId: String) {
     /**

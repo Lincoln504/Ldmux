@@ -167,6 +167,28 @@ impl<L: ByteLink> Companion<L> {
         Ok(())
     }
 
+    /// Tune the radio to a tuple, and confirm the firmware took it.
+    ///
+    /// Frequencies are in kHz and bandwidths in Hz, which is what the command carries; the
+    /// firmware's own bounds (150000..2500000 kHz, 7000..500000 Hz, SF 5..12, CR 5..8) are its
+    /// business, and a refusal comes back as an error rather than a silently unchanged radio.
+    pub fn set_radio_params(
+        &mut self,
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+    ) -> Result<(), SessionError> {
+        let mut payload = Vec::with_capacity(11);
+        payload.push(commands::SET_RADIO_PARAMS);
+        payload.extend_from_slice(&freq_khz.to_le_bytes());
+        payload.extend_from_slice(&bw_hz.to_le_bytes());
+        payload.push(sf);
+        payload.push(cr);
+        self.request(&payload, codes::OK, Duration::from_secs(10))?;
+        Ok(())
+    }
+
     /// The next asynchronous frame, if one arrives within `timeout`.
     ///
     /// Pushes are the receive log (`0x88`) and the advert/ack/status family. A

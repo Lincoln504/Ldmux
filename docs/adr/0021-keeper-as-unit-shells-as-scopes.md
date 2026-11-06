@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-10-06). Amends ADR-0015 and ADR-0018 (restart survival no longer rests on `KillMode=process` of the daemon unit).
 
 - **Date:** 2026-10-06
-- **Related:** ADR-0018 (the keeper), `docs/SPEC.md` §4.3, `deploy/ldmux.service`, `deploy/ldmux-keeper.service`
+- **Related:** ADR-0018 (the keeper), `docs/ARCHITECTURE.md` §4.3, `deploy/ldmux.service`, `deploy/ldmux-keeper.service`
 
 ## Context
 
@@ -14,9 +14,9 @@ and every process any shell ever daemonized (a qemu VM, php servers) lived in
 
 - systemd attributed **4.6 GB** (peak **19 GB**, with swap) to the daemon unit;
 - `systemctl --user status ldmux` was a wall of unrelated processes;
-- the journal filled with `Found left-over process ... in control group while starting unit`;
+- the journal filled with `Found left-over process.. in control group while starting unit`;
 - restart survival depended entirely on `KillMode=process`, a property of one unit file
-  (without it a restart killed every session, `docs/DESKTOP-INTEGRATION.md`).
+  (without it a restart killed every session, `docs/ARCHITECTURE.md#6-ownership`).
 
 ## Decision
 
@@ -63,7 +63,7 @@ and every process any shell ever daemonized (a qemu VM, php servers) lived in
 - **`systemd-run --scope -- <shell>` exec'd in the child.** It moves itself and execs,
   so the pid is unchanged (verified on a throwaway scope), but a failure before the exec
   and the shell exiting with the same status are indistinguishable: a
-  `systemd-run ... || exec shell` fallback can start the shell twice, and no fallback
+  `systemd-run.. || exec shell` fallback can start the shell twice, and no fallback
   can start it zero times. Asking for the scope from the parent, on a held child, has
   no such ambiguity.
 - **sd_bus (libsystemd) instead of `busctl`.** Avoids an exec per shell (about 20 ms) but

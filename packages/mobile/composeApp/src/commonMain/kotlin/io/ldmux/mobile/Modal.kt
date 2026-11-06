@@ -218,7 +218,7 @@ private fun LabelledField(
  * A new shell, asked for one way: where.
  *
  * What runs there is not a choice — it is always the host's login shell
- * (docs/SPEC.md §7), the same as `ldmux shell` and everything else that opens
+ * the same as `ldmux shell` and everything else that opens
  * one. A command field here was a second way to start a shell that looked like
  * a way to *choose the program*, and the daemon does not offer that: every
  * shell is the login shell, full stop. Only the directory is worth asking for,

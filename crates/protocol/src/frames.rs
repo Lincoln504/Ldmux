@@ -2,7 +2,7 @@
 //!
 //! Terminal data is binary; control/handshake messages are JSON text. Every
 //! frame shares one canonical 8-byte header — there is exactly ONE frame format
-//! (dooboxes shipped three incompatible ones; we do not repeat that).
+//! (shipping more than one is how a project ends up with three; this does not).
 //!
 //! ```text
 //!   offset  size  field
@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Only `OUTPUT` is emitted by the shipped code; the remaining members are the
-//! reserved vocabulary for later revisions (see docs/REMOTE.md).
+//! reserved vocabulary for later revisions (see docs/ARCHITECTURE.md#4-the-wire).
 //!
 //! Port of `packages/protocol/src/frames.ts` (the TS original, deleted at D4 and
 //! readable at git commit `6b3efb8`; it was unchanged during the port's A/B window). The header layout is byte-exact: the TS

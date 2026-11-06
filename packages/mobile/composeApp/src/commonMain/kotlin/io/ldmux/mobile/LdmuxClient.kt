@@ -366,7 +366,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
      * Open a new session on the host (FR-10). The list refreshes from the reply.
      *
      * There is no `command` here on purpose: every shell this client can ask for is
-     * the host's login shell (docs/SPEC.md §7), never a chosen program, so there is
+     * the host's login shell, never a chosen program, so there is
      * nothing for a caller to pass. `kind = "pi"` is the one exception the daemon
      * still recognises, and it needs no argv either.
      */

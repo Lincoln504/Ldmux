@@ -82,7 +82,7 @@ internal fun helloMessage(config: LdmuxConfig, features: List<String> = emptyLis
  * look like it changed hands), an attach, a fresh snapshot and a rebuilt engine.
  * With it the daemon sends a `caps` + `snapshot` marked `resync` on the same
  * socket, which the client already applies in place. That is the same repair for a
- * fraction of the bytes: it is the one lever `docs/WIRE-COST.md` measures at two
+ * fraction of the bytes: it is the one lever `docs/ARCHITECTURE.md#9-airtime` measures at two
  * orders of magnitude.
  */
 internal val PAGE_FEATURES: List<String> = listOf("inplaceResync")

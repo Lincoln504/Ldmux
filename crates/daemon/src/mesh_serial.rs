@@ -23,7 +23,7 @@
 //!
 //! The budget is computed from the preset the radio reports rather than assumed:
 //! `36 s/hour / airtime(172 bytes)`, which is the 1 % self-imposed policy in
-//! `docs/separation/05-RADIO-TUPLE.md`, not a limit the firmware enforces. The
+//! `docs/RELEASE-AUDIT.md` appendix B, not a limit the firmware enforces. The
 //! firmware has its own governor; this number only keeps LDMUX's meter honest.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -48,6 +48,14 @@ const AIRTIME_BUDGET_MS: f64 = 36_000.0;
 /// The one command the loop has for the radio.
 enum Command {
     Record { seq: u8, record: Vec<u8> },
+    /// Tune the radio, and answer on this channel when the firmware has.
+    SetPreset {
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
 }
 
 /// The radio, seen as a carrier.
@@ -86,6 +94,32 @@ impl SerialCarrier {
 }
 
 impl Carrier for SerialCarrier {
+    async fn set_preset(
+        &mut self,
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+    ) -> Result<(), MeshError> {
+        let (reply, answer) = channel();
+        self.commands
+            .as_ref()
+            .ok_or(MeshError::Closed)?
+            .send(Command::SetPreset {
+                freq_khz,
+                bw_hz,
+                sf,
+                cr,
+                reply,
+            })
+            .map_err(|_| MeshError::Closed)?;
+        match answer.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(MeshError::Unsupported(format!("the radio refused the tuple: {e}"))),
+            Err(_) => Err(MeshError::Timeout("the radio did not answer the retune")),
+        }
+    }
+
     async fn send_record(&mut self, seq: u8, record: &[u8]) -> Result<(), MeshError> {
         let commands = self.commands.as_ref().ok_or(MeshError::Closed)?;
         commands
@@ -174,7 +208,7 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
 /// The radio thread: serve commands and the air until the loop lets go.
 fn serve<L: ByteLink>(
     mut companion: Companion<L>,
-    settings: Settings,
+    mut settings: Settings,
     commands: Receiver<Command>,
     events: async_mpsc::Sender<Result<Event, MeshError>>,
 ) {
@@ -219,6 +253,39 @@ fn serve<L: ByteLink>(
                 {
                     return;
                 }
+            }
+            Ok(Command::SetPreset {
+                freq_khz,
+                bw_hz,
+                sf,
+                cr,
+                reply,
+            }) => {
+                // The firmware validates the tuple and answers OK or an error, so a refusal is
+                // reported rather than leaving the radio silently where it was.
+                let result = companion
+                    .set_radio_params(freq_khz, bw_hz, sf, cr)
+                    .map_err(|e| format!("{e:?}"));
+                if result.is_ok() {
+                    settings.preset = RadioPreset {
+                        freq_mhz: f64::from(freq_khz) / 1000.0,
+                        bw_khz: f64::from(bw_hz) / 1000.0,
+                        sf,
+                        cr,
+                    };
+                    // The airtime estimate follows the new tuple, or the budget keeps measuring
+                    // the radio that is no longer in use.
+                    settings.airtime_ms = ldmux_companion::codec::time_on_air_ms(
+                        settings.preset.bw_khz,
+                        settings.preset.sf,
+                        settings.preset.cr,
+                        RECORD_MAX,
+                    );
+                }
+                let _ = reply.send(result);
+                let _ = events.blocking_send(Ok(Event::Status(status(
+                    &settings, budget, sent,
+                ))));
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {

@@ -1,7 +1,7 @@
 package io.ldmux.mobile
 
 /**
- * Predictive local echo (see docs/PREDICTIVE-ECHO.md).
+ * Predictive local echo.
  *
  * The idea: when the user types, show the character immediately by feeding it to
  * the local emulator, and reconcile against the echo when it comes back — so a
@@ -12,7 +12,7 @@ package io.ldmux.mobile
  * (`key`) are resolved by the server against the pane's real modes and are never
  * predicted, so control characters, arrows, function keys and terminal queries
  * still take the honest round trip. That is the predictable/unpredictable gate
- * dooboxes recorded, enforced by the message split rather than by a table.
+ * established earlier, enforced by the message split rather than by a table.
  *
  * The safety net is that the prediction is *self-correcting*:
  *

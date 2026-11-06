@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-09-14); §1 superseded by [ADR-0011](0011-screen-orientation.md)
 
-> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > The ownership rule (ADR-0010) survives unchanged in shape; what changed is who
 > sizes the pane: the keeper applies the holder's size, not tmux's `window-size`.
@@ -130,8 +130,7 @@ avoid. `RECORD_AUDIO` is requested at first use, never at launch. iOS will use
   (amended 2026-09-27): a pinch lives for as long as that shell's composition
   lives, and the dialog's text size is the default a new shell starts at —
   saving the pinch had made one shell's zoom re-size every other open one.
-- Input latency is unchanged by this ADR. Predictive echo is designed in
-  `docs/PREDICTIVE-ECHO.md`.
+- Input latency is unchanged by this ADR. Predictive echo is designed in.
 
 ## Alternatives rejected
 

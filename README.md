@@ -21,7 +21,7 @@ over a Unix socket. There is no tmux and no second session layer.
 |---|---|---|
 | tailnet | a WebSocket to the daemon, bearer token, reachable only on your tailnet | instant handshake, the default |
 | LoRa live | two MeshCore radios | keystrokes leave as you type |
-| LoRa manual sync | the same radios | typing is held and sent on one action, which is forced on a public channel |
+| LoRa batch | the same radios | typing is collected and leaves as one batch when you send it, which is forced on a public channel |
 
 Only one phone talks to one desktop at a time. Whichever device holds a shell owns it,
 and a second device that wants it is told so and offers to take it back.
@@ -60,7 +60,7 @@ For the radio route both radios have to be on the same frequency, bandwidth, spr
 factor and coding rate, and the same channel key. The host prints its radio's operating
 point when it starts, `ldmux mesh status` reports what it is doing now, and the phone's
 radio panel can read a radio, adopt a public preset, or be given a tuple by hand.
-`docs/MESH-HOST-RADIO.md` walks the host side.
+`docs/ARCHITECTURE.md` section 11 is the whole procedure for the host side.
 
 ## Build and test
 
@@ -81,7 +81,7 @@ The Android release is signed from `packages/mobile/keystore.properties` or from
 `versionCode` comes from `git rev-list --count HEAD`, with `LDMUX_VERSION_CODE` and
 `LDMUX_VERSION_NAME` to override it. A release refuses to package unless both native
 libraries are present for every shipped ABI, and it carries the licence texts that
-`scripts/collect-licenses.sh` collects. `docs/STORE.md` has the listing material.
+`scripts/collect-licenses.sh` collects. `docs/RELEASE-AUDIT.md` appendix A has the listing material and the privacy policy.
 
 The terminal engine is libghostty-vt, built from the single pinned Ghostty commit by a
 nix derivation. `nix develop` exports `LDMUX_VT_LIB_DIR`, so plain `cargo` works inside
@@ -89,16 +89,9 @@ the shell. Outside it, point that variable at a directory holding `libghostty-vt
 
 ## Where to read more
 
-Start with [`docs/STATE-OF-RECORD.md`](docs/STATE-OF-RECORD.md), which is the index: what
-exists, what is deployed, what is open and what is known to be unfinished.
-
-- [`docs/SPEC.md`](docs/SPEC.md) is the software specification.
-- [`docs/PLATFORMS.md`](docs/PLATFORMS.md) says what is supported where, and which claims
-  are verified.
-- [`docs/MESH-STANDALONE.md`](docs/MESH-STANDALONE.md) is the radio route as built, with
-  [`docs/MESH-HOST-RADIO.md`](docs/MESH-HOST-RADIO.md) for the host half.
-- [`docs/RELEASE-AUDIT.md`](docs/RELEASE-AUDIT.md) is the release to-do, aspect by aspect.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the depth: the layers, the wire, the
+  invariants, the security model, the failure modes, and how to bring up the host radio.
+- [`docs/RELEASE-AUDIT.md`](docs/RELEASE-AUDIT.md) is the open work, aspect by aspect, with
+  the store submission material and the decisions still to make.
 - [`docs/adr/`](docs/adr/) holds the decisions and the reasoning behind them.
-- [`docs/archive/`](docs/archive/) is history: the Rust port, the tmux study, the older
-  state registers.
 - [`AGENTS.md`](AGENTS.md) is for agents working in this repo.

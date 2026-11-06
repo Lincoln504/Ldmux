@@ -2,7 +2,7 @@
 
 **Status:** Accepted (2026-09-18); the shell half is now the keeper's
 
-> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018 and `docs/archive/RUST-PORT-LOG.md`.
+> **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
 > Still true as written for the claim half: a claim does not outlive the app. The
 > shell half is now the keeper's, not tmux's.

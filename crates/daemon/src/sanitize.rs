@@ -1,4 +1,4 @@
-//! Stateful output sanitizer for pane bytes (ADR-0001, docs/archive/TRANSPORT.md §5.6).
+//! Stateful output sanitizer for pane bytes (ADR-0001).
 //!
 //! Port of `packages/daemon/src/sanitize.ts` (the TS original; deleted at D4, readable at git commit `6b3efb8`).
 //!
@@ -6,7 +6,7 @@
 //! queries. An unfiltered OSC 52 lets a program write the user's clipboard, and
 //! unfiltered device-status queries make xterm.js emit replies that ldmux sends
 //! back into the shell (`term.onData` → `input` → `send-keys`), injecting bytes
-//! that were never typed. This is the dooboxes "Patch 1" lesson.
+//! that were never typed. This is the lesson recorded as "Patch 1".
 //!
 //! Policy (one instance per PaneStream, so sequences may straddle chunks):
 //! drop OSC 52 (clipboard), all DCS/SOS/PM/APC strings, and device-status

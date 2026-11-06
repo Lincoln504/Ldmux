@@ -11,8 +11,7 @@ import androidx.compose.ui.text.font.FontFamily
  * Every measured layout in this app (the key rows, the header, the mesh rows, the terminal's cell
  * grid) assumes one advance per character, so the face is the app's, not the platform's.
  *
- * Fira Mono is SIL OFL 1.1; the licence is recorded in `THIRD-PARTY-NOTICES.md` and the notice is in
- * `docs/NATIVE-TERMINAL.md`. It has no italic cut, so Compose synthesises a slant for the terminal's
+ * Fira Mono is SIL OFL 1.1; the licence and the notice are in `THIRD-PARTY-NOTICES.md`. It has no italic cut, so Compose synthesises a slant for the terminal's
  * italic cells — a synthesis that is a slant, never a different advance, which is what the grid
  * needs.
  */

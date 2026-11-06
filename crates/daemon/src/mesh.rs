@@ -414,6 +414,11 @@ impl MeshSnapshot {
             "uplinkRecordMax": self.uplink_record_max,
             "recordsLeft": self.records_left,
             "radioState": self.radio_state.map(|s| s.code()),
+            // The tuple the host's own radio reported (or was retuned to). Absent for a gateway,
+            // which does not say, and before the radio has been identified.
+            "radioPreset": self
+                .radio_preset
+                .map(|(f, b, sf, cr)| vec![u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)]),
             "rssi": self.rssi,
             "batteryPercent": self.battery_percent,
             "txAirtimeTenths": self.tx_airtime_tenths,
@@ -464,11 +469,34 @@ pub struct MeshRuntime {
     /// wake for the other's traffic — and would let a permit meant for one be consumed by the
     /// other, which is a lost wakeup in the direction that did not get it.
     pub(crate) inbound_wake: Arc<Notify>,
+    /// A retune the CLI or the bridge asked for, waiting for the link task to apply it.
+    ///
+    /// The radio belongs to the link task, which owns the carrier, so every other caller can only
+    /// leave a request. It is applied on the loop's next pass and the snapshot then says whether
+    /// the firmware took it.
+    preset_request: Arc<Mutex<Option<(u32, u32, u8, u8)>>>,
 }
 
 static GLOBAL: OnceLock<MeshRuntime> = OnceLock::new();
 
 impl MeshRuntime {
+    /// Ask the link to tune the host's own radio. `false` when no session is running.
+    pub fn request_preset(&self, freq_khz: u32, bw_hz: u32, sf: u8, cr: u8) -> bool {
+        match self.preset_request.lock() {
+            Ok(mut slot) => {
+                *slot = Some((freq_khz, bw_hz, sf, cr));
+                self.wake.notify_one();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The pending retune, if any. Taken once, by the link task.
+    fn take_preset(&self) -> Option<(u32, u32, u8, u8)> {
+        self.preset_request.lock().ok().and_then(|mut slot| slot.take())
+    }
+
     /// Connects and keeps the connection up in the background.
     ///
     /// Never fails: a link that is down is a state, and the daemon must start
@@ -497,6 +525,7 @@ impl MeshRuntime {
             exchange: Arc::new(Mutex::new(Exchange::default())),
             wake: Arc::new(Notify::new()),
             inbound_wake: Arc::new(Notify::new()),
+            preset_request: Arc::new(Mutex::new(None)),
         };
         tokio::spawn(supervise(cfg, session, runtime.clone()));
         runtime
@@ -858,6 +887,23 @@ async fn session<C: Carrier>(
             .and_then(SessionHost::next_deadline)
             .map_or(MAX_IDLE_WAIT, |d| Duration::from_millis(d.saturating_sub(now_ms)))
             .min(MAX_IDLE_WAIT);
+        // **A retune is the radio's own, so the link task does it.** The firmware validates the
+        // tuple and either retunes (and saves it) or refuses, and the snapshot says which: the
+        // host owning its radio is new, and until this existed the host radio could only be
+        // configured with a different tool while the phone configured its own from the app.
+        if let Some((freq_khz, bw_hz, sf, cr)) = runtime.take_preset() {
+            match carrier.set_preset(freq_khz, bw_hz, sf, cr).await {
+                Ok(()) => {
+                    set(snapshot, |s| {
+                        s.radio_preset = Some((freq_khz, bw_hz, sf, cr));
+                        s.last_error = None;
+                    });
+                }
+                Err(e) => {
+                    set(snapshot, |s| s.last_error = Some(e.to_string()));
+                }
+            }
+        }
         tokio::select! {
             event = carrier.recv() => {
                 last_carrier = Instant::now();

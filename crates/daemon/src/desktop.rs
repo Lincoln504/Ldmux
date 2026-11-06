@@ -1,4 +1,4 @@
-//! Desktop windows (ADR-0010, `docs/DESKTOP-INTEGRATION.md`).
+//! Desktop windows (ADR-0010, `docs/ARCHITECTURE.md#6-ownership`).
 //!
 //! Port of the pure functions from `packages/daemon/src/desktop.ts`.
 //!

@@ -47,7 +47,7 @@ const val MESH_SESSION_BUILT: Boolean = true
  * nothing is opened for a route that resolves to a problem. The route is chosen in the app header
  * (`availableRoutes`), and Settings carries the BLE radio selector (`MeshRouteSection`,
  * `meshSetupView`). The standalone path has a two-radio hardware run as of 2026-11-02;
- * `docs/MESH-STANDALONE.md` is the current record.
+ * `docs/ARCHITECTURE.md` sections 2 and 3 are the current record.
  */
 const val MESH_TERMINAL_BUILT: Boolean = true
 

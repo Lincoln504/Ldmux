@@ -93,8 +93,8 @@ Android renderer still draws.
 
 ### 4.2 Voice dictation has a seam — DONE
 
-`commonMain/.../voice/Voice.kt` holds `VoiceState`, `expect object Dictation` and the
-banner, and `androidMain/.../voice/Voice.android.kt` is the `actual`, holding only the
+`commonMain/../voice/Voice.kt` holds `VoiceState`, `expect object Dictation` and the
+banner, and `androidMain/../voice/Voice.android.kt` is the `actual`, holding only the
 recogniser. The seam takes **no `Activity`**: the Android half attaches its own host,
 because an `Activity` in the common declaration would be the first platform's API
 wearing the shared concept's name, which is the failure this ADR exists to prevent.

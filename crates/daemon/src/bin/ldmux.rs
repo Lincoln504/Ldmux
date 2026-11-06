@@ -145,7 +145,7 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux remote\n  The remote endpoint: host, port, token, and whether it is listening."
         }
         "mesh" => {
-            "ldmux mesh [status] [--json]\n  The MeshMore link: state, the peer, the record budget left this hour, and the radio's own reading. Anything about frequencies lives on the gateway, not here."
+            "ldmux mesh [status] [--json]\n  The mesh link: state, the peer, the record budget left this hour, the radio's own reading, and the tuple the host's radio is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
         }
         "code" => {
             "ldmux code [--mesh | --mesh-only]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together). --mesh-only carries the mesh keys and nothing of the tailnet: no address, no daemon token, for a phone that will only ever reach this machine by radio."
@@ -699,9 +699,45 @@ async fn main() {
         }
         "mesh" => {
             let sub = rest.first().map(String::as_str).unwrap_or("status");
+            if sub == "preset" {
+                // `ldmux mesh preset <MHz> <kHz> <SF> <CR>`: tune the host's OWN radio.
+                let n: Vec<&str> = rest.iter().skip(1).map(String::as_str).collect();
+                let (Some(f), Some(b), Some(sf), Some(cr)) = (
+                    n.first().and_then(|v| v.parse::<f64>().ok()),
+                    n.get(1).and_then(|v| v.parse::<f64>().ok()),
+                    n.get(2).and_then(|v| v.parse::<u8>().ok()),
+                    n.get(3).and_then(|v| v.parse::<u8>().ok()),
+                ) else {
+                    eprintln!("usage: ldmux mesh preset <MHz> <kHz> <SF> <CR>");
+                    eprintln!("  e.g. ldmux mesh preset 910.525 62.5 7 5");
+                    std::process::exit(2);
+                };
+                let r: Result<serde_json::Value, CallError> = daemon_call(
+                    &sock,
+                    "mesh.preset",
+                    &serde_json::json!({ "freqMhz": f, "bwKhz": b, "sf": sf, "cr": cr }),
+                )
+                .await;
+                match r {
+                    Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
+                        println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}");
+                    }
+                    Ok(v) => {
+                        let detail = v
+                            .get("detail")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("the radio refused the change");
+                        eprintln!("ldmux mesh preset: {detail}");
+                        std::process::exit(1);
+                    }
+                    Err(e) => die(&e, &sock),
+                }
+                return;
+            }
             if sub != "status" {
                 eprintln!("ldmux mesh: unknown subcommand '{sub}'");
                 eprintln!("usage: ldmux mesh status [--json]");
+                eprintln!("       ldmux mesh preset <MHz> <kHz> <SF> <CR>");
                 std::process::exit(2);
             }
             let r: Result<serde_json::Value, CallError> =

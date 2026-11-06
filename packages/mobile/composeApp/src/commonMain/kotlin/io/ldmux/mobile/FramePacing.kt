@@ -16,7 +16,7 @@ package io.ldmux.mobile
  *    headroom** — a repaint walks the whole grid, and the main thread is the one
  *    the input path runs on, so every render the user cannot perceive is a render
  *    competing with their typing. The original reason to coalesce at all was a
- *    saturated main thread delaying input (docs/PREDICTIVE-ECHO.md); this is that
+ *    saturated main thread delaying input; this is that
  *    argument carried to its conclusion rather than a new one.
  *
  *    Deliberately **not** a claim about the network. Output is event-driven on the

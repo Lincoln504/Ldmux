@@ -33,6 +33,11 @@ pub enum MeshError {
     Timeout(&'static str),
     /// The socket failed.
     Io(std::io::Error),
+    /// The carriage cannot do what was asked of it.
+    ///
+    /// Distinct from a refusal by the far end: this is a carriage that does not have the
+    /// capability at all, such as a gateway being asked to retune a radio it does not own.
+    Unsupported(String),
 }
 
 impl fmt::Display for MeshError {
@@ -48,6 +53,7 @@ impl fmt::Display for MeshError {
             Self::Refused(what, code) => write!(f, "{what} refused with code {code}"),
             Self::Timeout(what) => write!(f, "{what} timed out"),
             Self::Io(e) => write!(f, "socket: {e}"),
+            Self::Unsupported(what) => write!(f, "{what}"),
         }
     }
 }

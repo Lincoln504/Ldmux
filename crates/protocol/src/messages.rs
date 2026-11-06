@@ -3,9 +3,8 @@
 //! shapes.
 //!
 //! Port of `packages/protocol/src/messages.ts` (the TS original for the
-//! client-facing union; deleted at D4, readable at git commit `6b3efb8`) plus the **new** keeper messages (`docs/archive/RUST-PORT-PLAN.md` §3.5) that have
-//! no TS source of record yet — those are specified here and in `docs/archive/RUST-PORT-PLAN.md` §3.5, and
-//! their field sets are finalised by the keeper phase (`docs/archive/RUST-PORT-PLAN.md` §7 phase 3).
+//! client-facing union; deleted at D4, readable at git commit `6b3efb8`) plus the keeper
+//! messages, which have no TS source of record and are specified here.
 //!
 //! The wire tag is `type`, lower-cased, and each message's fields are
 //! camelCase — matching the TS exactly. The one modelling choice over the TS:
@@ -25,7 +24,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The control-message union. Only these shapes are sent in v1: the v0.1
 /// draft's `HELLO`/`resumeToken`, `SESSION_STATE` and `CLOSE` were cut
-/// (docs/SPEC.md §6.2), so they are not modelled here — a type nothing can send
+/// (see `docs/ARCHITECTURE.md#4-the-wire`), so they are not modelled here: a type nothing can send
 /// or receive is a contract nobody can keep.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]

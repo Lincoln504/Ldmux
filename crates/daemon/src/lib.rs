@@ -20,7 +20,7 @@
 //! proper (remote WS, streams, desktop, CLI, keeper client) lands in later
 //! phases (plan §7).
 //!
-//! See `docs/archive/RUST-PORT-PLAN.md` and `docs/archive/RUST-PORT-LOG.md` (historical records of the port).
+//! See `docs/ARCHITECTURE.md` for the design of record.
 
 pub mod auth;
 pub mod clipboard_policy;

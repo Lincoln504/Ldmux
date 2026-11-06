@@ -5,9 +5,8 @@
 //! `daemon.ts` (git commit `6b3efb8`) and the ownership test file pinned.
 //!
 //! One device owns a session at a time. The whole reason this is a module and
-//! not a field on a record is the failure mode dooboxes' own glossary names
-//! *Stale State*: attachment state that outlives the connection **blocks the
-//! next attach**. The failure is a lockout, not a cosmetic bug.
+//! not a field on a record is the failure mode known as *stale state*:
+//! attachment state that outlives the connection **blocks the next attach**. The failure is a lockout, not a cosmetic bug.
 //!
 //! So ownership is a **map of live claims**, kept honest by three rules:
 //! - a device's claims are dropped when its connection ends (`release_device`);

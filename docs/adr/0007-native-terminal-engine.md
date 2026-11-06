@@ -18,7 +18,7 @@
 - We want **Kotlin Multiplatform + Compose Multiplatform**: Android and iOS are
   developed as **independent apps over a shared KMP core**, sharing the terminal,
   the protocol client, and the renderer, while each app owns its platform shell.
-- Earlier research in `docs/NATIVE-TERMINAL.md` wrongly recorded libghostty-vt as
+- Earlier research in `docs/ARCHITECTURE.md#1-components` wrongly recorded libghostty-vt as
   unreleased. **Corrected (verified 2026-09-14):** Ghostty's terminal core is
   published as `libghostty-vt` with its own version (`0.1.0-dev`); Ghostty's own
   `build.zig` produces a static lib, a shared lib, WASM, and an Apple
@@ -83,4 +83,4 @@ Multiplatform module, rendered with Compose Multiplatform `Canvas`.**
   the shared core.
 - If the Zig/native path stalls, the seam is core-agnostic: `alacritty_terminal`
   (Rust) can be linked behind the same `actual`, which is the fallback recorded in
-  `docs/NATIVE-TERMINAL.md`.
+  `docs/ARCHITECTURE.md#1-components`.

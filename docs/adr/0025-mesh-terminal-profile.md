@@ -1,8 +1,8 @@
 # ADR-0025: The mesh terminal profile (plain-text row diffs inside the session)
 
-**Status:** Accepted (2026-10-28). Implements `docs/MESH-GATEWAY.md` section 8 item 2. **Update 2026-10-28 (later):** the phone side is built. `MeshTerm.kt` is the Kotlin port, checked against `crates/protocol/test/fixtures/mesh-term-vectors.json` (written by the Rust encoder); `MeshTermDriver` and `MeshTerminalScreen` are the attach driver and the reduced terminal; `ldmux code --mesh` delivers the keys. The section "Not decided" below named the ceremony that tells the phone which shell to attach: it is built (2026-10-29) as the `List`/`Sessions` profile and the phone's shell picker. A host with more than one shell no longer answers `Closed(AMBIGUOUS)` unless the phone sends an empty selector.
+**Status:** Accepted (2026-10-28). Implements `docs/ARCHITECTURE.md#4-the-wire` section 8 item 2. **Update 2026-10-28 (later):** the phone side is built. `MeshTerm.kt` is the Kotlin port, checked against `crates/protocol/test/fixtures/mesh-term-vectors.json` (written by the Rust encoder); `MeshTermDriver` and `MeshTerminalScreen` are the attach driver and the reduced terminal; `ldmux code --mesh` delivers the keys. The section "Not decided" below named the ceremony that tells the phone which shell to attach: it is built (2026-10-29) as the `List`/`Sessions` profile and the phone's shell picker. A host with more than one shell no longer answers `Closed(AMBIGUOUS)` unless the phone sends an empty selector.
 
-- **Related:** ADR-0018 (the keeper owns the emulator), ADR-0020 (link security, record layout), ADR-0023 (session crates), `docs/MESH-TRANSPORT.md`
+- **Related:** ADR-0018 (the keeper owns the emulator), ADR-0020 (link security, record layout), ADR-0023 (session crates), `docs/ARCHITECTURE.md#3-layers`
 - **Scope:** `crates/protocol/src/mesh_term.rs`, `crates/daemon/src/mesh_bridge.rs`, and the phone's port of the same encoding. MeshMore never parses any of it: it travels inside the Noise session.
 
 ## Context: the budget
@@ -11,7 +11,7 @@ All figures are measured or derived in this repo, not assumed.
 
 | Quantity | Value | Source |
 |---|---|---|
-| Airtime of a 176-byte frame at the deployed preset (62.5 kHz, SF7, CR5) | 612 ms | `AirtimeEstimator.lora(...).forBytes(176)`, verified 2026-10-28 |
+| Airtime of a 176-byte frame at the deployed preset (62.5 kHz, SF7, CR5) | 612 ms | `AirtimeEstimator.lora(..).forBytes(176)`, verified 2026-10-28 |
 | Airtime the governor allows per hour | 36 s | design as if EU868 1 % applied (MESH-GATEWAY section 6) |
 | Records per hour | 36 / 0.612 = **58** | same |
 | L2 record | 172 bytes | `crates/mesh/src/constants.rs:24` |
@@ -20,7 +20,7 @@ All figures are measured or derived in this repo, not assumed.
 | **Payload per record** | **144** | 172 − 24 − 4 |
 | **Bytes per hour, one direction** | 58 × 144 = **8,352** | |
 
-A VT byte stream is tens of KB per screen and `ls -laR` is 514,758 bytes (`docs/MESH-TRANSPORT.md`). It cannot cross this link.
+A VT byte stream is tens of KB per screen and `ls -laR` is 514,758 bytes (`docs/ARCHITECTURE.md#3-layers`). It cannot cross this link.
 
 ## Decision
 
@@ -39,8 +39,8 @@ Framing: `tag u8 | len (LEB128, 1 or 2 bytes) | body`. The stream is split by th
 
 | tag | dir | name | body |
 |---|---|---|---|
-| 0x01 | phone→host | Attach | version u8, selector 0..=40 bytes |
-| 0x02 | phone→host | Input | 1..=96 raw bytes |
+| 0x01 | phone→host | Attach | version u8, selector 0.=40 bytes |
+| 0x02 | phone→host | Input | 1.=96 raw bytes |
 | 0x03 | phone→host | Resync | empty |
 | 0x04 | phone→host | Detach | empty |
 | 0x81 | host→phone | Profile | version u8, cols u8, rows u8, unsupported u16 LE |
@@ -87,7 +87,7 @@ Two gaps were found on the phone, and one duplicated table.
 
 | tag | direction | name | body |
 |---|---|---|---|
-| 0x06 | phone to host | `Key` | 1..=16 key names, one space between, at most 96 bytes in all |
+| 0x06 | phone to host | `Key` | 1.=16 key names, one space between, at most 96 bytes in all |
 | 0x81 | host to phone | `Profile` | as before, then from version 2 `shell_len u8, shell id` |
 
 - **`Key`.** Names are printable ASCII with no space (`Up`, `S-Tab`, `C-c`, `M-C-S-Left`, `Enter`, `PgUp`). More than 16 names, a body over `MAX_INPUT`, an empty name or any other byte is malformed and costs that message only. The host sends them through the daemon's own `send` RPC, which reads the pane's `app_cursor` and Kitty flags from the keeper and encodes with `key_name_to_bytes_in_mode`. If the mode cannot be read the normal-mode encoding is used, as on the tailnet. A name the table does not know is refused there and nothing reaches the shell.
@@ -117,7 +117,7 @@ The mesh terminal clipped on the right. The tailnet route asks the host to resiz
 
 | tag | direction | name | body |
 |---|---|---|---|
-| 0x07 | phone to host | `Resize` | `cols u8`, `rows u8`, each 1..=255 |
+| 0x07 | phone to host | `Resize` | `cols u8`, `rows u8`, each 1.=255 |
 
 - **`Resize`.** A zero in either byte or any other body length is malformed and costs that message only. The host resizes the attached pty through the keeper's own `Resize` message (daemon method `resizePane`, clamped by `clamp_pane_size` exactly as the tailnet's `PaneStream::resize` is), then resets its differ, so the next update is a fresh `Profile` with the new grid and a full screen. A refused resize changes nothing and sends nothing.
 - **Version 3.** `VERSION` is 3, `MIN_VERSION` stays 1, `RESIZE_VERSION` is 3. The `Profile` body is unchanged from version 2. A phone that attached below 3 is not obeyed on `Resize`, and a phone that attaches with 3 against an older host is told `Closed(VERSION)`.

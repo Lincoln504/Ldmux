@@ -69,6 +69,7 @@ Unix socket using the same message vocabulary it speaks to clients.
 
 ## What this does not decide
 
-- `docs/MESH-TRANSPORT.md` (multi-host) is untouched.
-- The tmux *investigation* (`docs/archive/TMUX-DEPENDENCY.md`) is kept as the evidence
+- Multi-host routing is untouched. Nothing in this repository implements it, and
+  `docs/ARCHITECTURE.md` does not claim otherwise.
+- The tmux investigation is kept in the decision record as the evidence
   base for this decision, not deleted.

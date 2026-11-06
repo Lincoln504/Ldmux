@@ -1,8 +1,8 @@
 # ADR-0026: Public-channel mode — typing held on the phone, one sync button
 
 **Status:** Accepted (2026-11-04). Implements the mode asked for after the first field sessions on a
-public channel. **Related:** ADR-0025 (the mesh terminal profile), `docs/MESH-GATEWAY.md` (the
-record budget), `docs/MESH-LATENCY.md`. **Scope:** `packages/mobile/composeApp/src/commonMain/
+public channel. **Related:** ADR-0025 (the mesh terminal profile), `docs/ARCHITECTURE.md#4-the-wire` (the
+record budget), `docs/ARCHITECTURE.md#9-airtime`. **Scope:** `packages/mobile/composeApp/src/commonMain/
 kotlin/dev/ldmux/mobile/mesh/` — `PublicChannelHold.kt`, `PublicChannelBar.kt`,
 `MeshTerminalSource.kt`, `MeshInput.kt`, `MeshTerminalScreen.kt`. No protocol change, no host
 change, no radio change.
@@ -10,7 +10,7 @@ change, no radio change.
 ## The problem
 
 On a public channel, everything typed is broadcast to everyone in range, and the mesh link's budget
-is about 58 records an hour (`docs/MESH-GATEWAY.md`, ADR-0025). Two costs follow from sending as the
+is about 58 records an hour (`docs/ARCHITECTURE.md#4-the-wire`, ADR-0025). Two costs follow from sending as the
 user types:
 
 - **Disclosure.** A command half-typed, a path being corrected, a password typed into a prompt that
@@ -24,7 +24,7 @@ to leave when *they* decide, and the screen to answer then. That is the whole mo
 
 ## Decision
 
-**Two modes — `live` and `manual sync` — chosen in Settings beside the channel. Manual sync is
+**Two modes — `live` and `batch` — chosen in Settings beside the channel. Batch is
 forced on a public channel and optional on a private one.**
 
 An earlier revision put the switch in the terminal as a `hold input` / `leave` pair. That was wrong
@@ -33,7 +33,7 @@ where the link is configured, next to the channel and the preset — a per-scree
 connection-level decision look like a view setting, and a `leave` button next to the keys made
 leaving a mode look like leaving a shell. And in `live` mode there is nothing to hold and nothing to
 release, so the terminal draws no mode row at all: a sync button there would be a control for a mode
-that is not running. What remains in the terminal, in `manual sync` only, is the one control the mode
+that is not running. What remains in the terminal, in `batch` only, is the one control the mode
 needs, drawn in every state of that mode and dimmed where it cannot act.
 
 The rule is one derived value, `LdmuxConfig.meshHoldsInput`: true on a public channel whatever the
@@ -267,5 +267,4 @@ background`. That this was needed for the echo is incidental; it was a rendering
   mode off clears the wait and the count.
 - `MeshInputTest`: `discard` throws away text and keys; the held summary counts characters, keys and
   the records they will take, against `MeshTerm.MAX_INPUT`.
-- `MeshHistoryTest` / `MeshHistoryShiftTest`: unchanged by this ADR apart from the shift rule (see
-  `docs/MOBILE-UX-AUDIT.md` §scroll), which is what makes a mesh scroll show anything at all.
+- `MeshHistoryTest` / `MeshHistoryShiftTest`: unchanged by this ADR apart from the shift rule §scroll), which is what makes a mesh scroll show anything at all.

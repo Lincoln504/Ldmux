@@ -66,6 +66,15 @@ pub trait Carrier {
     /// carry. Success means "accepted for transmission", never "delivered".
     async fn send_record(&mut self, seq: u8, record: &[u8]) -> Result<(), MeshError>;
 
+    /// Tune the radio to a tuple, where the carriage is a radio this process owns.
+    ///
+    /// A gateway does not answer this: its radio belongs to another process, and a command it
+    /// cannot carry must say so rather than pretend. The default is that refusal.
+    async fn set_preset(&mut self, freq_khz: u32, bw_hz: u32, sf: u8, cr: u8) -> Result<(), MeshError> {
+        let _ = (freq_khz, bw_hz, sf, cr);
+        Err(MeshError::Unsupported("this carriage does not own its radio".to_owned()))
+    }
+
     /// The next thing the carrier has to say. Waits; wrap in a deadline if the
     /// caller needs one.
     async fn recv(&mut self) -> Result<Event, MeshError>;
