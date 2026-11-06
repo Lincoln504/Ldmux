@@ -243,6 +243,9 @@ what closed it.
 
 | 15.34 | A second daemon given only `LDMUX_STATE_DIR` (a test, a scratch instance) inherited the deployment's persist directory, read the real PSK and grabbed the host radio out from under the daemon that owns it | FIXED — no `LDMUX_PERSIST_DIR` plus a `LDMUX_STATE_DIR` means `<state>/persist`; the deployed unit sets the persist directory explicitly, so a scratch run keeps its own credentials |
 
+| 15.35 | The "configured terminal" step read a **GNOME** `gsettings` schema on an **XFCE/i3** session, and that key answered the Debian alternative `x-terminal-emulator`, resolved to `xfce4-terminal.wrapper` — so a spawned window opened in a terminal the user does not use, over ten alacritty windows | FIXED — each desktop's configuration is read only on that desktop (GNOME/Cinnamon/MATE `gsettings`, KDE `kdeglobals`, XFCE `xfconf`/`helpers.rc`); a bare window manager is asked nothing; and an indirection is followed through the symlink and the `.wrapper` shim to the program that actually opens |
+| 15.36 | There was no way for a user to say which terminal they use: `$TERMINAL` set in a shell never reaches the daemon, and the desktop's setting may name nothing (this host's XFCE `helpers.rc` had no `TerminalEmulator` at all) | FIXED — `ldmux terminal set <program>` writes `$XDG_CONFIG_HOME/ldmux/terminal` and outranks every probe; `clear` removes it; `--explain` prints which step answered. On this host the missing XFCE setting was also set (`TerminalEmulator=alacritty`), so the desktop itself now agrees |
+
 ## 16. The tailnet route, audited separately (2026-11-06)
 
 The radio route got most of the attention in this pass; this is the same audit for the

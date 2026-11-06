@@ -186,7 +186,6 @@ const AUTODETECT: &[&str] = &[
     "konsole",
     "xfce4-terminal",
     "xterm",
-    "x-terminal-emulator",
 ];
 
 /// The XDG terminal convention's launcher. When a desktop ships it, it reads the
@@ -236,88 +235,312 @@ fn first_word(s: &str) -> Option<&str> {
     s.split_whitespace().next()
 }
 
-/// The terminal a window opens in: an absolute path, or "" when nothing was found.
+/// Where the answer came from, for `ldmux terminal --explain`.
 ///
-/// The order is the one in the module comment. Every step is skipped silently when
-/// it does not resolve: a stale `$TERMINAL`, a desktop with no configured terminal,
-/// and a probe whose tool is not installed are all ordinary, and none of them is a
-/// reason to refuse to open a window in something that does exist.
-pub fn terminal() -> String {
+/// A resolution nobody can interrogate is a resolution nobody can trust: "the window opened in
+/// the wrong terminal" has no next question without this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// `ldmux terminal set <program>` — this user's explicit choice.
+    Pinned,
+    /// `$TERMINAL`.
+    Environment,
+    /// `xdg-terminal-exec`, which reads the XDG terminal configuration.
+    XdgExec,
+    /// The desktop session's own configured terminal (GNOME, KDE, XFCE, MATE), for the
+    /// desktop this session is actually on.
+    Desktop,
+    /// An emulator already running for this user.
+    Running,
+    /// The distribution's `x-terminal-emulator` alternative, resolved to the real program.
+    Alternative,
+    /// The built-in list of known emulators.
+    Known,
+    /// Nothing resolved.
+    None,
+}
+
+impl Source {
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Pinned => "set with `ldmux terminal set`",
+            Self::Environment => "$TERMINAL",
+            Self::XdgExec => "xdg-terminal-exec (the XDG terminal configuration)",
+            Self::Desktop => "this desktop session's configured terminal",
+            Self::Running => "an emulator already running for this user",
+            Self::Alternative => "the system's x-terminal-emulator alternative",
+            Self::Known => "the built-in list of known emulators",
+            Self::None => "nothing: no terminal found",
+        }
+    }
+}
+
+/// The terminal a window opens in, and where that answer came from.
+#[must_use]
+pub fn terminal_with_source() -> (String, Source) {
     let path = std::env::var("PATH").unwrap_or_default();
+    let pinned = pinned_terminal(&path);
+    let term = std::env::var("TERMINAL").ok();
     let xdg = which_in(XDG_TERMINAL_EXEC, &path);
-    // The probes and the /proc scan only run when the cheap answers failed, and
-    // each is resolved once per process: `window_state` asks this question on every
-    // poll, and a 250 ms probe per poll would be a stall in a loop. `$TERMINAL` and
-    // the launcher stay live (two PATH lookups), so an explicit choice still applies
-    // without a restart; the desktop's configuration and the running session do not
-    // change under a daemon in any way worth re-reading.
-    let configured = if xdg.is_none() {
-        cached_configured()
+    // The session's desktop is asked only when the cheaper, more explicit answers are absent,
+    // and each probe is resolved once per process: `window_state` asks this question on every
+    // poll. The pin, `$TERMINAL` and the launcher stay live (a file read and two PATH
+    // lookups), so an explicit choice applies without a restart.
+    let desktop = if pinned.is_none() && xdg.is_none() {
+        cached_desktop()
     } else {
         None
     };
-    // **Both are needed to answer.** The session's emulators outrank the desktop's
-    // configured terminal (a settings key is often a distribution alternative while the
-    // person works in something else), so `running` cannot be skipped just because the
-    // configured probe answered — that is the bug that made this machine resolve to
-    // `x-terminal-emulator` with ten alacritty windows open.
-    let running = if xdg.is_none() {
+    let running = if pinned.is_none() && xdg.is_none() && desktop.is_none() {
         cached_running()
     } else {
         Vec::new()
     };
-    resolve_terminal(
-        std::env::var("TERMINAL").ok().as_deref(),
-        xdg.as_deref(),
-        configured,
-        &running,
-        &path,
-    )
+    resolve_terminal_full(pinned, term.as_deref(), xdg, desktop, &running, &path)
 }
 
-/// The rule behind [`terminal`], pure so every step is testable without mutating
+/// The terminal a window opens in: an absolute path, or "" when nothing was found.
+///
+/// The order is the one in the module comment. Every step is skipped silently when it does not
+/// resolve: a stale `$TERMINAL`, a desktop with no configured terminal, and a probe whose tool
+/// is not installed are all ordinary, and none of them is a reason to refuse to open a window in
+/// something that does exist.
+#[must_use]
+pub fn terminal() -> String {
+    terminal_with_source().0
+}
+
+/// Where the user's explicit choice lives: `$XDG_CONFIG_HOME/ldmux/terminal`.
+///
+/// A file rather than a variable because nobody discovers a variable: the daemon unit runs
+/// with the user manager's environment, so `$TERMINAL` exported in a shell never reaches the
+/// process that opens the window. One line, the program and nothing else.
+#[must_use]
+pub fn terminal_config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|v| !v.is_empty() && v.starts_with('/'))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .filter(|h| !h.is_empty())
+                .map(|h| format!("{h}/.config"))
+        })?;
+    Some(std::path::Path::new(&base).join("ldmux/terminal"))
+}
+
+/// Read the pinned program, if there is one.
+fn pinned_terminal_raw() -> Option<String> {
+    let path = terminal_config_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))?;
+    Some(line.to_string())
+}
+
+/// The pinned program resolved against `path`.
+fn pinned_terminal(path: &str) -> Option<String> {
+    let raw = pinned_terminal_raw()?;
+    Some(resolve_alias(&raw, path)?.0)
+}
+
+/// Pin the terminal a window opens in, or clear the pin with `None`.
+///
+/// The program must resolve now: a pin that names something that is not installed would open
+/// nothing, later, with no obvious cause. Returns the file written.
+pub fn set_terminal(program: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let path = terminal_config_path().ok_or("no HOME or XDG_CONFIG_HOME to keep the setting in")?;
+    match program {
+        None => {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("could not remove {}: {e}", path.display())),
+            }
+            Ok(path)
+        }
+        Some(program) => {
+            let program = program.trim();
+            if program.is_empty() {
+                return Err("which terminal? name a program, for example `alacritty`".to_string());
+            }
+            let path_var = std::env::var("PATH").unwrap_or_default();
+            let resolved = resolve_alias(program, &path_var).ok_or_else(|| {
+                format!("{program:?} is not a program on PATH or an absolute path to one")
+            })?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+            }
+            // Trailing newline, so `cat` and an editor both leave it alone.
+            std::fs::write(&path, format!("{}\n", resolved.0))
+                .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+            Ok(path)
+        }
+    }
+}
+
+/// The rule behind [`terminal_with_source`], pure so every step is testable without mutating
 /// the process environment (which tests share) or owning a desktop.
-fn resolve_terminal(
+fn resolve_terminal_full(
+    pinned: Option<String>,
     term: Option<&str>,
-    xdg_terminal_exec: Option<&str>,
-    configured: Option<&str>,
+    xdg_terminal_exec: Option<String>,
+    desktop: Option<String>,
     running: &[String],
     path: &str,
-) -> String {
-    let resolved = |value: &str| {
-        first_word(value).and_then(|w| which_in(w.trim_matches('\''), path))
-    };
-    // 1. The standard variable every other tool already sets.
-    if let Some(t) = term.filter(|v| !v.trim().is_empty()).and_then(resolved) {
-        return t;
+) -> (String, Source) {
+    // 1. This user said so, in the one place the daemon can read.
+    if let Some(t) = pinned.filter(|t| !t.is_empty()) {
+        return (t, Source::Pinned);
     }
-    // 2. The XDG launcher, when the desktop provides one.
-    if let Some(x) = xdg_terminal_exec
-        && let Some(abs) = which_in(x, path)
+    // 2. The standard variable every other tool already sets.
+    if let Some(t) = term
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| resolve_alias(v, path))
     {
-        return abs;
+        return (t.0, Source::Environment);
     }
-    // 3. **An emulator the user is running right now**, most frequent first.
-    //
-    // This sits above the desktop's configured terminal on purpose. A desktop setting is
-    // often a distribution alternative (`gsettings` answers `x-terminal-emulator`, which on
-    // Debian resolves to `xfce4-terminal.wrapper`) while the person is actually working in
-    // something else — measured on this machine 2026-11-06: ten alacritty windows open, and
-    // the configured setting named xfce4-terminal. A window that opens in a terminal the user
-    // is not using is the defect this whole chain exists to remove, so "what they are using"
-    // outranks "what a settings key says".
-    if let Some(t) = running.iter().find_map(|n| which_in(n, path)) {
-        return t;
+    // 3. The XDG launcher. When it is installed it *is* the configured default: it reads the
+    //    user's own terminal configuration and every desktop application goes through it.
+    if let Some(x) = xdg_terminal_exec {
+        return (x, Source::XdgExec);
     }
-    // 4. This desktop's configured terminal.
-    if let Some(t) = configured.filter(|v| !v.trim().is_empty()).and_then(resolved) {
-        return t;
+    // 4. This desktop session's configured terminal — the session that is actually running,
+    //    which is the bug this order fixes: a GNOME schema read on an XFCE session answered
+    //    `x-terminal-emulator`, and that answer opened xfce4-terminal over ten alacritty
+    //    windows.
+    if let Some(t) = desktop.and_then(|d| resolve_alias(&d, path)) {
+        return (t.0, Source::Desktop);
     }
-    // 5. The known names.
-    AUTODETECT
+    // 5. An emulator the user is running right now, most frequent first. Ten windows of one
+    //    emulator is a stronger statement of intent than any settings key, and it is what makes
+    //    a bare window manager (/i3 with no configured default) resolve to reality.
+    if let Some((name, abs)) = running
         .iter()
-        .find_map(|n| which_in(n, path))
-        .unwrap_or_default()
+        .find_map(|n| which_in(n, path).map(|abs| (n.clone(), abs)))
+    {
+        let _ = name;
+        return (abs, Source::Running);
+    }
+    // 6. The distribution's alternative, resolved to the program it actually runs: the
+    //    alternative is a system default, and on Debian it is a Perl wrapper around one.
+    if let Some(t) = resolve_alias(ALTERNATIVE, path) {
+        return (t.0, Source::Alternative);
+    }
+    // 7. The known names.
+    match AUTODETECT.iter().find_map(|n| which_in(n, path)) {
+        Some(t) => (t, Source::Known),
+        None => (String::new(), Source::None),
+    }
+}
+
+/// `x-terminal-emulator`: Debian's `update-alternatives` name for the system default terminal.
+const ALTERNATIVE: &str = "x-terminal-emulator";
+
+/// Resolve an indirection to the program that actually opens: `(absolute path, kind)`.
+///
+/// Two indirections exist in practice and both have to be followed, or the window opens in a
+/// program nobody named:
+///
+/// - `x-terminal-emulator` is a symlink to `<program>.wrapper`, a packaging shim (perl on
+///   Debian) that execs the real emulator;
+/// - an emulator whose name ends `.wrapper` (the shim itself) is not in `SPECS`, so its
+///   template would fall back to `-e` and lose the class and `--wait`.
+///
+/// `None` when the value names nothing runnable: a probe that answered with prose, a
+/// `.desktop` id, or a program that is not installed is not an answer.
+fn resolve_alias(value: &str, path: &str) -> Option<(String, &'static str)> {
+    let first = first_word(value)?.trim_matches('\'');
+    if first.is_empty() || first.ends_with(".desktop") {
+        return None;
+    }
+    let abs = which_in(first, path)?;
+    // Follow symlinks to the packaging shim and strip the suffix to the real program.
+    let real = std::fs::canonicalize(&abs).unwrap_or_else(|_| std::path::PathBuf::from(&abs));
+    let base = real.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let program = base.strip_suffix(".wrapper").unwrap_or(base);
+    // The shim is a script: the program it runs is the name it was installed as. Look that up
+    // in PATH, and fall back to the shim itself so a renamed packaging shim still opens.
+    if let Some(found) = which_in(program, path) {
+        return Some((found, program_kind(program)));
+    }
+    Some((abs, "wrapper"))
+}
+
+/// Which template applies: a known emulator's name, `wrapper`, or `unknown`.
+fn program_kind(program: &str) -> &'static str {
+    if SPECS.iter().any(|s| s.name == program) {
+        "known"
+    } else {
+        "unknown"
+    }
+}
+
+/// The desktop session's configured terminal, read from **that desktop's** configuration.
+///
+/// Reading another desktop's key is how this machine answered `x-terminal-emulator`: a GNOME
+/// schema (`org.gnome.desktop.default-applications.terminal`) consulted on an XFCE session,
+/// whose value is the Debian alternative rather than a user's choice. Each probe is now behind
+/// the session it belongs to.
+fn desktop_configured_terminal(
+    desktop: &str,
+    run: &dyn Fn(&str, &[&str]) -> Option<String>,
+    helpers_rc: Option<&str>,
+) -> Option<String> {
+    let is = |names: &[&str]| names.iter().any(|n| desktop.eq_ignore_ascii_case(n));
+    if is(&["gnome", "unity", "budgie", "pantheon"]) {
+        return run(
+            "gsettings",
+            &["get", "org.gnome.desktop.default-applications.terminal", "exec"],
+        )
+        .and_then(|out| parse_quoted_probe(&out));
+    }
+    if is(&["cinnamon"]) {
+        return run(
+            "gsettings",
+            &["get", "org.cinnamon.desktop.default-applications.terminal", "exec"],
+        )
+        .and_then(|out| parse_quoted_probe(&out));
+    }
+    if is(&["mate"]) {
+        return run(
+            "gsettings",
+            &["get", "org.mate.desktop.default-applications.terminal", "exec"],
+        )
+        .and_then(|out| parse_quoted_probe(&out));
+    }
+    if is(&["kde", "plasma"]) {
+        for tool in ["kreadconfig6", "kreadconfig5"] {
+            if let Some(v) = run(
+                tool,
+                &["--file", "kdeglobals", "--group", "General", "--key", "TerminalApplication"],
+            )
+            .and_then(|out| parse_word_probe(&out))
+            {
+                return Some(v);
+            }
+        }
+        return None;
+    }
+    if is(&["xfce", "x-cinnamon"]) {
+        if let Some(v) = run(
+            "xfconf-query",
+            &["-c", "xfce4-session", "-p", "/general/TerminalEmulator"],
+        )
+        .and_then(|out| parse_word_probe(&out))
+        {
+            return Some(v);
+        }
+        return helpers_rc.and_then(parse_helpers_rc);
+    }
+    // A bare window manager (i3, sway, hyprland) and any desktop this build does not know:
+    // there is no session-wide setting to read, and the running-emulator step answers instead.
+    None
 }
 
 /// Run one configuration probe, bounded by [`PROBE_TIMEOUT`], with no output on
@@ -359,64 +582,34 @@ fn run_probe(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// [`configured_terminal`], resolved once: see [`terminal`] for why.
-fn cached_configured() -> Option<&'static str> {
+/// [`desktop_configured_terminal`] for this session, resolved once: see
+/// [`terminal_with_source`] for why.
+fn cached_desktop() -> Option<String> {
     static CONFIGURED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CONFIGURED
-        .get_or_init(configured_terminal)
-        .as_deref()
+    CONFIGURED.get_or_init(session_configured_terminal).clone()
 }
 
-/// [`running_emulators`], resolved once: see [`terminal`] for why.
+/// [`running_emulators`], resolved once: see [`terminal_with_source`] for why.
 fn cached_running() -> Vec<String> {
     static RUNNING: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     RUNNING.get_or_init(running_emulators).clone()
 }
 
-/// The desktop's configured terminal, if this machine names one.
+/// The configured terminal of the desktop **this session is on**.
 ///
-/// Only probes that name a **program** are read. KDE's `TerminalService` names a
-/// `.desktop` file whose `Exec` would have to be parsed to be usable, and guessing
-/// wrong here opens a different terminal than the one configured — the failure
-/// this whole order exists to avoid — so it is left alone.
-fn configured_terminal() -> Option<String> {
-    if let Some(out) = run_probe(
-        "gsettings",
-        &[
-            "get",
-            "org.gnome.desktop.default-applications.terminal",
-            "exec",
-        ],
-    ) && let Some(v) = parse_quoted_probe(&out)
-    {
-        return Some(v);
+/// `XDG_CURRENT_DESKTOP` is a colon-separated list (`XFCE:GNOME`), and the first entry is the
+/// session's own. An empty or unknown value means a bare window manager, where no desktop key
+/// applies — and that is a real answer, not a reason to read someone else's schema.
+fn session_configured_terminal() -> Option<String> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let session = desktop.split(':').next().unwrap_or("").trim();
+    if session.is_empty() {
+        return None;
     }
-    for tool in ["kreadconfig6", "kreadconfig5"] {
-        if let Some(out) = run_probe(
-            tool,
-            &[
-                "--file",
-                "kdeglobals",
-                "--group",
-                "General",
-                "--key",
-                "TerminalApplication",
-            ],
-        ) && let Some(v) = parse_word_probe(&out)
-        {
-            return Some(v);
-        }
-    }
-    if let Some(out) = run_probe(
-        "xfconf-query",
-        &["-c", "xfce4-session", "-p", "/general/TerminalEmulator"],
-    ) && let Some(v) = parse_word_probe(&out)
-    {
-        return Some(v);
-    }
-    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
-    let text = std::fs::read_to_string(format!("{home}/.config/xfce4/helpers.rc")).ok()?;
-    parse_helpers_rc(&text)
+    let helpers = std::env::var("HOME").ok().filter(|h| !h.is_empty()).and_then(|h| {
+        std::fs::read_to_string(format!("{h}/.config/xfce4/helpers.rc")).ok()
+    });
+    desktop_configured_terminal(session, &|program, args| run_probe(program, args), helpers.as_deref())
 }
 
 /// `gsettings get` prints a quoted value (`'alacritty'`); an empty setting prints
@@ -1643,58 +1836,196 @@ mod tests {
             std::fs::write(&f, "#!/bin/sh\n").unwrap();
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // Debian's alternative: `x-terminal-emulator` is a symlink to a `.wrapper` script
+        // that execs the real emulator. Both indirections have to be followed.
+        let wrapper = dir.join("xterm.wrapper");
+        std::fs::write(&wrapper, "#!/bin/sh\nexec xterm \"$@\"\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&wrapper, dir.join("x-terminal-emulator")).unwrap();
         let path = dir.to_string_lossy().into_owned();
         let at = |n: &str| dir.join(n).to_string_lossy().into_owned();
-        let none: [String; 0] = [];
-        // `terminal()` resolves xdg-terminal-exec before the desktop probes, so the
-        // pure rule takes it as an argument; passing it is what selects it.
+        // The rule takes each answer as an argument; passing one is what selects it.
         assert_eq!(
-            resolve_terminal(None, Some(&at("xdg-terminal-exec")), Some("xterm"), &none, &path),
-            at("xdg-terminal-exec"),
-            "the XDG launcher beats the desktop's config"
+            resolve_terminal_full(
+                Some(at("kitty")),
+                Some("xterm"),
+                Some(at("xdg-terminal-exec")),
+                Some("foot".to_string()),
+                &["xterm".to_string()],
+                &path,
+            ),
+            (at("kitty"), Source::Pinned),
+            "the pin this user set wins over everything"
         );
         assert_eq!(
-            resolve_terminal(None, None, Some("xterm"), &none, &path),
-            at("xterm"),
-            "the desktop's configured terminal"
+            resolve_terminal_full(
+                None,
+                Some("kitty -f"),
+                Some(at("xdg-terminal-exec")),
+                Some("xterm".to_string()),
+                &[],
+                &path,
+            ),
+            (at("kitty"), Source::Environment),
+            "$TERMINAL is next, first word only"
         );
         assert_eq!(
-            resolve_terminal(None, None, None, &["foot".to_string()], &path),
-            at("foot"),
+            resolve_terminal_full(
+                None,
+                None,
+                Some(at("xdg-terminal-exec")),
+                Some("xterm".to_string()),
+                &[],
+                &path,
+            ),
+            (at("xdg-terminal-exec"), Source::XdgExec),
+            "the XDG launcher beats the desktop's own setting"
+        );
+        assert_eq!(
+            resolve_terminal_full(None, None, None, Some("xterm".to_string()), &[], &path),
+            (at("xterm"), Source::Desktop),
+            "the desktop's configured terminal, when there is nothing above it"
+        );
+        assert_eq!(
+            resolve_terminal_full(None, None, None, None, &["foot".to_string()], &path),
+            (at("foot"), Source::Running),
             "an emulator already running"
         );
-        let xdg_here = at("xdg-terminal-exec");
         assert_eq!(
-            resolve_terminal(None, Some(&xdg_here), None, &none, &path),
-            xdg_here
-        );
-        assert_eq!(
-            resolve_terminal(Some("kitty -f"), None, Some("xterm"), &none, &path),
-            at("kitty"),
-            "$TERMINAL wins, first word only"
-        );
-        assert_eq!(
-            resolve_terminal(None, Some("/not/here"), Some("xterm"), &none, &path),
-            at("xterm"),
-            "an xdg-terminal-exec that is not installed is skipped"
-        );
-        assert_eq!(
-            resolve_terminal(None, Some("/not/here"), None, &none, &path),
-            at("kitty"),
-            "and the chain continues past it"
-        );
-        assert_eq!(
-            resolve_terminal(None, None, Some("not-installed"), &["foot".to_string()], &path),
-            at("foot"),
+            resolve_terminal_full(
+                None,
+                None,
+                None,
+                Some("not-installed".to_string()),
+                &["foot".to_string()],
+                &path,
+            ),
+            (at("foot"), Source::Running),
             "a configured name that is missing falls through"
         );
+        // The known list is reached only when there is no system alternative either.
+        let plain = std::env::temp_dir().join(format!(
+            "ldmux-term-known-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&plain).unwrap();
+        for n in ["kitty", "xterm"] {
+            let f = plain.join(n);
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert_eq!(
-            resolve_terminal(None, None, None, &[], &path),
-            at("kitty"),
+            resolve_terminal_full(None, None, None, None, &[], &plain.to_string_lossy()),
+            (plain.join("kitty").to_string_lossy().into_owned(), Source::Known),
             "the known order, kitty before xterm"
         );
-        assert_eq!(resolve_terminal(None, None, None, &none, ""), "");
+        let _ = std::fs::remove_dir_all(&plain);
+        assert_eq!(
+            resolve_terminal_full(None, None, None, None, &[], ""),
+            (String::new(), Source::None)
+        );
+        // An answer that is an indirection is followed to the program, never returned raw.
+        assert_eq!(
+            resolve_terminal_full(None, None, None, Some("x-terminal-emulator".to_string()), &[], &path),
+            (at("xterm"), Source::Desktop),
+            "the alternative resolves to the program it runs"
+        );
         assert!(terminal_problem("").unwrap().contains("$TERMINAL"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Only the session's own desktop is asked.** Reading a GNOME schema on an XFCE session
+    /// is how this machine answered `x-terminal-emulator` over ten alacritty windows: the value
+    /// belonged to a desktop nobody was running, and it named the Debian alternative rather
+    /// than a terminal.
+    #[test]
+    fn only_the_sessions_own_desktop_is_asked() {
+        use std::cell::RefCell;
+        let asked: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let probe = |program: &str, _args: &[&str]| -> Option<String> {
+            asked.borrow_mut().push(program.to_string());
+            match program {
+                "gsettings" => Some("'gnome-terminal'\n".to_string()),
+                "kreadconfig6" => Some("konsole\n".to_string()),
+                "xfconf-query" => Some("xfce4-terminal\n".to_string()),
+                _ => None,
+            }
+        };
+        let helpers = Some("WebBrowser=firefox\nTerminalEmulator=alacritty\n");
+
+        // GNOME: its own key, and nothing else.
+        asked.borrow_mut().clear();
+        assert_eq!(
+            desktop_configured_terminal("GNOME", &probe, helpers).as_deref(),
+            Some("gnome-terminal")
+        );
+        assert_eq!(*asked.borrow(), vec!["gsettings".to_string()]);
+
+        // XFCE: xfconf first, then the helpers file — **never gsettings**, even though the
+        // probe would answer.
+        asked.borrow_mut().clear();
+        assert_eq!(
+            desktop_configured_terminal("XFCE", &probe, helpers).as_deref(),
+            Some("xfce4-terminal")
+        );
+        assert_eq!(*asked.borrow(), vec!["xfconf-query".to_string()]);
+        // With no xfconf answer, the helpers file decides.
+        let no_xfconf = |program: &str, _args: &[&str]| -> Option<String> {
+            (program == "gsettings").then(|| "'gnome-terminal'".to_string())
+        };
+        assert_eq!(
+            desktop_configured_terminal("XFCE", &no_xfconf, helpers).as_deref(),
+            Some("alacritty")
+        );
+
+        // KDE: kdeglobals, through kreadconfig6.
+        asked.borrow_mut().clear();
+        assert_eq!(
+            desktop_configured_terminal("KDE", &probe, None).as_deref(),
+            Some("konsole")
+        );
+        assert_eq!(*asked.borrow(), vec!["kreadconfig6".to_string()]);
+
+        // A bare window manager: no desktop key applies, and nothing is asked.
+        asked.borrow_mut().clear();
+        assert_eq!(desktop_configured_terminal("i3", &probe, helpers), None);
+        assert!(asked.borrow().is_empty(), "no probe on a bare session");
+        assert_eq!(desktop_configured_terminal("", &probe, helpers), None);
+    }
+
+    /// An indirection is followed: `x-terminal-emulator` is a symlink to a `.wrapper` script,
+    /// and the answer must be the program that script runs, or its template is lost.
+    #[test]
+    fn an_alternative_resolves_to_the_program_it_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "ldmux-alias-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &str| {
+            let f = dir.join(name);
+            std::fs::write(&f, body).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write("alacritty", "#!/bin/sh\n");
+        write("alacritty.wrapper", "#!/bin/sh\nexec alacritty \"$@\"\n");
+        std::os::unix::fs::symlink(dir.join("alacritty.wrapper"), dir.join("x-terminal-emulator"))
+            .unwrap();
+        let path = dir.to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_alias("x-terminal-emulator", &path).map(|(p, _)| p),
+            Some(dir.join("alacritty").to_string_lossy().into_owned()),
+            "the wrapper's program, not the wrapper"
+        );
+        assert_eq!(resolve_alias("alacritty.wrapper", &path).map(|(p, _)| p),
+            Some(dir.join("alacritty").to_string_lossy().into_owned()));
+        // Not an answer: prose, a .desktop id, a program that is not installed.
+        assert_eq!(resolve_alias("Property \"/general/x\" does not exist", &path), None);
+        assert_eq!(resolve_alias("org.gnome.Terminal.desktop", &path), None);
+        assert_eq!(resolve_alias("nothing-here", &path), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1747,19 +2078,21 @@ mod tests {
         }
         let path = dir.to_string_lossy().into_owned();
         assert_eq!(
-            resolve_terminal(None, None, None, &["xterm".to_string()], &path),
+            resolve_terminal_full(None, None, None, None, &["xterm".to_string()], &path).0,
             format!("{path}/xterm"),
         );
         // Most frequent first is the caller's contract; a name that does not
         // resolve is skipped rather than returned.
         assert_eq!(
-            resolve_terminal(
+            resolve_terminal_full(
+                None,
                 None,
                 None,
                 None,
                 &["not-a-term".to_string(), "xterm".to_string()],
                 &path
-            ),
+            )
+            .0,
             format!("{path}/xterm"),
         );
         let _ = std::fs::remove_dir_all(&dir);

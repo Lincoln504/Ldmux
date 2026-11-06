@@ -123,7 +123,7 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux new [--kind shell|pi] [cwd]\n  Create a session and print its id, without attaching to it or opening anything. Look at it with `ldmux attach <id>`."
         }
         "terminal" => {
-            "ldmux terminal [--exec <command...>]\n  Print the terminal emulator a desk window opens in — `$TERMINAL`, then xdg-terminal-exec, then your desktop's own setting, then an emulator already running. With --exec, run <command> in it instead of printing (the emulator's own flags applied). Non-zero with the reason when there is no terminal."
+            "ldmux terminal [--explain] [--exec <command...>]\n  The terminal a desk window opens in, and where the answer came from (--explain). The order: a pin set here, $TERMINAL, xdg-terminal-exec, this desktop session's configured terminal, an emulator already running, the system alternative, then the known list.\n\nldmux terminal set <program>\n  Pin it, for example `ldmux terminal set alacritty`. Kept in $XDG_CONFIG_HOME/ldmux/terminal, which the daemon reads.\n\nldmux terminal clear\n  Forget the pin.\n\nldmux terminal --exec <command...>\n  Run <command> in that terminal (the emulator's own flags applied)."
         }
         "send" => "ldmux send <id> <text...>\n  Type text into a session.",
         "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
@@ -392,6 +392,7 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--mesh",
         "--mesh-only",
         "--name",
+        "--explain",
         "--final",
         "--id",
         "--stdin",
@@ -624,13 +625,47 @@ async fn main() {
         "terminal" => {
             // **One resolver, asked by anything that needs a terminal.** The keybinding
             // wrapper carried its own copy of the chain in shell, so a change to the rules
-            // had to be made twice and the two drifted. This answers with the program, or
-            // replaces this process with `<program> -e <command>` — the emulator's own
-            // template applied, which is the part a shell cannot know.
-            let t = ldmux_daemon::desktop::terminal();
+            // had to be made twice and the two drifted. This answers with the program, says
+            // where the answer came from, or replaces this process with `<program> -e
+            // <command>` — the emulator's own template applied, which is the part a shell
+            // cannot know. `set`/`clear` pin the choice in a file the daemon can read.
+            if let Some(sub) = rest.first().map(String::as_str)
+                && (sub == "set" || sub == "clear")
+            {
+                let target = if sub == "set" {
+                    rest.get(1).map(String::as_str)
+                } else {
+                    None
+                };
+                if sub == "set" && target.is_none() {
+                    eprintln!("usage: ldmux terminal set <program> | clear");
+                    std::process::exit(2);
+                }
+                match ldmux_daemon::desktop::set_terminal(target) {
+                    Ok(path) => {
+                        match target {
+                            Some(t) => println!("{t}"),
+                            None => println!("cleared"),
+                        }
+                        eprintln!("ldmux: kept in {}", path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("ldmux: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            let explain = rest.iter().any(|a| a == "--explain");
+            let (t, source) = ldmux_daemon::desktop::terminal_with_source();
             if let Some(why) = ldmux_daemon::desktop::terminal_problem(&t) {
                 eprintln!("ldmux: {why}");
                 std::process::exit(1);
+            }
+            if explain {
+                println!("{t}");
+                println!("  from {}", source.describe());
+                return;
             }
             match rest.iter().position(|a| a == "--exec") {
                 None => println!("{t}"),

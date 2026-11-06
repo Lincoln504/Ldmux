@@ -57,15 +57,29 @@ session and become its window there. The CLI opens nothing: `ldmux new` creates 
 prints its id so a script can carry on.
 
 The one window the daemon spawns is the one asked for by a device that has no terminal — the
-phone's `send to desktop`. It opens in the terminal the user configured, resolved in this
-order and cached per daemon process: `$TERMINAL`, `xdg-terminal-exec`, an emulator already
-running for this user (most frequent first), the desktop's own setting (GNOME `gsettings`,
-KDE `kdeglobals`, XFCE `helpers.rc`), then the known list with `x-terminal-emulator` last. The
-running-emulator step outranks the desktop setting on purpose: a settings key is often a
-distribution alternative, while the emulator a person has ten windows of is the one they use.
-`ldmux terminal` prints the answer and `ldmux terminal --exec <command>` applies that
-emulator's own template and execs it, so the keybinding wrapper carries no second copy of the
-rules.
+phone's `send to desktop`. It opens in **the terminal the person configured**, resolved in this
+order (probes cached per daemon process, a pin read live):
+
+1. `ldmux terminal set <program>` — this user's explicit choice, kept in
+   `$XDG_CONFIG_HOME/ldmux/terminal`. A file because the daemon runs from the user manager:
+   `$TERMINAL` exported in a shell never reaches it.
+2. `$TERMINAL`.
+3. `xdg-terminal-exec`, when installed: it reads the XDG terminal configuration and every
+   desktop application goes through it.
+4. **This session's own desktop setting**, read only from that desktop — GNOME/Cinnamon/MATE
+   through their `gsettings` schema, KDE through `kdeglobals`, XFCE through `xfconf` and
+   `~/.config/xfce4/helpers.rc`. A bare window manager has no such key and is asked nothing.
+5. An emulator already running for this user, most frequent first — what makes a bare i3
+   session resolve to reality.
+6. The system alternative `x-terminal-emulator`, resolved through its symlink and its
+   `.wrapper` script to the program it actually runs, so that program's template still applies.
+7. The known emulators on `PATH`.
+
+Every answer that is an indirection is followed: a probe that returns `x-terminal-emulator`, a
+`.wrapper` shim or a `.desktop` id is not a terminal, and returning it raw is how a window
+opens in something nobody named. `ldmux terminal` prints the program, `--explain` prints the
+step it came from, and `--exec <command>` applies that emulator's own template and execs it,
+so the keybinding wrapper carries no second copy of the rules.
 
 Each spawned window is a transient unit under `ldmux-windows.slice`, held on a pipe until the
 move is visible in `/proc/<pid>/cgroup` (the same construction the keeper uses for shells), so

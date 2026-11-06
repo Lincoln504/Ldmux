@@ -56,9 +56,9 @@ ldmux new ~                       # create one and print its id, opening nothing
 `ldmux` never opens a terminal window of its own: it runs inside the one you have, and
 `super+Return` runs the installed `ldmux-terminal`, which opens your configured emulator
 and starts `ldmux shell` in it. The one window the daemon opens is the one the phone asks
-for (`send to desktop`), and it uses the same terminal you configured: `$TERMINAL`, then
-`xdg-terminal-exec`, then an emulator you are running, then your desktop's setting.
-`ldmux terminal` prints that answer.
+for (`send to desktop`), and it uses the terminal you configured: `ldmux terminal set
+alacritty` pins it, otherwise `$TERMINAL`, `xdg-terminal-exec` and your desktop's own setting
+decide. `ldmux terminal --explain` prints the answer and where it came from.
 
 `ldmux --help` lists every verb (`new`, `shell`, `run`, `attach`, `send`, `key`, `capture`,
 `kill`, `close`, `code`, `pair`, `mesh`, …). `ldmux --version` and `ldmux ping` say which
