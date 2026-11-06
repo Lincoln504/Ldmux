@@ -18,8 +18,9 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
 - **The radios are optional.** The tailnet needs no radio. The offline mode needs **two or more
   MeshCore radios**: one on the desktop's serial port and one that travels with the phone over
   Bluetooth, plus any repeaters in between. Both ends must share one frequency, bandwidth,
-  spreading factor and coding rate, and the desktop floods an advert so the phone learns the
-  route back through those repeaters.
+  spreading factor and coding rate. Repeaters need a route at both ends: the desktop floods an
+  advert so its radio is discoverable, and the reply direction follows the path a record arrived
+  by (`docs/ARCHITECTURE.md` §11 states what the phone still has to do to learn its own route).
 - **Records are sealed end to end.** Each is a Noise session message inside a MeshCore
   `RAW_CUSTOM` packet addressed to the peer radio's key; the radio's own channel encryption is
   never used. [`docs/SECURITY.md`](docs/SECURITY.md).

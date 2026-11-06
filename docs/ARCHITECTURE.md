@@ -368,18 +368,24 @@ cannot use a radio the host is holding.
    silent: two radios on different tuples simply cannot hear each other, and the
    only symptom is a link that never comes up.
 
-**Repeaters: two requirements, both now implemented.**
+**Repeaters: what has to be true, and what is in place.**
 
 A raw record is a **direct** packet, and the firmware delivers a `RAW_CUSTOM` packet only
 when its route is direct (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`: it checks
 `pkt->isRouteDirect()` and the flood branch is commented out), so a flooded raw record would
 be transmitted and then ignored by every receiver. Direct means the sender must know a path.
 
-1. **The peer needs a route to this host, and an advert is what teaches it.** A companion does
-   not advertise by itself, so the daemon floods a self-advert (`CMD_SEND_SELF_ADVERT` with
-   mode 1) when the link opens and every `LDMUX_MESH_ADVERT_SECS` (default 1800; `0` turns
-   adverts off). Repeaters forward it and its path accumulates, so the phone's radio stores a
-   contact whose out-path is the route back. The app asks for that contact and sends along it.
+1. **The host makes itself known, and the peer must then ask for a route.** A companion does not
+   advertise by itself, so the daemon floods a self-advert (`CMD_SEND_SELF_ADVERT` with mode 1)
+   when the link opens and every `LDMUX_MESH_ADVERT_SECS` (default 1800; `0` turns adverts off).
+   Repeaters forward it and its path accumulates, so the phone's radio learns a contact.
+   **An advert does not teach a route on its own**: `BaseChatMesh::onAdvertRecv` never touches
+   `out_path`. A route is learned from a path return, which MeshCore sends when a node receives a
+   **flooded request**: `onPeerDataRecv` answers a flood `PAYLOAD_TYPE_REQ` with
+   `createPathReturn(...)` sent flooded, and `onContactPathRecv` stores the reversed path as the
+   contact's `out_path`. The companion command for that is `CMD_SEND_PATH_DISCOVERY_REQ` (0x34,
+   which is a telemetry request forced to flood), and it needs the host in the radio's contact
+   list first (`CMD_ADD_UPDATE_CONTACT`, 0x09). See the audit for the state of that step.
 2. **The host replies along the path the request arrived by.** Each record that crosses
    repeaters arrives with its hops in travel order; `PeerPath::reversed` turns that into a
    usable out-path (per `hash_size` bytes, not per byte) and the radio thread sends every
@@ -395,7 +401,13 @@ Consequences worth knowing:
   would duplicate records the peer already has and spend the hour's allowance doing it.
 - **Paths move.** The phone re-asks for its contact every 45 s while it has no route and every
   10 minutes once it has one, so a host that becomes reachable mid-session becomes reachable
-  without a reconnect.
+  without a reconnect — provided the radio's contact carries an out-path, which is what the
+  step above has to establish.
+- **What is proven and what is not.** The reverse-path reply, the zero-hop fallback, the
+  per-`hash_size` hop reversal and the airtime-scaled timers are unit-tested. Nothing in this
+  tree has yet run through a real repeater: the two radios on the bench hear each other directly,
+  so the path is always empty there. The first three-radio test is what proves the route-learning
+  step end to end.
 - **A path is not authenticated by MeshCore.** Route integrity is an 8-bit prefix comparison per
   hop (issue #1775 in the firmware tracker), so the session's Noise layer, not the path, is what
   authenticates the peer.
