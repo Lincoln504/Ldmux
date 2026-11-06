@@ -63,8 +63,8 @@
 
 ## Context
 
-ADR-0006 §1 rejected dooboxes' exclusive attachment lock in favour of allowing
-any number of clients on one tmux session, with a read-only desktop mirror. That
+ADR-0006 §1 rejected an exclusive attachment lock in favour of allowing
+any number of clients on one session, with a read-only desktop mirror. That
 decision was made when the desktop side was a *mirror* — a read-only second view
 with no input of its own.
 
@@ -88,8 +88,8 @@ device identity, no presence, no attach counting, no ownership. `attachable` and
 `openedByPhone` are Kotlin-side derivations over wire data, so no server rule can
 be built on them. `kill` has no ownership check at all while `makeLive` does.
 
-Separately, dooboxes — the project this deliberately diverged from — specifies
-the opposite, and specifies it as a *product rule* rather than a limitation:
+Separately, the design this one deliberately diverged from specifies the
+opposite, and specifies it as a product rule rather than a limitation:
 
 > - Sessions allow only one attached device at a time (desktop local OR mobile remote)
 > - **No automatic session stealing or forced detach without user consent**
@@ -105,8 +105,8 @@ tied to a live connection, and released the moment that connection ends.
 
 ### Ownership is a connection, not a record
 
-The single most important lesson in dooboxes' own glossary is a failure mode it
-names *Stale State*: persisted attachment state that outlives the connection
+The single most important lesson in the prior art is a failure mode it names
+*Stale State*: persisted attachment state that outlives the connection
 **blocks the next attach**. The failure is a lockout, not a cosmetic bug.
 
 So ldmux stores ownership **nowhere**. It lives in memory, keyed by connection,
@@ -116,8 +116,8 @@ claim — which is correct, because a restart also loses every client.
 
 ### Consent is structural, so there is no tie to break
 
-dooboxes needs a "desktop wins ties" rule because attachment there is an API call
-that either side can make at any moment. Here, **both** directions require a
+That design needs a "desktop wins ties" rule because attachment there is an API
+call either side can make at any moment. Here, **both** directions require a
 deliberate act:
 
 - the phone shows a dialog — *"open on Desktop. Take it over?"* — and sends

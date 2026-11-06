@@ -4,9 +4,10 @@
 
 ## Context
 
-gmux's scroll-jump-to-top bug (PR #500) came from stale `wasAtBottom`/pixel
-snapshots racing user wheel input across BSU→ESU→rAF windows. gmux fixed it with
-an explicit `following`/`anchored` mode state machine in the client.
+The scroll-jump-to-top bug seen in earlier terminals came from stale
+`wasAtBottom` and pixel snapshots racing user wheel input across BSU to ESU to
+rAF windows. The fix is an explicit `following`/`anchored` mode state machine in
+the client.
 
 A server-facing integer `anchorLine` is meaningless: there are three incompatible
 line spaces (xterm.js buffer ids, `capture-pane` padded/reflowed lines, tmux

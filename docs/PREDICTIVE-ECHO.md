@@ -17,11 +17,9 @@ result comes back, and what to do when the round trip is 150–250 ms.
 Mobile RTT to a home box is 150–250 ms on WiFi/5G and worse on LTE with a
 tailnet hop in between. That is the same order of magnitude as the threshold at
 which typing stops feeling direct: a character that appears a fifth of a second
-after the key press reads as "laggy", even though nothing is broken. The prior
-work in `dooboxes` measured exactly this class of problem and recorded the
-targets (`docs/1_CORE_SPECIFICATIONS/TESTING_STRATEGY.md:535-566`): screen
-update latency **< 100 ms p95** as a launch blocker, with 150–250 ms called out
-as the *realistic mobile* figure to design against.
+after the key press reads as "laggy", even though nothing is broken. Earlier work on the same problem set the targets: screen
+update latency under 100 ms at p95 as a launch blocker, with 150 to 250 ms named
+as the realistic mobile figure to design against.
 
 So the goal is not to make the network fast. It is to make the *perceived*
 latency small.
@@ -43,9 +41,8 @@ In rough order of value per unit of work:
 3. **Predictive local echo** — show the keystroke before the echo returns.
    **Not done**; design in §5.
 4. **Frame coalescing / adaptive rate** — do not repaint faster than the link
-   can carry; do not let a flood starve input. `dooboxes`
-   (`MOBILE_TERMINAL_PERFORMANCE.md:186-196`) specifies *max 50 Hz, min
-   max(2 Hz, 1/2 RTT)*, explicitly so that buffer bloat cannot delay Ctrl-C.
+   can carry; do not let a flood starve input. The rule is max 50 Hz and min
+   max(2 Hz, half an RTT), explicitly so that buffer bloat cannot delay Ctrl-C.
    **Done** (`FramePacing` + `TerminalController.scheduleRender`). See §5.3 for
    where this deviates from the source and why.
 5. **Atomic repaint on connect/resize** — a snapshot is applied as a unit so a
@@ -58,16 +55,12 @@ In rough order of value per unit of work:
 7. **Bounded scrollback paging** — history is fetched in bounded chunks, never
    by one giant capture. **Done** (`HISTORY_CAPTURE_LINES`, `scrollback`).
 
-## 3. Prior art: what `dooboxes` already worked out
+## 3. Prior art: the mosh design
 
-`dooboxes` has a complete, portable design for (3), dated 2026-02-08, in
-`docs/4_RESEARCH/current/mobile/PREDICTIVE_ECHO_AND_TERMINAL_RENDERING_RESEARCH_FEBRUARY_2026.md`.
-It is scoped as P2/post-MVP there (2–4 weeks, `MOBILE_TERMINAL_PERFORMANCE.md:103`)
-and **not implemented** — but the hard thinking is done and is directly reusable.
+The mosh paper is the public source for all of this, and its numbers are the
+reason prediction is worth building at all.
 
 ### 3.1 The measured case (mosh's SSP)
-
-`:96-104`:
 
 | Metric | SSH | Mosh | Improvement |
 |---|---|---|---|
@@ -76,12 +69,12 @@ and **not implemented** — but the hard thinking is done and is directly reusab
 | Predictable keystrokes | 0% | 70% | — |
 | Error rate | 0 % | 0.9 % | acceptable |
 
-The mechanism (`:89-95`): idempotent diffs; **epoch-based confidence**; a
+The mechanism: idempotent diffs; **epoch-based confidence**; a
 **server-side ~50 ms delay before echoing**, to give the client's prediction time
 to land first (this is what removes flicker — the prediction is never painted
 and then immediately contradicted); and sequence-number synchronisation.
 
-### 3.2 The confidence algorithm (`:107-125`)
+### 3.2 The confidence algorithm
 
 1. A new *epoch* starts tentatively; its predictions are held.
 2. If **any** prediction in the epoch is confirmed, the whole epoch is displayed.
@@ -91,7 +84,7 @@ and then immediately contradicted); and sequence-number synchronisation.
 The property that matters: prediction is never a coin flip shown to the user —
 it is a state machine that earns the right to be shown.
 
-### 3.3 The prediction gate (`:127-142`)
+### 3.3 The prediction gate
 
 **Predictable** (safe to echo locally): alphanumerics; common punctuation
 `. , ; : ' " ! ? - _ = + [ ] { } ( ) @ # $ % ^ & * ~ \` | /`; space; TAB;
@@ -102,13 +95,11 @@ TAB/ENTER (Ctrl-C, Ctrl-D, Ctrl-Z …); navigation keys (arrows, PageUp/Down,
 Home/End); function keys; **password mode**; **raw-mode applications** (vim,
 top, …).
 
-This gate is the whole safety story, and it is small enough to port verbatim.
-`dooboxes` even wrote it out in executable form, `isPredictable(keystroke,
-terminalMode)` with a `PREDICTABLE_PATTERNS` regex table (`:186-215`), plus a
-`PredictionEngine` sketch (`addPrediction` / `confirmEpoch` / `loseConfidence` /
-`rollback`, `:175-185`).
+This gate is the whole safety story, and it is small enough to write out as one
+predicate: `isPredictable(keystroke, terminalMode)` over a pattern table, plus
+the epoch calls (`addPrediction`, `confirmEpoch`, `loseConfidence`, `rollback`).
 
-### 3.4 The sshx precedent (`:156-196`)
+### 3.4 The sshx precedent
 
 Sequence tracking with a **3-miss tolerance** before accepting the server's
 number, and a two-tier rolling buffer (client 8 MB, prune at 12 MB; server 2 MB
@@ -231,7 +222,7 @@ the delay the user actually experiences. It is shown in the sidebar
 (`link 42 ms · 30 fps`), because a number the user can see is the only way to
 tell "this link is slow" from "this app is slow".
 
-| | dooboxes' note | here | why |
+| | the earlier note | here | why |
 |---|---|---|---|
 | ceiling | max 50 Hz | **30 Hz** (`33 ms`) | Terminals stream text, not video. Input responsiveness is protected by coalescing and the predictor, not by painting faster; 60 Hz just wakes the CPU. |
 | floor | max(2 Hz, ½ RTT) | **6.7 Hz** (`150 ms`) | 2 Hz reads as broken rather than slow, and below the floor the predictor is the better answer to latency than more draws. |
@@ -242,7 +233,7 @@ Scrolling is exempt: it is a local view change, so it paints immediately
 
 ### 5.4 Scrollback is the emulator's, not a client-side buffer (done)
 
-Not in dooboxes' list, but part of the same honesty about where the truth lives.
+Not on that list, but part of the same honesty about where the truth lives.
 libghostty-vt owns the scrollback and exposes a viewport-scroll API
 (`ghostty_terminal_scroll_viewport` with TOP/BOTTOM/DELTA/ROW tags) plus a
 scrollbar struct (`GHOSTTY_TERMINAL_DATA_SCROLLBAR`, `{total, offset, len}`). The
@@ -265,7 +256,7 @@ and daemon (if this moves, we broke something local). The number that matters is
 the same tool pointed at the tailnet address (`--url ws://…`), which is not yet
 measured.
 
-1. **Round-trip echo latency:** as above. This is the dooboxes SLA metric.
+1. **Round-trip echo latency:** as above. This is the launch-blocking number.
 2. **Key-to-paint latency (local):** timestamp at key dispatch and at the
    Compose frame containing the predicted character — the number prediction
    improves; not measured yet.
@@ -299,11 +290,9 @@ None of this is implemented; there is no latency harness yet.
 
 ## 8. Sources
 
-- `dooboxes/docs/4_RESEARCH/current/mobile/PREDICTIVE_ECHO_AND_TERMINAL_RENDERING_RESEARCH_FEBRUARY_2026.md`
-  — algorithm (`:107-125`), rules (`:127-142`), `isPredictable` (`:186-215`),
-  mosh table (`:96-104`), sshx zoom patch (`:210-245`).
-- `dooboxes/docs/1_CORE_SPECIFICATIONS/TESTING_STRATEGY.md:535-566` — latency SLA.
-- `dooboxes/docs/1_CORE_SPECIFICATIONS/MOBILE_TERMINAL_PERFORMANCE.md:103,186-196`
-  — P2 scope, adaptive frame rate.
-- `dooboxes/docs/4_RESEARCH/current/misc/SSHX_COMPREHENSIVE_TECHNICAL_ANALYSIS_FEBRUARY_2026.md:885-903`
-  — client-sends-winsize.
+- The mosh paper (Winstein and Balakrishnan, USENIX ATC 2012): the latency table,
+  the epoch confidence rule, and the 50 ms server-side delay before echoing.
+- The sshx technical analysis: client-sends-winsize, and the xterm.js zoom caveat
+  where CSS scaling broke font measurement and pointer to cell mapping.
+- libghostty-vt (`render.h`, `terminal.h`): the password-input render flag and the
+  viewport scroll API.

@@ -642,7 +642,7 @@ fun MeshTerminalScreen(
     // screen's own layout: above the key pad in portrait, at the foot of the side panel in
     // landscape. It used to be a card floating over the bottom-right of the terminal, which covered
     // the shell's last line and its cursor — the two things a terminal is read for.
-    // **The row exists only in manual sync mode.** In live mode there is nothing to hold and
+    // **The row exists only in batch mode.** In live mode there is nothing to hold and
     // nothing to release, so a sync button would be a control for a mode that is not running —
     // and the mode is not switched from here any more: it is a property of the link, set in
     // Settings beside the channel. What is left in the terminal is the one control the mode
@@ -864,7 +864,7 @@ fun MeshTerminalScreen(
                 if (!portrait && !config.panelLeft) panel()
             }
             if (portrait) {
-                // The space above the keyboard: the mode's row (manual sync only), then the keys.
+                // The space above the keyboard: the mode's row (batch only), then the keys.
                 barRow?.invoke(Modifier.fillMaxWidth())
                 PortraitBar(
                     handle = handle,

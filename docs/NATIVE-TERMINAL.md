@@ -94,52 +94,41 @@ shared) and the full `include/ghostty/vt/*.h` header set.
 | **Flutter `xterm3`** | parser + renderer | yes | **AGPL-3.0** (v6+) | requires Flutter; AGPL |
 | **`termlib`** (ConnectBot) | parser + Canvas | yes | Apache-2.0 | older, Android-only, Java |
 
-## Prior art: the dooboxes project (read 2026-09-14)
+## Prior art in this space
 
-A sibling project (Rust) already worked this exact problem and its decisions are
-worth inheriting. Its renderer decision changed **three times**, and the older
-docs carry superseded banners — read the ADRs, not the specs.
-
-| When | Artifact | Mobile renderer decision |
-|---|---|---|
-| 2026-06-29 | `MOBILE_TERMINAL_PERFORMANCE.md`, `MOBILE_TERMINAL_UX.md` | xterm.js in a WebView; libghostty a post-MVP swap |
-| 2026-02-08 | `PREDICTIVE_ECHO_AND_TERMINAL_RENDERING_RESEARCH_FEBRUARY_2026.md` | keep xterm.js; native deferred |
-| 2026-07-05 | `ADR_2026-07_TAILNET_AND_RUST_TERMINAL_STACK.md` | one engine = **`alacritty_terminal`**, replacing xterm.js; mobile stays WebView for now |
-| 2026-07-14 | `ADR_2026-07-14_FLUTTER_MOBILE_AND_SEAMLESS_SESSIONS.md` | **authoritative:** Flutter + `flutter_rust_bridge` + the `alacritty_terminal` core + `CustomPainter` over the cell grid |
+A Rust project worked this exact problem before ldmux, and what it established is
+worth inheriting. Its renderer decision changed three times, so read conclusions
+rather than early notes.
 
 Findings that transfer directly:
 
-- **Engine: `alacritty_terminal` v0.26, not libvterm.** Verified dependency-light —
-  only `vte`, `base64`, `bitflags`, `unicode-width`, `serde`, `parking_lot` (plus a
-  `tty` module they never use). It gives the **grid + scrollback + `Term` API**,
-  whereas libvterm is parser-only and would leave us to build and maintain the
-  grid. The infamous "Alacritty is hard on Android" is its *app* (winit/fontconfig/
-  crossfont), not this crate. It cross-compiles to Android NDK and `aarch64-apple-ios`.
-- **The reusable seam is proven in code** (`libs/dooboxes-terminal-core`):
-  `Terminal::new(cols, rows)` → `advance(bytes)` in → `take_pty_output()` (query
-  replies that must go back upstream or full-screen apps hang) → `cells()` /
-  `visible_rows()` / `cursor()` out, plus `encode_key`/`encode_mouse`. A renderer
-  only needs the styled-grid-out shape.
-- **libghostty was rejected twice, with a revisit trigger of stable ABI
-  **and** shipped iOS/Android targets.** (Their rejection predates the 2026-08
-  Android projects and coder/ghostty-web; see the corrected section above — the
-  trigger is now substantially met, leaving only API stability.)
-- **"Never split engines"** — one emulation core for every client. Pairing
-  libvterm on mobile with xterm.js on the web would repeat the anti-pattern they
-  forbade.
-- **The engine is the cheap part; the renderer + input + FFI is the real cost, and
-  it is platform-native regardless of engine.** Their effort estimate: WebView
-  5–9 weeks vs native 19–28 weeks (~4×).
-- **Framework-independent perf targets to reuse:** 30 FPS target (15 acceptable),
-  input latency < 100 ms (< 200 acceptable), memory < 50 MB (< 100), battery
-  < 3 %/h, frame rate capped at 50 Hz with an RTT-adaptive floor of `max(2 Hz,
-  1/2 RTT)`, and 1000-line mobile scrollback.
-- Mobile WebView measured (their research): 30–45 FPS iOS / 30–40 Android,
-  200–400 ms first paint, 15–25 MB + 5–10 MB per 1000 scrollback lines, 3–5 %/h.
-- Their `vte`-based sanitizer policy matches ldmux's existing one (drop device
-  queries server-side, by state machine, not by string blocklist).
-- Note: their `rendererType: 'canvas'` advice is stale for xterm.js 6 (no such
-  option) — same finding ldmux already hit.
+- Engine: `alacritty_terminal`, not libvterm, if a Rust core is ever needed.
+  It is dependency-light (only `vte`, `base64`, `bitflags`, `unicode-width`,
+  `serde`, `parking_lot`) and gives the grid, scrollback and `Term` API, where
+  libvterm is parser-only and would leave the grid to build and maintain. The
+  reputation for being hard on Android belongs to the Alacritty app, not this
+  crate. It cross-compiles to the Android NDK and to `aarch64-apple-ios`.
+- The seam shape is proven: `Terminal::new(cols, rows)` then `advance(bytes)`
+  in, `take_pty_output()` out for query replies that must go back upstream or a
+  full-screen program hangs, and `cells()`, `visible_rows()`, `cursor()` plus
+  `encode_key` and `encode_mouse` for the rest. A renderer only needs styled cells
+  out and encoded keys in.
+- "Never split engines": one emulation core for every client. Pairing a
+  parser-only library on mobile with a different engine elsewhere repeats the
+  anti-pattern.
+- The engine is the cheap part. The renderer, the input handling and the FFI
+  are the real cost and they are platform-native whatever the engine is. The
+  estimate that circulated was five to nine weeks for a WebView client against
+  nineteen to twenty-eight for a native one.
+- Perf targets worth reusing: 30 fps with 15 acceptable, input latency under
+  100 ms with 200 acceptable, memory under 50 MB with 100 acceptable, battery
+  under 3 percent per hour, frame rate capped at 50 Hz with an RTT-adaptive floor
+  of max(2 Hz, half an RTT), and a 1000-line mobile scrollback.
+- A WebView measured 30 to 45 fps on iOS and 30 to 40 on Android, 200 to 400
+  ms to first paint, 15 to 25 MB plus 5 to 10 MB per thousand scrollback lines,
+  and 3 to 5 percent battery per hour.
+- A `vte`-based sanitizer policy matching ldmux's: device queries dropped
+  server-side by a state machine, not by a string blocklist.
 
 **The face is the app's, not the platform's.** `TerminalPainter` draws with Fira Mono, bundled at
 `packages/mobile/composeApp/src/androidMain/res/font/`, and every monospace label in the mobile UI
@@ -180,9 +169,8 @@ with no WebGL, and it buys nothing over the native library we would already link
    and render with the *same* Compose Canvas. The shared module and the protocol
    code are written once; only the tiny native-loading `actual` and the app shells
    differ.
-4. **Never split engines** (inherited from dooboxes): the web client keeps its
-   engine, but the native apps share exactly one core. Do not ship libghostty on
-   Android and a different core on iOS.
+4. **Never split engines**: the native apps share exactly one core. Do not ship
+   libghostty on Android and a different core on iOS.
 5. **Fallback if the Zig/native path stalls:** `alacritty_terminal` (Rust,
    dependency-light, cross-compiles to both) behind the same seam, or Termux
    `terminal-view` (fast, but **GPL-3.0** makes the app GPL).

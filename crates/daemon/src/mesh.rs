@@ -351,6 +351,9 @@ fn hex(bytes: &[u8]) -> String {
 pub struct MeshSnapshot {
     /// `connecting`, `handshaking`, `ready`, or `down`.
     pub state: &'static str,
+    /// The tuple the host's own radio reported: `(frequency in kHz, bandwidth in Hz, SF, CR)`.
+    /// `None` for a gateway, which does not say, and before the radio has been identified.
+    pub radio_preset: Option<(u32, u32, u8, u8)>,
     pub addr: String,
     /// The serial device the daemon drives itself, when it owns the radio.
     pub serial: Option<String>,
@@ -384,6 +387,7 @@ impl MeshSnapshot {
     fn new(cfg: &MeshConfig) -> Self {
         Self {
             state: "connecting",
+            radio_preset: None,
             addr: cfg.addr.clone(),
             serial: cfg.serial.clone(),
             peer: hex(&cfg.peer),
@@ -714,7 +718,18 @@ async fn link(
             )
             .await
             .map_err(|_| MeshError::Timeout("serial open"))??;
-            let (carrier, promise) = opened;
+            let (carrier, promise, preset) = opened;
+            // **The host's own tuple, said out loud.** Read from the radio at open and published
+            // here, because two radios on different tuples cannot hear each other and the phone
+            // could only ever compare against a number the host never gave it.
+            set(&runtime.snapshot, |s| {
+                s.radio_preset = Some((
+                    (preset.freq_mhz * 1000.0).round() as u32,
+                    (preset.bw_khz * 1000.0).round() as u32,
+                    preset.sf,
+                    preset.cr,
+                ));
+            });
             session(carrier, promise, runtime, setup, bound).await
         }
         None => {

@@ -47,7 +47,7 @@ import io.ldmux.mobile.MonoFont
  *
  * **The mode is not switched here.** It is a property of the link — live, or held until sync — and
  * it is chosen in Settings beside the channel, because a connection-level decision does not belong
- * in a per-screen row next to the keys. This bar is drawn only while the mode is manual sync, so
+ * in a per-screen row next to the keys. This bar is drawn only while the mode is batch, so
  * its presence *is* the mode's indicator, and there is no "leave" button: leaving is changing the
  * setting.
  *

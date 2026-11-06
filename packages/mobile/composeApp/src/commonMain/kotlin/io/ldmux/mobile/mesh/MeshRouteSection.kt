@@ -212,14 +212,14 @@ internal fun MeshRouteSection(
                 ) {
                     if (current.meshInputMode != MeshInputMode.Live) onInputMode(MeshInputMode.Live)
                 }
-                OptionButton("manual sync", selected = current.meshHoldsInput) {
+                OptionButton("batch", selected = current.meshHoldsInput) {
                     if (current.meshInputMode != MeshInputMode.ManualSync) {
                         onInputMode(MeshInputMode.ManualSync)
                     }
                 }
             }
             if (current.meshPublicChannel) {
-                SettingsNote("a public channel forces manual sync: every keystroke there is a broadcast")
+                SettingsNote("a public channel forces batch: every keystroke there is a broadcast")
             }
         }
 

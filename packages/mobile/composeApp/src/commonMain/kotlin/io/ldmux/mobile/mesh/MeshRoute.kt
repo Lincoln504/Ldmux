@@ -13,7 +13,7 @@ enum class MeshRoute { Tailnet, Mesh }
  * How typing leaves the phone on the mesh route.
  *
  * The names are the user's words, not the implementation's: `live` is "it goes as I type" and
- * `manual sync` is "it waits until I press sync". The old name for the second one was
+ * `batch` is "my typing leaves when I send it". The old name for the second one was
  * "public-channel mode", which described *why* it exists rather than what it does, and it was
  * forced on a public channel — so a user on a private channel had a mode named after a condition
  * that was not true for them.

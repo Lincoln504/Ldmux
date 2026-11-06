@@ -24,10 +24,9 @@ three had visible consequences on the device:
    was rendering *during* typing, competing with the keyboard for a 1080 px-tall
    landscape window.
 
-`dooboxes` offered two relevant precedents and no answers to (1): client-driven
-winsize with server-side bounds validation
-(`SSHX_COMPREHENSIVE_TECHNICAL_ANALYSIS…:885-903`,
-`TESTING.md:1379` — "1–200 rows, 1–500 cols"), and a recorded warning that
+The prior art offered two relevant precedents and no answers to (1): client-driven
+winsize with server-side bounds validation (one to two hundred rows, one to five
+hundred columns), and a recorded warning that
 scale-to-fit breaks pointer→cell mapping if coordinates are not scaled with it
 (`PREDICTIVE_ECHO…:210-245`). Their notes contain **no** soft-keyboard
 orientation or scale-vs-resize policy, so that part is a new decision.
@@ -69,8 +68,8 @@ itself) rather than assumed.
 
 The client measures its own viewport, computes the grid that fits, and tells the
 daemon (`Resize`, or `cols`/`rows` on `Attach`). The daemon clamps into
-`MIN/MAX_PANE_COLS` (20–500) and `MIN/MAX_PANE_ROWS` (5–255) — the same interval
-`dooboxes` recorded. (It was 300 until 2026-09-20 — a frame carries a selection's rows in
+`MIN/MAX_PANE_COLS` (20–500) and `MIN/MAX_PANE_ROWS` (5–255), the same interval
+the prior art recorded. (It was 300 until 2026-09-20 — a frame carries a selection's rows in
 one byte each while its columns get two, so a taller pane wrapped its selection rows
 modulo 256 — and runs `tmux resize-window -x -y`.) The daemon still
 enforces the bound, so a buggy or hostile client cannot ask tmux for a window
@@ -80,7 +79,7 @@ The pane is resized in **both** modes, from the *visible* viewport (in portrait
 that viewport already excludes the keyboard). An earlier iteration skipped the
 resize while typing and scaled the landscape grid instead; on the device that
 produced a postage-stamp grid with large empty bands, which is precisely the
-outcome `dooboxes` warns about. Resizing is the clean answer; the grid then
+outcome the prior art warns about. Resizing is the clean answer; the grid then
 draws at 1:1 and the scale transform only absorbs rounding.
 
 Resizes are debounced 250 ms in the surface, so a rotation that emits two or

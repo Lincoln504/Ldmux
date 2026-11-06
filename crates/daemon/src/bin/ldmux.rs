@@ -220,6 +220,21 @@ fn print_mesh_status(v: &serde_json::Value) {
             );
         }
     }
+    // **The tuple the host's radio is on, because the phone's must match it.** Two radios on
+    // different tuples cannot hear each other, and until this line existed the host never said
+    // what its own was tuned to: the failure looked exactly like being out of range.
+    if let Some(p) = v.get("radioPreset").and_then(|p| p.as_array())
+        && p.len() == 4
+    {
+        let n = |i: usize| p[i].as_u64().unwrap_or(0);
+        println!(
+            "preset   {:.3} MHz  {:.1} kHz  SF{}  CR{}",
+            n(0) as f64 / 1000.0,
+            n(1) as f64 / 1000.0,
+            n(2),
+            n(3)
+        );
+    }
     match v.get("uplinkRecordMax").and_then(serde_json::Value::as_u64) {
         Some(capacity) => println!("capacity {capacity} B per record"),
         None => println!("capacity unknown (not bound yet)"),

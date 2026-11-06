@@ -21,10 +21,9 @@
 3. **`capture-pane` diff polling** — no PTY; stateless/restart-safe; poll latency;
    repeated full-screen diffs for TUIs.
 
-The v0.1/v0.2 drafts *assumed* control mode is inherently PTY-based (echoing
-dooboxes' `TMUX_SESSION_MANAGEMENT.md`: "PTY-based tmux control mode connection"),
-which would force a native PTY dependency (`node-pty`) into the Node
-daemon and complicate single-binary packaging. That assumption was tested.
+The v0.1/v0.2 drafts *assumed* control mode is inherently PTY-based, which is a
+common way to describe it, and that would force a native PTY dependency
+(`node-pty`) into the Node daemon and complicate single-binary packaging. That assumption was tested.
 
 ## Experiment (this machine)
 
@@ -76,8 +75,8 @@ the pane is resumed with `refresh-client -A <pane>:continue`.
   Node single-binary packaging stays clean.
 - **+** Event-driven (no polling CPU), topology events available, low bytes for TUIs.
 - **+** Restart-safe: tmux owns state; the daemon is a cache.
-- **−** A real parser is required (framing/octal/UTF-8/sequence); dooboxes' shipped
-  parser is buggy (drops split UTF-8; `byte as char`) and was **dead code** — write
-  a new one with tests.
+- **−** A real parser is required (framing/octal/UTF-8/sequence). A shipped parser
+  elsewhere was buggy in exactly those places, dropping split UTF-8 and reading
+  `byte as char`, so write a new one with tests.
 - **−** One control client per viewed session (acceptable: a handful).
 - `pipe-pane` and a server-side VT emulator remain behind the `PaneStream` seam.

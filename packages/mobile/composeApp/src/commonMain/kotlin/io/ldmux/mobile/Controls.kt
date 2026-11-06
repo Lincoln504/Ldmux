@@ -80,7 +80,7 @@ internal fun OptionButton(
     selected: Boolean,
     /**
      * False where the option exists but cannot be chosen right now (a public channel forces
-     * manual sync, so `live` is not available there). Drawn dim and inert rather than removed:
+     * batch, so `live` is not available there). Drawn dim and inert rather than removed:
      * an option that vanishes reads as one the app does not have, and the row's other option
      * would move under the thumb.
      */

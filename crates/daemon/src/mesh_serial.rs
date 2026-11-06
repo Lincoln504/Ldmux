@@ -60,7 +60,7 @@ pub struct SerialCarrier {
 
 impl SerialCarrier {
     /// Open the device, identify the radio, and start serving it.
-    pub async fn open(device: &str) -> Result<(Self, Bound), MeshError> {
+    pub async fn open(device: &str) -> Result<(Self, Bound, RadioPreset), MeshError> {
         let path = device.to_owned();
         let prepared = tokio::task::spawn_blocking(move || prepare(&path))
             .await
@@ -80,6 +80,7 @@ impl SerialCarrier {
                 worker: Some(worker),
             },
             bound,
+            settings.preset,
         ))
     }
 }
@@ -123,6 +124,21 @@ struct Settings {
     hash_size: u8,
     /// Time on air for a full record, from the preset the radio reports.
     airtime_ms: f64,
+    /// **What this radio is actually tuned to.** Read from `SELF_INFO` at open and published in
+    /// the snapshot, because the two radios must be on the same tuple and nothing else in the
+    /// system can say what the host's is: the phone knows its own, the host knew nothing, and a
+    /// mismatch looked exactly like being out of range. The user needs to be able to compare the
+    /// two numbers.
+    preset: RadioPreset,
+}
+
+/// The four numbers that decide whether two radios can hear each other.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RadioPreset {
+    pub freq_mhz: f64,
+    pub bw_khz: f64,
+    pub sf: u8,
+    pub cr: u8,
 }
 
 /// Open the port and identify the radio. Runs off the async runtime: it blocks.
@@ -146,7 +162,13 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
         // No gateway is in the path: this process owns the radio, and the firmware is the meter.
         budget: Budget::RadioGoverned,
     };
-    Ok((companion, bound, Settings { hash_size, airtime_ms }))
+    let preset = RadioPreset {
+        freq_mhz: self_info.radio_freq_mhz,
+        bw_khz: self_info.radio_bw_khz,
+        sf: self_info.radio_sf,
+        cr: self_info.radio_cr,
+    };
+    Ok((companion, bound, Settings { hash_size, airtime_ms, preset }))
 }
 
 /// The radio thread: serve commands and the air until the loop lets go.
@@ -383,7 +405,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             serve(
                 companion,
-                Settings { hash_size: 1, airtime_ms: 137.9 },
+                Settings {
+                    hash_size: 1,
+                    airtime_ms: 137.9,
+                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                },
                 command_rx,
                 event_tx,
             );
@@ -428,7 +454,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             serve(
                 companion,
-                Settings { hash_size: 1, airtime_ms: 137.9 },
+                Settings {
+                    hash_size: 1,
+                    airtime_ms: 137.9,
+                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                },
                 command_rx,
                 event_tx,
             );
@@ -461,7 +491,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             serve(
                 companion,
-                Settings { hash_size: 1, airtime_ms: 137.9 },
+                Settings {
+                    hash_size: 1,
+                    airtime_ms: 137.9,
+                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                },
                 command_rx,
                 event_tx,
             );
@@ -473,7 +507,11 @@ mod tests {
 
     #[test]
     fn a_status_carries_a_budget_so_the_loop_can_send() {
-        let settings = Settings { hash_size: 1, airtime_ms: 137.9 };
+        let settings = Settings {
+                    hash_size: 1,
+                    airtime_ms: 137.9,
+                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                };
         let status = status(&settings, 255, 0);
         assert_eq!(status.ops_left_this_hour, Some(255));
         assert_eq!(status.radio_state, RadioState::Connected);

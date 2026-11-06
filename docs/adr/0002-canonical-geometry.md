@@ -15,8 +15,8 @@ sizing (`window-size latest/smallest`, or a control-mode client calling
 viewing client "claim the viewport", which would reflow the desktop `alacritty`
 mirror whenever the phone attached — defeating the synchronized-view goal (G5).
 
-dooboxes enforces a deliberate multi-client attachment model (1 desktop + 1
-mobile, with an exclusive lock) precisely to avoid geometry fights.
+One design enforces a deliberate multi-client attachment model, one desktop and
+one mobile with an exclusive lock, precisely to avoid geometry fights.
 
 ## Decision
 

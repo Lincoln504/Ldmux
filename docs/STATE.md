@@ -54,7 +54,8 @@ What exists, 2026-10-28:
 | L3 session (Kotlin) | `packages/mobile/.../mesh/MeshSession.kt`, `SessionLib.kt`, `NativeMeshSession.kt` | Implemented. `MeshSessionAbiTest`: 11 tests that load the real library in a JVM and run the phone against the daemon's side. No crypto in Kotlin. Not exercised on a device. |
 | BLE radio link (Kotlin) | `packages/mobile/.../mesh/AndroidRadioLink.kt` | Implemented and hardware-run 2026-11-02 against the WIO and a HELTEC-BASE host. It owns the bond, the MeshCore session, the radio preset and the shared-link reference count. |
 | Radio owner (phone) | LDMUX, directly over BLE | The phone no longer goes through MeshMore's loopback gateway. `docs/MESH-STANDALONE.md` is the record. |
-| Radio owner (host) | MeshMore `packages/meshcore_host` | Implemented and run against a real HELTEC-BASE on 2026-10-28 (USB serial). The daemon still speaks to the host radio through this gateway. |
+| Radio owner (host), current | `crates/companion` (`ldmux-companion`) | The daemon owns the radio. With `LDMUX_MESH_SERIAL` naming the device, `crates/daemon/src/mesh_serial.rs` opens the port itself, speaks the MeshCore companion protocol, and hands records to the same L3 session. No gateway process runs. Hardware-run on a HELTEC-BASE on 2026-11-05, and the phone's shell list, attach, typing and resize all pass over it. |
+| Radio owner (host), older | MeshMore `packages/meshcore_host` | The previous ingress, still supported for one release: the daemon dials a loopback gateway (`LDMUX_MESH_ADDR`). Selected only when `LDMUX_MESH_SERIAL` is unset. |
 
 ### What the L3 session has, and what it still lacks
 
@@ -96,8 +97,9 @@ What exists, 2026-10-28:
 - **The optional ML-KEM stage**, and the handshake-on-rekey trigger (`needs_rekey` exists;
   nothing acts on it yet).
 - **PSK rotation from the CLI.** `LDMUX_MESH_PSK` is the only source.
-- **Host-radio provisioning.** Flashing, starting the gateway, reading its state file and
-  setting six variables are all a person's job: `docs/MESH-HOST-RADIO.md`.
+- **Host-radio provisioning.** Flashing the board, naming it with `LDMUX_MESH_SERIAL`,
+  reading its public key into `LDMUX_MESH_SELF` and setting the session key are all a
+  person's job, and there is no installer or provisioning screen: `docs/MESH-HOST-RADIO.md`.
 - **A real-radio pass over rotation and the mode row was done on 2026-11-04 and is recorded in
   `docs/MOBILE-UX-AUDIT.md` §2c; the link it ran over is unreliable.** The daemon counted
   `53 sent` against `5 bytes received` in one session, so phone → host records were not arriving
@@ -245,16 +247,17 @@ Product and mobile:
   `sessionEnded` (the ending still arrives as a `resync`/`session_dead`), which needs a
   device check before it is claimed.
 - **iOS**: not started; needs a macOS host (`docs/IOS-DEVELOPMENT.md`).
-- **Mesh/LoRa**: the L2 clients and the host gateway exist
-  (`crates/mesh`, `packages/mobile/.../mesh`, `packages/meshcore_host`). The phone
-  owns its BLE radio standalone and the mesh route is wired. The daemon still has
-  no listener or RPC surface for MeshCore; the host gateway is its only ingress.
+- **Mesh/LoRa**: both carriers exist (`crates/mesh`, `crates/companion`,
+  `packages/mobile/.../mesh`, and the older `packages/meshcore_host` gateway). The phone
+  owns its BLE radio standalone and the mesh route is wired. The daemon is the radio's
+  owner on the host when `LDMUX_MESH_SERIAL` is set, and a loopback gateway is the older
+  ingress otherwise.
   The standalone path has a two-radio hardware pass (2026-11-02) and a second run on
   2026-11-03 with the burst pacing and the current client: the session established on the
   first handshake, the host's shell list arrived over the air, a shell attached and
-  mirrored, and typed text echoed back. No multi-hop path recovery yet. The host radio is brought up by hand — firmware, gateway,
-  environment — and `docs/MESH-HOST-RADIO.md` is the whole of that procedure, including
-  what each failure means. `ldmux mesh status` now prints the host radio key, because a
+  mirrored, and typed text echoed back. No multi-hop path recovery yet. The host radio is brought up by hand: firmware, then the device named in
+  `LDMUX_MESH_SERIAL`, then the environment. `docs/MESH-HOST-RADIO.md` is the whole of
+  that procedure, including what each failure means. `ldmux mesh status` now prints the host radio key, because a
   pairing code without one cannot be used.
 - **Mesh/LoRa pacing and feel**: the bridge coalesces screen updates into bursts of at most
   one a second, input echo and the first change after quiet bypass the wait, and the scrollback
