@@ -300,6 +300,40 @@ pub struct Bridge<H, L> {
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
+/// The mark table, cut into `Marks` messages that each fit one record.
+///
+/// **A message has a body ceiling and the table does not.** `MAX_ROWS_BODY` is 134 bytes and an
+/// entry is its id plus two bytes, so a table of a dozen shells already overflows one message — and
+/// `reply` drops a message it cannot encode, which would have meant "no marks at all" exactly when
+/// an operator had many shells marked. Pages are cheap: the phone's decoder is a stream decoder, so
+/// several messages cost the records they already cost and nothing more.
+fn marks_pages(marks: Vec<(String, u8)>) -> Vec<Message> {
+    use ldmux_protocol::mesh_term::{MAX_ROWS_BODY, MAX_SELECTOR};
+    let mut pages: Vec<Message> = Vec::new();
+    let mut page: Vec<MarkEntry> = Vec::new();
+    let mut bytes = 0usize;
+    for (id, kind) in marks {
+        // An id the wire cannot carry is not silently shortened into a mark for another shell: it is
+        // dropped, and only a bug could produce one (session ids are ten characters).
+        if id.len() > MAX_SELECTOR {
+            continue;
+        }
+        let cost = 2 + id.len();
+        if !page.is_empty() && bytes + cost > MAX_ROWS_BODY {
+            pages.push(Message::Marks {
+                entries: std::mem::take(&mut page),
+            });
+            bytes = 0;
+        }
+        bytes += cost;
+        page.push(MarkEntry { id, kind });
+    }
+    if !page.is_empty() {
+        pages.push(Message::Marks { entries: page });
+    }
+    pages
+}
+
 impl<H: Host, L: Link> Bridge<H, L> {
     /// Give a claim back, and count a refusal.
     ///
@@ -770,15 +804,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         if version >= MARKS_VERSION {
                             let marks = self.host.marks().await;
                             if !marks.is_empty() {
-                                self.reply(
-                                    shell,
-                                    &[Message::Marks {
-                                        entries: marks
-                                            .into_iter()
-                                            .map(|(id, kind)| MarkEntry { id, kind })
-                                            .collect(),
-                                    }],
-                                );
+                                self.reply(shell, &marks_pages(marks));
                             }
                         }
                     }
@@ -845,15 +871,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 if marks_version_ok {
                     let marks = self.host.marks().await;
                     if !marks.is_empty() {
-                        self.reply(
-                            shell,
-                            &[Message::Marks {
-                                entries: marks
-                                    .into_iter()
-                                    .map(|(id, kind)| MarkEntry { id, kind })
-                                    .collect(),
-                            }],
-                        );
+                        self.reply(shell, &marks_pages(marks));
                     }
                 }
             }
@@ -1967,6 +1985,28 @@ mod tests {
             "the table rides with the list: {:?}",
             sent(&link, 1)
         );
+    }
+
+    /// **The table is paged, because a message has a body ceiling the table does not.** A dozen
+    /// marked shells already overflow `MAX_ROWS_BODY`, and `reply` drops a message it cannot encode,
+    /// which would have been "no marks at all" exactly when there were many.
+    #[test]
+    fn a_large_mark_table_is_paged_into_messages_that_fit() {
+        let marks: Vec<(String, u8)> = (0..40).map(|i| (format!("s{i:09}"), (i % 2) as u8)).collect();
+        let pages = marks_pages(marks.clone());
+        assert!(pages.len() >= 2, "forty marks do not fit one message");
+        let mut seen = 0;
+        for p in &pages {
+            let bytes = p.encode().expect("every page encodes");
+            assert!(
+                bytes.len() <= ldmux_protocol::mesh_term::MAX_MESSAGE,
+                "a page is one message"
+            );
+            if let Message::Marks { entries } = p {
+                seen += entries.len();
+            }
+        }
+        assert_eq!(seen, marks.len(), "no mark is lost in the paging");
     }
 
     /// **The marks a phone missed go out with the attach.** The radio cannot reach a phone that is

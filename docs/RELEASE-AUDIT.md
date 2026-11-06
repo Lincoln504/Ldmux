@@ -342,6 +342,7 @@ suite (574 cases) green.
 | 17.66 | `mesh_keys` failed under the test pool about once a day (302 s): its two key tests read the *viewer's* stream, and the takeover the test performs tells the displaced viewer to stop, so the stream was empty whenever the takeover won the race it is allowed to win | FIXED, as a test — they wait on the pane (`capture`), which is the fact they are about |
 | 17.67 | A mark's `--note` never reached the banner (the app built the body from the kind) and the banner's title read a session list captured when the setting was installed, so a shell created later showed its id | FIXED — the note wins when present, and the title is read at post time |
 | 17.68 | A mark for a shell that had ended stayed in the app's map for ever, and would have been drawn on a row if a session id were ever reused | FIXED — the map is pruned against each session list |
+| 17.69 | The mark table was sent as one `Marks` message, and a message's body is capped at 134 bytes (`MAX_ROWS_BODY`) while the table holds 64: a dozen marked shells overflowed it, `reply` dropped the message, and the phone would have shown **no** marks exactly when there were many | FIXED — paged into messages that each fit, with a test that forty marks all arrive |
 
 ## How to use this
 
