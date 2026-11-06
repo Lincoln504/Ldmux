@@ -79,7 +79,9 @@ Every answer that is an indirection is followed: a probe that returns `x-termina
 `.wrapper` shim or a `.desktop` id is not a terminal, and returning it raw is how a window
 opens in something nobody named. `ldmux terminal` prints the program, `--explain` prints the
 step it came from, and `--exec <command>` applies that emulator's own template and execs it,
-so the keybinding wrapper carries no second copy of the rules.
+so the keybinding wrapper carries no second copy of the rules. The pin is read on every
+resolution, so `ldmux terminal set` applies without a restart; the desktop probes are cached
+per daemon process, so a change to the desktop's own setting applies on the next start.
 
 Each spawned window is a transient unit under `ldmux-windows.slice`, held on a pipe until the
 move is visible in `/proc/<pid>/cgroup` (the same construction the keeper uses for shells), so

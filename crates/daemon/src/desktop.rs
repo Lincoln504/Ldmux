@@ -699,7 +699,7 @@ pub fn terminal_problem(terminal: &str) -> Option<String> {
     let t = terminal.trim();
     if t.is_empty() {
         return Some(format!(
-            "no terminal emulator found (looked for {}, and at $TERMINAL, xdg-terminal-exec and this desktop's configured terminal); install one, or point $TERMINAL at the program you use — a wrapper script if it needs flags",
+            "no terminal emulator found (looked for {}, and at this user's pin, $TERMINAL, xdg-terminal-exec and this desktop session's configured terminal); install one, or name the program you use with `ldmux terminal set <program>`",
             AUTODETECT.join(", ")
         ));
     }
