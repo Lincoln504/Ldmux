@@ -118,9 +118,17 @@ impl Registry {
             // not shape into it is dropped at the same boundary. Files the
             // daemon itself wrote always shape: this only bites on hand-edited
             // or older files, where dropping is the safe direction.
-            let Ok(r) = serde_json::from_value::<SessionRecord>(record) else {
+            let Ok(mut r) = serde_json::from_value::<SessionRecord>(record) else {
                 continue;
             };
+            // A record written before `had_window` existed that has a window *now* has had
+            // one. Without this, every session already on screen when the field arrived keeps
+            // `false` for the rest of its life, and the phone is never told when that window
+            // goes away — which is the only case the label exists for.
+            if r.live_workspace.is_some() && !r.had_window {
+                r.had_window = true;
+                migrated = true;
+            }
             self.upsert(r);
         }
         // Persist under the current key right away, so the migration runs once
@@ -417,6 +425,7 @@ mod tests {
             exit_code: over.exit_code,
             exited_at: over.exited_at,
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,

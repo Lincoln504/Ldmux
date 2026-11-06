@@ -56,6 +56,15 @@ data class Session(
      */
     val liveWorkspace: String? = null,
     /**
+     * Whether this shell has **ever** had a desk window.
+     *
+     * `liveWorkspace` says "has one now"; this says "ever had one", and the pair is what
+     * separates a shell created headlessly from the CLI — an ordinary row — from one whose
+     * window went away, which is the only case worth an amber label. Absent from an older
+     * daemon, so it defaults to false and nothing is flagged.
+     */
+    val hadWindow: Boolean = false,
+    /**
      * The device holding this shell, when one does (ADR-0010).
      *
      * One device at a time. A shell someone else holds is not refused — it is
@@ -725,6 +734,7 @@ internal fun parseSessions(element: JsonElement?, deviceId: String): List<Sessio
             createdBy = o.text("createdBy"),
             process = o.text("process"),
             liveWorkspace = o.optionalText("liveWorkspace"),
+            hadWindow = o.flag("hadWindow"),
             ownerName = owner?.optionalText("name"),
             ownerKind = owner?.optionalText("kind"),
             heldElsewhere = ownerId != null && ownerId != deviceId,

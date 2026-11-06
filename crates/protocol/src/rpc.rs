@@ -91,6 +91,15 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_workspace: Option<String>,
 
+    /// Whether this shell has ever had a desk window.
+    ///
+    /// `live_workspace` answers "has one now"; this answers "ever had one", and the pair is
+    /// what tells a shell that was created headlessly (from `ldmux new`, never shown anywhere)
+    /// from one whose window went away. The phone draws the second as an anomaly and the
+    /// first as an ordinary row, and without this it called both "no window" in amber.
+    #[serde(default)]
+    pub had_window: bool,
+
     /// The process a desk window *is*, when the daemon did not launch it.
     ///
     /// `ldmux shell` and `ldmux run` become a desk window in the terminal they
@@ -158,6 +167,17 @@ pub struct SessionInfo {
     /// The desktop workspace this shell has a window on, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_workspace: Option<String>,
+
+    /// Whether this shell has **ever** had a desk window.
+    ///
+    /// `live_workspace` answers "has one now"; this answers "ever had one", and the phone
+    /// needs the pair: a shell created headlessly (`ldmux new`, never shown anywhere) is an
+    /// ordinary row, while a shell whose window went away is the anomaly worth an amber
+    /// label. Without this the two looked identical and every headless shell was drawn as a
+    /// fault. `#[serde(default)]` so a record written before this reads as "no window" and
+    /// simply is not flagged.
+    #[serde(default)]
+    pub had_window: bool,
 
     /// Why it ended, when it has. Absent while it is running.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -330,6 +350,7 @@ mod tests {
             process: None,
             owner: None,
             live_workspace: None,
+            had_window: false,
             ended_reason: Some("its shell exited".into()),
             exit_code: None,
             exit_signal: None,
@@ -365,6 +386,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,
@@ -396,6 +418,7 @@ mod tests {
             exit_code: Some(130),
             exited_at: Some(99),
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,

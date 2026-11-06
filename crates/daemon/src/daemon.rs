@@ -932,9 +932,15 @@ impl LdmuxDaemon {
     /// from "it never had one". See [Self::rebuild_live_windows].
     fn set_live_window(&mut self, id: &str, workspace: Option<String>, pid: Option<i32>) {
         if let Some(mut r) = self.registry.get(id).cloned() {
-            if r.live_workspace == workspace && r.live_pid == pid {
+            // A record that has a window now has had one, even if it was written before this
+            // fact existed: without the backfill, every session that was already on screen when
+            // the field arrived would keep `false` for the rest of its life, and the phone
+            // would never be told when that window later went away.
+            let had = r.had_window || workspace.is_some() || r.live_workspace.is_some();
+            if r.live_workspace == workspace && r.live_pid == pid && r.had_window == had {
                 return;
             }
+            r.had_window = had;
             r.live_workspace = workspace;
             r.live_pid = pid;
             self.registry.upsert(r);
@@ -1480,6 +1486,7 @@ impl LdmuxDaemon {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,
@@ -2300,6 +2307,7 @@ impl LdmuxDaemon {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,
@@ -2397,6 +2405,7 @@ impl LdmuxDaemon {
                     process,
                     owner,
                     live_workspace,
+                    had_window: record.had_window,
                     ended_reason: record.ended_reason.clone(),
                     exit_code: record.exit_code,
                     exit_signal: record.exit_signal,
@@ -2972,6 +2981,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,
@@ -3733,6 +3743,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: None,
+            had_window: false,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,
@@ -4553,6 +4564,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: Some("1".into()),
+            had_window: true,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,
@@ -4585,6 +4597,7 @@ mod tests {
             exit_code: None,
             exited_at: None,
             live_workspace: Some("1".into()),
+            had_window: true,
             live_pid: None,
             ended_reason: None,
             exit_signal: None,

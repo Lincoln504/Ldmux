@@ -296,6 +296,8 @@ data class LauncherEntry(
     val inUseOnPhone: Boolean = false,
     val openedByPhone: Boolean = false,
     val liveWorkspace: String? = null,
+    /** Whether this shell has ever had a desk window; see [shellStateLabel]. */
+    val hadWindow: Boolean = false,
     /**
      * Where the shell itself lives, in words, on every row. A desk window is a
      * fact the phone cannot otherwise see, and a shell with no window is the one
@@ -330,7 +332,8 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
             inUseOnPhone = shell.ownerKind == "phone",
             openedByPhone = shell.openedByPhone,
             liveWorkspace = shell.liveWorkspace,
-            state = shellStateLabel(shell.liveWorkspace, shell.openedByPhone),
+            hadWindow = shell.hadWindow,
+            state = shellStateLabel(shell.liveWorkspace, shell.openedByPhone, shell.hadWindow),
         )
     }
 
@@ -344,9 +347,17 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
  *   - neither: `no window` — the one state that is news, because a shell nothing
  *     is showing means something went wrong.
  */
-internal fun shellStateLabel(liveWorkspace: String?, openedByPhone: Boolean): String = when {
+internal fun shellStateLabel(
+    liveWorkspace: String?,
+    openedByPhone: Boolean,
+    hadWindow: Boolean = false,
+): String = when {
     liveWorkspace != null -> ""
     openedByPhone -> ""
+    // A shell that never had a window is ordinary: `ldmux new` makes one, and so does anything
+    // that opens a shell to attach to later. Only a shell whose window *went away* is the
+    // anomaly worth an amber row, and the daemon has to say which it is (`hadWindow`).
+    !hadWindow -> ""
     else -> NO_WINDOW_STATE
 }
 

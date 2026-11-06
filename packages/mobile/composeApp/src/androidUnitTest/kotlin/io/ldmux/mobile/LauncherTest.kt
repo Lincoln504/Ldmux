@@ -47,20 +47,25 @@ class LauncherTest {
     }
 
     @Test
-    fun `only a shell with nothing showing it says so`() {
-        // A desk window is the ordinary state and the row itself says it, so the
-        // words are blank. A phone shell says it with the icon. Only a shell that
-        // nothing is showing is news, and it is the one thing the list used to
-        // stay silent about, so a pile of them read as a bug (2026-10-05).
+    fun `only a shell that lost its window says so`() {
+        // A desk window is the ordinary state and the row itself says it, so the words are
+        // blank. A phone shell says it with the icon. A shell that never had a window is
+        // ordinary too: `ldmux new` makes one and it is waiting to be attached to.
+        //
+        // Only a shell whose window **went away** is news, and that is the one case the
+        // daemon has to name (`hadWindow`). Before it did, every headless shell was drawn in
+        // amber as a fault — three of them were on the phone, created from the CLI, with
+        // nothing wrong (2026-11-05).
         val rows = launcherEntries(
             listOf(
-                shell("desk", "/x").copy(liveWorkspace = "2"),
-                shell("unplaced", "/x").copy(liveWorkspace = ""),
+                shell("desk", "/x").copy(liveWorkspace = "2", hadWindow = true),
+                shell("unplaced", "/x").copy(liveWorkspace = "", hadWindow = true),
                 shell("phone", "/x").copy(createdBy = "phone"),
                 shell("headless", "/x"),
+                shell("lost", "/x").copy(hadWindow = true),
             ),
         )
-        assertEquals(listOf("", "", "", "no window"), rows.map { it.state })
+        assertEquals(listOf("", "", "", "", "no window"), rows.map { it.state })
     }
 
     @Test

@@ -2985,6 +2985,7 @@ mod tests {
                 exit_code: None,
                 exited_at: None,
                 live_workspace: None,
+                had_window: false,
                 live_pid: None,
                 ended_reason: None,
                 exit_signal: None,
