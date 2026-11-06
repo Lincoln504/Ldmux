@@ -96,6 +96,7 @@ internal fun SettingsScreen(
             // how to reach it — and then found the mesh route's pairing in a different
             // section from the tailnet one. The route is the first question and pairing is
             // the second, and the two pairings are the same kind of thing.
+            Spacer(Modifier.height(8.dp))
             val groups = settingsGroups(hasMesh = mesh != null)
             for (group in groups) {
                 Section(group.title) {
@@ -132,13 +133,15 @@ internal fun SettingsScreen(
                     }
                 }
                 // A gap between sections and none within one: the spacing is what says
-                // "this block is a different kind of thing", because the labels are only
-                // one point apart in size.
+                // "this block is a different kind of thing". It was one row-pad (6 dp), which
+                // is the same gap as between two rows inside a section, so the only thing
+                // separating "pairing" from "display" was a heading. Twenty-four is a break
+                // the eye can see without a heavier rule.
                 if (group != groups.last()) {
-                    Spacer(Modifier.height(LocalTouch.current.rowPad))
+                    Spacer(Modifier.height(SettingsSectionGap))
                 }
             }
-            Spacer(Modifier.height(LocalTouch.current.rowPad * 4))
+            Spacer(Modifier.height(SettingsSectionGap * 2))
         }
     }
 }
@@ -171,7 +174,7 @@ internal fun settingsGroups(hasMesh: Boolean): List<SettingsGroup> =
  * as two rows of the same list instead of a heading and its first row.
  */
 @Composable
-private fun Section(title: String, content: @Composable () -> Unit) {
+private fun Section(title: String, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     SettingsSection(title, content)
 }
 
@@ -185,21 +188,18 @@ private fun Section(title: String, content: @Composable () -> Unit) {
  */
 @Composable
 private fun LinkChoice(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
-    Column {
-        SettingsRow("route") {
-            OptionButton("tailnet", selected = current.route != MeshRoute.Mesh) {
-                if (current.route != MeshRoute.Tailnet) onSave(current.copy(route = MeshRoute.Tailnet))
-            }
-            // `radio`, not `lora`: the word in the row's own consequence line and in every
-            // message the mesh route prints is "radio", and `lora` is the name of a modulation
-            // the user never chose.
-            OptionButton("radio", selected = current.route == MeshRoute.Mesh) {
-                if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh))
-            }
+    // The consequence is the row's summary rather than a line under it: it is the value's
+    // explanation, and a settings row states its value beside its title.
+    SettingsChoice("route", summary = routeConsequence(current.route)) {
+        OptionButton("tailnet", selected = current.route != MeshRoute.Mesh) {
+            if (current.route != MeshRoute.Tailnet) onSave(current.copy(route = MeshRoute.Tailnet))
         }
-        // The consequence belongs under the value it explains, not beside the buttons: it used to
-        // sit on the same line, where it read as a third option.
-        SettingsNote(routeConsequence(current.route))
+        // `radio`, not `lora`: the word in the row's own consequence line and in every
+        // message the mesh route prints is "radio", and `lora` is the name of a modulation
+        // the user never chose.
+        OptionButton("radio", selected = current.route == MeshRoute.Mesh) {
+            if (current.route != MeshRoute.Mesh) onSave(current.copy(route = MeshRoute.Mesh))
+        }
     }
 }
 
@@ -224,8 +224,11 @@ internal fun routeConsequence(route: MeshRoute): String =
  * different kinds of control.
  */
 @Composable
-private fun SettingRow(label: String, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
-    SettingsRow(label, content = content)
+private fun SettingRow(
+    label: String,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
+) {
+    SettingsChoice(label, content = content)
 }
 
 @Composable
@@ -310,16 +313,17 @@ private fun PairingRow(
     var problem by remember { mutableStateOf<String?>(null) }
     var confirmUnpair by remember(current.connectionKey) { mutableStateOf(false) }
     Column {
-        SettingsRow("tailnet") {
+        SettingsRow(
+            "tailnet",
+            summary = if (current.isPaired) current.pairedName else "unpaired",
+            trailing = {
             if (current.isPaired) {
-                SettingsValue(current.pairedName, Modifier.weight(1f))
                 MiniTextButton(onClick = {
                     if (confirmUnpair) onUnpair() else confirmUnpair = true
                 }) {
                     Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Danger else Dim)
                 }
             } else {
-                SettingsValue("unpaired", Modifier.weight(1f), color = Muted)
                 MiniTextButton(onClick = {
                     problem = null
                     CodeScanner.scan { result ->
@@ -333,7 +337,8 @@ private fun PairingRow(
                     Text("pair", color = Accent)
                 }
             }
-        }
+            },
+        )
         // Only while the warning can be true: an install with no mesh route has nothing
         // else to lose, and a line that describes a consequence that does not exist is
         // noise on the one screen where the consequence is real.

@@ -28,6 +28,7 @@ import io.ldmux.mobile.OptionButton
 import io.ldmux.mobile.Notice
 import io.ldmux.mobile.NoticeLine
 import io.ldmux.mobile.ScanResult
+import io.ldmux.mobile.SettingsChoice
 import io.ldmux.mobile.SettingsNote
 import io.ldmux.mobile.SettingsRow
 import io.ldmux.mobile.SettingsValue
@@ -68,52 +69,101 @@ internal fun MeshRouteSection(
     var showPreset by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxWidth()) {
-        // Healthy credentials are automatic. Only a missing one is worth a line, and it is a note
-        // under the rows rather than a heading of its own: the rows are the settings, and a
-        // missing credential is a fact about them.
-        for (c in MeshCredential.entries) {
-            if (c !in view.present) SettingsNote(meshCredentialLine(c), color = Warn)
-        }
+        // **The pairing is a row, not a pile of notes.** It used to be three bare lines under
+        // `tailnet` — `✗ session keys`, `✗ host radio key`, `mesh · scan a pairing code…` — with
+        // the action in a separate row called `code`, so the state and the thing that fixes it
+        // were two unrelated statements and neither said what it was about. One row now names
+        // it, summarises its state, and carries the two verbs.
+        val missing = MeshCredential.entries.filter { it !in view.present }
+        SettingsRow(
+            "radio pairing",
+            summary = when {
+                // Three words beat a list: when nothing is stored the answer to "am I paired"
+                // is "not paired", and which particular key is missing is a detail the scanner
+                // fixes in one action anyway.
+                missing.size == MeshCredential.entries.size -> "not paired"
+                missing.isNotEmpty() -> missing.joinToString(", ") { meshCredentialName(it) } + " missing"
+                else -> "paired"
+            },
+            trailing = {
+                // One verb, one target: the ldmux code carries the session keys and the host
+                // radio key.
+                MiniTextButton(onClick = {
+                    note = null
+                    CodeScanner.scan { r ->
+                        note = when (r) {
+                            is ScanResult.Code -> {
+                                val o = onMeshPairing(r.text)
+                                credentials = readCredentials()
+                                when (o) {
+                                    is MeshPairingScan.Enrolled -> null
+                                    is MeshPairingScan.Refused -> meshPairingLine(o.problem)
+                                }
+                            }
+                            ScanResult.Cancelled -> null
+                            ScanResult.Unavailable -> "scanner unavailable"
+                        }
+                    }
+                }) { Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1) }
+                if (view.present.isNotEmpty()) {
+                    MiniTextButton(onClick = {
+                        if (confirmForget) {
+                            onUnpairMesh()
+                            credentials = readCredentials()
+                        } else {
+                            confirmForget = true
+                        }
+                    }) {
+                        // `unpair`, the word the tailnet row uses, because it is the same act on
+                        // the other pairing. It also drops the chosen radio and the saved route,
+                        // which is why it asks first and says so.
+                        Text(
+                            if (confirmForget) "unpair?" else "unpair",
+                            color = if (confirmForget) Danger else Dim,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+            },
+        )
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
             SettingsNote(meshProblemLabel(it.problem))
+        }
+        if (confirmForget) {
+            SettingsNote("this forgets the keys, the radio and the saved route")
         }
 
         // The radio is the one new physical fact. Its name is shown because a MAC address is not
         // something a person recognises, and the address is kept because that is what BLE needs
         // after a reboot.
-        //
-        // **Two actions, both written down.** The name used to be tappable to open the preset and
-        // the button beside it opened the radio picker, so one row carried a hidden action and a
-        // visible one: tapping the name to "select the radio" changed its *operating point*
-        // instead, which on a radio that then stops answering is indistinguishable from having
-        // broken it.
-        SettingsRow("radio") {
-            SettingsValue(
-                if (current.meshRadio.isEmpty()) {
-                    "none chosen"
-                } else if (current.meshRadioName.isEmpty()) {
-                    current.meshRadio
-                } else {
-                    current.meshRadioName + "  " + current.meshRadio
-                },
-                Modifier.weight(1f),
-                color = if (current.meshRadio.isEmpty()) Warn else Fg,
-            )
-            MiniTextButton(onClick = { showPicker = !showPicker; showPreset = false }) {
-                Text(if (current.meshRadio.isEmpty()) "choose" else "change", color = Accent, fontSize = 12.sp, maxLines = 1)
-            }
-        }
-        // The picker opens under the row that named the radio, not at the end of the list and
-        // not over the screen: it is an edit to this row, and an editor that hides the row it
-        // edits makes the user remember which one it was.
+        SettingsRow(
+            "radio",
+            summary = when {
+                current.meshRadio.isEmpty() -> "none chosen"
+                current.meshRadioName.isEmpty() -> current.meshRadio
+                else -> current.meshRadioName + "  " + current.meshRadio
+            },
+            trailing = {
+                MiniTextButton(onClick = { showPicker = !showPicker; showPreset = false }) {
+                    Text(
+                        if (current.meshRadio.isEmpty()) "choose" else "change",
+                        color = Accent,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                    )
+                }
+            },
+        )
+        // The picker opens under the row that named the radio, not at the end of the list and not
+        // over the screen: it is an edit to this row.
         if (showPicker) {
             RadioPickerPanel(
                 onDismiss = { showPicker = false },
                 onPick = { d ->
                     onConfig(current.copy(meshRadio = d.address, meshRadioName = d.name))
                     credentials = readCredentials()
-                    // One flow: choosing a radio moves straight to its operating point,
-                    // so a first run does not stop at an address and leave the radio deaf.
+                    // One flow: choosing a radio moves straight to its operating point, so a
+                    // first run does not stop at an address and leave the radio deaf.
                     showPicker = false
                     showPreset = true
                 },
@@ -122,8 +172,7 @@ internal fun MeshRouteSection(
 
         if (current.meshRadio.isNotEmpty()) {
             // The radio's own operating point and its airtime, read from the radio rather than
-            // remembered: the tuple is what the radio is actually on, and the airtime is the
-            // duty-cycle figure the budget is spent against.
+            // remembered.
             MeshRadioFacts(
                 address = current.meshRadio,
                 onOpenPreset = { showPreset = !showPreset; showPicker = false },
@@ -142,33 +191,31 @@ internal fun MeshRouteSection(
                 )
             }
 
-            // **Which kind of channel the radio is on**, beside the radio itself.
-            //
-            // It is not a setting: it is derived from the tuple the radio reports, and it decides
-            // one thing — whether typing is held (ADR-0026). Saying it here is what stops "typing
-            // does nothing until sync" from being a mystery.
-            SettingsRow("channel") {
-                SettingsValue(
-                    if (current.meshPublicChannel) {
-                        "public · every keystroke is a broadcast"
-                    } else {
-                        "private · mode is your choice"
-                    },
-                    Modifier.weight(1f),
-                )
-            }
+            // Which kind of channel the radio is on: derived from the tuple it reports, and it
+            // decides one thing — whether typing is held (ADR-0026).
+            SettingsRow(
+                "channel",
+                summary = if (current.meshPublicChannel) {
+                    "public · every keystroke is a broadcast"
+                } else {
+                    "private · mode is your choice"
+                },
+            )
 
-            // **The mode is a property of the link, so it is set where the link is set.** It used
-            // to be a `hold input` / `leave` pair in the terminal's own row, which made a
-            // connection-level decision look like a per-screen toggle and put a "leave" button
-            // next to the keys. `live` is unavailable on a public channel, and it is drawn dim
-            // rather than removed so the row keeps its shape.
-            SettingsRow("input") {
-                OptionButton("live", selected = !current.meshHoldsInput, enabled = !current.meshPublicChannel) {
+            // The mode is a property of the link, so it is set where the link is set. `live` is
+            // unavailable on a public channel and is drawn dim rather than removed.
+            SettingsChoice("input") {
+                OptionButton(
+                    "live",
+                    selected = !current.meshHoldsInput,
+                    enabled = !current.meshPublicChannel,
+                ) {
                     if (current.meshInputMode != MeshInputMode.Live) onInputMode(MeshInputMode.Live)
                 }
                 OptionButton("manual sync", selected = current.meshHoldsInput) {
-                    if (current.meshInputMode != MeshInputMode.ManualSync) onInputMode(MeshInputMode.ManualSync)
+                    if (current.meshInputMode != MeshInputMode.ManualSync) {
+                        onInputMode(MeshInputMode.ManualSync)
+                    }
                 }
             }
             if (current.meshPublicChannel) {
@@ -176,40 +223,6 @@ internal fun MeshRouteSection(
             }
         }
 
-        // One verb, one target: the ldmux code carries the session keys and the host radio key.
-        SettingsRow("code") {
-            MiniTextButton(onClick = {
-                note = null
-                CodeScanner.scan { r ->
-                    note = when (r) {
-                        is ScanResult.Code -> when (val o = onMeshPairing(r.text).also { credentials = readCredentials() }) {
-                            is MeshPairingScan.Enrolled -> null
-                            is MeshPairingScan.Refused -> meshPairingLine(o.problem)
-                        }
-                        ScanResult.Cancelled -> null
-                        ScanResult.Unavailable -> "scanner unavailable"
-                    }
-                }
-            }) { Text("scan", color = Accent, fontSize = 12.sp, maxLines = 1) }
-            if (view.present.isNotEmpty()) {
-                MiniTextButton(onClick = {
-                    if (confirmForget) {
-                        onUnpairMesh()
-                        credentials = readCredentials()
-                    } else {
-                        confirmForget = true
-                    }
-                }) {
-                    // `unpair`, the word the tailnet row uses, because it is the same act on the
-                    // other pairing. It also drops the chosen radio and the saved route, which is
-                    // why it asks first and says so.
-                    Text(if (confirmForget) "unpair?" else "unpair", color = if (confirmForget) Danger else Dim, fontSize = 12.sp)
-                }
-            }
-        }
-        if (confirmForget) {
-            SettingsNote("this forgets the keys, the radio and the saved route")
-        }
         note?.let { SettingsNote(it, color = Danger) }
     }
 

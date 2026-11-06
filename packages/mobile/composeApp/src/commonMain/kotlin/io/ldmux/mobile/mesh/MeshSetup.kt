@@ -71,10 +71,9 @@ fun meshPairingLine(p: MeshPairingProblem): String = when (p) {
 }
 
 /** One credential as a settings line. */
-fun meshCredentialLine(c: MeshCredential): String {
-    val name = when (c) {
-        MeshCredential.SessionKeys -> "session keys"
-        MeshCredential.HostRadioKey -> "host radio key"
-    }
-    return "✗ $name"
+fun meshCredentialName(c: MeshCredential): String = when (c) {
+    MeshCredential.SessionKeys -> "session keys"
+    MeshCredential.HostRadioKey -> "host radio key"
 }
+
+fun meshCredentialLine(c: MeshCredential): String = "\u2717 " + meshCredentialName(c)

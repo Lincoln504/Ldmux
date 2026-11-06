@@ -11,46 +11,54 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * The shape every settings row has: a label in its own column, then the value or the control.
+ * Settings rows, as a list of statements rather than a table.
  *
- * **Why a column and not a sentence.** The rows used to be a label and a value side by side with
- * nothing between them — `tailnet  debian  unpair`, `radio  WIOld  AA:BB:CC  preset  change` — so
- * the label and the value read as one run of words and the eye had no place to stop. A person
- * looking for "which machine am I paired with" had to parse the whole line to find out where the
- * label ended. A fixed label column puts every value on one vertical line, which is what makes a
- * list of settings scannable: the labels are read once, down the left, and the values are compared
- * down the right.
+ * **There is no label column any more.** Every row used to be a fixed 92 dp label band with the
+ * value pushed to a second band on its right, so the screen read as two columns: a noun down the
+ * left and an answer down the right, with the eye crossing a gap on every line. That is a form's
+ * shape, and it costs a third of a phone's width to a blank gutter. What the screen actually holds
+ * is a list of *statements* — "route: over tailscale", "radio: WIOld, change", "text size: 12,
+ * minus plus" — and a statement reads left to right on one line.
  *
- * The column is [LABEL_WIDTH] wide, which fits the longest label in the app (`airtime`, `channel`,
- * `controls`) with room to spare, and it is a fixed width rather than a weight so the values line
- * up across sections instead of drifting with each row's longest label.
+ * So a row is now a title, an optional one-line summary under it (the value, or why the setting
+ * matters), and the control at the trailing edge. Rows that hold a choice put the choice under the
+ * title instead, because two buttons beside a sentence on a 360 dp phone is where the text starts
+ * truncating.
+ *
+ * **The spacing is deliberate.** Rows are 14 dp apart vertically and a section starts 24 dp below
+ * the one before it. The old screen packed them at 6 dp, which is a density that reads as a table
+ * cell: the eye cannot tell where one setting ends and the next begins, and on a touch screen the
+ * gap between two tap targets is part of the control.
  */
-internal val LABEL_WIDTH = 92.dp
 
 /** A titled block: the heading, a rule under it, then its rows. */
 @Composable
-internal fun SettingsSection(title: String, content: @Composable () -> Unit) {
+internal fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth()) {
+        // **The header carries the hierarchy, so the spacing does not have to.** Uppercase at one
+        // size down from a row's label, spaced out, in the brightest dim the theme has: it reads
+        // as a label on a group rather than as the first row of one.
         Text(
-            title,
+            title.uppercase(),
             color = Dim,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
+            letterSpacing = 1.2.sp,
             fontFamily = MonoFont,
-            modifier = Modifier.padding(bottom = 6.dp),
+            modifier = Modifier.padding(bottom = 8.dp),
         )
         SettingsDivider()
-        Column(Modifier.fillMaxWidth()) { content() }
+        Column(Modifier.fillMaxWidth(), content = content)
     }
 }
 
@@ -61,39 +69,88 @@ internal fun SettingsDivider() {
 }
 
 /**
- * One setting: the label in its column, then whatever sets or shows it.
+ * One setting: a title, an optional summary line, and whatever sets or shows it.
  *
- * [content] is a `RowScope`, so a row can put a value and a button on the same line and let the
- * value take the space between them (`Modifier.weight(1f)`), which is how a long machine name
- * ellipsises instead of pushing its button off the screen.
+ * [trailing] is drawn at the row's end and aligned with the title's first line, so a value and a
+ * button sit on the row's own line rather than in a second column. Give it a `Modifier.weight`
+ * only when the value is the row's whole point; a trailing control should size to its content or
+ * the title beside it starts truncating.
  */
 @Composable
 internal fun SettingsRow(
     label: String,
+    summary: String? = null,
     modifier: Modifier = Modifier,
-    content: @Composable RowScope.() -> Unit,
+    trailing: @Composable RowScope.() -> Unit = {},
 ) {
     Row(
         modifier
             .fillMaxWidth()
-            .padding(vertical = LocalTouch.current.rowPad),
+            .padding(vertical = SettingsRowPad),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            label,
-            color = Dim,
-            fontSize = 12.sp,
-            maxLines = 1,
-            modifier = Modifier.width(LABEL_WIDTH),
-        )
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Fg, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!summary.isNullOrEmpty()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    summary,
+                    color = Dim,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         Row(
-            Modifier.weight(1f),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            content = trailing,
+        )
+    }
+}
+
+/**
+ * A setting whose control is a set of choices, drawn under the title.
+ *
+ * Two option buttons beside a title on a phone leaves the title about ten characters before it
+ * ellipsises, and a truncated label is what the label is for. So the choices get their own line,
+ * left-aligned with the title, which is also where a desktop settings app puts a segmented control.
+ */
+@Composable
+internal fun SettingsChoice(
+    label: String,
+    summary: String? = null,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(vertical = SettingsRowPad),
+    ) {
+        Text(label, color = Fg, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (!summary.isNullOrEmpty()) {
+            Spacer(Modifier.height(2.dp))
+            Text(summary, color = Dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             content = content,
         )
     }
 }
+
+/** Vertical padding inside one row. The touch floor still comes from the control itself. */
+internal val SettingsRowPad = 8.dp
+
+/** The gap between two sections. The break is the header's job, not a large blank. */
+internal val SettingsSectionGap = 20.dp
+
+/** How far a line that belongs to the row above it is indented: one character of the label. */
+internal val SettingsIndent = 10.dp
 
 /**
  * A value in a row: the thing the label names.
@@ -107,7 +164,7 @@ internal fun SettingsRow(
 internal fun SettingsValue(
     text: String,
     modifier: Modifier = Modifier,
-    color: androidx.compose.ui.graphics.Color = Fg,
+    color: Color = Fg,
     maxLines: Int = 1,
 ) {
     Text(
@@ -121,17 +178,21 @@ internal fun SettingsValue(
 }
 
 /**
- * A line under a row, aligned with the values rather than with the labels.
+ * A line under a row, explaining what the row does or what it costs.
  *
- * It is the row's consequence or its reason ("this also forgets the mesh keys and the radio"), so
- * it belongs to the value it explains, not to the label column.
+ * It used to be indented to start where the values started, because there was a label column to
+ * clear. There is no column now, so it starts where its row's title starts.
  */
 @Composable
-internal fun SettingsNote(text: String, color: androidx.compose.ui.graphics.Color = Muted) {
-    Row(Modifier.fillMaxWidth()) {
-        Box(Modifier.width(LABEL_WIDTH))
-        Text(text, color = color, fontSize = 11.sp, modifier = Modifier.weight(1f))
-    }
+internal fun SettingsNote(text: String, color: Color = Muted) {
+    Text(
+        text,
+        color = color,
+        fontSize = 11.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = SettingsIndent, bottom = SettingsRowPad),
+    )
 }
 
 /**
@@ -162,14 +223,19 @@ internal fun SettingsPanel(
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = LocalTouch.current.rowPad * 2)
+            .padding(bottom = SettingsRowPad)
             .clip(RadiusLarge)
             .background(Surface)
-            .padding(LocalTouch.current.rowPad * 2),
-        verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, color = Fg, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+            Text(
+                title,
+                color = Fg,
+                fontSize = 14.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            )
             Spacer(Modifier.weight(1f))
             MiniTextButton(onClick = onCollapse) { Text("done", color = Accent, fontSize = 12.sp) }
         }
