@@ -27,9 +27,8 @@ Only one phone talks to one desktop at a time. Whichever device holds a shell ow
 and a second device that wants it is told so and offers to take it back.
 
 <p align="center">
-  <img src="docs/media/02-terminal.png" width="30%" alt="a shell on the phone, over the tailnet">
-  <img src="docs/media/03-selection.png" width="30%" alt="selecting text in the terminal">
-  <img src="docs/media/01-launcher-row.png" width="33%" alt="a shell started from the phone: send to desktop, close">
+  <img src="docs/media/02-terminal.png" width="47%" alt="a shell on the phone, over the tailnet">
+  <img src="docs/media/01-launcher-row.png" width="47%" alt="a shell started from the phone: send to desktop, close">
 </p>
 
 The phone opens shells as well as using them: a shell started from the app is marked on
