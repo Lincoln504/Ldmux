@@ -155,6 +155,15 @@ ADR-0010 is the decision. The practice:
   AES-256-GCM under a non-exportable Android Keystore key, in private preferences.
 - Held text in batch mode never leaves the process. It is not persisted and the
   screen shows a count rather than the text when the channel is public.
+- **A public channel changes nothing about confidentiality.** The channel is a
+  frequency and a preset, not a trust decision: our records travel as direct
+  packets addressed to the peer's public key (`RAW_CUSTOM_DIRECT_HEADER = 0x3E`,
+  `crates/companion/src/codec.rs`), each one sealed afresh under the session
+  (`crates/session/src/session.rs`, handshake `Noise_IKpsk2_25519_ChaChaPoly_SHA256`),
+  and the radio only ever receives sealed bytes. Anyone in range on the public
+  preset can record the ciphertext and count the traffic, and cannot read it or
+  forge it without the PSK. What a public channel does cost is shared airtime,
+  which is why batch mode is forced there.
 
 ## 8. Failure modes
 
@@ -200,25 +209,35 @@ that number.
 | iOS client | not started, needs a macOS host for the xcframework |
 | LoRa route, Android plus host | built and run on real radios, multi-hop recovery not implemented |
 
-## 11. Bringing up the host radio
+## 11. Bringing up the two radios
 
-The phone's radio is the app's business. The host's is the operator's, and there is
-no installer or provisioning screen for it.
+**One radio per side, each configured by the device that owns it.** The host radio
+stays plugged into the host over USB, where the daemon drives it and can retune it.
+The phone radio is powered anywhere and belongs to the phone over Bluetooth LE,
+where the app reads and retunes it. A radio is driven by one owner at a time: the
+firmware takes one companion session and the daemon takes an exclusive lock, so
+plugging both radios into the host is harmless but gains nothing, and the phone
+cannot use a radio the host is holding.
 
 1. Flash both boards with MeshCore firmware that includes the companion
    environment, one `usb` build for the host and one `ble` build for the phone.
 2. Name the host's device with `LDMUX_MESH_SERIAL`, for example
-   `/dev/serial/by-id/usb-Espressif_...-if00`. The daemon opens it, reads the preset
+   `/dev/serial/by-id/usb-Espressif_...-if00`. The daemon opens it, reads the tuple
    the radio reports, and drives it. No gateway process runs.
 3. Put the host radio's public key in `LDMUX_MESH_SELF`. The daemon drives the radio
    but does not read its key, and a pairing code without it cannot be used.
 4. Generate the session PSK once into the state directory, or set
-   `LDMUX_MESH_PSK`. `ldmux mesh status` reports the link, the radio, the budget and
-   the last error.
-5. Set both radios to the same operating point. The host prints its own at start,
-   `ldmux mesh status` reports it, and the phone's radio panel can read a radio,
-   adopt a public preset, or take a tuple by hand.
-6. Pair the phone with `ldmux code --mesh`.
+   `LDMUX_MESH_PSK`.
+5. **The two radios must be on the same tuple** (frequency, bandwidth, spreading
+   factor, coding rate). Read the host's with `ldmux mesh status`, which prints
+   `preset 910.525 MHz  62.5 kHz  SF7  CR5`. Set the host's with
+   `ldmux mesh preset <MHz> <kHz> <SF> <CR>`, which the firmware validates and
+   refuses if the numbers are outside its range. Set the phone's in the app under
+   Settings, `phone's radio`, `edit`: adopt a public preset or take a tuple by hand.
+   A mismatch is silent on the air — two radios on different tuples simply cannot
+   hear each other, and the only symptom is a link that never comes up.
+6. Pair the phone with `ldmux code --mesh`, which carries the session keys, the
+   host radio key and the tailnet address and token in one code.
 
 If `LDMUX_MESH_SERIAL` is unset, the older path applies: the daemon dials a loopback
 gateway named by `LDMUX_MESH_ADDR` and learns nothing about presets, paths or
