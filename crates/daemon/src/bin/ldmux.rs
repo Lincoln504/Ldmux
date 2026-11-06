@@ -1160,7 +1160,18 @@ async fn main() {
                                 .and_then(|t| t.as_str())
                                 .map(|k| !k.is_empty())
                                 .unwrap_or(false);
-                            if !(is_shell && alive && backed) {
+                            // **A shell that already has a window is not the one to reuse.** The
+                            // reuse rule exists for "get me back to the shell in this directory",
+                            // and a window is the thing that is already there to go back to. Reusing
+                            // it here meant the new window was refused - "that shell already has a
+                            // desk window" - and exited inside a second, so `$mod+Return` in the
+                            // directory a person works in flashed a window open and shut. A
+                            // keybinding that is supposed to always give a terminal gives one.
+                            let windowed = s
+                                .get("liveWorkspace")
+                                .map(|v| !v.is_null())
+                                .unwrap_or(false);
+                            if !(is_shell && alive && backed) || windowed {
                                 continue;
                             }
                             let matches = match &name {
