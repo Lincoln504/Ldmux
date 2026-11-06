@@ -1238,11 +1238,23 @@ async fn open_window_in(
                 unsafe {
                     cmd.pre_exec(move || {
                         nix::libc::close(w);
-                        let mut buf = [0u8; 1];
+                        // **A window that cannot be scoped still has to open.** The parent
+                        // writes one byte as soon as the move is visible, and closing the
+                        // write end unblocks this read anyway (EOF). The `poll` timeout is
+                        // the third case: a parent that died, or a task cancelled, between
+                        // `spawn` and the release would otherwise leave this child blocked
+                        // for ever on a pipe nobody writes — which is a window that never
+                        // appears, and (measured 2026-11-06) a leaked process for as long as
+                        // the machine stays up.
+                        let mut pfd = nix::libc::pollfd {
+                            fd: r,
+                            events: nix::libc::POLLIN,
+                            revents: 0,
+                        };
                         loop {
-                            // Raw errno, not `io::Error`: the child may not allocate
-                            // between fork and exec (the keeper makes the same choice).
-                            let n = nix::libc::read(r, buf.as_mut_ptr().cast(), 1);
+                            // Raw errno, not `io::Error`: the child may not allocate between
+                            // fork and exec (the keeper makes the same choice).
+                            let n = nix::libc::poll(&mut pfd, 1, 2_000);
                             if n >= 0 || *nix::libc::__errno_location() != nix::libc::EINTR {
                                 break;
                             }

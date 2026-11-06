@@ -32,7 +32,18 @@ impl Reaper {
 
 /// Pids of `ldmux-keeper` processes whose first argument is exactly `sock`.
 pub fn keepers_on(sock: &Path) -> Vec<i32> {
-    let want = sock.to_string_lossy().into_owned();
+    keepers_matching(&sock.to_string_lossy())
+}
+
+/// Pids of `ldmux-keeper` processes whose socket path is `prefix` or sits under it.
+///
+/// The exact-argv match above misses two real cases: a keeper the daemon spawns in the last
+/// milliseconds of a test (after the reaper's last pass), and one started with its socket named
+/// differently inside the same scratch directory. A leaked keeper holds PTYs and a socket for
+/// the life of the machine, which is exactly what this file exists to prevent, so the sweep is
+/// by directory as well as by the exact path.
+fn keepers_matching(prefix: &str) -> Vec<i32> {
+    let want = prefix.to_owned();
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir("/proc") else {
         return out;
@@ -51,7 +62,9 @@ pub fn keepers_on(sock: &Path) -> Vec<i32> {
         let is_keeper = Path::new(&prog)
             .file_name()
             .is_some_and(|n| n == "ldmux-keeper");
-        if is_keeper && args.next().as_deref() == Some(want.as_str()) {
+        let sock = args.next().unwrap_or_default();
+        let same = sock == want || sock.starts_with(&format!("{want}/"));
+        if is_keeper && same {
             out.push(pid);
         }
     }
@@ -60,8 +73,15 @@ pub fn keepers_on(sock: &Path) -> Vec<i32> {
 
 impl Drop for Reaper {
     fn drop(&mut self) {
-        // Twice: a daemon that is still winding down may respawn one in between.
-        for _ in 0..2 {
+        // Several passes with a settle: a daemon that is still winding down may respawn one
+        // between passes, and the last spawn can land after the first sweep.
+        for _ in 0..6 {
+            for pid in keepers_matching(&self.dir.to_string_lossy()) {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
             for pid in keepers_on(&self.sock) {
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid),

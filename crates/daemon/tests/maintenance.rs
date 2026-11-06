@@ -112,7 +112,10 @@ fn install_stubs(dir: &std::path::Path) -> Stubs {
     // saw a window whose process was gone, and the session ended — which is the exact
     // assertion below failing, intermittently, for a reason that had nothing to do with the
     // window manager. Teardown kills it, so nothing outlives the test.
-    write("alacritty", "#!/bin/sh\nsleep 600\n");
+    // `exec`, so the process the daemon tracks **is** the sleep. A bare `sleep 600` leaves a
+    // shell with a `sleep` child, and killing the tracked pid took only the shell: two stub
+    // emulators per gate run were left sleeping for ten minutes (measured 2026-11-06).
+    write("alacritty", "#!/bin/sh\nexec sleep 600\n");
     let old_path = std::env::var("PATH").unwrap_or_default();
     let old_terminal = std::env::var("TERMINAL").ok();
     let old_display = std::env::var("DISPLAY").ok();
