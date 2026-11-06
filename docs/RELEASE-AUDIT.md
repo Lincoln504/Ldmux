@@ -343,6 +343,7 @@ suite (574 cases) green.
 | 17.67 | A mark's `--note` never reached the banner (the app built the body from the kind) and the banner's title read a session list captured when the setting was installed, so a shell created later showed its id | FIXED — the note wins when present, and the title is read at post time |
 | 17.68 | A mark for a shell that had ended stayed in the app's map for ever, and would have been drawn on a row if a session id were ever reused | FIXED — the map is pruned against each session list |
 | 17.69 | The mark table was sent as one `Marks` message, and a message's body is capped at 134 bytes (`MAX_ROWS_BODY`) while the table holds 64: a dozen marked shells overflowed it, `reply` dropped the message, and the phone would have shown **no** marks exactly when there were many | FIXED — paged into messages that each fit, with a test that forty marks all arrive |
+| 17.70 | The presence connection's longer idle window was untested against a live daemon: a page's is 20 s, and a phone that beats once a minute would be reaped by it | VERIFIED 2026-11-06 against the running daemon: a `hello` with the `buzz` feature received the marks table, stayed connected through 25 s of silence and answered a ping afterwards, while a client that said nothing was closed at 23.6 s |
 
 ## How to use this
 
