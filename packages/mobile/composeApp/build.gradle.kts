@@ -1,5 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.util.Properties
+import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -220,7 +221,7 @@ tasks.matching { it.name == "bundleRelease" }.configureEach {
     doLast {
         val aab = file("build/outputs/bundle/release/composeApp-release.aab")
         if (!aab.isFile) return@doLast
-        java.util.zip.ZipFile(aab).use { zip ->
+        ZipFile(aab).use { zip ->
             val shipped = zip.entries().asSequence()
                 .map { it.name }
                 .filter { it.startsWith("base/lib/") && it.endsWith(".so") }
