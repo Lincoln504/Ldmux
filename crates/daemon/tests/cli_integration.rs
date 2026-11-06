@@ -57,6 +57,10 @@ async fn run_cli(args: &[&str], state_dir: &str) -> (i32, String, String) {
         cmd.arg(arg);
     }
     cmd.env("LDMUX_STATE_DIR", state_dir);
+    // `window` asks the daemon to spawn a terminal. `/bin/true` is a terminal that opens and exits:
+    // the shell is created through the same path a person uses, and the test does not need a
+    // display. (The `new` verb that created a shell nothing could ever show was removed.)
+
     let handle = tokio::task::spawn_blocking(move || {
         let output = cmd.output().expect("CLI failed to run");
         (
@@ -83,6 +87,13 @@ async fn cli_ping_over_the_control_socket() {
     wait_socket(&keeper_sock).await;
 
     ensure_cli_built();
+    // The desk-window spawner runs **in the daemon**, so its environment is this process's, not the
+    // CLI subprocess's. The value must *stay up*: `window` treats a terminal that exits at once as
+    // one that could not open a window, which is the check that keeps a headless `window` from
+    // creating an invisible shell. A five-second sleep is a window that lives long enough for the
+    // rest of the test and never needs a display.
+    // SAFETY: test setup, before any daemon thread reads the environment.
+    unsafe { std::env::set_var("LDMUX_TERMINAL_CMD", "/bin/sh -c 'sleep 5'") };
 
     let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
@@ -123,6 +134,13 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     wait_socket(&keeper_sock).await;
 
     ensure_cli_built();
+    // The desk-window spawner runs **in the daemon**, so its environment is this process's, not the
+    // CLI subprocess's. The value must *stay up*: `window` treats a terminal that exits at once as
+    // one that could not open a window, which is the check that keeps a headless `window` from
+    // creating an invisible shell. A five-second sleep is a window that lives long enough for the
+    // rest of the test and never needs a display.
+    // SAFETY: test setup, before any daemon thread reads the environment.
+    unsafe { std::env::set_var("LDMUX_TERMINAL_CMD", "/bin/sh -c 'sleep 5'") };
 
     let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
@@ -133,9 +151,10 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     }
     let dir_str = dir.to_string_lossy().into_owned();
 
-    // `new` — create a session. The output is the session id (a hex string).
-    let (code, out, err) = run_cli(&["new", "shell", &dir_str], &dir_str).await;
-    assert_eq!(code, 0, "new failed: {out} {err}");
+    // `window` — create a session and open it in a desk window. The output is the session id (a
+    // hex string).
+    let (code, out, err) = run_cli(&["window", &dir_str], &dir_str).await;
+    assert_eq!(code, 0, "window failed: {out} {err}");
     let session_id = out.trim().to_string();
     assert!(!session_id.is_empty(), "no session id: {out} {err}");
 
@@ -250,6 +269,13 @@ async fn cli_desktop_json_is_json() {
     wait_socket(&keeper_sock).await;
 
     ensure_cli_built();
+    // The desk-window spawner runs **in the daemon**, so its environment is this process's, not the
+    // CLI subprocess's. The value must *stay up*: `window` treats a terminal that exits at once as
+    // one that could not open a window, which is the check that keeps a headless `window` from
+    // creating an invisible shell. A five-second sleep is a window that lives long enough for the
+    // rest of the test and never needs a display.
+    // SAFETY: test setup, before any daemon thread reads the environment.
+    unsafe { std::env::set_var("LDMUX_TERMINAL_CMD", "/bin/sh -c 'sleep 5'") };
 
     let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =

@@ -110,9 +110,6 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "desktop" => {
             "ldmux desktop [--json]\n  The desktop inventory: window manager, workspaces, windows."
         }
-        "new" => {
-            "ldmux new [shell|pi] [cwd] [--title T]\n  Create a session (default: a shell in the current directory); prints its id."
-        }
         "shell" => {
             "ldmux shell [--name N] [--cwd DIR] [dir]\n  Become a desk window for a shell in this terminal. Reuses the shell already in that directory unless --name asks for another."
         }
@@ -326,7 +323,7 @@ fn print_mesh_session(v: &serde_json::Value) {
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|desktop|new|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|desktop|shell|run|window|send|key|capture|snapshot|kill|close|forget|adopt|mirror|live|unlive|remote|mesh|code|pair|clipboard-write> [args]"
     );
 }
 
@@ -501,36 +498,6 @@ async fn main() {
                             println!("{id}  {status:7} {kind:5} {cwd}  \"{title}\"  {attach}{why}");
                         }
                     }
-                }
-                Err(e) => {
-                    die(&e, &sock);
-                }
-            }
-        }
-        "new" => {
-            let pos = positional(rest, &["--title"]);
-            let kind = pos.first().copied().unwrap_or("shell");
-            let cwd_default = current_dir_or_exit();
-            let cwd: &str = pos.get(1).copied().unwrap_or(&cwd_default);
-            let title = flag(rest, "--title");
-            let r: Result<serde_json::Value, CallError> = daemon_call(
-                &sock,
-                "new",
-                &serde_json::json!({
-                    "kind": kind,
-                    "cwd": cwd,
-                    "title": title,
-                }),
-            )
-            .await;
-            match r {
-                Ok(v) => {
-                    let id = v
-                        .get("session")
-                        .and_then(|s| s.get("id"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    println!("{id}");
                 }
                 Err(e) => {
                     die(&e, &sock);

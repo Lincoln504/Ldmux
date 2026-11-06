@@ -2410,10 +2410,23 @@ impl LdmuxDaemon {
             self.keeper_call(&KeeperMessage::List(km::List {})).await
         {
             for st in lr.sessions {
-                let activity = lr.activity.get(&st.session_id).copied().unwrap_or(0);
+                // **Attention, not output.** A full-screen program that repaints stamps its output
+                // clock every second, so ordering by output ranked shells by how much they animate:
+                // measured 2026-11-06, seven `pi` shells sat above a shell created seconds earlier,
+                // all stamped in the same second as the query. `touched` moves on input and on
+                // attach, which is what the launcher's "recent" means.
+                let attention = lr
+                    .touched
+                    .get(&st.session_id)
+                    .copied()
+                    .filter(|t| *t > 0)
+                    // A keeper that predates the field says nothing; its output clock is closer
+                    // to the truth than the record's creation time, so fall back to it.
+                    .or_else(|| lr.activity.get(&st.session_id).copied())
+                    .unwrap_or(0);
                 facts.insert(
                     st.session_id.clone(),
-                    (st.foreground.clone(), st.cwd.clone(), activity),
+                    (st.foreground.clone(), st.cwd.clone(), attention),
                 );
             }
         }

@@ -353,6 +353,17 @@ pub struct ListResult {
     /// is. `#[serde(default)]` so a keeper and a daemon rolled apart still talk.
     #[serde(default)]
     pub activity: std::collections::BTreeMap<String, u64>,
+    /// When a **person** last touched the pane, in unix milliseconds, keyed by session id.
+    ///
+    /// Separate from [`Self::activity`], which is output too, and the separation is the whole
+    /// point: a full-screen program that repaints — a `pi` session's spinner, a clock, a progress
+    /// bar — stamps `activity` every second for ever, so ordering a launcher by it ranks programs
+    /// by how much they animate rather than by what the person was last working in. Measured
+    /// 2026-11-06: seven `pi` shells sat above a shell created seconds earlier, all stamped in the
+    /// same second as the query. `touched` moves only on input (a keystroke, a paste, a named key)
+    /// and when a client attaches, which is what "recent" means to a person.
+    #[serde(default)]
+    pub touched: std::collections::BTreeMap<String, u64>,
 }
 
 /// A bare acknowledgement for a message that carries no meaningful result

@@ -139,6 +139,9 @@ pub struct Session {
     /// by the reader task (output) and by `Write` (input), read by `List`.
     /// This is the wire's `lastActivityAt`.
     activity: Arc<AtomicU64>,
+    /// When a person last wrote to this pane, and when a client last attached. See
+    /// `ListResult::touched`: the ordering clock, as distinct from the output clock.
+    touched: Arc<AtomicU64>,
     /// Serialises writes to this pane's master. A `Write` that timed out is not
     /// cancelled (it finishes when the pane reads), so without this the next
     /// `Write` could start while the first is still mid-way through its bytes
@@ -806,6 +809,7 @@ impl Keeper {
                             // Stamped under the lock we already hold, never a
                             // second acquisition.
                             s.activity.store(now_ms(), Ordering::Relaxed);
+                            s.touched.store(now_ms(), Ordering::Relaxed);
                             (s.master.clone(), s.write_lock.clone())
                         }
                         _ => return Err(format!("no live session: {}", w.session_id)),
@@ -985,6 +989,7 @@ impl Keeper {
                 };
                 let mut sessions = Vec::new();
                 let mut activity = std::collections::BTreeMap::new();
+                let mut touched = std::collections::BTreeMap::new();
                 for id in ids {
                     if let Ok(KeeperMessage::State(st)) = self.state_of(&id).await {
                         sessions.push(st);
@@ -994,9 +999,14 @@ impl Keeper {
                     let g = self.sessions.relock();
                     if let Some(sess) = g.get(&id) {
                         activity.insert(id.clone(), sess.activity.load(Ordering::Relaxed));
+                        touched.insert(id.clone(), sess.touched.load(Ordering::Relaxed));
                     }
                 }
-                Ok(KeeperMessage::ListResult(ListResult { sessions, activity }))
+                Ok(KeeperMessage::ListResult(ListResult {
+                    sessions,
+                    activity,
+                    touched,
+                }))
             }
             km::KeeperMessage::Close(_c) => Ok(KeeperMessage::Ack(Ack {})),
             // The keeper→daemon pushes (`ChildInfo`, `ChildExited`) and the
@@ -1288,6 +1298,9 @@ impl Keeper {
         // The session's activity clock, shared with its emulator thread (which
         // stamps it on every byte the master produces).
         let activity = Arc::new(AtomicU64::new(now_ms()));
+        // The attention clock starts at creation: a shell that has just been asked for is the most
+        // recent thing the person did.
+        let touched = Arc::new(AtomicU64::new(now_ms()));
         let (em_tx, em_rx) = mpsc::channel();
         let waker = emulator::new_waker();
         let (boot_tx, boot_rx) = oneshot::channel();
@@ -1327,6 +1340,7 @@ impl Keeper {
             out,
             em: Emu { tx: em_tx, waker },
             activity,
+            touched,
             write_lock: Arc::new(Mutex::new(())),
         })
     }

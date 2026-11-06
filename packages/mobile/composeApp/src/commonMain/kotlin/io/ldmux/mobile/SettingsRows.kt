@@ -214,6 +214,10 @@ internal fun SettingsValue(
         text,
         color = color,
         fontSize = 13.sp,
+        // **Technical data is monospaced.** A tuple, an address, a key, a count or a rate is read
+        // digit by digit and compared against another device's; proportional numerals move under
+        // the eye and make 910.525 and 910.525 hard to line up. Prose summaries stay proportional.
+        fontFamily = MonoFont,
         maxLines = maxLines,
         overflow = TextOverflow.Ellipsis,
         modifier = modifier,

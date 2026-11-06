@@ -238,7 +238,9 @@ impl FakeKeeper {
                     states.push(Self::state_fields(s));
                     activity.insert(s.id.clone(), s.activity);
                 }
+                let touched = activity.clone();
                 Ok(KeeperMessage::ListResult(ListResult {
+                    touched,
                     sessions: states,
                     activity,
                 }))
