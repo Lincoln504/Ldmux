@@ -53,6 +53,16 @@ internal class PublicChannelHold {
         private set
 
     /**
+     * When the last press happened, on the caller's clock.
+     *
+     * The deadline is 20 s after the *press*, not after the page was entered. Keyed only on the
+     * press count, leaving the page and coming back started a fresh 20 s, so "no answer yet" could
+     * appear long after the user pressed — a message about a wait they had already given up on.
+     */
+    var pressedAt: Long = 0L
+        private set
+
+    /**
      * How many syncs have been pressed. A monotonic count, not a flag, because the screen's
      * deadline is keyed on it: a second press while a wait is running must restart the clock, and
      * a Boolean that stays true cannot tell a re-launched effect that anything changed.
@@ -94,6 +104,21 @@ internal class PublicChannelHold {
     fun settle() {
         awaiting = false
         reported = false
+    }
+
+    /**
+     * Start again: a different shell's page, so nothing counted here applies.
+     *
+     * `updates` is the count the bar draws, and a shell switch drops the screens it counted
+     * (`MeshTerminalSource.forgetScreen`) — but the count itself survived, so the bar said "view 2
+     * behind" over a source that held nothing, and the button (labelled `show` because no text is
+     * held) hit the "nothing to show" early return and did nothing.
+     */
+    fun forget() {
+        awaiting = false
+        flushing = false
+        reported = false
+        updates = 0
     }
 
     /** The held screen was drawn without ending the wait: the answer may still be coming. */
@@ -149,11 +174,12 @@ internal class PublicChannelHold {
      * A second press while a wait is running is allowed and means "try again": the buffer may have
      * refilled since, and the wait may be on a link that has gone quiet.
      */
-    fun sync(pending: Boolean): Boolean {
+    fun sync(pending: Boolean, nowMs: Long = 0L): Boolean {
         if (!on) return false
         awaiting = true
         flushing = pending
         reported = false
+        pressedAt = nowMs
         seq += 1
         return pending
     }

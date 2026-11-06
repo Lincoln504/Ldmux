@@ -156,6 +156,9 @@ class MeshTerminalSource(
     /** A screen the hold is keeping back, waiting for something to release it. */
     val heldScreenWaiting: Boolean get() = pendingScreen != null
 
+    /** When the last sync was pressed, on the same clock this class reads. */
+    val pressedAt: Long get() = hold.pressedAt
+
     /** The deadline passed and the bar should say so. Cleared by the answer or by the next press. */
     val answerOverdue: Boolean get() = hold.reported
 
@@ -212,7 +215,7 @@ class MeshTerminalSource(
             hold.settle()
             return false
         }
-        if (hold.sync(pending)) {
+        if (hold.sync(pending, now())) {
             drawThroughUntil = now() + SYNC_SETTLE_MS
             drawThroughCeiling = now() + SYNC_DRAW_MAX_MS
             return true
@@ -240,7 +243,12 @@ class MeshTerminalSource(
      * it the answer sat in [pendingScreen] until the user pressed the button again.
      */
     fun syncDrained() {
-        hold.drained()
+        val wasFlushing = hold.drained()
+        // **The window opens when the send completes, not when the button was pressed.** Draining a
+        // multi-record command takes seconds on this link, and during the drain screens are held on
+        // purpose (they are the pty's reaction to a partial command). Arming the window at the press
+        // spent its life on the drain and closed it just as the answer began to arrive.
+        if (wasFlushing) drawThroughUntil = now() + SYNC_SETTLE_MS
         if (!hold.awaiting) return
         // **The answer that arrived during the drain is the answer.** It used to be drawn with the
         // wait deliberately kept (`drawHeldKeepingWait`), on the reasoning that the wait ends with
@@ -348,7 +356,10 @@ class MeshTerminalSource(
         val t = now()
         val open = t < drawThroughUntil && t < drawThroughCeiling
         if (open) drawThroughUntil = minOf(t + SYNC_SETTLE_MS, drawThroughCeiling)
-        val accepting = open
+        // **A drain is not overridden by the window.** Mid-send, a screen is the pty's reaction to a
+        // partial command; drawing it would show half a command's output as if it were the answer,
+        // which is the invariant `acceptScreen` states and the window must not quietly break.
+        val accepting = open && !hold.flushing
         val accept = accepting || hold.acceptScreen(painted = last != null && !rebuilt)
         // Which shell a screen belongs to, and whether the hold took it, is the one fact that
         // decides whether a freshly opened shell paints. Logged at the decision, because the two
@@ -372,12 +383,6 @@ class MeshTerminalSource(
     }
 
     /**
-     * Draw the newest screen the host sent, without sending anything.
-     *
-     * The honest answer to "sync" when nothing is waiting: there is nothing to send, so the only
-     * thing a button can do is show what the shell last said. False when no screen is held.
-     */
-    /**
      * Forget the screens the hold kept back, without drawing them.
      *
      * The held screen is the answer to something that happened on **this page**: a sync waiting
@@ -390,6 +395,12 @@ class MeshTerminalSource(
         hold.drewHeld()
     }
 
+    /**
+     * Draw the newest screen the host sent, without sending anything.
+     *
+     * The honest answer to "sync" when nothing is waiting: there is nothing to send, so the only
+     * thing a button can do is show what the shell last said. False when no screen is held.
+     */
     fun pullHeld(): Boolean {
         val held = pendingScreen ?: return false
         pendingScreen = null
@@ -553,6 +564,8 @@ class MeshTerminalSource(
 
     /** Drop the engine, the drawn screen and everything that belonged to it. */
     private fun forgetScreen() {
+        // The bar counts held screens; a page that holds none must not say it holds two.
+        hold.forget()
         engine?.close()
         engine = null
         last = null

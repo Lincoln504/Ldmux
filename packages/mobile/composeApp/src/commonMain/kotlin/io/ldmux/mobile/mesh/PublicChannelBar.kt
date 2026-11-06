@@ -109,9 +109,11 @@ internal fun PublicChannelBar(
         )
     }
 
-    // The standalone sync button. Filled, because it is the thing to press; dimmed while a send
-    // is out, so the user can always press it again when a wait goes quiet.
-    val syncEnabled = !flushing
+    // **One control, always live.** It is dimmed while a send is out, but pressing it still does
+    // something: it re-arms the wait and re-drains, which is what a user means when they press the
+    // one button while nothing is coming back. Disabling it made the only control on the page dead
+    // for up to the deadline (20 s) whenever the link stalled — with no other way to ask again.
+    val syncEnabled = true
     val syncButton: @Composable (Modifier) -> Unit = { m ->
         Box(
             m

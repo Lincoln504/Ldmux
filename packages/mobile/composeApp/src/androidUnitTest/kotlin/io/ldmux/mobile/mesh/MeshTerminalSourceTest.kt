@@ -119,6 +119,9 @@ class MeshTerminalSourceTest {
         // Typing makes `sync` a send rather than a show, which arms the window.
         b.appendText("pwd".encodeToByteArray(), clock.now)
         assertTrue(s.sync(), "there was text to send")
+        // The drain finishes, which is what opens the window: mid-send a screen is the pty's
+        // reaction to a partial command and is held on purpose.
+        s.syncDrained()
         s.show(MeshScreen(listOf("echo"), 0, 0, alternate = false, dead = false, epoch = 3, cols = 20), "aa11")
         assertFalse(s.heldScreenWaiting, "the answer must be drawn, not held")
         s.show(MeshScreen(listOf("/tmp"), 0, 0, alternate = false, dead = false, epoch = 4, cols = 20), "aa11")

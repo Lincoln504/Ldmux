@@ -440,7 +440,16 @@ fun MeshTerminalScreen(
     // earned. A count restarts the deadline on every press and nothing else.
     LaunchedEffect(source.syncSeq) {
         if (source.syncSeq == 0) return@LaunchedEffect
-        delay(SYNC_ANSWER_TIMEOUT_MS)
+        // What is left of the deadline, not a fresh one: re-entering the page must not give the
+        // wait another 20 s, and a press 15 s into a previous wait must not inherit a clock it did
+        // not earn.
+        val elapsed = clock() - source.pressedAt
+        val left = SYNC_ANSWER_TIMEOUT_MS - elapsed
+        if (left <= 0) {
+            source.syncTimedOut()
+            return@LaunchedEffect
+        }
+        delay(left)
         // Reports through the bar's own status line ("no answer yet: the link may be busy or down")
         // rather than a notice over the terminal: the row is where the mode speaks, and the answer
         // that arrives late is still drawn when it arrives.
@@ -545,6 +554,8 @@ fun MeshTerminalScreen(
     // is drawn when the screen actually arrives — keyed on the hold, not on a timer, because a timer
     // fires before the first screen on a slow channel and then never fires again.
     var drawnForOpen by remember { mutableStateOf<String?>(null) }
+    /** The last grid the surface measured, so a keyboard transition can re-assert it. */
+    var lastGrid by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     LaunchedEffect(shells.current, source.heldScreenWaiting) {
         val id = shells.current ?: return@LaunchedEffect
         if (drawnForOpen == id || !source.heldScreenWaiting) return@LaunchedEffect
@@ -569,6 +580,17 @@ fun MeshTerminalScreen(
     }
     // Leaving the terminal is the user's decision, so it is also the one that cancels the resume: a
     // rebuild after this must land on the list, not drag them back into a shell they left.
+    // **A keyboard transition re-asserts the fit.** The surface measures its own height, and the
+    // height changes when the keyboard opens; but the first measurement after a transition can land
+    // before the inset does, and if no further layout pass follows, the host keeps a pty taller than
+    // the screen — reported 2026-11-06 as the prompt pushed above the visible top while the keyboard
+    // was up. Re-asking is free when the host already agrees (the driver compares the reported grid
+    // against the wanted one), and costs one record when it does not.
+    LaunchedEffect(imeUp) {
+        delay(GRID_SETTLE_MS)
+        val g = lastGrid ?: return@LaunchedEffect
+        conn.driver.setGrid(g.first, g.second)
+    }
     val openList = {
         chosen = emptyList(); showList = true; resumeShell = ""
         scope.launch {
@@ -794,6 +816,7 @@ fun MeshTerminalScreen(
                         // leave the host at the pty's old size for ever.
                         val opened = TimeSource.Monotonic.markNow()
                         source.onGrid = grid@{ c, r ->
+                            lastGrid = c to r
                             // **Leaving is not a resize.** The list shrinks the layout, the surface
                             // reports the smaller grid, and the pending job then sent a `Resize`
                             // for a shell this screen had just let go of — which the host applied
