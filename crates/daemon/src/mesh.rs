@@ -1088,6 +1088,170 @@ mod tests {
         task.abort();
     }
 
+    /// A carriage that is not a radio: what the daemon writes is handed to the test, and what
+    /// the test seals is handed back as an inbound record.
+    ///
+    /// This is the seam the deleted gateway-based integration tests used to go through. The
+    /// transport they drove is gone (there is no loopback gateway), but the L3 path over *some*
+    /// carrier is the part that matters, and this keeps it covered without a device.
+    struct AirCarrier {
+        to_phone: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+        pending: std::collections::VecDeque<Event>,
+    }
+
+    impl Carrier for AirCarrier {
+        async fn send_record(&mut self, seq: u8, record: &[u8]) -> Result<(), MeshError> {
+            if self.to_phone.send(record.to_vec()).is_err() {
+                return Err(MeshError::Closed);
+            }
+            // A healthy radio takes the record; the loop needs the answer to retire the slot.
+            self.pending.push_back(Event::SendResult(ldmux_mesh::messages::SendResult {
+                seq,
+                outcome: SendOutcome::SentDirect,
+            }));
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<Event, MeshError> {
+            if let Some(e) = self.pending.pop_front() {
+                return Ok(e);
+            }
+            self.events.recv().await.ok_or(MeshError::Closed)
+        }
+    }
+
+    const E2E_PSK: [u8; 32] = [0x33; 32];
+
+    fn hex_key(hex_text: &str) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex_text[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        k
+    }
+
+    fn e2e_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ldmux-l3-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// **The whole L3 path over a carrier**: handshake, then one record each way.
+    ///
+    /// This is what the gateway-based integration tests covered, ported to the seam that
+    /// exists now. It fails if the handshake is never answered, if a sealed record does not
+    /// reach the runtime's inbound queue, or if a record queued for the phone never leaves.
+    #[tokio::test]
+    async fn a_handshake_and_a_record_each_way_cross_the_carrier() {
+        let dir = e2e_dir("e2e");
+        let setup = SessionSetup::new(&dir, E2E_PSK).unwrap();
+        let host_public = hex_key(&setup.public_key_hex());
+        let runtime = test_runtime();
+
+        let (to_phone_tx, mut to_phone) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let carrier = AirCarrier {
+            to_phone: to_phone_tx,
+            events: event_rx,
+            pending: std::collections::VecDeque::new(),
+        };
+        let session_task = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                let mut setup = setup;
+                let _ = session(
+                    carrier,
+                    Bound {
+                        uplink_record_max: 172,
+                        radio_state: RadioState::Connected,
+                        budget: Budget::RadioGoverned,
+                    },
+                    &runtime,
+                    Some(&mut setup),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await;
+            }
+        });
+
+        // Message 1 in, message 2 out.
+        let phone_keys = ldmux_session::handshake::Keypair::generate().unwrap();
+        // The host refuses a handshake whose timestamp is outside its clock window, so the
+        // phone's timestamp has to be the real one, exactly as a phone's would be.
+        let wall_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let (init, m1) = ldmux_session::handshake::Initiator::start(
+            &phone_keys,
+            &host_public,
+            &E2E_PSK,
+            wall_ms,
+        )
+        .unwrap();
+        event_tx.send(Event::Recv(m1)).unwrap();
+        let m2 = tokio::time::timeout(Duration::from_secs(5), to_phone.recv())
+            .await
+            .expect("the daemon answers message 1")
+            .expect("the carrier is open");
+        let mut phone = ldmux_session::Session::new(init.finish(&m2).unwrap(), 172, 0).unwrap();
+        let established = Instant::now() + Duration::from_secs(5);
+        while runtime.snapshot().session.state != "established" {
+            assert!(Instant::now() < established, "the session never established");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Phone -> daemon.
+        phone.send(7, b"hello host").unwrap();
+        let mut now = 4_000u64;
+        let limits = ldmux_session::arq::Limits {
+            records_left: 255,
+            l2_slots: 8,
+        };
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got.is_empty() {
+            assert!(Instant::now() < deadline, "the daemon never received the record");
+            for rec in phone.poll(now, limits).unwrap() {
+                event_tx.send(Event::Recv(rec)).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            for (shell, bytes) in runtime.take_inbound() {
+                assert_eq!(shell, 7);
+                got.extend(bytes);
+            }
+            now += 4_000;
+        }
+        assert_eq!(got, b"hello host");
+
+        // Daemon -> phone.
+        runtime.send(7, b"hello phone").unwrap();
+        let mut reply = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reply.is_empty() {
+            assert!(Instant::now() < deadline, "the daemon never sent the record");
+            let rec = tokio::time::timeout(Duration::from_millis(200), to_phone.recv())
+                .await
+                .ok()
+                .flatten();
+            if let Some(rec) = rec
+                && let Ok(ldmux_session::Inbound::Data(d)) = phone.receive(now, &rec)
+            {
+                reply.extend(d.into_iter().flat_map(|x| x.payload));
+            }
+            now += 4_000;
+        }
+        assert_eq!(reply, b"hello phone");
+
+        session_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_pairing_keys_are_this_daemons_public_key_and_the_configured_secret() {
         let dir = std::env::temp_dir().join(format!("ldmux-pairing-keys-{}", std::process::id()));

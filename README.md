@@ -5,7 +5,7 @@ tailnet, or over a pair of LoRa radios when there is no network at all.
 
 | Where | What |
 |---|---|
-| your Linux host | `ldmuxd` (daemon), `ldmux-keeper` (owns every PTY and shell), `ldmux` (CLI), desk windows (`ldmux window`) |
+| your Linux host | `ldmuxd` (daemon), `ldmux-keeper` (owns every PTY and shell), `ldmux` (CLI), and desk clients in your own terminals (`ldmux attach`) |
 | your phone | the Android app: a KMP/Compose client with its own VT emulator, no WebView |
 | the radio route | a MeshCore companion radio on the host's serial port, which the daemon drives, and one the phone drives over Bluetooth LE |
 
@@ -48,13 +48,22 @@ Linux x86_64, a systemd user session, and nix for the binaries.
 nix run .#install                 # binaries, desk-window launcher, both user units
 systemctl --user enable --now ldmux
 ldmux list                        # what the keeper has
-ldmux window ~                    # a shell in a desk window on this machine's screen
+ldmux shell ~                     # a shell in *this* terminal
+ldmux attach d8f92c0630           # an existing shell, in this terminal
+ldmux new ~                       # create one and print its id, opening nothing
 ```
 
-`ldmux --help` lists every verb (`shell`, `run`, `send`, `key`, `capture`, `live`,
-`mirror`, `kill`, `close`, `code`, `pair`, `mesh`). `ldmux --version` and
-`ldmux ping` say which build is running. Replacing the keeper ends every shell:
-`nix run .#restart-keeper` says so and asks first.
+`ldmux` never opens a terminal window of its own: it runs inside the one you have, and
+`super+Return` runs the installed `ldmux-terminal`, which opens your configured emulator
+and starts `ldmux shell` in it. The one window the daemon opens is the one the phone asks
+for (`send to desktop`), and it uses the same terminal you configured: `$TERMINAL`, then
+`xdg-terminal-exec`, then an emulator you are running, then your desktop's setting.
+`ldmux terminal` prints that answer.
+
+`ldmux --help` lists every verb (`new`, `shell`, `run`, `attach`, `send`, `key`, `capture`,
+`kill`, `close`, `code`, `pair`, `mesh`, …). `ldmux --version` and `ldmux ping` say which
+build is running. Replacing the keeper ends every shell: `nix run .#restart-keeper` says so
+and asks first.
 
 ## Pairing a phone
 

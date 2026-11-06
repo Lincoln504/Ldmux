@@ -49,6 +49,28 @@ public channel is classified from the tuple the radio reports, never from a conf
 name. `new shell` is the first row of the list on both routes, because it is the one
 action the list always offers.
 
+### The desk surface
+
+**A desk window is a terminal you already have.** `ldmux attach <id>` runs the same client a
+desk window runs, in the terminal it is started in; `ldmux shell` and `ldmux run` create a
+session and become its window there. The CLI opens nothing: `ldmux new` creates a shell and
+prints its id so a script can carry on.
+
+The one window the daemon spawns is the one asked for by a device that has no terminal — the
+phone's `send to desktop`. It opens in the terminal the user configured, resolved in this
+order and cached per daemon process: `$TERMINAL`, `xdg-terminal-exec`, an emulator already
+running for this user (most frequent first), the desktop's own setting (GNOME `gsettings`,
+KDE `kdeglobals`, XFCE `helpers.rc`), then the known list with `x-terminal-emulator` last. The
+running-emulator step outranks the desktop setting on purpose: a settings key is often a
+distribution alternative, while the emulator a person has ten windows of is the one they use.
+`ldmux terminal` prints the answer and `ldmux terminal --exec <command>` applies that
+emulator's own template and execs it, so the keybinding wrapper carries no second copy of the
+rules.
+
+Each spawned window is a transient unit under `ldmux-windows.slice`, held on a pipe until the
+move is visible in `/proc/<pid>/cgroup` (the same construction the keeper uses for shells), so
+a window's processes are not charged to the daemon's cgroup and are gone with it.
+
 ## 3. Layers
 
 - L1, the radios. A MeshCore companion radio on each end. The presets must match:
