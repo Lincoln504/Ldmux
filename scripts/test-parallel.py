@@ -120,7 +120,10 @@ def main() -> int:
         help="seconds before one binary is declared hung (default 600)",
     )
     ap.add_argument("rest", nargs="*", help="after `--`: arguments for each test binary")
-    ns = ap.parse_args()
+    # Known flags are ours; everything else is forwarded to `cargo test --no-run` by the
+    # hand parser below. `parse_args` refused them instead, which is why CI's `--locked`
+    # exited 2 before building a single binary and the step was dead without saying so.
+    ns, _unknown = ap.parse_known_args()
 
     # argparse cannot tell us where our own flags end and the binary's begin
     # without a separator, so split on the first `--` in argv instead.

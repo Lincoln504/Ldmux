@@ -3,6 +3,7 @@ package io.ldmux.mobile.mesh
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.roundToLong
 import kotlin.random.Random
 import kotlin.time.Clock
 import kotlin.time.TimeSource
@@ -256,7 +257,10 @@ fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPr
         (env.freqMinMhz + half) + env.freqStepMhz * random.nextInt(0, n + 1)
     }
     return RadioPreset(
-        frequencyMhz = ("%.4f".format(freq)).toDouble(),
+        // Rounded, not formatted. `"%.4f".format` uses the default locale, so a German, French,
+        // Spanish or Portuguese phone produced "902,2500" and `toDouble()` threw — a crash in the
+        // preset randomiser, on exactly the phones the EU rows exist for.
+        frequencyMhz = (freq * 10_000.0).roundToLong() / 10_000.0,
         bandwidthKhz = env.bandwidthKhz,
         spreadingFactor = env.spreadingFactors.random(random),
         codingRate = env.codingRate,

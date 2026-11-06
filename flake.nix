@@ -84,7 +84,7 @@
           ./Cargo.lock
           ./crates
           ./deploy
-          ./packages/mobile/composeApp/src/commonMain/kotlin/dev/ldmux/mobile/Modifiers.kt
+          ./packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/Modifiers.kt
         ];
       };
 

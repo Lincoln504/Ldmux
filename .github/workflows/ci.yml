@@ -1,8 +1,11 @@
 name: ci
 
 on:
+  # Every branch, not just main. The workflow ran only on main and on pull requests, so a
+  # long-lived feature branch accumulated two broken steps (a stale flake path and a
+  # rejected flag) that nothing was watching, and both were invisible until release.
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
 
 permissions:

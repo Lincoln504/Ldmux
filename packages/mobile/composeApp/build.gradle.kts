@@ -75,6 +75,13 @@ fun gitCommitCount(): Int? = runCatching {
 
 android {
     namespace = "io.ldmux.mobile"
+
+    // **The licence texts ship inside the artifact.** MIT, BSD-3-Clause and Apache-2.0 all require
+    // the notice to travel with a distributed binary; a Markdown file in a repository the user
+    // never opens does not discharge that. `scripts/collect-licenses.sh` writes the tree, and the
+    // release tasks run it first (see `scripts/android.sh`), so a bundle cannot be produced without
+    // the notices it owes.
+    sourceSets["main"].assets.srcDir(rootDir.resolve("../..").resolve("dist"))
     // Compile against the latest released platform (37.2), but TARGET 36 and
     // MIN 28: Android 8.0 reached end of security support in January 2021, so a
     // phone on 26 or 27 has had no security updates for five years and cannot
@@ -172,6 +179,28 @@ val buildSessionAndroid = tasks.register<Exec>("buildSessionAndroid") {
 }
 tasks.matching { it.name.startsWith("merge") && it.name.contains("JniLib") }.configureEach {
     dependsOn(buildSessionAndroid)
+}
+
+// **Both native libraries, or no release.** `jniLibs/` is gitignored, and the Gradle tasks above
+// build only the Rust session; `libldmux_terminal.so` comes from `scripts/build-libghostty-vt.sh`,
+// which `scripts/android.sh` runs but a bare `./gradlew bundleRelease` does not. The result installs,
+// starts, and dies with `UnsatisfiedLinkError` on the first session - a release artifact that cannot
+// open a shell. Checked here, where the mistake is made.
+val requiredNativeLibs = listOf("libldmux_session.so", "libldmux_terminal.so")
+val abiDirs = listOf("arm64-v8a", "x86_64")
+tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.configureEach {
+    doFirst {
+        val root = file("src/androidMain/jniLibs")
+        val missing = abiDirs.flatMap { abi -> requiredNativeLibs.map { "$abi/$it" } }
+            .filter { !root.resolve(it).isFile }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "native libraries missing from src/androidMain/jniLibs: ${missing.joinToString(", ")}. " +
+                    "Run scripts/android.sh release or bundle, which builds both; " +
+                    "scripts/build-libghostty-vt.sh produces the terminal engine.",
+            )
+        }
+    }
 }
 
 // A release bundle with no signing config is not a release: Play rejects it, and the

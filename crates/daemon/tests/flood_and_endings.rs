@@ -206,10 +206,25 @@ async fn a_client_that_fell_behind_gets_an_in_place_snapshot_not_a_forced_reconn
     );
     assert_eq!(snap["cols"], 80);
     assert!(snap["screen"].is_string());
-    // And it is live again afterwards: the end of the flood turns up.
+    // **Liveness is proved by a marker sent after the resync, not by the flood's own.**
+    // `D_48` was the wrong witness: the 4 MiB flood can finish while the snapshot is being
+    // taken, so the marker is either already inside `snap["screen"]` or was discarded with
+    // the screen the snapshot replaced. The wait then found nothing and burned its whole
+    // 300 s ceiling (`wsraw.rs:281`) on a daemon that was perfectly alive — measured
+    // 316 s before failing, on a test whose property is ordering, not speed.
+    let live = "LIVE_AFTER_RESYNC";
+    ws.send_json(&serde_json::json!({
+        "type": "input",
+        "data": format!("echo {live}\n"),
+    }))
+    .await;
     let mut out = Vec::new();
-    ws.until_output(&mut out, "D_48", Duration::from_millis(200))
+    ws.until_output(&mut out, live, Duration::from_millis(200))
         .await;
+    assert!(
+        String::from_utf8_lossy(&out).contains(live),
+        "the shell was not live after the in-place resync"
+    );
 }
 
 #[tokio::test]

@@ -31,8 +31,8 @@ case "$cmd" in
   test) gradle_in_mobile :composeApp:testDebugUnitTest ;;
   # The only artifacts Play accepts. They fail, loudly and early, when the signing inputs
   # are absent: an unsigned bundle is rejected at upload, which is a worse place to learn it.
-  release) native "$@"; gradle_in_mobile :composeApp:assembleRelease ;;
-  bundle) native "$@"; gradle_in_mobile :composeApp:bundleRelease ;;
+  release) native "$@"; ./scripts/collect-licenses.sh; gradle_in_mobile :composeApp:assembleRelease ;;
+  bundle) native "$@"; ./scripts/collect-licenses.sh; gradle_in_mobile :composeApp:bundleRelease ;;
   native-test) "$mobile/scripts/test-native.sh" ;;
   *) echo "usage: $0 native|build|install|test|release|bundle|native-test [args]" >&2; exit 2 ;;
 esac
