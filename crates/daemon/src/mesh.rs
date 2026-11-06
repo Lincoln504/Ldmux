@@ -351,6 +351,8 @@ fn hex(bytes: &[u8]) -> String {
 pub struct MeshSnapshot {
     /// `connecting`, `handshaking`, `ready`, or `down`.
     pub state: &'static str,
+    /// The host radio's own public key, read from `SELF_INFO` when the radio was identified.
+    pub own_radio_key: Option<[u8; 32]>,
     /// The tuple the host's own radio reported: `(frequency in kHz, bandwidth in Hz, SF, CR)`.
     /// `None` for a gateway, which does not say, and before the radio has been identified.
     pub radio_preset: Option<(u32, u32, u8, u8)>,
@@ -387,6 +389,7 @@ impl MeshSnapshot {
     fn new(cfg: &MeshConfig) -> Self {
         Self {
             state: "connecting",
+            own_radio_key: None,
             radio_preset: None,
             addr: cfg.addr.clone(),
             serial: cfg.serial.clone(),
@@ -638,10 +641,15 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
             .to_owned()
     })?;
     runtime.clear_pin()?;
+    // **The radio's own key, when the daemon drives the radio.** `LDMUX_MESH_SELF` existed because
+    // the daemon could not learn it; now it reads it from `SELF_INFO` at open, so a code is
+    // complete without a second environment variable that could be stale or mistyped. The
+    // variable still wins when set, so an operator who pinned a key keeps that pin.
+    let host_radio = keys.host_radio.or_else(|| runtime.snapshot().own_radio_key);
     Ok(serde_json::json!({
         "hostKey": hex(&keys.host_key),
         "psk": hex(&keys.psk),
-        "hostRadio": keys.host_radio.map(|r| hex(&r)),
+        "hostRadio": host_radio.map(|r| hex(&r)),
     }))
 }
 
@@ -656,7 +664,7 @@ pub fn status_json() -> serde_json::Value {
             // `NeedsPeer`, and re-scanning the same code cannot fix that because the key is
             // simply not in it. It belongs in the status the operator reads before printing.
             if let Some(keys) = runtime.pairing_keys() {
-                v["hostRadio"] = match keys.host_radio {
+                v["hostRadio"] = match keys.host_radio.or_else(|| runtime.snapshot().own_radio_key) {
                     Some(key) => serde_json::Value::String(hex(&key)),
                     None => serde_json::Value::Null,
                 };
@@ -752,6 +760,7 @@ async fn link(
             // here, because two radios on different tuples cannot hear each other and the phone
             // could only ever compare against a number the host never gave it.
             set(&runtime.snapshot, |s| {
+                s.own_radio_key = Some(preset.public_key);
                 s.radio_preset = Some((
                     (preset.freq_mhz * 1000.0).round() as u32,
                     (preset.bw_khz * 1000.0).round() as u32,

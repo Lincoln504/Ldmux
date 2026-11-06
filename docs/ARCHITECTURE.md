@@ -224,8 +224,10 @@ cannot use a radio the host is holding.
 2. Name the host's device with `LDMUX_MESH_SERIAL`, for example
    `/dev/serial/by-id/usb-Espressif_...-if00`. The daemon opens it, reads the tuple
    the radio reports, and drives it. No gateway process runs.
-3. Put the host radio's public key in `LDMUX_MESH_SELF`. The daemon drives the radio
-   but does not read its key, and a pairing code without it cannot be used.
+3. The host radio's public key needs no configuration: the daemon reads it from
+   `SELF_INFO` when it opens the radio, and a code made by a daemon that owns its
+   radio carries it. `LDMUX_MESH_SELF` still overrides it, for a host that pins a
+   key. A code with no key cannot be used, and re-scanning it cannot help.
 4. Generate the session PSK once into the state directory, or set
    `LDMUX_MESH_PSK`.
 5. **The two radios must be on the same tuple** (frequency, bandwidth, spreading

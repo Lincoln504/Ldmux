@@ -173,6 +173,12 @@ pub(crate) struct RadioPreset {
     pub bw_khz: f64,
     pub sf: u8,
     pub cr: u8,
+    /// This radio's own public key, from the same `SELF_INFO`.
+    ///
+    /// The daemon owns the radio, so it can read the key a phone must bind. Requiring the operator
+    /// to type it into `LDMUX_MESH_SELF` was a step that could only be got wrong: a stale or
+    /// mistyped key makes a pairing code that no phone can use.
+    pub public_key: [u8; 32],
 }
 
 /// Open the port and identify the radio. Runs off the async runtime: it blocks.
@@ -201,6 +207,7 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
         bw_khz: self_info.radio_bw_khz,
         sf: self_info.radio_sf,
         cr: self_info.radio_cr,
+        public_key: self_info.public_key,
     };
     Ok((companion, bound, Settings { hash_size, airtime_ms, preset }))
 }
@@ -267,11 +274,13 @@ fn serve<L: ByteLink>(
                     .set_radio_params(freq_khz, bw_hz, sf, cr)
                     .map_err(|e| format!("{e:?}"));
                 if result.is_ok() {
+                    // A retune changes the tuple and nothing else: the radio keeps its key.
                     settings.preset = RadioPreset {
                         freq_mhz: f64::from(freq_khz) / 1000.0,
                         bw_khz: f64::from(bw_hz) / 1000.0,
                         sf,
                         cr,
+                        public_key: settings.preset.public_key,
                     };
                     // The airtime estimate follows the new tuple, or the budget keeps measuring
                     // the radio that is no longer in use.
@@ -475,7 +484,13 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                    preset: RadioPreset {
+                        freq_mhz: 914.25,
+                        bw_khz: 500.0,
+                        sf: 8,
+                        cr: 5,
+                        public_key: [7u8; 32],
+                    },
                 },
                 command_rx,
                 event_tx,
@@ -524,7 +539,13 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                    preset: RadioPreset {
+                        freq_mhz: 914.25,
+                        bw_khz: 500.0,
+                        sf: 8,
+                        cr: 5,
+                        public_key: [7u8; 32],
+                    },
                 },
                 command_rx,
                 event_tx,
@@ -561,7 +582,13 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                    preset: RadioPreset {
+                        freq_mhz: 914.25,
+                        bw_khz: 500.0,
+                        sf: 8,
+                        cr: 5,
+                        public_key: [7u8; 32],
+                    },
                 },
                 command_rx,
                 event_tx,
@@ -577,7 +604,13 @@ mod tests {
         let settings = Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset { freq_mhz: 914.25, bw_khz: 500.0, sf: 8, cr: 5 },
+                    preset: RadioPreset {
+                        freq_mhz: 914.25,
+                        bw_khz: 500.0,
+                        sf: 8,
+                        cr: 5,
+                        public_key: [7u8; 32],
+                    },
                 };
         let status = status(&settings, 255, 0);
         assert_eq!(status.ops_left_this_hour, Some(255));
