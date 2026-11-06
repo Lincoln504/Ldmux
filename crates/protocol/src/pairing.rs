@@ -51,8 +51,11 @@ pub struct MeshKeys {
     pub host_key: [u8; 32],
     /// The pairing's pre-shared secret (32 bytes).
     pub psk: [u8; 32],
-    /// The host's radio public key, which the phone's gateway binds. Optional: the
-    /// daemon does not own the radio and learns this only if told (`LDMUX_MESH_SELF`).
+    /// The host's radio public key, which the phone binds.
+    ///
+    /// A daemon that owns its radio reads this from `SELF_INFO` and needs no configuration;
+    /// `LDMUX_MESH_SELF` still overrides it for a host that pins a key. Optional because a daemon
+    /// behind a gateway learns nothing about the radio, and a code without it cannot be used.
     pub host_radio: Option<[u8; 32]>,
 }
 
