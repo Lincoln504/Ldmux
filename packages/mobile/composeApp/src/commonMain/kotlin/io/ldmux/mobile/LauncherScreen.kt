@@ -138,24 +138,16 @@ fun LauncherScreen(
         routeNotice?.let { it(); Spacer(Modifier.height(LocalTouch.current.rowPad * 2)) }
 
         // ── one list ─────────────────────────────────────────────────────────
-        // Unpaired, there is no list and nothing to open, and pairing is in Settings. The app
-        // does not jump to a scanner by itself (ADR-0017).
+        // Unpaired, there is no list and nothing to open, and the app does not jump to a scanner
+        // by itself (ADR-0017). The empty state is [UnpairedHome], drawn by the caller as the
+        // route notice above; this branch only stops the list from existing.
         //
-        // It used to return here and draw nothing at all, which on a fresh install is a blank
-        // screen under a header reading `unpaired`: that reads as a broken app, not an unpaired
-        // one, and it is the first thing a stranger and a store reviewer both see. Two lines say
-        // what this is, what it needs, and the one action that helps.
+        // **The empty state used to be drawn here as well**, so a fresh install read "no
+        // computer paired [scan a code]" and then, immediately under it, "not paired with a
+        // host — run `ldmux code`, then scan it in Settings": two headlines for one state, the
+        // second pointing at a cog that the first button had already made unnecessary. One
+        // place owns the copy now, and it is the place that owns the two verbs.
         if (link == LinkState.Unpaired) {
-            Spacer(Modifier.height(LocalTouch.current.rowPad * 2))
-            // Two lines, not four sentences. A stranger needs to know what this is and what to do
-            // next; the route options are a Settings row and do not belong in a first-run notice.
-            Text("not paired with a host", color = Fg, fontSize = 13.sp)
-            Spacer(Modifier.height(LocalTouch.current.rowPad))
-            Text(
-                "On your Linux machine run `ldmux code`, then scan it in Settings.",
-                color = Dim,
-                fontSize = 11.sp,
-            )
             return@Column
         }
         run {

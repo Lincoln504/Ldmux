@@ -23,7 +23,7 @@ class MeshTermIntegrationTest {
 
     private class Gateway : GatewayPort {
         override val state = MutableStateFlow(MeshLinkState.Bound)
-        override val status = MutableStateFlow<MeshStatus?>(MeshStatus(0, null, null, 0, 58))
+        override val status = MutableStateFlow<MeshStatus?>(MeshStatus(0, null, 0, 58))
         override val received = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
         override val uplinkRecordMax = 172
         val sent = ArrayList<ByteArray>()
@@ -110,11 +110,11 @@ class MeshTermIntegrationTest {
         assertEquals(listOf("$ ls", "a.txt", "x"), assertIs<MeshTermView.Live>(driver.view.value).screen.lines)
 
         // --- no budget, nothing on the air: input is accepted into the session but not transmitted.
-        gw.status.value = MeshStatus(0, null, null, 0, 0)
+        gw.status.value = MeshStatus(0, null, 0, 0)
         assertEquals(InputOutcome.Accepted, driver.input(byteArrayOf(0x03)))
         assertTrue(gw.sent.isEmpty(), "a zero budget transmits nothing: ${gw.sent.size} records left the phone")
         // The budget returns and the held record goes out.
-        gw.status.value = MeshStatus(0, null, null, 0, 5)
+        gw.status.value = MeshStatus(0, null, 0, 5)
         now += 1
         driver.tick()
         assertEquals(1, gw.sent.size)

@@ -70,9 +70,33 @@ internal fun RadioPickerPanel(
             val r = result
             if (r != null && !r.ok) {
                 Text(radioProblemLine(r.problem), color = Warn, fontSize = 12.sp)
+                // **A denial needs a verb.** After the second denial on Android 11+ the system
+                // stops drawing the dialog, so a screen that only states the fact is a dead end:
+                // the same sentence returns on every press and nothing can be granted from here.
+                if (r.problem == RadioScanProblem.PermissionDenied) {
+                    val ask = RadioPermission.canAsk()
+                    MiniTextButton(onClick = {
+                        RadioPermission.resolve()
+                        token += 1
+                    }) {
+                        Text(
+                            if (ask) "allow Bluetooth" else "open app settings",
+                            color = Accent,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
             }
             if (r != null && r.devices.isEmpty() && r.ok) {
+                // The two causes a scan cannot tell apart, said instead of "no radio found":
+                // a radio that is off advertises nothing, and one another app (or another phone)
+                // already holds advertises but never answers the companion handshake.
                 Text("no LoRa radio found", color = Muted, fontSize = 12.sp)
+                Text(
+                    "check that it is powered on and not connected to another app or phone",
+                    color = Muted,
+                    fontSize = 11.sp,
+                )
             }
             r?.devices?.forEach { d ->
                 MiniTextButton(
@@ -147,10 +171,12 @@ internal fun RadioPresetPanel(
     val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
     val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
     val fallbackStatus = remember { MutableStateFlow<MeshStatus?>(null) }
+    val fallbackProblem = remember { MutableStateFlow<String?>(null) }
     val state by (link?.state ?: fallbackState).collectAsState()
     val info by (link?.selfInfo ?: fallbackInfo).collectAsState()
     val device by (link?.deviceInfo ?: fallbackDevice).collectAsState()
     val status by (link?.status ?: fallbackStatus).collectAsState()
+    val problem by (link?.lastProblem ?: fallbackProblem).collectAsState()
     val current = info?.let {
         RadioPreset(
             frequencyMhz = it.frequencyMhz,
@@ -281,7 +307,11 @@ internal fun RadioPresetPanel(
                 // without saying which radio, what firmware, or whether it was in range. A line only
                 // appears when its source answered, so an unbound radio shows nothing rather than
                 // zeros.
-                RadioFacts(info, device, status)
+                // The link's own sentence about the last attempt, when it has one. A block of
+                // "not read" said that nothing had answered, never why: Bluetooth off, no
+                // permission, no bond, another app holding the radio and the wrong firmware all
+                // looked the same on this screen.
+                RadioFacts(info, device, status, problem)
                 // Wrapped, not one row: the region names are wider than a phone's panel, and a
                 // row that overflows loses the last one — the same bug the portrait key bar was
                 // rebuilt to avoid.
@@ -301,7 +331,7 @@ internal fun RadioPresetPanel(
                 SettingsRow("preset", summary = presetLine(selected))
                 if (custom) {
                     // One line, four numbers, in the order the radio prints them: MHz, kHz, SF, CR.
-                    // The host's own preset appears in the gateway's start-up line; typing it here is
+                    // The host's own preset is what `ldmux mesh status` prints; typing it here is
                     // how the phone's board joins the channel the host is already on. Power and path
                     // width stay as they are, because they are not part of "which channel".
                     Field(
@@ -314,7 +344,7 @@ internal fun RadioPresetPanel(
                     )
                     Text(
                         if (customText.isBlank()) {
-                            "MHz kHz SF CR — the host's radio prints its preset when its gateway starts"
+                            "MHz kHz SF CR — `ldmux mesh status` on the host prints its own preset"
                         } else if (typed == null) {
                             "not a tuple: four numbers, 137-1020 MHz, 62.5-500 kHz, SF5-12, CR5-8"
                         } else {
@@ -472,20 +502,28 @@ private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
  * offering that as a control.
  */
 @Composable
-private fun RadioFacts(info: RadioSelfInfo?, device: RadioDeviceInfo?, status: MeshStatus?) {
-    if (info == null && device == null && status == null) return
+private fun RadioFacts(
+    info: RadioSelfInfo?,
+    device: RadioDeviceInfo?,
+    status: MeshStatus?,
+    problem: String?,
+) {
+    if (info == null && device == null && status == null && problem == null) return
+    problem?.let { FactLine("problem", it) }
     if (info != null) {
         FactLine("name", info.name + (device?.let { "  ·  " + it.firmwareVersion } ?: ""))
     } else if (device != null) {
         FactLine("firmware", device.firmwareVersion)
     }
     val rssi = status?.rssiDbm
+    // **Voltage, not a percentage.** The companion reports millivolts, and this app has no
+    // discharge curve for the cell the board happens to carry; the old `batteryPercent` field was
+    // never assigned by anything, so its readout here could not fire.
     val volts = device?.batteryMillivolts?.let { "%.2f V".format(it / 1000.0) }
-    val battery = status?.batteryPercent?.let { "$it%" }
-    if (rssi != null || volts != null || battery != null) {
+    if (rssi != null || volts != null) {
         FactLine(
             "signal",
-            listOfNotNull(rssi?.let { "$it dBm" }, volts ?: battery).joinToString("  ·  "),
+            listOfNotNull(rssi?.let { "$it dBm" }, volts).joinToString("  ·  "),
         )
     }
     if (info != null) {

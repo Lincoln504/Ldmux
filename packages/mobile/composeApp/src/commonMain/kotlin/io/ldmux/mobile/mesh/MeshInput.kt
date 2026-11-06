@@ -3,6 +3,7 @@ package io.ldmux.mobile.mesh
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import io.ldmux.mobile.ModifierLatch
 import io.ldmux.mobile.Modifiers
 import io.ldmux.mobile.StickyKey
 import io.ldmux.mobile.TerminalHandle
@@ -256,8 +257,23 @@ class MeshTerminalHandle(
     /** Called after something was added, so the pump looks again now rather than at its next tick. */
     private val onQueued: () -> Unit = {},
 ) : TerminalHandle {
+    /**
+     * The armed modifier, with the tailnet's own expiry.
+     *
+     * The handle used to keep this as a plain value that only toggled: a Ctrl armed and then
+     * forgotten stayed armed, so an Esc a minute later went out as C-Esc — a chord nobody meant.
+     * Same [ModifierLatch], same six seconds, and [expireModifiers] is the screen's tick that
+     * redraws the key once it has lapsed (`modifiers` is read by the bar).
+     */
+    private val latch = ModifierLatch(now = clock)
     override var modifiers: Modifiers by mutableStateOf(Modifiers())
         private set
+
+    /** Let go of an armed modifier whose six seconds have passed, and redraw it as unarmed. */
+    fun expireModifiers() {
+        val live = latch.current()
+        if (live != modifiers) modifiers = live
+    }
 
     /** What is waiting to be sent, as readable text (CR as ⏎, ESC as ␛, other controls as ^X, keys by name). */
     var pendingLabel: String by mutableStateOf("")
@@ -267,13 +283,17 @@ class MeshTerminalHandle(
     var overflow: Boolean by mutableStateOf(false)
         private set
 
-    override fun toggleModifier(which: StickyKey) { modifiers = modifiers.toggled(which) }
-    override fun clearModifiers() { modifiers = Modifiers() }
+    override fun toggleModifier(which: StickyKey) { modifiers = latch.toggle(which) }
+
+    override fun clearModifiers() {
+        latch.clear()
+        modifiers = Modifiers()
+    }
 
     override fun sendKey(name: String) {
-        val armed = modifiers
+        val armed = armedModifiers()
         if (armed.armed) {
-            modifiers = Modifiers()
+            clearModifiers()
             sendModifiedKey(name, armed)
             return
         }
@@ -290,9 +310,12 @@ class MeshTerminalHandle(
 
     override fun sendText(text: String) {
         if (text.isEmpty()) return
-        val armed = modifiers
+        val armed = armedModifiers()
         if (!armed.armed) { pushText(text.replace('\n', '\r')); return }
         val typed = spendLatchOnFirst(text, armed)
+        // The keystroke spent it: `latchAfter` is empty for every spend, so the latch must let go
+        // too — otherwise the next read of [armedModifiers] would put it straight back.
+        latch.clear()
         modifiers = typed.latchAfter
         if (typed.head.isEmpty()) {
             pushText(typed.rest.replace('\n', '\r'))
@@ -306,6 +329,13 @@ class MeshTerminalHandle(
     override fun paste(text: String): Boolean {
         if (text.isEmpty()) return true
         return pushText(text.replace("\r\n", "\r").replace('\n', '\r'))
+    }
+
+    /** What is armed *now*: [ModifierLatch] has already let go of expired ones. */
+    private fun armedModifiers(): Modifiers {
+        val live = latch.current()
+        if (live != modifiers) modifiers = live
+        return live
     }
 
     private fun pushText(text: String): Boolean = settle(batcher.appendText(text.encodeToByteArray(), clock()))

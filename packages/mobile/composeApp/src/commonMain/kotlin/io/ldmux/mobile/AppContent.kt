@@ -1,13 +1,15 @@
 package io.ldmux.mobile
 
+import io.ldmux.mobile.mesh.MeshEnrollOutcome
 import io.ldmux.mobile.mesh.MeshRoute
 import io.ldmux.mobile.mesh.MeshRouteResolution
-import io.ldmux.mobile.mesh.applyMeshPairingScan
+import io.ldmux.mobile.mesh.PairingNote
 import io.ldmux.mobile.mesh.availableRoutes
+import io.ldmux.mobile.mesh.currentMeshResolution
 import io.ldmux.mobile.mesh.currentPlatform
 import io.ldmux.mobile.mesh.meshSessionKeyStore
+import io.ldmux.mobile.mesh.pairingNote
 import io.ldmux.mobile.mesh.readMeshCredentials
-import io.ldmux.mobile.mesh.currentMeshResolution
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -24,6 +26,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -107,6 +110,32 @@ internal fun AppContent(
     // Read here, not inside the launcher branch: a refusal releases a pending
     // shell request, and that request is made from a screen the branch does not own.
     val errorTick by client.errorTick.collectAsState()
+
+    // **A pairing has three endings and the launcher used to show one.** The tailnet changing
+    // is visible by itself; a mesh-only code and a Keystore refusal are not, and both used to
+    // leave the screen exactly as it was — so a successful radio pairing looked like a scan
+    // that did nothing. The note distinguishes them. It lives here, above the launcher/terminal
+    // switch, because it has to survive a trip to the shell list.
+    //
+    // The paste dialog is emitted at this level too: `ModalCard` is a full-screen overlay, and
+    // a child of the launcher's `Column` would be laid out inside the list rather than over it.
+    var pairNote by remember { mutableStateOf<PairingNote?>(null) }
+    var pairProblem by remember { mutableStateOf<String?>(null) }
+    var pasteOpen by remember { mutableStateOf(false) }
+    val meshPresent = MeshRoute.Mesh in availableRoutes(currentPlatform)
+    val acceptPairing: (Pairing) -> Unit = { p ->
+        val outcome = store.pair(p)
+        pairNote = pairingNote(
+            p,
+            radioKeysStored = when (outcome) {
+                MeshEnrollOutcome.Enrolled -> true
+                MeshEnrollOutcome.NoMeshKeys -> null
+                MeshEnrollOutcome.LibraryUnavailable, MeshEnrollOutcome.StoreFailed -> false
+            },
+            route = store.config.value.route,
+            hasMeshRoute = meshPresent,
+        )
+    }
 
     // A phone that has just rejoined the wifi should not wait out the retry
     // backoff: the network callback cuts it short.
@@ -709,22 +738,32 @@ internal fun AppContent(
             // no notice of its own, so it gets the same one line every other dead end gets.
             routeNotice = if (link == LinkState.Unpaired) {
                 {
-                    // **The screen's one job gets the screen's one button.** It used to say
-                    // "scan a pairing code in Settings" and leave the user to find a cog in
-                    // the corner, on the one screen where nothing else can be done. The scan
-                    // is the same one the settings row runs: the scanner's result is the
-                    // intent, so a second confirmation would be asking twice.
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text("no computer paired", color = Muted, fontSize = 12.sp)
-                        MiniTextButton(onClick = {
+                    UnpairedHome(
+                        note = pairNote,
+                        problem = pairProblem,
+                        onScan = {
+                            pairProblem = null
                             CodeScanner.scan { result ->
-                                (scanOutcome(result) as? PairOutcome.Paired)?.let { store.pair(it.pairing) }
+                                when (val o = scanOutcome(result)) {
+                                    is PairOutcome.Paired -> acceptPairing(o.pairing)
+                                    is PairOutcome.Problem -> pairProblem = o.text
+                                    PairOutcome.Nothing -> Unit
+                                }
                             }
-                        }) { Text("scan a code", color = Accent, fontSize = 12.sp) }
-                    }
+                        },
+                        // The dialog is the screen's, not this block's: it is an overlay.
+                        onPaste = {
+                            pairProblem = null
+                            pasteOpen = true
+                        },
+                        onUseRadio = {
+                            // The one press that finishes a mesh-only pairing: the keys are in
+                            // the Keystore and the route is the only thing still pointing at a
+                            // tailnet this phone has no address for.
+                            store.update(store.config.value.copy(route = MeshRoute.Mesh))
+                            pairNote = null
+                        },
+                    )
                 }
             } else if (link == LinkState.RouteUnavailable && config.route == MeshRoute.Mesh) {
                 {
@@ -966,6 +1005,19 @@ internal fun AppContent(
         }
     }
 
+    // The link a phone without a scanner can still pair with. Beside the other modals, and
+    // above the app's own layout, so it covers the screen rather than living in it.
+    if (pasteOpen) {
+        PastePairingLink(
+            onDismiss = { pasteOpen = false },
+            onPair = { p ->
+                pasteOpen = false
+                pairProblem = null
+                acceptPairing(p)
+            },
+        )
+    }
+
     // A pairing link from outside the app (ADR-0017): asked about, never applied
     // silently, because it replaces where every keystroke goes.
     val inbound by PairingInbox.link.collectAsState()
@@ -989,4 +1041,70 @@ internal fun AppContent(
         }
     }
 
+}
+
+/**
+ * The lines a first run reads, in the order a first run needs them.
+ *
+ * Three questions, and each one is a place the old copy left the user without an answer:
+ * **what this needs** (a Linux machine running the daemon — nothing in the app ever named it),
+ * **how the phone reaches it** (the same tailnet, or a pair of radios — the two routes are a
+ * settings row, which is not discoverable from a blank screen), and **what to press here**.
+ *
+ * Pure so the content is held by a test rather than by whoever last reworded it: this is the
+ * first screen a stranger and a store reviewer both see, and losing the phrase `ldmux code`
+ * here makes the app look unpaired and unfixable.
+ */
+internal fun unpairedSteps(): List<String> = listOf(
+    "needs: a Linux machine running ldmuxd",
+    "the phone reaches it over the same tailnet, or over a pair of LoRa radios",
+    "pair: on the host run `ldmux code`, then scan it here",
+)
+
+/**
+ * The unpaired launcher: one state, one headline, and the two verbs that end it.
+ *
+ * This replaced two blocks that contradicted each other — a row here that said "no computer
+ * paired [scan a code]", and, directly under it, a launcher paragraph that said "not paired
+ * with a host … then scan it in settings" and pointed at a cog the button above had already
+ * made unnecessary. Two headlines for one state read as two problems.
+ *
+ * The paste field is the second verb because the scanner is Google's code scanner, which does
+ * not exist on a device without Play services: for that phone, `pair` opened nothing and the
+ * only sentence on screen was "scanner unavailable".
+ */
+@Composable
+private fun UnpairedHome(
+    note: PairingNote?,
+    problem: String?,
+    onScan: () -> Unit,
+    /** Open the paste dialog, which the screen draws over itself. */
+    onPaste: () -> Unit,
+    onUseRadio: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 2.dp)) {
+        Text("this phone is not paired", color = Fg, fontSize = 14.sp)
+        Spacer(Modifier.height(LocalTouch.current.rowPad))
+        for (line in unpairedSteps()) {
+            Text(line, color = Dim, fontSize = 11.sp)
+            Spacer(Modifier.height(2.dp))
+        }
+        Spacer(Modifier.height(LocalTouch.current.rowPad))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            MiniTextButton(onClick = onScan) { Text("scan a code", color = Accent, fontSize = 12.sp) }
+            MiniTextButton(onClick = onPaste) { Text("paste a link", color = Accent, fontSize = 12.sp) }
+        }
+        problem?.let {
+            Spacer(Modifier.height(LocalTouch.current.rowPad))
+            Text(it, color = Danger, fontSize = 11.sp)
+        }
+        note?.let {
+            Spacer(Modifier.height(LocalTouch.current.rowPad))
+            Text(it.text, color = Muted, fontSize = 11.sp)
+            if (it.useRadio) {
+                Spacer(Modifier.height(4.dp))
+                MiniTextButton(onClick = onUseRadio) { Text("use the radio", color = Accent, fontSize = 12.sp) }
+            }
+        }
+    }
 }

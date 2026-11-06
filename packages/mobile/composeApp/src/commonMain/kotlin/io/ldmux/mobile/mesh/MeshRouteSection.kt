@@ -52,6 +52,15 @@ import io.ldmux.mobile.parseHostPreset
 @Composable
 internal fun MeshRouteSection(
     current: LdmuxConfig,
+    /**
+     * Bumped by every pairing in the row above.
+     *
+     * Secure storage is not part of the config, so nothing here recomposes when a scan stores the
+     * keys: without this the block kept the reading it captured at first composition and went on
+     * saying "scan a pairing code made with `ldmux code --mesh`" directly under a row that had
+     * just said "· radio". The pair succeeded and the screen contradicted it.
+     */
+    credentialsVersion: Int = 0,
     /** Read secure storage now. Called again after every action, because the config alone may not change. */
     readCredentials: () -> MeshCredentialState,
     /** Apply a scanned ldmux code to the mesh route ([applyMeshPairingScan]). */
@@ -63,7 +72,7 @@ internal fun MeshRouteSection(
     /** How typing leaves the phone: live, or held until sync. Persisted beside the pairing. */
     onInputMode: (MeshInputMode) -> Unit,
 ) {
-    var credentials by remember { mutableStateOf(readCredentials()) }
+    var credentials by remember(credentialsVersion) { mutableStateOf(readCredentials()) }
     val view = meshSetupView(credentials)
     if (!view.meshExists) return // iOS: there is no mesh route to configure
 
@@ -77,6 +86,18 @@ internal fun MeshRouteSection(
         // question twice and left the reader guessing which one to scan under.
         (view.meshResolution as? MeshRouteResolution.Unusable)?.let {
             SettingsNote(meshProblemLabel(it.problem))
+        }
+        // **The success state, where the scan happened.** A code that carries only the radio's
+        // keys changes no tailnet fact, so with nothing said here a completed pairing and a
+        // refused one looked the same. The row above says `· radio`; this says what is stored.
+        if (view.present.size == MeshCredential.entries.size) {
+            SettingsNote("radio keys stored · the host's radio key is pinned")
+        } else if (view.present.isNotEmpty()) {
+            SettingsNote(
+                "stored: " + view.present.joinToString { meshCredentialName(it) } +
+                    " · missing: " + MeshCredential.entries.filterNot { it in view.present }
+                        .joinToString { meshCredentialName(it) },
+            )
         }
 
         // The radio is the one new physical fact. Its name is shown because a MAC address is not

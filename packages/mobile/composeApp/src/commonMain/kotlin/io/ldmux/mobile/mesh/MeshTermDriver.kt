@@ -22,6 +22,17 @@ interface GatewayPort {
     val status: StateFlow<MeshStatus?>
     val received: Flow<ByteArray>
     val uplinkRecordMax: Int
+
+    /**
+     * Why the link is down, in the link's own words, or null when it has not said.
+     *
+     * A state is a category and there are five ways to be unable to reach a radio - Bluetooth off,
+     * no permission, no bond, the wrong firmware, another app holding it - so the category alone
+     * left the screen saying "radio unavailable" to all of them. Defaulted, because a test double
+     * has no radio to be wrong about.
+     */
+    val problem: String? get() = null
+
     suspend fun send(record: ByteArray): MeshSendResult
 }
 
@@ -126,8 +137,11 @@ sealed interface MeshTermView {
     /** Nothing started yet. */
     data object Idle : MeshTermView
 
-    /** The gateway link is not bound, or the session beneath it gave up. The link's own state says why. */
-    data class LinkDown(val link: MeshLinkState) : MeshTermView
+    /**
+     * The gateway link is not bound, or the session beneath it gave up. [link] says the kind of
+     * failure; [detail] is the link's own sentence about this one, when it has one.
+     */
+    data class LinkDown(val link: MeshLinkState, val detail: String? = null) : MeshTermView
 
     /** Link up, handshake with the host under way. Minutes are normal on this link. */
     data object Handshaking : MeshTermView
@@ -300,6 +314,8 @@ class MeshTermDriver(
     private var choices: List<SessionEntry> = emptyList()
     /** A recoverable gateway problem (radio out). Cleared when the link is bound again. */
     private var linkProblem: MeshLinkState? = null
+    /** The link's own sentence about [linkProblem], when it had one to give. */
+    private var linkDetail: String? = null
 
     /** The shell this attach is on, by the host's own id, when it is known (see [MeshShells]). */
     private var attachedId: String? = null
@@ -422,13 +438,19 @@ class MeshTermDriver(
     }
 
     /** The gateway link changed. Anything but bound is a visible [MeshTermView.LinkDown]. */
-    suspend fun onGatewayState(state: MeshLinkState) = lock.withLock {
+    suspend fun onGatewayState(state: MeshLinkState, detail: String? = null) = lock.withLock {
         when (state) {
-            MeshLinkState.Bound -> linkProblem = null
+            MeshLinkState.Bound -> {
+                linkProblem = null
+                linkDetail = null
+            }
             // Not decisions: the link is still coming up or is idle.
             MeshLinkState.Idle, MeshLinkState.Connecting -> {}
             else -> {
                 linkProblem = state
+                // The link's own sentence, if it has one. A state that arrives without one keeps
+                // whatever the link last said, which is fresher than nothing.
+                linkDetail = detail ?: gateway.problem
                 // **A gateway that closed is the end of this connection.** `run`'s loops only end
                 // on [transportDead], and a peer close used to leave them ticking over a socket
                 // that no longer existed: the screen sat on "closed" for as long as the user
@@ -486,6 +508,26 @@ class MeshTermDriver(
         }
         pump()
         publish()
+    }
+
+    /**
+     * How long this link has carried nothing while something is still owed, or null when it is not
+     * owed anything.
+     *
+     * **Only meaningful with something outstanding.** An idle shell is silent by design: the diff
+     * sends nothing, so "nothing heard for a minute" is the normal, correct state of a shell
+     * nobody is typing into, and warning about it would train the user to ignore the line. With a
+     * record outstanding, the same silence is the preamble to [SILENCE_FAILURE_MS] - and in live
+     * mode there is no bar between "the link stopped carrying" and "the link dropped", so the
+     * screen can say it early instead of showing a screen that looks live.
+     */
+    suspend fun quietForMs(): Long? = lock.withLock {
+        val s = session ?: return@withLock null
+        val pending = runCatching { s.health(clock()).pending }.getOrDefault(0)
+        if (pending <= 0) return@withLock null
+        val last = maxOf(lastInboundAt, lastCarriedAt)
+        if (last == 0L) return@withLock null
+        (clock() - last).coerceAtLeast(0)
     }
 
     /** Time passed: retransmit what the session wants, and notice a dead end. */
@@ -1176,7 +1218,7 @@ class MeshTermDriver(
         val tv = terminalView
         if (tv != null) { _view.value = tv; return }
         val lp = linkProblem
-        if (lp != null) { _view.value = MeshTermView.LinkDown(lp); return }
+        if (lp != null) { _view.value = MeshTermView.LinkDown(lp, linkDetail); return }
         _view.value = when {
             session == null && handshake == null -> MeshTermView.Idle
             handshake != null -> MeshTermView.Handshaking

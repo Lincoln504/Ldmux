@@ -1,11 +1,11 @@
 package io.ldmux.mobile.mesh
 
 import android.Manifest
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import android.os.SystemClock
 import android.util.Log
 import io.ldmux.mobile.AndroidApp
 import io.ldmux.mobile.appLog
@@ -78,10 +78,15 @@ class AndroidRadioLink(
     private val _state = MutableStateFlow(if (address.isEmpty()) MeshLinkState.NeedsRadio else MeshLinkState.Idle)
     override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
 
+    // **Unknown is not connected.** `radioState` used to start at 0, which *is* RADIO_CONNECTED, so
+    // a brand-new link that had never opened a GATT client claimed its radio was up.
     private val _status = MutableStateFlow(
-        MeshStatus(radioState = 0, rssiDbm = null, batteryPercent = null, txAirtimeTenthsThisHour = 0, opsLeftThisHour = null),
+        MeshStatus(radioState = MeshStatus.RADIO_UNKNOWN, rssiDbm = null, txAirtimeTenthsThisHour = 0, opsLeftThisHour = null),
     )
     override val status: StateFlow<MeshStatus?> = _status.asStateFlow()
+
+    private val _lastProblem = MutableStateFlow<String?>(null)
+    override val lastProblem: StateFlow<String?> = _lastProblem.asStateFlow()
 
     private val _selfInfo = MutableStateFlow<RadioSelfInfo?>(null)
     override val selfInfo: StateFlow<RadioSelfInfo?> = _selfInfo.asStateFlow()
@@ -119,8 +124,22 @@ class AndroidRadioLink(
 
     @Volatile
     private var budgetMode: RadioBudgetMode = RadioBudgetMode.Metered
-    private var airtimeWindowStartMs: Long = SystemClock.elapsedRealtime()
-    private var airtimeUsedMs: Double = 0.0
+
+    /**
+     * **The hour's spend survives leaving the page.**
+     *
+     * This meter was per-link and in memory, and `RadioLinks.release` throws the link away at the
+     * last owner, so: open a shell, spend the hour's 36 s, go back to the list, reopen it, budget
+     * full again. In 869.4-869.65 MHz the meter is a condition of use, not a courtesy, and nothing
+     * else enforces it on a radio the phone owns, so a tap could reset a legal limit. It is now
+     * keyed by the radio's address and stored with a wall clock (the monotonic one does not
+     * survive a reboot, and neither should an hour's window).
+     */
+    private val airtimePrefs = context.getSharedPreferences("ldmux_radio_airtime", Context.MODE_PRIVATE)
+    private val airtimeKeyStart = "window_start_$address"
+    private val airtimeKeyUsed = "used_ms_$address"
+    private var airtimeWindowStartMs: Long = airtimePrefs.getLong(airtimeKeyStart, 0L)
+    private var airtimeUsedMs: Double = airtimePrefs.getFloat(airtimeKeyUsed, 0f).toDouble()
 
     /**
      * **Every send uses `CMD_SEND_RAW_PACKET` (0x41), at every path width.**
@@ -152,6 +171,9 @@ class AndroidRadioLink(
             if (closing) return
             when (state) {
                 SessionState.DISCONNECTED -> {
+                    // Deliberately no `lastProblem` write for a mid-session drop: the radio simply
+                    // went away, and the sentence this field carries is about a failed *attempt*.
+                    // The state is the fact, and the rebuild writes the next attempt's reason.
                     _state.value = MeshLinkState.RadioUnavailable
                     ready?.completeExceptionally(RadioLinkException(MeshLinkState.RadioUnavailable, "radio disconnected"))
                 }
@@ -164,13 +186,17 @@ class AndroidRadioLink(
             if (closing) return
             _selfInfo.value = selfInfo.toRadioSelfInfo()
             refreshStatus()
-            _status.value = _status.value.copy(radioState = 0)
+            _status.value = _status.value.copy(radioState = MeshStatus.RADIO_CONNECTED)
             _state.value = MeshLinkState.Bound
+            _lastProblem.value = null
             ready?.complete(Unit)
-            // One command, one reply, and the only way the phone learns how much charge its own
-            // radio has. The host's gateway asks the same question; this link had never asked, so
-            // a board running on a battery could die with the screen showing nothing about it.
-            session?.requestBatteryStorage()
+            // **One tracked command at a time.** The battery request is deliberately *not* sent
+            // here: the companion session has one uncorrelated answer window, so an untracked
+            // command written into the same window as the tracked contact query lets an
+            // `ErrorFrame`/`OkFrame` meant for the battery free the contact slot early — and
+            // `isIdle()` then lies during the preset write, whose only proof is the read-back.
+            // `connect()` asks for the battery once the contact answer has settled.
+            //
             // Learning the host's path is one command by full key, not a full
             // contact dump. The wait is bounded in connect(); if the radio has
             // no contact yet the zero-hop route is still a valid direct send to
@@ -230,34 +256,52 @@ class AndroidRadioLink(
 
     override suspend fun connect() = mutex.withLock {
         if (_state.value == MeshLinkState.Bound) return@withLock
+        // A fresh attempt starts with no failure to report; whatever happens next says its own.
+        _lastProblem.value = null
         if (address.isEmpty()) {
+            _lastProblem.value = "choose a LoRa radio in Settings"
             _state.value = MeshLinkState.NeedsRadio
             throw RadioLinkException(MeshLinkState.NeedsRadio, "no radio selected")
         }
         if (!hasConnectPermission()) {
+            _lastProblem.value = "Bluetooth permission is off for LDMUX"
             _state.value = MeshLinkState.NeedsPermission
             throw RadioLinkException(MeshLinkState.NeedsPermission, "Bluetooth permission is not granted")
         }
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         val adapter = manager?.adapter
         if (adapter == null || !adapter.isEnabled) {
+            _lastProblem.value = "Bluetooth is off"
             _state.value = MeshLinkState.RadioUnavailable
             throw RadioLinkException(MeshLinkState.RadioUnavailable, "Bluetooth is off")
         }
         val device = try {
             adapter.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
+            _lastProblem.value = "not a Bluetooth address: $address"
             _state.value = MeshLinkState.NeedsRadio
             throw RadioLinkException(MeshLinkState.NeedsRadio, "not a Bluetooth address: $address")
         } catch (e: SecurityException) {
+            _lastProblem.value = "Bluetooth permission is off for LDMUX"
             _state.value = MeshLinkState.NeedsPermission
             throw RadioLinkException(MeshLinkState.NeedsPermission, "Bluetooth permission is not granted")
         }
+
+        // **A first bond takes longer than a connect.** The transport bonds inside `initialize()`
+        // and can wait up to 30 s for the system pairing prompt, so a 30 s deadline measured from
+        // before `connectToDevice` expires during the one moment a brand-new radio is being set
+        // up - and then reports "the radio did not answer APP_START", which names the wrong thing.
+        // Unbonded devices get a deadline that covers the prompt; the sentence says what to do.
+        val bonded = runCatching { device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)
+        val deadline = if (bonded) CONNECT_TIMEOUT_MS else BOND_CONNECT_TIMEOUT_MS
+        if (!bonded) _lastProblem.value = "accept the Bluetooth pairing request"
 
         closing = false
         hostPath = null
         _selfInfo.value = null
         _deviceInfo.value = null
+        // A voltage from the previous session must not be attached to this one's DEVICE_INFO.
+        batteryMv = null
         _state.value = MeshLinkState.Connecting
         val t = AndroidBleTransport(context)
         val s = MeshcoreSession("ldmux", t, listener)
@@ -273,7 +317,7 @@ class AndroidRadioLink(
         contactDone = contact
         try {
             t.connectToDevice(device)
-            withTimeout(CONNECT_TIMEOUT_MS) { gate.await() }
+            withTimeout(deadline) { gate.await() }
             // Wait for the contact dump so the first raw send does not race
             // the only other command the link sends. A radio with no contacts
             // still answers END_OF_CONTACTS; a dead command times out and the
@@ -285,9 +329,14 @@ class AndroidRadioLink(
             withTimeoutOrNull(COMMAND_SETTLE_MS) { while (!s.isIdle()) delay(20) }
             if (!s.isIdle()) {
                 closeTransport()
+                _lastProblem.value = "the radio did not finish its contact query"
                 _state.value = MeshLinkState.RadioUnavailable
                 throw RadioLinkException(MeshLinkState.RadioUnavailable, "the radio did not finish its contact query")
             }
+            // One command, one reply, and the only way the phone learns how much charge its own
+            // radio has - asked here, after the tracked contact query has settled, so it cannot
+            // race the one answer window the companion has.
+            if (s.isIdle()) s.requestBatteryStorage()
             if (closing) {
                 closeTransport()
                 throw RadioLinkException(MeshLinkState.Closed, "closed while connecting")
@@ -295,16 +344,23 @@ class AndroidRadioLink(
         } catch (e: TimeoutCancellationException) {
             Log.d("ldmux", "radio connect timeout: " + e.message)
             closeTransport()
+            _lastProblem.value = if (bonded) {
+                "the radio did not answer APP_START"
+            } else {
+                "no answer while pairing. Accept the Bluetooth pairing request, then try again"
+            }
             _state.value = MeshLinkState.RadioUnavailable
-            throw RadioLinkException(MeshLinkState.RadioUnavailable, "the radio did not answer APP_START")
+            throw RadioLinkException(MeshLinkState.RadioUnavailable, _lastProblem.value!!)
         } catch (e: RadioLinkException) {
             closeTransport()
+            _lastProblem.value = e.message
             throw e
         } catch (e: Exception) {
             Log.d("ldmux", "radio connect failed: " + e)
             closeTransport()
+            _lastProblem.value = e.message ?: "radio connect failed"
             _state.value = MeshLinkState.RadioUnavailable
-            throw RadioLinkException(MeshLinkState.RadioUnavailable, e.message ?: "radio connect failed")
+            throw RadioLinkException(MeshLinkState.RadioUnavailable, _lastProblem.value!!)
         }
     }
 
@@ -460,10 +516,14 @@ class AndroidRadioLink(
     }
 
     private fun remainingAirtimeMs(): Double {
-        val now = SystemClock.elapsedRealtime()
-        if (now - airtimeWindowStartMs >= 3_600_000L) {
+        // Wall clock, not `elapsedRealtime`: the spend is persisted per radio address, and a
+        // monotonic origin restarts at boot, which would make a stored window look ancient (or
+        // future) for reasons that have nothing to do with the hour it measures.
+        val now = System.currentTimeMillis()
+        if (airtimeWindowStartMs <= 0L || now - airtimeWindowStartMs >= 3_600_000L || now < airtimeWindowStartMs) {
             airtimeWindowStartMs = now
             airtimeUsedMs = 0.0
+            saveAirtime()
         }
         return (RadioAirtime.BUDGET_MS_PER_HOUR - airtimeUsedMs).coerceAtLeast(0.0)
     }
@@ -472,7 +532,23 @@ class AndroidRadioLink(
         if (budgetMode != RadioBudgetMode.Metered) return
         remainingAirtimeMs()
         airtimeUsedMs += RadioAirtime.timeOnAirMs(currentPreset(), otaBytes)
+        saveAirtime()
         refreshStatus()
+    }
+
+    /**
+     * The hour's spend, written where the next link for this radio finds it.
+     *
+     * `apply()`, because `recordAirtime` runs on the caller's dispatcher and the main thread must
+     * not wait on disk for a metering write. Losing the last second to a process kill would cost a
+     * little budget, never the limit: the window start is written too, so a reopened page cannot
+     * read a fresh hour out of an old spend.
+     */
+    private fun saveAirtime() {
+        airtimePrefs.edit()
+            .putLong(airtimeKeyStart, airtimeWindowStartMs)
+            .putFloat(airtimeKeyUsed, airtimeUsedMs.toFloat())
+            .apply()
     }
 
     private fun refreshStatus() {
@@ -574,6 +650,15 @@ class AndroidRadioLink(
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 30_000L
+        /**
+         * A connect that includes a first bond.
+         *
+         * The transport's own bond wait is 300 polls of 100 ms - 30 s - and that is before
+         * service discovery and the companion handshake. A deadline that expires during the
+         * prompt is the worst possible first-run message: the user did what was asked and the
+         * app said the radio was silent.
+         */
+        const val BOND_CONNECT_TIMEOUT_MS = 75_000L
         const val CONTACT_WAIT_MS = 3_000L
         const val COMMAND_SETTLE_MS = 2_500L
         const val SEND_TIMEOUT_MS = 10_000L

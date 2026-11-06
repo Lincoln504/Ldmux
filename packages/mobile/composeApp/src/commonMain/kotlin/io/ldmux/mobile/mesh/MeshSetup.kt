@@ -1,6 +1,7 @@
 package io.ldmux.mobile.mesh
 
 import io.ldmux.mobile.ConfigStore
+import io.ldmux.mobile.Pairing
 import io.ldmux.mobile.parseScannedPairing
 
 /** The two things a mesh attach needs, each of which can be missing on its own. */
@@ -77,3 +78,45 @@ fun meshCredentialName(c: MeshCredential): String = when (c) {
 }
 
 fun meshCredentialLine(c: MeshCredential): String = "\u2717 " + meshCredentialName(c)
+
+/**
+ * What a finished pairing should say, when the code is not the whole answer.
+ *
+ * A pairing is one gesture with three different endings that used to look identical: the
+ * tailnet changed (the header says so by itself), the radio was enrolled but the app is still
+ * on the tailnet route (nothing on screen changes), or the keys could not be stored (the
+ * pairing looks complete and the radio route never works). The last two are the ones a user
+ * cannot discover without being told, and the middle one is the common case on a first run
+ * with `ldmux code --mesh-only`.
+ *
+ * [radioKeysStored] is null when there is nothing to ask: a build with no radio route, or a
+ * code that carried no mesh keys.
+ */
+data class PairingNote(
+    val text: String,
+    /** Whether the note comes with the one press that finishes the job: use the radio route. */
+    val useRadio: Boolean = false,
+)
+
+fun pairingNote(
+    p: Pairing,
+    radioKeysStored: Boolean?,
+    route: MeshRoute,
+    hasMeshRoute: Boolean,
+): PairingNote? = when {
+    // A code that is only keys, on a build that has no radio: nothing was paired and nothing
+    // can be, and the honest line is that the code cannot be used here.
+    p.isMeshOnly && !hasMeshRoute -> PairingNote("this build has no radio route; that code does nothing here")
+    // The tailnet half landed and the radio half did not. Saying "paired" alone would promise a
+    // route whose keys are not in the Keystore, and the radio row would then say "unpaired".
+    p.mesh != null && radioKeysStored == false ->
+        PairingNote("paired, but the radio keys were not stored. Scan again, or unpair and re-pair")
+    // Keys stored, route still the tailnet: the app stays where it was, so this is the only
+    // sentence that can tell the user the radio half worked.
+    p.isMeshOnly && route != MeshRoute.Mesh -> PairingNote("radio paired; the app is still on the tailnet", useRadio = true)
+    p.isMeshOnly -> PairingNote("radio paired")
+    else -> null
+}
+
+/** Whether the one `unpair` verb has anything to forget. */
+fun canUnpair(isPaired: Boolean, radioPaired: Boolean): Boolean = isPaired || radioPaired

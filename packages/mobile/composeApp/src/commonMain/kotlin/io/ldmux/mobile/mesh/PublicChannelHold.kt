@@ -8,7 +8,7 @@ import androidx.compose.runtime.setValue
  * Public-channel mode: what you type waits on the phone, and the view does not follow the host.
  *
  * On a public channel every byte is broadcast to everyone in range, and the link's own budget is
- * about 58 records an hour (`docs/ARCHITECTURE.md#9-airtime`, ADR-0025). Neither is a reason for a keystroke
+ * a few hundred records an hour at most (`docs/ARCHITECTURE.md` section 9, ADR-0025). Neither is a reason for a keystroke
  * to leave as it is typed: a person composing a command wants the command to leave when *they*
  * decide, and the screen to answer then. That decision, and the frozen view that goes with it, is
  * this object.

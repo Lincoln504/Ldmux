@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -60,6 +62,55 @@ private fun PairingFact(label: String, value: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(label, color = Dim, fontSize = 12.sp, modifier = Modifier.width(56.dp))
         Text(value, color = Fg, fontFamily = MonoFont, fontSize = 12.sp)
+    }
+}
+
+/**
+ * A pairing link pasted or typed, for a phone whose scanner cannot run.
+ *
+ * The scanner is Google's code scanner, which does not exist on a device without Play
+ * services (or a build of Android without it), and until this dialog existed such a phone
+ * could not pair at all: the pairing row said "scanner unavailable" and offered no other
+ * verb. The link is the same string the QR code encodes, so the same parser reads it
+ * ([parseScannedPairing]), and what the dialog shows before the press is the address and the
+ * token fingerprint [ConfirmPairing] shows for a link that arrived from outside. The press
+ * is the question, as it is for a scan.
+ */
+@Composable
+internal fun PastePairingLink(onDismiss: () -> Unit, onPair: (Pairing) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    // Parsed on every edit, so the one control says whether the link is usable before it is
+    // pressed. Eight lines of `ldmux code` output is easy to truncate when copying.
+    val pairing = remember(text) { parseScannedPairing(text) }
+    val prompt = pairing?.let(::pairingPrompt)
+    ModalCard("paste a pairing link", onDismiss) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                "on the host, run `ldmux code` and copy the whole link",
+                color = Muted,
+                fontSize = 11.sp,
+            )
+            Field(
+                value = text,
+                onValueChange = { text = it },
+                placeholder = "ldmux://pair?v=1&…",
+            )
+            when {
+                text.isBlank() -> Unit
+                prompt == null -> Text(NOT_A_CODE, color = Warn, fontSize = 11.sp)
+                else -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (prompt.name.isNotEmpty()) PairingFact("name", prompt.name)
+                    PairingFact("address", prompt.address)
+                    PairingFact(if (pairing!!.isMeshOnly) "key" else "token", prompt.fingerprint)
+                }
+            }
+        }
+        ModalActions {
+            OutlinedBtn("cancel", Modifier.weight(1f), onClick = onDismiss)
+            AccentBtn("pair", Modifier.weight(1f), enabled = pairing != null) {
+                pairing?.let(onPair)
+            }
+        }
     }
 }
 

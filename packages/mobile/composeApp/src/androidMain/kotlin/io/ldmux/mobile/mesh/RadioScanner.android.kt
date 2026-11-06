@@ -7,7 +7,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -84,7 +87,7 @@ actual object RadioScanner {
     }
 
     private fun beginScan(onResult: (RadioScanResult) -> Unit) {
-        cancelNow()
+        cancelNow(report = true)
         pending = onResult
         seen.clear()
         finished = false
@@ -100,14 +103,28 @@ actual object RadioScanner {
                 finish(RadioScanResult(emptyList(), RadioScanProblem.PermissionDenied))
                 return
             }
+            // Remember that a dialog was asked for: after the answer, `neverAsked` must be false
+            // so the recovery button can tell "answer the dialog again" from "open settings".
+            activity.getSharedPreferences("ldmux_radio_permission", Context.MODE_PRIVATE)
+                .edit().putBoolean("asked", true).apply()
             activity.requestPermissions(neededPermissions(), REQ_RADIO)
             return
         }
         startScan()
     }
 
-    private fun cancelNow() {
+    /**
+     * Stop whatever is running.
+     *
+     * [report] is for a scan another scan replaced: that caller is still waiting for an answer and
+     * would otherwise wait for ever (`scanning…` never flipping was the visible symptom), so it is
+     * told this one produced no list. The public `cancel()` keeps its contract — the user closed
+     * the picker, nobody is waiting — and stays silent.
+     */
+    private fun cancelNow(report: Boolean = false) {
+        val waiting = pending
         pending = null
+        if (report) waiting?.invoke(RadioScanResult(emptyList(), RadioScanProblem.Failed))
         stopScan()
         seen.clear()
         finished = true
@@ -192,6 +209,33 @@ actual object RadioScanner {
         cb?.invoke(result)
     }
 
+    internal const val REQ_PERMISSION = REQ_RADIO
+
+    internal fun permissionsGranted(context: Context): Boolean = hasScanPermissions(context)
+
+    internal fun permissionsNeeded(): Array<String> = neededPermissions()
+
+    internal fun hostActivity(): Activity? = host?.get()
+
+    /**
+     * Whether a *dialog* can still be drawn for a missing permission.
+     *
+     * `shouldShowRequestPermissionRationale` is false for a first request and false after a
+     * permanent denial; only the activity can tell them apart, and only when it is alive.
+     */
+    internal fun rationale(): Boolean {
+        val activity = host?.get() ?: return false
+        return neededPermissions().any { activity.shouldShowRequestPermissionRationale(it) }
+    }
+
+    /**
+     * Whether this app has asked before. Persisted, because the process can be restarted between
+     * the denial and the next press, and "never asked" and "denied for good" must not be confused.
+     */
+    internal fun neverAsked(context: Context): Boolean =
+        !context.getSharedPreferences("ldmux_radio_permission", Context.MODE_PRIVATE)
+            .getBoolean("asked", false)
+
     private fun hasScanPermissions(context: Context): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             return context.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
@@ -213,4 +257,45 @@ actual object RadioScanner {
                 Manifest.permission.ACCESS_FINE_LOCATION,
             )
         }
+}
+
+/**
+ * The permission seam's Android half.
+ *
+ * "Asked before" is persisted: `shouldShowRequestPermissionRationale` answers false both for
+ * "never asked" and for "denied for good", and the two need opposite buttons. The first press
+ * must ask (a dialog appears); every press after a denial where the system no longer shows a
+ * dialog must open the app's settings page, which is the only place a permanent denial can be
+ * undone.
+ */
+actual object RadioPermission {
+    private const val PREFS = "ldmux_radio_permission"
+    private const val KEY_ASKED = "asked"
+
+    actual fun granted(): Boolean = RadioScanner.permissionsGranted(AndroidApp.context)
+
+    actual fun canAsk(): Boolean {
+        val context = AndroidApp.context
+        if (granted()) return true
+        if (RadioScanner.neverAsked(context) || RadioScanner.rationale()) return true
+        return false
+    }
+
+    actual fun resolve() {
+        val context = AndroidApp.context
+        val activity = RadioScanner.hostActivity()
+        if (canAsk() && activity != null) {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_ASKED, true).apply()
+            activity.requestPermissions(RadioScanner.permissionsNeeded(), RadioScanner.REQ_PERMISSION)
+            return
+        }
+        // Permanent denial, or no activity to ask from: the system settings page for this app is
+        // the only place the permission can be granted.
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(Uri.fromParts("package", context.packageName, null))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(intent) }
+            .onFailure { appLog("could not open the app's settings page: $it") }
+    }
 }

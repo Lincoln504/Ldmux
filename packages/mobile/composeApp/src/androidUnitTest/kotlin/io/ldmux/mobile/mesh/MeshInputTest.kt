@@ -179,6 +179,26 @@ class MeshInputTest {
         assertEquals(text("x"), flat.last())
     }
 
+    /**
+     * **An armed modifier the user forgot lets go, and the lapse is visible.** The handle only
+     * toggled, so a Ctrl armed a minute earlier silently turned the next Esc into C-Esc; the
+     * tailnet's handle has expired an unused latch for exactly that reason.
+     */
+    @Test
+    fun `an armed modifier lapses after the latch timeout and no longer modifies the next key`() {
+        val b = MeshInputBatcher()
+        var now = 0L
+        val h = MeshTerminalHandle(b, { now })
+        h.toggleModifier(StickyKey.Ctrl)
+        assertTrue(h.modifiers.ctrl)
+        now = io.ldmux.mobile.LATCH_TIMEOUT_MS + 1
+        h.expireModifiers()
+        assertFalse(h.modifiers.armed, "the screen's tick redraws the key as unlatched")
+        h.sendKey("Escape")
+        val keys = b.pending.filterIsInstance<MeshOut.Keys>().flatMap { it.names }
+        assertEquals(listOf("Escape"), keys, "no chord nobody asked for")
+    }
+
     @Test
     fun `a paste that does not fit is refused and says so, a newline is a carriage return`() {
         val b = MeshInputBatcher(capacity = 4)

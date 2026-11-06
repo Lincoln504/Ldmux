@@ -221,6 +221,7 @@ class MeshStandaloneTest {
         override val deviceInfo: StateFlow<RadioDeviceInfo?> = MutableStateFlow(null)
         override val received: Flow<ByteArray> = emptyFlow()
         override val uplinkRecordMax: Int = 172
+        override val lastProblem: StateFlow<String?> = MutableStateFlow(null)
         var sends = 0
         override suspend fun connect() = Unit
         override suspend fun send(record: ByteArray): RadioSendResult {

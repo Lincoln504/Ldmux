@@ -26,9 +26,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.ldmux.mobile.mesh.MeshRoute
 import io.ldmux.mobile.mesh.MeshRouteActions
 import io.ldmux.mobile.mesh.MeshRouteSection
-import io.ldmux.mobile.mesh.MeshRoute
+import io.ldmux.mobile.mesh.PairingNote
+import io.ldmux.mobile.mesh.canUnpair
+import io.ldmux.mobile.mesh.pairingNote
 
 /**
  * Settings, as a screen.
@@ -61,6 +64,39 @@ internal fun SettingsScreen(
     /** The mesh route's setup, or null where this build has no mesh route. */
     mesh: MeshRouteActions? = null,
 ) {
+    // **One pairing can change another block's facts.** A scan in the `pairing` row can store the
+    // radio's keys, and the radio block below reads secure storage rather than the config: it used
+    // to capture that reading once, so right after a successful scan the row said "· radio" while
+    // the block underneath still said "scan a pairing code made with `ldmux code --mesh`". The
+    // counter is bumped by every pairing and is the block's remember key. Not `connectionKey`: a
+    // mesh-only code does not change it, and that key carries the token.
+    var credentialsVersion by remember { mutableStateOf(0) }
+    val meshPresent = mesh != null
+    // What secure storage holds, re-read whenever a pairing (or an unpair) happened. The config
+    // cannot answer this: the keys are in the Keystore, not in [LdmuxConfig].
+    val radioPaired = remember(mesh, current.connectionKey, credentialsVersion) {
+        mesh?.credentials()?.complete == true
+    }
+    var pairProblem by remember { mutableStateOf<String?>(null) }
+    var pairNote by remember { mutableStateOf<PairingNote?>(null) }
+    var pasteOpen by remember { mutableStateOf(false) }
+    // **One place where a pairing lands**, whether it came from the scanner or the field. Both
+    // return a [Pairing], and both have the same three endings: the tailnet changed (the config
+    // says so), the radio was enrolled but the route is still the tailnet (nothing on screen
+    // changes), or the keys could not be stored (the row would say "paired" and the radio half
+    // would be empty).
+    val acceptPairing: (Pairing) -> Unit = { p ->
+        pairProblem = null
+        onPaired(p)
+        // Bumped *after* the store call: this is what makes the block below re-read storage.
+        credentialsVersion++
+        pairNote = pairingNote(
+            p,
+            radioKeysStored = mesh?.credentials()?.complete,
+            route = current.route,
+            hasMeshRoute = meshPresent,
+        )
+    }
     // The system back gesture means what the `back` button means, and it must not be allowed to
     // fall through to the activity: leaving the app from a settings screen that is one tap from
     // the launcher reads as a crash.
@@ -108,12 +144,46 @@ internal fun SettingsScreen(
                             // `ConfigStore.pair` has always applied whichever halves it holds. Two
                             // rows were two buttons over that one operation, and a person had to
                             // guess which one to scan under.
-                            PairingRow(current, onPaired, onUnpair, mesh = mesh)
+                            PairingRow(
+                                current = current,
+                                radioPaired = radioPaired,
+                                meshPresent = meshPresent,
+                                problem = pairProblem,
+                                note = pairNote,
+                                onScan = {
+                                    pairProblem = null
+                                    pairNote = null
+                                    CodeScanner.scan { result ->
+                                        when (val o = scanOutcome(result)) {
+                                            is PairOutcome.Paired -> acceptPairing(o.pairing)
+                                            is PairOutcome.Problem -> pairProblem = o.text
+                                            PairOutcome.Nothing -> Unit
+                                        }
+                                    }
+                                },
+                                onPaste = {
+                                    pairProblem = null
+                                    pasteOpen = true
+                                },
+                                onUnpair = {
+                                    pairProblem = null
+                                    pairNote = null
+                                    // A radio-only install has no tailnet pairing to forget; the
+                                    // mesh route owns its own keys, so the press goes there.
+                                    if (current.isPaired) onUnpair() else mesh?.onUnpair()
+                                    credentialsVersion++
+                                },
+                                onUseRadio = {
+                                    mesh?.onConfig(current.copy(route = MeshRoute.Mesh))
+                                    pairNote = null
+                                },
+                            )
                             // The radio, its preset and its credentials are one block, and it is
                             // the same block the dialog had: it decides nothing itself.
                             if (mesh != null) {
                                 MeshRouteSection(
                                     current = current,
+                                    credentialsVersion = credentialsVersion,
                                     readCredentials = mesh.credentials,
                                     onMeshPairing = mesh.onPairing,
                                     onConfig = mesh.onConfig,
@@ -148,6 +218,18 @@ internal fun SettingsScreen(
             About()
             Spacer(Modifier.height(SettingsSectionGap))
         }
+    }
+    // **A sibling of the screen, not a child of it.** `ModalCard` is a full-screen overlay; a
+    // fill-the-parent child inside a scrolling `Column` measures against an unbounded height, so
+    // it would size itself to its content and be laid out in the list instead of over the screen.
+    if (pasteOpen) {
+        PastePairingLink(
+            onDismiss = { pasteOpen = false },
+            onPair = { p ->
+                pasteOpen = false
+                acceptPairing(p)
+            },
+        )
     }
 }
 
@@ -289,87 +371,109 @@ private fun TextSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
 }
 
 /**
- * The tailnet pairing, as one row labelled next to the mesh one (ADR-0017).
+ * What the pairing row says it is paired with.
+ *
+ * Pure, because the row has four states and only two of them are `paired`/`unpaired`: a
+ * mesh-only install is paired with a radio and *not* with a daemon, and reading that as
+ * "unpaired" is what made such an install impossible to unpair.
+ */
+internal fun pairingRowSummary(current: LdmuxConfig, radioPaired: Boolean, meshPresent: Boolean): String = when {
+    current.isPaired && !meshPresent -> current.pairedName
+    current.isPaired && radioPaired -> "${current.pairedName} · radio"
+    current.isPaired -> "${current.pairedName} · radio not paired"
+    radioPaired -> "radio only"
+    else -> "unpaired"
+}
+
+/**
+ * The pairing, as one row labelled next to the mesh one (ADR-0017).
  *
  * The `tailnet` label is what makes the two pairings legible as two: the mesh block below
  * has always had a heading of its own, and this row had none, so the pairing that existed
  * first was the one you had to infer.
  *
- * Unpaired: `unpaired` and `pair`, which opens the scanner. Paired: the machine's name and
- * `unpair`, which asks once (`unpair?`) because it ends every shell's link. **And it says
- * what else it takes with it**: `Link.unpair()` also forgets the mesh keys and the radio,
- * which is not something a button under `tailnet` can be expected to imply.
+ * Unpaired: `unpaired` and the two ways to pair — `pair` opens the scanner, `paste` a link
+ * for a device whose scanner cannot run. Paired: the machine's name and `unpair`, which asks
+ * once (`unpair?`) because it ends every shell's link. **And it says what else it takes with
+ * it**: `Link.unpair()` also forgets the mesh keys and the radio, which is not something a
+ * button under `tailnet` can be expected to imply.
  *
- * A scan that is not an ldmux code says so on the row, in three words.
+ * **A radio-only install is paired.** `ldmux code --mesh-only` stores the radio's keys and no
+ * daemon address, so `isPaired` is false; the row used to offer only `pair` and there was no
+ * way to forget a radio. The verb and the summary both follow [canUnpair], not `isPaired`.
+ *
+ * It holds no state and opens nothing: the scan, the paste field's dialog and the outcome
+ * note all belong to the screen, because a `ModalCard` has to be emitted beside the screen
+ * rather than inside its scrolling column.
  */
 @Composable
 private fun PairingRow(
     current: LdmuxConfig,
-    onPaired: (Pairing) -> Unit,
+    radioPaired: Boolean,
+    meshPresent: Boolean,
+    /** Why the last scan did nothing, when it did nothing. */
+    problem: String?,
+    /** What the last pairing did, when the screen would not otherwise show it. */
+    note: PairingNote?,
+    onScan: () -> Unit,
+    onPaste: () -> Unit,
+    /** Forget the tailnet pairing (and, with it, the mesh keys). */
     onUnpair: () -> Unit,
-    /** The radio route, when this install has one: its keys arrive in the same code. */
-    mesh: MeshRouteActions?,
+    /** The one press that finishes a pairing that came with no daemon address. */
+    onUseRadio: () -> Unit,
 ) {
-    val meshPresent = mesh != null
-    // What the code stored for the radio, read from secure storage rather than remembered here.
-    var radioPaired by remember(mesh, current.connectionKey) {
-        mutableStateOf(mesh?.credentials()?.complete == true)
-    }
-    var problem by remember { mutableStateOf<String?>(null) }
-    var confirmUnpair by remember(current.connectionKey) { mutableStateOf(false) }
+    // Asked once, because unpairing ends every open shell's link. Reset by any pairing change,
+    // so a confirmation does not outlive the state it was asking about.
+    var confirmUnpair by remember(current.connectionKey, radioPaired) { mutableStateOf(false) }
     Column {
         SettingsRow(
             // The pairing is with the desktop, and it arrives as one code whatever it carries.
             "pairing",
-            summary = when {
-                current.isPaired && !meshPresent -> current.pairedName
-                current.isPaired && radioPaired -> "${current.pairedName} · radio"
-                current.isPaired -> "${current.pairedName} · radio not paired"
-                radioPaired -> "radio only"
-                else -> "unpaired"
-            },
+            summary = pairingRowSummary(current, radioPaired, meshPresent),
             trailing = {
-            if (current.isPaired) {
-                MiniTextButton(onClick = {
-                    if (confirmUnpair) onUnpair() else confirmUnpair = true
-                }) {
-                    Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Danger else Dim)
-                }
-            } else {
-                MiniTextButton(onClick = {
-                    problem = null
-                    CodeScanner.scan { result ->
-                        when (val o = scanOutcome(result)) {
-                            is PairOutcome.Paired -> {
-                                onPaired(o.pairing)
-                                radioPaired = mesh?.credentials()?.complete == true
-                            }
-                            is PairOutcome.Problem -> problem = o.text
-                            PairOutcome.Nothing -> Unit
-                        }
+                if (canUnpair(current.isPaired, radioPaired)) {
+                    MiniTextButton(onClick = {
+                        if (confirmUnpair) onUnpair() else confirmUnpair = true
+                    }) {
+                        Text(if (confirmUnpair) "unpair?" else "unpair", color = if (confirmUnpair) Danger else Dim)
                     }
-                }) {
-                    Text("pair", color = Accent)
+                } else {
+                    MiniTextButton(onClick = onScan) {
+                        Text("pair", color = Accent)
+                    }
+                    MiniTextButton(onClick = onPaste) {
+                        Text("paste", color = Accent)
+                    }
                 }
-            }
             },
         )
         // Only while the warning can be true: an install with no mesh route has nothing
         // else to lose, and a line that describes a consequence that does not exist is
         // noise on the one screen where the consequence is real.
-        if (confirmUnpair && meshPresent) {
-            SettingsNote("this also forgets the mesh keys and the LoRa radio")
+        if (confirmUnpair && (meshPresent || radioPaired)) {
+            SettingsNote(
+                if (current.isPaired) "this also forgets the mesh keys and the LoRa radio"
+                else "this forgets the radio keys and the chosen radio",
+            )
         }
         problem?.let { SettingsNote(it, color = Danger) }
+        note?.let {
+            SettingsNote(it.text, color = Muted)
+            if (it.useRadio) {
+                MiniTextButton(onClick = onUseRadio) {
+                    Text("use the radio", color = Accent, fontSize = 12.sp)
+                }
+            }
+        }
     }
 }
 
 /**
- * The footer: which build this is, and where the project lives.
+ * The footer: which build this is.
  *
  * Centred, because it is not a setting and must not read as one — a row is left-aligned
  * because its label is a thing to scan; this is an aside about the app, and the one line a
- * support question needs. The version comes from the package, so it cannot drift from what a
+ * support question needs. It carried a link to the project site, which answered HTTP 410. The version comes from the package, so it cannot drift from what a
  * store listing says. No copyright line: a claim about ownership answers nothing a reader of
  * a settings screen asked, and the licence files are where that question belongs.
  */
@@ -385,9 +489,10 @@ private fun About() {
             fontSize = 11.sp,
             fontFamily = MonoFont,
         )
-        Spacer(Modifier.height(2.dp))
-        MiniTextButton(onClick = { openUrl("https://ldmux.io") }, bordered = false) {
-            Text("ldmux.io", color = Accent, fontSize = 12.sp)
-        }
+        // **No link to the project site.** It pointed at `https://ldmux.io`, which answers
+        // HTTP 410 (the domain is parked), so the one "read more" affordance in the app was a
+        // dead end — and a support question cannot be answered by a URL that does not resolve.
+        // When there is a page, it goes here; a version number is the fact a support question
+        // actually needs.
     }
 }

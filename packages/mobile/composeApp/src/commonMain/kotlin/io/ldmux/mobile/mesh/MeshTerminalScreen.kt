@@ -82,6 +82,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import io.ldmux.mobile.AccentBtn
 import io.ldmux.mobile.HeldElsewhere
+import io.ldmux.mobile.MiniTextButton
+import io.ldmux.mobile.Muted
 import io.ldmux.mobile.Notice
 import io.ldmux.mobile.NoticeLine
 
@@ -131,6 +133,18 @@ internal const val IME_WAIT_MS = 700L
  * so eight seconds would abandon a rebuild that is working. See the effect that uses it.
  */
 internal const val MESH_FAILURE_GRACE_MS = 30_000L
+
+/**
+ * When live mode says the link is quiet, and how often it asks.
+ *
+ * Ten seconds is half the driver's twenty-second verdict: long enough that a record's own round
+ * trip (about a second at this spreading factor, plus a retransmission ladder starting at two
+ * seconds) never trips it, short enough that a screen which has silently stopped carrying is not
+ * left looking live for the whole twenty. Only asked while something is owed, so an idle shell
+ * pays nothing; the poll is a local read, not a transmission.
+ */
+internal const val QUIET_POLL_MS = 2_000L
+internal const val QUIET_NOTICE_MS = 10_000L
 
 /**
  * The longest wait before a dropped link is rebuilt, for the Nth rebuild of this screen.
@@ -514,8 +528,20 @@ fun MeshTerminalScreen(
     }
 
     val live = view as? MeshTermView.Live
+    // **How long the link has owed an answer and carried nothing.** Only the driver knows, because
+    // only it sees both directions; it is asked on a timer rather than pushed, so an idle shell
+    // (which owes nothing) costs no wakeups and says nothing. Zero means "nothing to report".
+    var quietSecs by remember(conn) { mutableStateOf(0L) }
+    LaunchedEffect(conn, live != null) {
+        if (live == null) { quietSecs = 0L; return@LaunchedEffect }
+        while (true) {
+            delay(QUIET_POLL_MS)
+            val q = conn.driver.quietForMs() ?: 0L
+            quietSecs = if (q >= QUIET_NOTICE_MS) (q / 1000L).coerceAtLeast(1L) else 0L
+        }
+    }
     // Asked once per connection, on first arriving: one record up, one or more down. After that
-    // it is the user's (menu → shells), never a timer, because the link has about 58 records an hour.
+    // it is the user's (menu → shells), never a timer, because the hour's budget is a few hundred records at most.
     var listed by remember(conn) { mutableStateOf(false) }
     LaunchedEffect(conn, live != null) {
         if (live != null && !listed) { listed = true; conn.driver.listShells() }
@@ -556,6 +582,15 @@ fun MeshTerminalScreen(
     DisposableEffect(conn) {
         val remove = AppLifecycle.onBackground { Dictation.stop() }
         onDispose { remove(); Dictation.stop() }
+    }
+    // **An armed modifier the user never used lets go, visibly.** The mesh handle's latch only
+    // toggled, so a Ctrl armed a minute ago silently turned the next Esc into C-Esc. The expiry
+    // itself lives in the handle (it is the same [io.ldmux.mobile.ModifierLatch] the tailnet uses);
+    // this is the tick that redraws the key as unlatched once it has passed.
+    LaunchedEffect(handle.modifiers.armed) {
+        if (!handle.modifiers.armed) return@LaunchedEffect
+        delay(io.ldmux.mobile.LATCH_TIMEOUT_MS + 1)
+        handle.expireModifiers()
     }
     LaunchedEffect(voice) {
         if (voice is VoiceState.Failed || voice == VoiceState.Unavailable || voice == VoiceState.NoSpeech) {
@@ -616,6 +651,11 @@ fun MeshTerminalScreen(
     // against the wanted one), and costs one record when it does not.
     LaunchedEffect(imeUp, config.meshHoldsInput) {
         delay(GRID_SETTLE_MS)
+        // **Leaving is not a resize.** The list closes the keyboard, this effect fires, and the
+        // grid it re-asserts is for a shell `openList()` has just released — which the host
+        // applies and never restores, leaving a desk shell at the phone's list height (measured
+        // 2026-11-05: 46x35 after returning home). The surface's own path already guards this.
+        if (showList) return@LaunchedEffect
         val g = lastGrid ?: return@LaunchedEffect
         conn.driver.setGrid(g.first, g.second)
     }
@@ -789,7 +829,7 @@ fun MeshTerminalScreen(
                         Dictation.toggle(onText = { source.sendText(it) }, onState = { voice = it })
                     },
                     onLauncher = { openList() },
-                    press = handle::sendKey,
+                    press = source::sendKey,
                     shownId = shownId,
                     onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
                     modeRow = barRow,
@@ -829,7 +869,7 @@ fun MeshTerminalScreen(
                         // fitted its pty to a pane the user was not looking at, the shell's program
                         // drew at that height, and a second `Resize` arrived a moment later to undo
                         // it. Two records where one is correct — and in manual-sync mode a record is
-                        // a sync the user paid for, on a link that allows about 58 records an hour.
+                        // a sync the user paid for, on a link whose hour allows a few hundred records at most.
                         // Waiting for the measurement to stop moving picks the keyboard-UP size,
                         // which is the size the shell actually starts at.
                         // **The first fit waits for the keyboard, then for the size to settle.**
@@ -948,6 +988,12 @@ fun MeshTerminalScreen(
                             handle.overflow && source.publicChannel ->
                                 Notice("input refused: the held text is at its limit", ok = false)
                             handle.overflow -> Notice("too much typed: wait for it to send", ok = false)
+                            // **Live mode has no bar, so a link that stopped carrying used to look
+                            // live for twenty seconds.** The driver's own verdict is the silence
+                            // rule; this is the same silence said earlier, and only while something
+                            // is still owed - an idle shell is silent by design and says nothing.
+                            quietSecs > 0L && !config.meshHoldsInput ->
+                                Notice("link quiet · ${quietSecs} s, nothing heard", ok = true)
                             live?.stalled == true -> Notice("waiting for send budget", ok = true)
                             live?.screen?.alternate == true ->
                                 Notice("full-screen program: updates are large and slow", ok = true)
@@ -984,7 +1030,7 @@ fun MeshTerminalScreen(
                     onLauncher = { openList() },
                     modifiers = handle.modifiers,
                     onSticky = handle::toggleModifier,
-                    press = handle::sendKey,
+                    press = source::sendKey,
                     shownId = shownId,
                     onShow = { id -> scope.launch { conn.driver.selectShell(id) } },
                 )
@@ -1054,6 +1100,7 @@ fun MeshTerminalScreen(
                         // or a host that stopped answering, is a fresh-connection case; a missing
                         // radio or key is a settings case, not a retry.
                         meshBodyFor(v)?.let { MeshBodyBlock(it) }
+                        LinkDownExtra(v)
                     }
                     // **Taking a shell from the desk is a tap the user makes.** The host refuses a
                     // plain attach while another device holds it, and this is the one action that
@@ -1078,6 +1125,35 @@ fun MeshTerminalScreen(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * What only the link can say, under [MeshBodyBlock]'s line: the link's own sentence about *this*
+ * failure, and the one verb a permission denial needs.
+ *
+ * The state is a category — `RadioUnavailable` covers Bluetooth off, a radio held by another app, a
+ * radio in the wrong firmware mode, and a first bond that ran out of time — so the category alone
+ * left four different cures behind one sentence. [MeshTermView.LinkDown.detail] is the link's
+ * sentence; the button is the difference between "grant it" and "the system will not ask again".
+ */
+@Composable
+private fun LinkDownExtra(view: MeshTermView) {
+    val down = view as? MeshTermView.LinkDown ?: return
+    down.detail?.let {
+        if (it.isNotEmpty()) {
+            Text(it, color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+    if (down.link == MeshLinkState.NeedsPermission) {
+        val ask = RadioPermission.canAsk()
+        MiniTextButton(onClick = { RadioPermission.resolve() }) {
+            Text(
+                if (ask) "allow Bluetooth" else "open app settings",
+                color = Accent,
+                fontSize = 12.sp,
+            )
         }
     }
 }

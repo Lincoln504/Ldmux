@@ -73,7 +73,7 @@ internal fun TerminalArea(
     Box(modifier.background(Bg)) {
         if (pages.isEmpty()) {
             Text(
-                if (pendingOpen) "Opening a shell…" else "No sessions yet. Tap + shell to start one.",
+                if (pendingOpen) "Opening a shell…" else "No sessions yet. Tap new shell to start one.",
                 color = Dim,
                 fontSize = 13.sp,
                 modifier = Modifier.align(Alignment.Center).padding(16.dp),

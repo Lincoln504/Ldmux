@@ -56,7 +56,6 @@ enum class MeshSendOutcome {
 data class MeshStatus(
     val radioState: Int,
     val rssiDbm: Int?,
-    val batteryPercent: Int?,
     /** The radio's own transmit airtime this hour, 0.1 s units. An estimate, display only. */
     val txAirtimeTenthsThisHour: Int,
     /**
@@ -69,6 +68,15 @@ data class MeshStatus(
     val radioConnected: Boolean get() = radioState == RADIO_CONNECTED
 
     companion object {
+        /** The firmware's `RADIO_CONNECTED` code, as `SELF_INFO`/status report it. */
         const val RADIO_CONNECTED = 0
+
+        /**
+         * Nothing has said anything about the radio yet.
+         *
+         * The status used to start at [RADIO_CONNECTED], so a link that had never opened a GATT
+         * client reported a connected radio. A fact nobody has established is not a fact.
+         */
+        const val RADIO_UNKNOWN = -1
     }
 }

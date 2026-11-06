@@ -28,6 +28,17 @@ interface RadioLink {
     val received: Flow<ByteArray>
     val uplinkRecordMax: Int
 
+    /**
+     * Why the last attempt failed, in the words the user should read, or null while it is fine.
+     *
+     * The link already built these sentences and threw them away: `run` carried only the state on,
+     * so "Bluetooth is off", "not a Bluetooth address", "accept the Bluetooth pairing request"
+     * and "the radio did not finish its contact query" all reached the screen as one of four
+     * labels. A state says what kind of thing is wrong; this says which thing. It is cleared when
+     * the link becomes [MeshLinkState.Bound] and at the start of every attempt.
+     */
+    val lastProblem: StateFlow<String?>
+
     /** Connect, run the companion handshake and wait until the radio is READY. */
     suspend fun connect()
 
@@ -342,6 +353,30 @@ object RadioAirtime {
         max(0, (budgetMs / timeOnAirMs(preset, payloadBytes)).toInt())
 }
 
+/**
+ * The Bluetooth permission, as the two screens that can hit it need it.
+ *
+ * A denial is not one state on Android 11+: the first one is a dialog the user can answer again,
+ * and the second one is permanent, after which `requestPermissions` returns without drawing
+ * anything. The screens used to print "permission is off, grant it, then scan again" in both
+ * cases, with no control — so after a permanent denial the app kept saying that forever and there
+ * was no way to grant anything from inside it. One seam, because the picker and the terminal are
+ * looking at the same permission and must not disagree about what pressing the button will do.
+ */
+expect object RadioPermission {
+    /** Whether both the scan and the connect permission are held. */
+    fun granted(): Boolean
+
+    /**
+     * Whether asking again would draw a dialog. False means the system will refuse silently and
+     * the only cure is the app's system settings page.
+     */
+    fun canAsk(): Boolean
+
+    /** Ask for the permission, or open this app's settings page when asking cannot work. */
+    fun resolve()
+}
+
 /** A scanned MeshCore companion. The address is a BLE MAC on Android. */
 data class RadioDevice(val address: String, val name: String, val rssi: Int?)
 
@@ -402,6 +437,7 @@ class RadioLinkException(val state: MeshLinkState, message: String) : Exception(
 class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override val state: StateFlow<MeshLinkState> = link.state
     override val status: StateFlow<MeshStatus?> = link.status
+    override val problem: String? get() = link.lastProblem.value
     override val received: Flow<ByteArray> = link.received
     override val uplinkRecordMax: Int get() = link.uplinkRecordMax
 
@@ -454,7 +490,10 @@ class MeshRadioConnection(
             link.connect()
             driver.run()
         } catch (e: RadioLinkException) {
-            driver.onGatewayState(e.state)
+            // The link's sentence, not just its category: "Bluetooth is off" and "the radio did
+            // not finish its contact query" are both `RadioUnavailable`, and they are cured by
+            // two different actions.
+            driver.onGatewayState(e.state, e.message)
         }
     }
 
@@ -477,6 +516,8 @@ expect fun meshRadioLink(address: String, hostKey: ByteArray): RadioLink?
 /** A link that exists only so the common screen can compile where no radio is built. */
 internal class UnsupportedRadioLink : RadioLink {
     private val _state = MutableStateFlow(MeshLinkState.NeedsRadio)
+    private val _lastProblem = MutableStateFlow<String?>("the mesh route is not available on this device")
+    override val lastProblem: StateFlow<String?> = _lastProblem.asStateFlow()
     override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
     private val _status = MutableStateFlow<MeshStatus?>(null)
     override val status: StateFlow<MeshStatus?> = _status.asStateFlow()

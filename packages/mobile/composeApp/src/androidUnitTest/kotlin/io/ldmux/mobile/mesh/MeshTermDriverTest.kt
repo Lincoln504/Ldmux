@@ -24,7 +24,7 @@ import kotlin.test.assertTrue
 class MeshTermDriverTest {
     private class FakeGateway : GatewayPort {
         override val state = MutableStateFlow(MeshLinkState.Bound)
-        override val status = MutableStateFlow<MeshStatus?>(MeshStatus(0, null, null, 0, 58))
+        override val status = MutableStateFlow<MeshStatus?>(MeshStatus(0, null, 0, 58))
         override val received = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
         override var uplinkRecordMax = 172
         val sent = ArrayList<ByteArray>()
@@ -577,7 +577,7 @@ class MeshTermDriverTest {
     @Test
     fun `the budget the gateway reports bounds what the session is asked for`() = runBlocking<Unit> {
         val d = driver(); live(d)
-        gw.status.value = MeshStatus(0, null, null, 0, 2)
+        gw.status.value = MeshStatus(0, null, 0, 2)
         sess.pollCalls.clear()
         repeat(5) { assertEquals(InputOutcome.Accepted, d.input(byteArrayOf(1))) }
         assertTrue(sess.pollCalls.all { it.first <= 2 && it.second <= 8 }, "poll asked for ${sess.pollCalls}")
@@ -595,7 +595,7 @@ class MeshTermDriverTest {
     @Test
     fun `a zero budget with something waiting is shown as a stall`() = runBlocking<Unit> {
         val d = driver(); live(d)
-        gw.status.value = MeshStatus(0, null, null, 0, 0)
+        gw.status.value = MeshStatus(0, null, 0, 0)
         sess.health = SessionHealth(false, false, false, pending = 3, dropped = 0)
         d.tick()
         assertTrue(assertIs<MeshTermView.Live>(d.view.value).stalled)

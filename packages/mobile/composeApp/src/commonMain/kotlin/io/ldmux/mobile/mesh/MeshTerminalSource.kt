@@ -720,6 +720,16 @@ class MeshTerminalSource(
         paint()
     }
 
+    /**
+     * Rows this view is parked above the live bottom; 0 means it is following the shell.
+     *
+     * Read-only, and the observable the key bars are judged by: a bar key goes through [sendKey],
+     * which follows the input back to live, while the page's own batcher would send it into a
+     * prompt the user cannot see. That is RELEASE-AUDIT 9.14, and it was fixed on the tailnet and
+     * reopened here, so it is a fact worth being able to assert.
+     */
+    internal val scrolledRows: Int get() = history.offset
+
     /** The screen has shown [scrollNotice]; stop drawing it. */
     fun clearScrollNotice() { scrollNotice = null }
 

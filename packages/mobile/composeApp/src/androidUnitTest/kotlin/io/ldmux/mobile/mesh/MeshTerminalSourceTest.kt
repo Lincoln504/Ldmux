@@ -69,6 +69,25 @@ class MeshTerminalSourceTest {
         assertFalse(s.hasSelection)
     }
 
+    /**
+     * **A key sent while reading history returns the view to the live screen.** The key bars used
+     * to call the page's batcher directly, so Esc/Tab/Ctrl-c/arrows went to the live prompt while
+     * the user was looking at rows above it and saw nothing happen — the same defect fixed on the
+     * tailnet (RELEASE-AUDIT 9.14). The bars now go through the source, whose `sendKey` follows the
+     * input, and this is the difference between the two paths.
+     */
+    @Test
+    fun `a key sent while reading history returns the view to the live bottom`() {
+        val (s, _, b) = source()
+        s.show(MeshScreen(listOf("one", "two", "three"), 0, 2, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
+        s.show(MeshScreen(listOf("two", "three", "four"), 0, 2, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
+        assertEquals(-1, s.scrollBy(-1), "one row up, into history")
+        assertEquals(1, s.scrolledRows)
+        s.sendKey("Escape")
+        assertEquals(0, s.scrolledRows, "sending a key is typing, and typing returns to live")
+        assertTrue(b.pending.isNotEmpty(), "the key still reaches the batcher")
+    }
+
     /// **A newly opened shell paints its first screen, in batch mode, with no timer and no tap.**
     ///
     /// The hold draws a screen only when nothing has been painted; it used to judge that over the
